@@ -2206,24 +2206,38 @@ async fn the_buffered_and_flushed_attribute_arms_refuse_identically() {
 /// test here; a `render` column is filterable through the row route (decision 0068), and a filter
 /// evaluated against one view's rows is that view's tail and no other's.
 async fn filtered_points(served: &Served, view: &str, filter: Value) -> Vec<PointRow> {
-    let resp = served
-        .server
-        .client
-        .post(served.server.viewer_url("/v1/viewport"))
-        .bearer_auth(&served.token)
-        .json(&json!({
-            "view": view, "zoom": 8, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200,
-            "filters": filter
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        resp.status().as_u16(),
-        200,
-        "a filtered view answers: {view}"
-    );
-    decode_viewport(&resp.bytes().await.unwrap()).1
+    // A 429 is the admission gate shedding under machine load and a stale hint is
+    // serve-stale-not-block — neither is the answer under test; retry both, as points() does.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let resp = served
+            .server
+            .client
+            .post(served.server.viewer_url("/v1/viewport"))
+            .bearer_auth(&served.token)
+            .json(&json!({
+                "view": view, "zoom": 8, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200,
+                "filters": filter.clone()
+            }))
+            .send()
+            .await
+            .unwrap();
+        let unsettled = std::time::Instant::now() < deadline;
+        if resp.status().as_u16() == 429 && unsettled {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            continue;
+        }
+        assert_eq!(
+            resp.status().as_u16(),
+            200,
+            "a filtered view answers: {view}"
+        );
+        if resp.headers().get("x-tessera-stale").is_some_and(|v| v == "1") && unsettled {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            continue;
+        }
+        return decode_viewport(&resp.bytes().await.unwrap()).1;
+    }
 }
 
 /// **An omitted render value is backfilled into the joined view's tail** (`views.md` §4, owner
