@@ -925,7 +925,7 @@ ordinal (decision 0113). The C15/C17 notes stand.
 | Write-path §2, §4, §5 | The create record; the join rule at admission; one pending segment per view touched restated for several views; `delete_dangling` as submitted deletions |
 | Compaction | Reclamation of a dropped view; the attribute pass over a family |
 | Appendix C | **Made 2026-08-31**: the C15 and C17 annotations, and the gate's enforcement under C4's closure. C27 (the ordinal gap) was added the same day and **deleted at r16**, ordinals having been removed — nothing of this row remains owed |
-| Conformance | A two-view differential: the oracle answers per view; the pinned-leaf cases, the gate-failed pin among them; the gate's work-indistinguishability |
+| Conformance | **Done 2026-08-31** but for one clause: `conformance/tests/test_multiview_differential.py` over `reference/oracle/multiview.py`'s six views — the oracle answers per view, the pinned-leaf cases including the gate-failed pin, and the gate over a group whose `visibility` is a real access label (a failing principal finds it on no surface; a passing one is served the ungated expectation; the union-equals-mask equality holds over the views each principal may reach). ⊘ The gate's **work**-indistinguishability is a timing property and is not asserted there — the identical outcome is, the identical cost is not |
 | Decisions | ~~The allocation key~~ — ruled, decision 0112. Ordinals removed, decision 0113, superseding 0110 |
 
 ## 12. Rulings

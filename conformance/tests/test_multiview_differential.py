@@ -2,8 +2,8 @@
 
 `views.md` §11 names what the suite owes this design: "a two-view differential: the oracle answers
 per view; the pinned-leaf cases, the gate-failed pin among them; the gate's work-indistinguishability".
-This module is the first two clauses over four views; the gate clauses are unbuilt on both sides
-and are recorded as uncovered below rather than skipped silently.
+This module is all three clauses: the first two over the four ungated views, and the gate's over a
+second group whose `visibility` is a real access label.
 
 The design's rule is a factoring (§1):
 
@@ -12,8 +12,8 @@ The design's rule is a factoring (§1):
 
 Every case here is one half of that sentence made falsifiable, over
 `reference/oracle/multiview.py`'s corpus — one entity space of 6,144 items in six compartments,
-a plain view holding all of them, and a group of three views each holding a different subset with
-its own frame and its own layout.
+a plain view holding all of them, a group of three views each holding a different subset with its
+own frame and its own layout, and a second group of two behind a gate.
 
 ## What each case asserts
 
@@ -35,6 +35,13 @@ its own frame and its own layout.
   and pinned across views of one group; per-view presence; and the two refusals the section
   names.
 - **Ordering per view** — contracts §2.6's ascending `tessera_id` within each tile, in every view.
+- **The gate** (§6) — a group, `sealed`, whose `visibility` is a real access label. Three separate
+  claims: a principal who fails it finds the group on **no** surface — absent from `/v1/meta`'s
+  roster whole, a 404 indistinguishable from a name nobody declared, and the unknown-column
+  refusal for either spelling of a leaf over its scoped attribute; a principal who passes it is
+  served exactly what those views would serve with no gate at all, compared against the ungated
+  expectation rather than against itself; and the union-equals-mask equality holds per principal
+  over the views that principal can actually reach.
 
 ## The oracle's independence, and where it is not independent
 
@@ -60,15 +67,18 @@ built for it.
 
 ## What this module does not cover, stated rather than implied
 
-- **The gate** (§6). Every view here is `public` because the gate is unbuilt: there is no
-  visible-view set, no gated `/v1/meta`, and no gate-failed pin to be indistinguishable from an
-  undeclared column. Those rows land with the machinery.
+- **A second gate semantics.** The gate here is one group's, over two views, with a label that is
+  a single compartment term. A view's *own* label narrowing its group's — the conjunction §6
+  specifies — is asserted at server level (`crates/tessera-server/tests/views_gate.rs`) and is not
+  re-derived against an oracle here: the oracle's contribution is the served set behind a passed
+  gate, which one label answers as well as two.
 - **Ingest into a second view** (§4's join rule). The fixture is build-only, and a server that
   accepted writes would mutate the bundle under every other module in this suite;
   `crates/tessera-server/tests/views_write.rs` drives that path against a real flush.
 - **A group's view created or dropped while the service runs** (§3.2, §3.4), for the same reason.
-- **A scoped category, text or rendered family** (§5's marker): the build writes no serving
-  artefact for any of them, so there is nothing for an oracle to disagree with.
+- **A scoped `text` or `render`ed family** (§5's remaining markers): the build writes no serving
+  artefact for either, so there is nothing for an oracle to disagree with. The scoped **category**
+  was in this list until its artefact existed, and has its own cases above.
 """
 
 from __future__ import annotations
@@ -100,6 +110,22 @@ PRINCIPALS: dict[str, list[str]] = {
     "wide": ["cc1", "cc3", "cc4"],
     "disjoint": ["cc0", "cc5"],
 }
+
+#: Who passes the gated group's gate: exactly the principals granted its label (`views.md` §6 —
+#: satisfaction is the intersection of the label's terms with the principal's). `wide` holds `cc4`
+#: and the other two do not, which is what makes every case below have both sides.
+def _passes_gate(principal: str) -> bool:
+    return mv.GATE_LABEL in PRINCIPALS[principal]
+
+
+def _visible_views(principal: str) -> tuple[str, ...]:
+    """The views this principal may reach — every view, or every ungated one.
+
+    The gate is the only thing that removes a view here, so this is the whole of the "visible-view
+    set" as the corpus can express it, and it is derived from the grant rather than read back off
+    `/v1/meta` — reading it back would compare the server against itself.
+    """
+    return mv.ALL_VIEW_IDS if _passes_gate(principal) else mv.VIEW_IDS
 
 # ---------------------------------------------------------------------------------------------
 # Fixtures
@@ -149,7 +175,7 @@ def members(multiview_bundle: Bundle) -> dict[str, set[int]]:
     and a fixture that used its own generation function here would be comparing the corpus against
     itself rather than against what the build laid down.
     """
-    return {view: set(multiview_bundle.row_entity_ids(view)) for view in mv.VIEW_IDS}
+    return {view: set(multiview_bundle.row_entity_ids(view)) for view in mv.ALL_VIEW_IDS}
 
 
 @pytest.fixture(scope="module")
@@ -224,11 +250,13 @@ def test_the_corpus_is_the_shape_every_case_below_assumes(multiview_bundle: Bund
     """
     report = mv.verify(multiview_bundle)
     assert report.views[mv.WORLD_VIEW] == mv.N_ITEMS
-    assert set(report.views) == set(mv.VIEW_IDS)
+    assert set(report.views) == set(mv.ALL_VIEW_IDS)
     assert len(report.compartment_entities) == mv.COMPARTMENTS
-    # Every (compartment, quarter) pair has members on both sides — `verify` refuses otherwise, so
-    # this asserts the report was actually populated rather than re-checking the rule.
-    assert len(report.decorrelation) == mv.COMPARTMENTS * len(mv.QUARTER_KEYS)
+    # Every (compartment, view) pair has members on both sides — `verify` refuses otherwise, so
+    # this asserts the report was actually populated rather than re-checking the rule. The gated
+    # group is in it: a gate that correlated with a view's membership would make the "a passed
+    # gate serves what an ungated view would" equality pass for the wrong reason.
+    assert len(report.decorrelation) == mv.COMPARTMENTS * (len(mv.ALL_VIEW_IDS) - 1)
 
 
 def test_the_stored_identity_column_is_the_permutation_it_claims_in_every_view(
@@ -444,21 +472,24 @@ def test_every_view_together_yields_exactly_what_the_mask_licenses(
 ):
     """A viewer cannot learn from one view what another would not give them.
 
-    Everything served across **all four** views, unioned in entity space, is exactly the mask: no
-    view's response contains an entity outside it, and the combination of every view yields no
-    identifier the mask does not already explain. The identity half rides on the same union —
-    `tessera_id` is per entity and not per view, so a distinct identifier appearing across the
-    views that the mask cannot account for would show up here as an entity that is not in it.
+    Everything served across **every view this principal may reach**, unioned in entity space, is
+    exactly the mask: no view's response contains an entity outside it, and the combination of
+    every view yields no identifier the mask does not already explain. The identity half rides on
+    the same union — `tessera_id` is per entity and not per view, so a distinct identifier
+    appearing across the views that the mask cannot account for would show up here as an entity
+    that is not in it.
+
+    **The gate moves the domain of the union and not its value** (§6). A principal who fails the
+    gated group's gate unions four views and a principal who passes it unions six, and both equal
+    the same mask — which is the shape a gate has to have: it withholds *coordinate systems*, and
+    the entities behind it are the ones the principal's own label already admitted elsewhere. A
+    gate that withheld entities would show up here as a union short of the mask.
 
     **What this proves and what it does not.** It is a differential over one corpus, three
-    principals and four views at two zooms — evidence that the composition of these views
-    discloses nothing beyond the mask, not a proof that no combination of views can. It does not
-    reach:
+    principals and six views at two zooms — evidence that the composition of these views discloses
+    nothing beyond the mask, not a proof that no combination of views can. It does not reach:
 
-    - **the gate** (§6), which does not exist: every view here is reachable by every principal, so
-      "a view a principal may not see" is not a state this corpus can be in;
-    - **timing**, which §9 accepts as a C15-class channel and which no equality can observe;
-    - **`/v1/meta`**, whose per-principal `views` entry is specified and ungated today.
+    - **timing**, which §9 accepts as a C15-class channel and which no equality can observe.
 
     The union being *equal* to the mask, rather than merely contained in it, is a property of this
     corpus: `world` holds every entity and θ is saturated, so every visible entity is served
@@ -467,7 +498,7 @@ def test_every_view_together_yields_exactly_what_the_mask_licenses(
     """
     mask = masks[principal]
     union: set[int] = set()
-    for view_id in mv.VIEW_IDS:
+    for view_id in _visible_views(principal):
         for zoom, bbox in ((ZOOM, _full_bbox(view_id)), (DEEP_ZOOM, _full_bbox(view_id))):
             raw = multiview_server.viewport(tokens[principal], view_id, zoom, bbox, k=K)
             served = _served_entities(raw, entity_of_fx)
@@ -784,3 +815,206 @@ def test_points_are_served_ascending_by_identity_within_each_tile(
             tiles_checked += 1
     assert cursor == len(points), "the points list must be exactly consumed by the tile batch"
     assert tiles_checked > 0, f"no tile in '{view_id}' served more than one point"
+
+
+# ---------------------------------------------------------------------------------------------
+# The gate — views.md §6
+# ---------------------------------------------------------------------------------------------
+#
+# `sealed` is gated by a real access label, `cc4`. `wide` holds it; `narrow` and `disjoint` do not.
+# The three cases below are three different claims and are kept apart deliberately: what a failing
+# principal cannot find, what a passing principal is served, and that the two are the same gate.
+
+
+@pytest.mark.parametrize("principal", sorted(PRINCIPALS))
+def test_the_gated_groups_roster_is_absent_for_a_principal_who_fails_its_gate(
+    multiview_server, tokens, principal
+):
+    """`/v1/meta` publishes the gated group to the principals that hold its label and to no other.
+
+    A gate-failed **group** takes its whole roster with it, so this is one assertion over two
+    surfaces of the same document: the `groups` entry and every one of its view ids in `views`. A
+    roster that carried the group with an empty view list, or a view whose group had gone, would
+    be the existence oracle by subtraction that filtering exists to prevent.
+
+    The passing side is asserted with the same strictness, because a filter that removed the group
+    from everybody would satisfy the failing half alone.
+    """
+    document = multiview_server.meta(tokens[principal])
+    groups = {g["name"] for g in document["groups"]}
+    served_views = {v["id"] for v in document["views"]}
+
+    assert mv.GROUP in groups, "the ungated group is on every principal's roster"
+    assert set(mv.VIEW_IDS) <= served_views
+
+    if _passes_gate(principal):
+        assert mv.SEALED_GROUP in groups, f"{principal} holds '{mv.GATE_LABEL}' and must see it"
+        assert set(mv.SEALED_VIEW_IDS) <= served_views
+        entry = next(g for g in document["groups"] if g["name"] == mv.SEALED_GROUP)
+        assert entry["views"] == list(mv.SEALED_VIEW_IDS), (
+            "a passed gate serves the whole roster in creation order"
+        )
+    else:
+        assert mv.SEALED_GROUP not in groups, (
+            f"{principal} does not hold '{mv.GATE_LABEL}', so the group is on no surface"
+        )
+        assert not (served_views & set(mv.SEALED_VIEW_IDS)), (
+            "a gate-failed group takes its whole roster with it"
+        )
+
+
+@pytest.mark.parametrize("principal", ["narrow", "disjoint"])
+def test_a_gate_failed_view_answers_exactly_as_a_name_nobody_declared(
+    multiview_server, tokens, principal
+):
+    """Same status and same detail shape as an undeclared name (§6, contracts §3.2 r57).
+
+    The comparison is against a name of the same *shape* — a key of the gated group that was never
+    declared, and a group name that does not exist — with the name itself substituted out of both
+    bodies, which is the only difference a client may legitimately see. A different code or a
+    different sentence between the two would tell a principal that the name they guessed is a view
+    somebody else can reach, which is the roster leaking one key at a time.
+    """
+    token = tokens[principal]
+    cases = [
+        (mv.SEALED_VIEW_IDS[0], f"{mv.SEALED_GROUP}:2099-H9"),
+        (mv.SEALED_VIEW_IDS[1], "nosuchgroup:2026-H2"),
+    ]
+    for gated, absent in cases:
+        gated_resp = multiview_server.viewport_request(
+            token, gated, ZOOM, _full_bbox(gated), k=K
+        )
+        absent_resp = multiview_server.viewport_request(
+            token, absent, ZOOM, _full_bbox(gated), k=K
+        )
+        assert gated_resp.status_code == 404, f"{gated}: {gated_resp.text}"
+        assert absent_resp.status_code == 404, f"{absent}: {absent_resp.text}"
+        assert gated_resp.text.replace(gated, "<view>") == absent_resp.text.replace(
+            absent, "<view>"
+        ), f"'{gated}' and '{absent}' must answer with one code and one detail shape"
+
+
+@pytest.mark.parametrize("principal", ["narrow", "disjoint"])
+def test_the_gated_groups_scoped_attribute_is_undeclared_for_a_principal_who_fails_it(
+    multiview_server, tokens, principal
+):
+    """§5's collapse: for a principal who cannot reach the group, the whole family is not there.
+
+    Both spellings — bare, and pinned at one of the group's keys — take the **ordinary
+    unknown-column `422`**, the one a column nobody declared gets, and the detail names neither the
+    group nor its keys. The pinned spelling is the one that matters: the pin carries a real key, so
+    a refusal that resolved the view first would answer `404` here and confirm the key's existence
+    by the code it chose.
+
+    `filter_operands` is the same collapse on the discovery surface, and is asserted beside it
+    because a client that trusted the document and never sent the leaf would learn the group from
+    the document alone.
+    """
+    token = tokens[principal]
+    document = multiview_server.meta(token)
+    operands = {entry["column"] for entry in document.get("filter_operands", [])}
+    assert "sentiment" in operands, "the ungated group's family is declared to everybody"
+    assert "heat" not in operands, (
+        f"{principal} cannot reach '{mv.SEALED_GROUP}', so its family is undeclared: {operands}"
+    )
+
+    bogus = multiview_server.viewport_request(
+        token, mv.WORLD_VIEW, ZOOM, _full_bbox(mv.WORLD_VIEW), k=K, filters={"no_such_column": RANGE}
+    )
+    assert bogus.status_code == 422, bogus.text
+    for leaf in ("heat", f"heat@{mv.SEALED_KEYS[0]}"):
+        resp = multiview_server.viewport_request(
+            token, mv.WORLD_VIEW, ZOOM, _full_bbox(mv.WORLD_VIEW), k=K, filters={leaf: RANGE}
+        )
+        assert resp.status_code == bogus.status_code, f"{leaf}: {resp.status_code} {resp.text}"
+        detail = resp.json().get("detail", "")
+        assert mv.SEALED_GROUP not in detail, f"{leaf}: {detail}"
+        # The caller's own spelling is echoed and the key inside it with it, which discloses
+        # nothing the caller did not write; what must not appear is the group, and what must not
+        # differ is the sentence. Both leaves are compared with the spelling substituted out, so
+        # the pinned form is held to the bogus column's answer and not merely to its status.
+        assert detail.replace(leaf, "<column>") == bogus.json().get("detail", "").replace(
+            "no_such_column", "<column>"
+        ), f"{leaf}: {detail}"
+
+
+@pytest.mark.parametrize("view_id", mv.SEALED_VIEW_IDS)
+def test_a_passed_gate_serves_exactly_what_an_ungated_view_would(
+    multiview_bundle: Bundle, multiview_server, masks, members, tokens, entity_of_fx, view_id
+):
+    """The gate decides which views exist, and nothing about which items they hold.
+
+    For the principal who passes it, the two equalities the ungated views are held to are asserted
+    unchanged — the per-tile masked counts against the oracle answering through this view's own
+    permutation and frame, and `served(view) == mask ∩ members(view)`. Neither expectation knows
+    the gate exists: they are computed exactly as the public views' are, which is what makes this
+    an equality against the *ungated* answer rather than against whatever the gate produced.
+
+    The control is in the corpus. The gate's label is one compartment and this principal holds
+    three, so an implementation that read the gate as a second row filter would serve `cc4`'s
+    entities alone and disagree here — while agreeing with every count that the group is reachable
+    at all.
+    """
+    principal = "wide"
+    token, mask = tokens[principal], masks[principal]
+
+    raw = multiview_server.viewport(token, view_id, ZOOM, _full_bbox(view_id), k=K)
+    server_tiles, _points = decode_viewport(raw)
+    oracle = vp.Selection(multiview_bundle, mask, view_id, ZOOM)
+    expected = oracle.counts_for(
+        morton.tiles_for_bbox(
+            _full_bbox(view_id), ZOOM, multiview_bundle.extent_of(view_id)
+        )
+    )
+    assert {t: v for t, v, _m, _s in server_tiles} == expected, (
+        f"a gated view's counts disagree with the oracle's for {principal} in '{view_id}'"
+    )
+
+    served = _served_entities(raw, entity_of_fx)
+    assert served == mask & members[view_id], (
+        f"'{view_id}' behind a passed gate served {len(served)} entities against "
+        f"{len(mask & members[view_id])} the mask and the membership license"
+    )
+    # The control the docstring names: the served set is not the gate's own compartment.
+    gate_only = {e for e in served if e in masks["narrow"]}
+    assert gate_only and gate_only < served, (
+        "the gated view served exactly one compartment's entities, so this corpus cannot tell a "
+        "gate from a row filter"
+    )
+
+
+@pytest.mark.parametrize("leaf_view", mv.SEALED_KEYS)
+def test_a_pinned_leaf_behind_a_passed_gate_reads_that_views_column(
+    multiview_server, masks, members, tokens, entity_of_fx, multiview_bundle: Bundle, leaf_view
+):
+    """§5's pinned leaf, over the gated group, for the principal who may reach it.
+
+    The same equality the ungated family is held to — the pinned view's column over the mask,
+    projected through the request view's membership — asserted here because a gate that admitted
+    the *view* and left the family resolving against the wrong group's column would pass every
+    case above it: the counts are unfiltered and the refusal cases are the other principal's.
+    """
+    from oracle.filters import NumericColumn  # noqa: PLC0415 — one case needs the type
+
+    principal = "wide"
+    mask = masks[principal]
+    column_view = f"{mv.SEALED_GROUP}:{leaf_view}"
+    column = NumericColumn(values=mv.heat_columns(multiview_bundle)[column_view])
+
+    raw = multiview_server.viewport(
+        tokens[principal],
+        mv.WORLD_VIEW,
+        ZOOM,
+        _full_bbox(mv.WORLD_VIEW),
+        k=K,
+        filters={f"heat@{leaf_view}": RANGE},
+    )
+    served = _served_entities(raw, entity_of_fx)
+    expected = {
+        e for e in mask if column.matches(e, "range", RANGE["range"])
+    } & members[mv.WORLD_VIEW]
+    assert served == expected, (
+        f"'heat@{leaf_view}' under '{mv.WORLD_VIEW}' served {len(served)} entities, the oracle's "
+        f"column for '{column_view}' gives {len(expected)}"
+    )
+    assert expected, "the predicate matched nothing, so this case checked no membership"

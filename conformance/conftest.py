@@ -225,7 +225,10 @@ def multiview_bundle(multiview_bundle_root: Path):
     from oracle import multiview as mv  # noqa: PLC0415
 
     bundle = Bundle(multiview_bundle_root)
-    for view_id in mv.VIEW_IDS:
+    # **Every view, the gated group's included.** A gate decides which principal may reach a view
+    # and nothing about what the view holds, so the oracle needs each one's source geometry to
+    # answer for the principal who passes it.
+    for view_id in mv.ALL_VIEW_IDS:
         bundle.attach_source_geometry(
             read_source_geometry(mv.points_path(view_id), mv.extent_of(view_id)),
             view_id=view_id,
