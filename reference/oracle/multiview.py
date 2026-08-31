@@ -45,6 +45,10 @@ So the corpus is built so that each half of that sentence has something to disag
   catalogue plants and for the same reason (see its module doc's `fx_key` section): the oracle
   names a served point without a reverse map and with no I10 tension. It is drawn from a seeded
   RNG and is not a function of the entity id.
+* **One group-scoped category, `mood`** (§5), over a closed `public` vocabulary: the second family
+  a scope can carry, and the one whose per-view artefact is a set of postings rather than a value
+  column. An entity's value differs by quarter and about a sixth of each view's entities carry
+  none, so reading the wrong view's column is observable in both directions.
 
 ## What it deliberately does not carry
 
@@ -52,10 +56,12 @@ So the corpus is built so that each half of that sentence has something to disag
 the visible-view set is another track's. A fixture carrying a gated view would be a corpus whose
 expected answers no implementation can produce.
 
-**No layers, no vocabulary, no keyword or text column.** Every one of those is covered against the
-catalogue, in entity space, where views change nothing about them. A scoped **category** or
-**text** family would be a fixture for machinery the build does not write (`views.md` §5's marker),
-so the family here is the numeric one the build serves.
+**No layers, no keyword or text column, and no `derived` vocabulary.** Each is covered against the
+catalogue, in entity space, where views change nothing about them. A **`derived`** value set would
+be the one addition that said something new here — `/v1/categories` derives a scoped category's
+list from *that view's* postings, so two views of one group offer two lists — and it is not here:
+it needs a value-list verb on the harness and a second derivation in the oracle, and the channel
+itself (C11) is already covered in entity space. Named rather than left out in silence.
 
 **No second partition.** Phase 1 has one, and I13b's row says so.
 
@@ -195,6 +201,28 @@ def sentiment_of(source_id: int, key: str) -> float | None:
     return ((h >> 8) % 2001 - 1000) / 1024.0
 
 
+#: `mood`'s value set, and the codes the declaration pins them at. Closed and `public`, so the
+#: value list is authored and the differential's subject is the per-view *column* rather than the
+#: per-view list (module doc).
+MOOD_CODES = {"calm": 11, "tense": 22, "wild": 33}
+
+
+def mood_of(source_id: int, key: str) -> str | None:
+    """The group-scoped **category** value for one `(entity, view)`, or `None` where there is none.
+
+    The same two `None`s [`sentiment_of`] keeps apart: an item outside the quarter has no row
+    there, and an item inside it either carries a value or carries the presence bitmap's absence
+    (decision 0064). Decorrelated from `sentiment_of` by a different hash input, so a reader that
+    confused the two families' columns is caught rather than accidentally right.
+    """
+    if not in_quarter(source_id, key):
+        return None
+    h = _hash("mood", key, source_id)
+    if h % 6 == 0:
+        return None
+    return sorted(MOOD_CODES)[(h >> 8) % len(MOOD_CODES)]
+
+
 def fx_keys() -> list[int]:
     """One unique 64-bit join key per item, indexed by source id.
 
@@ -253,6 +281,8 @@ label  = "{key}"
         for key in QUARTER_KEYS
     )
 
+    mood_values = "".join(f"  {key} = {code}\n" for key, code in sorted(MOOD_CODES.items()))
+
     return f"""\
 # The multi-view conformance corpus (`reference/oracle/multiview.py`). Generated — edit the
 # module, not this file.
@@ -296,13 +326,32 @@ render = true
 source = "{WORLD_VIEW}"
 
 # The group-scoped attribute (`views.md` §5): one entity-space column per view of the group, read
-# from each view's own points file. No `source` — a scoped attribute declaring one is refused,
-# because that file would need `fields.view` to say which view each row's value is for.
+# from each view's own points file. No `source` — an attribute may declare one, and then its
+# `fields.view` says which view each row's value is for; reading each view's own file is the
+# shape that needs no discriminator.
 [[attribute]]
 name  = "sentiment"
 type  = "f32"
 scope = {{ group = "{GROUP}" }}
 index = true
+
+# The scoped **category** beside it: the same scope, a different family. Its per-view artefact is
+# a set of postings over the codes below rather than a value column, which is the whole reason it
+# is here — a reader that served the numeric family correctly and this one from another view's
+# postings passes every case above.
+[[vocabulary]]
+name       = "mood"
+width      = "u8"
+value_set  = "closed"
+visibility = "public"
+  [vocabulary.values]
+{mood_values}
+[[attribute]]
+name       = "mood"
+type       = "category"
+vocabulary = "mood"
+scope      = {{ group = "{GROUP}" }}
+index      = true
 """
 
 
@@ -361,6 +410,9 @@ def write_corpus(work_dir: Path) -> None:
                     "sentiment": pa.array(
                         [sentiment_of(i, key) for i in members], type=pa.float32()
                     ),
+                    # The scoped category's own column, keys rather than codes: the build mints
+                    # against the declaration's pinning, which is what `MOOD_CODES` records.
+                    "mood": pa.array([mood_of(i, key) for i in members], type=pa.string()),
                 }
             ),
             work_dir / quarter_points_name(key),
@@ -575,6 +627,23 @@ def entity_of_fx_key(bundle: Bundle) -> dict[int, int]:
     """
     entity_of = bundle.entities_by_source()
     return {key: entity_of[source] for source, key in enumerate(fx_keys())}
+
+
+def mood_columns(bundle: Bundle) -> dict[str, dict[int, str]]:
+    """The scoped **category** family as the fixture planted it: `{view id: {entity: key}}`.
+
+    [`sentiment_columns`]'s construction over the other family, and for its reason: built from
+    [`mood_of`] and never from the bundle's postings, so the comparison is a differential.
+    """
+    entity_of = bundle.entities_by_source()
+    return {
+        f"{GROUP}:{key}": {
+            entity_of[i]: value
+            for i in range(N_ITEMS)
+            if (value := mood_of(i, key)) is not None
+        }
+        for key in QUARTER_KEYS
+    }
 
 
 def sentiment_columns(bundle: Bundle) -> dict[str, dict[int, float]]:
