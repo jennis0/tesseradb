@@ -927,15 +927,15 @@ def test_the_gated_groups_scoped_attribute_is_undeclared_for_a_principal_who_fai
             token, mv.WORLD_VIEW, ZOOM, _full_bbox(mv.WORLD_VIEW), k=K, filters={leaf: RANGE}
         )
         assert resp.status_code == bogus.status_code, f"{leaf}: {resp.status_code} {resp.text}"
-        detail = resp.json().get("detail", "")
-        assert mv.SEALED_GROUP not in detail, f"{leaf}: {detail}"
-        # The caller's own spelling is echoed and the key inside it with it, which discloses
-        # nothing the caller did not write; what must not appear is the group, and what must not
-        # differ is the sentence. Both leaves are compared with the spelling substituted out, so
-        # the pinned form is held to the bogus column's answer and not merely to its status.
-        assert detail.replace(leaf, "<column>") == bogus.json().get("detail", "").replace(
+        assert mv.SEALED_GROUP not in resp.text, f"{leaf}: {resp.text}"
+        # **The whole body, not the detail alone** — the 404 case's comparison, for its reason: a
+        # refusal that carried the same sentence under a different `error` code would still tell a
+        # principal that this column is one somebody else can filter on. The caller's own spelling
+        # is echoed and the key inside it with it, which discloses nothing the caller did not
+        # write, so it is substituted out of both sides exactly as the view name is there.
+        assert resp.text.replace(leaf, "<column>") == bogus.text.replace(
             "no_such_column", "<column>"
-        ), f"{leaf}: {detail}"
+        ), f"{leaf}: {resp.text}"
 
 
 @pytest.mark.parametrize("view_id", mv.SEALED_VIEW_IDS)
@@ -975,11 +975,16 @@ def test_a_passed_gate_serves_exactly_what_an_ungated_view_would(
         f"'{view_id}' behind a passed gate served {len(served)} entities against "
         f"{len(mask & members[view_id])} the mask and the membership license"
     )
-    # The control the docstring names: the served set is not the gate's own compartment.
-    gate_only = {e for e in served if e in masks["narrow"]}
-    assert gate_only and gate_only < served, (
-        "the gated view served exactly one compartment's entities, so this corpus cannot tell a "
-        "gate from a row filter"
+    # The control the docstring names, and it is a claim about `cc1` rather than about the gate's
+    # own `cc4`: an engine treating the gate as a row filter would serve `cc4`'s entities and no
+    # others, so the presence of entities this principal holds through a *different* compartment —
+    # `narrow`'s mask is `cc1` alone — is what separates the two readings. A strict subset, because
+    # the view must also serve more than that one compartment.
+    through_another_compartment = {e for e in served if e in masks["narrow"]}
+    assert through_another_compartment and through_another_compartment < served, (
+        f"'{view_id}' served {len(through_another_compartment)} of `cc1`'s entities out of "
+        f"{len(served)}: a gate read as a row filter over its own label would serve none of them, "
+        "and a corpus where they are the whole answer cannot tell the two readings apart"
     )
 
 
