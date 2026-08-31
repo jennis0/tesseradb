@@ -1030,6 +1030,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
                 view.projection,
                 &view.extent,
                 args.limit,
+                view.select.as_ref(),
                 |point| {
                     chunk.push((point.source_id, (point.qx, point.qy)));
                     if chunk.len() == JOIN_CHUNK_ROWS {
@@ -1470,6 +1471,20 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // coverage exactly as they agree about bytes.
     crate::report_attribute_coverage(&coverage);
 
+    // ---- 8b. the group-scoped column families (`views.md` §5) --------------------------
+    // Here, beside the attribute tail, because it wants exactly what the tail wants: `source_ids`
+    // and `entity_of_ordinal`, both alive, and entity ids final under I9. One column per view of
+    // the group, in entity space; nothing per row space.
+    let scoped_paths = write_scoped_columns(
+        args,
+        &partition_dir,
+        n,
+        &source_ids,
+        &entity_of_ordinal,
+        &mut minters,
+        &scratch,
+    )?;
+
     timer.end(BuildStage::AttributeTail, n);
 
     // ---- 8c. layers and their artifacts ------------------------------------------------
@@ -1489,6 +1504,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
             let mut plan = crate::layers::read(
                 &args.layers,
                 &args.layer_inputs,
+                &args.scoped_layers,
                 // ⊘ **One frame for a layer's several views** (`views.md` §2's marker): an
                 // authored shape canonicalises against the anchor view's projection and extent,
                 // which `polygon-membership.md` §4.3 wants per view. A layer's views must share a
@@ -1604,6 +1620,9 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     let mut segments: Vec<tessera_store::manifest::SegmentDescriptor> = Vec::new();
     let mut occupancies: Vec<crate::Occupancy> = Vec::with_capacity(args.views.len());
     let mut artifact_paths: Vec<PathBuf> = Vec::new();
+    // Accumulated across the views, like the extents beside them: what a scoped layer's artifacts
+    // came to in each view is per view or it says nothing (`views.md` §3.5).
+    let mut artifact_levels: Vec<crate::artifact_pass::LevelLayoutReport> = Vec::new();
     for (index, view) in args.views.iter().enumerate() {
         let view_dir = tessera_store::view_path(&partition_dir, &view.view_id);
         let segment_dir = view_dir.join("segments").join(SEG_ID);
@@ -1760,6 +1779,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         );
         published_layers.store = artifact_store;
         crate::artifact_pass::report(&artifact_pass);
+        artifact_levels.extend(artifact_pass.levels.iter().cloned());
         // **Accumulated across views, not replaced.** Every artifact extent is keyed by
         // `(view, layer, level)`, so each view's pass adds its own; assigning would leave the
         // manifest carrying the last view's alone.
@@ -1803,6 +1823,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     let mut other_paths = vec![postings_path];
     other_paths.extend(view_files);
     other_paths.extend(filter_paths);
+    other_paths.extend(scoped_paths);
     other_paths.extend(record_paths);
     other_paths.extend(pairs_path);
     other_paths.extend(ext_locator_path);
@@ -1830,6 +1851,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // so it scales with bundle size rather than with item count.
     timer.end(BuildStage::Manifests, report.bundle_bytes);
     report.attribute_coverage = coverage;
+    report.artifact_levels = artifact_levels;
     Ok(report)
 }
 
@@ -2040,6 +2062,9 @@ fn read_one_attribute_source(
         attributes,
         minters,
         args.limit,
+        // An attribute source is entity space: one value per entity, in a file of its own, with
+        // no view to select (`views.md` §5).
+        None,
         |batch| {
             // Flushed **before** the batch rather than after a row count is reached, because a
             // batch is staged as a unit. Chunk boundaries are unobservable in the output — see
@@ -2109,6 +2134,179 @@ fn read_one_attribute_source(
             .collect(),
     });
     Ok(())
+}
+
+/// **The group-scoped attribute column families** (`views.md` §5): one entity-space column per
+/// view of the group, each with its own presence bitmap, under `attrs/<column>/<group>/<key>/`.
+///
+/// **Entity space, one column per view, and nothing per row space** — which is what keeps a scoped
+/// attribute inside I2's argument: every value is indexed by entity, so a predicate over it would
+/// answer a bitmap in entity space and meet the mask there, before any permutation.
+///
+/// The values are each view's own: the column is read from the view's points file, under that
+/// view's selection where a group's views share one file (`views.md` §3.1's form B). An entity the
+/// view does not hold, and one whose row carries a null, are the same state — absent, the presence
+/// bitmap's ordinary case (decision 0064).
+///
+/// ⊘ **Storage only.** The columns are written and digested and are on no serving surface: no
+/// postings, no hot column, no filter operand, no pinned leaf. `MANIFEST.declared_scalars` is one
+/// flat bundle-wide list with no slot for a family, which is `views.md` §11's contracts §2.3
+/// amendment and is scheduled work; `index` and `render` on a scoped attribute have nothing to act
+/// on until it lands.
+#[allow(clippy::too_many_arguments)]
+fn write_scoped_columns(
+    args: &BuildArgs,
+    partition_dir: &Path,
+    n: u64,
+    source_ids: &[u64],
+    entity_of_ordinal: &[u32],
+    minters: &mut std::collections::HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
+    scratch: &crate::column::ColumnScratch,
+) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    for family in &args.scoped_attributes {
+        let attribute = &family.attribute;
+        // ⊘ Said at the build rather than left to the design's marker: a declaration that asked
+        // for an index or a hot column and got neither is a gap an operator should hear about
+        // where they can still act on it.
+        if attribute.index || attribute.render {
+            eprintln!(
+                "attribute '{}': ⊘ `scope = {{ group = \"{}\" }}` is stored as one column per \
+                 view and is on no serving surface yet (views §5) — its `index`/`render` are \
+                 recorded by the declaration and have nothing to act on",
+                attribute.name, family.group
+            );
+        }
+        for &index in &family.views {
+            let view = &args.views[index];
+            let column = read_scoped_column(
+                args,
+                attribute,
+                view,
+                n,
+                source_ids,
+                entity_of_ordinal,
+                minters,
+                scratch,
+            )?;
+            // `attrs/<column>/<group>/<key>/` — the view id's own path components, through the
+            // one place a view id becomes a path (`tessera_store::view_path`).
+            let mut column_dir = partition_dir.join("attrs").join(&attribute.name);
+            for component in tessera_store::view_path_components(&view.view_id) {
+                column_dir.push(component);
+            }
+            std::fs::create_dir_all(&column_dir).map_err(|e| BuildError::io(&column_dir, e))?;
+            let values_path = column_dir.join("values.arrow");
+            let presence_path = column_dir.join("presence.roaring");
+            let written = write_column_values(
+                &column_dir,
+                &values_path,
+                &presence_path,
+                attribute,
+                &column.values,
+            )?;
+            fsync_file(&values_path)?;
+            paths.push(values_path);
+            if let Some(dict_path) = written.dict {
+                fsync_file(&dict_path)?;
+                paths.push(dict_path);
+            }
+            if written.presence {
+                fsync_file(&presence_path)?;
+                paths.push(presence_path);
+            }
+            // Printed per column of the family, where an entity-scoped column's coverage is
+            // printed: a scoped column covers the view's own rows, so *fewer than the corpus* is
+            // its ordinary state rather than a symptom.
+            eprintln!(
+                "attribute '{}' in view '{}': {} of {} entities have a value",
+                attribute.name,
+                view.view_id,
+                crate::thousands(column.present),
+                crate::thousands(n)
+            );
+        }
+    }
+    Ok(paths)
+}
+
+/// One view's column of a group-scoped attribute, in entity space ([`write_scoped_columns`]).
+struct ScopedColumn {
+    values: EntityColumn,
+    present: u64,
+}
+
+/// Read one view's values of a group-scoped attribute out of that view's points file.
+///
+/// The same resolution every other attribute pass makes — `source_ids` → ordinal →
+/// `entity_of_ordinal` — because entity ids are assigned in signature-sorted order (§11.1) and a
+/// source id is not its own entity id. A row naming an entity this build did not load is counted
+/// nowhere and refused nowhere: it is the join's ordinary case, exactly as it is for an
+/// entity-scoped source.
+#[allow(clippy::too_many_arguments)]
+fn read_scoped_column(
+    args: &BuildArgs,
+    attribute: &crate::config::Attribute,
+    view: &crate::ViewArgs,
+    n: u64,
+    source_ids: &[u64],
+    entity_of_ordinal: &[u32],
+    minters: &mut std::collections::HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
+    scratch: &crate::column::ColumnScratch,
+) -> Result<ScopedColumn> {
+    let mut values = EntityColumn::filled(scratch, attribute.ty, n as usize)?;
+    let columns = [attribute];
+    let staged_rows = staging_rows(&columns, n).max(input::ATTRIBUTE_BATCH_ROWS);
+    let mut staged = EntityColumn::filled(scratch, attribute.ty, staged_rows)?;
+    let mut chunk: Vec<(u64, u32)> = Vec::with_capacity(staged_rows);
+    let mut present = 0u64;
+    // The merge sweep the entity-scoped pass uses, over one column: both sides ascend, so the
+    // join is sequential rather than a probe into `source_ids` per row.
+    let flush = |chunk: &mut Vec<(u64, u32)>,
+                 staged: &mut EntityColumn,
+                 values: &mut EntityColumn,
+                 present: &mut u64|
+     -> Result<()> {
+        let mut moved: Vec<(u32, u32)> = Vec::with_capacity(chunk.len());
+        join_chunk(chunk, source_ids, |ordinal, _source_id, pos| {
+            if let Some(ordinal) = ordinal {
+                moved.push((entity_of_ordinal[ordinal as usize], pos));
+            }
+            Ok(())
+        })?;
+        for (entity, pos) in moved {
+            if staged.is_present(pos as usize) {
+                *present += 1;
+            }
+            values.take_from(entity as usize, staged, pos as usize, &attribute.name)?;
+        }
+        staged.reset_staging();
+        Ok(())
+    };
+    input::scan_attributes(
+        &view.points,
+        &view.point_fields,
+        &columns,
+        minters,
+        args.limit,
+        view.select.as_ref(),
+        |batch| {
+            if !chunk.is_empty() && chunk.len() + batch.rows.len() > staged_rows {
+                flush(&mut chunk, &mut staged, &mut values, &mut present)?;
+            }
+            let base = chunk.len();
+            for (offset, &row) in batch.rows.iter().enumerate() {
+                chunk.push((batch.ids[row as usize], (base + offset) as u32));
+                let value = batch.decoded[0].value(row as usize, attribute, &args.schema)?;
+                staged.set(base + offset, value, &attribute.name)?;
+            }
+            Ok(())
+        },
+    )?;
+    if !chunk.is_empty() {
+        flush(&mut chunk, &mut staged, &mut values, &mut present)?;
+    }
+    Ok(ScopedColumn { values, present })
 }
 
 /// Write the entity-space filter postings for every column declared `index = true`, and
@@ -3669,10 +3867,11 @@ pub(crate) fn render_presence_of(
 /// build exists to avoid.
 fn read_source_ids(args: &BuildArgs, view: &crate::ViewArgs) -> Result<Vec<u64>> {
     let count = match args.limit {
-        // No limit ⇒ every row is selected ⇒ the metadata row count is exact and the counting
-        // decode is a whole pass over the file for nothing.
-        None => input::count_point_rows(&view.points)? as usize,
-        Some(_) => {
+        // No limit and no selection ⇒ every row is selected ⇒ the metadata row count is exact and
+        // the counting decode is a whole pass over the file for nothing. A form B source's rows
+        // are several views', so the count there is data-dependent like a limit's.
+        None if view.select.is_none() => input::count_point_rows(&view.points)? as usize,
+        _ => {
             let mut count = 0usize;
             input::scan_points(
                 &view.points,
@@ -3680,6 +3879,7 @@ fn read_source_ids(args: &BuildArgs, view: &crate::ViewArgs) -> Result<Vec<u64>>
                 view.projection,
                 &view.extent,
                 args.limit,
+                view.select.as_ref(),
                 |_| {
                     count += 1;
                     ControlFlow::Continue(())
@@ -3695,6 +3895,7 @@ fn read_source_ids(args: &BuildArgs, view: &crate::ViewArgs) -> Result<Vec<u64>>
         view.projection,
         &view.extent,
         args.limit,
+        view.select.as_ref(),
         |point| {
             ids.push(point.source_id);
             ControlFlow::Continue(())

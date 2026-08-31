@@ -107,6 +107,7 @@ fn args(points: &Path, out: &Path, default: &str) -> BuildArgs {
             extent: extent(),
             points: points.to_path_buf(),
             point_fields: Default::default(),
+            select: None,
             access: AccessInput {
                 source: AccessSource::Field("categories".to_string()),
                 default: default.to_string(),
@@ -114,6 +115,7 @@ fn args(points: &Path, out: &Path, default: &str) -> BuildArgs {
         }],
         anchor: 0,
         groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: Vec::new(),
         out: out.to_path_buf(),
         limit: None,
@@ -123,6 +125,7 @@ fn args(points: &Path, out: &Path, default: &str) -> BuildArgs {
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
         mint_external_ids: false,
         emit_oracle_pairs: false,
         batch_items: None,

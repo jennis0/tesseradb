@@ -162,6 +162,24 @@ pub fn run(
         })
         .map(|layer| layer.declaration.name.as_str())
         .collect();
+    // **An artifact of a scoped layer is drawn in its own view and in no other** (`views.md`
+    // §3.5): its membership is entity space and every view holds some of those entities, so a
+    // Q1 cluster projected into Q2's row space would be a real, wrong artifact there. The view's
+    // own key is what an artifact names, so a group's several layouts over one key set — `quarter`
+    // and `quarter_alt` — draw the same artifact in each.
+    let view_key = tessera_store::view_path_components(view)
+        .last()
+        .copied()
+        .unwrap_or(view)
+        .to_string();
+    let elsewhere = |layer: &str, level: u32, ordinal: u32| -> bool {
+        published
+            .artifact_views
+            .get(layer)
+            .and_then(|artifacts| artifacts.get(&(level, ordinal)))
+            .is_some_and(|owner| owner != &view_key)
+    };
+
     let levels: Vec<(String, u32)> = store
         .levels_and_extents()
         .filter(|(layer, _, _)| drawn.contains(layer))
@@ -285,6 +303,9 @@ pub fn run(
                 return;
             }
             for (ordinal, record) in store.level(layer, *level) {
+                if elsewhere(layer, *level, ordinal) {
+                    continue;
+                }
                 visit(
                     ordinal,
                     &space.project_base_with(&record.members, &mut scratch.borrow_mut()),
@@ -352,6 +373,9 @@ pub fn run(
                     return;
                 }
                 for (ordinal, record) in store.level(layer, *level) {
+                    if elsewhere(layer, *level, ordinal) {
+                        continue;
+                    }
                     visit(
                         ordinal,
                         &space.project_base_with(&record.members, &mut scratch.borrow_mut()),
@@ -391,6 +415,9 @@ pub fn run(
                 return;
             }
             for (ordinal, record) in store.level(layer, *level) {
+                if elsewhere(layer, *level, ordinal) {
+                    continue;
+                }
                 visit(
                     ordinal,
                     &space.project_base_with(&record.members, &mut scratch.borrow_mut()),

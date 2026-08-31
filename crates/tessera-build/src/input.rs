@@ -40,7 +40,7 @@ use tessera_spatial::tiler::{ScalarType, ScalarValue};
 use tessera_spatial::{fixed32, Bounds, Projection};
 use tessera_store::vocabulary::VocabularyMinter;
 
-use crate::config::{Fields, ENTITY_ID};
+use crate::config::{Fields, ViewSelector, ENTITY_ID};
 use crate::error::{BuildError, Result};
 
 /// One input point: its source-corpus entity ID (which becomes the external ID) and geometry.
@@ -81,6 +81,103 @@ pub const IDENTITY_EXTENT: Bounds = Bounds {
     y_max: 65536.0,
 };
 
+/// Where the discriminator column sits in a file's own schema, refused by name when it is absent.
+///
+/// Refused rather than read as *every row*: a form B source with no `view` column would land
+/// every one of its rows in every view of the group (`views.md` §3.1).
+fn discriminator_index(
+    path: &Path,
+    schema: &arrow::datatypes::Schema,
+    select: &ViewSelector,
+) -> Result<usize> {
+    schema
+        .column_with_name(&select.column)
+        .map(|(i, _)| i)
+        .ok_or_else(|| BuildError::Schema {
+            path: path.to_path_buf(),
+            detail: format!(
+                "view '{}': `fields.view = \"{}\"` names the column saying which view each row \
+                 lands in, and this file has no column of that name. Its columns are: {}",
+                select.view_id,
+                select.column,
+                column_names(schema)
+            ),
+        })
+}
+
+/// Which rows of one decoded batch belong to `select`'s view, and a refusal for any row naming a
+/// key the group's roster does not carry (`views.md` §3.1's form B).
+///
+/// **A stray key is refused, not skipped.** Every other view's rows are skipped here by design —
+/// that is what the selection is — so a key nobody declared would be skipped by every view and
+/// its rows would vanish from the bundle with nothing said. The refusal names the key and the
+/// roster, which is the pair an operator needs to tell a typo from a missing declaration.
+///
+/// A null discriminator is the same refusal: a row that names no view is in no view.
+fn selected_rows(
+    path: &Path,
+    column: &arrow::array::ArrayRef,
+    select: &ViewSelector,
+) -> Result<Vec<bool>> {
+    use arrow::array::{LargeStringArray, StringArray};
+    let stray = |key: Option<&str>| -> BuildError {
+        BuildError::Schema {
+            path: path.to_path_buf(),
+            detail: match key {
+                Some(key) => format!(
+                    "the discriminator column '{}' carries the key '{key}', which this group's \
+                     roster does not list (views §3.1). Its keys are: {}. A row naming a view \
+                     nobody declared belongs to no view, and every view's own selection would \
+                     skip it — so it is refused here rather than dropped from the bundle in \
+                     silence",
+                    select.column,
+                    select.keys.join(", ")
+                ),
+                None => format!(
+                    "the discriminator column '{}' has a null in it, and a row that names no view \
+                     is in no view (views §3.1). Its keys are: {}",
+                    select.column,
+                    select.keys.join(", ")
+                ),
+            },
+        }
+    };
+    let rows = column.len();
+    let mut keep = vec![false; rows];
+    let mut decide = |i: usize, value: Option<&str>| -> Result<()> {
+        let Some(value) = value else {
+            return Err(stray(None));
+        };
+        if select.keys.binary_search_by(|k| k.as_str().cmp(value)).is_err() {
+            return Err(stray(Some(value)));
+        }
+        keep[i] = value == select.value;
+        Ok(())
+    };
+    if let Some(values) = column.as_any().downcast_ref::<StringArray>() {
+        for i in 0..rows {
+            decide(i, (!values.is_null(i)).then(|| values.value(i)))?;
+        }
+        return Ok(keep);
+    }
+    if let Some(values) = column.as_any().downcast_ref::<LargeStringArray>() {
+        for i in 0..rows {
+            decide(i, (!values.is_null(i)).then(|| values.value(i)))?;
+        }
+        return Ok(keep);
+    }
+    Err(BuildError::Schema {
+        path: path.to_path_buf(),
+        detail: format!(
+            "the discriminator column '{}' has type {:?}, and a view key is a string \
+             (views §3.2's charset). Refused rather than coerced: a key read out of another type \
+             would select rows for a view under a name nobody wrote",
+            select.column,
+            column.data_type()
+        ),
+    })
+}
+
 /// Read `points`, keeping rows with `source_id < limit` when `limit` is `Some`.
 ///
 /// Accepted schemas (checked in this order), all yielding [`PointRow`]'s 32-bit fixed point:
@@ -104,9 +201,10 @@ pub fn read_points(
     projection: Projection,
     extent: &Bounds,
     limit: Option<u64>,
+    select: Option<&ViewSelector>,
 ) -> Result<Vec<PointRow>> {
     let mut out = Vec::new();
-    scan_points(path, fields, projection, extent, limit, |row| {
+    scan_points(path, fields, projection, extent, limit, select, |row| {
         out.push(row);
         ControlFlow::Continue(())
     })?;
@@ -148,6 +246,7 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
     projection: Projection,
     extent: &Bounds,
     limit: Option<u64>,
+    select: Option<&ViewSelector>,
     mut visit: F,
 ) -> Result<()> {
     let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
@@ -188,9 +287,14 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
     // Project: the probe corpus carries columns this build has no use for, and at 10^9 rows
     // not decoding them is the difference between one pass and two. Each decode worker builds
     // its own `ProjectionMask` from these root indices against its own reader.
-    let mut roots = Vec::with_capacity(wanted.len());
+    let mut roots = Vec::with_capacity(wanted.len() + 1);
     for canonical in geometry_kind.canonical_fields() {
         roots.push(field_index(path, &schema, fields, canonical)?);
+    }
+    // Form B's discriminator rides the same projection as the geometry: the selection is part of
+    // reading this view's points, not a second pass over the file (`views.md` §3.1).
+    if let Some(select) = select {
+        roots.push(discriminator_index(path, &schema, select)?);
     }
 
     let keep = prunable_row_groups(builder.metadata(), id_idx_in_file, limit);
@@ -205,8 +309,15 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
     let (id_name, x_name, y_name) = (fields.of(ENTITY_ID), fields.of("x"), fields.of("y"));
     let (morton_name, residual_name) = (fields.of("morton"), fields.of("residual"));
 
-    /// One decoded batch's columns, extracted on a worker thread.
-    enum PointCols {
+    /// One decoded batch's columns, extracted on a worker thread, with the rows this view's
+    /// selection keeps — `None` where the file is the view and every row is kept.
+    struct PointCols {
+        keep: Option<Vec<bool>>,
+        geometry: PointGeom,
+    }
+
+    /// One decoded batch's geometry columns, extracted on a worker thread.
+    enum PointGeom {
         Xy(Vec<u64>, Vec<f64>, Vec<f64>),
         /// Codes only: 16 bits per axis, all a bare `morton` column can carry.
         Morton(Vec<u64>, Vec<u64>),
@@ -214,6 +325,7 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
         MortonResidual(Vec<u64>, Vec<u64>, Vec<u64>),
     }
 
+    let select_name = select.map(|s| s.column.as_str());
     let (tx, rx) =
         mpsc::sync_channel::<std::result::Result<PointCols, BuildError>>(DECODE_CHANNEL_BATCHES);
     std::thread::scope(|scope| {
@@ -248,26 +360,36 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
                             column_index(path, &projected, residual_name)?,
                         ),
                     };
+                    let select_idx = match select_name {
+                        Some(name) => Some(column_index(path, &projected, name)?),
+                        None => None,
+                    };
                     for batch in reader {
                         let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
                         let ids = read_u64_column(path, &batch, id_idx, id_name)?;
-                        let cols = match geometry {
-                            Geometry::Xy(xi, yi) => PointCols::Xy(
+                        let keep = match (select, select_idx) {
+                            (Some(select), Some(idx)) => {
+                                Some(selected_rows(path, batch.column(idx), select)?)
+                            }
+                            _ => None,
+                        };
+                        let geometry = match geometry {
+                            Geometry::Xy(xi, yi) => PointGeom::Xy(
                                 ids,
                                 read_f64_column(path, &batch, xi, x_name)?,
                                 read_f64_column(path, &batch, yi, y_name)?,
                             ),
-                            Geometry::Morton(mi) => PointCols::Morton(
+                            Geometry::Morton(mi) => PointGeom::Morton(
                                 ids,
                                 read_u64_column(path, &batch, mi, morton_name)?,
                             ),
-                            Geometry::MortonResidual(mi, ri) => PointCols::MortonResidual(
+                            Geometry::MortonResidual(mi, ri) => PointGeom::MortonResidual(
                                 ids,
                                 read_u64_column(path, &batch, mi, morton_name)?,
                                 read_u64_column(path, &batch, ri, residual_name)?,
                             ),
                         };
-                        if tx.send(Ok(cols)).is_err() {
+                        if tx.send(Ok(PointCols { keep, geometry })).is_err() {
                             // The consumer went away (its own error path); stop quietly.
                             return Ok(());
                         }
@@ -283,10 +405,14 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
 
         let mut consume = || -> Result<()> {
             while let Ok(message) = rx.recv() {
-                match message? {
-                    PointCols::Xy(ids, xs, ys) => {
+                let PointCols { keep, geometry } = message?;
+                // The view's own rows, and no other's: a batch of a shared points file carries
+                // every view's (`views.md` §3.1's form B).
+                let selected = |i: usize| keep.as_ref().is_none_or(|keep| keep[i]);
+                match geometry {
+                    PointGeom::Xy(ids, xs, ys) => {
                         for i in 0..ids.len() {
-                            if limit.is_some_and(|l| ids[i] >= l) {
+                            if limit.is_some_and(|l| ids[i] >= l) || !selected(i) {
                                 continue;
                             }
                             // The one place a coordinate is placed, reached in the width the file
@@ -311,9 +437,9 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
                             }
                         }
                     }
-                    PointCols::Morton(ids, codes) => {
+                    PointGeom::Morton(ids, codes) => {
                         for i in 0..ids.len() {
-                            if limit.is_some_and(|l| ids[i] >= l) {
+                            if limit.is_some_and(|l| ids[i] >= l) || !selected(i) {
                                 continue;
                             }
                             let code = narrow_code(path, codes[i], "morton")?;
@@ -334,9 +460,9 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
                             }
                         }
                     }
-                    PointCols::MortonResidual(ids, codes, residuals) => {
+                    PointGeom::MortonResidual(ids, codes, residuals) => {
                         for i in 0..ids.len() {
-                            if limit.is_some_and(|l| ids[i] >= l) {
+                            if limit.is_some_and(|l| ids[i] >= l) || !selected(i) {
                                 continue;
                             }
                             let code = narrow_code(path, codes[i], "morton")?;
@@ -537,11 +663,12 @@ pub fn read_access_vocabulary(
     field: Option<&str>,
     default: &str,
     limit: Option<u64>,
+    select: Option<&ViewSelector>,
 ) -> Result<Vec<String>> {
     let mut distinct: BTreeSet<String> = BTreeSet::new();
     distinct.insert(default.to_string());
     if let Some(field) = field {
-        scan_access_column(points, fields, field, limit, |_, terms| {
+        scan_access_column(points, fields, field, limit, select, |_, terms| {
             for term in terms {
                 if !distinct.contains(*term) {
                     distinct.insert((*term).to_string());
@@ -571,6 +698,10 @@ pub fn read_access_vocabulary(
 ///   only widen it, which makes overriding inadmissible rather than merely unwise.
 ///
 /// `field` is `None` for a view declaring only a default, where every point takes it.
+// The eighth argument is the view's selection, and it belongs beside the file it filters: every
+// pass over a form B source takes the same three (`path`, `fields`, `select`) and a struct around
+// them would be a second spelling of `ViewArgs`.
+#[allow(clippy::too_many_arguments)]
 pub fn scan_access_field<F: FnMut(u64, u64) -> ControlFlow<()>>(
     points: &Path,
     fields: &Fields,
@@ -578,13 +709,14 @@ pub fn scan_access_field<F: FnMut(u64, u64) -> ControlFlow<()>>(
     vocabulary: &[String],
     default_term: u64,
     limit: Option<u64>,
+    select: Option<&ViewSelector>,
     mut visit: F,
 ) -> Result<AccessFill> {
     let mut fill = AccessFill::default();
     let Some(field) = field else {
         // Every point takes the default: the corpus with no permission model. Read from the
         // identity column alone, so a view declaring only a default opens no access column at all.
-        scan_identity(points, fields, limit, |source_id| {
+        scan_identity(points, fields, limit, select, |source_id| {
             fill.filled += 1;
             visit(source_id, default_term)
         })?;
@@ -594,7 +726,7 @@ pub fn scan_access_field<F: FnMut(u64, u64) -> ControlFlow<()>>(
     // build. Refused rather than assumed away: the two passes must see one relation, and the
     // second is what assigns the postings.
     let mut changed: Option<BuildError> = None;
-    scan_access_column(points, fields, field, limit, |source_id, terms| {
+    scan_access_column(points, fields, field, limit, select, |source_id, terms| {
         if terms.is_empty() {
             fill.filled += 1;
             return visit(source_id, default_term);
@@ -638,6 +770,7 @@ fn scan_identity<F: FnMut(u64) -> ControlFlow<()>>(
     path: &Path,
     fields: &Fields,
     limit: Option<u64>,
+    select: Option<&ViewSelector>,
     mut visit: F,
 ) -> Result<()> {
     let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
@@ -646,7 +779,11 @@ fn scan_identity<F: FnMut(u64) -> ControlFlow<()>>(
     let schema = builder.schema().clone();
     let id_root = field_index(path, &schema, fields, ENTITY_ID)?;
     let keep = prunable_row_groups(builder.metadata(), id_root, limit);
-    let projection = parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), [id_root]);
+    let mut roots = vec![id_root];
+    if let Some(select) = select {
+        roots.push(discriminator_index(path, &schema, select)?);
+    }
+    let projection = parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), roots);
     let reader = builder
         .with_row_groups(keep)
         .with_projection(projection)
@@ -655,11 +792,21 @@ fn scan_identity<F: FnMut(u64) -> ControlFlow<()>>(
         .map_err(|e| BuildError::parquet(path, e))?;
     let projected = arrow::array::RecordBatchReader::schema(&reader);
     let id_idx = column_index(path, &projected, fields.of(ENTITY_ID))?;
+    let select_idx = match select {
+        Some(select) => Some(column_index(path, &projected, &select.column)?),
+        None => None,
+    };
     for batch in reader {
         let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
         let ids = read_u64_column(path, &batch, id_idx, fields.of(ENTITY_ID))?;
-        for &id in &ids {
-            if limit.is_some_and(|l| id >= l) {
+        let selected = match (select, select_idx) {
+            (Some(select), Some(idx)) => Some(selected_rows(path, batch.column(idx), select)?),
+            _ => None,
+        };
+        for (i, &id) in ids.iter().enumerate() {
+            if limit.is_some_and(|l| id >= l)
+                || !selected.as_ref().is_none_or(|selected| selected[i])
+            {
                 continue;
             }
             if visit(id).is_break() {
@@ -678,6 +825,7 @@ fn scan_access_column<F: FnMut(u64, &[&str]) -> ControlFlow<()>>(
     fields: &Fields,
     field: &str,
     limit: Option<u64>,
+    select: Option<&ViewSelector>,
     mut visit: F,
 ) -> Result<()> {
     let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
@@ -703,8 +851,14 @@ fn scan_access_column<F: FnMut(u64, &[&str]) -> ControlFlow<()>>(
             ),
         })?;
     let keep = prunable_row_groups(builder.metadata(), id_root, limit);
-    let projection =
-        parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), [id_root, access_root]);
+    // The label is read for this view's rows alone where the file holds several views'
+    // (`views.md` §3.1): a shared source's other rows carry another view's labels for entities
+    // this view may not even hold.
+    let mut roots = vec![id_root, access_root];
+    if let Some(select) = select {
+        roots.push(discriminator_index(path, &schema, select)?);
+    }
+    let projection = parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), roots);
     let reader = builder
         .with_row_groups(keep)
         .with_projection(projection)
@@ -714,14 +868,24 @@ fn scan_access_column<F: FnMut(u64, &[&str]) -> ControlFlow<()>>(
     let projected = arrow::array::RecordBatchReader::schema(&reader);
     let id_idx = column_index(path, &projected, fields.of(ENTITY_ID))?;
     let access_idx = column_index(path, &projected, field)?;
+    let select_idx = match select {
+        Some(select) => Some(column_index(path, &projected, &select.column)?),
+        None => None,
+    };
 
     for batch in reader {
         let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
         let ids = read_u64_column(path, &batch, id_idx, fields.of(ENTITY_ID))?;
         let terms = read_access_column(path, batch.column(access_idx), field)?;
+        let selected = match (select, select_idx) {
+            (Some(select), Some(idx)) => Some(selected_rows(path, batch.column(idx), select)?),
+            _ => None,
+        };
         let mut row: Vec<&str> = Vec::new();
         for (i, &id) in ids.iter().enumerate() {
-            if limit.is_some_and(|l| id >= l) {
+            if limit.is_some_and(|l| id >= l)
+                || !selected.as_ref().is_none_or(|selected| selected[i])
+            {
                 continue;
             }
             row.clear();
@@ -907,6 +1071,7 @@ pub fn survey_points(
     fields: &Fields,
     projection: Projection,
     limit: Option<u64>,
+    select: Option<&ViewSelector>,
     against: Option<&Bounds>,
 ) -> Result<PointSurvey> {
     let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
@@ -960,9 +1125,15 @@ pub fn survey_points(
 
     let id_idx_in_file = field_index(path, &schema, fields, ENTITY_ID)?;
     let keep = prunable_row_groups(builder.metadata(), id_idx_in_file, limit);
-    let mut roots = Vec::with_capacity(3);
+    let mut roots = Vec::with_capacity(4);
     for canonical in [ENTITY_ID, "x", "y"] {
         roots.push(field_index(path, &schema, fields, canonical)?);
+    }
+    // The box is this view's own, so the survey reads this view's rows (`views.md` §3.1): a
+    // group's frame is fitted over every view's source at once, and each of those surveys sees
+    // only the rows the discriminator gives it.
+    if let Some(select) = select {
+        roots.push(discriminator_index(path, &schema, select)?);
     }
     let mask = parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), roots);
     let reader = builder
@@ -975,6 +1146,10 @@ pub fn survey_points(
     let id_idx = column_index(path, &projected, fields.of(ENTITY_ID))?;
     let x_idx = column_index(path, &projected, x_name)?;
     let y_idx = column_index(path, &projected, y_name)?;
+    let select_idx = match select {
+        Some(select) => Some(column_index(path, &projected, &select.column)?),
+        None => None,
+    };
 
     let mut found = false;
     let (mut x_min, mut x_max) = (f64::INFINITY, f64::NEG_INFINITY);
@@ -992,8 +1167,12 @@ pub fn survey_points(
         let ids = read_u64_column(path, &batch, id_idx, fields.of(ENTITY_ID))?;
         let xs = read_f64_column(path, &batch, x_idx, x_name)?;
         let ys = read_f64_column(path, &batch, y_idx, y_name)?;
+        let keep = match (select, select_idx) {
+            (Some(select), Some(idx)) => Some(selected_rows(path, batch.column(idx), select)?),
+            _ => None,
+        };
         for i in 0..ids.len() {
-            if limit.is_some_and(|l| ids[i] >= l) {
+            if limit.is_some_and(|l| ids[i] >= l) || !keep.as_ref().is_none_or(|keep| keep[i]) {
                 continue;
             }
             // A non-finite coordinate would poison every comparison below and produce a box the
@@ -1522,6 +1701,7 @@ pub fn scan_attributes<F: FnMut(AttributeBatch<'_>) -> Result<()>>(
     columns: &[&crate::config::Attribute],
     minters: &mut HashMap<String, VocabularyMinter>,
     limit: Option<u64>,
+    select: Option<&ViewSelector>,
     mut visit: F,
 ) -> Result<()> {
     if columns.is_empty() {
@@ -1552,6 +1732,11 @@ pub fn scan_attributes<F: FnMut(AttributeBatch<'_>) -> Result<()>>(
                 })?,
         );
     }
+    // A group-scoped column is read from a points file that may hold several views' rows, so the
+    // selection rides the same projection here as it does on the geometry (`views.md` §5, §3.1).
+    if let Some(select) = select {
+        roots.push(discriminator_index(path, &file_schema, select)?);
+    }
     let projection = parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), roots.clone());
     let reader = builder
         .with_projection(projection)
@@ -1567,10 +1752,18 @@ pub fn scan_attributes<F: FnMut(AttributeBatch<'_>) -> Result<()>>(
 
     // The batch's selected rows, rebuilt per batch into one retained allocation. Materialised even
     // where no limit is set, so the visitor has one shape to walk rather than two.
+    let select_idx = match select {
+        Some(select) => Some(column_index(path, &projected, &select.column)?),
+        None => None,
+    };
     let mut rows: Vec<u32> = Vec::with_capacity(ATTRIBUTE_BATCH_ROWS);
     for batch in reader {
         let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
         let ids = read_u64_column(path, &batch, id_idx, fields.of(ENTITY_ID))?;
+        let selected = match (select, select_idx) {
+            (Some(select), Some(idx)) => Some(selected_rows(path, batch.column(idx), select)?),
+            _ => None,
+        };
 
         // **Decoded once per batch, not once per row.** An earlier revision called a
         // whole-column converter from inside the row loop, so a 65,536-row batch decoded its
@@ -1591,7 +1784,10 @@ pub fn scan_attributes<F: FnMut(AttributeBatch<'_>) -> Result<()>>(
         rows.extend(
             ids.iter()
                 .enumerate()
-                .filter(|(_, &entity_id)| !limit.is_some_and(|l| entity_id >= l))
+                .filter(|(row, &entity_id)| {
+                    !limit.is_some_and(|l| entity_id >= l)
+                        && selected.as_ref().is_none_or(|selected| selected[*row])
+                })
                 .map(|(row, _)| row as u32),
         );
         visit(AttributeBatch {
@@ -2184,4 +2380,233 @@ mod tests {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The roster as a table (`views.md` §3.1's form B)
+// ---------------------------------------------------------------------------------------------
+
+/// One row of a `[view_group.views]` table: a view of the group, as the file declares it.
+///
+/// **The rows are the roster, in file order**, which is the table's analogue of block order: the
+/// ordinal is creation order and a build creates the views in the order it reads them.
+#[derive(Debug, Clone)]
+pub struct RosterRow {
+    pub key: String,
+    /// The view's own gate, where the table carries a `visibility` column and this row a value.
+    /// `None` takes the group's (`views.md` §6).
+    pub visibility: Option<String>,
+    pub metadata: std::collections::BTreeMap<String, crate::config::MetadataValue>,
+}
+
+/// Read the roster table: one row per view, the canonical `key`, `visibility` and one column per
+/// declared metadata name (`views.md` §3.1).
+///
+/// **Every declared name, on every row, non-null.** A roster record is immutable
+/// ([decision 0108](../../../docs/decisions/0108-a-roster-record-is-immutable.md)), so a value the
+/// table leaves out is a view served with that field missing for the whole of its life rather than
+/// one an update fills in later — the same rule the inline block is held to.
+///
+/// `visibility` is the one optional column: a table carrying none is a roster of views that all
+/// take the group's gate.
+pub fn read_roster_table(
+    path: &Path,
+    fields: &Fields,
+    metadata: &[crate::config::ViewMetadata],
+) -> Result<Vec<RosterRow>> {
+    use crate::config::MetadataValue;
+    use arrow::array::{BooleanArray, LargeStringArray, StringArray};
+
+    let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
+    let schema = builder.schema().clone();
+    let key_name = fields.of("key").to_string();
+    let visibility_name = fields.of("visibility").to_string();
+    if schema.column_with_name(&key_name).is_none() {
+        return Err(BuildError::Schema {
+            path: path.to_path_buf(),
+            detail: format!(
+                "the roster table has no '{key_name}' column, and the key is the view's own name \
+                 — `<group>:<key>` is the id every request names (views §3.2). Its columns are: {}",
+                column_names(&schema)
+            ),
+        });
+    }
+    let carries_visibility = schema.column_with_name(&visibility_name).is_some();
+    let reader = builder
+        .with_batch_size(65_536)
+        .build()
+        .map_err(|e| BuildError::parquet(path, e))?;
+    let projected = arrow::array::RecordBatchReader::schema(&reader);
+    let key_idx = column_index(path, &projected, &key_name)?;
+    let visibility_idx = match carries_visibility {
+        true => Some(column_index(path, &projected, &visibility_name)?),
+        false => None,
+    };
+    let metadata_idx: Vec<usize> = metadata
+        .iter()
+        .map(|declared| {
+            let name = fields.of(&declared.name);
+            column_index(path, &projected, name).map_err(|_| BuildError::Schema {
+                path: path.to_path_buf(),
+                detail: format!(
+                    "the roster table has no '{name}' column, and this group declares '{}' as \
+                     metadata every view carries (views §3.1). Its columns are: {}",
+                    declared.name,
+                    column_names(&projected)
+                ),
+            })
+        })
+        .collect::<Result<_>>()?;
+
+    /// One column's rows as strings, or a refusal naming the column's type.
+    fn strings(path: &Path, column: &arrow::array::ArrayRef, name: &str) -> Result<Vec<Option<String>>> {
+        if let Some(values) = column.as_any().downcast_ref::<StringArray>() {
+            return Ok((0..values.len())
+                .map(|i| (!values.is_null(i)).then(|| values.value(i).to_string()))
+                .collect());
+        }
+        if let Some(values) = column.as_any().downcast_ref::<LargeStringArray>() {
+            return Ok((0..values.len())
+                .map(|i| (!values.is_null(i)).then(|| values.value(i).to_string()))
+                .collect());
+        }
+        Err(BuildError::Schema {
+            path: path.to_path_buf(),
+            detail: format!(
+                "the roster column '{name}' has type {:?}, and this one is a string",
+                column.data_type()
+            ),
+        })
+    }
+
+    let mut rows: Vec<RosterRow> = Vec::new();
+    for batch in reader {
+        let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
+        let keys = strings(path, batch.column(key_idx), &key_name)?;
+        let gates = match visibility_idx {
+            Some(idx) => strings(path, batch.column(idx), &visibility_name)?,
+            None => vec![None; keys.len()],
+        };
+        // One decode per column per batch, as every other reader here does: the roster is a
+        // handful of rows, and the shape is the file's rather than the row's.
+        let mut values: Vec<Vec<MetadataValue>> = Vec::with_capacity(metadata.len());
+        for (declared, &idx) in metadata.iter().zip(&metadata_idx) {
+            let column = batch.column(idx);
+            let name = fields.of(&declared.name);
+            let missing = |row: usize| BuildError::Schema {
+                path: path.to_path_buf(),
+                detail: format!(
+                    "the roster's row {row} carries no '{name}', and this group declares it as \
+                     metadata every view carries (views §3.1). A roster record is immutable \
+                     (decision 0108), so a value left out is a view served with that field \
+                     missing for the whole of its life"
+                ),
+            };
+            let held: Vec<MetadataValue> = if declared.vocabulary.is_some() {
+                // A category's key, carried as written: it is resolved against the vocabulary
+                // where a category column's values are, which is not this parse's decision.
+                strings(path, column, name)?
+                    .into_iter()
+                    .enumerate()
+                    .map(|(row, value)| value.map(MetadataValue::Text).ok_or_else(|| missing(row)))
+                    .collect::<Result<_>>()?
+            } else {
+                match declared.ty {
+                    ScalarType::Bool => {
+                        let values = column
+                            .as_any()
+                            .downcast_ref::<BooleanArray>()
+                            .ok_or_else(|| BuildError::Schema {
+                                path: path.to_path_buf(),
+                                detail: format!(
+                                    "the roster column '{name}' has type {:?}, and this group \
+                                     declares it 'bool'",
+                                    column.data_type()
+                                ),
+                            })?;
+                        (0..values.len())
+                            .map(|row| match values.is_null(row) {
+                                true => Err(missing(row)),
+                                false => Ok(MetadataValue::Bool(values.value(row))),
+                            })
+                            .collect::<Result<_>>()?
+                    }
+                    ScalarType::F32 | ScalarType::F64 => {
+                        let nulls = column.nulls().cloned();
+                        read_f64_column(path, &batch, idx, name)?
+                            .into_iter()
+                            .enumerate()
+                            .map(|(row, value)| {
+                                match nulls.as_ref().is_some_and(|n| n.is_null(row)) {
+                                    true => Err(missing(row)),
+                                    false => Ok(MetadataValue::Float(value)),
+                                }
+                            })
+                            .collect::<Result<_>>()?
+                    }
+                    ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => {
+                        strings(path, column, name)?
+                            .into_iter()
+                            .enumerate()
+                            .map(|(row, value)| {
+                                value.map(MetadataValue::Text).ok_or_else(|| missing(row))
+                            })
+                            .collect::<Result<_>>()?
+                    }
+                    ty => {
+                        let widened =
+                            read_integer(column.as_any(), column.data_type()).ok_or_else(|| {
+                                BuildError::Schema {
+                                    path: path.to_path_buf(),
+                                    detail: format!(
+                                        "the roster column '{name}' has type {:?}, and this group \
+                                         declares it '{}'. A `timestamp_us` reads a microsecond \
+                                         timestamp or an `i64`, and nothing else — a millisecond \
+                                         column read here would be a date a thousandfold wrong",
+                                        column.data_type(),
+                                        ty.arrow_type_name()
+                                    ),
+                                }
+                            })?;
+                        let nulls = column.nulls().cloned();
+                        widened
+                            .into_iter()
+                            .enumerate()
+                            .map(|(row, value)| {
+                                if nulls.as_ref().is_some_and(|n| n.is_null(row)) {
+                                    return Err(missing(row));
+                                }
+                                Ok(match ty {
+                                    ScalarType::TimestampUs => MetadataValue::TimestampUs(value),
+                                    _ => MetadataValue::Int(value),
+                                })
+                            })
+                            .collect::<Result<_>>()?
+                    }
+                }
+            };
+            values.push(held);
+        }
+        for (row, key) in keys.into_iter().enumerate() {
+            let key = key.ok_or_else(|| BuildError::Schema {
+                path: path.to_path_buf(),
+                detail: format!(
+                    "the roster's row {row} carries no '{key_name}', and a view's key is required \
+                     at creation (views §3.2)"
+                ),
+            })?;
+            rows.push(RosterRow {
+                key,
+                visibility: gates[row].clone(),
+                metadata: metadata
+                    .iter()
+                    .zip(&values)
+                    .map(|(declared, held)| (declared.name.clone(), held[row].clone()))
+                    .collect(),
+            });
+        }
+    }
+    Ok(rows)
 }

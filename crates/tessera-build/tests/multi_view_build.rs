@@ -100,6 +100,7 @@ fn view_args(view: &str, points: &Path, pairs: &Path) -> ViewArgs {
         extent: extent(),
         points: points.to_path_buf(),
         point_fields: Default::default(),
+        select: None,
         access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
     }
 }
@@ -133,6 +134,7 @@ fn two_views_are_two_row_spaces_over_one_entity_space() {
                 metadata: Default::default(),
             }],
         }],
+        scoped_attributes: Vec::new(),
         attribute_sources: Vec::new(),
         out: out.clone(),
         limit: None,
@@ -142,6 +144,7 @@ fn two_views_are_two_row_spaces_over_one_entity_space() {
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
         mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
@@ -263,6 +266,7 @@ fn a_label_that_disagrees_between_views_refuses() {
         extent: extent(),
         points: points.to_path_buf(),
         point_fields: Default::default(),
+        select: None,
         access: tessera_build::config::AccessInput {
             source: tessera_build::config::AccessSource::Field("access".to_string()),
             default: "public".to_string(),
@@ -272,6 +276,7 @@ fn a_label_that_disagrees_between_views_refuses() {
         views: vec![field_view("a", &a), field_view("b", &b)],
         anchor: 0,
         groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: Vec::new(),
         out: dir.path().join("bundle"),
         limit: None,
@@ -281,6 +286,7 @@ fn a_label_that_disagrees_between_views_refuses() {
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
         mint_external_ids: false,
         emit_oracle_pairs: false,
         batch_items: None,
@@ -292,4 +298,511 @@ fn a_label_that_disagrees_between_views_refuses() {
     let message = format!("{error}");
     assert!(message.contains("entity_id 5"), "{message}");
     assert!(message.contains("different access labels"), "{message}");
+}
+
+/// **Form B: one file, a discriminator column** (`views.md` §3.1). Each view's rows are picked
+/// out of the shared source by its key, so the two row spaces are the two halves of one file and
+/// neither reads the other's rows.
+#[test]
+fn a_discriminator_selects_each_views_rows_out_of_one_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let points = dir.path().join("quarter-alt.parquet");
+    // Q2 holds 0..24 and Q3 holds 12..36 — the same overlap the file-per-view case has, written
+    // as one file with a key per row.
+    write_discriminated(
+        &points,
+        &[("2026-Q2", WORLD), ("2026-Q3", QUARTER)],
+    );
+    let pairs = dir.path().join("pairs.parquet");
+    write_pairs(&pairs);
+    let out = dir.path().join("bundle");
+
+    let report = build(&BuildArgs {
+        views: vec![
+            selected_view("quarter_alt:2026-Q2", "2026-Q2", &points, &pairs),
+            selected_view("quarter_alt:2026-Q3", "2026-Q3", &points, &pairs),
+        ],
+        anchor: 0,
+        groups: vec![alt_group(&["2026-Q2", "2026-Q3"])],
+        scoped_attributes: Vec::new(),
+        attribute_sources: Vec::new(),
+        out: out.clone(),
+        limit: None,
+        identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        idset: 1,
+        shard_id: 0,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
+        mint_external_ids: false,
+        emit_oracle_pairs: false,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema: Default::default(),
+    })
+    .expect("a form B build succeeds");
+
+    // Entity space is the union of the two selections, and each row space is its own selection.
+    assert_eq!(report.items, ENTITIES);
+    assert_eq!(report.views[0].rows, WORLD.end - WORLD.start);
+    assert_eq!(report.views[1].rows, QUARTER.end - QUARTER.start);
+
+    let bundle = open_bundle(&out).expect("the bundle opens");
+    let partition = bundle.partitions.get("default").expect("one partition");
+    let q2 = partition.views.get("quarter_alt:2026-Q2").expect("Q2");
+    let q3 = partition.views.get("quarter_alt:2026-Q3").expect("Q3");
+    let (mut both, mut q2_only, mut q3_only) = (0u64, 0u64, 0u64);
+    for entity in 0..ENTITIES {
+        let entity = EntityId::new(entity);
+        match (q2.row_space.row_of(entity), q3.row_space.row_of(entity)) {
+            (Some(_), Some(_)) => both += 1,
+            (Some(_), None) => q2_only += 1,
+            (None, Some(_)) => q3_only += 1,
+            (None, None) => panic!("every entity came from some view's rows"),
+        }
+    }
+    assert_eq!(both, QUARTER.start - WORLD.start);
+    assert_eq!(q2_only, WORLD.end - QUARTER.start);
+    assert_eq!(q3_only, QUARTER.end - WORLD.end);
+}
+
+/// A row naming a key the roster does not carry belongs to no view, and every view's own
+/// selection would skip it — so it is refused naming the key and the roster (`views.md` §3.1).
+#[test]
+fn a_discriminator_value_outside_the_roster_refuses() {
+    let dir = tempfile::tempdir().unwrap();
+    let points = dir.path().join("quarter-alt.parquet");
+    write_discriminated(&points, &[("2026-Q2", 0..8), ("2026-Q9", 8..12)]);
+    let pairs = dir.path().join("pairs.parquet");
+    write_pairs(&pairs);
+
+    let error = build(&BuildArgs {
+        views: vec![selected_view(
+            "quarter_alt:2026-Q2",
+            "2026-Q2",
+            &points,
+            &pairs,
+        )],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
+        attribute_sources: Vec::new(),
+        out: dir.path().join("bundle"),
+        limit: None,
+        identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        idset: 1,
+        shard_id: 0,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
+        mint_external_ids: false,
+        emit_oracle_pairs: false,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema: Default::default(),
+    })
+    .expect_err("a key nobody declared refuses");
+    let message = format!("{error}");
+    assert!(message.contains("2026-Q9"), "{message}");
+    assert!(message.contains("2026-Q2"), "{message}");
+}
+
+/// One file holding several views' points, `quarter` saying which view each row is in.
+fn write_discriminated(path: &Path, blocks: &[(&str, std::ops::Range<u64>)]) {
+    use arrow::array::StringArray;
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("quarter", DataType::Utf8, false),
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+    ]));
+    let mut ids: Vec<u64> = Vec::new();
+    let mut keys: Vec<String> = Vec::new();
+    let mut xs: Vec<f64> = Vec::new();
+    let mut ys: Vec<f64> = Vec::new();
+    for (key, range) in blocks {
+        for e in range.clone() {
+            let (x, y) = position(key, e);
+            ids.push(e);
+            keys.push((*key).to_string());
+            xs.push(x);
+            ys.push(y);
+        }
+    }
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(ids)),
+            Arc::new(StringArray::from(keys)),
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+        ],
+    )
+    .unwrap();
+    let mut writer = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+}
+
+/// The roster the manifest publishes for the form B group these tests build.
+fn alt_group(keys: &[&str]) -> tessera_store::manifest::GroupDescriptor {
+    tessera_store::manifest::GroupDescriptor {
+        name: "quarter_alt".to_string(),
+        members_of: None,
+        views: keys
+            .iter()
+            .enumerate()
+            .map(|(ordinal, key)| tessera_store::manifest::GroupViewDescriptor {
+                key: (*key).to_string(),
+                ordinal: ordinal as u32,
+                visibility: None,
+                metadata: Default::default(),
+            })
+            .collect(),
+    }
+}
+
+fn selected_view(view: &str, key: &str, points: &Path, pairs: &Path) -> ViewArgs {
+    ViewArgs {
+        select: Some(tessera_build::config::ViewSelector {
+            column: "quarter".to_string(),
+            value: key.to_string(),
+            keys: vec!["2026-Q2".to_string(), "2026-Q3".to_string()],
+            view_id: view.to_string(),
+        }),
+        ..view_args(view, points, pairs)
+    }
+}
+
+/// **One frame for the group, surveyed over every view's source** (`views.md` §3.1): `auto` on a
+/// `[[view_group]]` fits one box to the union of its views' boxes, so a Morton prefix means the
+/// same thing in each of them. Fitting per file would give each view its own grid under one
+/// declaration.
+#[test]
+fn an_auto_frame_over_a_group_fits_every_views_source() {
+    use tessera_build::config::{frame_of, Extent, FrameSource};
+
+    let dir = tempfile::tempdir().unwrap();
+    let q2 = dir.path().join("q2.parquet");
+    let q3 = dir.path().join("q3.parquet");
+    // Two disjoint boxes: Q2's points are the low corner, Q3's the high one.
+    write_points(&q2, "world", 0..8);
+    write_points(&q3, "quarter", 24..36);
+    let fields = Default::default();
+    let (q2, q3) = (q2.as_path(), q3.as_path());
+    let of = |points| FrameSource {
+        points,
+        fields: &fields,
+        select: None,
+    };
+
+    let group = frame_of(
+        "view group 'quarter'",
+        tessera_spatial::Projection::None,
+        &Extent::Auto { margin: 0.0 },
+        &[of(q2), of(q3)],
+        None,
+    )
+    .expect("one frame over both sources");
+    let alone = frame_of(
+        "view 'quarter:2026-Q2'",
+        tessera_spatial::Projection::None,
+        &Extent::Auto { margin: 0.0 },
+        &[of(q2)],
+        None,
+    )
+    .expect("one frame over one source");
+
+    // The group's box holds both views' data; the single view's does not hold the other's.
+    for path in [q2, q3] {
+        let rows = tessera_build::input::read_points(
+            path,
+            &fields,
+            tessera_spatial::Projection::None,
+            &group.extent,
+            None,
+            None,
+        )
+        .expect("points read");
+        assert!(!rows.is_empty());
+    }
+    assert!(
+        group.extent.x_max > alone.extent.x_max || group.extent.y_max > alone.extent.y_max,
+        "the group's frame {:?} is no wider than one view's {:?}",
+        group.extent,
+        alone.extent
+    );
+    // Nothing clamps: the box was fitted to every row it will place.
+    assert!(group.refusal().is_none());
+}
+
+/// **The roster as a table** (`views.md` §3.1's form B): the keys are rows of a file, read before
+/// pass two, and each becomes a view of the group with its ordinal, its typed metadata and its
+/// own selection out of the shared points file.
+#[test]
+fn a_roster_table_enumerates_the_groups_views() {
+    use arrow::array::{Int64Array, StringArray};
+
+    let dir = tempfile::tempdir().unwrap();
+    write_discriminated(
+        &dir.path().join("quarter-alt.parquet"),
+        &[("2026-Q2", WORLD), ("2026-Q3", QUARTER)],
+    );
+    // One row per view: the key, its own gate, and the group's declared metadata.
+    let roster = dir.path().join("roster.parquet");
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("quarter", DataType::Utf8, false),
+        Field::new("visibility", DataType::Utf8, true),
+        Field::new("label", DataType::Utf8, false),
+        Field::new("starts", DataType::Int64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["2026-Q2", "2026-Q3"])),
+            Arc::new(StringArray::from(vec![Some("public"), None])),
+            Arc::new(StringArray::from(vec!["Q2 2026", "Q3 2026"])),
+            Arc::new(Int64Array::from(vec![1_775_001_600_000_000i64, 1i64])),
+        ],
+    )
+    .unwrap();
+    let mut writer = ArrowWriter::try_new(File::create(&roster).unwrap(), schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+
+    let config = dir.path().join("corpus.toml");
+    std::fs::write(
+        &config,
+        r#"
+[sources]
+alt    = "quarter-alt.parquet"
+roster = "roster.parquet"
+
+[defaults]
+allocation_view = "quarter:2026-Q2"
+
+[[view_group]]
+name             = "quarter"
+extent           = { x = [0.0, 1000.0], y = [0.0, 1000.0] }
+source           = "alt"
+fields           = { view = "quarter" }
+point_visibility = { field = "access", default = "public" }
+metadata         = { label = "text", starts = "timestamp_us" }
+
+[view_group.views]
+source = "roster"
+fields = { key = "quarter" }
+"#,
+    )
+    .unwrap();
+    let config = tessera_build::config::Config::parse(&config, &Default::default())
+        .expect("the declaration parses");
+    let registry = config.build_views().expect("the roster enumerates");
+
+    assert_eq!(
+        registry.iter().map(|v| v.id.as_str()).collect::<Vec<_>>(),
+        ["quarter:2026-Q2", "quarter:2026-Q3"]
+    );
+    let group = registry[1].group.as_ref().expect("a group's view");
+    assert_eq!(group.ordinal, 1, "the ordinal is the roster's own order");
+    assert_eq!(
+        group.metadata.get("label"),
+        Some(&tessera_build::config::MetadataValue::Text(
+            "Q3 2026".to_string()
+        ))
+    );
+    assert_eq!(
+        group.metadata.get("starts"),
+        Some(&tessera_build::config::MetadataValue::TimestampUs(1))
+    );
+    // Every view's points are the group's one file, selected by its key, and the selection
+    // carries the whole roster so a stray key can be refused naming it.
+    let select = registry[0].select.as_ref().expect("form B selects");
+    assert_eq!(select.column, "quarter");
+    assert_eq!(select.value, "2026-Q2");
+    assert_eq!(select.keys, ["2026-Q2", "2026-Q3"]);
+    // The anchor names a view of the group, which is a view id like any other (`views.md` §3.2).
+    assert_eq!(config.anchor_view(&registry).expect("the anchor"), 0);
+}
+
+/// **A listed key with no rows is an empty view** (`views.md` §3.1) — declared, materialised, and
+/// holding nobody: its permutation is sentinel everywhere and its segment has no rows.
+#[test]
+fn a_roster_key_with_no_rows_is_an_empty_view() {
+    let dir = tempfile::tempdir().unwrap();
+    let points = dir.path().join("quarter-alt.parquet");
+    write_discriminated(&points, &[("2026-Q2", 0..ENTITIES)]);
+    let pairs = dir.path().join("pairs.parquet");
+    write_pairs(&pairs);
+    let out = dir.path().join("bundle");
+
+    let report = build(&BuildArgs {
+        views: vec![
+            selected_view("quarter_alt:2026-Q2", "2026-Q2", &points, &pairs),
+            selected_view("quarter_alt:2026-Q3", "2026-Q3", &points, &pairs),
+        ],
+        anchor: 0,
+        groups: vec![alt_group(&["2026-Q2", "2026-Q3"])],
+        scoped_attributes: Vec::new(),
+        attribute_sources: Vec::new(),
+        out: out.clone(),
+        limit: None,
+        identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        idset: 1,
+        shard_id: 0,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
+        mint_external_ids: false,
+        emit_oracle_pairs: false,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema: Default::default(),
+    })
+    .expect("an empty view builds");
+
+    assert_eq!(report.views[1].rows, 0);
+    let bundle = open_bundle(&out).expect("the bundle opens");
+    let partition = bundle.partitions.get("default").expect("one partition");
+    let empty = partition.views.get("quarter_alt:2026-Q3").expect("Q3");
+    assert_eq!(empty.segments[0].row_count, 0);
+    for entity in 0..ENTITIES {
+        assert!(empty.row_space.row_of(EntityId::new(entity)).is_none());
+    }
+}
+
+/// **A group-scoped attribute is a family of entity-space columns** (`views.md` §5): one per view
+/// of the group, each with its own presence bitmap (decision 0064), read from that view's own
+/// rows. Here the group is form B — one points file, a discriminator — so the two columns are two
+/// selections of one file, which is the case a form A group's file-per-view never exercises.
+#[test]
+fn a_group_scoped_attribute_is_one_column_per_view_of_the_group() {
+    use arrow::array::{Float32Array, StringArray};
+    use tessera_spatial::tiler::ScalarType;
+
+    let dir = tempfile::tempdir().unwrap();
+    // Q2 holds 0..24 and Q3 12..36, and a row's sentiment is null on every third entity — so the
+    // two columns carry different values *and* different presence for the entities they share.
+    let points = dir.path().join("quarter-alt.parquet");
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("quarter", DataType::Utf8, false),
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+        Field::new("sentiment", DataType::Float32, true),
+    ]));
+    let mut ids: Vec<u64> = Vec::new();
+    let mut keys: Vec<String> = Vec::new();
+    let (mut xs, mut ys) = (Vec::new(), Vec::new());
+    let mut sentiment: Vec<Option<f32>> = Vec::new();
+    for (key, range) in [("2026-Q2", WORLD), ("2026-Q3", QUARTER)] {
+        for e in range {
+            let (x, y) = position(key, e);
+            ids.push(e);
+            keys.push(key.to_string());
+            xs.push(x);
+            ys.push(y);
+            sentiment.push((e % 3 != 0).then_some(if key == "2026-Q2" { 0.5 } else { -0.5 }));
+        }
+    }
+    let q2_present = WORLD.filter(|e| e % 3 != 0).count() as u64;
+    let q3_present = QUARTER.filter(|e| e % 3 != 0).count() as u64;
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(ids)),
+            Arc::new(StringArray::from(keys)),
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(Float32Array::from(sentiment)),
+        ],
+    )
+    .unwrap();
+    let mut writer = ArrowWriter::try_new(File::create(&points).unwrap(), schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+    let pairs = dir.path().join("pairs.parquet");
+    write_pairs(&pairs);
+    let out = dir.path().join("bundle");
+
+    let sentiment = tessera_build::config::Attribute {
+        name: "sentiment".to_string(),
+        title: None,
+        field: None,
+        ty: ScalarType::F32,
+        analyser: None,
+        vocabulary: None,
+        value_set: None,
+        index: true,
+        render: false,
+    };
+    build(&BuildArgs {
+        views: vec![
+            selected_view("quarter_alt:2026-Q2", "2026-Q2", &points, &pairs),
+            selected_view("quarter_alt:2026-Q3", "2026-Q3", &points, &pairs),
+        ],
+        anchor: 0,
+        groups: vec![alt_group(&["2026-Q2", "2026-Q3"])],
+        scoped_attributes: vec![tessera_build::ScopedColumnFamily {
+            attribute: sentiment,
+            group: "quarter_alt".to_string(),
+            views: vec![0, 1],
+        }],
+        attribute_sources: Vec::new(),
+        out: out.clone(),
+        limit: None,
+        identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        idset: 1,
+        shard_id: 0,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
+        mint_external_ids: false,
+        emit_oracle_pairs: false,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema: Default::default(),
+    })
+    .expect("a scoped family builds");
+
+    let bundle = open_bundle(&out).expect("the bundle opens");
+    // **No serving surface**: the family is stored and digested, and the manifest's flat list of
+    // declared scalars has no slot for it (`views.md` §5, §11).
+    assert!(bundle.manifest.declared_scalars.is_empty());
+    let attrs = out
+        .join("v00000")
+        .join("partitions/default/attrs/sentiment/quarter_alt");
+    for (key, present) in [("2026-Q2", q2_present), ("2026-Q3", q3_present)] {
+        let values = attrs.join(key).join("values.arrow");
+        let presence = attrs.join(key).join("presence.roaring");
+        assert!(values.is_file(), "{key} has a column");
+        let bytes = std::fs::read(&presence).expect("a presence bitmap beside it");
+        let bitmap = croaring::Bitmap::try_deserialize::<croaring::Portable>(&bytes)
+            .expect("the presence bitmap deserialises");
+        assert_eq!(
+            bitmap.cardinality(),
+            present,
+            "{key}'s presence is its own rows' values"
+        );
+        // Every file the build wrote is digested, which is what `tessera verify` walks.
+        for path in [&values, &presence] {
+            let rel = path
+                .strip_prefix(out.join("v00000"))
+                .unwrap()
+                .to_string_lossy()
+                .to_string();
+            assert!(
+                bundle.manifest.files.contains_key(&rel),
+                "{rel} is in the manifest"
+            );
+        }
+    }
 }

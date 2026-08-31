@@ -243,16 +243,6 @@ pub fn check(config: &Config) -> CheckReport {
     report
 }
 
-/// Whether the attribute at `index` was grouped against a file of its own — `false` means the
-/// declaration named no `source` and took no default, which is a refusal for an entity-scoped
-/// column and the ordinary case for a group-scoped one.
-fn attribute_source_absent(config: &Config, index: usize) -> bool {
-    !config
-        .attribute_sources
-        .iter()
-        .any(|group| group.attributes.contains(&index))
-}
-
 /// Every attribute source, and the declared columns each one carries.
 ///
 /// **One group per file, exactly as the build reads them.** An attribute names its own `source` or
@@ -269,15 +259,10 @@ fn check_attribute_sources(config: &Config, report: &mut CheckReport) {
         .flat_map(|s| s.attributes.iter().copied())
         .collect();
     carried.sort_unstable();
+    // A group-scoped attribute is not in the schema at all — it is a column family, read from
+    // the group's views' points files, which [`check_view_group`] checks column by column
+    // (`views.md` §5).
     for (index, attribute) in config.schema.attributes.iter().enumerate() {
-        // **A group-scoped attribute with no source of its own is read from the group's views'
-        // points files** (`views.md` §5), which [`check_view_group`] checks column by column — so
-        // it has a file, and it is not this pass's.
-        if config.scopes.attribute(&attribute.name).is_some()
-            && attribute_source_absent(config, index)
-        {
-            continue;
-        }
         if carried.binary_search(&index).is_err() {
             report.note(
                 format!("attribute '{}'", attribute.name),
@@ -412,15 +397,18 @@ fn check_view_group(config: &Config, group: &ViewGroup, report: &mut CheckReport
     }
     // The columns a scoped attribute reads out of this group's points files, where it declares no
     // source of its own — Appendix A's `sentiment`, read from each quarter's own file.
-    let scoped: Vec<&str> = config
-        .schema
-        .attributes
-        .iter()
-        .enumerate()
-        .filter(|(_, a)| config.scopes.attribute(&a.name) == Some(group.name.as_str()))
-        .filter(|(index, _)| attribute_source_absent(config, *index))
-        .map(|(_, a)| a.column())
-        .collect();
+    // A `members` group's views are its owner's, and so are the files a column family scoped to
+    // them is read from — this group's own points carry its geometry and nothing else
+    // (`views.md` §3.3, §5).
+    let scoped: Vec<&str> = match group.members.is_some() {
+        true => Vec::new(),
+        false => config
+            .scoped_attributes
+            .iter()
+            .filter(|scoped| scoped.group == group.name)
+            .map(|scoped| scoped.attribute.column())
+            .collect(),
+    };
 
     match &group.roster {
         Roster::Inline(views) => {

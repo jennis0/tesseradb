@@ -85,6 +85,10 @@ use tessera_store::derived::authored_shape_input;
 /// One artifact as the build inputs describe it, before any id has been resolved.
 #[derive(Debug, Default)]
 struct PlannedArtifact {
+    /// The key of the view this artifact belongs to, on a layer scoped to a group
+    /// (`views.md` §3.5); `None` on an unscoped layer, whose one artifact set is drawn on every
+    /// view it names.
+    view_key: Option<String>,
     membership: PlannedMembership,
     /// Indexed by rank, dense — a gap would silently renumber the caller's ranking.
     contents: Vec<PlannedContent>,
@@ -420,6 +424,10 @@ pub struct SplitCoverage {
 
 /// What a build's layer pass produced, for the manifest and for the digest map.
 pub struct PublishedLayers {
+    /// For a layer scoped to a group, which view's artifact set each published artifact belongs
+    /// to: layer → `(level, ordinal)` → the view's key (`views.md` §3.5). Empty for every
+    /// unscoped layer, whose one set is drawn on every view it names.
+    pub artifact_views: BTreeMap<String, BTreeMap<(u32, u32), String>>,
     pub layers: Vec<RegisteredLayer>,
     /// Edges whose child escapes its parent's membership — reported, never acted on.
     pub containment_violations: Vec<ContainmentViolation>,
@@ -480,6 +488,7 @@ impl Default for PublishedLayers {
     fn default() -> Self {
         PublishedLayers {
             layers: Vec::new(),
+            artifact_views: BTreeMap::new(),
             containment_violations: Vec::new(),
             split_coverage: Vec::new(),
             low_water: tessera_types::layer::ROWLESS_CEILING,
@@ -505,9 +514,14 @@ impl Default for PublishedLayers {
 /// own, which is what retires the discriminator column: there is no second layer's rows in the
 /// file to tell apart, no filter to configure, and no way for a layer to ingest another's rows
 /// (`annotation-write-cycle.md` §6.1).
+// The eighth argument is which layers are scoped, and it belongs beside the declarations it
+// qualifies: a struct around the seven would be a second spelling of `BuildArgs`' layer half.
+#[allow(clippy::too_many_arguments)]
 pub fn read(
     declarations: &[LayerDeclaration],
     inputs: &[LayerSources],
+    // Which layers are scoped to a group, by name (`views.md` §3.5).
+    scoped: &BTreeMap<String, crate::ScopedLayer>,
     projection: tessera_spatial::Projection,
     extent: &tessera_spatial::Bounds,
     max_shape_vertices: u64,
@@ -567,10 +581,25 @@ pub fn read(
                 path,
                 fields,
                 enumerated,
+                scoped.get(&input.name),
                 &mut plan,
                 shapes.as_mut(),
             )?,
             Some(ArtifactSource::Inline(rows)) => {
+                // **A scoped layer's artifacts are read from a file**, because the view each
+                // belongs to is a column of it (`views.md` §3.5). The inline spelling has no such
+                // column, and taking every row for every view would draw one quarter's clusters on
+                // all four.
+                if let Some(scope) = scoped.get(&input.name) {
+                    return Err(BuildError::Invalid(format!(
+                        "layer '{}': `scope = {{ group = \"{}\" }}` with the artifacts written \
+                         inline. A scoped layer's rows say which view each artifact belongs to, \
+                         under `fields.view`, and an inline row carries no such column (views \
+                         §3.5) — write the artifacts to a file, or drop the scope for one set \
+                         drawn on every view named",
+                        input.name, scope.group
+                    )));
+                }
                 plan_inline(&input.name, rows, &mut plan, shapes.as_mut())?
             }
             // **Which artifacts exist is the layer's own artifact source's to say** — while the
@@ -725,17 +754,39 @@ pub fn read(
 /// disagreement rather than detecting it. What one row per artifact *does* admit is the same
 /// artifact written twice, which is refused below: two rows for one key are two artifacts as far
 /// as the file is concerned, and taking either would be taking the file's row order for an answer.
+#[allow(clippy::too_many_arguments)]
 fn read_artifacts(
     layer: &str,
     path: &Path,
     fields: &Fields,
     enumerated: bool,
+    scoped: Option<&crate::ScopedLayer>,
     plan: &mut LayerPlan,
     mut shapes: Option<&mut ShapeReader>,
 ) -> Result<()> {
     for batch in batches(path)? {
         let batch = batch?;
         let key = key_column(path, &batch, fields, "key")?;
+        // **Which view each artifact belongs to**, on a layer scoped to a group (`views.md`
+        // §3.5). Required where the scope is declared: a row that names no view belongs to no
+        // artifact set, and every view's own selection would pass it over.
+        let view: Option<&StringArray> = match scoped {
+            None => None,
+            Some(scope) => {
+                let array = batch.column_by_name(&scope.column).ok_or_else(|| {
+                    BuildError::Invalid(format!(
+                        "{}: layer '{layer}' is scoped to group '{}' and reads the view each \
+                         artifact belongs to from a column named '{}', which this file does not \
+                         carry. Its columns are: {}",
+                        path.display(),
+                        scope.group,
+                        scope.column,
+                        column_names(&batch)
+                    ))
+                })?;
+                Some(typed(path, array, &scope.column)?)
+            }
+        };
         let shape_columns = match shapes.as_ref() {
             Some(reader) => Some(ShapeColumns::open(path, &batch, fields, reader.kind())?),
             None => None,
@@ -826,8 +877,38 @@ fn read_artifacts(
                 }
                 (None, None) => PlannedMembership::default(),
             };
+            let view_key = match (scoped, view) {
+                (Some(scope), Some(column)) => {
+                    let named = value_at(column, row).ok_or_else(|| {
+                        BuildError::Invalid(format!(
+                            "{}: artifact {} carries no '{}', and this layer's artifacts are a \
+                             different set per view of '{}' (views §3.5) — a row naming no view \
+                             is in no artifact set",
+                            path.display(),
+                            address.2,
+                            scope.column,
+                            scope.group
+                        ))
+                    })?;
+                    if scope.keys.binary_search(&named).is_err() {
+                        return Err(BuildError::Invalid(format!(
+                            "{}: artifact {} names view '{named}', which group '{}' has no such \
+                             key for. Its keys are: {}. An artifact belongs to one view and its \
+                             keys are unique per (layer, view), so a key nobody declared is a \
+                             refusal rather than an artifact drawn nowhere (views §3.5)",
+                            path.display(),
+                            address.2,
+                            scope.group,
+                            scope.keys.join(", ")
+                        )));
+                    }
+                    Some(named)
+                }
+                _ => None,
+            };
             let index = plan.intern(address.clone());
             plan.bodies[index] = PlannedArtifact {
+                view_key,
                 membership,
                 contents: match contents.as_ref() {
                     None => Vec::new(),
@@ -888,6 +969,9 @@ fn plan_inline(
         };
         let index = plan.intern(address);
         plan.bodies[index] = PlannedArtifact {
+            // An inline artifact is on an unscoped layer: the scoped spelling is refused where
+            // the source is chosen, having no column to name a view with.
+            view_key: None,
             membership: match (&row.members, &row.excluding) {
                 // Both is refused at parse, where the declaration can name the artifact.
                 (Some(members), _) => PlannedMembership::Included(members.clone()),
@@ -1489,9 +1573,36 @@ pub fn publish(
         }
     }
 
+    // **Which view's set each published artifact belongs to**, on a layer scoped to a group
+    // (`views.md` §3.5). Taken here, where the plan's keys and the store's ordinals are both in
+    // hand: the artifact pass draws an artifact in its own view and in no other, and an ordinal is
+    // what it has to say that with.
+    let mut wanted: BTreeMap<(&str, u32), BTreeMap<&str, &str>> = BTreeMap::new();
+    for ((layer, level, key), index) in &plan.artifacts {
+        if let Some(view) = &plan.bodies[*index].view_key {
+            wanted
+                .entry((layer.as_str(), *level))
+                .or_default()
+                .insert(key.as_str(), view.as_str());
+        }
+    }
+    let mut artifact_views: BTreeMap<String, BTreeMap<(u32, u32), String>> = BTreeMap::new();
+    for ((layer, level), keys) in wanted {
+        for (ordinal, record) in store.level(layer, level) {
+            let Some(view) = record.key.as_deref().and_then(|key| keys.get(key)) else {
+                continue;
+            };
+            artifact_views
+                .entry(layer.to_string())
+                .or_default()
+                .insert((level, ordinal), (*view).to_string());
+        }
+    }
+
     let (layers, _tombstones) = registry.snapshot();
     let mut published = PublishedLayers {
         layers,
+        artifact_views,
         containment_violations: violations,
         split_coverage: coverage,
         low_water: alloc.low_water(),
@@ -3235,6 +3346,7 @@ mod tests {
         let plan = read(
             &declarations,
             &sources,
+            &BTreeMap::new(),
             projection,
             &extent,
             DEFAULT_MAX_SHAPE_VERTICES,
@@ -3320,6 +3432,7 @@ mod tests {
         read(
             &declarations,
             &sources,
+            &BTreeMap::new(),
             projection,
             &extent,
             DEFAULT_MAX_SHAPE_VERTICES,

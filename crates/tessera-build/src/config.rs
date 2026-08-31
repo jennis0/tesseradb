@@ -763,13 +763,16 @@ pub struct Config {
     pub views: Vec<View>,
     /// The declared view groups, in declaration order (`views.md` §3).
     ///
-    /// ⊘ **Compiled and not built.** Nothing below the declaration materialises a group: there is
-    /// no roster object, no ordinal, no create operation and no row space per key, so a build
-    /// against a declaration carrying one refuses ([`Config::sole_view`]). What this stage buys is
-    /// that the declaration is read, checked and reported rather than met by an unknown-key error.
+    /// A build materialises every view of every one of them ([`Config::build_views`]). ⊘ What
+    /// has no build behind it is the *running* half of spec §3.2 — the roster object, the create
+    /// operation, the ordinal high-water — so a group's views are the ones the declaration
+    /// enumerates and no key comes into being after the build.
     pub view_groups: Vec<ViewGroup>,
     /// Which attributes and which layers are bound to a group's views (`views.md` §5, §3.5).
     pub scopes: Scopes,
+    /// The group-scoped attributes, in declaration order — the column families a build writes
+    /// beside the entity-space schema (`views.md` §5).
+    pub scoped_attributes: Vec<ScopedAttribute>,
     /// In declaration order, which is registration order: a layer must be declared after every
     /// layer it names in `depends_on`.
     pub layers: Vec<LayerDeclaration>,
@@ -1036,6 +1039,20 @@ pub enum Scope {
     Group(String),
 }
 
+/// One attribute whose values are per view of a group (`views.md` §5).
+///
+/// **A family, not a column**: one entity-space column per view of the group, each with its own
+/// presence bitmap (decision 0064), written under `attrs/<column>/<group>/<key>/`. It is held
+/// beside [`Schema::attributes`] rather than in it because the manifest's declared scalars are one
+/// flat bundle-wide list, and a family has no slot there.
+#[derive(Debug, Clone)]
+pub struct ScopedAttribute {
+    pub attribute: Attribute,
+    /// The group that owns the views this column family is over — always the owner, a scope
+    /// naming a `members` group being refused pointing at it.
+    pub group: String,
+}
+
 /// Which attributes and which layers carry a group scope, by name.
 ///
 /// **Beside the declarations rather than inside them**, on `Config::layer_sources`' precedent and
@@ -1175,7 +1192,9 @@ pub const CLAMP_REFUSAL_FRACTION: f64 = 0.5;
 /// nineteen-cell corner, and the build silent.
 #[derive(Debug, Clone)]
 pub struct Frame {
-    pub view: String,
+    /// Whose frame this is, already spelled for a message: `view 'world'`, or
+    /// `view group 'quarter'` where one frame covers every view of a group (`views.md` §3.1).
+    pub subject: String,
     /// What placed every position in this view, before the frame did (`projections.md` §3).
     pub projection: Projection,
     /// What every stored position in this view is quantised across. For a projected view this is
@@ -1232,12 +1251,12 @@ impl Frame {
         // in front of every existing corpus's frame for nothing.
         let mut out = match self.projection {
             Projection::None => format!(
-                "view '{}': quantising against x [{}, {}], y [{}, {}]",
-                self.view, e.x_min, e.x_max, e.y_min, e.y_max
+                "{}: quantising against x [{}, {}], y [{}, {}]",
+                self.subject, e.x_min, e.x_max, e.y_min, e.y_max
             ),
             projection => format!(
-                "view '{}': {}, quantising against x [{}, {}], y [{}, {}]",
-                self.view,
+                "{}: {}, quantising against x [{}, {}], y [{}, {}]",
+                self.subject,
                 projection.name(),
                 e.x_min,
                 e.x_max,
@@ -1378,13 +1397,13 @@ impl Frame {
         }
         let data = survey.bounds?;
         Some(format!(
-            "view '{}': {} of {} point(s) ({:.1}%) would be stored on the frame's edge rather \
+            "{}: {} of {} point(s) ({:.1}%) would be stored on the frame's edge rather \
              than where they were written. The frame is x [{}, {}], y [{}, {}]; the data spans x \
              [{}, {}], y [{}, {}]. Past half the corpus this is not a tail, it is the wrong frame \
              — quantisation clamps rather than filters, so a bundle built here is well-formed \
              with the geometry wrong. Write `extent = \"auto\"` to fit the data, or state the box \
              the data is actually in; filter the source if the intent was to crop",
-            self.view,
+            self.subject,
             survey.clamped,
             survey.rows,
             survey.clamped_fraction() * 100.0,
@@ -1424,12 +1443,62 @@ pub fn frame_view(
     fields: &Fields,
     limit: Option<u64>,
 ) -> Result<Frame> {
+    frame_of(
+        &format!("view '{view}'"),
+        projection,
+        extent,
+        &[FrameSource {
+            points,
+            fields,
+            select: None,
+        }],
+        limit,
+    )
+}
+
+/// One source a frame is fitted over: a view's points, and the rows of that file which are its
+/// own (`views.md` §3.1's form B).
+#[derive(Debug, Clone, Copy)]
+pub struct FrameSource<'a> {
+    pub points: &'a Path,
+    pub fields: &'a Fields,
+    pub select: Option<&'a ViewSelector>,
+}
+
+/// [`frame_view`] over **several** sources, which is what a group's one frame is fitted to.
+///
+/// **One frame for the group** (`views.md` §3.1): its views differ by a key and by per-view
+/// metadata and by nothing else, which is what makes a Morton prefix mean the same thing in each
+/// of them. So `auto` on a group surveys every view's source and fits the box to the union of
+/// their boxes — never one box per view, which would give each view its own grid under one
+/// declaration — and a stated extent is surveyed against every one of them, so the clamp report
+/// covers the whole group.
+pub fn frame_of(
+    name: &str,
+    projection: Projection,
+    extent: &Extent,
+    sources: &[FrameSource],
+    limit: Option<u64>,
+) -> Result<Frame> {
+    let survey_all = |against: Option<&Bounds>| -> Result<PointSurvey> {
+        let mut surveys = Vec::with_capacity(sources.len());
+        for source in sources {
+            surveys.push(crate::input::survey_points(
+                source.points,
+                source.fields,
+                projection,
+                limit,
+                source.select,
+                against,
+            )?);
+        }
+        union_surveys(name, surveys)
+    };
     let margin = match extent {
         Extent::Fixed(bounds) => {
-            let survey =
-                crate::input::survey_points(points, fields, projection, limit, Some(bounds))?;
+            let survey = survey_all(Some(bounds))?;
             return Ok(Frame {
-                view: view.to_string(),
+                subject: name.to_string(),
                 projection,
                 extent: *bounds,
                 asked: None,
@@ -1444,10 +1513,9 @@ pub fn frame_view(
         Extent::LonLat(asked) => {
             let snap = snap_lon_lat(projection, asked);
             let bounds = snap.square.bounds();
-            let survey =
-                crate::input::survey_points(points, fields, projection, limit, Some(&bounds))?;
+            let survey = survey_all(Some(&bounds))?;
             return Ok(Frame {
-                view: view.to_string(),
+                subject: name.to_string(),
                 projection,
                 extent: bounds,
                 asked: Some(*asked),
@@ -1460,14 +1528,14 @@ pub fn frame_view(
         // already the thing to snap — projecting the corners of the degree-space box would give
         // the same square, every projection in the set being monotone on each axis.
         Extent::AutoLonLat => {
-            let survey = crate::input::survey_points(points, fields, projection, limit, None)?;
+            let survey = survey_all(None)?;
             let PointSurvey::Coordinates(survey) = survey else {
                 unreachable!("survey_points refuses a Morton source when no frame is supplied")
             };
-            let data = survey.bounds.ok_or_else(|| empty_auto_source(view))?;
+            let data = survey.bounds.ok_or_else(|| empty_auto_source(name))?;
             let snap = snap_outward(&data);
             return Ok(Frame {
-                view: view.to_string(),
+                subject: name.to_string(),
                 projection,
                 extent: snap.square.bounds(),
                 asked: None,
@@ -1477,11 +1545,11 @@ pub fn frame_view(
         }
         Extent::Auto { margin } => *margin,
     };
-    let survey = crate::input::survey_points(points, fields, projection, limit, None)?;
+    let survey = survey_all(None)?;
     let PointSurvey::Coordinates(survey) = survey else {
         unreachable!("survey_points refuses a Morton source when no frame is supplied")
     };
-    let data = survey.bounds.ok_or_else(|| empty_auto_source(view))?;
+    let data = survey.bounds.ok_or_else(|| empty_auto_source(name))?;
     // Square, then margin: a circle in the data stays a circle on the grid. `span` is the larger
     // of the two axes, and a corpus whose points are all at one position has no span at all — a
     // unit box is the only non-degenerate frame available, and it is centred on the point.
@@ -1506,14 +1574,14 @@ pub fn frame_view(
     };
     bounds.validate().map_err(|detail| {
         declaration_error(format!(
-            "view '{view}': `extent = \"auto\"` fitted no usable box around the data \
+            "{name}: `extent = \"auto\"` fitted no usable box around the data \
              ({detail}). The data spans x [{}, {}], y [{}, {}]; state the frame outright if that \
              is not what this corpus is",
             data.x_min, data.x_max, data.y_min, data.y_max
         ))
     })?;
     Ok(Frame {
-        view: view.to_string(),
+        subject: name.to_string(),
         projection,
         extent: bounds,
         asked: None,
@@ -1522,11 +1590,59 @@ pub fn frame_view(
     })
 }
 
+/// One frame's several sources, folded into the survey the report is printed from.
+///
+/// Boxes union, and every counter sums: the group's frame is judged against every row it will
+/// place, so a clamp in one view is a clamp in the group's report. A build mixing coordinate and
+/// Morton sources under one frame is refused naming the mixture — the two are quantised in
+/// different places, so a shared frame would mean one thing for some of the group's views and
+/// another for the rest.
+fn union_surveys(name: &str, surveys: Vec<PointSurvey>) -> Result<PointSurvey> {
+    let mut folded: Option<CoordinateSurvey> = None;
+    let mut quantised = false;
+    for survey in surveys {
+        match survey {
+            PointSurvey::Quantised => quantised = true,
+            PointSurvey::Coordinates(one) => {
+                folded = Some(match folded {
+                    None => one,
+                    Some(acc) => CoordinateSurvey {
+                        rows: acc.rows + one.rows,
+                        bounds: match (acc.bounds, one.bounds) {
+                            (Some(a), Some(b)) => Some(Bounds {
+                                x_min: a.x_min.min(b.x_min),
+                                x_max: a.x_max.max(b.x_max),
+                                y_min: a.y_min.min(b.y_min),
+                                y_max: a.y_max.max(b.y_max),
+                            }),
+                            (a, b) => a.or(b),
+                        },
+                        clamped: acc.clamped + one.clamped,
+                        clamped_x: acc.clamped_x + one.clamped_x,
+                        clamped_y: acc.clamped_y + one.clamped_y,
+                        clipped: acc.clipped + one.clipped,
+                    },
+                });
+            }
+        }
+    }
+    match (folded, quantised) {
+        (Some(folded), false) => Ok(PointSurvey::Coordinates(folded)),
+        (None, _) => Ok(PointSurvey::Quantised),
+        (Some(_), true) => Err(declaration_error(format!(
+            "'{name}': one frame is fitted over several sources (views §3.1), and some of them \
+             carry coordinates while others carry Morton codes. A code is already placed in the \
+             grid's own frame and a coordinate is quantised against this one, so the two cannot \
+             share a frame. Give the group's views one geometry shape"
+        ))),
+    }
+}
+
 /// `auto` over a source that selects no rows: there is no data to fit a box around, on either
 /// spelling, so the frame has to be stated (`projections.md` §4.2, `configuration.md` §1).
-fn empty_auto_source(view: &str) -> BuildError {
+fn empty_auto_source(subject: &str) -> BuildError {
     declaration_error(format!(
-        "view '{view}': `extent` is `auto` and the points source selects no rows, so there is no \
+        "{subject}: `extent` is `auto` and the points source selects no rows, so there is no \
          data to fit a box around. Either the source is empty or `--limit` excludes every row; \
          state the frame instead — `extent = {{ min = <a>, max = <b> }}`, or `extent = {{ lon = \
          [<a>, <b>], lat = [<c>, <d>] }}` under a projection — if this corpus is meant to start \
@@ -2014,8 +2130,11 @@ impl Config {
         // names a group may not share; before the attributes and layers whose `scope` names one.
         let view_groups =
             compile_view_groups(&file.view_group, &views, &vocabularies, &sources, &defaults)?;
-        let attributes = compile_attributes(&file.attribute, &vocabularies)?;
+        // The scopes first: which attributes are entity space and which are a family is what
+        // decides the schema itself (`views.md` §5).
         let attribute_scopes = compile_attribute_scopes(&file.attribute, &view_groups)?;
+        let (attributes, scoped_attributes) =
+            compile_attributes(&file.attribute, &vocabularies, &attribute_scopes)?;
         let attribute_sources =
             compile_attribute_sources(&file.attribute, &attribute_scopes, &sources, &defaults)?;
         let (layers, layer_sources, label_layers, layer_scopes) =
@@ -2033,53 +2152,12 @@ impl Config {
                 attributes: attribute_scopes,
                 layers: layer_scopes,
             },
+            scoped_attributes,
             layers,
             layer_sources,
             label_layers,
             allocation_view: defaults.allocation_view.clone(),
         })
-    }
-
-    /// The view a build materialises when the invocation names none.
-    ///
-    /// **One declared view is not a default; it is the only answer.** With several there is
-    /// nothing to choose from: ⊘ the multi-view build is specified and not implemented
-    /// (`views.md` §7), so a build here materialises exactly one row space and the declaration
-    /// asks for several. With none, there is nothing to build at all.
-    ///
-    /// A declared `[[view_group]]` is the same refusal for the same reason and is taken first,
-    /// because it is the one a caller cannot work around with `--view`: a group's views are not
-    /// named in the declaration at all under a discriminator, and building the plain views while
-    /// silently dropping the groups would publish a bundle whose declaration promises coordinate
-    /// systems it does not carry.
-    pub fn sole_view(&self) -> Result<&str> {
-        if !self.view_groups.is_empty() {
-            return Err(declaration_error(format!(
-                "the declaration has {} view group(s) — {} — and the multi-view build is \
-                 specified and not implemented (views §7). A build materialises one coordinate \
-                 system per run and a group is a set of them, so there is nothing here to \
-                 materialise one of; the declaration is parsed, checked and reported by `tessera \
-                 check` meanwhile. Removing the groups is what builds the plain views",
-                self.view_groups.len(),
-                names(self.view_groups.iter().map(|g| g.name.as_str()))
-            )));
-        }
-        match self.views.as_slice() {
-            [only] => Ok(&only.name),
-            [] => Err(declaration_error(
-                "the declaration has no `[[view]]` block, so this build has no coordinate system \
-                 to materialise. A view names the geometry source and the frame it is quantised \
-                 against (configuration.md §1)",
-            )),
-            several => Err(declaration_error(format!(
-                "the declaration has {} views and `--view` names none. ⊘ The multi-view build is \
-                 specified and not implemented (views §7), so a build materialises one coordinate \
-                 system: {}. Two views quantise the same corpus differently, so choosing one here \
-                 would produce a bundle that is well-formed and not the one asked for",
-                several.len(),
-                names(several.iter().map(|v| v.name.as_str()))
-            ))),
-        }
     }
 
     /// The entity-space files this build reads: the attribute sources and the layers.
@@ -2093,19 +2171,6 @@ impl Config {
     /// view owns everything downstream of the permutation and nothing upstream of it
     /// (`views.md` §1).
     pub fn acquire(&self) -> Result<Acquisition> {
-        // ⊘ **A group-scoped attribute is a column family, and the build writes none**
-        // (`views.md` §5): one entity-space column per view of the group, each with its own
-        // presence bitmap, under `attrs/<column>/<group>/<key>/`. Refused by name rather than
-        // falling through to the unsourced check below, which would report the missing
-        // `[defaults].source` the scope deliberately withholds.
-        if let Some((attribute, group)) = self.scopes.attributes.iter().next() {
-            return Err(declaration_error(format!(
-                "attribute '{attribute}': ⊘ `scope = {{ group = \"{group}\" }}` is a column \
-                 family — one column per view of '{group}' — and the build writes entity-scoped \
-                 columns only (views §5). The declaration parses and `tessera check` reports it; \
-                 drop the scope to build the column once for every view meanwhile"
-            )));
-        }
         // **Every declared column must have a file by now.** Declaring one with no source is
         // legal (§2) and is the write-path deployment's normal state; a build that would have to
         // read it is where the absence becomes a refusal, naming the columns rather than the block
@@ -2142,19 +2207,11 @@ impl Config {
 
 /// One view's own inputs: its geometry source and where its points' labels come from.
 ///
-/// ⊘ **A form B discriminator is not yet selected on.** A view whose rows are picked out of a
-/// shared file by a `view` column needs the points reader to filter on it, which is the next
-/// stage's work (`views.md` §3.1); such a view refuses here rather than reading every other
-/// view's rows into its own row space.
+/// **Form B's selection travels with the file** (`views.md` §3.1): a view whose points sit in a
+/// shared source carries the discriminator here, and every pass over that file — the id union,
+/// the labels, the geometry, the survey — applies it, so no view ever reads another's rows into
+/// its own row space.
 pub fn acquire_view(view: &BuildView) -> Result<ViewAcquisition> {
-    if let Some((column, key)) = &view.discriminator {
-        return Err(declaration_error(format!(
-            "view '{}': ⊘ its points are selected out of a shared file by `{column} = \"{key}\"` \
-             (views §3.1's form B), and the build reads a whole file per view. Give the group's \
-             views a file each — `[[view_group.view]]` with its own `source` — meanwhile",
-            view.id
-        )));
-    }
     let points = view.source.clone().ok_or_else(|| {
         declaration_error(format!(
             "view '{}': `source` is required to build from a file (configuration.md §1). \
@@ -2168,6 +2225,7 @@ pub fn acquire_view(view: &BuildView) -> Result<ViewAcquisition> {
     Ok(ViewAcquisition {
         points,
         point_fields: view.fields.clone(),
+        select: view.select.clone(),
         access: AccessInput {
             source: match (&view.point_visibility.source, &view.point_visibility.field) {
                 (Some(path), _) => AccessSource::Relation(path.clone()),
@@ -2190,6 +2248,9 @@ pub struct ViewAcquisition {
     pub points: PathBuf,
     /// Where the view's identity and geometry fields sit in that file.
     pub point_fields: Fields,
+    /// Which of that file's rows are this view's, where the file holds several views'
+    /// (`views.md` §3.1's form B). `None` where the file is the view.
+    pub select: Option<ViewSelector>,
     /// Where this view's points get their access terms, and what a point carrying none gets.
     pub access: AccessInput,
 }
@@ -2782,15 +2843,23 @@ fn compile_attribute_sources(
     defaults: &Defaults,
 ) -> Result<Vec<AttributeSource>> {
     let mut groups: Vec<AttributeSource> = Vec::new();
-    for (index, block) in blocks.iter().enumerate() {
+    // **The index recorded is the *schema's*, not the block's.** A group-scoped attribute is a
+    // column family and is not in the schema at all (`views.md` §5), so the two spaces differ the
+    // moment a scoped block is declared ahead of an entity-scoped one — and the scalar tail is
+    // stored positionally, which is what a shifted index would silently rewrite.
+    let mut schema_index = 0usize;
+    for block in blocks {
         let object = format!("attribute '{}'", block.name);
+        let index = schema_index;
+        if !scopes.contains_key(&block.name) {
+            schema_index += 1;
+        }
         // **`[defaults].source` does not reach a group-scoped attribute** (`views.md` §5). Its
-        // values are one per `(entity, view)`, so where it names no source of its own they are
-        // read from each view's own points file — which is what Appendix A's `sentiment` does —
-        // and the default, a single whole-corpus file, is exactly the wrong file. Taking it would
-        // group the column against a source carrying one value per entity and report the column
-        // missing from it.
-        if scopes.contains_key(&block.name) && block.source.is_none() {
+        // values are one per `(entity, view)` and are read from each view's own points file —
+        // which is what Appendix A's `sentiment` does — and the default, a single whole-corpus
+        // file, is exactly the wrong file. Taking it would group the column against a source
+        // carrying one value per entity and report the column missing from it.
+        if scopes.contains_key(&block.name) {
             continue;
         }
         // **An attribute with no source at all is legal to *declare*** (`configuration.md` §2):
@@ -4392,8 +4461,10 @@ fn check_codes(
 fn compile_attributes(
     blocks: &[AttributeBlock],
     vocabularies: &HashMap<String, Vocabulary>,
-) -> Result<Vec<Attribute>> {
+    scopes: &BTreeMap<String, String>,
+) -> Result<(Vec<Attribute>, Vec<ScopedAttribute>)> {
     let mut attributes = Vec::with_capacity(blocks.len());
+    let mut scoped: Vec<ScopedAttribute> = Vec::new();
     let mut seen_names: HashSet<&str> = HashSet::new();
 
     for decl in blocks {
@@ -4631,9 +4702,39 @@ fn compile_attributes(
                 }
             }
         };
-        attributes.push(attribute);
+        // **A group-scoped column is not one of `MANIFEST.declared_scalars`** (`views.md` §5):
+        // it is a *family* — one entity-space column per view of the group — and the manifest's
+        // list is one flat set of bundle-wide columns. Held apart here rather than filtered at
+        // each consumer, so no pass can forget: a scoped column in the schema would take a slot
+        // in every row's hot tail and a whole-corpus `attrs/<column>/` of its own, both of them
+        // absent for every entity, and both served as if the attribute were entity-scoped.
+        match scopes.get(&decl.name) {
+            None => attributes.push(attribute),
+            Some(group) => {
+                // ⊘ **A scoped attribute's own `source` is not read.** Its values are one per
+                // `(entity, view)`, so a file of its own needs `fields.view` to say which view
+                // each row's value is for (`views.md` §5) — which the build does not yet select
+                // on for an attribute source. Refused by name: taking the file as an entity-space
+                // source would read one arbitrary view's values as every view's.
+                if decl.source.is_some() {
+                    return Err(declaration_error(format!(
+                        "attribute '{}': ⊘ a `scope = {{ group = \"{group}\" }}` attribute with \
+                         its own `source` needs `fields.view` on that file to say which view each \
+                         row's value is for (views §5), and the build reads a scoped column from \
+                         each view's own points instead. Drop the `source` to read '{}' from the \
+                         group's views' files meanwhile",
+                        decl.name,
+                        attribute.column()
+                    )));
+                }
+                scoped.push(ScopedAttribute {
+                    attribute,
+                    group: group.clone(),
+                });
+            }
+        }
     }
-    Ok(attributes)
+    Ok((attributes, scoped))
 }
 
 fn declared_names(vocabularies: &HashMap<String, Vocabulary>) -> String {
@@ -5724,6 +5825,26 @@ pub struct GroupMembership {
     pub metadata: BTreeMap<String, MetadataValue>,
 }
 
+/// How one view's rows are picked out of a shared points file (`views.md` §3.1's form B).
+///
+/// **The roster is what makes the selection checkable.** A row carrying a key the group's roster
+/// does not list belongs to no view, so it is refused naming the key and the roster rather than
+/// dropped: dropping it would build a bundle quietly missing the rows of a view nobody declared,
+/// which is the failure form B's refusal exists to prevent. A listed key with no rows is the
+/// other case entirely, and is an empty view.
+#[derive(Debug, Clone)]
+pub struct ViewSelector {
+    /// The discriminator column — `fields.view` on the group, resolved.
+    pub column: String,
+    /// The value this view's rows carry: the view's key.
+    pub value: String,
+    /// Every key the group's roster carries, sorted, so a row's key is a binary search and an
+    /// unknown one is a refusal that can list the alternatives.
+    pub keys: Vec<String>,
+    /// The view whose rows these are, for the refusal to name.
+    pub view_id: String,
+}
+
 /// One coordinate system a build materialises (`views.md` §7).
 ///
 /// **The registry is ordered, and the order is a contract**: it decides which view's Morton code
@@ -5745,12 +5866,50 @@ pub struct BuildView {
     pub source: Option<PathBuf>,
     pub fields: Fields,
     pub point_visibility: PointVisibility,
-    /// Form B: the column naming which view each row lands in, and the value this view's rows
-    /// carry (`views.md` §3.1). `None` where the file *is* the view — every plain view, and every
-    /// view of a form A group.
-    pub discriminator: Option<(String, String)>,
+    /// Form B: how this view's rows are picked out of a shared points file (`views.md` §3.1).
+    /// `None` where the file *is* the view — every plain view, and every view of a form A group.
+    pub select: Option<ViewSelector>,
     /// This view's own gate; `None` takes its group's. ⊘ No gate is evaluated (`views.md` §6).
     pub visibility: Option<String>,
+}
+
+/// The roster table's rows as roster records (`views.md` §3.1's form B).
+///
+/// **The same rules the inline block is held to**, applied to a file: the key charset, no key
+/// twice, and each view's own gate through the one gate compiler — so which form a corpus wrote
+/// its roster in changes nothing about what the roster may say.
+fn read_roster(group: &ViewGroup, table: &RosterTable) -> Result<Vec<RosterView>> {
+    let object = format!("view group '{}' `[view_group.views]`", group.name);
+    let rows = crate::input::read_roster_table(&table.source, &table.fields, &group.metadata)?;
+    if rows.is_empty() {
+        return Err(declaration_error(format!(
+            "{object}: {} carries no rows, so this group has no views. A group with none is a \
+             declaration promising coordinate systems the bundle would not carry (views §3.1)",
+            table.source.display()
+        )));
+    }
+    let mut roster: Vec<RosterView> = Vec::with_capacity(rows.len());
+    for row in rows {
+        let view = format!("{object}, view '{}'", row.key);
+        check_view_name(&view, &row.key)?;
+        if roster.iter().any(|v| v.key == row.key) {
+            return Err(declaration_error(format!(
+                "{object}: view key '{}' appears twice. A key is the caller's own name for one \
+                 view, tombstoned on drop and never reused, and `<group>:<key>` is the id every \
+                 request and every stored path is written under (views §3.2)",
+                row.key
+            )));
+        }
+        roster.push(RosterView {
+            key: row.key,
+            // Form B's points are the group's own file, selected by the discriminator: a roster
+            // row names no source of its own.
+            source: None,
+            visibility: compile_view_gate(&view, row.visibility.as_deref())?,
+            metadata: row.metadata,
+        });
+    }
+    Ok(roster)
 }
 
 impl Config {
@@ -5772,7 +5931,7 @@ impl Config {
                 source: view.source.clone(),
                 fields: view.fields.clone(),
                 point_visibility: view.point_visibility.clone(),
-                discriminator: None,
+                select: None,
                 visibility: view.visibility.clone(),
             })
             .collect();
@@ -5791,51 +5950,51 @@ impl Config {
                         ))
                     })?,
             };
-            let roster = match &owner.roster {
-                Roster::Inline(views) => views,
-                // ⊘ Both arms need a file read this stage does not do: the roster table's keys are
-                // rows of `[view_group.views].source`, and a discriminator group's are the
-                // distinct values of a column. Refused rather than built empty — a group with no
-                // views is a declaration promising coordinate systems the bundle would not carry.
-                Roster::Table(_) | Roster::Discriminator => {
+            // **The roster's rows are views**, whichever form declared them: inline blocks, or
+            // the rows of `[view_group.views].source` read here — before pass two, because the
+            // registry is what pass two iterates and a key the table carries is a coordinate
+            // system this build materialises (`views.md` §3.1, §7).
+            let roster: Vec<RosterView> = match &owner.roster {
+                Roster::Inline(views) => views.clone(),
+                Roster::Table(table) => read_roster(owner, table)?,
+                // ⊘ A discriminator group's keys are the distinct values of a column, discovered
+                // as the points are read. Refused rather than built empty — a group with no views
+                // is a declaration promising coordinate systems the bundle would not carry.
+                Roster::Discriminator => {
                     return Err(declaration_error(format!(
-                        "view group '{}': ⊘ its roster is {} and the build enumerates only the \
-                         inline form (`[[view_group.view]]` blocks) — the multi-view build reads \
-                         no roster table and discovers no discriminator value yet (views §3.1, \
-                         §7). Write the views as `[[view_group.view]]` blocks meanwhile",
+                        "view group '{}': ⊘ its roster is {} and the build enumerates a roster it \
+                         can read — `[[view_group.view]]` blocks, or a `[view_group.views]` table \
+                         — rather than discovering keys from the points (views §3.1, §7). Write \
+                         the views out meanwhile",
                         owner.name,
                         owner.form()
                     )))
                 }
             };
-            // **One frame for the group** (`views.md` §3.1): its views differ by a key and by
-            // per-view metadata, and by nothing else — which is what makes a Morton prefix mean
-            // the same thing in each of them and a key set comparable at all. ⊘ An `auto` frame
-            // is fitted per file, so it would give each view its own box; fitting one over every
-            // view's source is the build this refusal is waiting for.
-            if matches!(group.extent, Extent::Auto { .. } | Extent::AutoLonLat) {
-                return Err(declaration_error(format!(
-                    "view group '{}': ⊘ `extent = \"auto\"` is fitted to one file's data, and a \
-                     group's views share one frame (views §3.1) — fitting it over every view's \
-                     source is not built. Write the box out, in any of configuration.md §1's \
-                     stated spellings",
-                    group.name
-                )));
-            }
             let discriminator_field = group.fields.of("view").to_string();
+            // Sorted once per group, not once per view: it is the same roster each of its views
+            // checks a stray key against.
+            let mut keys: Vec<String> = roster.iter().map(|v| v.key.clone()).collect();
+            keys.sort();
             for (ordinal, view) in roster.iter().enumerate() {
-                // Form A gives each view its own file, so there is nothing to select on; a
-                // `members` group carries every view's points in one file and selects by key.
-                let (source, discriminator) = if group.members.is_some() {
-                    (
-                        group.source.clone(),
-                        Some((discriminator_field.clone(), view.key.clone())),
-                    )
-                } else {
-                    (view.source.clone(), None)
+                // Form A gives each view its own file, so there is nothing to select on; a group
+                // carrying its own `source` — form B, and every `members` group — holds every
+                // view's points in one file and selects by key.
+                let id = format!("{}:{}", group.name, view.key);
+                let (source, select) = match (&group.source, &view.source) {
+                    (Some(shared), _) => (
+                        Some(shared.clone()),
+                        Some(ViewSelector {
+                            column: discriminator_field.clone(),
+                            value: view.key.clone(),
+                            keys: keys.clone(),
+                            view_id: id.clone(),
+                        }),
+                    ),
+                    (None, own) => (own.clone(), None),
                 };
                 registry.push(BuildView {
-                    id: format!("{}:{}", group.name, view.key),
+                    id,
                     group: Some(GroupMembership {
                         group: group.name.clone(),
                         key: view.key.clone(),
@@ -5852,7 +6011,7 @@ impl Config {
                     source,
                     fields: group.fields.clone(),
                     point_visibility: group.point_visibility.clone(),
-                    discriminator,
+                    select,
                     visibility: if group.members.is_some() {
                         group.visibility.clone()
                     } else {

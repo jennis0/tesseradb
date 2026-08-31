@@ -1,7 +1,7 @@
 """multiview — a cheap fixture exercising every shape `docs/design/views.md` r6 adds.
 
 Not a rung on the dataset ladder: it measures nothing and is not part of the ingest campaign.
-Its only job is to be a `corpus.toml` a two-view build can be pointed at once one exists — one
+Its only job is to be the `corpus.toml` a multi-view build is pointed at — one
 plain view, two view groups (one sharing the other's views, in each of the two roster forms), a
 constant and a group-scoped attribute, and an unscoped and a scoped layer — small enough to
 prepare and validate in seconds, at a default of about 100,000 rows total across every file.
@@ -314,14 +314,14 @@ def main() -> None:
         pick = hashed_unit(entity_id, 0xC0 + i) < 0.08  # ~8% of the whole population each
         members = entity_id[pick].tolist()
         coll_rows["key"].append(name)
-        coll_rows["contents"].append([f"{name}-tag"])
+        coll_rows["contents"].append([[f"{name}-tag"]])
         coll_rows["members"].append(members)
         coll_rows["access"].append(None if i % 3 else "public")
     coll_table = pa.table(
         {
             "key": pa.array(coll_rows["key"], type=pa.string()),
-            "contents": pa.array(coll_rows["contents"], type=pa.list_(pa.string())),
-            "members": pa.array(coll_rows["members"], type=pa.list_(pa.int64())),
+            "contents": pa.array(coll_rows["contents"], type=pa.list_(pa.list_(pa.string()))),
+            "members": pa.array(coll_rows["members"], type=pa.list_(pa.uint64())),
             "access": pa.array(coll_rows["access"], type=pa.string()),
         }
     )
@@ -344,14 +344,14 @@ def main() -> None:
             members = ids[cluster_idx == c].tolist()
             clus_rows["key"].append(f"{QUARTERS[q]}-cluster-{c}")
             clus_rows["quarter"].append(QUARTERS[q])
-            clus_rows["contents"].append([f"cluster {c}"])
+            clus_rows["contents"].append([[f"cluster {c}"]])
             clus_rows["members"].append(members)
     clus_table = pa.table(
         {
             "key": pa.array(clus_rows["key"], type=pa.string()),
             "quarter": pa.array(clus_rows["quarter"], type=pa.string()),
-            "contents": pa.array(clus_rows["contents"], type=pa.list_(pa.string())),
-            "members": pa.array(clus_rows["members"], type=pa.list_(pa.int64())),
+            "contents": pa.array(clus_rows["contents"], type=pa.list_(pa.list_(pa.string()))),
+            "members": pa.array(clus_rows["members"], type=pa.list_(pa.uint64())),
         }
     )
     pq.write_table(clus_table, out / "clusters-quarter.parquet")

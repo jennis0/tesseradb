@@ -4,9 +4,9 @@
 # convention every rung in this tree follows: `[sources]` is relative to the declaring document,
 # configuration.md §3, so the copy beside the data is what `tessera build` would read).
 #
-# **`tessera check` passes against this file; `tessera build` refuses it.** The declaration
-# surface is parsed and validated; ⊘ the multi-view build is specified and not implemented
-# (views.md §7), so a build against a declaration carrying a `[[view_group]]` refuses naming that.
+# **`tessera check` and `tessera build` both pass against this file, unmodified** (2026-08-31):
+# nine row spaces over one entity space — the plain view, `quarter`'s four inline views, and
+# `quarter_alt`'s four selected out of one file by its discriminator (views.md §7).
 #
 # Positions: `world` and `quarter_alt` are real-derived (a seeded sample of the GeoNames rung's own
 # built points, its Web Mercator [0,1] coordinates un-projected back to WGS84 degrees — see
@@ -177,6 +177,19 @@ visibility                = "public"
 artifact_visibility       = { field = "access", default = "inherited" }
 require_member_visibility = "all"
 
+# One supplied content value per artifact — the `contents` column both layer files carry, one
+# entry per rank and one value per supplied kind. `inherited` because the tag is the artifact's
+# own name rather than anything derived from its members (configuration.md,
+# `[[layer.content.supplied]]`).
+[layer.content]
+computed = []
+
+[[layer.content.supplied]]
+name                      = "tag"
+type                      = "text"
+require_member_visibility = "inherited"
+
+
 [[layer]]
 name                      = "quarter_clusters"
 title                     = "Clusters by quarter"
@@ -189,3 +202,16 @@ hierarchy                 = { kind = "flat" }
 visibility                = "public"
 artifact_visibility       = { default = "inherited" }
 require_member_visibility = "any"
+
+# One supplied content value per artifact — the `contents` column both layer files carry, one
+# entry per rank and one value per supplied kind. `inherited` because the tag is the artifact's
+# own name rather than anything derived from its members (configuration.md,
+# `[[layer.content.supplied]]`).
+[layer.content]
+computed = []
+
+[[layer.content.supplied]]
+name                      = "tag"
+type                      = "text"
+require_member_visibility = "inherited"
+

@@ -116,6 +116,14 @@ pub struct ViewArgs {
     /// Where the view's identity and geometry fields sit in that file — the view's `fields` map,
     /// resolved. [`config::Fields::default`] is canonical names throughout.
     pub point_fields: crate::config::Fields,
+    /// Which of that file's rows are this view's, where a group's views share one points file
+    /// (`views.md` §3.1's form B). `None` where the file *is* the view — every plain view, and
+    /// every view of a form A group.
+    ///
+    /// **Every pass over the file applies it**: the id union, the label vocabulary and its scan,
+    /// the geometry read, the frame survey and a group-scoped attribute's own column. A pass that
+    /// forgot it would read another view's rows into this view's row space.
+    pub select: Option<crate::config::ViewSelector>,
     /// Where each of this view's points gets its access terms, and what a point carrying none
     /// gets — the view's `point_visibility`, resolved.
     ///
@@ -123,6 +131,40 @@ pub struct ViewArgs {
     /// sets a view's rows carry over every view an entity appears in, and a disagreement is a
     /// refusal naming the entity and the files.
     pub access: crate::config::AccessInput,
+}
+
+/// One group-scoped attribute, and the views of its group whose values this build reads
+/// (`views.md` §5).
+///
+/// **The values are the views' own.** Where the attribute declares no source of its own — the
+/// only shape the build reads today — each view's column is read from that view's points file,
+/// which for a form B group is the group's shared source under that view's own selection. So the
+/// family needs no file of its own: it names the views, and each view already says where its rows
+/// are.
+#[derive(Debug, Clone)]
+pub struct ScopedColumnFamily {
+    /// The column, exactly as an entity-scoped one is declared.
+    pub attribute: crate::config::Attribute,
+    /// The group that owns the views — the `<group>` component of the column's path.
+    pub group: String,
+    /// Indices into [`BuildArgs::views`], one per view of that group, in registry order.
+    pub views: Vec<usize>,
+}
+
+/// One layer whose artifacts are a different set per view of a group (`views.md` §3.5).
+///
+/// **A scoped layer's artifact rows say which view each belongs to**, under the layer's own
+/// `fields.view`, and an artifact is drawn only in that view: its membership is projected into
+/// that view's row space and into no other. The keys are the group's, so a row naming one the
+/// roster does not carry is refused, exactly as a points row is.
+#[derive(Debug, Clone)]
+pub struct ScopedLayer {
+    /// The group whose views the artifact sets are per.
+    pub group: String,
+    /// The discriminator column on the artifacts source — the layer's `fields.view`, resolved.
+    pub column: String,
+    /// Every key of that group, sorted.
+    pub keys: Vec<String>,
 }
 
 /// Arguments to [`build`].
@@ -161,6 +203,16 @@ pub struct BuildArgs {
     /// are per view, attributes are entity space, and a corpus whose geometry is recomputed does
     /// not rewrite its attributes to say so.
     pub attribute_sources: Vec<crate::config::AttributeSource>,
+    /// The **group-scoped attribute column families** this build writes (`views.md` §5): one
+    /// entity-space column per view of the group, each with its own presence bitmap, under
+    /// `attrs/<column>/<group>/<key>/`.
+    ///
+    /// **Not part of [`BuildArgs::schema`], and deliberately.** `MANIFEST.declared_scalars` is one
+    /// flat bundle-wide list and a family has no slot in it, so a scoped column is stored and
+    /// digested and is on no serving surface: ⊘ no filter operand, no postings, no hot column —
+    /// `index` and `render` on a scoped attribute are recorded by the declaration and have nothing
+    /// to act on until contracts §2.3 carries the scope (`views.md` §11).
+    pub scoped_attributes: Vec<ScopedColumnFamily>,
     /// Bundle root to create.
     pub out: PathBuf,
     /// Prefix filter on the *source* entity ID: keep rows with `entity_id < limit`.
@@ -208,6 +260,10 @@ pub struct BuildArgs {
     ///
     /// **One source per layer**, so no row carries the layer it belongs to.
     pub layer_inputs: Vec<crate::config::LayerSources>,
+    /// Which of [`BuildArgs::layers`] are **scoped to a group** — a different artifact set per
+    /// view of it (`views.md` §3.5) — by layer name. Absent is the default `scope = "entity"`:
+    /// one artifact set, drawn on every view the layer names.
+    pub scoped_layers: BTreeMap<String, ScopedLayer>,
     /// Write `pairs.parquet` (contracts §2.4). On by default; `--no-oracle-pairs` clears it.
     ///
     /// The file is read by nothing on any request path — its consumers are the test-only
@@ -259,6 +315,7 @@ impl std::fmt::Debug for BuildArgs {
             .field("views", &self.views)
             .field("anchor", &self.anchor)
             .field("groups", &self.groups)
+            .field("scoped_attributes", &self.scoped_attributes)
             .field("attribute_sources", &self.attribute_sources)
             .field("out", &self.out)
             .field("limit", &self.limit)
@@ -317,6 +374,13 @@ pub struct BuildReport {
     /// what stands between an operator and noticing. An ingest batch reports the same number for
     /// itself in its own 200.
     pub minted_artifacts: u64,
+    /// Every `(view, layer, level)` the post-bundle artifact pass observed, in the order the
+    /// views were built (`crate::artifact_pass`).
+    ///
+    /// **Returned as well as printed, because a scoped layer's per-view separation is only
+    /// visible here** (`views.md` §3.5): an artifact belongs to one view, so the artifact count
+    /// with rows in a view is the layer's own set there and not the level's whole roster.
+    pub artifact_levels: Vec<crate::artifact_pass::LevelLayoutReport>,
     /// What each declared attribute source's join met — the figures
     /// [`report_attribute_coverage`] prints, returned as well as printed.
     ///
@@ -580,6 +644,7 @@ pub(crate) fn plan_access(args: &BuildArgs) -> Result<AccessPlan> {
             field,
             &view.access.default,
             args.limit,
+            view.select.as_ref(),
         )?);
     }
     vocabulary.sort_unstable();
@@ -635,6 +700,7 @@ pub(crate) fn scan_access<F: FnMut(usize, u64, u64) -> std::ops::ControlFlow<()>
             vocabulary,
             plan.default_term[index],
             args.limit,
+            view.select.as_ref(),
             |id, term| visit(index, id, term),
         )?;
         fill.carried += one.carried;
@@ -927,6 +993,19 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         )));
     };
 
+    // **And one entity space, with no column family in it.** The oracle exists to be the
+    // byte-equality reference for the streaming build's entity-id assignment; a second
+    // implementation of the scoped families would be a second thing to keep in step rather than a
+    // check on the first, and they change no byte of what this build writes.
+    if let Some(family) = args.scoped_attributes.first() {
+        return Err(BuildError::Invalid(format!(
+            "the linear build writes no group-scoped column family, and this build declares one: \
+             '{}' over group '{}'. It is the byte-equality oracle for the streaming pipeline \
+             (views §5)",
+            family.attribute.name, family.group
+        )));
+    }
+
     // ---- 1. read inputs --------------------------------------------------------------
     let mut points = input::read_points(
         &view.points,
@@ -934,6 +1013,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         view.projection,
         &view.extent,
         args.limit,
+        view.select.as_ref(),
     )?;
     if points.is_empty() {
         return Err(BuildError::Invalid(
@@ -1181,6 +1261,8 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                 &columns,
                 &mut minters,
                 args.limit,
+                // An attribute source is entity space and has no view to select (`views.md` §5).
+                None,
                 |batch| {
                     // **Serial, row by row, on purpose.** This is the reference build: the
                     // streaming pipeline splits a batch across its columns for the speed
@@ -1371,6 +1453,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             let mut plan = crate::layers::read(
                 &args.layers,
                 &args.layer_inputs,
+                &args.scoped_layers,
                 view.projection,
                 &view.extent,
                 tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
@@ -1782,6 +1865,7 @@ fn write_manifests(
         unclustered_member_rows: published_layers.unclustered.iter().map(|u| u.rows).sum(),
         minted_artifacts: published_layers.minted.values().sum(),
         // Filled by the caller: the join happened stages ago and this function digests files.
+        artifact_levels: Vec::new(),
         attribute_coverage: Vec::new(),
     })
 }
@@ -2352,10 +2436,12 @@ mod tests {
                 },
                 points: PathBuf::from("points.parquet"),
                 point_fields: Default::default(),
+                select: None,
                 access: crate::config::AccessInput::relation(PathBuf::from("pairs.parquet")),
             }],
             anchor: 0,
             groups: Vec::new(),
+            scoped_attributes: Vec::new(),
             attribute_sources: Vec::new(),
             out: PathBuf::from("out"),
             limit: None,
@@ -2365,6 +2451,7 @@ mod tests {
             shard_id: 0,
             layers: Vec::new(),
             layer_inputs: Vec::new(),
+            scoped_layers: Default::default(),
             mint_external_ids: true,
             emit_oracle_pairs: true,
             batch_items: None,
