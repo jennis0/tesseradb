@@ -121,11 +121,7 @@ filter grammar (§5's `name@key`) — a filter surface, not a corpus declaration
 
 Structural checks over the parquets and `corpus.toml` as written — no build, no engine.
 
-**The transcript below predates the three families added on 2026-08-31** — the scoped category, the
-scoped text column and the attribute reading its own source — and their three checks are not in it:
-`data/ladder/geonames/points.parquet` was not on the machine that added them, so `prepare.py` could
-not be re-run and the numbers could not be regenerated. Re-running it replaces this block, and the
-count moves from 17 to 20. Latest run at the default scale:
+Latest run at the default scale:
 
 ```
 validating data/ladder/multiview
@@ -138,29 +134,21 @@ validating data/ladder/multiview
   [11] constant attribute (importance, kind) covers all 21,300 entities: OK
   [12] `kind` vocabulary closure — 9 declared, 9 used: OK
   [13] sentiment (group-scoped) has both present and absent values in every quarter: OK
-  [14] view_group.view metadata typed and present on all 4 blocks: OK
-  [15] quarter_alt declares members=quarter and no roster of its own: OK
-  [16] collections layer's 8,373 member ids are all real entities: OK
-  [17] quarter_clusters partitions each quarter's own entity set: OK
-  [18] regions layer spans 2 frames (world=web_mercator, world_flat=equirectangular), all `wgs84`: OK
+  [14] mood (group-scoped category) is closed and differs by quarter: [['calm', 'tense', 'wild'], ['still', 'tense', 'wild'], ['calm', 'still', 'wild'], ['calm', 'still', 'tense']]
+  [15] note (group-scoped text) carries each quarter's own word and no other's: OK
+  [16] attrs_scoped is one row per (entity, view) with a closed discriminator: OK
+  [17] view_group.view metadata typed and present on all 4 blocks: OK
+  [18] quarter_alt declares members=quarter and no roster of its own: OK
+  [19] collections layer's 8,373 member ids are all real entities: OK
+  [20] quarter_clusters partitions each quarter's own entity set: OK
+  [21] regions layer spans 2 frames (world=web_mercator, world_flat=equirectangular), all `wgs84`: OK
 
-18 checks passed.
+21 checks passed.
 ```
 
-## A finding for `views.md`, not a fixture defect
+## Appendix A, validated by writing against it
 
-**One spelling in `views.md`'s examples is not a spelling the surface has.** Spec §3.1's form A
-example and Appendix A both write a group's frame as
-`extent = { min = [-40.0, -40.0], max = [40.0, 40.0] }` — `min` and `max` as two-element arrays.
-`configuration.md` §1, which owns the *spelling* of every key (see its preamble), gives `extent`
-four forms, and `{ min, max }` is the **scalar** one — one range applied to both axes, preserving
-aspect ratio — with `{ x = [a, b], y = [c, d] }` the per-axis form. A group takes every `[[view]]`
-key with the same meaning, so a group's `extent` has a view's four spellings and no fifth. This
-file was written from views.md's example and now carries the surface's own spelling,
-`{ x = [-40.0, 40.0], y = [-40.0, 40.0] }`, which is the same box. **The example is what needs
-correcting, or `configuration.md` needs the array form; neither is decided here.**
-
-Otherwise **Appendix A's worked declaration parses, and nothing else in it had to be adapted.**
+**Appendix A's worked declaration parses, and nothing else in it had to be adapted.**
 Writing this corpus.toml against the r6 spellings — one `visibility` key, `[[view_group.view]]`
 vs. `[view_group.views]`, typed `metadata`, `scope` on an attribute and on a layer, `fields.view`
 on a group source and on a scoped layer — turned up no other gap between the appendix and spec
