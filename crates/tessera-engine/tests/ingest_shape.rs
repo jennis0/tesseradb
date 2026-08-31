@@ -143,6 +143,7 @@ fn build_rows_with_signatures(
             UnallocatedRow {
                 external_id: Some(format!("{tag}-{i}").into_bytes()),
                 view: "s0".to_string(),
+                join: None,
                 x: ((i * 7) % 1000) as f64,
                 y: ((i * 13) % 1000) as f64,
                 scalars: Vec::new(),

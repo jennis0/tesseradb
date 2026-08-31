@@ -76,6 +76,23 @@ pub(crate) struct FlushPlan {
     pub(crate) items: Vec<(EntityId, BufferedItem)>,
 }
 
+impl FlushPlan {
+    /// The rows that carry **entity-space** facts: this entity's label, its attributes, its prose
+    /// (`views.md` §4).
+    ///
+    /// **A join is excluded, and that exclusion is the join rule's teeth.** A joining row is the
+    /// same document in a second view: its entity, its label and its entity-scoped attributes are
+    /// the ones it already has, and they are already in the postings, the dictionary, the
+    /// attribute columns and the record extent — put there by the flush that gave the entity its
+    /// first row. Writing them again from a *second* row is how a second view would come to
+    /// re-label an entity with no overlay entry, or to give one entity two values for one
+    /// attribute column. The segment write below takes every row, joins included, because that is
+    /// geometry and geometry is what a join contributes.
+    pub(crate) fn entity_space_items(&self) -> impl Iterator<Item = &(EntityId, BufferedItem)> {
+        self.items.iter().filter(|(_, item)| !item.join)
+    }
+}
+
 /// Why a tick published nothing. Each is a distinct operator-facing condition, and two of them are
 /// fail-closed postures rather than absences of work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,7 +163,7 @@ pub(crate) fn plan_flush(
 
     let mut items: Vec<(EntityId, BufferedItem)> = generation
         .buffer
-        .iter()
+        .rows()
         .filter(|(entity, item)| item.view == view && !is_deleted(&generation.overlay, **entity))
         .map(|(entity, item)| (*entity, item.clone()))
         .collect();
@@ -572,7 +589,7 @@ fn promote(plan: &FlushPlan, ctx: &FlushContext) -> Result<Promotion, FlushFaile
     let mut interned: Vec<Vec<u8>> = Vec::new();
     let mut assigned: FxHashMap<u32, u32> = FxHashMap::default();
 
-    for (entity, item) in &plan.items {
+    for (entity, item) in plan.entity_space_items() {
         let Ok(entity) = u32::try_from(entity.raw()) else {
             return Err(FlushFailed(format!(
                 "entity {} does not fit the u32 posting space (I9's ceiling)",
@@ -813,7 +830,7 @@ fn extent_values<'a>(
 
     let mut presence = croaring::Bitmap::new();
     let mut entities = Vec::with_capacity(plan.items.len());
-    for (entity, item) in &plan.items {
+    for (entity, item) in plan.entity_space_items() {
         let entity = u32::try_from(entity.raw()).map_err(|_| {
             FlushFailed(format!(
                 "entity {} does not fit the u32 entity space (I9's ceiling)",
@@ -1064,7 +1081,7 @@ fn write_text_extents(
         let mut terms: std::collections::BTreeMap<String, Vec<u32>> =
             std::collections::BTreeMap::new();
         let mut presence = croaring::Bitmap::new();
-        for (entity, row) in &plan.items {
+        for (entity, row) in plan.entity_space_items() {
             let entity = entity.raw() as u32;
             let value = row.scalars.get(spec.index);
             let prose = match value {
@@ -1158,7 +1175,7 @@ fn write_record_extent(
     .map_err(|e| FlushFailed(format!("record extent: {e}")))?;
 
     let mut fields: Vec<tessera_filter::RecordField> = Vec::with_capacity(ctx.record_schema.len());
-    for (entity, item) in &plan.items {
+    for (entity, item) in plan.entity_space_items() {
         let entity = u32::try_from(entity.raw()).map_err(|_| {
             FlushFailed(format!(
                 "entity {} does not fit the u32 entity space (I9's ceiling)",
@@ -1348,6 +1365,7 @@ mod tests {
         BufferedItem {
             terms: terms.iter().map(|t| TermId::new(*t)).collect(),
             view: VIEW.to_string(),
+            join: false,
             x: 0.5,
             y: 0.5,
             scalars: vec![WalScalar::U64(1)],
@@ -1363,6 +1381,7 @@ mod tests {
                 external_id: Some(format!("ext-{entity}").into_bytes()),
                 entity_id: EntityId::new(*entity),
                 view: item.view.clone(),
+                join: false,
                 descriptors: Vec::new(),
                 x: item.x,
                 y: item.y,

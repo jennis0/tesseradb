@@ -413,6 +413,7 @@ fn ingest_point(engine: &Engine, external_id: &str, term: u32, x: f64, y: f64) {
             vec![UnallocatedRow {
                 external_id: Some(external_id.as_bytes().to_vec()),
                 view: "s0".to_string(),
+                join: None,
                 descriptors: descriptors.clone(),
                 x,
                 y,

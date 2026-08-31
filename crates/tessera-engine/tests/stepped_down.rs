@@ -71,6 +71,7 @@ fn a_stepped_down_node_refuses_ingest_flushes_nothing_and_rotates_nothing() {
                 external_id: Some(b"pre-existing-row".to_vec()),
                 entity_id: tessera_types::EntityId::new(N_ITEMS),
                 view: "s0".to_string(),
+                join: false,
                 descriptors: vec![b"0".to_vec()],
                 x: 0.5,
                 y: 0.5,
@@ -107,6 +108,7 @@ fn a_stepped_down_node_refuses_ingest_flushes_nothing_and_rotates_nothing() {
     let row = UnallocatedRow {
         external_id: Some(b"refused-on-stepdown".to_vec()),
         view: "s0".to_string(),
+        join: None,
         descriptors: vec![b"0".to_vec()],
         x: 0.5,
         y: 0.5,

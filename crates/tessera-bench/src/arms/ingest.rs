@@ -375,6 +375,7 @@ pub(crate) fn synth_rows(
             UnallocatedRow {
                 external_id: Some(format!("bench-{n}").into_bytes()),
                 view: "s0".to_string(),
+                join: None,
                 descriptors: descriptors.to_vec(),
                 x: ((n * 37) % 65536) as f64,
                 y: ((n * 53) % 65536) as f64,
@@ -1094,6 +1095,7 @@ fn rate_rows(
             UnallocatedRow {
                 external_id: Some(format!("rate-{n}").into_bytes()),
                 view: "s0".to_string(),
+                join: None,
                 descriptors: picks.iter().map(|&k| pool_descriptors[k].clone()).collect(),
                 x: ((n * 37) % 65536) as f64,
                 y: ((n * 53) % 65536) as f64,

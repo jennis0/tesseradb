@@ -396,6 +396,7 @@ pub fn assign_sorted(items: &mut [PendingItem], alloc: &mut Allocator) -> Result
     let mut order: Vec<(usize, Vec<u32>)> = items
         .iter()
         .enumerate()
+        .filter(|(_, item)| item.entity_id.is_none())
         .map(|(i, item)| (i, signature_sort_key(&item.terms)))
         .collect();
     order.sort_by(|(a, ka), (b, kb)| {
@@ -403,7 +404,12 @@ pub fn assign_sorted(items: &mut [PendingItem], alloc: &mut Allocator) -> Result
             .then_with(|| items[*a].external_id.cmp(&items[*b].external_id))
     });
 
-    let ids = alloc.allocate(items.len() as u64)?;
+    // **A row that arrives with an entity is a join** (`views.md` §4): the same document in a
+    // second view, whose identity was decided when it was first ingested. It takes no id and no
+    // rank — allocating one would mint a second entity for one document, and the join rule exists
+    // precisely so that cannot happen — so the allocation is sized by the rows that need one.
+    let wanted = order.len();
+    let ids = alloc.allocate(wanted as u64)?;
     for (rank, (idx, _)) in order.into_iter().enumerate() {
         items[idx].entity_id = Some(EntityId::new(ids.start + rank as u64));
     }
@@ -623,6 +629,7 @@ mod tests {
                 external_id: Some(entity_id.to_le_bytes().to_vec()),
                 entity_id: EntityId::new(entity_id),
                 view: "default".to_string(),
+                join: false,
                 descriptors: Vec::new(),
                 x: 0.0,
                 y: 0.0,

@@ -216,6 +216,7 @@ fn flush_interleaved_segments(engine: &Engine) -> Vec<Vec<(EntityId, String)>> {
             rows.push(UnallocatedRow {
                 external_id: Some(external_id.as_bytes().to_vec()),
                 view: "s0".to_string(),
+                join: None,
                 // x ≡ s (mod TIER_WIDTH), scaled to distinct cells inside the extent.
                 x: ((t * TIER_WIDTH + s) * 20) as f64,
                 y: 5.0,
@@ -819,6 +820,7 @@ fn a_reboot_after_a_merge_reads_back_the_watermark_the_process_served() {
                 UnallocatedRow {
                     external_id: Some(format!("late-{t}").into_bytes()),
                     view: "s0".to_string(),
+                    join: None,
                     x: ((t * TIER_WIDTH) * 20) as f64,
                     y: 45.0,
                     scalars: Vec::new(),
@@ -940,6 +942,7 @@ fn flush_one_segment(engine: &Engine, tag: usize, rows: usize) -> Vec<EntityId> 
         batch.push(UnallocatedRow {
             external_id: Some(external_id.into_bytes()),
             view: "s0".to_string(),
+            join: None,
             x: ((t % 47) * 20) as f64,
             y: 5.0,
             scalars: Vec::new(),

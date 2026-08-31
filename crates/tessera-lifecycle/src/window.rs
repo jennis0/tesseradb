@@ -732,6 +732,7 @@ mod tests {
         UnallocatedRow {
             external_id: external_id.map(|s| s.as_bytes().to_vec()),
             view: "default".to_string(),
+            join: None,
             descriptors: vec![b"d".to_vec()],
             x: 1.0,
             y: 2.0,

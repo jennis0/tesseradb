@@ -745,6 +745,7 @@ fn concurrent_ingest_and_change_both_survive() {
         let row = tessera_lifecycle::UnallocatedRow {
             external_id: Some(new_external_id.clone()),
             view: "s0".to_string(),
+            join: None,
             descriptors: vec![b"0".to_vec()],
             x: 5.0,
             y: 5.0,

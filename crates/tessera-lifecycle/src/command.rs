@@ -54,6 +54,15 @@ use crate::wal::{ChangeOp, WalError, WalRow, WalScalar};
 pub struct UnallocatedRow {
     pub external_id: Option<Vec<u8>>,
     pub view: String,
+    /// The entity this row **joins**, where the handler resolved its `external_id` to one that
+    /// already exists and is in no such view (`views.md` §4). `None` is the ordinary case: an
+    /// unknown external id, or none at all, and the close allocates.
+    ///
+    /// **Carried rather than re-resolved on the executor**, on [`Command::Change`]'s rule: the
+    /// resolution happens once, at admission, and what travels is the entity. The executor's own
+    /// backstop re-reads the live map beside the same generation it will clone from, so a batch
+    /// that raced a delete cannot be admitted against a stale answer.
+    pub join: Option<tessera_types::EntityId>,
     pub descriptors: Vec<Vec<u8>>,
     pub x: f64,
     pub y: f64,
@@ -81,7 +90,10 @@ impl UnallocatedRow {
         PendingItem {
             external_id: self.external_id.take(),
             terms: std::mem::take(&mut self.terms),
-            entity_id: None,
+            // **A join arrives with its id already decided, and `assign_sorted` leaves it
+            // alone.** The entity exists; a second allocation for it would be a second identity
+            // for one document, which is the whole of what the join rule prevents.
+            entity_id: self.join,
         }
     }
 
@@ -110,6 +122,7 @@ impl UnallocatedRow {
                 external_id: pending.external_id,
                 entity_id,
                 view: self.view,
+                join: self.join.is_some(),
                 descriptors: self.descriptors,
                 x: self.x,
                 y: self.y,
@@ -650,6 +663,7 @@ mod tests {
         UnallocatedRow {
             external_id: Some(b"ext-1".to_vec()),
             view: "default".to_string(),
+            join: None,
             descriptors: vec![b"dept:eng".to_vec(), b"region:emea".to_vec()],
             x: 1.5,
             y: -2.5,

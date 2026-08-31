@@ -206,6 +206,7 @@ fn ingest_row(engine: &Engine, external_id: &str, scalar: WalScalar) -> EntityId
             vec![UnallocatedRow {
                 external_id: Some(external_id.as_bytes().to_vec()),
                 view: "s0".to_string(),
+                join: None,
                 descriptors: vec![b"0".to_vec()],
                 x: 1.0,
                 y: 1.0,
@@ -339,6 +340,7 @@ fn two_rows_in_one_window_with_the_same_novel_key_mint_once() {
     let row = |external_id: &str| UnallocatedRow {
         external_id: Some(external_id.as_bytes().to_vec()),
         view: "s0".to_string(),
+        join: None,
         descriptors: vec![b"0".to_vec()],
         x: 1.0,
         y: 1.0,
@@ -508,6 +510,7 @@ fn a_minted_code_survives_a_restart_and_is_never_redrawn() {
             vec![UnallocatedRow {
                 external_id: Some(b"one-too-many".to_vec()),
                 view: "s0".to_string(),
+                join: None,
                 descriptors: vec![b"0".to_vec()],
                 x: 1.0,
                 y: 1.0,

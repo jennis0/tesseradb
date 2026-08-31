@@ -1741,17 +1741,40 @@ impl LiveState {
     /// must never refuse a user's write). A *suppressed* holder still collides: suppression is
     /// temporary hiding, and re-ingesting past one is the byte-identical-copy hole this check
     /// exists to close.
+    /// The apply-adjacent backstop for the check-to-apply race, **rewritten as the join rule**
+    /// (`views.md` §4): a known external id is a collision only where the entity it names already
+    /// has a row in the view this batch names. Anywhere else it is a join, and the row is stamped
+    /// with the entity it joins — here rather than in the handler's answer, because this map and
+    /// this generation are the ones the apply will clone from.
+    ///
+    /// **A deleted holder is neither** (decision 0047): the binding is dead bookkeeping and the
+    /// row allocates fresh, which is what makes a re-ingest under the same external id land.
     fn established_collisions(
         &self,
-        rows: &[UnallocatedRow],
+        rows: &mut [UnallocatedRow],
         is_deleted: impl Fn(EntityId) -> bool,
+        holds: impl Fn(EntityId, &str) -> bool,
     ) -> usize {
         let established = lock_recover(&self.established);
-        rows.iter()
-            .filter_map(|r| r.external_id.as_ref())
-            .filter_map(|id| established.get(id.as_slice()))
-            .filter(|entity| !is_deleted(**entity))
-            .count()
+        let mut collisions = 0;
+        for row in rows.iter_mut() {
+            let Some(id) = row.external_id.as_ref() else {
+                continue;
+            };
+            let Some(entity) = established.get(id.as_slice()).copied() else {
+                continue;
+            };
+            if is_deleted(entity) {
+                row.join = None;
+                continue;
+            }
+            if holds(entity, &row.view) {
+                collisions += 1;
+                continue;
+            }
+            row.join = Some(entity);
+        }
+        collisions
     }
 
     /// Drop every retired entity's external-id binding from the live map — **the other half of
@@ -2198,7 +2221,7 @@ impl WritePath {
         dict: &Dict,
         initial_deny: &[(EntityId, ChangeOp)],
         vocabularies: &mut Vocabularies,
-        has_row: impl Fn(EntityId) -> bool,
+        has_row: impl Fn(EntityId, &str) -> bool,
     ) -> Result<(Overlay, IngestBuffer, WritePathState), EngineError> {
         let (wal, records) = Wal::open(wal_path).map_err(EngineError::Wal)?;
 
@@ -2400,10 +2423,16 @@ impl WritePath {
         // It is also what `compose::verdict` now relies on. That function used to gate rule 4 on
         // `entity < watermark` to stop a stale buffer answering for an entity the fragment already
         // covers; the gate is gone, and this invariant is what replaces it.
-        let already_flushed: Vec<EntityId> = buffer
-            .iter()
-            .map(|(entity, _)| *entity)
-            .filter(|entity| has_row(*entity))
+        // **Per (entity, view), because an entity may hold a row in several views** (`views.md`
+        // §4). The question is not "does this entity have geometry" — a joined entity has some,
+        // in the view it was first ingested into — but "does this *row* have geometry", and a
+        // predicate over the entity alone would drop a second view's pending row from the buffer
+        // while no segment held it. Every row is in one view, so the two questions coincide
+        // exactly while a corpus has one view, which is why the narrower one costs nothing.
+        let already_flushed: Vec<(EntityId, String)> = buffer
+            .rows()
+            .map(|(entity, item)| (*entity, item.view.clone()))
+            .filter(|(entity, view)| has_row(*entity, view))
             .collect();
         if !already_flushed.is_empty() {
             tracing::debug!(
@@ -2411,8 +2440,8 @@ impl WritePath {
                 "WAL rows that already have geometry were not re-buffered"
             );
         }
-        for entity in already_flushed {
-            buffer.remove(entity);
+        for (entity, view) in already_flushed {
+            buffer.remove_in_view(entity, &view);
         }
 
         // **Where each surviving row sits in the log**, so a rotation knows what it may reclaim
@@ -2427,7 +2456,7 @@ impl WritePath {
         for (record, position) in records.iter().zip(wal.replayed_positions()) {
             if let WalRecord::IngestBatch { rows, .. } = record {
                 for row in rows {
-                    buffer.set_wal_pos(row.entity_id, *position);
+                    buffer.set_wal_pos(row.entity_id, &row.view, *position);
                 }
             }
         }
@@ -8317,9 +8346,22 @@ impl Executor {
         // apply below will clone from, on the same thread, so the deleted-holder exemption cannot
         // race its own delete.
         let generation = self.generation.load();
-        let collisions = self
-            .live
-            .established_collisions(&rows, |e| generation.overlay.is_deleted(e));
+        let mut rows = rows;
+        let collisions = self.live.established_collisions(
+            &mut rows,
+            |e| generation.overlay.is_deleted(e),
+            |entity, view| {
+                // The same predicate the handler answered with, read from the generation this
+                // apply will clone from: the view's permutation, and the buffer beside it for the
+                // rows an earlier window accepted and no flush has taken yet.
+                generation.bundle.partitions.values().any(|partition| {
+                    partition
+                        .views
+                        .get(view)
+                        .is_some_and(|data| data.row_space.row_of(entity).is_some())
+                }) || generation.buffer.contains_in_view(entity, view)
+            },
+        );
         drop(generation);
         if collisions > 0 {
             self.ack_failed(
@@ -9867,7 +9909,7 @@ impl Executor {
                 }
                 buffer.insert_row_with_terms(row, row_terms);
                 let m = self.health.lap(WriteStage::RowBufferInsert, m);
-                buffer.set_wal_pos(row.entity_id, *wal_pos);
+                buffer.set_wal_pos(row.entity_id, &row.view, *wal_pos);
                 self.health.lap(WriteStage::RowWalPos, m);
             }
         }
@@ -9875,9 +9917,10 @@ impl Executor {
         drop(established_inverse);
         mark = self.health.lap(WriteStage::ApplyRows, mark);
 
-        // Published here, at the one place buffer occupancy changes, so `/control/ingest`'s
-        // occupancy bound reads a figure the executor maintains rather than one a handler derives
-        // from a generation it would have to load.
+        // Published here, and at every other place buffer occupancy changes — the flush's
+        // publication and the deny lane's — so `/control/ingest`'s occupancy bound reads a figure
+        // the executor maintains rather than one a handler derives from a generation it would
+        // have to load.
         self.health
             .buffered_items
             .store(buffer.len(), Ordering::SeqCst);
@@ -11627,8 +11670,19 @@ impl Executor {
         // design adds rather than one it avoids.
         let mut buffer = (*live.buffer).clone();
         for entity in &completed.consumed {
-            buffer.remove(*entity);
+            // **By (entity, view), never by entity.** A flush consumes one view's rows; an entity
+            // that also holds a row awaiting flush in another view keeps it, and removing the
+            // entity outright would lose a row that is in no segment and no buffer (`views.md`
+            // §4).
+            buffer.remove_in_view(*entity, &completed.view);
         }
+        // **The gauge follows the buffer here too.** A flush is the other place occupancy changes,
+        // and until it was stated here the figure only ever came down at the next apply — so a
+        // node that flushed and then took no ingest reported a backlog it had already written, and
+        // `/control/ingest`'s occupancy bound was measured against it.
+        self.health
+            .buffered_items
+            .store(buffer.len(), Ordering::SeqCst);
 
         let watermark = next_bundle
             .partitions
@@ -12304,6 +12358,7 @@ mod dispatch_rules_tests {
         let item = BufferedItem {
             terms: Vec::new(),
             view: "s".to_string(),
+            join: false,
             x: 0.5,
             y: 0.5,
             scalars: Vec::new(),

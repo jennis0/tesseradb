@@ -1038,6 +1038,7 @@ fn engine_open_refuses_an_out_of_range_allocator_seed() {
                 external_id: None,
                 entity_id: tessera_types::EntityId::new(u32::MAX as u64 - 1),
                 view: "s0".to_string(),
+                join: false,
                 descriptors: Vec::new(),
                 x: 0.5,
                 y: 0.5,

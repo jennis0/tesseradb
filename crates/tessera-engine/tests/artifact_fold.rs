@@ -636,6 +636,7 @@ fn ingest(engine: &Engine, external_id: &[u8]) -> EntityId {
     let row = tessera_lifecycle::command::UnallocatedRow {
         external_id: Some(external_id.to_vec()),
         view: "s0".to_string(),
+        join: None,
         descriptors: descriptors.clone(),
         x: 5.0,
         y: 5.0,

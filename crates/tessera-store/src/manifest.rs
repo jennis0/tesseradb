@@ -1805,6 +1805,8 @@ mod tests {
                 "vocabulary_extensions",
                 "layers",
                 "layer_tombstones",
+                "views",
+                "view_tombstones",
             ],
             "deltas: `build_fragment_with_deltas` unions every live tier into a fragment. \
              deny/tombstones: the loader seeds the initial overlay from them and WAL replay \
@@ -1815,7 +1817,13 @@ mod tests {
              before replaying the WAL over the top, which is what makes a registration survive the \
              rotation that reclaims its `LayerCreate` record — a reader carrying them and ignoring \
              them would open a bundle as though no layer had ever been registered, every gate \
-             absent and every reserved run free for reissue"
+             absent and every reserved run free for reissue. views/view_tombstones: \
+             `Engine::open` seeds the `ViewRoster` from them and amends the bundle's own manifest \
+             with what it holds, before replaying the WAL over the top — which is what makes a \
+             view created while the service ran survive the rotation that reclaims its \
+             `ViewCreate` record; a reader carrying them and ignoring them would 404 every \
+             request naming such a view and would hand the next create an ordinal a live view \
+             already holds"
         );
     }
 

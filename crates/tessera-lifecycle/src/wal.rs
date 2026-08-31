@@ -186,6 +186,16 @@ pub struct WalRow {
     pub external_id: Option<Vec<u8>>,
     pub entity_id: EntityId,
     pub view: String,
+    /// **This row joined an existing entity to a second view** (`views.md` §4): geometry, and
+    /// nothing else. `descriptors` is empty on such a row and stays empty — the entity's label is
+    /// the one it already has, and a join that carried terms would be a re-label with no overlay
+    /// entry, which decision 0047 makes a delete plus a re-ingest instead.
+    ///
+    /// Durable rather than derived, because the whole difference between a first row and a join is
+    /// what the *rest of the write path* may do with it: a join contributes no postings and no
+    /// filter-column value, and replay has to reproduce that decision rather than re-take it
+    /// against a live map that has moved on.
+    pub join: bool,
     pub descriptors: Vec<Vec<u8>>,
     pub x: f64,
     pub y: f64,
@@ -1843,6 +1853,7 @@ mod tests {
                 external_id: None,
                 entity_id: EntityId::new(1),
                 view: "s0".to_string(),
+                join: false,
                 descriptors: Vec::new(),
                 x: 0.5,
                 y: 0.5,

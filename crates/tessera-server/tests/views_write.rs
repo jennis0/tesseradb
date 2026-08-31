@@ -54,16 +54,21 @@ fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>) {
         Field::new("entity_id", DataType::UInt64, false),
         Field::new("x", DataType::Float64, false),
         Field::new("y", DataType::Float64, false),
+        // One declared attribute, so the join rule's entity-scoped arm has a column to disagree
+        // about (`views.md` §4).
+        Field::new("score", DataType::Int32, true),
     ]));
     let ids: Vec<u64> = ids.collect();
     let xs: Vec<f64> = ids.iter().map(|&e| position(view, e).0).collect();
     let ys: Vec<f64> = ids.iter().map(|&e| position(view, e).1).collect();
+    let scores: Vec<i32> = ids.iter().map(|&e| e as i32).collect();
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
             Arc::new(UInt64Array::from(ids)),
             Arc::new(Float64Array::from(xs)),
             Arc::new(Float64Array::from(ys)),
+            Arc::new(arrow::array::Int32Array::from(scores)),
         ],
     )
     .unwrap();
@@ -131,6 +136,29 @@ fn build_fixture_bundle(dir: &Path) -> std::path::PathBuf {
             },
         }]
     };
+    // The declaration, for its schema alone: one entity-space attribute over the world file,
+    // which is the file that holds every entity.
+    let config_path = dir.join("config.toml");
+    std::fs::write(
+        &config_path,
+        r#"
+[sources]
+points = "world.parquet"
+
+[[view]]
+name             = "world"
+extent           = { min = 0.0, max = 1000.0 }
+point_visibility = { default = "public" }
+
+[[attribute]]
+name   = "score"
+type   = "i32"
+render = true
+"#,
+    )
+    .unwrap();
+    let config = tessera_build::config::Config::parse(&config_path, &Default::default())
+        .expect("the fixture declaration parses");
     let out = dir.join("bundle");
     build(&BuildArgs {
         views,
@@ -165,7 +193,10 @@ fn build_fixture_bundle(dir: &Path) -> std::path::PathBuf {
             },
         ],
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources: tessera_build::config::AttributeSource::over(
+            dir.join("world.parquet"),
+            &config.schema,
+        ),
         out: out.clone(),
         limit: None,
         identity_key: test_key(),
@@ -180,7 +211,7 @@ fn build_fixture_bundle(dir: &Path) -> std::path::PathBuf {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema: config.schema,
     })
     .expect("a three-view build succeeds");
     out
@@ -291,17 +322,52 @@ async fn points(served: &Served, view: &str) -> Vec<PointRow> {
 }
 
 /// One ingest batch of `(external id, x, y, access)` rows into `view`.
+/// One ingest row: the external id, its position, its access label and the declared attribute —
+/// every declared column, which the schema check requires.
+type Row<'a> = (Vec<u8>, f32, f32, &'a str, Option<i32>);
+
+/// One ingest body.
+fn batch(rows: &[Row<'_>]) -> Vec<u8> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("external_id", DataType::Binary, true),
+        Field::new("x", DataType::Float32, false),
+        Field::new("y", DataType::Float32, false),
+        Field::new("access", DataType::Utf8, false),
+        Field::new("score", DataType::Int32, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(arrow::array::BinaryArray::from_iter(
+                rows.iter().map(|(id, ..)| Some(id.as_slice())),
+            )),
+            Arc::new(arrow::array::Float32Array::from_iter_values(
+                rows.iter().map(|(_, x, ..)| *x),
+            )),
+            Arc::new(arrow::array::Float32Array::from_iter_values(
+                rows.iter().map(|(_, _, y, ..)| *y),
+            )),
+            Arc::new(arrow::array::StringArray::from_iter_values(
+                rows.iter().map(|(_, _, _, access, _)| *access),
+            )),
+            Arc::new(arrow::array::Int32Array::from_iter(
+                rows.iter().map(|(.., score)| *score),
+            )),
+        ],
+    )
+    .unwrap();
+    let mut writer = arrow::ipc::writer::StreamWriter::try_new(Vec::new(), &schema).unwrap();
+    writer.write(&batch).unwrap();
+    writer.into_inner().unwrap()
+}
+
 async fn ingest(
     served: &Served,
     batch_id: &str,
     view: &str,
-    rows: &[(Vec<u8>, f32, f32, &str)],
+    rows: &[Row<'_>],
 ) -> reqwest::Response {
-    let borrowed: Vec<(Option<&[u8]>, f32, f32, &str)> = rows
-        .iter()
-        .map(|(id, x, y, access)| (Some(id.as_slice()), *x, *y, *access))
-        .collect();
-    let body = build_ingest_batch_optional(&borrowed);
+    let body = batch(rows);
     served
         .server
         .client
@@ -316,24 +382,28 @@ async fn ingest(
         .unwrap()
 }
 
+/// Flush until the buffer is empty — **a flush unit is one view**, and a tick publishes one of
+/// them, so a batch that landed in two views needs two ticks (write path's `dispatch_flushes`).
 async fn flush(served: &Served) {
-    let before = served.server.state.engine.write_executor_stats().flushes;
-    let resp = served
-        .server
-        .client
-        .post(served.server.control_url("/control/flush"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 202);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while served.server.state.engine.write_executor_stats().flushes == before {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the flush never published"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    while served.server.state.engine.buffered_items() > 0 {
+        let before = served.server.state.engine.write_executor_stats().flushes;
+        let resp = served
+            .server
+            .client
+            .post(served.server.control_url("/control/flush"))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 202);
+        while served.server.state.engine.write_executor_stats().flushes == before {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the flush never published"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
     }
 }
 
@@ -410,8 +480,16 @@ async fn a_created_view_is_served_ingested_flushed_and_survives_a_restart() {
 
     // Populate it. These are entities the corpus has never seen, so this is ordinary ingest into
     // a view that did not exist when the bundle was built.
-    let rows: Vec<(Vec<u8>, f32, f32, &str)> = (0..4)
-        .map(|i| (format!("q5-{i}").into_bytes(), 100.0 + i as f32, 200.0, "0"))
+    let rows: Vec<Row<'_>> = (0..4)
+        .map(|i| {
+            (
+                format!("q5-{i}").into_bytes(),
+                100.0 + i as f32,
+                200.0,
+                "0",
+                Some(i),
+            )
+        })
         .collect();
     let resp = ingest(&served, "q5-batch", "quarter:2026-Q5", &rows).await;
     assert_eq!(resp.status(), 200, "a created view accepts rows");
@@ -589,4 +667,262 @@ async fn a_drop_burns_the_key_and_the_ordinal_and_survives_a_restart() {
     assert!(view_ids(&document).contains(&"quarter:2026-Q1".to_string()));
     drop_view(&served, "quarter", "2026-Q1", false).await;
     assert_eq!(viewport(&served, "quarter:2026-Q1").await.status(), 404);
+}
+
+/// **One entity, two views** (`views.md` §4): a known `external_id` naming a view the entity is
+/// not in is accepted, the row lands in that view's pending segment, and after the flush the point
+/// is in both views at its own position in each.
+///
+/// The entity is untouched by the second batch — that is what makes this a join rather than an
+/// update — and the arms below are the ways a caller could try to make it an update by accident.
+#[tokio::test]
+async fn a_known_external_id_joins_a_second_view_and_is_placed_in_each() {
+    let served = serve().await;
+    assert_eq!(
+        create(&served, "quarter", "2026-Q5", q_record("Q5", 1))
+            .await
+            .status(),
+        201
+    );
+
+    let id = b"joiner".to_vec();
+    assert_eq!(
+        ingest(&served, "first", "world", &[(id.clone(), 10.0, 10.0, "0", Some(7))])
+            .await
+            .status(),
+        200,
+        "an unknown external id allocates, as it always did"
+    );
+    // The same id, a different view: accepted. Before the flush and after it.
+    let resp = ingest(
+        &served,
+        "join",
+        "quarter:2026-Q5",
+        &[(id.clone(), 800.0, 300.0, "0", Some(7))],
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        200,
+        "a known external id naming a view the entity is not in is a join: {:?}",
+        resp.text().await
+    );
+    flush(&served).await;
+
+    let in_world = points(&served, "world").await;
+    let in_q5 = points(&served, "quarter:2026-Q5").await;
+    let world_ids: Vec<u64> = in_world.iter().map(|p| p.0).collect();
+    let q5_ids: Vec<u64> = in_q5.iter().map(|p| p.0).collect();
+    let shared: Vec<u64> = world_ids
+        .iter()
+        .copied()
+        .filter(|id| q5_ids.contains(id))
+        .collect();
+    assert_eq!(
+        shared.len(),
+        1,
+        "one identity, in two views: world {world_ids:?}, q5 {q5_ids:?}"
+    );
+    let joined = shared[0];
+    let world_code = in_world
+        .iter()
+        .find(|p| p.0 == joined)
+        .unwrap()
+        .1;
+    let q5_code = in_q5.iter().find(|p| p.0 == joined).unwrap().1;
+    assert_ne!(
+        world_code, q5_code,
+        "a view owns everything downstream of the permutation: the same point sits somewhere \
+         different in each"
+    );
+
+    // And the second batch is now a duplicate *in that view*: positions are not updated in place.
+    assert_eq!(
+        ingest(
+            &served,
+            "join-again",
+            "quarter:2026-Q5",
+            &[(id.clone(), 810.0, 310.0, "0", Some(7))]
+        )
+        .await
+        .status(),
+        409,
+        "already in the named view"
+    );
+}
+
+/// The three arms a join refuses, each of which would otherwise be a way to change entity space
+/// through a second view's row (`views.md` §4).
+#[tokio::test]
+async fn a_join_refuses_a_second_row_a_relabel_and_a_changed_attribute() {
+    let served = serve().await;
+    assert_eq!(
+        create(&served, "quarter", "2026-Q5", q_record("Q5", 1))
+            .await
+            .status(),
+        201
+    );
+    let id = b"arms".to_vec();
+    assert_eq!(
+        ingest(&served, "first", "world", &[(id.clone(), 10.0, 10.0, "0", Some(7))])
+            .await
+            .status(),
+        200
+    );
+
+    // Already in the named view — the buffer's half of the arm, before any flush has run.
+    assert_eq!(
+        ingest(
+            &served,
+            "same-view",
+            "world",
+            &[(id.clone(), 11.0, 11.0, "0", Some(7))]
+        )
+        .await
+        .status(),
+        409,
+        "'in the view' is the permutation AND the commit window's buffer"
+    );
+
+    // A different label on a known id: a re-label is a delete plus a re-ingest (decision 0047).
+    assert_eq!(
+        ingest(
+            &served,
+            "relabel",
+            "quarter:2026-Q5",
+            &[(id.clone(), 800.0, 300.0, "1", Some(7))]
+        )
+        .await
+        .status(),
+        409,
+        "a second view's row is not a route to a new access label"
+    );
+
+    // A different value for an entity-scoped attribute, refused naming the column.
+    let resp = ingest(
+        &served,
+        "reattribute",
+        "quarter:2026-Q5",
+        &[(id.clone(), 800.0, 300.0, "0", Some(9))],
+    )
+    .await;
+    assert_eq!(resp.status(), 409);
+    let body: Value = resp.json().await.unwrap();
+    assert!(
+        body["detail"].as_str().unwrap().contains("score"),
+        "the refusal names the column: {body}"
+    );
+
+    // Null is absence, and absence is not disagreement: the join lands.
+    assert_eq!(
+        ingest(
+            &served,
+            "attribute-absent",
+            "quarter:2026-Q5",
+            &[(id.clone(), 800.0, 300.0, "0", None)]
+        )
+        .await
+        .status(),
+        200,
+        "a joining row byte-matches the stored value or omits it"
+    );
+}
+
+/// **A suppressed holder takes the same arms and stays hidden** (`views.md` §4) — the rule's edge,
+/// stated because the two removal rules have been conflated twice.
+///
+/// The new row lands on the *same* entity, suppression composes in entity space, and the entity is
+/// invisible in the new view as in every other. What write-path §2.1 refuses is a byte-identical
+/// re-ingest *past* a suppression — a second copy under a fresh entity — and attaching a view to
+/// the suppressed entity creates no copy. **The suppression retires only by unsuppress** (Rule S).
+#[tokio::test]
+async fn a_suppressed_holder_joins_a_view_and_stays_hidden_until_it_is_unsuppressed() {
+    let served = serve().await;
+    assert_eq!(
+        create(&served, "quarter", "2026-Q5", q_record("Q5", 1))
+            .await
+            .status(),
+        201
+    );
+    let id = b"hidden".to_vec();
+    let resp = ingest(&served, "first", "world", &[(id.clone(), 10.0, 10.0, "0", Some(7))]).await;
+    assert_eq!(resp.status(), 200);
+    let tessera_id: u64 = resp.json::<Value>().await.unwrap()["tessera_ids"][0]
+        .as_u64()
+        .expect("the 200 returns one identifier per accepted row");
+    flush(&served).await;
+    assert!(
+        points(&served, "world")
+            .await
+            .iter()
+            .any(|p| p.0 == tessera_id),
+        "visible before the suppression"
+    );
+
+    let change = |op: &str| {
+        let body = json!([{ "tessera_id": tessera_id.to_string(), "idset": FIXTURE_IDSET, "op": op }]);
+        served
+            .server
+            .client
+            .post(served.server.control_url("/control/changes"))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .json(&body)
+            .send()
+    };
+    assert_eq!(change("suppress").await.unwrap().status(), 200);
+    assert!(
+        !points(&served, "world")
+            .await
+            .iter()
+            .any(|p| p.0 == tessera_id),
+        "suppressed"
+    );
+
+    // The join is accepted past the suppression, because it creates no copy.
+    assert_eq!(
+        ingest(
+            &served,
+            "join",
+            "quarter:2026-Q5",
+            &[(id.clone(), 800.0, 300.0, "0", Some(7))]
+        )
+        .await
+        .status(),
+        200,
+        "a suppressed holder takes the same arms as a live one"
+    );
+    flush(&served).await;
+    assert!(
+        !points(&served, "quarter:2026-Q5")
+            .await
+            .iter()
+            .any(|p| p.0 == tessera_id),
+        "hidden in the new view from the moment the row exists — suppression is entity-space"
+    );
+    assert!(
+        !points(&served, "world")
+            .await
+            .iter()
+            .any(|p| p.0 == tessera_id),
+        "and still hidden in the first"
+    );
+
+    // **Rule S**: the entry leaves `suppressed` only by its unsuppress. Nothing above — not the
+    // join, not the flush that gave it a second row — retired it, and the item comes back in both
+    // views when, and only when, it is unsuppressed.
+    assert_eq!(change("unsuppress").await.unwrap().status(), 200);
+    assert!(
+        points(&served, "world")
+            .await
+            .iter()
+            .any(|p| p.0 == tessera_id),
+        "unsuppress is the one retirement route, and it reveals the row"
+    );
+    assert!(
+        points(&served, "quarter:2026-Q5")
+            .await
+            .iter()
+            .any(|p| p.0 == tessera_id),
+        "in the joined view too"
+    );
 }

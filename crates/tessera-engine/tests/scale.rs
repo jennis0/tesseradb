@@ -394,6 +394,7 @@ fn ingest_round(engine: &Engine, round: usize, batch: usize) -> (Vec<Planted>, R
             rows.push(UnallocatedRow {
                 external_id: Some(external_id.as_bytes().to_vec()),
                 view: "s0".to_string(),
+                join: None,
                 x,
                 y,
                 scalars: Vec::new(),
@@ -1070,6 +1071,7 @@ fn ingest_rows(engine: &Engine, round: usize, batch: usize) {
             rows.push(UnallocatedRow {
                 external_id: Some(format!("p{round}-i{i}").into_bytes()),
                 view: "s0".to_string(),
+                join: None,
                 x,
                 y,
                 scalars: Vec::new(),
@@ -1978,6 +1980,7 @@ fn ingest_returning_ids(engine: &Engine, round: usize, batch: usize, keep: usize
             rows.push(UnallocatedRow {
                 external_id: Some(format!("p{round}-i{i}").into_bytes()),
                 view: "s0".to_string(),
+                join: None,
                 x,
                 y,
                 scalars: Vec::new(),

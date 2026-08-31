@@ -1192,15 +1192,17 @@ impl Engine {
             &dict,
             &initial_deny,
             &mut vocabularies,
-            // An entity belongs to exactly one view, so "any view's row space holds it" is the
-            // same question as "its view's does" — and asking it this way needs no view lookup,
-            // which the buffer would otherwise have to supply before it has been filtered.
-            |entity| {
+            // **Does this row's own view hold it**, not "does any view" (`views.md` §4). An
+            // entity may hold a row in several views at once — that is what the ingest join
+            // produces — so a predicate over the entity alone would discard a pending row of a
+            // second view because the first had already been flushed, leaving it in no segment
+            // and no buffer.
+            |entity, view| {
                 bundle.partitions.values().any(|partition| {
                     partition
                         .views
-                        .values()
-                        .any(|view| view.row_space.row_of(entity).is_some())
+                        .get(view)
+                        .is_some_and(|data| data.row_space.row_of(entity).is_some())
                 })
             },
         )?;
@@ -2499,6 +2501,45 @@ impl Engine {
                 (id_shard == shard && issued).then_some(entity)
             })
             .collect())
+    }
+
+    /// Does `view` hold a row for `entity` — **the "already in the view" arm of the ingest join
+    /// rule** (`views.md` §4)?
+    ///
+    /// "In the view" is the view's permutation **and** the commit window's buffer: a row accepted
+    /// but not yet flushed is in no permutation, and a check that missed it would let two batches
+    /// hand one flush two rows for one entity in one view, which the single-valued permutation
+    /// cannot hold. The window's own open entries are covered upstream, by the early close a held
+    /// external id already forces.
+    ///
+    /// One permutation read and one hash lookup; nothing walks.
+    pub fn view_holds(&self, entity: EntityId, view: &str) -> bool {
+        let generation = self.generation();
+        generation
+            .bundle
+            .partitions
+            .values()
+            .any(|partition| {
+                partition
+                    .views
+                    .get(view)
+                    .is_some_and(|data| data.row_space.row_of(entity).is_some())
+            })
+            || generation.buffer.contains_in_view(entity, view)
+    }
+
+    /// The entity's **own** buffered row — its terms and its scalars — where one is still awaiting
+    /// a flush, for the join rule's label and attribute arms (`views.md` §4).
+    ///
+    /// `None` means the buffer has nothing to compare against, which is the ordinary case for an
+    /// entity ingested before the last flush. ⊘ **There is no entity→label oracle behind it**: the
+    /// bundle stores labels as postings, term by term, so what an already-flushed entity's label
+    /// *is* cannot be read back without a scan of every term. What keeps that gap from being a
+    /// hole is structural rather than procedural — a joining row carries no descriptors and no
+    /// filter-column value at all (`BufferedItem::join`), so a label supplied on one can neither
+    /// widen nor narrow anything.
+    pub fn buffered_row(&self, entity: EntityId) -> Option<tessera_lifecycle::BufferedItem> {
+        self.generation().buffer.get(entity).cloned()
     }
 
     pub fn resolve_external_ids(

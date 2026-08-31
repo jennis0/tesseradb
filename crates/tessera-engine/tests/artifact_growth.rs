@@ -710,6 +710,7 @@ fn ingest_naming(engine: &Engine, batch: &str, layer: &str, key: &str) -> u64 {
     let row = tessera_lifecycle::command::UnallocatedRow {
         external_id: Some(batch.as_bytes().to_vec()),
         view: "s0".to_string(),
+        join: None,
         descriptors: descriptors.clone(),
         x: 5.0,
         y: 5.0,
@@ -826,6 +827,7 @@ fn a_closed_layers_unknown_key_refuses_the_batch() {
     let row = tessera_lifecycle::command::UnallocatedRow {
         external_id: Some(b"p1".to_vec()),
         view: "s0".to_string(),
+        join: None,
         descriptors: descriptors.clone(),
         x: 5.0,
         y: 5.0,

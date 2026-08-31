@@ -214,6 +214,7 @@ fn a_credential_re_presented_after_a_promoting_flush_sees_the_promoted_descripto
         let row = UnallocatedRow {
             external_id: Some(external.as_bytes().to_vec()),
             view: "s0".to_string(),
+            join: None,
             descriptors: vec![b"novel".to_vec()],
             x: 10.0 + i as f64,
             y: 10.0 + i as f64,
@@ -327,6 +328,7 @@ fn a_background_refresh_does_not_poison_a_later_authorise_of_the_same_credential
         let row = UnallocatedRow {
             external_id: Some(external.as_bytes().to_vec()),
             view: "s0".to_string(),
+            join: None,
             descriptors: vec![b"novel".to_vec()],
             x: 10.0 + i as f64,
             y: 10.0 + i as f64,
