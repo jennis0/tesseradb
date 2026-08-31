@@ -53,7 +53,7 @@ spec §5's evaluation rule is built end to end — the family is recorded in the
 roster, `/v1/meta`'s `filter_operands` carries its scope, and a leaf resolves to one view's column
 by the request's own view or by a pin, `name@key`, with a `422` naming the group where
 nothing decides and the unknown-view `404` for a pin naming no view of it (contracts §2.2, §3.2
-r55). **All four families answer, and a scoped attribute may declare its own `source`** (r17,
+r55). **All four families answer, and a scoped attribute may declare its own `source`** (r20,
 2026-08-31, owner ruling; contracts r60): a category's per-view postings and a text column's
 per-view dictionary and postings are written and opened, `/v1/categories` is view-addressed for a
 scoped category, and a source of the attribute's own is routed per view by `fields.view`. ⊘ What
