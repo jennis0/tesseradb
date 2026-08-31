@@ -35,7 +35,8 @@ use parquet::arrow::ArrowWriter;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use tessera_build::{
-    build, BuildArgs, GroupDescriptor, GroupViewDescriptor, ViewArgs, ViewMetadataValue,
+    build, BuildArgs, GroupDescriptor, GroupMetadataField, GroupViewDescriptor, Quantisation,
+    ViewArgs, ViewMetadataType, ViewMetadataValue,
 };
 
 const ENTITIES: u64 = 30;
@@ -85,6 +86,18 @@ fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>) {
     let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
     w.write(&batch).unwrap();
     w.close().unwrap();
+}
+
+/// [`extent`] in the manifest's own shape — one frame for a group, which is what its own copy
+/// records so a view created while the service runs has one to take.
+fn group_frame() -> Quantisation {
+    let e = extent();
+    Quantisation {
+        x_min: e.x_min,
+        x_max: e.x_max,
+        y_min: e.y_min,
+        y_max: e.y_max,
+    }
 }
 
 fn view_args(view: &str, points: &Path, pairs: &Path) -> ViewArgs {
@@ -160,11 +173,31 @@ fn build_multiview(dir: &Path) -> std::path::PathBuf {
             GroupDescriptor {
                 name: "quarter".to_string(),
                 members_of: None,
+                quantisation: group_frame(),
+                projection: tessera_spatial::Projection::None,
+                // The declared metadata schema, which is what a view created while the service
+                // runs is measured against (`views.md` §3.2).
+                metadata: vec![
+                    GroupMetadataField {
+                        name: "label".to_string(),
+                        ty: ViewMetadataType::Text,
+                        vocabulary: None,
+                    },
+                    GroupMetadataField {
+                        name: "starts".to_string(),
+                        ty: ViewMetadataType::TimestampUs,
+                        vocabulary: None,
+                    },
+                ],
                 views: roster(true),
             },
             GroupDescriptor {
                 name: "quarter_alt".to_string(),
                 members_of: Some("quarter".to_string()),
+                quantisation: group_frame(),
+                projection: tessera_spatial::Projection::None,
+                // A `members` group declares none: they belong to the group that owns the views.
+                metadata: Vec::new(),
                 views: roster(false),
             },
         ],

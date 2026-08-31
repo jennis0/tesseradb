@@ -120,7 +120,10 @@ fn segment_bytes(
     view: &str,
     seg_id: &str,
 ) -> u64 {
-    let dir = format!("partitions/{partition}/views/{view}/segments/{seg_id}/");
+    let dir = format!(
+        "partitions/{partition}/{}/segments/{seg_id}/",
+        tessera_store::view_rel(view)
+    );
     manifest
         .files
         .iter()
@@ -344,11 +347,17 @@ pub(crate) fn rebase_into(
 }
 
 fn run_path(partition: &str, view: &str, seg_id: &str) -> String {
-    format!("partitions/{partition}/views/{view}/segments/{seg_id}/external-ids.arrow")
+    format!(
+        "partitions/{partition}/{}/segments/{seg_id}/external-ids.arrow",
+        tessera_store::view_rel(view)
+    )
 }
 
 fn locator_path(partition: &str, view: &str, seg_id: &str) -> String {
-    format!("partitions/{partition}/views/{view}/segments/{seg_id}/ext-locator.u32")
+    format!(
+        "partitions/{partition}/{}/segments/{seg_id}/ext-locator.u32",
+        tessera_store::view_rel(view)
+    )
 }
 
 /// Where `needle` sits in `haystack` as a contiguous run of equal keys, in order.

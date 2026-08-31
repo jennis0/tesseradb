@@ -254,10 +254,15 @@ pub fn high_water_from(records: &[WalRecord]) -> u64 {
             // hand every point id below the row-less region away in a single step. A growth
             // allocates nothing at all — it names an artifact that already has its ordinal and its
             // entity — so it moves neither mark.
+            // A view create and a drop allocate nothing at all: a view is a coordinate system
+            // and holds no entity, which is what keeps entity space the invariant plane
+            // (`views.md` §1).
             WalRecord::LayerCreate { .. }
             | WalRecord::LayerDrop { .. }
             | WalRecord::ArtifactPublish { .. }
-            | WalRecord::ArtifactGrow { .. } => {}
+            | WalRecord::ArtifactGrow { .. }
+            | WalRecord::ViewCreate { .. }
+            | WalRecord::ViewDrop { .. } => {}
         }
     }
     hw

@@ -1662,6 +1662,10 @@ fn main() -> ExitCode {
             // Read out before the declaration is broken up into build arguments: it is a
             // property of the declaration, and every value in it exists by now.
             let disclosure = tessera_build::disclosure::Disclosure::of(&config);
+            // The group registry beside it, and before the declaration is broken up for the same
+            // reason: it reads the declaration's groups and the frames the views resolved to
+            // (`views.md` §3.2).
+            let groups = config.group_registry(&registry, &view_args);
             let schema = config.schema;
             // §2.3: the cost is reported, never hidden — a hot column is baked into every row and
             // is unalterable without rewriting the corpus, so the operator sees the per-row and
@@ -1716,7 +1720,7 @@ fn main() -> ExitCode {
             let args = tessera_build::BuildArgs {
                 views: view_args,
                 anchor,
-                groups: tessera_build::config::Config::group_registry(&registry),
+                groups,
                 scoped_attributes,
                 attribute_sources: acquired.attribute_sources,
                 out: out.clone(),

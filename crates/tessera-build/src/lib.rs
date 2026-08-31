@@ -53,7 +53,7 @@ use tessera_spatial::{split32, Bounds};
 use tessera_store::manifest::{
     identity_key_fingerprint, CurrentPointer, DeclaredScalar, DictExtent, FileDigest,
     IdentityDescriptor, Manifest, ManifestVocabulary, ManifestVocabularyValue, PartitionDescriptor,
-    Quantisation, SegmentDescriptor, SegmentsManifest, ViewDescriptor,
+    SegmentDescriptor, SegmentsManifest, ViewDescriptor,
 };
 use tessera_store::write::{write_permutation, write_segment};
 use tessera_store::{write_current, write_manifest_json, PairsParquetWriter};
@@ -69,7 +69,10 @@ pub use error::{BuildError, Result};
 // caller that cannot reach `tessera-store` — every test above the store layer — could not
 // otherwise declare a group at all (`views.md` §3.2).
 pub use observer::{BuildObserver, BuildStage, NoopObserver};
-pub use tessera_store::manifest::{GroupDescriptor, GroupViewDescriptor, ViewMetadataValue};
+pub use tessera_store::manifest::{
+    GroupDescriptor, GroupMetadataField, GroupViewDescriptor, Quantisation, ViewMetadataType,
+    ViewMetadataValue,
+};
 
 /// The single bundle prefix a batch build writes. Later publications get their own prefix; the
 /// batch build always starts a bundle from scratch.
@@ -1669,6 +1672,8 @@ fn write_manifests(
         // Nothing a build writes has ever been dropped: a tombstone is a control-plane act against
         // a running node, and a build produces a bundle rather than editing one.
         layer_tombstones: Vec::new(),
+        views: Vec::new(),
+        view_tombstones: Vec::new(),
         membership_extents: published_layers.membership_extents.clone(),
         level_versions: published_layers.level_versions.clone(),
         // **The post-bundle artifact pass's output** (`crate::artifact_pass`). Empty only where

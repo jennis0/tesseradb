@@ -484,6 +484,22 @@ pub struct GroupDescriptor {
     /// (`views.md` §3.3); `None` where it owns them. Chains are refused at the declaration, so
     /// this always names an owner.
     pub members_of: Option<String>,
+    /// The frame every view of this group is quantised against, and what placed its positions
+    /// before that frame did.
+    ///
+    /// **Here as well as on each view, because a view of this group may not exist yet.** A group
+    /// grows at a running service (`views.md` §3.2) and the view a create mints takes both from
+    /// the group — reading them off a sibling view is correct only while the group has one, and a
+    /// group whose whole roster was dropped, or which was declared empty, has none. They are the
+    /// same values every view of the group already carries: a group's views share every setting
+    /// by construction, which is what makes a key set meaningful.
+    pub quantisation: Quantisation,
+    #[serde(with = "projection_name")]
+    pub projection: Projection,
+    /// The per-view metadata names and types this group declared, in declaration order. Empty on
+    /// a `members` group, whose metadata belongs to the owner, and on a group whose views carry
+    /// none — which is the one group a first ingest batch may create a view of (`views.md` §3.2).
+    pub metadata: Vec<GroupMetadataField>,
     /// The roster, in ordinal order.
     pub views: Vec<GroupViewDescriptor>,
 }
@@ -509,23 +525,12 @@ pub struct GroupViewDescriptor {
     pub metadata: BTreeMap<String, ViewMetadataValue>,
 }
 
-/// One roster metadata value, typed against the group's declaration (`views.md` §3.1).
-///
-/// **View metadata is not an attribute** (`views.md` §5): one value per view rather than one per
-/// `(entity, view)`, it filters nothing, and it is served typed. The two are kept apart so that
-/// neither grows the other's surface.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "value", rename_all = "snake_case")]
-pub enum ViewMetadataValue {
-    Bool(bool),
-    /// Every integer width, and a category's key resolved to its code.
-    Int(i64),
-    Float(f64),
-    Text(String),
-    /// Microseconds since the Unix epoch — the one time unit a `timestamp_us` may hold, so a
-    /// declaration and a reader cannot disagree about it.
-    TimestampUs(i64),
-}
+/// The roster's own types live in `tessera-types`, because the WAL record that makes a create
+/// durable travels through `tessera-lifecycle`, which does not depend on this crate
+/// (`tessera_types::view`). Re-exported here so a manifest reader still names one module.
+pub use tessera_types::view::{
+    CreatedView, GroupMetadataField, TombstonedView, ViewMetadataType, ViewMetadataValue,
+};
 
 /// `views[..].projection` as the name a declaration writes (`projections.md` §5), refusing one
 /// outside the set rather than defaulting it.
@@ -657,6 +662,97 @@ impl Manifest {
             }
         }
         Ok(())
+    }
+
+    /// This manifest as the **live roster** makes it: the views a build declared, plus every view
+    /// created while the service runs, minus every key that has been dropped (`views.md` §3.2,
+    /// §3.4).
+    ///
+    /// **One derivation, two callers.** `Engine::open` builds it after replay, and the create and
+    /// drop operations build it again when they publish — so the roster a request resolves against
+    /// is the same function of the same state whether it was reached by a restart or by a `PUT`.
+    /// Everything downstream — `/v1/meta`, view resolution on both planes, the flush's frame
+    /// lookup — reads the manifest and needs no second notion of which views exist.
+    ///
+    /// **A create names the owner group and lands on every group sharing its views**
+    /// (`views.md` §3.3): keys and ordinals belong to the group that owns them, so
+    /// `quarter:2026-Q5` creates `quarter_map:2026-Q5` at the same moment, empty, and a request
+    /// naming it is answered rather than 404ed. A drop of the key takes both away.
+    ///
+    /// A create naming a group this manifest does not declare is **dropped rather than expanded**:
+    /// it cannot arise from the create operation, which refuses an unknown group, and a rebuild is
+    /// free to remove a group — in which case its views are not views of this bundle either.
+    pub fn with_roster(
+        &self,
+        created: &[CreatedView],
+        tombstones: &[TombstonedView],
+    ) -> Manifest {
+        let mut manifest = self.clone();
+        for view in created {
+            // The owner, then every group whose views are the owner's.
+            let sharing: Vec<String> = manifest
+                .groups
+                .iter()
+                .filter(|g| {
+                    g.name == view.group || g.members_of.as_deref() == Some(view.group.as_str())
+                })
+                .map(|g| g.name.clone())
+                .collect();
+            for group_name in sharing {
+                let group = manifest
+                    .groups
+                    .iter_mut()
+                    .find(|g| g.name == group_name)
+                    .expect("named from this list");
+                if group.views.iter().any(|v| v.key == view.key) {
+                    continue;
+                }
+                group.views.push(GroupViewDescriptor {
+                    key: view.key.clone(),
+                    ordinal: view.ordinal,
+                    visibility: view.visibility.clone(),
+                    // Metadata belongs to the group that owns the views; a sharing group's copies
+                    // carry none, exactly as a build writes them.
+                    metadata: if group.name == view.group {
+                        view.metadata.clone()
+                    } else {
+                        BTreeMap::new()
+                    },
+                });
+                let (quantisation, projection) = (group.quantisation, group.projection);
+                let id = format!("{group_name}{}{}", crate::GROUP_SEPARATOR, view.key);
+                if !manifest.views.iter().any(|v| v.id == id) {
+                    manifest.views.push(ViewDescriptor {
+                        display_name: id.clone(),
+                        id,
+                        // **The group's frame and the group's projection**: a view of a group
+                        // shares every setting with its siblings, which is what makes a key set
+                        // one coordinate system observed at several keys.
+                        quantisation,
+                        projection,
+                    });
+                }
+            }
+        }
+        for stone in tombstones {
+            let ids: Vec<String> = manifest
+                .groups
+                .iter()
+                .filter(|g| {
+                    g.name == stone.group || g.members_of.as_deref() == Some(stone.group.as_str())
+                })
+                .map(|g| format!("{}{}{}", g.name, crate::GROUP_SEPARATOR, stone.key))
+                .collect();
+            for group in &mut manifest.groups {
+                if group.name == stone.group
+                    || group.members_of.as_deref() == Some(stone.group.as_str())
+                {
+                    group.views.retain(|v| v.key != stone.key);
+                }
+            }
+            manifest.views.retain(|v| !ids.contains(&v.id));
+        }
+        manifest
     }
 
     pub fn quantisation_of(&self, view: &str) -> Option<Quantisation> {
@@ -1155,6 +1251,29 @@ pub struct SegmentsManifest {
     /// must not come to mean something else. A tombstone list that forgot would let a recreated
     /// layer silently inherit every stale reference to the old one.
     pub layer_tombstones: Vec<String>,
+    /// Every view **created while the service runs**, complete current state (`views.md` §3.2).
+    ///
+    /// **This is the roster's durable home, and the WAL is not.** The create and drop records are
+    /// WAL entries for replay, but rotation reclaims them — so a roster that lived only in the log
+    /// is lost at the first rotation, and a reused ordinal or key silently repoints every client
+    /// cache keyed on the view (decision 0029). Carried forward for ever, exactly as
+    /// [`SegmentsManifest::entity_id_low_water`] and [`SegmentsManifest::layer_tombstones`] are
+    /// and for the same reason.
+    ///
+    /// The views a *build* declared are in `MANIFEST.json` and are not restated here: this list
+    /// is the additions, and the served roster is the two together plus the WAL's own overlay.
+    ///
+    /// No `serde(default)`, on `layers`' argument: a manifest omitting it is malformed, not
+    /// creation-free, and the two are indistinguishable under a default while only one is safe to
+    /// serve — an absent list reads as *no view was ever created*, which is what a lost list looks
+    /// like, and the next create then reissues an ordinal a live view holds.
+    pub views: Vec<CreatedView>,
+    /// Every view key that has ever been dropped, with the ordinal it burnt (`views.md` §3.4).
+    ///
+    /// **Carried for ever and never pruned**, on `layer_tombstones`' argument: a key that once
+    /// meant something must not come to mean something else, and a recreated `2026-Q3` with
+    /// different contents would silently repoint every bookmark and every cached θ.
+    pub view_tombstones: Vec<TombstonedView>,
     /// Every packed membership extent this partition holds — see [`MembershipExtent`]. Empty in a
     /// bundle straight out of `tessera build`, which registers no layers and publishes no artifacts.
     ///
@@ -1327,6 +1446,11 @@ pub const HONOURED_STATE: &[&str] = &[
     // reserved run available for reissue — which is the fail-open this list exists to close.
     "layers",
     "layer_tombstones",
+    // The roster's runtime half, on the same argument: a reader carrying created views and
+    // ignoring them would serve a bundle as though the views did not exist — every request naming
+    // one a 404 — and, worse, would hand the next create an ordinal a live view already holds.
+    "views",
+    "view_tombstones",
 ];
 
 /// The subset of state fields a manifest carries **because a deny was accepted** (contracts
@@ -1416,6 +1540,8 @@ impl SegmentsManifest {
             ),
             ("layers", !self.layers.is_empty()),
             ("layer_tombstones", !self.layer_tombstones.is_empty()),
+            ("views", !self.views.is_empty()),
+            ("view_tombstones", !self.view_tombstones.is_empty()),
         ]
         .into_iter()
         .filter(|(name, carried)| *carried && !HONOURED_STATE.contains(name))
@@ -1556,6 +1682,8 @@ mod tests {
             entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
             layers: Vec::new(),
             layer_tombstones: Vec::new(),
+            views: Vec::new(),
+            view_tombstones: Vec::new(),
             membership_extents: Vec::new(),
             level_versions: Vec::new(),
             containment_extents: Vec::new(),

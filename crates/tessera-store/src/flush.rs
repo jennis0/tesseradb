@@ -134,9 +134,14 @@ pub fn write_flush_segment(
             ),
         })?;
 
+    // **`view_rel`, never the joined id** (`views.md` §3.2): a group's view lays its files down
+    // at `views/<group>/<key>/` and a `files` key spelled `views/<group>:<key>/` names a path no
+    // reader will look at — every file under the view unverifiable, which the loader reads as a
+    // corrupt bundle. The path below and the key here must come from one derivation.
     let rel = |name: &str| {
         format!(
-            "partitions/{partition}/views/{view}/segments/{}/{name}",
+            "partitions/{partition}/{}/segments/{}/{name}",
+            crate::view_rel(view),
             input.seg_id
         )
     };

@@ -36,6 +36,7 @@ use tessera_lifecycle::{
     BatchArtifacts, BatchEdge, BatchMembership, ChangeOp, UnallocatedRow, WalScalar,
 };
 
+use tessera_types::view::ViewMetadataValue;
 use tessera_types::{EntityId, TermId, TesseraId};
 
 use crate::error::{
@@ -255,6 +256,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         // refused rather than repeated if it is taken; there is no server-minted name to `POST` to.
         .route("/control/layers", axum::routing::put(register_layer))
         .route("/control/layers/{name}", axum::routing::delete(drop_layer))
+        // **`PUT` and `DELETE` on the view itself, spelled as a layer's are** (`views.md` §3.2,
+        // §3.4): the key is the identity, so the operation is refused rather than repeated if it
+        // is taken, and there is no server-minted name to `POST` to. A roster record is small and
+        // takes no body limit of its own.
+        .route(
+            "/control/views/{group}/{key}",
+            axum::routing::put(create_view).delete(drop_view),
+        )
         .route(
             "/control/layers/{name}/artifacts",
             axum::routing::put(publish_artifacts),
@@ -2336,6 +2345,152 @@ async fn drop_layer(
         .map_err(crate::error::map_join_error)?
         .map_err(crate::error::map_accept_error)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `PUT /control/views/{group}/{key}`'s body: the roster record, which is the inline
+/// `[[view_group.view]]` block written as a request (`views.md` §3.2).
+///
+/// **`deny_unknown_fields`, because a misspelt metadata name must not be silently absent.** The
+/// record is immutable, so a value that did not land is one that can never be supplied; a typo
+/// answered 201 would leave a view carrying a default nobody wrote.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ViewRecord {
+    /// This view's own gate; absent takes the group's. ⊘ Only `"public"` is accepted — no gate is
+    /// evaluated anywhere (`views.md` §6), so a label would be a control accepted and never
+    /// enforced. The refusal is the write executor's, beside every other roster rule.
+    #[serde(default)]
+    visibility: Option<String>,
+    /// One entry per name the group declared, typed against it. `timestamp_us` is **microseconds
+    /// since the epoch as a JSON integer**: JSON carries no date type, and a string would have to
+    /// name a format the roster does not otherwise have.
+    #[serde(default)]
+    metadata: serde_json::Map<String, serde_json::Value>,
+}
+
+/// `DELETE /control/views/{group}/{key}`'s query: `?delete_dangling=true`.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DropViewQuery {
+    /// Also delete the entities of this view that hold a row in **no other view**
+    /// (`views.md` §3.4). Sugar over the ordinary deletion path — the entities enter the overlay
+    /// and retire at the fold, like any deletion — and off by default, because dropping a view
+    /// deletes no entity.
+    #[serde(default)]
+    delete_dangling: bool,
+}
+
+/// One supplied metadata value as the roster stores it.
+///
+/// **The JSON shape decides the type, and the group's declaration decides whether that type
+/// belongs** — checked on the executor, against the manifest, beside every other roster rule. A
+/// float and an integer are told apart here rather than coerced: the roster is served typed, and a
+/// client reading `starts` as a float because one record happened to carry one is a client the
+/// declaration cannot help.
+fn metadata_value(name: &str, value: &serde_json::Value) -> Result<ViewMetadataValue, ApiError> {
+    match value {
+        serde_json::Value::Bool(v) => Ok(ViewMetadataValue::Bool(*v)),
+        serde_json::Value::String(v) => Ok(ViewMetadataValue::Text(v.clone())),
+        serde_json::Value::Number(n) => {
+            if let Some(v) = n.as_i64() {
+                // An integer stands for `int`, for a category's code and for `timestamp_us`; which
+                // one it is is the declaration's to say, so the value is carried as both and the
+                // roster picks. A `timestamp_us` is microseconds since the epoch.
+                Ok(ViewMetadataValue::Int(v))
+            } else if let Some(v) = n.as_f64() {
+                Ok(ViewMetadataValue::Float(v))
+            } else {
+                Err(ApiError::Contract(format!(
+                    "metadata '{name}' is a number this build cannot store"
+                )))
+            }
+        }
+        serde_json::Value::Null => Err(ApiError::Contract(format!(
+            "metadata '{name}' is null. Every name a view group declares is required and a roster \
+             record is immutable, so an absent value is one that can never be supplied \
+             (views §3.2)"
+        ))),
+        _ => Err(ApiError::Contract(format!(
+            "metadata '{name}' is an array or an object, and view metadata is one typed scalar \
+             per name (views §3.1). A per-(entity, view) value is an attribute, not metadata"
+        ))),
+    }
+}
+
+/// `PUT /control/views/{group}/{key}` — create a view of a group while the service runs
+/// (`views.md` §3.2, decision 0108).
+///
+/// **Nothing is checked here.** Whether the group exists, whether the key is free or burnt, and
+/// what ordinal it takes are all state only the write executor may read — a handler that checked
+/// first could be overtaken between its check and the enqueue, and would then have acked two views
+/// onto one key. The one thing this function does is turn JSON into the typed record the roster
+/// stores, and refuse a shape that is not a scalar.
+///
+/// The three answers are the executor's: **404** for a group or key this deployment does not
+/// carry, **409** for a key already taken or already dropped — a roster record is immutable, so
+/// there is no resubmission that would make it land — and **422** for a record refused on its own
+/// terms.
+async fn create_view(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path((group, key)): axum::extract::Path<(String, String)>,
+    body: Json<ViewRecord>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let record = body.0;
+    let mut metadata = std::collections::BTreeMap::new();
+    for (name, value) in &record.metadata {
+        metadata.insert(name.clone(), metadata_value(name, value)?);
+    }
+    let visibility = record.visibility;
+    let (group_name, view_key) = (group.clone(), key.clone());
+    // The **shared** blocking pool, not the deny runtime beside it, on `register_layer`'s rule: a
+    // creation is not a deny, and delaying one under ingest load is backpressure working rather
+    // than a security operation refused.
+    let ordinal = tokio::task::spawn_blocking(move || {
+        state
+            .engine
+            .create_view(group_name, view_key, visibility, metadata)
+    })
+    .await
+    .map_err(crate::error::map_join_error)?
+    .map_err(crate::error::map_accept_error)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "view": format!("{group}:{key}"),
+            "group": group,
+            "key": key,
+            // The view's second address, `<group>:#<ordinal>`, which the caller cannot derive:
+            // it is creation order across every create this deployment has taken, drops included.
+            "ordinal": ordinal,
+        })),
+    ))
+}
+
+/// `DELETE /control/views/{group}/{key}` — drop a view and tombstone its key for ever
+/// (`views.md` §3.4).
+///
+/// **The key never comes back**, and that is the operation rather than a side effect of it: a
+/// recreated `2026-Q3` with different contents would silently repoint every bookmark, every cached
+/// θ and every client cache keyed on the view (decision 0029). The ordinal is burnt with it.
+///
+/// **Dropping a view deletes no entity.** `?delete_dangling=true` is for the caller who did mean
+/// "and the items that were only here": the entities of this view that hold a row in no other one
+/// — the commit-window buffer included — are submitted as **ordinary deletions**, which enter the
+/// overlay and retire at the fold like any other (Rule F, write-path §5.4). It is not a second
+/// retirement route. The count is in the body, because a deletion is not undoable and the caller
+/// who asked for it is told what it did, in the same response that accepted the drop.
+async fn drop_view(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path((group, key)): axum::extract::Path<(String, String)>,
+    axum::extract::Query(query): axum::extract::Query<DropViewQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let deleted = tokio::task::spawn_blocking(move || {
+        state.engine.drop_view(group, key, query.delete_dangling)
+    })
+    .await
+    .map_err(crate::error::map_join_error)?
+    .map_err(crate::error::map_accept_error)?;
+    Ok(Json(serde_json::json!({ "deleted": deleted })))
 }
 
 /// Turn a flat member offset back into `(artifact index, member index)`, so a refusal names the

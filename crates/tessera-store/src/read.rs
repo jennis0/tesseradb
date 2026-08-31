@@ -242,6 +242,46 @@ impl Bundle {
         })
     }
 
+    /// This bundle carrying a different **top-level manifest**, with the per-view map brought
+    /// into step with the views it declares (`views.md` §3.2).
+    ///
+    /// The one edit a view create and a view drop make to a live bundle, and the only site that
+    /// touches `Bundle::manifest` at all: a created view gains an **empty** row space, because it
+    /// owns nothing on disc until its first flush and a view absent from this map is read as
+    /// *unknown view* by the viewport and as *the mask and the bundle disagree* by the deny mask;
+    /// a dropped view leaves it, which is what makes a request naming it the same 404 as one that
+    /// never existed. **No file is read, written or removed**: the dropped view's files are
+    /// garbage the fold reclaims, and until then they are simply unreachable.
+    ///
+    /// Side-manifests are untouched — the roster's durable half is published by the ordinary
+    /// deny-state path at the next tick, on the mechanism `layer_tombstones` already uses.
+    pub fn with_views(&self, manifest: Manifest) -> Arc<Bundle> {
+        let declared: Vec<&str> = manifest.views.iter().map(|v| v.id.as_str()).collect();
+        let mut partitions = self.partitions.clone();
+        for partition in partitions.values_mut() {
+            partition.views.retain(|id, _| declared.contains(&id.as_str()));
+            for view in &manifest.views {
+                partition
+                    .views
+                    .entry(view.id.clone())
+                    .or_insert_with(|| ViewData {
+                        row_space: RowSpace::new(
+                            Arc::new(
+                                crate::permutation::Permutation::empty()
+                                    .expect("an anonymous mapping of one page"),
+                            ),
+                            0,
+                        ),
+                        segments: Vec::new(),
+                    });
+            }
+        }
+        Arc::new(Bundle {
+            manifest,
+            partitions,
+        })
+    }
+
     /// The shared half of [`Self::with_segment`], [`Self::with_merged`] and
     /// [`Self::with_manifest`]: clone the partition and view maps — `Arc`s and a manifest, no
     /// file IO — and replace the one view.
@@ -447,17 +487,36 @@ fn open_prefix(
 
             let view_dir = crate::view_path(&partition_dir, &seg_desc.view);
             let is_new_view = !views.contains_key(&seg_desc.view);
+            let perm_path = view_dir.join("permutation.bin");
+            let perm_rel = format!(
+                "partitions/{}/{}/permutation.bin",
+                partition_desc.phash,
+                crate::view_rel(&seg_desc.view)
+            );
+            // **A view need not have a base at all** (`views.md` §3.2). Every view a build or a
+            // fold wrote has one, and its first segment is the build segment `permutation.bin`
+            // addresses; a view *created while the service runs* owns no row space until its
+            // first flush, and every segment it ever takes is an extent over an empty base. The
+            // manifest is what says which — a view whose permutation no manifest names has none,
+            // and reading that as a missing file would refuse the bundle for a view that is
+            // simply new.
+            let has_base = segments_manifest.files.contains_key(&perm_rel)
+                || manifest.files.contains_key(&perm_rel);
+            let is_base_segment = is_new_view && has_base;
             let view_entry = match views.get_mut(&seg_desc.view) {
                 Some(entry) => entry,
                 None => {
-                    let perm_path = view_dir.join("permutation.bin");
-                    let perm_rel = format!(
-                        "partitions/{}/{}/permutation.bin",
-                        partition_desc.phash,
-                        crate::view_rel(&seg_desc.view)
-                    );
-                    ensure_verified(&perm_rel, &segments_manifest, &manifest.files, &perm_path)?;
-                    let permutation = Permutation::load(&perm_path)?;
+                    let permutation = if has_base {
+                        ensure_verified(
+                            &perm_rel,
+                            &segments_manifest,
+                            &manifest.files,
+                            &perm_path,
+                        )?;
+                        Permutation::load(&perm_path)?
+                    } else {
+                        Permutation::empty()?
+                    };
 
                     // `row-entity.u32` beside it, the other direction
                     // (`crate::row_entity`). **Optional, and its absence is not a refusal**: it is
@@ -492,8 +551,13 @@ fn open_prefix(
                     // The first segment named for a view is its build segment: `permutation.bin`
                     // addresses that one's row space, and every later segment arrives as an
                     // extent above it.
-                    let mut row_space =
-                        RowSpace::new(std::sync::Arc::new(permutation), seg_desc.row_count);
+                    // A base-less view's rows all belong to extents, so its base owns none:
+                    // `base_rows` is this segment's count only where the permutation is what
+                    // addresses it.
+                    let mut row_space = RowSpace::new(
+                        std::sync::Arc::new(permutation),
+                        if has_base { seg_desc.row_count } else { 0 },
+                    );
                     if let Some(table) = row_entity {
                         row_space = row_space.with_row_entity(table);
                     }
@@ -586,7 +650,7 @@ fn open_prefix(
             // row bound against that segment's `row_count` the first time we see it (I11/I4 —
             // a corrupt permutation must never hand out a `RowId` that indexes `columns.arrow`
             // out of range). Only meaningful once, against the one segment a Phase-1 view has.
-            if is_new_view && verification == Verification::Digests {
+            if is_base_segment && verification == Verification::Digests {
                 view_entry
                     .row_space
                     .base()
@@ -600,7 +664,7 @@ fn open_prefix(
             // well-formedness, so a manifest listing segments out of entity order, or one whose
             // `row_count` disagrees with what the extent actually owns, fails closed here rather
             // than serving rows under the wrong entity.
-            if !is_new_view {
+            if !is_base_segment {
                 let row_base = u32::try_from(view_entry.row_space.total_rows()).map_err(|_| {
                     StoreError::MalformedBundle {
                         detail: format!(
@@ -638,6 +702,25 @@ fn open_prefix(
                 morton,
                 columns,
             }));
+        }
+
+        // **Every declared view is a view, with or without rows** (`views.md` §3.2). The map
+        // above is built from the segments, because that is where a row space comes from; a view
+        // that has taken no flush yet has no segment and would otherwise be absent from it — and
+        // absent is read as *unknown view* by the viewport (404) and as *the deny mask and the
+        // bundle disagree* by the mask derivation (500). A view created while the service runs is
+        // in exactly that state between its create and its first flush, and it must answer
+        // **empty** in both places, so it is seeded here.
+        for view in &manifest.views {
+            views.entry(view.id.clone()).or_insert_with(|| ViewData {
+                row_space: RowSpace::new(
+                    std::sync::Arc::new(
+                        Permutation::empty().expect("an anonymous mapping of one page"),
+                    ),
+                    0,
+                ),
+                segments: Vec::new(),
+            });
         }
 
         partitions.insert(

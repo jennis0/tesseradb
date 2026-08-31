@@ -330,6 +330,35 @@ pub enum WalRecord {
         /// exactly one entry — its level 0.
         runs: Vec<ReservedRuns>,
     },
+    /// A view of a group **created while the service runs** (`views.md` §3.2), carrying the whole
+    /// roster record: the key, the ordinal it was given, its gate and its typed metadata.
+    ///
+    /// **This record is for replay, and the segments manifest is the durable home.** Rotation
+    /// reclaims WAL records, so a roster that lived only here is lost at the first rotation — and
+    /// a reused ordinal or key silently repoints every client cache keyed on the view
+    /// (decision 0029). `SegmentsManifest::views` is where it survives; this is what puts it back
+    /// between a publication and a restart, in the order it happened.
+    ///
+    /// **The ordinal is recorded, never re-derived.** Replay applies what was decided: a
+    /// re-derivation would renumber every view above a drop the log no longer carries.
+    ///
+    /// **It names the owner group only.** Groups sharing these views (`members`, `views.md` §3.3)
+    /// take their copies from this one record, because the key and the ordinal are the owner's.
+    ViewCreate { view: tessera_types::view::CreatedView },
+    /// An accepted view drop. **The key is tombstoned, not freed** — for `LayerDrop`'s reason,
+    /// stated for a view in `views.md` §3.4: a recreated `2026-Q3` with different contents would
+    /// silently repoint every bookmark, every cached θ and every client cache keyed on the view.
+    ///
+    /// **The ordinal travels with it** because it is burnt too: a high-water recovered from the
+    /// live views alone would reissue the newest ordinal the moment it was the one dropped.
+    ///
+    /// **This record removes no entity.** An entity whose only view was dropped still exists, with
+    /// its label, its attributes and its memberships, in no view; `delete_dangling` submits
+    /// ordinary deletions through the deny lane and is not a second retirement route
+    /// (`views.md` §3.4, write-path §5.4).
+    ViewDrop {
+        view: tessera_types::view::TombstonedView,
+    },
     /// An accepted layer drop. **The name is tombstoned, not freed**: it is refused on recreation
     /// for ever, because bookmarks, edges and suppressions all travel by it and a name that once
     /// meant something must not come to mean something else.

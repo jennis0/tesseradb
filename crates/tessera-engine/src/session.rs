@@ -1102,6 +1102,32 @@ impl Engine {
             .values()
             .flat_map(|partition| partition.manifest.layer_tombstones.iter().cloned())
             .collect();
+        // **The roster's runtime half, unioned on `manifest_layers`' argument** (`views.md` §3.2):
+        // a view is a deployment-level object — its key and its ordinal are the group's, not a
+        // partition's — so the creations and the tombstones belong to the deployment whichever
+        // partition's manifest published them. With one partition this is that partition's list.
+        let manifest_created_views: Vec<tessera_types::view::CreatedView> = bundle
+            .partitions
+            .values()
+            .flat_map(|partition| partition.manifest.views.iter().cloned())
+            .collect();
+        let manifest_view_tombstones: Vec<tessera_types::view::TombstonedView> = bundle
+            .partitions
+            .values()
+            .flat_map(|partition| partition.manifest.view_tombstones.iter().cloned())
+            .collect();
+        // The views the *build* declared, whose ordinals a create continues.
+        let declared_views: Vec<(String, String, u32)> = bundle
+            .manifest
+            .groups
+            .iter()
+            .flat_map(|group| {
+                group
+                    .views
+                    .iter()
+                    .map(|view| (group.name.clone(), view.key.clone(), view.ordinal))
+            })
+            .collect();
         // **The union across partitions, on `manifest_layers`' argument**: an artifact is a
         // deployment-level object with an entity of its own, so its membership belongs to the
         // deployment rather than to whichever partition's manifest happens to name the extent.
@@ -1156,6 +1182,9 @@ impl Engine {
                 ),
                 layers: &manifest_layers,
                 tombstones: &manifest_layer_tombstones,
+                created_views: &manifest_created_views,
+                view_tombstones: &manifest_view_tombstones,
+                declared_views,
                 membership_extents: &manifest_membership_extents,
                 level_versions: &manifest_level_versions,
                 prefix_dir: prefix_dir.clone(),
@@ -1202,7 +1231,18 @@ impl Engine {
         // row space the bundle carries — the same derivation every later publication repeats
         // (`compose::derive_denied`). A node restarting into a live suppression set gets it here,
         // not on its first request.
-        let bundle = Arc::new(bundle);
+        // **The bundle as the roster makes it** (`views.md` §3.2): the views a build declared,
+        // plus every view created while the service ran and replayed just now, minus every key
+        // dropped. Applied here, before the first generation is built, because everything below
+        // reads the manifest — the deny mask over every view, `/v1/meta`, view resolution on both
+        // planes — and a created view absent from it comes back from a restart as a 404.
+        let (created_views, view_tombstones) = write_state.roster.snapshot();
+        let bundle = if created_views.is_empty() && view_tombstones.is_empty() {
+            Arc::new(bundle)
+        } else {
+            let manifest = bundle.manifest.with_roster(&created_views, &view_tombstones);
+            Arc::new(bundle).with_views(manifest)
+        };
         let denied = Arc::new(crate::compose::derive_denied(&overlay, &bundle));
 
         // The filter artefact belongs to the published prefix, so it is opened here with the
@@ -3013,6 +3053,34 @@ impl Engine {
     /// Drop a layer. Its name is tombstoned and refused on recreation for ever.
     pub fn drop_layer(&self, name: String) -> std::result::Result<(), crate::write::AcceptError> {
         self.write.drop_layer(name)
+    }
+
+    /// Create a view of a view group while the service runs, returning its ordinal
+    /// (`views.md` §3.2, decision 0108).
+    ///
+    /// **Nothing is validated here**, on `register_layer`'s rule: whether the key is free, and the
+    /// ordinal that follows, are state only the write executor may read — a handler that checked
+    /// first could be overtaken between its check and the enqueue.
+    pub fn create_view(
+        &self,
+        group: String,
+        key: String,
+        visibility: Option<String>,
+        metadata: std::collections::BTreeMap<String, tessera_types::view::ViewMetadataValue>,
+    ) -> std::result::Result<u32, crate::write::AcceptError> {
+        self.write.create_view(group, key, visibility, metadata)
+    }
+
+    /// Drop a view. Its key is tombstoned and refused on recreation for ever, and the answer is
+    /// how many entities `delete_dangling` submitted for deletion — zero unless it was asked for
+    /// (`views.md` §3.4).
+    pub fn drop_view(
+        &self,
+        group: String,
+        key: String,
+        delete_dangling: bool,
+    ) -> std::result::Result<u64, crate::write::AcceptError> {
+        self.write.drop_view(group, key, delete_dangling)
     }
 
     /// Publish a batch of artifacts into one level of a layer, returning a `tessera_id` per

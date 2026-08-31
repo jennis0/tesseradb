@@ -150,3 +150,51 @@ fn a_log_at_the_version_before_the_coordinates_widened_is_refused() {
     .unwrap();
     assert!(Wal::open(other.join("wal.log")).is_ok());
 }
+
+/// A create and a drop round-trip, and the drop replays whatever else the log carries
+/// (`views.md` §3.2): the roster's WAL half is what puts a created view back between a
+/// publication and a restart.
+#[test]
+fn view_create_and_drop_round_trip() {
+    use tessera_types::view::{CreatedView, TombstonedView, ViewMetadataValue};
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("wal.log");
+    let created = CreatedView {
+        group: "quarter".to_string(),
+        key: "2026-Q5".to_string(),
+        ordinal: 4,
+        visibility: None,
+        metadata: [(
+            "label".to_string(),
+            ViewMetadataValue::Text("Q5 2026".to_string()),
+        )]
+        .into_iter()
+        .collect(),
+    };
+    let dropped = TombstonedView {
+        group: "quarter".to_string(),
+        key: "2026-Q4".to_string(),
+        ordinal: 3,
+    };
+    {
+        let (mut wal, _) = Wal::open(&path).unwrap();
+        wal.append(&WalRecord::ViewCreate {
+            view: created.clone(),
+        })
+        .unwrap();
+        wal.append(&WalRecord::ViewDrop {
+            view: dropped.clone(),
+        })
+        .unwrap();
+        wal.fsync().unwrap();
+    }
+    let (_wal, records) = Wal::open(&path).unwrap();
+    assert_eq!(records.len(), 2);
+    match (&records[0], &records[1]) {
+        (WalRecord::ViewCreate { view }, WalRecord::ViewDrop { view: stone }) => {
+            assert_eq!(view, &created);
+            assert_eq!(stone, &dropped);
+        }
+        other => panic!("expected a create then a drop, got {other:?}"),
+    }
+}

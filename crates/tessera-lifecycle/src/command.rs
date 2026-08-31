@@ -221,6 +221,32 @@ pub enum Command {
     },
     /// Drop an annotation layer, tombstoning its name for ever.
     DropLayer { name: String },
+    /// Create a view of a view group (`views.md` §3.2).
+    ///
+    /// **The record travels unvalidated**, in the same shape and for the same reason as
+    /// [`Command::RegisterLayer`]'s declaration: the checks that decide a key is free — and the
+    /// ordinal that follows them — read state only the executor may write, so a handler that
+    /// validated first could be overtaken by a create of the same key between its check and the
+    /// enqueue, and would then have acked two views onto one key.
+    CreateView {
+        group: String,
+        key: String,
+        visibility: Option<String>,
+        metadata: std::collections::BTreeMap<String, tessera_types::view::ViewMetadataValue>,
+    },
+    /// Drop a view of a view group, tombstoning its key for ever (`views.md` §3.4).
+    ///
+    /// `delete_dangling` is **sugar and nothing else**: at the drop the executor computes the
+    /// entities of this view that hold a row in no other view — the commit-window buffer included
+    /// — and submits them as *ordinary* deletions, which enter the overlay and retire at the fold
+    /// like any deletion (Rule F, write-path §5.4). It is not a second retirement route and must
+    /// not become one; a drop that removed an entity any other way would be the fail-open the two
+    /// removal rules exist to prevent.
+    DropView {
+        group: String,
+        key: String,
+        delete_dangling: bool,
+    },
     /// Publish a batch of artifacts into one level of one layer.
     ///
     /// **Members are entities already.** The handler inverts the caller's `tessera_id`s once, at
@@ -435,6 +461,14 @@ pub enum Ack {
     LayerRegistered { entity: EntityId },
     /// A layer was dropped and its name tombstoned. Nothing to return: the caller named it.
     LayerDropped,
+    /// A view was created. The ordinal is returned because it is the view's second address —
+    /// `<group>:#<ordinal>` — and the caller cannot derive it: it is creation order across every
+    /// create this deployment has ever taken, drops included.
+    ViewCreated { ordinal: u32 },
+    /// A view was dropped. `deleted` is how many entities `delete_dangling` submitted for
+    /// deletion — **reported because the operation is not undoable**, on the same rule
+    /// [`Ack::Ingested`]'s `minted` is reported by, and `0` for a drop that did not ask for it.
+    ViewDropped { deleted: u64 },
     /// Artifacts were published, in the caller's submitted order.
     ///
     /// **Entities, which the handler turns into `tessera_id`s — never the ordinals.** An ordinal is
@@ -525,6 +559,17 @@ pub enum ExecError {
     /// name tombstoned, a tree declaring levels — which is exactly the class of detail a caller can
     /// act on and cannot otherwise obtain. It names no entity, no path and no other layer's terms.
     LayerRefused { detail: String },
+    /// A view create or drop the roster refused on its own terms — the key's charset, the
+    /// metadata against the group's declaration, a gate this build cannot honour → **422**.
+    ViewRefused { detail: String },
+    /// A key that is already a view of the group, or one a drop has burnt → **409**. Separate from
+    /// [`Self::ViewRefused`] because the caller's remedy differs: a refused record is one to
+    /// correct and resubmit, and a taken key is one to replace — a roster record is immutable, so
+    /// there is no resubmission that would make it land (`views.md` §3.2).
+    ViewConflict { detail: String },
+    /// A group or a key this deployment does not carry → **404**, the same answer an unknown view
+    /// gets on every other surface.
+    ViewUnknown { detail: String },
 }
 
 impl std::fmt::Display for ExecError {
@@ -543,6 +588,9 @@ impl std::fmt::Display for ExecError {
             ),
             ExecError::VocabularyRefused { detail } => write!(f, "{detail}"),
             ExecError::LayerRefused { detail } => write!(f, "{detail}"),
+            ExecError::ViewRefused { detail }
+            | ExecError::ViewConflict { detail }
+            | ExecError::ViewUnknown { detail } => write!(f, "{detail}"),
         }
     }
 }

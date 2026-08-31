@@ -549,6 +549,14 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
         // WAL append, so the answer is a clean 422 with no effect, and a 422 the caller cannot read
         // is one they cannot fix.
         AcceptError::Exec(ExecError::LayerRefused { detail }) => ApiError::Contract(detail.clone()),
+        // **The roster's three answers, told apart because the caller's remedy differs**
+        // (`views.md` §3.2). A refused record is one to correct; a taken or burnt key is one to
+        // replace, a roster record being immutable; and an unknown group or key is the same 404
+        // an unknown view id is on every other surface, so the two planes cannot disagree about
+        // what "no such view" means.
+        AcceptError::Exec(ExecError::ViewRefused { detail }) => ApiError::Contract(detail.clone()),
+        AcceptError::Exec(ExecError::ViewConflict { detail }) => ApiError::Conflict(detail.clone()),
+        AcceptError::Exec(ExecError::ViewUnknown { detail }) => ApiError::Unknown(detail.clone()),
         // Both are the caller's row, malformed in a way the engine refused before anything was
         // acked or WAL-durable — a contract answer, not a fault.
         // 404 and not 422, because that is what an unknown view id is on both planes
@@ -742,6 +750,14 @@ fn exec_failure_may_be_in_force(
         // and false is the honest answer anyway: a registry refusal happens before the append, so
         // nothing is in force.
         ExecError::LayerRefused { .. } => false,
+        // Not reachable from a `/control/changes` item either — a view verb is its own endpoint —
+        // and false is honest for the same reason: every one of the three is decided before the
+        // append. The deletions `delete_dangling` submits are ordinary `/control/changes` items
+        // and answer through the arms above, which is the whole point of it being sugar
+        // (`views.md` §3.4).
+        ExecError::ViewRefused { .. }
+        | ExecError::ViewConflict { .. }
+        | ExecError::ViewUnknown { .. } => false,
         ExecError::Alloc(_) => false,
     }
 }

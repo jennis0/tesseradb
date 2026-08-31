@@ -227,6 +227,8 @@ fn flushed_bundle(root: &Path) {
         entity_id_low_water: seg0.entity_id_low_water,
         layers: seg0.layers.clone(),
         layer_tombstones: seg0.layer_tombstones.clone(),
+        views: Vec::new(),
+        view_tombstones: Vec::new(),
         membership_extents: Vec::new(),
         level_versions: Vec::new(),
         containment_extents: Vec::new(),

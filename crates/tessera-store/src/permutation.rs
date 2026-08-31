@@ -165,6 +165,48 @@ pub struct Permutation {
 }
 
 impl Permutation {
+    /// The permutation of a view that has no row space at all — **a view created while the
+    /// service runs, before its first flush** (`views.md` §3.2).
+    ///
+    /// `bound = 0`, no pages, no present slots: [`Self::row_of`] answers `None` for every entity
+    /// and [`Self::project`] answers the empty bitmap, which is what an empty view must answer.
+    /// It is an anonymous mapping carrying the same header a `bound = 0` file would, rather than
+    /// a second representation with its own arithmetic — every accessor below reads it exactly as
+    /// it reads a mapped file, so there is one decode path and not two.
+    ///
+    /// **No file is written for it, and that is the point.** A created view owns nothing on disc
+    /// until the flush that gives it rows; writing an empty `permutation.bin` into the live prefix
+    /// at creation would put a file into a bundle the create does not otherwise publish, and a
+    /// prefix rotation would then have to carry it.
+    pub fn empty() -> Result<Self> {
+        let len = payload_start(0);
+        let mut map = memmap2::MmapOptions::new()
+            .len(len)
+            .map_anon()
+            .map_err(|source| StoreError::Io {
+                path: PathBuf::from("<empty permutation>"),
+                source,
+            })?;
+        map[0..4].copy_from_slice(PERMUTATION_MAGIC);
+        map[4..6].copy_from_slice(&PERMUTATION_VERSION.to_le_bytes());
+        map[6..8].copy_from_slice(&(PAGE_SHIFT as u16).to_le_bytes());
+        // bound, page_count and present_count are all zero, which the zeroed mapping already
+        // holds; they are not written back so that the header's shape is stated once, above.
+        let mmap = map.make_read_only().map_err(|source| StoreError::Io {
+            path: PathBuf::from("<empty permutation>"),
+            source,
+        })?;
+        Ok(Permutation {
+            mmap,
+            bound: 0,
+            bound_usize: 0,
+            page_count: 0,
+            present_count: 0,
+            payload_start: len,
+            path: PathBuf::from("<empty permutation>"),
+        })
+    }
+
     /// Open and validate `path`: magic, version, page width, that the directory is canonical, and
     /// that the file is exactly as long as its own header says (a truncated or padded file is a
     /// corrupt bundle, not a partial one to silently accept).

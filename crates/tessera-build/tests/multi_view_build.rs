@@ -30,6 +30,18 @@ const WORLD: std::ops::Range<u64> = 0..24;
 const QUARTER: std::ops::Range<u64> = 12..36;
 const ENTITIES: u64 = 36;
 
+/// The same frame as [`extent`], in the manifest's own shape — every view of a group shares one
+/// (`views.md` §3.1), which is what the group's own copy records.
+fn group_frame() -> tessera_store::manifest::Quantisation {
+    let e = extent();
+    tessera_store::manifest::Quantisation {
+        x_min: e.x_min,
+        x_max: e.x_max,
+        y_min: e.y_min,
+        y_max: e.y_max,
+    }
+}
+
 fn extent() -> Bounds {
     Bounds {
         x_min: 0.0,
@@ -127,6 +139,9 @@ fn two_views_are_two_row_spaces_over_one_entity_space() {
         groups: vec![tessera_store::manifest::GroupDescriptor {
             name: "quarter".to_string(),
             members_of: None,
+            quantisation: group_frame(),
+            projection: tessera_spatial::Projection::None,
+            metadata: Vec::new(),
             views: vec![tessera_store::manifest::GroupViewDescriptor {
                 key: "2026-Q2".to_string(),
                 ordinal: 0,
@@ -453,6 +468,9 @@ fn alt_group(keys: &[&str]) -> tessera_store::manifest::GroupDescriptor {
     tessera_store::manifest::GroupDescriptor {
         name: "quarter_alt".to_string(),
         members_of: None,
+        quantisation: group_frame(),
+        projection: tessera_spatial::Projection::None,
+        metadata: Vec::new(),
         views: keys
             .iter()
             .enumerate()
@@ -873,6 +891,9 @@ fn a_sparse_views_permutation_costs_its_pages_and_not_its_bound() {
         groups: vec![tessera_store::manifest::GroupDescriptor {
             name: "quarter".to_string(),
             members_of: None,
+            quantisation: group_frame(),
+            projection: tessera_spatial::Projection::None,
+            metadata: Vec::new(),
             views: vec![tessera_store::manifest::GroupViewDescriptor {
                 key: "2026-Q2".to_string(),
                 ordinal: 0,
