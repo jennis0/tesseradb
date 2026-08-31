@@ -210,7 +210,10 @@ paths:
           in: path
           required: true
           description: |
-            A column name from `/v1/meta`'s `declared_scalars` that carries a `category` block, or
+            Any column from `/v1/meta`'s `declared_scalars` that carries a `category` block —
+            including one with neither `render` nor `index`, which is blob-resident and is not a
+            filter operand, a value list being a property of the vocabulary rather than of the
+            placement — or
             a **group-scoped** category family from `filter_operands` — which is one column per
             view, so it is addressed with a view. Either pin one here, `<column>@<key>`, or name
             the request's own view in `view` below; a scoped column named with neither is a `422`
@@ -224,9 +227,12 @@ paths:
           required: false
           description: |
             The request's own view, for a **group-scoped** category (`views.md` §5). Resolved
-            through the session's visible-view set exactly as a viewer verb's `view` is, so a view
-            this principal cannot reach is the `404` an unknown one gets. Ignored for an
-            entity-scoped column, which has one value set for the corpus.
+            through the session's visible-view set exactly as a viewer verb's `view` is, and
+            resolved **before** the column is, whatever that column's scope — so a `view` naming
+            nothing, or naming a view this principal may not reach, is the `404` an unknown view
+            gets even where the column is entity-scoped and no view would have decided anything
+            about it. What the scope changes is only whether the view *chooses a column*: an
+            entity-scoped column has one value set for the corpus.
           schema:
             type: string
         - name: codes

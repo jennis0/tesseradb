@@ -615,7 +615,13 @@ an attribute. The two are kept apart so that neither grows the other's surface.
 > same two ways a leaf does — `?view=<group>:<key>` for the request's own, `{column}@{key}` in the
 > path for a pin — resolved at the same site, with the same `422` naming the group where nothing
 > decides, the same unknown-view `404`, and the same collapse to the route's own unknown-column
-> answer for a principal whose group gate fails. A `derived` vocabulary's list is then derived from
+> answer for a principal whose group gate fails. `?view=` is resolved *before* the column is and
+> whatever the column's scope, so the gate is the route's first act rather than a check on one
+> branch of it; an entity-scoped category's list is unaffected by which view asked, but a `view`
+> naming nothing still refuses. Note the one asymmetry with the filter surface, which is the
+> vocabulary's rather than the scope's: a category has a value list whether or not it is an
+> operand, so a blob-resident one — neither `render` nor `index` — is answered here and appears in
+> no `filter_operands` entry. A `derived` vocabulary's list is then derived from
 > that view's postings inside `M_auth`: two views of one group offer two lists, and each is that
 > view's.
 >
