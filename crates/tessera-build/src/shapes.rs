@@ -23,9 +23,8 @@ use std::path::Path;
 use arrow::array::{Array, BinaryArray, Float64Array, LargeBinaryArray, StringArray};
 use arrow::record_batch::RecordBatch;
 use tessera_lifecycle::membership::ArtifactShapes;
-use tessera_spatial::{Bounds, Projection};
 use tessera_store::derived::{
-    canonical_shapes, shape_input, ShapeInput, ShapeSpace, ShapeStats,
+    canonical_shapes, check_shape_span, shape_input, ShapeInput, ShapeSpace, ShapeStats, ViewFrame,
 };
 use tessera_types::layer::{
     LayerDeclaration, MembershipSource, ShapeKind, DEFAULT_MAX_SHAPE_VERTICES,
@@ -38,12 +37,11 @@ use crate::error::{BuildError, Result};
 /// the transform that placed them there, and the views the layer is drawn in.
 #[derive(Debug, Clone)]
 pub struct ShapeContext {
-    pub extent: Bounds,
-    /// **The view's own declared projection** (`projections.md` §10) — what a `wgs84` shape is
-    /// put through, and the same function the points went through, which is what makes the two
-    /// spaces comparable at all.
-    pub projection: Projection,
-    pub views: Vec<String>,
+    /// **One frame per view, and never one for the layer** (decision 0111): each view's own
+    /// declared projection — what a `wgs84` shape is put through, the same function that view's
+    /// points went through — beside the extent that view quantises against. A layer's views need
+    /// share neither, and a group's share both by construction.
+    pub views: Vec<ViewFrame>,
     /// The publication vertex cap (`polygon-membership.md` §9, ruling (e)).
     pub max_vertices: u64,
 }
@@ -80,11 +78,48 @@ pub struct ShapeLayerReport {
     /// The held decomposition's bytes beyond the shapes' own — sixteen per interior tile, five
     /// per boundary cell (§9).
     pub held_bytes: u64,
-    /// The layer spans several views, none of which declares a projection, so nothing says whether
-    /// they share a space (§4.3) — warned, never refused.
-    pub several_views: bool,
+    /// Per view, what canonicalisation did in **that view's own frame** — the numbers the
+    /// out-of-extent warning is made of, which a sum over views cannot say (decision 0111). One
+    /// entry per view of the layer, in the layer's declared order.
+    pub by_view: Vec<ShapeViewReport>,
     /// The resolution's cost, filled by the build's artifact pass and absent from a check.
     pub resolution: Option<ResolutionReport>,
+}
+
+/// One view's own half of a [`ShapeLayerReport`]: what canonicalising this layer's shapes against
+/// **that view's** extent and projection did.
+///
+/// **Where the frames differ these differ**, which is the whole reason they are not summed: a
+/// boundary inside one view's extent and wholly outside another's is exactly the state the operator
+/// has to see, and a total of `1` over two views does not distinguish it from a shape half-outside
+/// both (decision 0111).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ShapeViewReport {
+    pub view: String,
+    /// Shapes clipped to this view's extent.
+    pub clipped: u64,
+    /// Shapes wholly outside this view's extent — **warned, never refused**: their membership
+    /// there is empty and the operator decides (§4.3).
+    pub outside: u64,
+    pub rings_dropped: u64,
+    pub degrees_looking: u64,
+    pub interior_tiles: u64,
+    pub boundary_cells: u64,
+}
+
+impl ShapeViewReport {
+    /// Everything but the view's name — what two views are compared on to decide whether their
+    /// frames made any difference.
+    fn counts(&self) -> (u64, u64, u64, u64, u64, u64) {
+        (
+            self.clipped,
+            self.outside,
+            self.rings_dropped,
+            self.degrees_looking,
+            self.interior_tiles,
+            self.boundary_cells,
+        )
+    }
 }
 
 /// What resolving the build's segment against a layer's shapes cost (§9's per-flush row, measured
@@ -133,13 +168,38 @@ impl ShapeLayerReport {
             self.canonical_bytes,
             self.held_bytes
         );
-        if self.several_views {
+        // **Per view, and only where the views disagree.** One view, or several agreeing, says
+        // nothing a reader cannot read off the totals above; a difference between them is a
+        // frame difference, which is what decision 0111 made possible and what an operator has to
+        // be able to see.
+        let differ = self
+            .by_view
+            .iter()
+            .any(|v| v.counts() != self.by_view[0].counts());
+        if self.by_view.len() > 1 && differ {
+            for view in &self.by_view {
+                eprintln!(
+                    "    view '{}': clipped {}, wholly outside {}, rings dropped {}, \
+                     degrees-looking {}; {} interior tile(s), {} boundary cell(s)",
+                    view.view,
+                    view.clipped,
+                    view.outside,
+                    view.rings_dropped,
+                    view.degrees_looking,
+                    view.interior_tiles,
+                    view.boundary_cells
+                );
+            }
+        }
+        // **Warned, never a refusal** (§4.3): a shape wholly outside a view's extent holds no rows
+        // there, is published, and the operator decides whether the extent or the geometry is
+        // wrong. The number is per view, because that is the number that says which.
+        for view in self.by_view.iter().filter(|v| v.outside > 0) {
             eprintln!(
-                "    WARNING: the layer is drawn in {} views ({}) and none declares a projection, \
-                 so nothing says whether they share a coordinate system; the shapes are resolved \
-                 in each (`polygon-membership.md` §4.3)",
-                self.views.len(),
-                self.views.join(", ")
+                "    WARNING: {} of this layer's {} shape(s) lie wholly outside view '{}''s \
+                 extent and hold no rows there; the other views are unaffected \
+                 (`polygon-membership.md` §4.3)",
+                view.outside, self.artifacts, view.view
             );
         }
         if let Some(r) = &self.resolution {
@@ -346,18 +406,24 @@ impl ShapeReader {
         ctx: ShapeContext,
         default_space: ShapeSpace,
     ) -> Self {
-        // Warned only where nothing says whether the views share a space: two views that both
-        // declare `projection = "none"` (`polygon-membership.md` §4.3). Two views declaring
-        // *different* projections are refused at the declaration, and two declaring the same one
-        // do share a space and have nothing to warn about.
-        let several_views = ctx.views.len() > 1 && ctx.projection == Projection::None;
+        // **No warning for a layer over several views.** Spanning is opt-in and the caller
+        // declared it, so the two-unprojected-views warning is removed (decision 0111); what is
+        // warned is a shape outside a view's own extent, which is a fact about the geometry and
+        // not about the declaration.
         ShapeReader {
             kind,
             report: ShapeLayerReport {
                 layer: layer.to_string(),
                 kind: kind.as_str().to_string(),
-                views: ctx.views.clone(),
-                several_views,
+                views: ctx.views.iter().map(|v| v.view.clone()).collect(),
+                by_view: ctx
+                    .views
+                    .iter()
+                    .map(|v| ShapeViewReport {
+                        view: v.view.clone(),
+                        ..Default::default()
+                    })
+                    .collect(),
                 ..Default::default()
             },
             ctx,
@@ -403,25 +469,19 @@ impl ShapeReader {
                 ))
             })?,
         };
-        let views: Vec<&str> = self.ctx.views.iter().map(String::as_str).collect();
-        let canonical = canonical_shapes(
-            &shape,
-            &views,
-            space,
-            self.ctx.projection,
-            &self.ctx.extent,
-            self.ctx.max_vertices,
-        )
-        .map_err(|e| {
+        let canonical =
+            canonical_shapes(&shape, &self.ctx.views, space, self.ctx.max_vertices).map_err(|e| {
                 BuildError::Invalid(format!(
                     "layer '{}': artifact {key}: {e}",
                     self.report.layer
                 ))
             })?;
         self.report.artifacts += 1;
-        // The report reads the first view's canonicalisation, every view sharing one frame today.
-        if let Some((_, report, stats)) = canonical.reports.first() {
-            self.note(report, stats);
+        // **Every view's canonicalisation, not the first's** (decision 0111): where the frames
+        // differ the results differ, and the layer's totals are the sum over its views while the
+        // per-view rows keep them apart.
+        for (view, report, stats) in &canonical.reports {
+            self.note(view, report, stats);
         }
         self.report.canonical_bytes += canonical
             .by_view
@@ -432,7 +492,20 @@ impl ShapeReader {
         Ok(ArtifactShapes::new(canonical.by_view))
     }
 
-    fn note(&mut self, report: &tessera_spatial::shape::CanonReport, stats: &ShapeStats) {
+    fn note(
+        &mut self,
+        view: &str,
+        report: &tessera_spatial::shape::CanonReport,
+        stats: &ShapeStats,
+    ) {
+        if let Some(per_view) = self.report.by_view.iter_mut().find(|v| v.view == view) {
+            per_view.clipped += u64::from(report.clipped);
+            per_view.outside += u64::from(report.outside);
+            per_view.rings_dropped += u64::from(report.rings_dropped);
+            per_view.degrees_looking += u64::from(report.degrees_looking);
+            per_view.interior_tiles += stats.interior_tiles;
+            per_view.boundary_cells += stats.boundary_cells;
+        }
         let r = &mut self.report;
         r.parts += stats.parts;
         r.rings += stats.rings;
@@ -495,40 +568,50 @@ pub fn check_reports(config: &Config) -> Vec<std::result::Result<ShapeLayerRepor
         let Some(kind) = shape_declared(declaration) else {
             continue;
         };
-        let frame = declaration
+        // **A frame per view of the layer, not the first view's for all of them** (decision
+        // 0111): `tessera check` sizes what the build will store, and where the frames differ so
+        // do the decompositions. A view whose extent is `auto` has no frame until the points are
+        // read, so the whole layer is reported unsized rather than half-sized.
+        let frames: std::result::Result<Vec<ViewFrame>, String> = declaration
             .views
-            .first()
-            .and_then(|name| config.views.iter().find(|v| &v.name == name))
+            .iter()
+            .filter_map(|name| config.views.iter().find(|v| &v.name == name))
             .map(|view| match &view.extent {
-                Extent::Fixed(bounds) => Ok((*bounds, view.projection)),
+                Extent::Fixed(bounds) => Ok(ViewFrame::new(&view.name, view.projection, *bounds)),
                 // A stated longitude/latitude box is a frame without reading anything: the
                 // projection and the snap are both functions of the declaration alone
                 // (`projections.md` §4.2).
-                Extent::LonLat(asked) => Ok((
+                Extent::LonLat(asked) => Ok(ViewFrame::new(
+                    &view.name,
+                    view.projection,
                     crate::config::snap_lon_lat(view.projection, asked)
                         .square
                         .bounds(),
-                    view.projection,
                 )),
                 Extent::Auto { .. } | Extent::AutoLonLat => Err(format!(
-                    "layer '{}': its view's extent is `auto`, which is fitted to the points at the \
-                     build; the shapes cannot be sized before then. Declare the extent to size \
-                     them here",
-                    declaration.name
+                    "layer '{}': view '{}''s extent is `auto`, which is fitted to the points at \
+                     the build; the shapes cannot be sized before then. Declare the extent to \
+                     size them here",
+                    declaration.name, view.name
                 )),
-            });
-        let (extent, projection) = match frame {
-            Some(Ok(frame)) => frame,
-            Some(Err(why)) => {
+            })
+            .collect();
+        let views = match frames {
+            Ok(views) if views.is_empty() => continue,
+            Ok(views) => views,
+            Err(why) => {
                 out.push(Err(why));
                 continue;
             }
-            None => continue,
         };
+        // The layer-level half of decision 0111's span rules, at the earliest place that can say
+        // it: before a data file is opened. The row-level half needs the row's own `space`.
+        if let Err(refusal) = check_shape_span(&views, ShapeSpace::Wgs84) {
+            out.push(Err(format!("layer '{}': {refusal}", declaration.name)));
+            continue;
+        }
         let ctx = ShapeContext {
-            extent,
-            projection,
-            views: declaration.views.clone(),
+            views,
             max_vertices: DEFAULT_MAX_SHAPE_VERTICES,
         };
         let result = (|| -> Result<ShapeLayerReport> {

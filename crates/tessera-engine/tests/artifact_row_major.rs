@@ -58,6 +58,7 @@ fn declaration(
     layout: Option<ServingLayout>,
 ) -> LayerDeclaration {
     LayerDeclaration {
+        scope: Default::default(),
         name: name.into(),
         title: Some(format!("{name} (title)")),
         views: vec!["s0".into()],

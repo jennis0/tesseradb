@@ -1486,6 +1486,7 @@ mod tests {
 
     fn declaration(name: &str) -> LayerDeclaration {
         LayerDeclaration {
+            scope: Default::default(),
             name: name.into(),
             title: Some(name.into()),
             views: vec!["default".into()],

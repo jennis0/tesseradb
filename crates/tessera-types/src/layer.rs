@@ -656,6 +656,44 @@ pub struct LayerDeclaration {
     /// and a layer without it serves nothing rather than serving something wider.
     #[serde(default)]
     pub shape: Option<ShapeDeclaration>,
+    /// **Which artifact set this layer carries over the views it names** (`views.md` §3.5,
+    /// [decision 0109](../../../docs/decisions/0109-scope-binds-an-attribute-or-layer-to-a-groups-views.md)):
+    /// [`LayerScope::Entity`] — the default — is one set drawn on every view; a group scope is a
+    /// different set per view of that group, each artifact belonging to one.
+    ///
+    /// **On the declaration, so the manifest carries it** (contracts §2.3): the scope was compiled
+    /// beside the declaration and written nowhere, so a bundle reopened without its build
+    /// configuration could not tell the two kinds of layer apart — and the two answer differently
+    /// on every view. `#[serde(default)]` is entity scope, which is a complete statement and not
+    /// an unfilled one: it says *one set, every view*, which is what a layer that mentions no
+    /// group means.
+    #[serde(default)]
+    pub scope: LayerScope,
+}
+
+/// What a layer's artifacts are per (`views.md` §3.5).
+///
+/// Spelled as an attribute's scope is (`configuration.md`): `scope = "entity"` and
+/// `scope = { group = "quarter" }`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LayerScope {
+    /// One artifact set, drawn on every view the layer names.
+    #[default]
+    Entity,
+    /// A different artifact set per view of the named group. The artifact rows carry a `view`
+    /// column, keys are unique per `(layer, view)`, and edges may not cross views.
+    Group(String),
+}
+
+impl LayerScope {
+    /// The group this layer's artifact sets are per, or `None` for the entity-scoped default.
+    pub fn group(&self) -> Option<&str> {
+        match self {
+            LayerScope::Entity => None,
+            LayerScope::Group(group) => Some(group.as_str()),
+        }
+    }
 }
 
 /// What kind of shape a spatial layer's artifacts carry (`polygon-membership.md` §6.1).
@@ -1435,6 +1473,7 @@ mod tests {
 
     fn decl(kind: HierarchyKind, levels: Vec<u32>) -> LayerDeclaration {
         LayerDeclaration {
+            scope: Default::default(),
             name: "clusters/x".into(),
             title: Some("X".into()),
             views: vec!["default".into()],

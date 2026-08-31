@@ -201,6 +201,29 @@ def main() -> None:
     checks += 1
     print(f"  [{checks}] quarter_clusters partitions each quarter's own entity set: OK")
 
+    # --- the shape layer spans two frames (decision 0111) ---------------------------------
+    (regions,) = [l for l in corpus["layer"] if l["name"] == "regions"]
+    assert regions["membership"] == "spatial"
+    projections = {
+        v["name"]: v["projection"] for v in corpus["view"] if v["name"] in regions["views"]
+    }
+    assert len(projections) == 2, "the shape layer is drawn on two plain views"
+    assert len(set(projections.values())) == 2, (
+        "the two views must place their points by different functions, or the layer spans "
+        "no frames at all (decision 0111)"
+    )
+    assert "none" not in set(projections.values()), (
+        "a layer's views are all projected or all `none`, never the mix (decision 0111)"
+    )
+    assert all(a["space"] == "wgs84" for a in regions["artifacts"]), (
+        "`view` space is refused over unequal frames; `wgs84` is the spelling that spans"
+    )
+    checks += 1
+    print(
+        f"  [{checks}] regions layer spans {len(projections)} frames "
+        f"({', '.join(f'{k}={v}' for k, v in sorted(projections.items()))}), all `wgs84`: OK"
+    )
+
     print(f"\n{checks} checks passed.")
 
 

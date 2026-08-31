@@ -1,12 +1,13 @@
 # Shape membership — requirements and design
 
-**Status:** **Normative — 2026-08-30 (r9).** Designed, taken through one adversarial review
+**Status:** **Normative — 2026-08-31 (r10).** Designed, taken through one adversarial review
 (Appendix R, r4), owner-ruled (§13), and **built in four stages on 2026-08-29** (§12), each in its
 own worktree and gate-green: the core, the artifact type, the wire and client, the region leaf.
 **`wgs84` shapes are built** (§4.3): a view now declares a projection, and a shape declared in
 longitude and latitude goes through the view's own transform, each edge densified first — the last
-of R9 to land. The figures in §9 are measured on one Overture part; the world-scale figures stay
-modelled and say so. What remains unbuilt is scoped out in §11 — saving a selection as a shape
+of R9 to land. **§4.3's spanning is built** (r10, 2026-08-31, decision 0111): a layer's geometry is
+canonicalised once per view, in that view's own frame, on both entry points. The figures in §9 are
+measured on one Overture part; the world-scale figures stay modelled and say so. What remains unbuilt is scoped out in §11 — saving a selection as a shape
 waits on the edit pass, and the export verb — and each is marked ⊘ at its claim. §2 is the
 requirements set the owner directed on 2026-08-27, unchanged.
 
@@ -961,6 +962,17 @@ differently from the recommendation:
 
 ## Appendix R — review trail
 
+- **r10 (2026-08-31)** — §4.3's cross-projection spanning is **built**. `canonical_shapes` takes a
+  frame — view id, projection, extent — per view; the build's layer read and `PUT /control/layers`
+  each resolve one per view of the layer, neither reading a first or an anchor view for all of
+  them. The layer-level refusal (projected mixed with `none`) is at the declaration on both entry
+  points and names the layer and both sides; the row-level one (`space = "view"` over unequal
+  frames) is at the row, the space being a fact about the submission. Out-of-extent is a per-view
+  count in the build's report and a per-view flag in the publication's, never a refusal. The
+  pre-0111 refusal of a shape layer whose views declare different projections is deleted from the
+  config parse. `test_corpora/multiview` carries the case (`regions` over `world` and
+  `world_flat`); `crates/tessera-build/tests/shape_span.rs` and
+  `crates/tessera-server/tests/shape_span_serving.rs` are the tests. No design content changed.
 - **r9 (2026-08-30)** — cross-projection spanning (decision 0111): a `wgs84` shape spans any
   projected views through each view's own transform; `view`-space geometry spans only equal
   frames; all-projected or all-`none` per layer; the two-`none` warning removed (opt-in needs no

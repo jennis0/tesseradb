@@ -2222,6 +2222,7 @@ mod tests {
         criterion: Option<ExistenceCriterion>,
     ) -> LayerDeclaration {
         LayerDeclaration {
+            scope: Default::default(),
             name: "clusters/a".into(),
             title: Some("A".into()),
             views: vec!["s0".into()],

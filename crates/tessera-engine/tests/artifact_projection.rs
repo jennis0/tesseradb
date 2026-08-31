@@ -79,6 +79,7 @@ fn credential(grant: &str) -> Vec<u8> {
 
 fn declaration(name: &str, kind: HierarchyKind, prune_children: bool) -> LayerDeclaration {
     LayerDeclaration {
+        scope: Default::default(),
         name: name.into(),
         title: Some(format!("{name} (title)")),
         views: vec!["s0".into()],

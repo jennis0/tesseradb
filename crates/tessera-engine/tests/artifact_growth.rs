@@ -37,6 +37,7 @@ const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 /// weaker assertion of the two and the one this file exists to distinguish from a real absence.
 fn declaration(name: &str) -> LayerDeclaration {
     LayerDeclaration {
+        scope: Default::default(),
         name: name.into(),
         title: Some(format!("{name} (title)")),
         views: vec!["s0".into()],
@@ -693,6 +694,7 @@ fn a_join_naming_something_other_than_a_point_is_refused() {
 /// (`artifacts-from-points.md` §3).
 fn open_declaration(name: &str) -> LayerDeclaration {
     LayerDeclaration {
+        scope: Default::default(),
         value_set: tessera_types::layer::ValueSet::Open,
         ..declaration(name)
     }

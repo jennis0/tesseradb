@@ -52,6 +52,7 @@ mod tests {
 
     fn declaration(membership: MembershipSource, pin: Option<ServingLayout>) -> LayerDeclaration {
         LayerDeclaration {
+            scope: Default::default(),
             name: "clusters/x".into(),
             title: None,
             views: vec!["s0".into()],

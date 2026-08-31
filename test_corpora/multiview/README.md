@@ -5,11 +5,14 @@ parent README). Not a rung on the dataset ladder — it measures nothing and is 
 campaign. Its job is to be the `corpus.toml` a multi-view build is pointed at.
 
 **`tessera check` and `tessera build` both pass against it, unmodified** (2026-08-31). The whole
-declaration builds: nine row spaces over one entity space of 21,300 — `world`, `quarter`'s four
-inline views and `quarter_alt`'s four selected out of one file by its `quarter` discriminator —
-with `sentiment`'s four entity-space columns under `attrs/sentiment/quarter/<key>/`, `collections`
-drawn on all five of the views it names, and `quarter_clusters`' six clusters per quarter each
-resolved only in its own view. `tessera verify` and `tessera verify --deep` pass on the result.
+declaration builds: ten row spaces over one entity space of 21,300 — `world` and `world_flat`,
+`quarter`'s four inline views and `quarter_alt`'s four selected out of one file by its `quarter`
+discriminator — with `sentiment`'s four entity-space columns under `attrs/sentiment/quarter/<key>/`,
+`collections` drawn on all five of the views it names, `quarter_clusters`' six clusters per quarter
+each resolved only in its own view, and `regions`' three `wgs84` polygons canonicalised **twice**,
+once against each of the two frames it spans (decision 0111): the three decompose to
+26,031 interior tiles in `world` and 29,469 in `world_flat`, which is what per-view
+canonicalisation means and what one frame for both would have hidden. `tessera verify` and `tessera verify --deep` pass on the result.
 
 **Two things in this fixture were wrong against the readers and were corrected** (2026-08-31),
 neither of them a views.md question: the `members` lists on both layer files were `int64` where an
@@ -64,7 +67,7 @@ Output goes to `$TESSERA_LADDER/multiview/` (default `data/ladder/multiview/`, `
 | File | Rows (default scale) | What it is |
 |---|---|---|
 | `corpus.toml` | — | the declaration; committed here, copied beside the derived data |
-| `world.parquet` | 12,816 | the plain view `world`: `entity_id, lon, lat, access` |
+| `world.parquet` | 12,816 | the plain views `world` and `world_flat`, which read the same file through different projections: `entity_id, lon, lat, access` |
 | `quarter-2026-Q1..Q4.parquet` | ~8,200 each | the `quarter` group, form A: `entity_id, x, y, access, sentiment` |
 | `quarter-alt.parquet` | 32,833 | the `quarter_alt` group, form B: `entity_id, quarter, lon, lat, access` |
 | `attrs-constant.parquet` | 21,300 | the two entity-scoped attributes: `entity_id, importance, kind` |
@@ -97,6 +100,8 @@ This table is the fixture's point — read it as the implementation's checklist,
 | Presence bitmap on a group-scoped attribute — some entities missing a value in some views (§5, decision 0064) | ~15% of each quarter's rows carry `sentiment = null` |
 | An unscoped layer over a view and a group at once (§3.5) | `collections`, `views = ["world", "quarter"]`, default `scope = "entity"` |
 | A scoped layer, a different artifact set per view of a group (§3.5) | `quarter_clusters`, `scope = { group = "quarter" }`, `views = ["quarter"]`, `fields.view = "quarter"` |
+| A shape layer over views whose **frames differ** ([decision 0111](../../docs/decisions/0111-a-shape-spans-projected-views-through-wgs84.md), `polygon-membership.md` §4.3) | `regions`, `views = ["world", "world_flat"]`, three `wgs84` polygons, `[layer.shape] kind = "polygon"` — one declaration, two canonical forms |
+| A second frame over one points file (§2's "the extent belongs to the view") | `world_flat`, equirectangular over the same `world.parquet` |
 | Two roster forms in one corpus | `quarter` (form A) and `quarter_alt` (form B), side by side |
 
 **Not exercised, deliberately out of this fixture's scope:** the create/drop control operations
@@ -125,8 +130,9 @@ validating data/ladder/multiview
   [15] quarter_alt declares members=quarter and no roster of its own: OK
   [16] collections layer's 8,373 member ids are all real entities: OK
   [17] quarter_clusters partitions each quarter's own entity set: OK
+  [18] regions layer spans 2 frames (world=web_mercator, world_flat=equirectangular), all `wgs84`: OK
 
-17 checks passed.
+18 checks passed.
 ```
 
 ## A finding for `views.md`, not a fixture defect

@@ -1474,8 +1474,13 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                 &args.layers,
                 &args.layer_inputs,
                 &args.scoped_layers,
-                view.projection,
-                &view.extent,
+                // The oracle build materialises exactly one view, so its one frame is the whole
+                // of decision 0111's per-view slice.
+                &[tessera_store::derived::ViewFrame::new(
+                    &view.view_id,
+                    view.projection,
+                    view.extent,
+                )],
                 tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
                 tmp.path(),
                 args.memory_budget

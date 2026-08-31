@@ -1413,6 +1413,86 @@ pub fn shape_input(kind: ShapeKind, input: ShapeInput) -> Result<ShapeF64, Shape
     })
 }
 
+/// One view a shape layer is drawn in, with **the frame that view's own points are quantised in**
+/// (decision 0040): the transform that placed them and the extent they were quantised against.
+///
+/// A layer's views need share neither, and what makes them comparable is that each shape is put
+/// through *this* view's pair and no other — the same function that placed the rows it is about to
+/// select (`polygon-membership.md` §4.3, R12).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ViewFrame {
+    /// The view id — a plain view's name, or a group's view as `group:key`.
+    pub view: String,
+    pub projection: Projection,
+    pub extent: Bounds,
+}
+
+impl ViewFrame {
+    pub fn new(view: impl Into<String>, projection: Projection, extent: Bounds) -> Self {
+        ViewFrame {
+            view: view.into(),
+            projection,
+            extent,
+        }
+    }
+}
+
+/// The two spans [decision 0111](../../../docs/decisions/0111-a-shape-spans-projected-views-through-wgs84.md)
+/// refuses, checked once for a whole layer.
+///
+/// **A layer's views are all projected or all `none`.** `wgs84` means nothing in an embedding, so
+/// no geometry spans the two kinds of space and the mix is refused whatever a row declares — which
+/// is why this arm ignores `space` and can be called at the layer's declaration, before any
+/// geometry is read.
+///
+/// **A `view`-space shape spans only identical frames.** Its coordinates are one specific frame's,
+/// so over views differing in projection or extent it names different places in each; `wgs84` is
+/// the spelling that spans, and this arm therefore depends on what the submission declared. A
+/// layer scoped to a group is exempt in fact rather than by rule — a group's views share a frame
+/// by construction, so the frames compare equal.
+///
+/// The caller prefixes the layer's name: every publication route already wraps a
+/// [`ShapeRefusal`] in `layer '<name>': …`.
+pub fn check_shape_span(views: &[ViewFrame], space: ShapeSpace) -> Result<(), ShapeRefusal> {
+    let named = |select: &dyn Fn(&ViewFrame) -> bool| -> String {
+        views
+            .iter()
+            .filter(|v| select(v))
+            .map(|v| format!("'{}'", v.view))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let projected = |v: &ViewFrame| v.projection != Projection::None;
+    if views.iter().any(projected) && views.iter().any(|v| !projected(v)) {
+        return Err(ShapeRefusal(format!(
+            "its views are a mix of projected and unprojected row spaces — {} declare a \
+             projection and {} declare `projection = \"none\"`. A `wgs84` coordinate means \
+             nothing in an embedding, so no geometry spans the two kinds of space (decision 0111); \
+             draw the layer on one kind or the other",
+            named(&projected),
+            named(&|v| !projected(v))
+        )));
+    }
+    if space == ShapeSpace::View {
+        if let Some(first) = views.first() {
+            if let Some(other) = views
+                .iter()
+                .find(|v| v.projection != first.projection || v.extent != first.extent)
+            {
+                return Err(ShapeRefusal(format!(
+                    "`space = \"view\"` geometry is written in one view's frame, and views '{}' \
+                     and '{}' do not share one — {:?} against {:?}. Declare the geometry \
+                     `space = \"wgs84\"`, which is the spelling that spans frames (decision \
+                     0111), or draw the layer on views of one group, whose frames are identical by \
+                     construction",
+                    first.view, other.view, first.extent, other.extent
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Canonicalise one shape for every named view against the frame the points are quantised in
 /// (`polygon-membership.md` §4.4), and decompose it so the report can say what it will cost to
 /// hold.
@@ -1428,29 +1508,34 @@ pub fn shape_input(kind: ShapeKind, input: ShapeInput) -> Result<ShapeF64, Shape
 /// before it is quantised (`polygon-membership.md` §4.3, R10), and a caller cannot canonicalise
 /// one without naming the function that placed the points.
 ///
-/// ⊘ The frame is now the view's in the manifest (decision 0040), but this function still takes
-/// **one** extent and one projection for every named view: a build materialises one view, so the
-/// views of a layer share a frame in fact, and the design's "per view, in its own frame"
-/// (`polygon-membership.md` §4.3 — the projection must agree across a layer's views, the extent
-/// need not) reduces to one form stored under each view's name. The loop is kept because the
-/// storage is keyed by view; per-view extents here wait on a bundle that carries two.
+/// **Per view, in that view's own frame** ([decision 0111](../../../docs/decisions/0111-a-shape-spans-projected-views-through-wgs84.md)):
+/// each [`ViewFrame`] carries the projection that placed its view's points and the extent they are
+/// quantised against, and the shape goes through that pair once per view. A layer whose views share
+/// a frame — every view of a group, by construction — therefore produces identical bytes under each
+/// name and pays only the repeated canonicalisation; a layer spanning frames produces a genuinely
+/// different canonical form per view, which is the semantics `polygon-membership.md` §4.3 states.
+///
+/// Two spans are refused rather than resolved, both by [`check_shape_span`]: a layer mixing a
+/// `projection = "none"` view with a projected one, and a `view`-space shape over views whose
+/// frames are not identical. The first is a property of the layer and is refused at its
+/// declaration too; the second is a property of the submission and can only be known here.
 pub fn canonical_shapes(
     shape: &ShapeF64,
-    views: &[&str],
+    views: &[ViewFrame],
     space: ShapeSpace,
-    projection: Projection,
-    extent: &Bounds,
     max_vertices: u64,
 ) -> Result<CanonicalShapes, ShapeRefusal> {
-    let space = space.resolve(projection)?;
+    check_shape_span(views, space)?;
     let mut out = CanonicalShapes {
         by_view: Vec::with_capacity(views.len()),
         reports: Vec::with_capacity(views.len()),
         bounds: Vec::with_capacity(views.len()),
     };
-    for view in views {
+    for frame in views {
+        let view = frame.view.as_str();
+        let space = space.resolve(frame.projection)?;
         let (canonical, report) = shape
-            .canonical(space, extent)
+            .canonical(space, &frame.extent)
             .map_err(|e| ShapeRefusal(e.to_string()))?;
         let vertices = canonical.vertex_count();
         if vertices > max_vertices {

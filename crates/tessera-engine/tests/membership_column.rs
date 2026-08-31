@@ -37,6 +37,7 @@ fn declaration(
     layout: Option<ServingLayout>,
 ) -> LayerDeclaration {
     LayerDeclaration {
+        scope: Default::default(),
         name: name.into(),
         title: Some(format!("{name} (title)")),
         views: vec!["s0".into()],
@@ -64,6 +65,7 @@ fn declaration(
 /// A label layer over the tree, the shape a toponymy layer publishes.
 fn labels() -> LayerDeclaration {
     LayerDeclaration {
+        scope: Default::default(),
         name: LABELS.into(),
         title: Some("labels".into()),
         views: vec!["s0".into()],

@@ -1,7 +1,11 @@
 # Views — design
 
 **Date:** 2026-08-30
-**Status:** Normative (r16) — **ordinals are removed** (r16, 2026-08-31, owner ruling): a view of a
+**Status:** Normative (r17) — **a shape layer canonicalises per view** (r17, 2026-08-31; spec §2's
+marker, [decision 0111](../decisions/0111-a-shape-spans-projected-views-through-wgs84.md)): the
+three consumers that read one frame for a layer's several views each take a frame per view, the two
+spans 0111 refuses are refused, and `test_corpora/multiview` carries a layer over two frames.
+**Ordinals are removed** (r16, 2026-08-31, owner ruling): a view of a
 group is addressed `<group>:<key>` and by nothing else. There is no ordinal on the wire, in a
 roster record, in a WAL record or in the manifest, and the `#` form addresses nothing; a caller
 wanting a numeric ordering mints numeric keys. Views of a group are served in **creation order**,
@@ -9,7 +13,7 @@ which is roster-record order, so the ordering a client walks survives without a 
 tombstones are unchanged — a dropped key is refused for ever. Appendix C's C27 (the ordinal gap) is
 deleted and [decision 0110](../decisions/0110-the-ordinal-gap-is-accepted.md) is superseded by
 [0113](../decisions/0113-ordinals-are-removed-and-the-key-is-the-only-address.md): with no ordinal
-served there is no gap to observe. **the gate is built** (r15, 2026-08-31): spec §6 is end to end.
+served there is no gap to observe. **The gate is built** (r15, 2026-08-31): spec §6 is end to end.
 `visibility` is accepted on a view, a group and a roster record, checked at acceptance against the
 plugin that will evaluate it, and stored on the manifest; a session's **visible-view set** is
 resolved once at authorise — every view of every group, whatever the outcome, by intersection of
@@ -150,14 +154,22 @@ grid, which is why the extent is per view and not per bundle.
 > was settled before anything depended on it; the artifacts are recreated rather than migrated
 > (decision 0048), and `bundle_format` did not move — the required field is the loud guard.
 >
-> **⊘ Three consumers still read one frame for a layer's several views, and a bundle carrying
-> several now exists.** A shape publication canonicalises against one view's extent — the layer's
-> *first* at `canonical_shapes` and at `/control/layers`' own resolution, the build's **anchor**
-> view at the build's own read — where `polygon-membership.md` §4.3 wants it per view: a layer's
-> views must share a projection, but need not share a frame. A group's views do share one by
-> construction (spec §3.1), so a shape layer scoped to a group is exact; one spanning a plain view
-> and a group is not, and nothing refuses it. No fixture carries a shape layer over several
-> frames, so this is untested rather than known-wrong.
+> **Implemented 2026-08-31 — a shape layer canonicalises per view, in each view's own frame**
+> ([decision 0111](../decisions/0111-a-shape-spans-projected-views-through-wgs84.md)). The three
+> consumers that read one frame for a layer's several views now each take a frame per view:
+> `canonical_shapes` takes a `ViewFrame` — view id, projection, extent — per view rather than one
+> projection and one extent for all of them; `/control/layers` resolves one per view of the layer;
+> and the build's layer read passes every view it materialises rather than the anchor's frame. A
+> layer whose views share a frame — every view of a group (spec §3.1) — produces identical bytes
+> under each name and pays only the repeated canonicalisation; one spanning frames produces a
+> genuinely different canonical form per view, which is the semantics `polygon-membership.md` §4.3
+> states. Two spans are refused: a layer mixing a projected view with a `projection = "none"` one,
+> at the declaration on both entry points (the build's config parse and `PUT /control/layers`),
+> naming the layer and both sides; and a `space = "view"` row over frames that are not identical,
+> at the row, since the space is a fact about the submission. A shape wholly outside a view's
+> extent warns with the count for **that view** and is published. `test_corpora/multiview` now
+> carries the case: `regions`, three `wgs84` polygons over `world` (Web Mercator) and `world_flat`
+> (equirectangular), decomposing differently in each.
 
 **Addressing.** Every viewer verb names its view in the request body (contracts §3.2); an ingest
 batch names it in `x-tessera-view`, optional only while the bundle has one view (write-path
@@ -811,7 +823,7 @@ ordinal (decision 0113). The C15/C17 notes stand.
 | Architecture §5.1, §9 | View generalised from the temporal case to a named coordinate system; groups and shared views; the paged permutation as the representation |
 | Contracts §2.1 | A bundle carries several views, `views/<view>/` and `views/<group>/<key>/`; the `group:key` id form; the roster and the key tombstones in the segments manifest, carried for ever |
 | Contracts §2.2, §2.5 | The quantisation extent moves onto the view descriptor — first, ahead of any multi-view build |
-| Contracts §2.2 | **Done at contracts r55** for the attribute: a `groups` row carrying the roster and each group's `scoped_scalars`, with the column families under `attrs/<column>/<group>/<key>/`. ⊘ A layer's `scope` still has no manifest field — it is compiled beside the declaration and never written |
+| Contracts §2.2, §2.3 | **Done at contracts r55** for the attribute: a `groups` row carrying the roster and each group's `scoped_scalars`, with the column families under `attrs/<column>/<group>/<key>/`. **Done at contracts r59** for the layer: `scope` is a field of the declaration, so `SEGMENTS-<n>.json`'s `layers` carries it and a reopened bundle can tell a per-view artifact set from a shared one without the build's configuration |
 | Contracts §3.2 | `/v1/meta`: per-view `extent` (r52), groups with their rosters and typed metadata (r53–r54), `filter_operands` carrying the scope and the pinned leaf `name@key` in the filter grammar (r55), and every one of them gate-filtered per principal (r56) — all done |
 | Contracts §3.4 | The duplicate rule amended per spec §4; `PUT /control/views/{group}/{key}` and its drop with `delete_dangling`, the create taking a gate label checked against the plugin (r57); identifier forms with mandatory idset on the `tessera_id` form; `--view` withdrawn |
 | Configuration §1, §8 | `[[view_group]]` with `[[view_group.view]]`, `[view_group.views]`, `members`, `metadata` and per-view `visibility` on the roster; `fields.view` on a group source, a scoped attribute and a scoped layer; `scope` on `[[attribute]]` and `[[layer]]` |
@@ -982,6 +994,18 @@ each view under spec §4's rule.
 
 ## Appendix R — review trail
 
+- **r17 (2026-08-31)** — **a shape layer is canonicalised per view, in each view's own frame**
+  (decision 0111), and spec §2's marker and §11's contracts row record it. `canonical_shapes` takes
+  a frame per view rather than one projection and one extent for every view of a layer;
+  `/control/layers` resolves one per view; the build's layer read passes every view it
+  materialises rather than the anchor's. The 2026-08-29 refusal of a shape layer whose views
+  declare different projections is **deleted** — 0111 supersedes it — and two narrower refusals
+  replace it: the mix of a projected view and a `projection = "none"` one, at the declaration on
+  both entry points, and a `space = "view"` row over frames that are not identical, at the row. A
+  shape wholly outside a view's extent warns with that view's own count and is published. A
+  layer's `scope` is now a field of the declaration and therefore of the manifest (contracts r59),
+  which is §11's remaining `§2.2` item. No design content changed: this revision records what was
+  built against text r9 of `polygon-membership.md` §4.3 already specified.
 - **r16 (2026-08-31)** — **ordinals are removed** (owner ruling), and the removal is total rather
   than an address form withdrawn. Gone: `/v1/meta`'s `ordinal` field, the roster record's and the
   `ViewDrop` record's ordinal, the per-group high-water, the manifest's stored number, the

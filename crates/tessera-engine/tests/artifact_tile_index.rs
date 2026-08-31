@@ -276,6 +276,7 @@ impl Fixture {
 
 fn declaration() -> LayerDeclaration {
     LayerDeclaration {
+        scope: Default::default(),
         name: LAYER.into(),
         title: None,
         views: vec!["s0".into()],

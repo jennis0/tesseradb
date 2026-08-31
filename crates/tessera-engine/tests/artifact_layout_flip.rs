@@ -45,6 +45,7 @@ const MEMBERS: usize = 100;
 
 fn declaration() -> LayerDeclaration {
     LayerDeclaration {
+        scope: Default::default(),
         name: LAYER.into(),
         title: Some("scattered".into()),
         views: vec!["s0".into()],

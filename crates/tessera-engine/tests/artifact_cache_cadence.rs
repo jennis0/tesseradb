@@ -35,6 +35,7 @@ const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 /// artifact that appeared or vanished — the distinction these cases turn on.
 fn declaration(name: &str, kind: HierarchyKind) -> LayerDeclaration {
     LayerDeclaration {
+        scope: Default::default(),
         name: name.into(),
         title: Some(format!("{name} (title)")),
         views: vec!["s0".into()],

@@ -332,6 +332,7 @@ const LABELS: &str = "case/labels";
 
 fn clusters() -> LayerDeclaration {
     LayerDeclaration {
+        scope: Default::default(),
         name: CLUSTERS.into(),
         title: Some("clusters".into()),
         views: vec!["s0".into()],
@@ -356,6 +357,7 @@ fn clusters() -> LayerDeclaration {
 /// over nothing is `false` under every filter, and that is what a label would carry without it.
 fn labels() -> LayerDeclaration {
     LayerDeclaration {
+        scope: Default::default(),
         name: LABELS.into(),
         title: Some("labels".into()),
         views: vec!["s0".into()],
@@ -498,6 +500,7 @@ const DESCRIBED: &str = "case/described";
 /// answers `NothingToContain` and the conjunct is never evaluated at all.
 fn described() -> LayerDeclaration {
     LayerDeclaration {
+        scope: Default::default(),
         name: DESCRIBED.into(),
         title: Some("described".into()),
         views: vec!["s0".into()],
