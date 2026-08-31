@@ -1,6 +1,19 @@
 # Views — design
 
 **Date:** 2026-08-30
+**Status:** Normative (r24) — **the write half of §5 is built: ingest carries a scoped value,
+flush writes the column, and merge and fold keep the lane** (r24, 2026-08-31, owner ruling;
+`contracts.md` §2.2/§3.1 r64). §5's three ⊘ markers are discharged. A batch into a view of a group
+may carry that group's scoped columns under their plain names; the flush writes the family's
+per-view extents beside the build's, and the base a view created since the build has none of; and
+a merge or a fold takes the **view's** writer schema rather than the bundle's, which was a defect
+rather than an absence — a rewritten segment of a group's view dropped the family's lane, and
+values served correctly before the rewrite came back as zeros. A view created while the service
+runs therefore gains its scoped columns at its first flush, with no rebuild. Two things stay
+marked, both narrow: a batch into a view of a group that only *shares* another's views may not
+carry the family (the column is the owner's, and a second writer for one `(entity, view)` column
+is two layers claiming one entity), and §4's attribute arm is still exact only while the entity's
+own row is buffered. No design changes.
 **Status:** Normative (r23) — **§4's join rule refuses a re-label past the entity's own flush**
 (r23, 2026-08-31; `contracts.md` §2.4 r63,
 [decision 0114](../decisions/0114-the-drill-down-serves-the-satisfied-labels-only.md)). The label
@@ -650,6 +663,13 @@ source is a `[[view_group.view]]` file, `fields.view` says which view each row's
 batch into a plain view may not carry a group-scoped attribute at all: there is no view of the
 group for the value to belong to.
 
+A batch into a view of a group that declares `members` may not carry one either, and for a
+different reason: the column it would land in is the **owner's**, addressed by the key the two
+groups share, so a batch into the sharing view and one into the owner's view of the same key could
+each write a value for one entity into one column — two layers claiming one entity, which the
+composition refuses. The value is ingested through the owning group's view, where it is entity
+space and reaches both.
+
 **Render.** A `render = true` group-scoped attribute is rendered in the views of its group and
 of any group sharing them, and in no other view — the rule `per-point-attributes.md` §3.9 already
 has for `render_in`, with the view set decided by the scope instead of listed.
@@ -676,9 +696,15 @@ has for `render_in`, with the view set decided by the scope instead of listed.
 > another view's, which no scan of the rows in front of the request could answer; the two routes
 > would answer different questions under one spelling.
 >
-> ⊘ **A merge or a fold drops the column until the next build.** Both take their writer schema from
-> the bundle-wide render list, a family having no row in it, so a rewritten segment of a group's
-> view carries the entity-scoped tail alone and its rows read as the ordinary absence below.
+> **A merge and a fold keep the lane, built 2026-08-31 — and this was a defect, not an absence.**
+> Both took their writer schema from the bundle-wide render list, a family having no row in it, so
+> a rewritten segment of a group's view carried the entity-scoped tail alone: values served
+> correctly before the rewrite came back as the type's zero afterwards, indistinguishable from
+> absence and with no error anywhere. The schema is now the **view's** — the bundle-wide render
+> tail, then that view's scoped render lanes, one derivation shared with the flush — and the
+> fold's attribute pass folds each family's per-view column exactly as it folds an entity-scoped
+> one, which it previously did not do at all: a fold wrote a prefix the families' directories were
+> simply not in.
 
 **View metadata is not an attribute.** A view's `label` or `starts` is one value per view, lives
 on the roster, filters nothing and is served typed on `/v1/meta`. A per-(entity, view) value is
@@ -751,15 +777,40 @@ an attribute. The two are kept apart so that neither grows the other's surface.
 > `scoped_scalars` is where a client reads the placement: the family's `render` and `index` flags,
 > its type, its vocabulary or analyser, and the view ids that have a column.
 >
-> ⊘ The **ingest** rule is unimplemented with the rest of the write half — a buffered row's scalars
-> are positional against `MANIFEST.declared_scalars`, which a family is deliberately absent from,
-> so a batch naming a scoped column is refused as an unknown column by construction and every
-> column of a family is the build's. A view created after the build therefore has no column of any
-> family until one is written for it, which is what `scoped_scalars[..].views` naming the views
-> that *have* one records — and what a request under such a view sees is the ordinary absence: the
-> column is in no response's schema. The same absence covers a segment a flush wrote under a view
-> that *does* have a column: its rows carry the type's zero, which is what a row with no value
-> carries anyway.
+> **The write half is built, 2026-08-31** (contracts §2.2, §3.1 r64). A row carries the group's
+> scoped values in a **second positional list** beside its declared scalars — `WalRow::scoped`,
+> positional against the owning group's `scoped_scalars` — rather than in slots of the first,
+> because the two are indexed against different declarations: `declared_scalars` is one flat
+> bundle-wide list a family has no slot in, and a family's columns are the group's. The boundary
+> admits a column named for a family of the group that owns the batch's view and nothing else, so
+> the entity-space refusal is byte-identical where it always applied; nullability, the wire type
+> and a category's key-not-code rule are the entity-scoped ones, asked of the family's own
+> declaration. A scoped category's novel key is minted where an entity-scoped one is, at the
+> commit-window close.
+>
+> The flush writes the family's extent for its view under `attrs/<column>/<group>/<key>/extents/`,
+> beside the build's base and composed at publication exactly as an entity-scoped extent is — the
+> only thing the scope changes is the directory. A view the family has no column for acquires an
+> **empty base** at the same flush, so what is on disc is what a build would have written for an
+> empty view, and the pair enters `scoped_scalars[..].views` — the durable record being
+> `SEGMENTS-<n>.json`'s `scoped_columns`, since a render-only family writes a row lane and no
+> extent for a derivation to find. A rendered family's lane is written from the row's own value,
+> which is why a **join** row carries the scoped values and nothing else: the value belongs to the
+> `(entity, view)` pair the join is creating rather than to the entity.
+>
+> ⊘ **A view of a group that only shares the family's views still carries no value from a batch.**
+> Its rows render the family — the column is entity space, reached through the shared key — but
+> writing it there would put two writers on one column. A segment such a view flushes therefore
+> carries the family's lane holding **absences**: the lane is written, so every segment of the
+> view holds the same columns and its own rewriters can read it, and the rows read as the ordinary
+> absence they would if no batch had mentioned the family. `verify --deep` keeps the build-only
+> exemption for exactly those views and for no others.
+>
+> The lane is the one thing a segment may lawfully **not** hold, and both ends now say so at the
+> same index: `gather_tile_columns` reads a missing scoped column as the row's placeholder, and
+> the merge's and the fold's `gather_scalars` write one — which a view whose family list grew
+> after some of its segments were flushed needs, its older ones having no lane. A *wrong type*
+> under the name stays malformed, scoped or not.
 
 ## 6. The gate
 
@@ -1149,6 +1200,18 @@ each view under spec §4's rule.
 
 ## Appendix R — review trail
 
+- **r24 (2026-08-31)** — §5's write half is built and its three ⊘ markers are discharged; no
+  design content changed. Ingest: a batch into a view of a group carries the group's scoped columns
+  under their plain names, in a second positional list against the group's own `scoped_scalars`,
+  the entity-space refusal untouched. Flush: the family's per-view extents beside the build's, the
+  empty base a runtime-created view has none of, and the render lane written from the row's own
+  value — so a join row carries this view's scoped value and nothing else. Merge and fold: the
+  **view's** writer schema rather than the bundle's, which is where the ⊘ was understating itself —
+  a rewritten segment did not merely lack a column a rebuild would supply, it *lost* values already
+  being served — and the fold's attribute pass now folds each family's per-view column, which it
+  had never written at all. Two markers replace them, both narrow: a sharing group's views take no
+  value from a batch (the column is the owner's, and a second writer for one `(entity, view)`
+  column is two layers claiming one entity), and §4's attribute arm is unchanged.
 - **r23 (2026-08-31)** — §4's label arm is exact past a flush and its ⊘ is discharged; the
   attribute half stays marked, with what it would cost stated. No design content changed: the rule
   §4 states is the one it always stated, and what moved is that the deployment can now enforce it.

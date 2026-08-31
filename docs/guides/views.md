@@ -237,9 +237,11 @@ guard the entity from being silently changed by a second view's row:
   `409` naming the column.
 
 A **group-scoped** attribute may not appear on a plain view's batch at all — it is an undeclared
-column there. A join carries geometry only: it allocates no id, writes no descriptor, and
-contributes no postings, which is what keeps a label supplied on a joining row inert rather than a
-quiet widening.
+column there. On a batch into a view of the group that owns it, it may and should: a join carries
+geometry **and this view's scoped values**, and nothing else. It allocates no id, writes no
+descriptor and contributes no postings, which is what keeps a label supplied on a joining row inert
+rather than a quiet widening — but a scoped value belongs to the `(entity, view)` pair the join is
+creating, not to the entity, so it is the one thing such a row legitimately brings.
 
 ## Give an attribute a per-quarter value
 
@@ -296,12 +298,31 @@ attribute is undeclared to them entirely, and both spellings collapse to the pla
 `?view=quarter:2026-Q3` or the pinned path `mood@2026-Q3` — two views of a group hold two value
 sets, and each is genuinely that view's own.
 
-⊘ **Not built:** a group-scoped column cannot be populated by ingest. A buffered row's scalars are
-positional against the bundle-wide `declared_scalars` list, which a family is deliberately absent
-from — so a view created while the service runs carries **no column of any scoped family until the
-next rebuild**, whatever `sentiment`, `mood`, `note` or `coverage` said about the group it belongs
-to. A request under such a view sees the ordinary absence: the column is missing from the schema,
-not present with a placeholder value.
+### Populating one by ingest
+
+A batch into a view of the group carries the group's scoped columns **under their plain names** —
+`sentiment`, not `sentiment@2026-Q3`. The view comes from `x-tessera-view`, so the column is not
+qualified and the view decides which of the family's columns the value lands in:
+
+```
+POST /control/ingest
+x-tessera-view: quarter:2026-Q3
+
+external_id | x | y | access | kind | sentiment
+```
+
+Nulls are absences, a category arrives as its **key** (never a code), and a column the batch
+omits entirely means every row of it is absent — a family has no slot in the positional scalar
+tail, so leaving it out misaligns nothing. A view created while the service runs acquires its
+columns at the **first flush** that covers it, with no rebuild: from then on it filters, pins,
+renders and answers `/v1/categories` like any other, and `/v1/meta`'s `scoped_scalars[..].views`
+names it.
+
+⊘ **One case still needs a rebuild**: a group that declares `members` of another. Its views render
+the owner's family — the column is shared through the key — but a batch into one may not carry a
+value, because the column it would land in is the owner's and two writers for one column is two
+layers claiming one entity. Ingest such a value through the owning group's view; it is entity
+space and reaches both.
 
 ## Layers and shapes over groups
 
@@ -420,8 +441,8 @@ not a duplicate — its label and its constant attributes are unchanged, and its
 `2026-Q5` is a fresh value in a fresh column. Until the next flush, `quarter:2026-Q5` answers every
 viewer route empty. `/v1/viewport` against `quarter:2026-Q5` after the flush returns the new
 quarter's points; `/v1/meta` lists `quarter:2026-Q5` in `groups[..].views` from the moment the
-`PUT` was acknowledged, in `scoped_scalars[..].views` only once a rebuild has written its column —
-until then a request under it simply has no `sentiment`.
+`PUT` was acknowledged, and in `scoped_scalars[..].views` from the first flush that covers the new
+quarter — before that a request under it simply has no `sentiment`.
 
 ## Sharp edges
 
@@ -433,5 +454,7 @@ until then a request under it simply has no `sentiment`.
   `quater`; creation is always the explicit `PUT` first.
 - **There are no ordinals.** Sort a group's views by your own metadata (`starts`, a numeric key you
   minted) — creation order is served order and nothing else.
-- **A group-scoped column has no ingest route today.** A view created while the service runs carries
-  no scoped values until the next rebuild, even for attributes the group has always declared.
+- **A sharing group's views take no scoped value on ingest.** A group declaring `members` renders
+  the owner's family but cannot be written through: send the value to the owning group's view,
+  where it is entity space and reaches both. A segment flushed under a sharing view carries the
+  family's lane holding absences, so its rows draw at the placeholder there until a rebuild.
