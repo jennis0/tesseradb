@@ -8,7 +8,7 @@ arm's ⊘ is discharged: the bundle now carries the entity→term transpose the 
 exist, so the arm compares against the buffer and then against the transpose, and a second view's
 row naming a different label is the `409` the rule always specified rather than an accepted, inert
 row. The attribute half stays marked, with the cost of closing it stated. Nothing else moves.
-**Previously:** Normative (r20) — **every family of a group-scoped attribute answers, and such an
+**Status:** Normative (r20) — **every family of a group-scoped attribute answers, and such an
 attribute may declare its own `source`** (r20, 2026-08-31, owner ruling; contracts r60): §5's two
 ⊘ markers are discharged. A scoped **category** carries per-view keyed postings — the filter route,
 and what `/v1/categories` derives a per-view value list from — and a scoped **text** column carries
