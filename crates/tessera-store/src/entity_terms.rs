@@ -448,9 +448,14 @@ pub fn coalesce_entity_terms_extents(
         }
         let Some((index, entity)) = least else { break };
         cursors[index].next();
-        let terms = inputs[index]
-            .terms_of(entity)?
-            .expect("the layer's own has-row bitmap named this entity");
+        let terms = inputs[index].terms_of(entity)?.ok_or_else(|| {
+            StoreError::InvalidEntityTerms {
+                path: inputs[index].dir.clone(),
+                detail: "the layer's own has-row bitmap names an entity its offsets do not \
+                         answer for — a merge input that disagrees with itself"
+                    .to_string(),
+            }
+        })?;
         writer.push(entity, &terms)?;
         written += 1;
     }

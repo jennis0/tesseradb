@@ -2031,7 +2031,10 @@ impl FilterColumns {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         format!(
-                            "a coalesce's entity→term stack holds lists for {} entities where the                              one it replaces holds {}; replacing on that would answer 'unknown'                              for an entity that carries labels, which on the write path is a 409                              that does not fire",
+                            "a coalesce's entity→term stack holds lists for {} entities where the one it \
+                             replaces holds {}; replacing on that would answer 'unknown' for an \
+                             entity that carries labels, which on the write path is a 409 that \
+                             does not fire",
                             replacement.cardinality(),
                             held.cardinality()
                         ),
