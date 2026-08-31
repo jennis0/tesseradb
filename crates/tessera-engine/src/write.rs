@@ -3712,12 +3712,17 @@ pub(crate) fn scalar_schema_of(
 
 /// Every view's **group-scoped** attribute families, keyed by view id (`views.md` §5).
 ///
-/// **The families of the group that owns the view, and of no other.** A family belongs to the
-/// group that owns the keys (a `members` group's list is always empty — §3.3), and a batch into
-/// one of that group's views carries its values under their plain names. A view of a *sharing*
-/// group takes no entry: its rows render the family (the column being entity space, shared through
-/// the key) but they do not write it, which is the one asymmetry between the render rule and this
-/// one — see `views.md` §5's ingest paragraph.
+/// **The families whose owning group's key set holds this view's key** — the owner's own views,
+/// and the same keys under every group declaring `members` of it (§3.3, decision 0116). A family
+/// belongs to the group that owns the keys (a `members` group's list is always empty), and a batch
+/// into any view addressing one of those keys carries its values under their plain names, because
+/// the address of a scoped value is `(attribute → its group, key)` and never the view.
+///
+/// The sharing door was refused until 2026-09-01 on the argument that two views of one key would
+/// put two extents over one entity. That is withdrawn: the cell is written once — `admit`'s cell
+/// arm dedupes an identical second value and refuses a differing one — and the extent it is written
+/// into is addressed by [`scoped_owner_view_of`], which is the owner's view id whichever door the
+/// row came through.
 ///
 /// **This is the one derivation, and three callers take it**: the ingest boundary parses a batch's
 /// schema against it, the commit window mints a scoped category's keys against it, and the flush
@@ -3732,19 +3737,49 @@ pub(crate) fn scoped_families_by_view(
         if group.scoped_scalars.is_empty() {
             continue;
         }
-        for view in &group.views {
-            out.insert(
-                format!(
-                    "{}{}{}",
-                    group.name,
-                    tessera_store::GROUP_SEPARATOR,
-                    view.key
-                ),
-                group.scoped_scalars.clone(),
-            );
+        // The owner's own views, then every sharing group's views of the same keys. A sharing
+        // group's roster carries the owner's keys by construction, so the key is matched rather
+        // than assumed: a key the sharing group does not carry has no row space to write into.
+        let sharing = manifest
+            .groups
+            .iter()
+            .filter(|g| g.members_of.as_deref() == Some(group.name.as_str()));
+        for g in std::iter::once(group).chain(sharing) {
+            for view in &g.views {
+                if !group.views.iter().any(|v| v.key == view.key) {
+                    continue;
+                }
+                out.insert(
+                    format!("{}{}{}", g.name, tessera_store::GROUP_SEPARATOR, view.key),
+                    group.scoped_scalars.clone(),
+                );
+            }
         }
     }
     out
+}
+
+/// The view id a scoped value written through `view` is **addressed by** — the owning group's view
+/// of the same key (`views.md` §5, decision 0116).
+///
+/// Equal to `view` itself for every view of the owning group, and for every view in no scope at
+/// all; a sharing group's view resolves to the owner's. This is the one place a door becomes an
+/// address, so a row that arrived through the sharing spelling writes the byte-identical extent,
+/// under the byte-identical column name, that the owner's door would have written.
+pub(crate) fn scoped_owner_view_of(
+    manifest: &tessera_store::manifest::Manifest,
+    view: &str,
+) -> String {
+    let Some((group, key)) = view.split_once(tessera_store::GROUP_SEPARATOR) else {
+        return view.to_string();
+    };
+    let owner = manifest
+        .groups
+        .iter()
+        .find(|g| g.name == group)
+        .and_then(|g| g.members_of.as_deref())
+        .unwrap_or(group);
+    format!("{owner}{}{key}", tessera_store::GROUP_SEPARATOR)
 }
 
 /// One view's writer schema: the bundle-wide render tail, then the **group-scoped** render lanes
@@ -7583,6 +7618,9 @@ impl Executor {
             // `scoped_families_by_view`, so the two cannot come to disagree about which value
             // belongs to which family.
             let families = scoped_by_view.get(&view).cloned().unwrap_or_default();
+            // **Where those families' columns live** — the owner's view of the same key, which is
+            // `view` itself under the owning group's own views (decision 0116).
+            let scoped_view = scoped_owner_view_of(manifest, &view);
             let scoped_schema: Vec<crate::flush::ScopedColumnSpec> = match families
                 .iter()
                 .enumerate()
@@ -7600,7 +7638,7 @@ impl Executor {
                         category: family.vocabulary.is_some(),
                         filterable: crate::filter::scoped_is_filterable(family),
                         render: family.render,
-                        has_base: family.views.contains(&view),
+                        has_base: family.views.contains(&scoped_view),
                         analyser,
                     })
                 })
@@ -7629,9 +7667,10 @@ impl Executor {
             // very batch that acquired it. Publication adds the pair, so every later flush, merge
             // and fold of this view derives the same list from `view_scalar_schema_of`.
             //
-            // Under any other view the read side's list is exactly right, and it is wider than the
-            // families above: a view of a group that only *shares* the family's views renders it
-            // and cannot write it, so it owes a lane of absences rather than no lane. A segment
+            // A sharing group's view is on the same side of that split since decision 0116 — it
+            // writes the family through the key it shares — so it takes the same branch and the
+            // same argument. Under any other view the read side's list is exactly right: a view in
+            // no scope at all owes a lane of absences rather than no lane, because a segment
             // missing one is a segment its own view's rewriters would have to guess about.
             let scoped_render: Vec<tessera_store::manifest::ScopedScalar> = if families.is_empty() {
                 crate::viewport::scoped_render_families(manifest, &view)
@@ -7641,6 +7680,7 @@ impl Executor {
             } else {
                 families.iter().filter(|f| f.render).cloned().collect()
             };
+
             // Where each lane's value sits in a buffered row's `scoped` list, `None` where this
             // view writes none of them — a sharing group's, and any family the batch could not
             // have named.
@@ -7654,6 +7694,7 @@ impl Executor {
                     prefix_dir: self.prefix_dir(generation),
                     partition: partition.clone(),
                     view: view.clone(),
+                    scoped_view,
                     // **`seg_id`s are never reused** (contracts §2.1), which is what makes the
                     // merge rebase ABA-safe — and the attempt counter is not decoration. `next_n`
                     // alone repeats whenever a flush is planned twice before it publishes, and the
@@ -7673,11 +7714,13 @@ impl Executor {
                     //
                     // **The two derivations agree only because a `members` group can never own a
                     // family** (`Manifest::validate_groups` refuses one, `views.md` §3.3): under a
-                    // view of the owning group `scoped_render` is that group's rendered families
-                    // in manifest order, which is exactly what `scoped_render_families` yields
-                    // there; under any other view the branch above *is* that function. Change
-                    // either site — or that refusal — and the third has to move with it, or a
-                    // flush writes a tail its own view's rewriters cannot read.
+                    // view whose key is in a scope — the owner's own, or a sharing group's of the
+                    // same key — `scoped_render` is the owning group's rendered families in
+                    // manifest order, which is exactly what `scoped_render_families` yields there
+                    // once publication has put the owner view id on each family's list; under any
+                    // other view the branch above *is* that function. Change either site — or that
+                    // refusal — and the third has to move with it, or a flush writes a tail its own
+                    // view's rewriters cannot read.
                     scalar_schema: {
                         let mut schema = scalar_schema.clone();
                         schema.extend(scoped_render.iter().map(|f| (f.name.clone(), f.arrow_type)));
@@ -8715,6 +8758,36 @@ impl Executor {
                 }) || generation.buffer.contains_in_view(entity, view)
             },
         );
+        // **The join rule's arms, on the one thread that settles join-ness** (`views.md` §4, §5;
+        // decision 0116). They used to run in `/control/ingest`'s handler, a whole queue drain
+        // before `established_collisions` above decided which rows are joins — so a row whose
+        // holder was established in between was admitted as a join having passed no arm at all.
+        // One authoritative site, and the refusal text is the handler's own so the bodies are
+        // byte-identical to what the earlier site answered.
+        if collisions == 0 {
+            if let Err(detail) = join_arms(&generation, &mut rows) {
+                drop(generation);
+                self.ack_failed(&respond, ExecError::JoinRefused { detail });
+                self.health.note_work_refused();
+                return None;
+            }
+        }
+        // **A joining row carries no descriptors and no terms, and this is where they go**
+        // (`views.md` §4). The entity's label is the one it already has: its terms are already in
+        // the postings, put there by the flush that gave it its first row, and re-writing them from
+        // this row is how a second view would come to re-label an entity with no overlay entry.
+        //
+        // Here rather than in the handler for `established_collisions`'s reason: the handler's
+        // answer is a queue drain old. A row it called new and this pass calls a join would arrive
+        // with its descriptors intact and re-label the entity; a row it called a join and this pass
+        // calls new — its holder deleted in between — would arrive with them already dropped and
+        // allocate a fresh entity carrying no label at all, which is invisible to every principal.
+        for row in rows.iter_mut() {
+            if row.join.is_some() {
+                row.descriptors = Vec::new();
+                row.terms = Vec::new();
+            }
+        }
         // **An accepted join's omitted `render` values are backfilled here** (`views.md` §4, owner
         // ruling 2026-08-31), and here rather than in the handler because this is where join-ness
         // is *settled*: `established_collisions` above is what finally decides which rows join and
@@ -8789,7 +8862,188 @@ impl Executor {
             waiters: vec![respond],
         })
     }
+}
 
+/// The **join rule**'s three arms, over one batch whose join-ness `established_collisions` has just
+/// settled (`views.md` §4, §5; decision 0116).
+///
+/// `Err` is the refusal the caller is answered with — a `409`, whole batch without effect, taken
+/// before the WAL append so a refused batch leaves no record. The text is what
+/// `/control/ingest`'s handler answered with until 2026-09-01, byte for byte: the site moved and
+/// the body did not, so a caller cannot tell one from the other and the byte-identity tests hold.
+///
+/// **Why all three are here and none in the handler.** A joining row carries geometry, and — for a
+/// scoped family — the cell its key addresses. Everything else it might name is already decided:
+/// the entity's label, and its entity-scoped attributes. What each arm checks is that the caller is
+/// not trying to change one of those through a second view's row. The handler could ask the same
+/// questions, and did, but it asked them of an answer a queue drain old: a row promoted to a join
+/// between the handler's pass and this one passed no arm at all, which is the race this collapse
+/// closes.
+///
+/// **A row index and a column name reach the caller; nothing else does.** No entity id, no external
+/// id and no value on either side (**I10**, and `error.rs`'s standing rule about caller data in
+/// bodies).
+fn join_arms(generation: &Generation, rows: &mut [UnallocatedRow]) -> Result<(), String> {
+    if rows.iter().all(|row| row.join.is_none()) {
+        return Ok(());
+    }
+    let manifest = &generation.bundle.manifest;
+    let declared = &manifest.declared_scalars;
+    // One derivation per batch, not per row: every row of a batch names one view, and this is the
+    // list its `scoped` tail was parsed positionally against at the boundary.
+    let mut by_view = scoped_families_by_view(manifest);
+    let scoped_families = rows
+        .first()
+        .and_then(|row| by_view.remove(row.view.as_str()))
+        .unwrap_or_default();
+    let owner_view = rows
+        .first()
+        .map(|row| scoped_owner_view_of(manifest, &row.view))
+        .unwrap_or_default();
+    // The cell's key, for the refusal — the half of the owner view id a caller spelled, and never
+    // the owning group, which a sharing group's caller has no business learning from a refusal.
+    let key = owner_view
+        .split_once(tessera_store::GROUP_SEPARATOR)
+        .map(|(_, key)| key)
+        .unwrap_or(owner_view.as_str())
+        .to_string();
+
+    for (index, row) in rows.iter_mut().enumerate() {
+        let Some(entity) = row.join else {
+            continue;
+        };
+        let buffered = generation.buffer.get(entity);
+        // **The label arm reads the buffer first and the transpose after it, and both are exact.**
+        // The buffer holds the entity's own row until its flush; past that, `entities/terms/`
+        // holds the same set in promoted ordinals (contracts §2.4).
+        //
+        // A novel descriptor resolves to a process-local extension id, which no stored ordinal can
+        // equal, so a batch naming a label the deployment has never interned is a mismatch — which
+        // is right: the flushed entity cannot be carrying it.
+        let held_terms: Option<Vec<u32>> = match &buffered {
+            Some(buffered) => Some(buffered.terms.iter().map(|t| t.raw()).collect()),
+            None => crate::session::flushed_terms_of(generation, entity)
+                .map(|terms| terms.iter().map(|t| t.raw()).collect()),
+        };
+        if let Some(mut held_terms) = held_terms {
+            let mut supplied_terms: Vec<u32> = row.terms.iter().map(|t| t.raw()).collect();
+            supplied_terms.sort_unstable();
+            supplied_terms.dedup();
+            held_terms.sort_unstable();
+            held_terms.dedup();
+            if supplied_terms != held_terms {
+                return Err(format!(
+                    "row {index} joins an entity this deployment already holds, under a different \
+                     access label. A re-label is a delete plus a re-ingest (decision 0047), never \
+                     a field carried in on a second view's row: the alternative is a widening with \
+                     no overlay entry, or a narrowing that bypasses the deny lanes (views §4)"
+                ));
+            }
+        }
+        // **The attribute arm reads the buffer first and the stored value after it, and both are
+        // exact** (2026-08-31, closing `views.md` §4's last ⊘). An entity-scoped attribute is one
+        // value per entity, so a joining row must carry the stored value or leave it absent. A
+        // differing one is refused naming the column — silently keeping either value would make
+        // the answer depend on which view a filter was asked under, which is exactly what a
+        // *scoped* attribute is for and this is not one.
+        //
+        // The two sources are compared by the *same* equality, on values normalised to the shape a
+        // batch carries (`stored_as_wal`), so the buffered and the flushed arm produce
+        // byte-identical refusals and cannot come to disagree about what "the same value" means.
+        for (position, d) in declared.iter().enumerate() {
+            let Some(supplied) = row.scalars.get(position) else {
+                continue;
+            };
+            let held = match &buffered {
+                Some(buffered) => buffered.scalars.get(position).cloned(),
+                // `None` here is *no value held* and *could not find out* alike; see
+                // `session::flushed_scalar_of` for why one answer serves both.
+                None => crate::session::flushed_scalar_of(generation, entity, position),
+            };
+            let Some(held) = held else {
+                continue;
+            };
+            if crate::session::scalar_is_absent(&held, d) {
+                continue;
+            }
+            // **An omitted value is not a disagreement**, and is not written through as an absence
+            // either: the backfill below fills a `render` column's omitted slot from the entity's
+            // stored value, once join-ness is settled.
+            if crate::session::scalar_is_absent(supplied, d) || held == *supplied {
+                continue;
+            }
+            return Err(format!(
+                "row {index} joins an entity this deployment already holds, with a different \
+                 value for column '{}'. An entity-scoped attribute is one value per entity, so a \
+                 joining row byte-matches the stored value or omits it (views §4, §5)",
+                d.name
+            ));
+        }
+        // **The scoped cell arm: one value per `(entity, attribute, key)`, whichever door wrote it**
+        // (`views.md` §5, decision 0116). A scoped value is not the entity's, so the two arms above
+        // do not reach it; it is the *cell's*, and the cell a joining row addresses may already hold
+        // a value — put there through the owning group's view, or through any group sharing those
+        // views, in this window or a previous one.
+        //
+        // Three answers, and the middle one is what makes the two doors safe:
+        //
+        // - the cell is empty, or this row names no value for it → the row writes it;
+        // - the cell holds the **same** value → the row's copy is dropped. One claimant per cell, so
+        //   the extents stay disjoint in entity space and the composition has nothing to refuse;
+        //   this is what replaces the old two-extents jam argument for the one-door rule;
+        // - the cell holds a **different** value → `409` naming the column and the key.
+        //
+        // **The same-window case needs no separate check.** Two batches writing one cell means two
+        // rows for one entity, so the second names an external id the open window already holds and
+        // `admit_ingest` closes the window before reaching here — after which the first batch's row
+        // is in the buffer and the buffered source below is the one that answers.
+        for (position, family) in scoped_families.iter().enumerate() {
+            let Some(supplied) = row.scoped.get(position) else {
+                continue;
+            };
+            let d = crate::session::declared_of_scoped(family);
+            if crate::session::scalar_is_absent(supplied, &d) {
+                continue;
+            }
+            // Every buffered row of the entity whose view addresses this same key — the cell's own
+            // rows, not the entity's own row, which is a different question and `buffer.get`'s.
+            let held = generation
+                .buffer
+                .rows_of(entity)
+                .filter(|item| scoped_owner_view_of(manifest, &item.view) == owner_view)
+                .find_map(|item| {
+                    let value = item.scoped.get(position)?;
+                    (!crate::session::scalar_is_absent(value, &d)).then(|| value.clone())
+                })
+                .or_else(|| {
+                    crate::session::flushed_scoped_of(generation, entity, family, &owner_view)
+                });
+            let Some(held) = held else {
+                continue;
+            };
+            if crate::session::scalar_is_absent(&held, &d) {
+                continue;
+            }
+            if held == row.scoped[position] {
+                // The dedupe. Absence in this row's tail, and the cell keeps the one claimant it
+                // already had.
+                row.scoped[position] = tessera_lifecycle::WalScalar::Null;
+                continue;
+            }
+            return Err(format!(
+                "row {index} names a different value for group-scoped column '{}' than this \
+                 deployment already holds for key '{}'. A scoped value is addressed by \
+                 (attribute, key) and is one value per cell, so a row naming that cell — through \
+                 the owning group's view or through any group sharing it — byte-matches the stored \
+                 value or omits it (views §5)",
+                family.name, key
+            ));
+        }
+    }
+    Ok(())
+}
+
+impl Executor {
     /// Resolve one batch's membership keys, and check the edges its adjacency declared.
     ///
     /// Returns the memberships — each carrying the ordinal it resolved to, or `None` where an open

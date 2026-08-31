@@ -2649,26 +2649,7 @@ impl Engine {
     /// of the inconsistency, which is what an operator chasing a systematic build or flush defect
     /// needs, and naming the slot buys nothing an entity-independent message does not.
     pub fn flushed_terms(&self, entity: EntityId) -> Option<Vec<TermId>> {
-        let entity = u32::try_from(entity.raw()).ok()?;
-        let terms = match self
-            .generation()
-            .filter_columns
-            .entity_terms()
-            .terms_of(entity)
-        {
-            Ok(terms) => terms?,
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "the entity->term transpose could not answer, so the join rule's label arm \
-                     has nothing to compare against and this batch's joins are accepted \
-                     unchecked (views §4). The artefact is a build or flush defect and the error \
-                     names the file; a fold rewrites it."
-                );
-                return None;
-            }
-        };
-        Some(terms.into_iter().map(TermId::new).collect())
+        flushed_terms_of(&self.generation(), entity)
     }
 
     /// An already-flushed entity's stored value for one declared column, at the shape a batch
@@ -3830,6 +3811,72 @@ pub(crate) fn flushed_scalar_of(
         crate::viewport::flushed_row_scalar(generation, entity, declared_index)
     }?;
     stored_as_wal(stored, declared)
+}
+
+/// [`Engine::flushed_terms`]'s body, over a generation the caller already holds.
+///
+/// **The write executor needs this form, and that is why it is not a method** — the same reason
+/// [`flushed_scalar_of`] is not one. The join rule's label arm runs on the serial writer
+/// (decision 0116), beside the generation its apply will clone from, and re-loading the pointer
+/// under itself is exactly the race the relocation exists to close.
+pub(crate) fn flushed_terms_of(generation: &Generation, entity: EntityId) -> Option<Vec<TermId>> {
+    let entity = u32::try_from(entity.raw()).ok()?;
+    let terms = match generation.filter_columns.entity_terms().terms_of(entity) {
+        Ok(terms) => terms?,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "the entity->term transpose could not answer, so the join rule's label arm \
+                 has nothing to compare against and this batch's joins are accepted \
+                 unchecked (views §4). The artefact is a build or flush defect and the error \
+                 names the file; a fold rewrites it."
+            );
+            return None;
+        }
+    };
+    Some(terms.into_iter().map(TermId::new).collect())
+}
+
+/// One already-flushed `(entity, attribute, key)` cell's value, at the shape a batch carries it in
+/// — the scoped half of the join rule's attribute arm (`views.md` §5, decision 0116).
+///
+/// `owner_view` is the cell's address, `write::scoped_owner_view_of`'s answer, so a value written
+/// through a sharing group's door and one written through the owner's are read back from the one
+/// column. A family on no filter surface has no store to read and answers `None`, as does a `text`
+/// family, whose extent is a dictionary and postings and holds no value per entity; both lose the
+/// comparison rather than the rule, exactly as a blob-resident entity-scoped column does.
+pub(crate) fn flushed_scoped_of(
+    generation: &Generation,
+    entity: EntityId,
+    family: &tessera_store::manifest::ScopedScalar,
+    owner_view: &str,
+) -> Option<tessera_lifecycle::WalScalar> {
+    if !crate::filter::scoped_is_filterable(family) {
+        return None;
+    }
+    let entity = u32::try_from(entity.raw()).ok()?;
+    let column = crate::filter::scoped_column_name(&family.name, owner_view);
+    let stored = generation.filter_columns.stored_value(&column, entity)?;
+    stored_as_wal(stored, &declared_of_scoped(family))
+}
+
+/// A scoped family as the entity-scoped declaration the absence and comparison helpers take.
+///
+/// **The same transcription the ingest boundary makes** (`control.rs`'s `scoped_as_declared`): a
+/// scoped column *is* an entity-scoped one — same types, same vocabulary, same absence rules — so
+/// the two helpers that decide what "absent" and "the same value" mean take one shape and cannot
+/// come to mean two things.
+pub(crate) fn declared_of_scoped(
+    family: &tessera_store::manifest::ScopedScalar,
+) -> tessera_store::manifest::DeclaredScalar {
+    tessera_store::manifest::DeclaredScalar {
+        name: family.name.clone(),
+        arrow_type: family.arrow_type,
+        vocabulary: family.vocabulary.clone(),
+        analyser: family.analyser.clone(),
+        index: family.index,
+        render: family.render,
+    }
 }
 
 /// Is this value **no value at all** for `declared` — the join rule's "or be absent from the

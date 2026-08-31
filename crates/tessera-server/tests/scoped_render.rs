@@ -1344,3 +1344,132 @@ async fn an_ingested_value_of_a_render_only_family_filters_after_a_flush_and_a_f
         "and the fold's rewritten column answers it too"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// The two doors (decision 0116)
+// ---------------------------------------------------------------------------------------------
+
+/// **A sharing group's view writes the owner's cell, and both groups read it back**
+/// (`views.md` §5, decision 0116).
+///
+/// A scoped value's address is `(attribute → its group, key)`. `quarter_map` declares `members` of
+/// `quarter`, so its `2026-Q1` view holds the owner's key and addresses the same cell — a batch
+/// through that door writes it. Until 2026-09-01 the write half admitted the owning group's views
+/// alone, and this batch's `heat` column was refused as undeclared.
+///
+/// What is asserted is the cell's identity rather than the door's: the value written through
+/// `quarter_map:2026-Q1` is answered by a leaf under `quarter:2026-Q1`, whose rows are a different
+/// row space entirely, and by one under `quarter_map:2026-Q1` beside it.
+#[tokio::test]
+async fn a_sharing_groups_door_writes_the_cell_the_owners_view_addresses() {
+    let served = serve().await;
+    const NEW: u64 = 9_401;
+    // Above the fixture's threshold, so the leaf below separates it from the absent rows.
+    const VALUE: f32 = 77.5;
+    ingest_with_heat(
+        &served,
+        "sharing-door",
+        "quarter_map:2026-Q1",
+        &[(external_id_of(NEW), 250.0, 250.0, "0")],
+        &[Some(VALUE)],
+    )
+    .await;
+    // The same entity joins the owner's own view carrying **no** value: the cell is already
+    // written, and a join that omits a family's column names nothing to disagree with.
+    ingest_with_heat(
+        &served,
+        "sharing-door-owner",
+        "quarter:2026-Q1",
+        &[(external_id_of(NEW), 260.0, 260.0, "0")],
+        &[None],
+    )
+    .await;
+    flush(&served).await;
+
+    for view in ["quarter:2026-Q1", "quarter_map:2026-Q1"] {
+        let answer = filtered_entities(&served, &served.token, view, range("heat")).await;
+        assert!(
+            answer.contains(&NEW),
+            "{view} reads the cell the sharing door wrote: {answer:?}"
+        );
+    }
+    // And the lane the sharing door's own row carries is the value it supplied, not the absence a
+    // view that could not write the family used to take.
+    let expected = members(0).count() + 1;
+    let (_, values) =
+        settled_points(&served, &served.token, "quarter_map:2026-Q1", expected).await;
+    let by_entity = by_entity(&served, &served.token, &values).await;
+    assert_eq!(
+        by_entity[&NEW], VALUE,
+        "the sharing group's row renders the value its own batch carried"
+    );
+}
+
+/// **One cell, one value: an identical second write dedupes and a differing one is a 409**
+/// (`views.md` §5, decision 0116).
+///
+/// This is what replaces the old one-door rule's argument. Two views of one key can both name the
+/// cell, so the writer settles it: the same value is dropped from the second row — one claimant, so
+/// the extents stay disjoint in entity space — and a different value is refused naming the column
+/// and the key, before the WAL append, whole batch without effect.
+///
+/// The refusal names neither group. A caller writing through `quarter_map` learns that the key
+/// already holds a value, which is its own request measured against the schema, and nothing about
+/// who owns the family.
+#[tokio::test]
+async fn a_second_door_naming_one_cell_dedupes_an_equal_value_and_refuses_a_different_one() {
+    let served = serve().await;
+    const AGREES: u64 = 9_501;
+    const DISAGREES: u64 = 9_502;
+    const VALUE: f32 = 88.25;
+    ingest_with_heat(
+        &served,
+        "cell-first",
+        "quarter:2026-Q1",
+        &[
+            (external_id_of(AGREES), 250.0, 250.0, "0"),
+            (external_id_of(DISAGREES), 251.0, 251.0, "0"),
+        ],
+        &[Some(VALUE), Some(VALUE)],
+    )
+    .await;
+
+    // The same value through the other door: accepted, and the second copy is not written.
+    ingest_with_heat(
+        &served,
+        "cell-agrees",
+        "quarter_map:2026-Q1",
+        &[(external_id_of(AGREES), 300.0, 300.0, "0")],
+        &[Some(VALUE)],
+    )
+    .await;
+
+    // A different one: refused, naming the column and the key.
+    let (status, body) = try_ingest_with_heat(
+        &served,
+        "cell-disagrees",
+        "quarter_map:2026-Q1",
+        &[(external_id_of(DISAGREES), 301.0, 301.0, "0")],
+        &[Some(VALUE + 1.0)],
+    )
+    .await;
+    assert_eq!(status, 409, "one cell holds one value: {body}");
+    assert!(
+        body.contains("group-scoped column 'heat'") && body.contains("key '2026-Q1'"),
+        "the refusal names the column and the key: {body}"
+    );
+    assert!(
+        !body.contains("quarter_map") && !body.contains("group 'quarter'"),
+        "and names no group: {body}"
+    );
+
+    flush(&served).await;
+    // The deduped write left one value behind, and both views answer with it.
+    for view in ["quarter:2026-Q1", "quarter_map:2026-Q1"] {
+        let answer = filtered_entities(&served, &served.token, view, range("heat")).await;
+        assert!(
+            answer.contains(&AGREES),
+            "{view} answers the one value the cell holds: {answer:?}"
+        );
+    }
+}

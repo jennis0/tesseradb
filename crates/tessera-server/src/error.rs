@@ -557,6 +557,12 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
         AcceptError::Exec(ExecError::ViewRefused { detail }) => ApiError::Contract(detail.clone()),
         AcceptError::Exec(ExecError::ViewConflict { detail }) => ApiError::Conflict(detail.clone()),
         AcceptError::Exec(ExecError::ViewUnknown { detail }) => ApiError::Unknown(detail.clone()),
+        // **The join rule's refusal, and the detail is the whole answer** (`views.md` §4, decision
+        // 0116). It moved off the handler and onto the serial writer, and the body did not move
+        // with it: the text is the handler's own, byte for byte, so a caller cannot tell which site
+        // refused — which is the point, the two sites having been collapsed into one. It names a
+        // row index, a column and a view key, and nothing else.
+        AcceptError::Exec(ExecError::JoinRefused { detail }) => ApiError::Conflict(detail.clone()),
         // Both are the caller's row, malformed in a way the engine refused before anything was
         // acked or WAL-durable — a contract answer, not a fault.
         // 404 and not 422, because that is what an unknown view id is on both planes
@@ -758,6 +764,10 @@ fn exec_failure_may_be_in_force(
         ExecError::ViewRefused { .. }
         | ExecError::ViewConflict { .. }
         | ExecError::ViewUnknown { .. } => false,
+        // Not reachable from a `/control/changes` item — the join rule is `/control/ingest`'s —
+        // and false is honest: every arm runs before the WAL append, so a refused batch has no
+        // record and nothing in force (decision 0116).
+        ExecError::JoinRefused { .. } => false,
         ExecError::Alloc(_) => false,
     }
 }

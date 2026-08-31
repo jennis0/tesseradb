@@ -586,6 +586,24 @@ pub enum ExecError {
     /// A group or a key this deployment does not carry → **404**, the same answer an unknown view
     /// gets on every other surface.
     ViewUnknown { detail: String },
+    /// The **join rule** refused this batch (`views.md` §4, §5) → HTTP **409**, no effect: a
+    /// joining row named a different access label, a different value for an entity-scoped
+    /// attribute, or a different value for a `(entity, attribute, key)` cell the deployment
+    /// already holds one for.
+    ///
+    /// **Evaluated on the serial writer, which is why it is an `ExecError`** (decision 0116).
+    /// These comparisons used to run in `/control/ingest`'s handler, a whole queue drain before
+    /// the map that decides which rows *are* joins — so a row promoted to a join in between skipped
+    /// every arm. The refusal is now taken beside `LiveState::established_collisions`, on the one
+    /// thread that also performs the apply, and before the WAL append: a refused batch leaves no
+    /// record, spends no entity id and moves nothing.
+    ///
+    /// **A rendered string, and it reaches the caller** — the same standing as
+    /// [`Self::LayerRefused`], and for the same reason. It names a row index, a column name and a
+    /// view key: the caller's own request measured against the deployment's published schema. It
+    /// names no entity id, no external id, no group the caller did not spell, and no value on
+    /// either side (**I10**).
+    JoinRefused { detail: String },
 }
 
 impl std::fmt::Display for ExecError {
@@ -606,7 +624,8 @@ impl std::fmt::Display for ExecError {
             ExecError::LayerRefused { detail } => write!(f, "{detail}"),
             ExecError::ViewRefused { detail }
             | ExecError::ViewConflict { detail }
-            | ExecError::ViewUnknown { detail } => write!(f, "{detail}"),
+            | ExecError::ViewUnknown { detail }
+            | ExecError::JoinRefused { detail } => write!(f, "{detail}"),
         }
     }
 }

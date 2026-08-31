@@ -373,6 +373,20 @@ impl IngestBuffer {
             .map(|item| &**item)
     }
 
+    /// Every buffered row this entity holds, in **any** view — joins included.
+    ///
+    /// **The scoped cell arm's source** (`views.md` §5, decision 0116). A scoped value is addressed
+    /// by `(entity, attribute, key)`, so the question "does this deployment already hold a value
+    /// for the cell this row names" is asked of every row of the entity whose view resolves to the
+    /// same key, not of the entity's own row alone — which is what [`Self::get`] answers and is a
+    /// different question, about labels.
+    pub fn rows_of(&self, entity: EntityId) -> impl Iterator<Item = &BufferedItem> {
+        self.items
+            .get(&entity)
+            .into_iter()
+            .flat_map(|rows| rows.iter().map(|item| &**item))
+    }
+
     /// Does this entity hold **any** buffered row?
     pub fn contains(&self, entity: EntityId) -> bool {
         self.items.contains_key(&entity)

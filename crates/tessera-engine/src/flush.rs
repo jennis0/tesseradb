@@ -208,14 +208,26 @@ pub(crate) struct FlushContext {
     pub(crate) record_schema: Vec<RecordColumnSpec>,
     /// This view's **group-scoped** attribute families (`views.md` §5), in the owning group's
     /// manifest order — which is the order a buffered row's `scoped` list is positional against.
-    /// Empty for a plain view, for a view of a group that owns no family, and for a view of a
-    /// group that only *shares* another's (§3.3: a family belongs to the group that owns the keys,
-    /// and only that group's views carry values at ingest).
+    /// Empty for a plain view and for a view whose key is in no scope.
+    ///
+    /// **A view of a group that only *shares* the keys has these too** (decision 0116): the address
+    /// of a scoped value is the key, so either door writes the same cell, and this flush writes it
+    /// into the owner's column — see [`FlushContext::scoped_view`].
     pub(crate) scoped_schema: Vec<ScopedColumnSpec>,
+    /// The view id this flush's **scoped** columns are addressed by — the owning group's view of
+    /// the same key, and [`FlushContext::view`] itself everywhere that is the same thing
+    /// (`write::scoped_owner_view_of`, decision 0116).
+    ///
+    /// **Only the scoped columns take it.** Everything else this context writes belongs to the row
+    /// space, which is the flush's own view; a scoped family's column belongs to the
+    /// `(attribute, group, key)` cell, which a sharing group's view addresses under the owner's id.
+    /// A flush that used `view` for both would put a sharing door's values in a directory no leaf
+    /// resolves to and no reader opens — served as absence, with no error anywhere.
+    pub(crate) scoped_view: String,
     /// One entry per lane in [`FlushContext::scalar_schema`]'s **scoped suffix**, giving where
     /// that lane's value sits in a buffered row's `scoped` list — `None` for a lane this view
-    /// renders and does not write, which is a view of a group that only *shares* the family's
-    /// views (`views.md` §3.3, §5).
+    /// renders and does not write, which since decision 0116 is only a family this view's batches
+    /// could not have named (`views.md` §3.3, §5).
     ///
     /// **Positional against the schema's suffix, exactly as `render_indices` is against its
     /// prefix.** A writer pairs each buffer with the next column's name, so a list built on a
@@ -1396,7 +1408,9 @@ fn write_text_layer(
 /// becomes a path so the writer cannot drift from `FilterColumns::open`'s reader.
 fn scoped_column_rel(ctx: &FlushContext, column: &str) -> String {
     let mut rel = format!("partitions/{}/attrs/{column}", ctx.partition);
-    for component in tessera_store::view_path_components(&ctx.view) {
+    // **`scoped_view`, not `view`** (decision 0116): the directory is the cell's address and the
+    // cell is `(attribute → its group, key)`, so a sharing group's door writes the owner's path.
+    for component in tessera_store::view_path_components(&ctx.scoped_view) {
         rel.push('/');
         rel.push_str(component);
     }
@@ -1439,7 +1453,7 @@ fn write_scoped_extents(plan: &FlushPlan, ctx: &FlushContext) -> Result<ScopedWr
         // so does the request's render list — so a view left off it renders nothing and is opened
         // for nothing.
         if !spec.has_base && (spec.filterable || spec.render) {
-            created.push((spec.name.clone(), ctx.view.clone()));
+            created.push((spec.name.clone(), ctx.scoped_view.clone()));
         }
         // A family on no surface has no column any reader opens, so an extent for it would be
         // bytes nothing reads — the predicate is `filter::scoped_is_filterable`'s, the same one
@@ -1476,7 +1490,7 @@ fn write_scoped_extents(plan: &FlushPlan, ctx: &FlushContext) -> Result<ScopedWr
             if let Some(extent) = write_text_layer(
                 &format!("{column_rel}/{}", tessera_filter::EXTENTS_DIR),
                 &spec.name,
-                Some(ctx.view.clone()),
+                Some(ctx.scoped_view.clone()),
                 analyser,
                 scoped_rows(spec, plan)?,
                 ctx,
@@ -1523,7 +1537,7 @@ fn write_scoped_extents(plan: &FlushPlan, ctx: &FlushContext) -> Result<ScopedWr
             .transpose()?;
         extents.push(FlushedExtent {
             column: spec.name.clone(),
-            view: Some(ctx.view.clone()),
+            view: Some(ctx.scoped_view.clone()),
             values_rel: rel_of(&values_path)?,
             presence_rel: rel_of(&presence_path)?,
             dict_rel: dict_path.as_ref().map(|p| rel_of(p)).transpose()?,

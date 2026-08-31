@@ -1544,26 +1544,29 @@ fn run_ingest(
     // WAL append on the executor, so a column naming a layer registered a moment ago resolves here
     // exactly as the publication that created its artifacts did — and a name nothing registered is
     // refused with the undeclared-column message rather than accepted into nothing.
-    // **The group-scoped families this batch may carry** (`views.md` §5): those of the group that
-    // owns the named view, under their plain names, the view deciding which of each family's
-    // columns a value lands in. A plain view gets none, so a scoped column named on an
-    // entity-space batch takes the undeclared-column refusal exactly as before — which is what
-    // makes such a column un-nameable outside its group's views.
+    // **The group-scoped families this batch may carry** (`views.md` §5, decision 0116): those
+    // whose owning group's key set contains this view's key, under their plain names, the *key*
+    // deciding which of each family's columns a value lands in. A plain view gets none, so a scoped
+    // column named on an entity-space batch takes the undeclared-column refusal exactly as before —
+    // which is what makes such a column un-nameable outside the views its key addresses.
     //
-    // ⊘ **A view of a group declaring `members` gets none either.** Its rows *render* the owner's
-    // family (the column is entity space and reached through the key it shares), but they may not
-    // write it: the value would land in the owner's `(group, key)` column, where a batch into the
-    // owner's own view of the same key may already have put one — two extents claiming one entity,
-    // which the layer composition refuses. The value is ingested through the owning group's view.
-    let scoped: Vec<ScopedScalar> = match view.split_once(':') {
-        Some((group, _)) => meta
-            .scoped_scalars
-            .iter()
-            .filter(|f| f.group == group)
-            .cloned()
-            .collect(),
-        None => Vec::new(),
-    };
+    // **A view of a group declaring `members` gets them too**, on the ruling of 2026-09-01: the
+    // address of a scoped value is `(attribute → its group, key)` and never the view, so the key a
+    // sharing group's view holds — the owner's by construction (`views.md` §3.3) — is the same cell
+    // the owner's own view addresses, and either door writes it. What was withdrawn with that is
+    // the "two extents claiming one entity" argument for the old one-door rule: the cell is written
+    // once, by whichever row reaches it first, and a second row naming it is deduped or refused on
+    // the writer (`WriteExecutor::admit`).
+    //
+    // `EngineMeta::owning_key` is the resolution, and is the same function the filter surface and
+    // the render list ask — a view whose key is in no scope resolves to `None` here and its batch
+    // may name no family's column, whatever the view's spelling.
+    let scoped: Vec<ScopedScalar> = meta
+        .scoped_scalars
+        .iter()
+        .filter(|f| meta.owning_key(&view, &f.group).is_some())
+        .cloned()
+        .collect();
     let ParsedBatch {
         items,
         artifacts,
@@ -1727,6 +1730,12 @@ fn run_ingest(
     // write-path §2.1 refuses is a byte-identical *re-ingest past* a suppression — a second copy
     // under a fresh entity — and attaching a view to the suppressed entity creates no copy.
     // Resolution is newest-binding-first, so a re-ingested id's live holder is the one consulted.
+    //
+    // **The join rule's own arms are NOT here** (ruled 2026-09-01, decision 0116). What survives in
+    // this handler is the duplicate answer alone — the one refusal that may *name* the ids, because
+    // the caller supplied them. Whether a row joins, and what a join may carry, is settled once on
+    // the serial writer (`WriteExecutor::admit`), where the map that decides it is the map the apply
+    // clones from; a row promoted to a join between this pass and that one used to skip both arms.
     let overlay_generation = state.engine.generation();
     let mut duplicate_ids: Vec<String> = Vec::new();
     let mut joins: Vec<(usize, EntityId)> = Vec::new();
@@ -1751,95 +1760,6 @@ fn run_ingest(
             duplicate_ids.join(", ")
         )));
     }
-    // The two arms that guard **entity space** on a join. A joining row carries geometry and
-    // nothing else, so what is checked here is that the caller is not trying to change anything
-    // else through it.
-    for (index, entity) in &joins {
-        let buffered = state.engine.buffered_row(*entity);
-        // **The label arm reads the buffer first and the transpose after it, and both are exact.**
-        // The buffer holds the entity's own row until its flush; past that, `entities/terms/`
-        // holds the same set in promoted ordinals (contracts §2.4). Before the transpose existed
-        // this arm simply stopped here, and a join naming a flushed entity under a different label
-        // was accepted — inert, because a joining row carries no descriptors, but unreported. It
-        // is now the 409 `views.md` §4 always specified.
-        //
-        // A novel descriptor resolves to a process-local extension id, which no stored ordinal can
-        // equal, so a batch naming a label the deployment has never interned is a mismatch — which
-        // is right: the flushed entity cannot be carrying it.
-        let held_terms: Option<Vec<u32>> = match &buffered {
-            Some(buffered) => Some(buffered.terms.iter().map(|t| t.raw()).collect()),
-            None => state
-                .engine
-                .flushed_terms(*entity)
-                .map(|terms| terms.iter().map(|t| t.raw()).collect()),
-        };
-        if let Some(mut held_terms) = held_terms {
-            let mut supplied_terms: Vec<u32> =
-                terms_per_item[*index].iter().map(|t| t.raw()).collect();
-            supplied_terms.sort_unstable();
-            supplied_terms.dedup();
-            held_terms.sort_unstable();
-            held_terms.dedup();
-            if supplied_terms != held_terms {
-                return Err(ApiError::Conflict(format!(
-                    "row {index} joins an entity this deployment already holds, under a different \
-                     access label. A re-label is a delete plus a re-ingest (decision 0047), never \
-                     a field carried in on a second view's row: the alternative is a widening with \
-                     no overlay entry, or a narrowing that bypasses the deny lanes (views §4)"
-                )));
-            }
-        }
-        // **The attribute arm reads the buffer first and the stored value after it, and both are
-        // exact** (2026-08-31, closing `views.md` §4's last ⊘). An entity-scoped attribute is one
-        // value per entity, so a joining row must carry the stored value or leave it absent. A
-        // differing one is refused naming the column — silently keeping either value would make
-        // the answer depend on which view a filter was asked under, which is exactly what a
-        // *scoped* attribute is for and this is not one.
-        //
-        // Before `Engine::flushed_scalar` existed this arm stopped at the buffer, and a join
-        // naming an already-flushed entity under a different value was accepted. It was inert for
-        // an entity-space column — a joining row writes no attribute column and no record field
-        // (`FlushPlan::entity_space_items`) — but never inert for a **rendered** one, whose value
-        // travels in the row's own tail into the joined view's hot column. What was lost was
-        // therefore the report for two homes and the rule itself for the third.
-        //
-        // The two sources are compared by the *same* equality, on values normalised to the shape a
-        // batch carries (`stored_as_wal`), so the buffered and the flushed arm produce byte-identical
-        // refusals and cannot come to disagree about what "the same value" means.
-        for (position, declared) in meta.declared_scalars.iter().enumerate() {
-            let Some(supplied) = items[*index].scalars.get(position) else {
-                continue;
-            };
-            let held = match &buffered {
-                Some(buffered) => buffered.scalars.get(position).cloned(),
-                // `None` here is *no value held* and *could not find out* alike; see
-                // `Engine::flushed_scalar` for why one answer serves both.
-                None => state.engine.flushed_scalar(*entity, position),
-            };
-            let Some(held) = held else {
-                continue;
-            };
-            if tessera_engine::scalar_is_absent(&held, declared) {
-                continue;
-            }
-            // **An omitted value is not a disagreement**, and is not written through as an
-            // absence either: the write executor backfills a `render` column's omitted slot from
-            // the entity's stored value once join-ness is settled (`views.md` §4, owner ruling;
-            // `WriteExecutor::admit`). Doing it there rather than here is what keeps a row that
-            // *stops* being a join — its holder deleted between this check and the apply — from
-            // carrying a value it took from an entity it turned out not to be joining.
-            if tessera_engine::scalar_is_absent(supplied, declared) || held == *supplied {
-                continue;
-            }
-            return Err(ApiError::Conflict(format!(
-                "row {index} joins an entity this deployment already holds, with a different \
-                 value for column '{}'. An entity-scoped attribute is one value per entity, so a \
-                 joining row byte-matches the stored value or omits it (views §4, §5)",
-                declared.name
-            )));
-        }
-    }
-
     // **The buffer-occupancy bound (§1.3).** Checked here, before submission, and distinct from
     // `ingest_queue_bound`: that one bounds the *command queue* — 32 jobs by default — and the
     // executor drains a job into the buffer in milliseconds, so no ingest rate produces a 429 by
@@ -1873,36 +1793,36 @@ fn run_ingest(
     // Moving also deletes four per-row allocations on the path that must sustain 10⁹-scale ingest;
     // the three source vectors drop at the end of this statement.
     // Which rows join, by position. Empty for every batch of new items, which is most of them.
+    //
+    // **This resolution stays here; the join rule does not** (decision 0116). The *sidecar* half of
+    // it can only be answered here — the bundle's external-id extents are immutable, so the answer
+    // cannot go stale, and the executor's backstop deliberately re-reads only the live map. What
+    // moved to the writer is every *comparison* the rule makes, and the drop of a joining row's
+    // descriptors and terms with them: `LiveState::established_collisions` is what finally settles
+    // join-ness, so a row this pass called new and that pass calls a join must still arrive with
+    // its descriptors intact for that site to drop them, and a row this pass called a join and
+    // that pass calls new — its holder deleted in between — must still arrive with a label.
     let join_of: FxHashMap<usize, EntityId> = joins.into_iter().collect();
     let rows: Vec<UnallocatedRow> = items
         .into_iter()
         .zip(terms_per_item)
         .zip(descriptor_lists)
         .enumerate()
-        .map(|(index, ((item, terms), descriptors))| {
-            let join = join_of.get(&index).copied();
-            UnallocatedRow {
-                external_id: item.external_id,
-                view: view.clone(),
-                join,
-                // **A joining row carries no descriptors, and that is what makes the join
-                // geometry-only** (`views.md` §4). The entity's label is the one it already has:
-                // its terms are already in the postings, put there by the flush that gave it its
-                // first row, and re-writing them from this row is how a second view would come to
-                // re-label an entity with no overlay entry. The terms resolved above are still
-                // computed — the label arm compares against them — and dropped here.
-                descriptors: if join.is_some() { Vec::new() } else { descriptors },
-                x: item.x,
-                y: item.y,
-                scalars: item.scalars,
-                // **A join carries these, and they are the one thing it carries beyond geometry**
-                // (`views.md` §4, §5). A scoped value belongs to the `(entity, view)` the join is
-                // creating rather than to the entity, so it is not a re-statement of anything the
-                // entity already holds — which is what the descriptors and the entity-scoped
-                // scalars above would be, and why those are dropped here and this is not.
-                scoped: item.scoped,
-                terms: if join.is_some() { Vec::new() } else { terms },
-            }
+        .map(|(index, ((item, terms), descriptors))| UnallocatedRow {
+            external_id: item.external_id,
+            view: view.clone(),
+            join: join_of.get(&index).copied(),
+            descriptors,
+            x: item.x,
+            y: item.y,
+            scalars: item.scalars,
+            // **A join carries these, and they are the one thing it carries beyond geometry**
+            // (`views.md` §4, §5). A scoped value belongs to the `(entity, attribute, key)` cell
+            // the row addresses rather than to the entity, so it is not a re-statement of anything
+            // the entity already holds — which is what the descriptors and the entity-scoped
+            // scalars are, and why the writer drops those on a join and keeps this.
+            scoped: item.scoped,
+            terms,
         })
         .collect();
 

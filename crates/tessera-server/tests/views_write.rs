@@ -2399,3 +2399,62 @@ async fn the_value_oracle_does_not_let_one_views_absence_answer_for_anothers_val
         }
     }
 }
+
+/// **The join rule's arms fire on a row that becomes a join between the handler and the apply**
+/// (`views.md` §4, decision 0116).
+///
+/// This is the race the relocation closes. Until 2026-09-01 the label and attribute arms ran in
+/// `/control/ingest`'s handler, and the map that decides which rows *are* joins is written at
+/// apply — a whole executor drain later. Two batches naming one external id in two views could
+/// therefore both pass the handler with `join = None`; the second was promoted to a join by
+/// `LiveState::established_collisions` on the writer, having been compared against nothing, and
+/// carried its own descriptors through into a re-label with no overlay entry.
+///
+/// **Driven by the executor's own ordering, not by sleeps.** The two batches are submitted
+/// concurrently, so which one applies first is the executor's business and the interleaving is
+/// whatever the queue produces — including the promoted case, which is why the pair is repeated.
+/// What is asserted is the property that holds under *every* ordering: exactly one of the two is
+/// taken, and the other is a `409` naming the label arm. Before the relocation the promoted
+/// ordering answered `200` to both.
+#[tokio::test]
+async fn a_row_promoted_to_a_join_after_its_handler_pass_still_meets_the_arms() {
+    let served = serve().await;
+    assert_eq!(
+        create(&served, "quarter", "2026-Q5", q_record("Q5", 1))
+            .await
+            .status(),
+        201
+    );
+
+    // Bounded, because the interleaving is the executor's: eight pairs is enough to reach the
+    // promoted ordering on this machine and costs a fraction of a second, and the assertion below
+    // is the one that must hold whichever ordering each pair took.
+    for round in 0..8u32 {
+        let id = format!("race-{round}").into_bytes();
+        let (world_batch, quarter_batch) =
+            (format!("race-world-{round}"), format!("race-quarter-{round}"));
+        let world_rows = [(id.clone(), 10.0f32, 10.0f32, "0", Some(7))];
+        let quarter_rows = [(id.clone(), 400.0f32, 400.0f32, "1", Some(7))];
+        let (first, second) = tokio::join!(
+            ingest(&served, &world_batch, "world", &world_rows),
+            ingest(&served, &quarter_batch, "quarter:2026-Q5", &quarter_rows),
+        );
+        let mut statuses = [first.status().as_u16(), second.status().as_u16()];
+        let bodies = [first.text().await.unwrap(), second.text().await.unwrap()];
+        statuses.sort_unstable();
+        assert_eq!(
+            statuses,
+            [200, 409],
+            "round {round}: one batch is taken and the other meets the label arm, whichever \
+             order the executor ran them in — bodies {bodies:?}"
+        );
+        let refusal = bodies
+            .iter()
+            .find(|body| body.contains("409") || body.contains("different access label"))
+            .unwrap_or(&bodies[1]);
+        assert!(
+            refusal.contains("under a different access label"),
+            "round {round}: the refusal is the label arm's, not some other 409: {refusal}"
+        );
+    }
+}

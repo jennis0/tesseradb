@@ -1455,7 +1455,12 @@ impl EngineMeta {
     /// The key `view` holds in `group`'s roster — its own if it is a view of that group, and the
     /// key it shares if its group declares `members` of it (`views.md` §3.3). `None` for a plain
     /// view, or a view of an unrelated group.
-    fn owning_key(&self, view: &str, group: &str) -> Option<&str> {
+    ///
+    /// **Public because the ingest boundary asks it too** (decision 0116): a scoped value's address
+    /// is `(attribute → its group, key)`, so which families a batch may name is this question and
+    /// not a spelling test on the view id. One resolution, three surfaces — the filter leaf, the
+    /// render list, and the write.
+    pub fn owning_key(&self, view: &str, group: &str) -> Option<&str> {
         let roster = self.resolve_view(view)?.roster.as_ref()?;
         owning_key_of(
             (&roster.group, &roster.key),
