@@ -76,9 +76,10 @@ built for it.
   accepted writes would mutate the bundle under every other module in this suite;
   `crates/tessera-server/tests/views_write.rs` drives that path against a real flush.
 - **A group's view created or dropped while the service runs** (§3.2, §3.4), for the same reason.
-- **A scoped `text` or `render`ed family** (§5's remaining markers): the build writes no serving
-  artefact for either, so there is nothing for an oracle to disagree with. The scoped **category**
-  was in this list until its artefact existed, and has its own cases above.
+- **A scoped `text` family** (§5's remaining marker): the build writes no serving artefact a
+  request can reach for it here, so there is nothing for an oracle to disagree with. The scoped
+  **category** was in this list until its artefact existed, and so was the **rendered** family
+  until `render` alone became an operand licence (§5 r26); both have their own cases above.
 """
 
 from __future__ import annotations
@@ -591,6 +592,70 @@ def test_a_pinned_leaf_reads_the_pinned_views_column_in_entity_space(
     assert served == expected, (
         f"{principal}: '{leaf}' under '{request_view}' served {len(served)} entities, the oracle's "
         f"column for '{column_view}' projected into '{request_view}' gives {len(expected)}"
+    )
+    assert expected, "the predicate matched nothing, so this case checked no membership"
+
+
+@pytest.fixture(scope="module")
+def glow(multiview_bundle: Bundle):
+    """The **render-only** family as the fixture planted it, `{view: NumericColumn}`."""
+    from oracle.filters import NumericColumn  # noqa: PLC0415 — one case needs the type
+
+    return {
+        view: NumericColumn(values=values)
+        for view, values in mv.glow_columns(multiview_bundle).items()
+    }
+
+
+@pytest.mark.parametrize(
+    ("request_view", "leaf", "column_view"),
+    [
+        (f"{mv.GROUP}:2026-Q2", "glow", f"{mv.GROUP}:2026-Q2"),
+        (mv.WORLD_VIEW, "glow@2026-Q3", f"{mv.GROUP}:2026-Q3"),
+        (f"{mv.GROUP}:2026-Q3", "glow@2026-Q1", f"{mv.GROUP}:2026-Q1"),
+    ],
+)
+@pytest.mark.parametrize("principal", ["narrow", "wide"])
+def test_a_render_only_familys_leaf_reads_the_pinned_views_column_in_entity_space(
+    multiview_server,
+    masks,
+    members,
+    tokens,
+    entity_of_fx,
+    glow,
+    principal,
+    request_view,
+    leaf,
+    column_view,
+):
+    """`render` alone is the operand licence, and the column it reads is the pinned view's (§5 r26).
+
+    The case above, asked of a family declared `render = true` and `index = false`. Two things
+    could go wrong that the indexed family cannot show: the leaf could be refused as an unknown
+    column, and — because a rendered family also occupies each view's **row tail** — it could be
+    answered from the rows in front of the request rather than from the pinned view's entity-space
+    column. The second is what the pinned cases discriminate: the row lane under `request_view`
+    holds that view's values, and the expectation here is `column_view`'s.
+    """
+    mask = masks[principal]
+    raw = multiview_server.viewport(
+        tokens[principal],
+        request_view,
+        ZOOM,
+        _full_bbox(request_view),
+        k=K,
+        filters={leaf: RANGE},
+    )
+    served = _served_entities(raw, entity_of_fx)
+
+    column = glow[column_view]
+    matched = {e for e in mask if column.matches(e, "range", RANGE["range"])}
+    expected = matched & members[request_view]
+
+    assert served == expected, (
+        f"{principal}: '{leaf}' under '{request_view}' served {len(served)} entities, the oracle's "
+        f"render-only column for '{column_view}' projected into '{request_view}' gives "
+        f"{len(expected)}"
     )
     assert expected, "the predicate matched nothing, so this case checked no membership"
 

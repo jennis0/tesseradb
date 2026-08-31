@@ -26,10 +26,13 @@ CI runs it on every pull request and every push to `main`, alongside the rest of
 (`.github/workflows/ci.yml`). That is conformance §6's per-PR tier; the nightly and release tiers
 it also specifies do not exist.
 
-**686 pass, 4 skip and 2 fail, over 692 cases (2026-08-31, measured serially on a loaded box)** —
+**700 pass, 5 skip and 2 fail, over 707 cases (2026-08-31, measured serially on a loaded box)** —
 `conformance/tests` and `conformance/suite` together, the split CI's own case-count step compares
 against `conformance.md` §0's marker line. The 39 that arrived on that date are the multi-view
-differential; six more are the scoped category added to it, and eleven more are the gate.
+differential; six more are the scoped category added to it, eleven more are the gate, and six more
+are the family licensed by `render` alone (`views.md` §5 r26). Nine arrived between r18's
+measurement and this one without the marker moving, which is why the total is fifteen higher rather
+than six.
 
 **The two failures are the machine, not the suite.** Both are
 `test_text_differential.py::…[phrase on … -full_100pct]`, and both are a 30-second HTTP **read
