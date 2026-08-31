@@ -7,9 +7,9 @@
 //! geometry back. Four facts carry it, and each is a way the serving half could be wrong while
 //! every build test still passed:
 //!
-//! - **The roster is published, in ordinal order.** A client offering previous-and-next has to be
-//!   able to order a group's views; a list in some other order is a picker that walks a corpus's
-//!   quarters out of sequence.
+//! - **The roster is published, in creation order.** A client offering previous-and-next walks
+//!   the group's own list, there being no number to sort by (decision 0113); a list in some other
+//!   order is a picker that walks a corpus's quarters out of sequence.
 //! - **A group's view is a view.** `quarter:2026-Q2` on `/v1/viewport` answers with that view's
 //!   own layout, not the plain view's — the failure the shared entity below would show is a
 //!   server that resolved every request to the first declared view and drew one map for all nine.
@@ -114,9 +114,10 @@ fn view_args(view: &str, points: &Path, pairs: &Path) -> ViewArgs {
 }
 
 /// One microsecond timestamp per quarter boundary — the roster metadata's `timestamp_us` values,
-/// stated here so the wire can be compared against a number this file wrote.
-fn starts_us(ordinal: u32) -> i64 {
-    1_767_225_600_000_000 + i64::from(ordinal) * 7_776_000_000_000
+/// stated here so the wire can be compared against a number this file wrote. `slot` is this
+/// file's own index into [`QUARTERS`] and nothing the service knows about.
+fn starts_us(slot: u32) -> i64 {
+    1_767_225_600_000_000 + i64::from(slot) * 7_776_000_000_000
 }
 
 /// The nine-view bundle: one plain view, one group of four with metadata, and a second group over
@@ -139,12 +140,11 @@ fn build_multiview(dir: &Path) -> std::path::PathBuf {
         QUARTERS
             .iter()
             .enumerate()
-            .map(|(ordinal, (key, label, _))| GroupViewDescriptor {
+            .map(|(slot, (key, label, _))| GroupViewDescriptor {
                 key: key.to_string(),
-                ordinal: ordinal as u32,
                 visibility: None,
-                // A `members` group declares no metadata: the keys, the ordinals and the values
-                // belong to the group that owns them (`views.md` §3.3).
+                // A `members` group declares no metadata: the keys and the values belong to the
+                // group that owns them (`views.md` §3.3).
                 metadata: if with_metadata {
                     [
                         (
@@ -153,7 +153,7 @@ fn build_multiview(dir: &Path) -> std::path::PathBuf {
                         ),
                         (
                             "starts".to_string(),
-                            ViewMetadataValue::TimestampUs(starts_us(ordinal as u32)),
+                            ViewMetadataValue::TimestampUs(starts_us(slot as u32)),
                         ),
                     ]
                     .into_iter()
@@ -306,10 +306,11 @@ fn meta_schema() -> jsonschema::Validator {
 }
 
 /// **The roster on the wire** (`views.md` §3.2): nine views, plain first and then each group's in
-/// ordinal order, every group view carrying its key, ordinal, group and typed metadata, and a
-/// `groups` structure a client can walk without reading a key.
+/// creation order, every group view carrying its key, group and typed metadata — and no number,
+/// the key being a view's only address (decision 0113) — with a `groups` structure a client can
+/// walk without reading a key.
 #[tokio::test]
-async fn meta_publishes_every_view_and_its_roster_in_ordinal_order() {
+async fn meta_publishes_every_view_and_its_roster_in_creation_order() {
     let served = serve().await;
     let body = meta(&served).await;
     let errors: Vec<String> = meta_schema()
@@ -337,13 +338,13 @@ async fn meta_publishes_every_view_and_its_roster_in_ordinal_order() {
             "quarter_alt:2026-Q3",
             "quarter_alt:2026-Q4",
         ],
-        "the plain view in manifest order, then each group's views by ordinal: {body}"
+        "the plain view in manifest order, then each group's views in creation order: {body}"
     );
 
     // The plain view has no roster record, and says so in the same spelling the fields beside it
     // use for absence.
     let world = &views[0];
-    for field in ["group", "key", "ordinal", "metadata"] {
+    for field in ["group", "key", "metadata"] {
         assert_eq!(world[field], Value::Null, "a plain view has no {field}");
     }
 
@@ -354,7 +355,10 @@ async fn meta_publishes_every_view_and_its_roster_in_ordinal_order() {
         .expect("the group's second view");
     assert_eq!(q2["group"], "quarter");
     assert_eq!(q2["key"], "2026-Q2");
-    assert_eq!(q2["ordinal"], 1);
+    assert!(
+        q2.get("ordinal").is_none(),
+        "a roster record carries no ordinal: {q2}"
+    );
     assert_eq!(
         q2["metadata"],
         json!({
@@ -364,14 +368,13 @@ async fn meta_publishes_every_view_and_its_roster_in_ordinal_order() {
         "one typed value per declared metadata name: {q2}"
     );
 
-    // A `members` group's views carry keys and ordinals — they are the owner's — and no metadata.
+    // A `members` group's views carry keys — they are the owner's — and no metadata.
     let alt = views
         .iter()
         .find(|v| v["id"] == "quarter_alt:2026-Q2")
         .expect("the sharing group's view");
     assert_eq!(alt["group"], "quarter_alt");
     assert_eq!(alt["key"], "2026-Q2");
-    assert_eq!(alt["ordinal"], 1);
     assert_eq!(alt["metadata"], json!({}));
 
     // **Previous-and-next without interpreting a key**: the groups list is the order, and its
@@ -461,26 +464,24 @@ async fn a_sharing_group_serves_one_membership_in_two_geometries() {
     );
 }
 
-/// **A view is addressable by its ordinal** (`views.md` §3.2): `<group>:#<ordinal>` is an alias for
-/// the key, and `#` is what keeps a numeric-looking key from being read as one. The alias answers
-/// with the same rows as the key, on the viewer plane and the ingest plane alike.
+/// **A key addresses its view on both planes** (`views.md` §3.2, decision 0113): `<group>:<key>`
+/// is the whole of a view's address, and one namespace answers the viewer plane and the ingest
+/// plane — a second resolution would eventually disagree about what a name means.
 #[tokio::test]
-async fn an_ordinal_addresses_the_view_its_key_does() {
+async fn a_key_addresses_its_view_on_both_planes() {
     let served = serve().await;
-    assert_eq!(
-        points(&served, "quarter:#1").await,
-        points(&served, "quarter:2026-Q2").await,
-        "the second view of the group, by ordinal and by key"
+    assert!(
+        !points(&served, "quarter:2026-Q2").await.is_empty(),
+        "the group's second view answers by key"
     );
-    // The ingest plane resolves the same alias — a batch naming it is not a 404, which is what a
-    // second resolution would eventually make it.
+    // The ingest plane resolves the same id — a batch naming it is not a 404.
     let resp = served
         .server
         .client
         .post(served.server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "ordinal-alias")
-        .header("x-tessera-view", "quarter:#1")
+        .header("x-tessera-batch-id", "key-address")
+        .header("x-tessera-view", "quarter:2026-Q2")
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(build_ingest_batch_optional(&[(
             Some(&external_id_of(9_001)),
@@ -494,14 +495,15 @@ async fn an_ordinal_addresses_the_view_its_key_does() {
     assert_eq!(
         resp.status().as_u16(),
         200,
-        "the ingest plane resolves the same alias: {}",
+        "the ingest plane resolves the same id: {}",
         resp.text().await.unwrap()
     );
 }
 
 /// **Unknown is one 404, whatever shape the name has.** A name nobody declared, a well-formed key
-/// no view holds and an ordinal past the roster's end are the same answer with the same detail —
-/// the difference between them would be an existence oracle over the roster.
+/// no view holds and an id in the retired `#<ordinal>` form — which addresses nothing at all now
+/// (decision 0113) — are the same answer with the same detail; the difference between them would
+/// be an existence oracle over the roster.
 #[tokio::test]
 async fn an_unknown_view_and_an_absent_key_are_the_same_404() {
     let served = serve().await;

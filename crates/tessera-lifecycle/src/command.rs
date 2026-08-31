@@ -474,10 +474,9 @@ pub enum Ack {
     LayerRegistered { entity: EntityId },
     /// A layer was dropped and its name tombstoned. Nothing to return: the caller named it.
     LayerDropped,
-    /// A view was created. The ordinal is returned because it is the view's second address —
-    /// `<group>:#<ordinal>` — and the caller cannot derive it: it is creation order across every
-    /// create this deployment has ever taken, drops included.
-    ViewCreated { ordinal: u32 },
+    /// A view was created. Nothing to return: the caller named the group and the key, and the
+    /// key is the view's only address (decision 0113).
+    ViewCreated,
     /// A view was dropped. `deleted` is how many entities `delete_dangling` submitted for
     /// deletion — **reported because the operation is not undoable**, on the same rule
     /// [`Ack::Ingested`]'s `minted` is reported by, and `0` for a drop that did not ask for it.

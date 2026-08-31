@@ -646,11 +646,11 @@ components:
           description: The identity set the `tessera_id`s were minted under. The identity **key** appears in no response on any plane.
         views:
           type: array
-          description: "The views this principal may reach, in serving order. **Per-principal**: a view whose own `visibility` label — or whose group's — the principal does not satisfy is absent, and naming it on a viewer verb is the same `404` a name nobody declared gets (`views.md` §6). Ordinals are **not** densified: a gap means a view exists there that this principal may not reach, which is accepted (decision 0110)."
+          description: "The views this principal may reach, in serving order. **Per-principal**: a view whose own `visibility` label — or whose group's — the principal does not satisfy is absent, and naming it on a viewer verb is the same `404` a name nobody declared gets (`views.md` §6). A filtered roster is a shorter list and nothing else: a view carries no position of its own, so nothing here counts the views withheld from this principal (decision 0113)."
           items:
             type: object
             additionalProperties: false
-            required: [id, display_name, quantisation, projection, world_aspect, tile_scheme, tile, group, key, ordinal, metadata]
+            required: [id, display_name, quantisation, projection, world_aspect, tile_scheme, tile, group, key, metadata]
             properties:
               id:
                 type: string
@@ -687,15 +687,11 @@ components:
                   x: { type: integer, minimum: 0 }
                   y: { type: integer, minimum: 0 }
               group:
-                description: "The view group this view belongs to, or `null` for a plain view (`views.md` §3.2). The four roster fields are one record and are null together."
+                description: "The view group this view belongs to, or `null` for a plain view (`views.md` §3.2). The three roster fields are one record and are null together."
                 type: [string, "null"]
               key:
-                description: "This view's key within its group — the caller's own, required at creation, and the `<group>:<key>` that makes up `id`."
+                description: "This view's key within its group — the caller's own, required at creation, a view's only address, and the `<group>:<key>` that makes up `id` (decision 0113)."
                 type: [string, "null"]
-              ordinal:
-                description: "Creation order within the group — monotone, never reused, an alias for the key. `<group>:#<ordinal>` addresses this view wherever a view id goes; `#` is what keeps a numeric-looking key from being read as an ordinal."
-                type: [integer, "null"]
-                minimum: 0
               metadata:
                 description: "The typed per-view values this view carries, one entry per name its group declared. Empty on a `members` group's views, whose metadata belongs to the group that owns the keys (`views.md` §3.3). Not an attribute — one value per view rather than one per (entity, view), and it filters nothing."
                 type: [object, "null"]
@@ -712,7 +708,7 @@ components:
                       type: [boolean, number, string]
         groups:
           type: array
-          description: "The view groups this principal may reach, in manifest order, each listing its reachable view ids in ordinal order — what lets a client offer previous-and-next without interpreting a key. A group is not a view: it cannot be named on a viewer verb (`views.md` §3.1). **Per-principal**: a group whose gate the principal fails is absent, and takes its whole roster with it (`views.md` §6). Empty where the declaration carries plain views alone."
+          description: "The view groups this principal may reach, in manifest order, each listing its reachable view ids in creation order — what lets a client offer previous-and-next without interpreting a key. A group is not a view: it cannot be named on a viewer verb (`views.md` §3.1). **Per-principal**: a group whose gate the principal fails is absent, and takes its whole roster with it (`views.md` §6). Empty where the declaration carries plain views alone."
           items:
             type: object
             additionalProperties: false
@@ -721,10 +717,10 @@ components:
               name:
                 type: string
               members_of:
-                description: "The group whose keys and ordinals these are, where this group is a second layout over another's views (`views.md` §3.3); `null` where it owns them."
+                description: "The group whose keys these are, where this group is a second layout over another's views (`views.md` §3.3); `null` where it owns them."
                 type: [string, "null"]
               views:
-                description: "This group's view ids, in ordinal order — the joined `group:key` form a request names."
+                description: "This group's view ids, in creation order — the joined `group:key` form a request names."
                 type: array
                 items: { type: string }
         declared_scalars:
@@ -758,8 +754,7 @@ components:
                   The view group whose views this column's values are per. Under a view of that
                   group — or of a group sharing its views — the request's own view decides which
                   column the leaf reads and nothing is added to the wire. Under any other view the
-                  leaf must **pin** one: `<column>@<key>` or `<column>@#<ordinal>`, the same key
-                  and ordinal forms `views` publishes. An unpinned leaf there is a `422` naming the
+                  leaf must **pin** one: `<column>@<key>`, the same key form `views` publishes. An unpinned leaf there is a `422` naming the
                   group; a pin naming no view of it is the `404` an unknown view gets.
                 properties:
                   group:

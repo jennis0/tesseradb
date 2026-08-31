@@ -120,15 +120,13 @@ pub struct GroupMetadataField {
 /// new key, never an update: the alternative is a narrowed gate that does not bite live sessions.
 ///
 /// **It names the owner group only.** Where other groups share these views (`members`,
-/// `views.md` §3.3), their copies are derived from this one record — the key and the ordinal
-/// belong to the group that owns them, so a second record per sharing group would be a second
-/// place for them to disagree.
+/// `views.md` §3.3), their copies are derived from this one record — the key belongs to the group
+/// that owns it, so a second record per sharing group would be a second place for them to
+/// disagree.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreatedView {
     pub group: String,
     pub key: String,
-    /// Creation order within the group — monotone, **never reused**, an alias for the key.
-    pub ordinal: u32,
     /// This view's own gate; `None` takes the group's.
     ///
     /// ⊘ **Recorded and never evaluated** (`views.md` §6): no gate is evaluated anywhere and no
@@ -141,14 +139,13 @@ pub struct CreatedView {
 ///
 /// **Carried for ever and never pruned**, exactly as a layer's tombstone is: a recreated key with
 /// different contents would silently repoint every bookmark, every cached θ and every client cache
-/// keyed on the view (decision 0029). The ordinal travels with it because it is burnt too — the
-/// high-water is what the roster reads back, and an ordinal recovered from the live views alone
-/// would be reissued the moment the newest view was the one dropped.
+/// keyed on the view (decision 0029). The key is the only address a view has
+/// ([decision 0113](../../../docs/decisions/0113-ordinals-are-removed-and-the-key-is-the-only-address.md)),
+/// so burning it burns the whole of what a drop must burn.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TombstonedView {
     pub group: String,
     pub key: String,
-    pub ordinal: u32,
 }
 
 /// A name a view id is built out of — a plain view's name, or a group's name or one of its keys
@@ -157,9 +154,9 @@ pub struct TombstonedView {
 /// **The same charset a column name takes**, and for the same reason: a view id addresses a
 /// directory in the bundle (`views/<group>/<key>/`), the `view` in a request body, the
 /// `x-tessera-view` header and the manifest's `files` map, so it has to survive being a path
-/// segment. Three characters are refused ahead of the charset because they are *reserved* rather
-/// than merely outside it: `:` joins a group to its key, `#` marks an ordinal so a numeric-looking
-/// key is not read as one, and `@` pins a group-scoped attribute to a view (`views.md` §5).
+/// segment. Two characters are refused ahead of the charset because they are *reserved* rather
+/// than merely outside it: `:` joins a group to its key, and `@` pins a group-scoped attribute to
+/// a view (`views.md` §5).
 ///
 /// **One definition, two entry points.** The declaration parser and the create operation are the
 /// two places a key is coined (decision 0091: a build is ingest into an empty database), and a
@@ -170,13 +167,13 @@ pub fn check_view_key(key: &str) -> Result<(), String> {
                     every verb and names its directory in the bundle"
             .to_string());
     }
-    for reserved in [':', '#', '@'] {
+    for reserved in [':', '@'] {
         if key.contains(reserved) {
             return Err(format!(
                 "`{reserved}` is reserved out of a view name and a view key (views §3.2). A view \
-                 of a group is addressed `<group>:<key>` or `<group>:#<ordinal>`, and a filter \
-                 leaf pins a group-scoped attribute as `<column>@<key>` — so a name carrying one \
-                 of `:`, `#` or `@` would make a request mean two things"
+                 of a group is addressed `<group>:<key>`, and a filter leaf pins a group-scoped \
+                 attribute as `<column>@<key>` — so a name carrying `:` or `@` would make a \
+                 request mean two things"
             ));
         }
     }

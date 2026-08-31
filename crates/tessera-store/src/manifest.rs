@@ -488,8 +488,8 @@ pub struct ViewDescriptor {
 /// `groups` entry: one view group and its roster (`views.md` §3.1, §3.2).
 ///
 /// **The roster's durable home is the manifest**, not the WAL: rotation reclaims WAL records, so
-/// a roster that lived only in the log is lost at the first rotation, and a reused ordinal or key
-/// silently repoints every client cache keyed on the view (decision 0029, `views.md` §3.2).
+/// a roster that lived only in the log is lost at the first rotation, and a reused key silently
+/// repoints every client cache keyed on the view (decision 0029, `views.md` §3.2).
 ///
 /// A group is **not** a view: it cannot be named on a viewer verb, has no row space and no
 /// permutation. What it carries is the half of a view that is the same for all of them, beside
@@ -498,7 +498,7 @@ pub struct ViewDescriptor {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupDescriptor {
     pub name: String,
-    /// The group whose keys and ordinals these are, where this group declares `members`
+    /// The group whose keys these are, where this group declares `members`
     /// (`views.md` §3.3); `None` where it owns them. Chains are refused at the declaration, so
     /// this always names an owner.
     pub members_of: Option<String>,
@@ -529,7 +529,9 @@ pub struct GroupDescriptor {
     ///
     /// Required, for the reason [`ViewDescriptor::visibility`] gives.
     pub visibility: Option<String>,
-    /// The roster, in ordinal order.
+    /// The roster, in creation order — which at a build is declaration order, and afterwards is
+    /// the order the creations were appended in (`views.md` §3.2). There is no stored number: the
+    /// order is the record order (decision 0113).
     pub views: Vec<GroupViewDescriptor>,
     /// The **group-scoped attribute column families** this group owns (`views.md` §5): one
     /// entity-space column per view of the roster above, under
@@ -539,7 +541,7 @@ pub struct GroupDescriptor {
     /// addressed positionally by the record blob's field tags and by every segment's scalar tail:
     /// a family has no slot in it, and a scoped column placed there would take a slot in every
     /// row and a whole-corpus `attrs/<column>/` of its own, both absent for every entity. The
-    /// group is where it belongs instead, beside the ordinals a pinned leaf's `@#n` resolves
+    /// group is where it belongs instead, beside the keys a pinned leaf's `@<key>` resolves
     /// against.
     ///
     /// Empty is the ordinary case — a group with no attribute scoped to it — and a `members`
@@ -586,7 +588,7 @@ pub struct ScopedScalar {
     /// build says so where an operator can read it; this field is what the declaration asked for,
     /// not a placement that exists.
     pub render: bool,
-    /// The view ids that have a column, in the roster's ordinal order — the joined `group:key`
+    /// The view ids that have a column, in roster order — the joined `group:key`
     /// form, which is what [`crate::view_path_components`] turns into the column's directory.
     ///
     /// **Named rather than derived from the roster**, because the two can differ: a view created
@@ -601,9 +603,6 @@ pub struct GroupViewDescriptor {
     /// The caller's own key. `<group>:<key>` is the view id, and is the [`ViewDescriptor::id`]
     /// this roster entry must have.
     pub key: String,
-    /// Creation order within the group — monotone, never reused, an alias for the key. At a build
-    /// this is roster order (`views.md` §3.2).
-    pub ordinal: u32,
     /// This view's own gate, as the roster records it and as `/v1/meta` publishes the roster;
     /// `None` is `public` (`views.md` §6).
     ///
@@ -712,7 +711,7 @@ impl Manifest {
     /// **The roster is not a second list of views; it is what orders and names them.** Every
     /// roster entry must have its `group:key` view declared, and every view whose id carries the
     /// group separator must be on a roster — either direction failing leaves a view a client can
-    /// see and cannot address, or an ordinal that resolves to nothing.
+    /// see and cannot address, or a roster entry that resolves to nothing.
     pub fn validate_groups(&self) -> std::result::Result<(), String> {
         let mut rostered: Vec<String> = Vec::new();
         for group in &self.groups {
@@ -723,12 +722,12 @@ impl Manifest {
                     crate::GROUP_SEPARATOR
                 ));
             }
-            let mut ordinals: Vec<u32> = group.views.iter().map(|v| v.ordinal).collect();
-            ordinals.sort_unstable();
-            if ordinals.windows(2).any(|w| w[0] == w[1]) {
+            let mut keys: Vec<&str> = group.views.iter().map(|v| v.key.as_str()).collect();
+            keys.sort_unstable();
+            if keys.windows(2).any(|w| w[0] == w[1]) {
                 return Err(format!(
-                    "group '{}' reuses an ordinal; an ordinal is monotone and never reused \
-                     (views §3.2)",
+                    "group '{}' carries a key twice; a key is a view's only address and is never \
+                     reused (views §3.2)",
                     group.name
                 ));
             }
@@ -795,7 +794,7 @@ impl Manifest {
             if view.id.contains(crate::GROUP_SEPARATOR) && !rostered.contains(&view.id) {
                 return Err(format!(
                     "view '{}' is a group's view and no roster carries it, so nothing gives it a \
-                     key or an ordinal (views §3.2)",
+                     key (views §3.2)",
                     view.id
                 ));
             }
@@ -827,7 +826,7 @@ impl Manifest {
     /// lookup — reads the manifest and needs no second notion of which views exist.
     ///
     /// **A create names the owner group and lands on every group sharing its views**
-    /// (`views.md` §3.3): keys and ordinals belong to the group that owns them, so
+    /// (`views.md` §3.3): a key belongs to the group that owns it, so
     /// `quarter:2026-Q5` creates `quarter_map:2026-Q5` at the same moment, empty, and a request
     /// naming it is answered rather than 404ed. A drop of the key takes both away.
     ///
@@ -861,7 +860,6 @@ impl Manifest {
                 }
                 group.views.push(GroupViewDescriptor {
                     key: view.key.clone(),
-                    ordinal: view.ordinal,
                     visibility: view.visibility.clone(),
                     // Metadata belongs to the group that owns the views; a sharing group's copies
                     // carry none, exactly as a build writes them.
@@ -1411,8 +1409,8 @@ pub struct SegmentsManifest {
     ///
     /// **This is the roster's durable home, and the WAL is not.** The create and drop records are
     /// WAL entries for replay, but rotation reclaims them — so a roster that lived only in the log
-    /// is lost at the first rotation, and a reused ordinal or key silently repoints every client
-    /// cache keyed on the view (decision 0029). Carried forward for ever, exactly as
+    /// is lost at the first rotation, and a reused key silently repoints every client cache keyed
+    /// on the view (decision 0029). Carried forward for ever, exactly as
     /// [`SegmentsManifest::entity_id_low_water`] and [`SegmentsManifest::layer_tombstones`] are
     /// and for the same reason.
     ///
@@ -1422,9 +1420,9 @@ pub struct SegmentsManifest {
     /// No `serde(default)`, on `layers`' argument: a manifest omitting it is malformed, not
     /// creation-free, and the two are indistinguishable under a default while only one is safe to
     /// serve — an absent list reads as *no view was ever created*, which is what a lost list looks
-    /// like, and the next create then reissues an ordinal a live view holds.
+    /// like, and the roster then serves a group as though nothing had ever been added to it.
     pub views: Vec<CreatedView>,
-    /// Every view key that has ever been dropped, with the ordinal it burnt (`views.md` §3.4).
+    /// Every view key that has ever been dropped (`views.md` §3.4).
     ///
     /// **Carried for ever and never pruned**, on `layer_tombstones`' argument: a key that once
     /// meant something must not come to mean something else, and a recreated `2026-Q3` with

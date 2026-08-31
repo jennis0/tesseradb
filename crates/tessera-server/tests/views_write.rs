@@ -11,9 +11,9 @@
 //!   a 404 with an acknowledgement in front of it.
 //! - **The roster survives a restart.** The WAL carries the create for replay and rotation
 //!   reclaims it, so the *segments manifest* is the durable home — a roster that lived only in
-//!   the log comes back missing, and the next create then reissues an ordinal a live view holds.
-//! - **A key and an ordinal are burnt by a drop.** A recreated key with different contents would
-//!   silently repoint every bookmark and every client cache keyed on the view (decision 0029).
+//!   the log comes back missing, and a burnt key then comes back to life.
+//! - **A key is burnt by a drop.** A recreated key with different contents would silently repoint
+//!   every bookmark and every client cache keyed on the view (decision 0029).
 //!
 //! The fixture is built here rather than taken from `test_corpora/` because these tests assert the
 //! shapes the declaration states, and a synthetic corpus states them with no data dependency —
@@ -117,7 +117,6 @@ fn build_fixture_bundle(dir: &Path) -> std::path::PathBuf {
     let roster = |with_metadata: bool| {
         vec![GroupViewDescriptor {
             key: "2026-Q1".to_string(),
-            ordinal: 0,
             visibility: None,
             metadata: if with_metadata {
                 [
@@ -471,8 +470,8 @@ fn view_ids(meta: &Value) -> Vec<String> {
         .collect()
 }
 
-/// **The whole operation, end to end** (`views.md` §3.2): a key that did not exist becomes a view
-/// with the next ordinal, on `/v1/meta` with its typed metadata, answering a viewer verb empty;
+/// **The whole operation, end to end** (`views.md` §3.2): a key that did not exist becomes a view,
+/// on `/v1/meta` with its typed metadata, answering a viewer verb empty;
 /// ingest into it lands; a flush gives it a row space; and a restart reproduces every part of that
 /// from the segments manifest and the log.
 #[tokio::test]
@@ -489,19 +488,15 @@ async fn a_created_view_is_served_ingested_flushed_and_survives_a_restart() {
     assert_eq!(resp.status(), 201, "a free key on a declared group creates");
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["view"], "quarter:2026-Q5");
-    assert_eq!(
-        body["ordinal"], 1,
-        "the ordinal continues the build's roster rather than restarting at 0"
-    );
+    assert_eq!(body["key"], "2026-Q5");
     // The visible-view set is fixed per session (`views.md` §6), so a reader of the newly created
     // view takes a new session, exactly as a client would.
     reauthorise(&mut served).await;
 
-    // On `/v1/meta`, in ordinal order, with its typed record — and on the sharing group too,
-    // because keys and ordinals belong to the group that owns them (`views.md` §3.3).
+    // On `/v1/meta`, after the view it was created behind — and on the sharing group too, because
+    // a key belongs to the group that owns the views (`views.md` §3.3).
     let document = meta(&served).await;
     let entry = roster_of(&document, "quarter:2026-Q5").expect("the created view is published");
-    assert_eq!(entry["ordinal"], 1);
     assert_eq!(entry["key"], "2026-Q5");
     assert_eq!(entry["group"], "quarter");
     assert_eq!(
@@ -563,7 +558,6 @@ async fn a_created_view_is_served_ingested_flushed_and_survives_a_restart() {
     let served = restart(served).await;
     let document = meta(&served).await;
     let entry = roster_of(&document, "quarter:2026-Q5").expect("the roster survives a restart");
-    assert_eq!(entry["ordinal"], 1);
     assert_eq!(entry["metadata"]["label"]["value"], "Q5 2026");
     assert_eq!(
         points(&served, "quarter:2026-Q5").await.len(),
@@ -652,21 +646,15 @@ async fn a_create_refuses_a_taken_key_a_bad_key_a_wrong_record_and_an_unknown_gr
          principal at all (views §6)"
     );
 
-    // None of the refusals created anything, and the ordinal they would have taken is still free.
+    // None of the refusals created anything, so the key they named is still free.
     let resp = create(&served, "quarter", "2026-Q5", q_record("Q5", 1)).await;
-    assert_eq!(resp.status(), 201);
-    assert_eq!(
-        resp.json::<Value>().await.unwrap()["ordinal"],
-        1,
-        "a refused create spends no ordinal"
-    );
+    assert_eq!(resp.status(), 201, "a refused create takes no key");
 }
 
 /// **A drop takes the key out of the roster and burns it** (`views.md` §3.4): the view is a 404
-/// from then on, on every group sharing it, the key is refused on recreation for ever, and its
-/// ordinal is never handed to another view.
+/// from then on, on every group sharing it, and the key is refused on recreation for ever.
 #[tokio::test]
-async fn a_drop_burns_the_key_and_the_ordinal_and_survives_a_restart() {
+async fn a_drop_burns_the_key_and_survives_a_restart() {
     let served = serve().await;
     let created = create(&served, "quarter", "2026-Q5", q_record("Q5", 1)).await;
     assert_eq!(created.status(), 201);
@@ -696,22 +684,17 @@ async fn a_drop_burns_the_key_and_the_ordinal_and_survives_a_restart() {
         "a dropped key is never reused"
     );
 
-    // The next create takes the *next* ordinal, not the dropped one.
+    // A different key still creates: what a drop burns is the key it named and nothing else.
     let resp = create(&served, "quarter", "2026-Q6", q_record("Q6", 2)).await;
     assert_eq!(resp.status(), 201);
-    assert_eq!(
-        resp.json::<Value>().await.unwrap()["ordinal"],
-        2,
-        "an ordinal is burnt with its key"
-    );
 
     // And all of it comes back from the segments manifest.
     let served = restart(served).await;
     let document = meta(&served).await;
     assert!(roster_of(&document, "quarter:2026-Q5").is_none());
     assert_eq!(
-        roster_of(&document, "quarter:2026-Q6").unwrap()["ordinal"],
-        2
+        roster_of(&document, "quarter:2026-Q6").unwrap()["key"],
+        "2026-Q6"
     );
     assert_eq!(
         create(&served, "quarter", "2026-Q5", q_record("Q5", 1))

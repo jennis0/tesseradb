@@ -93,7 +93,7 @@ export type FilterOperandSet = {
    *
    * Under a view of that group, or of a group sharing its views, the leaf is sent bare and the
    * request's own view decides which column it reads. Under any other view the leaf must **pin**
-   * one: `column@key`, or `column@#ordinal` against the ordinals {@link Meta.groups} publishes.
+   * one: `column@key`, the key being a view's only address.
    * An unpinned leaf there is a 422 naming the group, and a pin naming no view of it is the same
    * 404 an unknown view gets.
    */
@@ -262,24 +262,23 @@ export type ViewInfo = {
   tile: {z: number; x: number; y: number} | null;
   /**
    * Where this view sits in its group's roster (`views.md` §3.2), or `null` for a plain view —
-   * which has no group, no key and no ordinal, so the four fields are null together.
+   * which has no group and no key, so the three fields are null together.
    */
   roster: ViewRoster | null;
 };
 
 /**
- * One view's roster record: its group, the caller's key, the creation-order ordinal, and the
- * typed per-view metadata its group declared.
+ * One view's roster record: its group, the caller's key, and the typed per-view metadata its
+ * group declared.
  *
- * The **ordinal** is what orders a group's views — creation order, never reused — and
- * `<group>:#<ordinal>` addresses the view wherever a view id goes. A client offering
- * previous-and-next should walk {@link Meta.groups} rather than compare keys: a key is the
- * caller's own string and means nothing to a client.
+ * **The key is the view's only address** — `<group>:<key>` wherever a view id goes — and the
+ * order of a group's views is the order {@link Meta.groups} lists them in, which is creation
+ * order. A client offering previous-and-next walks that list rather than comparing keys: a key is
+ * the caller's own string and means nothing to a client.
  */
 export type ViewRoster = {
   group: string;
   key: string;
-  ordinal: number;
   /**
    * One entry per metadata name the group declared, typed. Empty on a `members` group's views,
    * whose metadata belongs to the group that owns the keys (`views.md` §3.3).
@@ -303,7 +302,7 @@ export type ViewMetadataValue =
   | {type: 'timestamp_us'; value: number};
 
 /**
- * One view group: its name and its view ids in ordinal order (`views.md` §3.2).
+ * One view group: its name and its view ids in creation order (`views.md` §3.2).
  *
  * **A group is not a view** — it cannot be named on a viewer verb — and it carries no frame,
  * projection or gate of its own here: every one of those is already on each of its views, and a
@@ -312,11 +311,11 @@ export type ViewMetadataValue =
 export type ViewGroup = {
   name: string;
   /**
-   * The group whose keys and ordinals these are, where this group is a second layout over
+   * The group whose keys these are, where this group is a second layout over
    * another's views (`views.md` §3.3); `null` where it owns them.
    */
   membersOf: string | null;
-  /** This group's view ids, in ordinal order — the `group:key` form a request names. */
+  /** This group's view ids, in creation order — the `group:key` form a request names. */
   views: string[];
 };
 
@@ -325,7 +324,8 @@ export type Meta = {
   idset: number;
   /**
    * The declared views in serving order (`views.md` §3.2) — the plain views first, then each
-   * group's views by ordinal — each carrying its own frame, see {@link ViewInfo.quantisation}.
+   * group's views in creation order — each carrying its own frame, see
+   * {@link ViewInfo.quantisation}.
    */
   views: ViewInfo[];
   /**

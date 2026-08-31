@@ -3315,8 +3315,10 @@ fn the_reserved_characters_are_refused_in_a_name_and_in_a_key() {
     let message = err(&with_group("").replace("\"quarter\"", "\"quarter:one\""));
     assert!(message.contains("reserved out of a view name"), "{message}");
 
+    // `#` is no longer reserved by name — it addressed an ordinal and ordinals are gone
+    // (decision 0113) — so it falls to the charset like any other punctuation.
     let message = err(&with_group("").replace("\"2026-Q2\"", "\"2026#Q2\""));
-    assert!(message.contains("reserved out of a view name"), "{message}");
+    assert!(message.contains("column-name charset"), "{message}");
 
     let message = err(&with_group("").replace("\"2026-Q2\"", "\"2026.Q2\""));
     assert!(message.contains("column-name charset"), "{message}");

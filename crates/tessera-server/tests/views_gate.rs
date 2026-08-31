@@ -11,8 +11,8 @@
 //!   its whole roster with it. A roster that disagreed with what a viewer verb will answer is an
 //!   existence oracle by subtraction.
 //! - **The refusal is the refusal an unknown name gets** — same status, same detail shape — for a
-//!   gated view and for a key nobody declared, addressed by key or by ordinal. A different code, or
-//!   a different sentence, is the oracle the filtering exists to prevent.
+//!   gated view and for a key nobody declared. A different code, or a different sentence, is the
+//!   oracle the filtering exists to prevent.
 //! - **Intersection, not the conservative label join.** `atlas` is gated `finance,legal`: a
 //!   principal holding *either* term reaches it and a principal holding *neither* does not. Under
 //!   the required-set reading a disjunctive gate has an empty required set and **every** principal
@@ -26,10 +26,10 @@
 //!   404 to that session and is served to the next one, which is the price of resolving the whole
 //!   set once (owner ruling 2026-08-30).
 //!
-//! **Ordinal gaps are asserted to be present, not absent** ([decision 0110](../../../docs/decisions/0110-the-ordinal-gap-is-accepted.md),
-//! `views.md` §9). A principal failing `quarter:2026-Q3`'s gate sees ordinals 0, 1, 3, and that is
-//! the accepted behaviour rather than a defect: densifying them per principal re-opens the
-//! per-session handle machinery decision 0006 retired, for a channel of one bit per creation.
+//! **A filtered roster is a shorter list and nothing else** ([decision 0113](../../../docs/decisions/0113-ordinals-are-removed-and-the-key-is-the-only-address.md),
+//! `views.md` §9). Views carry no position of their own, so a principal failing
+//! `quarter:2026-Q3`'s gate reads three keys in creation order with nothing to count the missing
+//! one by — which is what closes the gap the ordinal used to leave.
 //!
 //! The bundle is synthetic and built here. The multi-view fixtures beside this file are all-public,
 //! and a gate needs a corpus that gates something.
@@ -68,15 +68,15 @@ fn label_of(e: u64) -> &'static str {
     }
 }
 
-/// The gated view inside the otherwise public `quarter` group, by ordinal. Its ordinal is the gap
-/// a failing principal sees.
-const GATED_QUARTER_ORDINAL: u32 = 2;
+/// The gated view inside the otherwise public `quarter` group: the key a failing principal never
+/// sees, and the one this file's indistinguishability cases are built on.
+const GATED_QUARTER_KEY: &str = "2026-Q3";
 
 const QUARTERS: [(&str, std::ops::Range<u64>, Option<&str>); 4] = [
     ("2026-Q1", 0..15, None),
     ("2026-Q2", 10..30, None),
     // **A gated view inside a public group**: the group's gate passes for everyone and this one
-    // does not, which is what leaves the ordinal gap below.
+    // does not, so a failing principal reads the roster with this key simply absent.
     ("2026-Q3", 5..25, Some("finance")),
     ("2026-Q4", 8..28, None),
 ];
@@ -176,10 +176,8 @@ fn view_args(view: &str, points: &Path, visibility: Option<&str>) -> ViewArgs {
 fn roster(views: &[(&str, Option<&str>)]) -> Vec<GroupViewDescriptor> {
     views
         .iter()
-        .enumerate()
-        .map(|(ordinal, (key, visibility))| GroupViewDescriptor {
+        .map(|(key, visibility)| GroupViewDescriptor {
             key: key.to_string(),
-            ordinal: ordinal as u32,
             visibility: visibility.map(str::to_string),
             metadata: Default::default(),
         })
@@ -518,7 +516,7 @@ async fn the_meta_document_names_no_unreachable_view_anywhere() {
 // Indistinguishability
 // ---------------------------------------------------------------------------------------------
 
-/// **A gate-failed view and a name nobody declared are one answer**, by key and by ordinal alike.
+/// **A gate-failed view and a name nobody declared are one answer.**
 ///
 /// The comparison substitutes the requested id out of the detail before comparing, because the
 /// detail echoes the caller's own string: what must be identical is the status and the shape, and
@@ -533,7 +531,9 @@ async fn a_gate_failed_view_answers_exactly_as_a_view_that_never_existed() {
         ("sealed:s1", "sealed:nosuch"),
         ("quarter:2026-Q3", "quarter:2026-Q9"),
         ("atlas", "nosuchview"),
-        (&format!("quarter:#{GATED_QUARTER_ORDINAL}"), "quarter:#97"),
+        // The retired `#<ordinal>` form addresses nothing at all now (decision 0113), so both
+        // sides of this pair are keys nobody declared and the answer must not distinguish them.
+        (&format!("quarter:#{GATED_QUARTER_KEY}"), "quarter:#2026-Q9"),
     ];
     for (gated, absent) in cases {
         let (gated_status, gated_body) = viewport(&served, &outsider, gated, None).await;
@@ -580,25 +580,45 @@ async fn artifact_status(served: &Served, token: &str, view: &str) -> u16 {
         .as_u16()
 }
 
-/// **Ordinal gaps are visible, and that is the accepted behaviour** (decision 0110,
-/// `views.md` §9). This asserts the gap is *there*: a principal failing `2026-Q3`'s gate reads
-/// ordinals 0, 1, 3 and learns that a view exists at #2. Densifying them per principal is the
-/// alternative decision 0006's retired machinery makes expensive, for one bit per creation.
+/// **A gate-failed view leaves no trace in the roster it is filtered out of** (decision 0113,
+/// `views.md` §9). The views a failing principal reads are the three public keys in creation
+/// order and nothing else: no position, no count and no number to notice a hole in. The roster
+/// record's whole published shape is asserted here, so a field carrying an ordinal again would
+/// fail this test rather than reappear quietly.
 #[tokio::test]
-async fn a_gate_failed_view_leaves_its_ordinal_as_a_gap() {
+async fn a_gate_failed_view_leaves_nothing_countable_in_the_roster() {
     let served = serve().await;
     let out = meta(&served, &token(&served, &[]).await).await;
-    let ordinals: Vec<u64> = out["views"]
+    let rostered: Vec<&Value> = out["views"]
         .as_array()
         .unwrap()
         .iter()
         .filter(|v| v["group"] == json!("quarter"))
-        .map(|v| v["ordinal"].as_u64().unwrap())
+        .collect();
+    let keys: Vec<&str> = rostered
+        .iter()
+        .map(|v| v["key"].as_str().unwrap())
         .collect();
     assert_eq!(
-        ordinals,
-        vec![0, 1, 3],
-        "the gated view's ordinal is a gap, not renumbered away"
+        keys,
+        vec!["2026-Q1", "2026-Q2", "2026-Q4"],
+        "the gated key is absent, and the rest keep creation order"
+    );
+    for view in rostered {
+        assert!(
+            view.get("ordinal").is_none(),
+            "a view carries no ordinal on the wire: {view}"
+        );
+    }
+    assert_eq!(
+        out["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["name"] == json!("quarter"))
+            .unwrap()["views"],
+        json!(["quarter:2026-Q1", "quarter:2026-Q2", "quarter:2026-Q4"]),
+        "the group lists the keys it serves, in creation order"
     );
 }
 

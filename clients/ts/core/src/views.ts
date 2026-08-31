@@ -1,10 +1,10 @@
 import type {Meta, ViewInfo} from './types.js';
 
 /**
- * The views of one group, in ordinal order (`views.md` §3.2).
+ * The views of one group, in the order the server lists them (`views.md` §3.2).
  *
- * The order is the server's: `/v1/meta` lists a group's views by ordinal — creation order, never
- * reused — and this walks that list rather than sorting keys. **A key is the caller's own string
+ * The order is the server's: `/v1/meta` lists a group's views in creation order and this walks
+ * that list rather than sorting keys. **A key is the caller's own string
  * and means nothing to a client**: `2026-Q2` sorts after `2026-Q10` and a key need not be a date
  * at all, so a picker that sorted keys would offer a corpus's quarters in an order nobody chose.
  *
