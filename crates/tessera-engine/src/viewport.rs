@@ -62,7 +62,7 @@ use tessera_store::read::{ScalarSlice, SegmentData};
 use tessera_store::vocabulary::Vocabularies;
 use tessera_store::{tile_ranges_all, tile_ranges_within};
 use tessera_types::layer::ComputedProperty;
-use tessera_types::{EntityId, GenerationStamp, RowId, TesseraId, API_VERSION};
+use tessera_types::{EntityId, GenerationStamp, RowId, TermId, TesseraId, API_VERSION};
 
 use crate::cache::{CacheWaitEnded, Peek, RowProjectionKey, SessionGeometry};
 use crate::cancel::CancelToken;
@@ -1053,6 +1053,20 @@ pub struct ItemOut {
     /// the same statement the record blob makes byte-wise (records §3).
     pub fields: Vec<ItemField>,
     pub external_id: Option<Vec<u8>>,
+    /// **The satisfied terms only** (decision 0114): the intersection of this item's own term set
+    /// with the asking session's satisfied set, presented through the plugin, sorted bytewise.
+    ///
+    /// Never the item's full label set. A viewer learning a compartment they do not hold is the
+    /// disclosure this endpoint would otherwise be, and the intersection is what makes every
+    /// string here computable from inside the principal's own authority (**I2**). It is taken
+    /// against [`Session::satisfied_descriptors`], which holds only the descriptors the
+    /// credential itself presented — so a term outside the grant has no name to be served under,
+    /// whatever the intersection does.
+    ///
+    /// **Sorted by the presented string, not by term ordinal.** Ordinal order is the corpus's
+    /// interning order, which is a fact about the whole dictionary rather than about this
+    /// principal; sorting the strings is deterministic and says nothing the set does not.
+    pub labels: Vec<String>,
 }
 
 /// One declared field of a drill-down record: the column's declared name and its value.
@@ -1573,6 +1587,59 @@ impl Engine {
         )
     }
 
+    /// The drill-down's `labels` array: this entity's own terms, intersected with the session's
+    /// satisfied set, presented through the plugin (decision 0114).
+    ///
+    /// **Satisfied-only, twice over.** The intersection is `filter_map` over the entity's stored
+    /// ordinals against [`Session::satisfied_descriptors`]; that map holds exactly the descriptors
+    /// the credential presented, plus `public`, so there is no descriptor in scope for a term
+    /// outside the grant even if the intersection were written wrongly. Nothing here reads the
+    /// bundle dictionary, and there is deliberately no route from an ordinal to a descriptor that
+    /// does not pass through the session.
+    ///
+    /// **Reached only after the visibility verdict**, like every other read in [`Engine::item`]:
+    /// this is called from inside the row-bearing arm, so the transpose is never probed for an
+    /// entity the principal cannot see and C4 stays closed by position rather than by measure.
+    ///
+    /// An entity the transpose does not hold answers `[]` rather than refusing. That is the
+    /// direction that hides a label rather than inventing one, and it is reachable only while a
+    /// prefix predates the transpose — the base layer covers every entity a build knew and each
+    /// flush publishes its own.
+    ///
+    /// ⊘ **The plugin routing is the built-in one.** There is no wasmtime host (design §6.1's
+    /// standing gap), so `present_terms` is answered by `builtin:passthrough`, whose descriptors
+    /// are the caller's own label strings and whose presentation is therefore the identity. When a
+    /// host arrives this call site does not change; the plugin behind `self.plugin` does.
+    fn labels_for(
+        &self,
+        generation: &Generation,
+        session: &Session,
+        entity: u32,
+    ) -> Result<Vec<String>> {
+        let Some(terms) = generation.filter_columns.entity_terms().terms_of(entity) else {
+            return Ok(Vec::new());
+        };
+        let descriptors: Vec<Vec<u8>> = terms
+            .into_iter()
+            .filter_map(|term| {
+                session
+                    .satisfied_descriptors
+                    .get(&TermId::new(term))
+                    .cloned()
+            })
+            .collect();
+        if descriptors.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut labels = self
+            .plugin
+            .present_terms(&descriptors)
+            .map_err(EngineError::Plugin)?;
+        labels.sort_unstable();
+        labels.dedup();
+        Ok(labels)
+    }
+
     /// `POST /v1/items/{handle}` (R5): validate `idset` if the caller sent one, invert `id` to
     /// its entity, test visibility in entity space, and only then locate a row and read its
     /// scalars/external id.
@@ -1770,6 +1837,7 @@ impl Engine {
                     .collect();
                 return Ok(Some(ItemOut {
                     fields,
+                    labels: self.labels_for(&generation, session, entity_raw)?,
                     // N-3: propagate, never swallow. `EngineError::Store`, the same wrapping
                     // every other store-backed call in this crate uses (see `Engine::open`).
                     // Against the generation this request loaded, never a second `load()`: the

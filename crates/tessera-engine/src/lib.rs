@@ -317,6 +317,7 @@ pub(crate) fn synthetic_generation_parts() -> (Arc<FragmentCache>, Arc<session::
         dict_extents: Vec::new(),
         attr_extents: Vec::new(),
         record_extents: Vec::new(),
+        entity_terms_extents: Vec::new(),
         text_extents: Vec::new(),
         external_id_runs: Vec::new(),
         locator_extents: Vec::new(),

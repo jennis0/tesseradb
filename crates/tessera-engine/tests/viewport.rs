@@ -1092,6 +1092,13 @@ impl tessera_plugin::Plugin for RelabellingPlugin {
         Passthrough::new().terms_of_auth(auth_data)
     }
 
+    fn present_terms(
+        &self,
+        descriptors: &[tessera_plugin::Descriptor],
+    ) -> Result<Vec<String>, tessera_plugin::PluginError> {
+        Passthrough::new().present_terms(descriptors)
+    }
+
     fn declared_bounds(&self) -> tessera_plugin::DeclaredBounds {
         Passthrough::new().declared_bounds()
     }
@@ -1245,7 +1252,11 @@ fn engine_open_does_not_touch_the_sidecar() {
         .as_object()
         .unwrap()
         .keys()
-        .filter(|rel| rel.contains("/entities/"))
+        // The external-ID sidecar's own files, not everything under `entities/`: the entity→term
+        // transpose lives there too (contracts §2.4) and is deliberately opened *at* `Engine::open`
+        // like the record blob, so deleting it would make this test assert the opposite posture for
+        // an artefact it is not about.
+        .filter(|rel| rel.contains("/entities/external-ids") || rel.contains("/entities/ext-locator"))
         .map(|rel| prefix_dir.join(rel))
         .collect();
     assert!(

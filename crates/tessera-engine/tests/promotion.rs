@@ -46,6 +46,9 @@ impl Plugin for CappedTerms {
     fn terms_of_auth(&self, auth_data: &[u8]) -> Result<AuthTerms, PluginError> {
         Passthrough::new().terms_of_auth(auth_data)
     }
+    fn present_terms(&self, descriptors: &[Vec<u8>]) -> Result<Vec<String>, PluginError> {
+        Passthrough::new().present_terms(descriptors)
+    }
     fn declared_bounds(&self) -> DeclaredBounds {
         DeclaredBounds {
             max_distinct_terms: self.0,

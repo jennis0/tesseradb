@@ -1814,6 +1814,13 @@ impl tessera_plugin::Plugin for ParkingPlugin {
         self.inner.terms_of_auth(auth_data)
     }
 
+    fn present_terms(
+        &self,
+        descriptors: &[tessera_plugin::Descriptor],
+    ) -> Result<Vec<String>, tessera_plugin::PluginError> {
+        self.inner.present_terms(descriptors)
+    }
+
     fn declared_bounds(&self) -> tessera_plugin::DeclaredBounds {
         self.inner.declared_bounds()
     }

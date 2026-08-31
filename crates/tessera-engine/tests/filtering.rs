@@ -321,6 +321,7 @@ fn fixture() -> Fixture {
         &opened.partitions[&phash].manifest.attr_extents,
         &opened.partitions[&phash].manifest.record_extents,
         &opened.partitions[&phash].manifest.artifact_record_extents,
+        &[],
         &opened.partitions[&phash].manifest.text_extents,
         // Mapped, which is what the engine does at session open — so the round-trip these tests
         // assert is the one a served request actually takes.
@@ -1115,6 +1116,7 @@ fn an_extent_file_the_manifest_names_but_that_is_absent_refuses_to_open() {
             &[],
             &[],
             &[],
+            &[],
             true,
         )
     };
@@ -1197,6 +1199,7 @@ fn an_extent_overlapping_an_earlier_layer_is_refused() {
             )],
             &[],
             &[],
+            &[],
         )
         .expect_err("an extent claiming entity 0 overlaps the base column");
     assert!(format!("{err}").contains("I9"), "{err}");
@@ -1213,6 +1216,7 @@ fn an_extent_overlapping_an_earlier_layer_is_refused() {
                 stray,
                 Some(stray_dict),
             )],
+            &[],
             &[],
             &[]
         )
@@ -2252,6 +2256,7 @@ fn reopen(fx: &Fixture) -> std::io::Result<FilterColumns> {
         &[],
         &fx.vocabularies,
         &fx.extents,
+        &[],
         &[],
         &[],
         &[],
@@ -3673,6 +3678,7 @@ fn a_coalesced_layer_that_does_not_cover_its_window_is_refused() {
                     None,
                 ),
             ],
+            &[],
             &[],
             &[],
         )

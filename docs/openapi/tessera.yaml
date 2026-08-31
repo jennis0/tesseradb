@@ -1298,7 +1298,7 @@ components:
     ItemResponse:
       type: object
       additionalProperties: false
-      required: [fields]
+      required: [fields, labels]
       properties:
         fields:
           type: object
@@ -1309,6 +1309,16 @@ components:
           type: string
           contentEncoding: base64
           description: The caller's own external id, present only where one exists.
+        labels:
+          type: array
+          items:
+            type: string
+          description: |
+            **The satisfied labels only** — the item's own access labels intersected with this
+            session's satisfied term set, as the authorisation plugin presents them, sorted. Never
+            the item's full label set: a viewer must not learn a compartment they do not hold, so
+            every string here is one the credential itself presented. Always present; empty where
+            this principal satisfies none of the item's labels, which is a fact and not an absence.
 
     ArtifactRequest:
       type: object

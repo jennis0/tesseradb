@@ -1340,12 +1340,16 @@ async fn a_minted_group_takes_a_create_a_drop_and_a_join() {
 
     // **Join.** An entity the build already knows joins the new view by its external id, and is
     // placed there with its own geometry — the same identity, a second row space.
+    //
+    // The batch carries the entity's **own** label set. Source 3 is a multiple of three, so the
+    // fixture gave it `{0, 1}`; naming only `0` is now the 409 `views.md` §4 always specified,
+    // the entity→term transpose having made the arm exact past its own flush.
     let known = external_id_of(3);
     let resp = ingest(
         &served,
         "join-minted",
         "quarter:2026-Q2",
-        &[(known.clone(), 400.0, 400.0, "0", Some(3))],
+        &[(known.clone(), 400.0, 400.0, "0,1", Some(3))],
     )
     .await;
     assert_eq!(resp.status(), 200, "a join into a minted group's view");

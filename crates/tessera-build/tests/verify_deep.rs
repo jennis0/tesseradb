@@ -243,6 +243,7 @@ fn flushed_bundle(root: &Path) {
         dict_extents: seg0.dict_extents.clone(),
         attr_extents: Vec::new(),
         record_extents: Vec::new(),
+        entity_terms_extents: Vec::new(),
         text_extents: Vec::new(),
         external_id_runs,
         locator_extents: vec![flush.locator_extent.clone()],

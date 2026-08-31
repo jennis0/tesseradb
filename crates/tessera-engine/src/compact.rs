@@ -482,6 +482,9 @@ pub(crate) struct FoldPlan {
     /// folded into the new base blob, under [`FoldPlan::attr_extents`]'s all-or-nothing argument:
     /// the folded state is a function of the schema, never of deletion history.
     pub(crate) record_extents: Vec<RecordExtent>,
+    /// The entity→term transpose's extents at the snapshot — folded into the new base by pass 4c,
+    /// exactly as the record extents are folded into the new blob.
+    pub(crate) entity_terms_extents: Vec<tessera_store::manifest::EntityTermsExtent>,
     /// Every text extent the side-manifest named at the snapshot — **all** consumed and merged into
     /// the new base index, under the same all-or-nothing argument.
     pub(crate) text_extents: Vec<tessera_store::manifest::TextExtent>,
@@ -782,6 +785,7 @@ pub(crate) fn plan_fold(
             .collect(),
         attr_extents: manifest.attr_extents.clone(),
         record_extents: manifest.record_extents.clone(),
+        entity_terms_extents: manifest.entity_terms_extents.clone(),
         text_extents: manifest.text_extents.clone(),
         tombstones,
         entity_bound,
@@ -1386,6 +1390,83 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
             (directory_rel, directory_path),
         ] {
             attr_written += file_len(&path);
+            written.push((rel, path));
+        }
+    }
+
+    // ---- pass 4c — the entity→term transpose ---------------------------------------------------
+    //
+    // The same shape as the record blob's fold and the same retention: base plus every snapshot
+    // extent, streamed in entity order into one new base, with `D₀`'s entities emitting nothing.
+    // **Rule F only** — a suppression is not in `D₀`, and a suppressed entity's list streams
+    // through unchanged, which is correct: a suppression hides an item and does not unlabel it.
+    //
+    // **No ordinal is remapped, and that is a property of the dictionary rather than a choice
+    // here.** A stored ordinal is a position in the concatenation of `dict_extents` in listed
+    // order; pass 4b carries that list forward verbatim by hard link, never renumbered and never
+    // shrunk, and `coalesce_dict_extents` preserves positions for the same reason. So the numbers
+    // this pass copies mean the same terms in the new prefix — unlike a keyword column's
+    // ordinals, which are positions in a per-layer dictionary the fold rebuilds.
+    //
+    // Unconditional, unlike the blob's pass: every entity has a label set, so a base always
+    // exists.
+    {
+        let terms_rel = format!(
+            "partitions/{}/{}",
+            plan.partition,
+            tessera_store::ENTITY_TERMS_DIR
+        );
+        let from_dir = ctx.from_prefix_dir.join(&terms_rel);
+        let to_dir = ctx.to_prefix_dir.join(&terms_rel);
+        std::fs::create_dir_all(&to_dir).map_err(|e| failed("pass 4c (entity terms)", &e))?;
+
+        let mut extent_paths = Vec::with_capacity(plan.entity_terms_extents.len());
+        for extent in &plan.entity_terms_extents {
+            extent_paths.push(tessera_store::EntityTermsExtentPaths {
+                hasrow: ctx.from_prefix_dir.join(&extent.hasrow),
+                offsets: ctx.from_prefix_dir.join(&extent.offsets),
+                terms: ctx.from_prefix_dir.join(&extent.terms),
+            });
+            for rel in [&extent.hasrow, &extent.offsets, &extent.terms] {
+                attr_read += file_len(&ctx.from_prefix_dir.join(rel));
+            }
+        }
+        for name in [
+            tessera_store::ENTITY_TERMS_HASROW_FILE,
+            tessera_store::ENTITY_TERMS_OFFSETS_FILE,
+            tessera_store::ENTITY_TERMS_TERMS_FILE,
+        ] {
+            attr_read += file_len(&from_dir.join(name));
+        }
+        let layers = tessera_store::EntityTermsStack::open(Some(&from_dir), &extent_paths)
+            .map_err(|e| failed("pass 4c (entity terms: the layers)", &e))?;
+        let mut writer = tessera_store::EntityTermsWriter::create(&to_dir)
+            .map_err(|e| failed("pass 4c (entity terms: the rewrite)", &e))?;
+        // One ascending pass over the union of the layers' has-row sets, which is the order the
+        // writer requires and the order every layer already holds.
+        let live = layers.entity_set();
+        for entity in live.iter() {
+            if plan.tombstones.contains(entity) {
+                continue;
+            }
+            let Some(terms) = layers.terms_of(entity) else {
+                continue;
+            };
+            writer
+                .push(entity, &terms)
+                .map_err(|e| failed("pass 4c (entity terms: the rewrite)", &e))?;
+        }
+        for path in writer
+            .finish()
+            .map_err(|e| failed("pass 4c (entity terms: the rewrite)", &e))?
+        {
+            attr_written += file_len(&path);
+            let rel = format!(
+                "{terms_rel}/{}",
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default()
+            );
             written.push((rel, path));
         }
     }

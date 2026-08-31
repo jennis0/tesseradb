@@ -1141,6 +1141,20 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     let mut pair_count = 0u64;
     let mut over_bound_items = 0u64;
     let mut entity_base = 0u64;
+    // The entity→term transpose (contracts §2.4), written in the same walk that assigns entity
+    // ids: entities ascend with position within a batch and bases ascend across batches, so this
+    // loop already visits them in the strictly ascending order the writer requires, and each
+    // item's `sig` is already its sorted, deduplicated term list. Writing it here rather than from
+    // the bands costs no second pass and no second relation in memory.
+    let entity_terms_dir = args
+        .out
+        .join(PREFIX)
+        .join("partitions")
+        .join(PHASH)
+        .join(tessera_store::ENTITY_TERMS_DIR);
+    let mut entity_terms = tessera_store::EntityTermsWriter::create(&entity_terms_dir)
+        .map_err(|e| BuildError::Invalid(format!("entity-terms transpose: {e}")))?;
+    let mut sig_terms: Vec<u32> = Vec::new();
     for k in 0..plan.batches {
         let ordinal_lo = k * plan.batch_items;
         let ordinal_hi = ((k + 1) * plan.batch_items).min(n);
@@ -1249,9 +1263,11 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
                         .join(", ")
                 )));
             }
+            sig_terms.clear();
             for &value in sig {
                 let term = term_of(value);
                 let band = band_los.partition_point(|&lo| lo <= term) - 1;
+                sig_terms.push(term);
                 band_writers[band].push(term, entity)?;
                 term_counts[term as usize] =
                     term_counts[term as usize].checked_add(1).ok_or_else(|| {
@@ -1261,6 +1277,9 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
                         ))
                     })?;
             }
+            entity_terms
+                .push(entity, &sig_terms)
+                .map_err(|e| BuildError::Invalid(format!("entity-terms transpose: {e}")))?;
         }
         entity_base += recs.len() as u64;
         store.delete(k)?;
@@ -1287,6 +1306,13 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
              max_terms_per_item ({}); no term was dropped",
             bounds.max_terms_per_item
         );
+    }
+
+    let entity_terms_paths = entity_terms
+        .finish()
+        .map_err(|e| BuildError::Invalid(format!("entity-terms transpose: {e}")))?;
+    for path in &entity_terms_paths {
+        fsync_file(path)?;
     }
 
     let partition_dir = args.out.join(PREFIX).join("partitions").join(PHASH);
@@ -1824,6 +1850,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
 
     // ---- 11. manifests ---------------------------------------------------------------
     let mut other_paths = vec![postings_path];
+    other_paths.extend(entity_terms_paths);
     other_paths.extend(view_files);
     other_paths.extend(filter_paths);
     other_paths.extend(scoped_paths);

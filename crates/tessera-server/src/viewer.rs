@@ -1841,6 +1841,15 @@ struct ItemResp {
     /// viewer-plane sweep must be scoped to exclude this endpoint's response.
     #[serde(skip_serializing_if = "Option::is_none")]
     external_id: Option<String>,
+    /// **The satisfied terms only** (contracts §3.2, decision 0114): the item's own labels
+    /// intersected with this session's satisfied set, as the authorisation plugin presents them,
+    /// sorted. Never the full label set — a viewer must not learn a compartment they do not hold,
+    /// which is what makes this array computable from inside their own authority (**I2**).
+    ///
+    /// Always present, empty included: an item whose labels this principal holds none of is a
+    /// different fact from an endpoint that does not answer the question, and a client rendering
+    /// a "why can I see this" panel needs the first to be sayable. It costs two bytes.
+    labels: Vec<String>,
 }
 
 /// `engine.item`'s sidecar read plus the scalar/external-id shaping that follows it — the CPU-bound
@@ -1918,6 +1927,9 @@ fn run_item(
     Ok(ItemResp {
         fields,
         external_id,
+        // Assembled inside the engine, against the session's own satisfied descriptors — this
+        // layer neither resolves a term nor holds a dictionary to resolve one with.
+        labels: item.labels,
     })
 }
 

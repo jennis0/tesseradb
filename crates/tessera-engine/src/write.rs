@@ -4026,6 +4026,7 @@ mod vocabulary_extensions_tests {
             dict_extents: Vec::new(),
             attr_extents: Vec::new(),
             record_extents: Vec::new(),
+            entity_terms_extents: Vec::new(),
             text_extents: Vec::new(),
             external_id_runs: Vec::new(),
             locator_extents: Vec::new(),
@@ -5955,6 +5956,12 @@ impl Executor {
                     .iter()
                     .any(|extent| extent.dict == consumed.dict)
             })
+            || !plan.entity_terms_extents.iter().all(|consumed| {
+                live_manifest
+                    .entity_terms_extents
+                    .iter()
+                    .any(|extent| extent.terms == consumed.terms)
+            })
         {
             discard("an artefact it consumed is no longer listed in the live manifest");
             return;
@@ -6030,6 +6037,22 @@ impl Executor {
             .text_extents
             .iter()
             .map(|extent| extent.dict.as_str())
+            .collect();
+        // The transpose's extents, the same shape a third time: pass 4c folded every one its
+        // snapshot named into the new base, and what is carried is the flight's. Identified by the
+        // terms path, `seg_id`-derived and never reused. Dropping a flight entry would leave the
+        // entities that flush minted with *unknown* labels — a drill-down without them and, on the
+        // write path, a join rule with nothing to compare against.
+        let consumed_entity_terms: FxHashSet<&str> = plan
+            .entity_terms_extents
+            .iter()
+            .map(|extent| extent.terms.as_str())
+            .collect();
+        let carried_entity_terms: Vec<tessera_store::manifest::EntityTermsExtent> = live_manifest
+            .entity_terms_extents
+            .iter()
+            .filter(|extent| !consumed_entity_terms.contains(extent.terms.as_str()))
+            .cloned()
             .collect();
         let carried_texts: Vec<tessera_store::manifest::TextExtent> = live_manifest
             .text_extents
@@ -6352,6 +6375,7 @@ impl Executor {
             // halves are written here, in one manifest write.
             attr_extents: carried_attrs.clone(),
             record_extents: carried_records.clone(),
+            entity_terms_extents: carried_entity_terms.clone(),
             external_id_runs,
             locator_extents: carried_locators.clone(),
             tombstones: Vec::new(),
@@ -6476,6 +6500,14 @@ impl Executor {
             carried_rels.insert(extent.dict.clone());
             carried_rels.insert(extent.postings.clone());
             carried_rels.insert(extent.presence.clone());
+        }
+        // All three files of every carried transpose extent, under the same rule: the offsets
+        // address the terms and the has-row bitmap ranks them, so any one missing is a refusal at
+        // open rather than a shorter label set (`tessera_store::entity_terms`).
+        for extent in &carried_entity_terms {
+            carried_rels.insert(extent.hasrow.clone());
+            carried_rels.insert(extent.offsets.clone());
+            carried_rels.insert(extent.terms.clone());
         }
         carried_rels.extend(live_manifest.dict_extents.iter().map(|e| e.path.clone()));
         for rel in &carried_rels {
@@ -11477,6 +11509,11 @@ impl Executor {
                 directory: record_dir.join(&e.directory),
             })
             .collect();
+        let entity_terms_paths = vec![tessera_store::EntityTermsExtentPaths {
+            hasrow: record_dir.join(&completed.entity_terms_extent.hasrow),
+            offsets: record_dir.join(&completed.entity_terms_extent.offsets),
+            terms: record_dir.join(&completed.entity_terms_extent.terms),
+        }];
         let text_paths: Vec<crate::filter::TextExtentPaths> = completed
             .text_extents
             .iter()
@@ -11491,6 +11528,7 @@ impl Executor {
         let filter_columns = match live.filter_columns.with_extents(
             &extents,
             &record_paths,
+            &entity_terms_paths,
             &text_paths,
         ) {
             Ok(columns) => Arc::new(columns),
@@ -11579,6 +11617,14 @@ impl Executor {
         // what `record_extents` names, so bytes this list omits answer no drill-down and bytes it
         // names but that are absent refuse the open (records §7's fail-closed rule).
         manifest.record_extents.extend(completed.record_extent);
+        // The entity→term transpose's extent, under the same two-obligation rule and for the
+        // sharper of the two reasons: a list this manifest omits leaves the flushed entities'
+        // labels unknown, which serves a drill-down without them (harmless) *and* leaves the join
+        // rule's label arm with nothing to compare against (a re-label accepted through a second
+        // view's row). The live generation composes it below.
+        manifest
+            .entity_terms_extents
+            .push(completed.entity_terms_extent.clone());
         // The text layers, under the same two-obligation rule: the files are already digested in
         // `files`, and this entry is what makes them reachable to a reopen. The live generation
         // composes them below — a published layer no live reader holds answers no `match` until the

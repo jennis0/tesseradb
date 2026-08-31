@@ -1630,27 +1630,50 @@ fn run_ingest(
     // nothing else, so what is checked here is that the caller is not trying to change anything
     // else through it.
     for (index, entity) in &joins {
-        let Some(buffered) = state.engine.buffered_row(*entity) else {
-            // Nothing to compare against: the entity's own row was flushed before this batch
-            // arrived. The comparison is unavailable rather than passed — see
-            // `Engine::buffered_row` for why it cannot be made against a segment, and
-            // `BufferedItem::join` for what makes a supplied label inert either way.
+        let buffered = state.engine.buffered_row(*entity);
+        // **The label arm reads the buffer first and the transpose after it, and both are exact.**
+        // The buffer holds the entity's own row until its flush; past that, `entities/terms/`
+        // holds the same set in promoted ordinals (contracts §2.4). Before the transpose existed
+        // this arm simply stopped here, and a join naming a flushed entity under a different label
+        // was accepted — inert, because a joining row carries no descriptors, but unreported. It
+        // is now the 409 `views.md` §4 always specified.
+        //
+        // A novel descriptor resolves to a process-local extension id, which no stored ordinal can
+        // equal, so a batch naming a label the deployment has never interned is a mismatch — which
+        // is right: the flushed entity cannot be carrying it.
+        let held_terms: Option<Vec<u32>> = match &buffered {
+            Some(buffered) => Some(buffered.terms.iter().map(|t| t.raw()).collect()),
+            None => state
+                .engine
+                .flushed_terms(*entity)
+                .map(|terms| terms.iter().map(|t| t.raw()).collect()),
+        };
+        if let Some(mut held_terms) = held_terms {
+            let mut supplied_terms: Vec<u32> =
+                terms_per_item[*index].iter().map(|t| t.raw()).collect();
+            supplied_terms.sort_unstable();
+            supplied_terms.dedup();
+            held_terms.sort_unstable();
+            held_terms.dedup();
+            if supplied_terms != held_terms {
+                return Err(ApiError::Conflict(format!(
+                    "row {index} joins an entity this deployment already holds, under a different \
+                     access label. A re-label is a delete plus a re-ingest (decision 0047), never \
+                     a field carried in on a second view's row: the alternative is a widening with \
+                     no overlay entry, or a narrowing that bypasses the deny lanes (views §4)"
+                )));
+            }
+        }
+        // ⊘ **The attribute arm is still buffer-only.** An entity-scoped value's server-side home
+        // is the filter column or the record blob, and reading it back to compare would be a
+        // second value oracle across every declared family — a wider surface than the label arm's
+        // one transpose, and one the fold and the coalesce would each owe a pass. A join naming a
+        // flushed entity with a different attribute value is therefore still accepted, and still
+        // changes nothing: the row carries no filter-column value either
+        // (`FlushPlan::entity_space_items`).
+        let Some(buffered) = buffered else {
             continue;
         };
-        let mut supplied_terms: Vec<u32> = terms_per_item[*index].iter().map(|t| t.raw()).collect();
-        supplied_terms.sort_unstable();
-        supplied_terms.dedup();
-        let mut held_terms: Vec<u32> = buffered.terms.iter().map(|t| t.raw()).collect();
-        held_terms.sort_unstable();
-        held_terms.dedup();
-        if supplied_terms != held_terms {
-            return Err(ApiError::Conflict(format!(
-                "row {index} joins an entity this deployment already holds, under a different \
-                 access label. A re-label is a delete plus a re-ingest (decision 0047), never a \
-                 field carried in on a second view's row: the alternative is a widening with no \
-                 overlay entry, or a narrowing that bypasses the deny lanes (views §4)"
-            )));
-        }
         // An entity-scoped attribute is one value per entity, so a joining row must carry the
         // stored value or leave it null. A differing one is refused naming the column — silently
         // keeping either value would make the answer depend on which view a filter was asked

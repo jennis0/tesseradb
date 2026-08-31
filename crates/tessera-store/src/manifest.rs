@@ -1128,6 +1128,27 @@ pub struct RecordExtent {
     pub directory: String,
 }
 
+/// One entry of `entity_terms_extents`: one flush's slice of the entity→term transpose
+/// (`entities/terms/`, contracts §2.4; `crate::entity_terms` for the format).
+///
+/// The same shape and the same argument as [`RecordExtent`]: three files named explicitly rather
+/// than recovered from a path convention, layers disjoint in entity space by **I9**, and a
+/// missing or short file refusing the open rather than reading as "those entities carry no
+/// terms". The stakes differ from the blob's by direction, not by degree — a record read short
+/// omits a field from a drill-down, a term list read short omits a *label*, which is what the
+/// join rule's `409` compares against.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EntityTermsExtent {
+    /// Prefix-relative path of the extent's has-row Roaring bitmap — the entities this flush
+    /// minted a term list for. Rank in it addresses `offsets`.
+    pub hasrow: String,
+    /// Prefix-relative path of the extent's `(cardinality + 1)` ascending `u32` offsets.
+    pub offsets: String,
+    /// Prefix-relative path of the extent's concatenated `u32` term ordinals.
+    pub terms: String,
+}
+
 /// One entry of `membership_extents`: one publication's packed artifact memberships for one level
 /// of one layer (`annotation-representation.md` §2.4, and `membership.rs` for the format).
 ///
@@ -1536,6 +1557,14 @@ pub struct SegmentsManifest {
     /// No `serde(default)`, per [`SegmentsManifest::attr_extents`]'s argument: a manifest that
     /// omits it is malformed, not extent-free.
     pub record_extents: Vec<RecordExtent>,
+    /// Every entity→term transpose extent this partition holds — see [`EntityTermsExtent`].
+    /// Empty in a bundle straight out of `tessera build`, whose base layer
+    /// (`entities/terms/*`) covers every entity it knows about. Oldest first, and disjoint in
+    /// entity space (**I9**), so order decides only which layer answers first.
+    ///
+    /// No `serde(default)`, per [`SegmentsManifest::attr_extents`]'s argument: a manifest that
+    /// omits it is malformed, not extent-free.
+    pub entity_terms_extents: Vec<EntityTermsExtent>,
     /// One flush's text layer per entry, oldest first — the base build's index is not in this list
     /// and is opened from the column's own directory, exactly as `record_extents` treats the base
     /// blob.
@@ -1852,6 +1881,7 @@ mod tests {
             dict_extents: Vec::new(),
             attr_extents: Vec::new(),
             record_extents: Vec::new(),
+            entity_terms_extents: Vec::new(),
             text_extents: Vec::new(),
             external_id_runs: Vec::new(),
             locator_extents: Vec::new(),

@@ -571,6 +571,13 @@ pub struct FilterColumns {
     /// column) plus every flush extent the manifest names. Empty — zero layers — when neither
     /// exists, which answers `fields_of` with an ordinary absence.
     records: Arc<RecordStack>,
+    /// The entity→term transpose: the build's base plus every flush extent the manifest names
+    /// (contracts §2.4). It rides here for the record blob's reasons exactly — opened from the
+    /// same manifests at the same two sites, carried forward by every flush successor, replaced
+    /// whole at a fold's prefix rotation — and it is read by the same two callers a record is:
+    /// the drill-down (intersected with the session's satisfied set, decision 0114) and the write
+    /// path's join arm (`views.md` §4).
+    entity_terms: Arc<tessera_store::EntityTermsStack>,
 }
 
 // Hand-written because `RecordStack` carries no `Debug` of its own (it is a stack of mapped
@@ -591,6 +598,7 @@ impl Default for FilterColumns {
             placements: BTreeMap::new(),
             access: tessera_filter::Access::Read,
             records: Arc::new(empty_record_stack()),
+            entity_terms: Arc::new(tessera_store::EntityTermsStack::empty()),
         }
     }
 }
@@ -1403,6 +1411,7 @@ impl FilterColumns {
         extents: &[tessera_store::manifest::AttrExtent],
         record_extents: &[tessera_store::manifest::RecordExtent],
         artifact_record_extents: &[tessera_store::manifest::RecordExtent],
+        entity_terms_extents: &[tessera_store::manifest::EntityTermsExtent],
         text_extents: &[tessera_store::manifest::TextExtent],
         mmap: bool,
     ) -> std::io::Result<Self> {
@@ -1688,11 +1697,28 @@ impl FilterColumns {
             request_access(mmap),
         )
         .map_err(record_open_error)?;
+        // **The transpose's base is unconditional**, where the blob's is schema-dependent: every
+        // entity has a label set, so a build always writes one. A bundle that lacks it refuses the
+        // open rather than reading as "no entity carries a term" — the fail-open direction on the
+        // write path, where the join rule's label arm compares against it (`views.md` §4).
+        let entity_terms = tessera_store::EntityTermsStack::open(
+            Some(&partition_dir.join(tessera_store::ENTITY_TERMS_DIR)),
+            &entity_terms_extents
+                .iter()
+                .map(|e| tessera_store::EntityTermsExtentPaths {
+                    hasrow: prefix_dir.join(&e.hasrow),
+                    offsets: prefix_dir.join(&e.offsets),
+                    terms: prefix_dir.join(&e.terms),
+                })
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
         let mut open = FilterColumns {
             columns,
             placements,
             access: request_access(mmap),
             records: Arc::new(records),
+            entity_terms: Arc::new(entity_terms),
         };
         for extent in extents {
             let column = tessera_filter::open_extent(
@@ -1720,6 +1746,12 @@ impl FilterColumns {
     /// has published an extent.
     pub fn records(&self) -> &RecordStack {
         &self.records
+    }
+
+    /// The entity→term transpose this prefix answers a label question from — see this type's doc
+    /// for why it lives here.
+    pub fn entity_terms(&self) -> &tessera_store::EntityTermsStack {
+        &self.entity_terms
     }
 
     /// The route affordances of one filterable column, or `None` where the column is not
@@ -1871,6 +1903,7 @@ impl FilterColumns {
         &self,
         extents: &[PublishedExtent],
         records: &[RecordExtentPaths],
+        entity_terms: &[tessera_store::EntityTermsExtentPaths],
         texts: &[TextExtentPaths],
     ) -> std::io::Result<FilterColumns> {
         // The record blob's extent composes here for the same reason a filter extent does: the
@@ -1887,11 +1920,26 @@ impl FilterColumns {
                     .map_err(record_open_error)?,
             )
         };
+        // The transpose's extent composes here for the record blob's reason, plus one of its own:
+        // a flush's labels that no live stack holds leave the join rule's label arm unable to
+        // compare against the batch that just landed, which is the arm's whole point.
+        let entity_terms = if entity_terms.is_empty() {
+            Arc::clone(&self.entity_terms)
+        } else {
+            Arc::new(
+                self.entity_terms
+                    .with_extents(entity_terms)
+                    .map_err(|e| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
+                    })?,
+            )
+        };
         let mut next = FilterColumns {
             columns: self.columns.clone(),
             placements: self.placements.clone(),
             access: self.access,
             records,
+            entity_terms,
         };
         // A text extent appends a layer: its own dictionary, its own postings, and the entities it
         // covers. Composed here for the same reason a filter extent is — a published layer the live
@@ -1961,6 +2009,11 @@ impl FilterColumns {
             placements: self.placements.clone(),
             access: self.access,
             records: Arc::clone(&self.records),
+            // **A coalesce does not touch the transpose**, and nothing here has to. Its ordinals
+            // are dictionary positions, which `coalesce_dict_extents` preserves by construction
+            // (it replaces a contiguous window with the same records in the same order), so unlike
+            // a keyword column's ordinals they name the same terms after every coalesce.
+            entity_terms: Arc::clone(&self.entity_terms),
         };
         for window in windows {
             let Some(layers) = next.columns.get_mut(&window.column) else {
@@ -3535,6 +3588,7 @@ mod keyword_tests {
             placements,
             access: tessera_filter::Access::Read,
             records: Arc::new(empty_record_stack()),
+            entity_terms: Arc::new(tessera_store::EntityTermsStack::empty()),
         }
     }
 
