@@ -332,10 +332,27 @@ async fn viewport(served: &Served, view: &str) -> reqwest::Response {
 }
 
 async fn points(served: &Served, view: &str) -> Vec<PointRow> {
-    let resp = viewport(served, view).await;
-    assert_eq!(resp.status().as_u16(), 200, "a served view answers: {view}");
-    let (_, points) = decode_viewport(&resp.bytes().await.unwrap());
-    points
+    // Two responses here are the server behaving as specified under machine load, and neither is
+    // the answer under test. A 429 is the admission gate shedding (contracts §3.1) — honour
+    // `Retry-After` and ask again. `x-tessera-stale: 1` is a publication served from a superseded
+    // generation while the refresh runs (`geometry-pinning.md` §7) — serve-stale-not-block is the
+    // design, so wait for a fresh one. Anything else is asserted as the real response.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let resp = viewport(served, view).await;
+        let unsettled = std::time::Instant::now() < deadline;
+        if resp.status().as_u16() == 429 && unsettled {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            continue;
+        }
+        assert_eq!(resp.status().as_u16(), 200, "a served view answers: {view}");
+        if resp.headers().get("x-tessera-stale").is_some_and(|v| v == "1") && unsettled {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            continue;
+        }
+        let (_, points) = decode_viewport(&resp.bytes().await.unwrap());
+        return points;
+    }
 }
 
 /// One ingest batch of `(external id, x, y, access)` rows into `view`.
@@ -402,8 +419,13 @@ async fn ingest(
 /// Flush until the buffer is empty — **a flush unit is one view**, and a tick publishes one of
 /// them, so a batch that landed in two views needs two ticks (write path's `dispatch_flushes`).
 async fn flush(served: &Served) {
+    // Always drive at least one flush: `buffered_items()` lags by up to one apply — its own doc
+    // says so, deliberately — so an acked batch can still read as 0 here, and gating the first
+    // flush on it skips the flush entirely under load. Every caller flushes straight after an
+    // acked ingest, so the buffer is genuinely non-empty on the first iteration and the flush
+    // counter is guaranteed to move.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while served.server.state.engine.buffered_items() > 0 {
+    loop {
         let before = served.server.state.engine.write_executor_stats().flushes;
         let resp = served
             .server
@@ -422,6 +444,9 @@ async fn flush(served: &Served) {
                 served.server.state.engine.write_executor_stats().flushes
             );
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        if served.server.state.engine.buffered_items() == 0 {
+            break;
         }
     }
 }
@@ -517,7 +542,16 @@ async fn a_created_view_is_served_ingested_flushed_and_survives_a_restart() {
     assert_eq!(resp.status(), 200, "a created view accepts rows");
     flush(&served).await;
 
-    let served_points = points(&served, "quarter:2026-Q5").await;
+    // The flush's publication and a live session's sight of the entities it minted are two
+    // events, and the second follows the first by an asynchronous refresh with no wire signal on
+    // the interim response — a viewport between them is a fresh 200 serving the pre-flush answer.
+    // So wait for the settled count rather than asserting the first response.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let mut served_points = points(&served, "quarter:2026-Q5").await;
+    while served_points.len() != 4 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        served_points = points(&served, "quarter:2026-Q5").await;
+    }
     assert_eq!(
         served_points.len(),
         4,
