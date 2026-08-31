@@ -209,10 +209,26 @@ paths:
         - name: column
           in: path
           required: true
-          description: A column name from `/v1/meta`'s `declared_scalars` that carries a `category` block.
+          description: |
+            A column name from `/v1/meta`'s `declared_scalars` that carries a `category` block, or
+            a **group-scoped** category family from `filter_operands` — which is one column per
+            view, so it is addressed with a view. Either pin one here, `<column>@<key>`, or name
+            the request's own view in `view` below; a scoped column named with neither is a `422`
+            naming the group, and a pin naming no view of it is the unknown-view `404`. A pin on an
+            entity-scoped column is a `422`: it is one value set for the corpus.
           schema:
             type: string
-            pattern: "^[A-Za-z0-9_-]+$"
+            pattern: "^[A-Za-z0-9_-]+(@[A-Za-z0-9_.:-]+)?$"
+        - name: view
+          in: query
+          required: false
+          description: |
+            The request's own view, for a **group-scoped** category (`views.md` §5). Resolved
+            through the session's visible-view set exactly as a viewer verb's `view` is, so a view
+            this principal cannot reach is the `404` an unknown one gets. Ignored for an
+            entity-scoped column, which has one value set for the corpus.
+          schema:
+            type: string
         - name: codes
           in: query
           required: false
@@ -746,6 +762,25 @@ components:
                 items:
                   type: string
                   enum: [eq, in, prefix, contains, range, match, phrase]
+              category:
+                description: For a group-scoped **category** family, the vocabulary its codes index — the same three facts `DeclaredScalar.category` carries, which a family has no row there to publish. `null` for every other family and absent on an entity-scoped column, whose `declared_scalars` entry already carries it.
+                oneOf:
+                  - type: "null"
+                  - type: object
+                    additionalProperties: false
+                    required: [vocabulary, kind, visibility]
+                    properties:
+                      vocabulary:
+                        type: string
+                      kind:
+                        type: string
+                        enum: [declared, discovered]
+                      visibility:
+                        type: string
+                        enum: [public, derived]
+              analyser:
+                description: For a group-scoped **text** family, the `<name>/<version>` analyser identity that segmented its per-view indexes. `null` for every other family; absent on an entity-scoped column.
+                type: [string, "null"]
               scope:
                 type: object
                 additionalProperties: false
