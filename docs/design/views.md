@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-30
 **Status:** Normative (r24) — **§4's join rule refuses a changed entity-scoped attribute value past
-the entity's own flush** (r24, 2026-08-31; `contracts.md` §3.4 r64). §4's last ⊘ is discharged, and
+the entity's own flush** (r24, 2026-08-31; `contracts.md` §3.4 r65). §4's last ⊘ is discharged, and
 with it the section's last one: the value is read back from the home its declaration gives it — the
 entity-space value column, the record blob, or the hot column — and a joining batch carrying a
 different one is the `409` naming the column that the rule always specified. Two things the marker
@@ -590,7 +590,7 @@ indistinguishable from its invisibility there (C4's closure).
 > serves the *intersection* with the asking session, which is a different question with a different
 > answer.
 >
-> **The attribute arm is exact past the flush** (2026-08-31, `contracts.md` §3.4 r64). This marker
+> **The attribute arm is exact past the flush** (2026-08-31, `contracts.md` §3.4 r65). This marker
 > said the read-back would be a second value oracle across every declared family; it is one read
 > per column, because a declared column's value already has exactly three homes and the
 > declaration says which (records §3, decision 0068) — the entity-space **value column** where the
