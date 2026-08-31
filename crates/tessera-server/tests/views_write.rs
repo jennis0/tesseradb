@@ -1502,6 +1502,9 @@ fn view_dirs(root: &Path, group: &str, key: &str) -> Vec<std::path::PathBuf> {
 /// - **The tombstone outlives the fold.** The fold rewrites the manifest; a key burnt before it
 ///   that came back free after it would be decision 0029's silent repointing, reached the long way
 ///   round.
+/// - **And the two removal rules compose.** A second drop, this one with `delete_dangling`, puts
+///   ordinary deletions on the deny lane; the fold that omits the view's segments is also the fold
+///   that executes them, and their overlay entries retire there (Rule F) rather than at the drop.
 #[tokio::test]
 async fn a_fold_after_a_drop_reclaims_the_dropped_view_and_keeps_its_tombstone() {
     let mut served = serve().await;
@@ -1611,5 +1614,38 @@ async fn a_fold_after_a_drop_reclaims_the_dropped_view_and_keeps_its_tombstone()
             .status(),
         409,
         "a key burnt before the fold is still burnt after it"
+    );
+
+    // (e) **`delete_dangling`'s deletions retire at the fold that omits their view's segments**
+    // (`views.md` §3.4, Rule F, write-path §5.4). The two removal rules meet here and only here:
+    // the *view* goes by omission at the publication, and the *entities* the drop submitted go the
+    // ordinary way, through the overlay, at the fold that executes them. Nothing else in this file
+    // reaches the second half — a drop's own test ends at the acknowledgement — and the reasoning
+    // that they compose is exactly the reasoning that has been wrong twice.
+    //
+    // The four entities ingested into `2026-Q2` hold a row in that view and nowhere else: they
+    // were minted by that batch, and `quarter_map:2026-Q2` was created empty beside it. So the
+    // drop's probe finds all four dangling.
+    let before = served.server.state.engine.retirable_deletions();
+    let body = drop_view(&served, "quarter", "2026-Q2", true).await;
+    assert_eq!(body["deleted"], 4, "every entity of the view was in no other: {body}");
+    assert_eq!(
+        served.server.state.engine.retirable_deletions(),
+        before + 4,
+        "the dangling entities are ordinary deletions and enter the overlay"
+    );
+
+    fold(&served).await;
+    assert_eq!(
+        served.server.state.engine.retirable_deletions(),
+        0,
+        "the fold executed them, so their overlay entries retire (Rule F) — an entity carried \
+         forward by a segment the fold kept would not have"
+    );
+    let (_, second) = live_prefix(&served);
+    assert_eq!(
+        segment_views(&second),
+        vec!["world".to_string()],
+        "and the second dropped view left the plan as the first did"
     );
 }
