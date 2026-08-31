@@ -498,6 +498,11 @@ pub struct ViewDescriptor {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupDescriptor {
     pub name: String,
+    /// The group's human-readable title, served on `/v1/meta` as `groups[..].title`
+    /// (`configuration.md` §1, contracts §3.2). `None` where the declaration gave none, and
+    /// served as `null` there — presentation metadata on an object whose visibility is already
+    /// decided, so it discloses nothing the name does not.
+    pub title: Option<String>,
     /// The group whose keys these are, where this group declares `members`
     /// (`views.md` §3.3); `None` where it owns them. Chains are refused at the declaration, so
     /// this always names an owner.

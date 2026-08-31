@@ -311,6 +311,11 @@ export type ViewMetadataValue =
 export type ViewGroup = {
   name: string;
   /**
+   * The group's human-readable title, or `null` where the deployment declared none — in which
+   * case a picker has the name and nothing else to show.
+   */
+  title: string | null;
+  /**
    * The group whose keys these are, where this group is a second layout over
    * another's views (`views.md` §3.3); `null` where it owns them.
    */

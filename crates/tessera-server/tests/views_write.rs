@@ -174,6 +174,7 @@ render = true
         anchor: 0,
         groups: vec![
             GroupDescriptor {
+                title: None,
                 visibility: None,
                 scoped_scalars: Vec::new(),
                 name: "quarter".to_string(),
@@ -195,6 +196,7 @@ render = true
                 views: roster(true),
             },
             GroupDescriptor {
+                title: None,
                 visibility: None,
                 scoped_scalars: Vec::new(),
                 name: "quarter_map".to_string(),

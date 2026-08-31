@@ -204,6 +204,7 @@ export class TesseraClient {
       // "no groups here" — no group picker.
       groups: m.groups.map((g) => ({
         name: g.name,
+        title: g.title,
         membersOf: g.members_of,
         views: g.views
       })),
@@ -719,7 +720,7 @@ type RawMeta = {
     metadata: Record<string, ViewMetadataValue> | null;
   }[];
   /** The view groups, each its view ids in creation order. Empty where there are none. */
-  groups: {name: string; members_of: string | null; views: string[]}[];
+  groups: {name: string; title: string | null; members_of: string | null; views: string[]}[];
   declared_scalars: {
     name: string;
     arrow_type: ArrowType;

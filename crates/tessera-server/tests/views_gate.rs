@@ -253,6 +253,7 @@ fn build_gated(dir: &Path) -> std::path::PathBuf {
         anchor: 0,
         groups: vec![
             GroupDescriptor {
+                title: None,
                 name: "quarter".to_string(),
                 members_of: None,
                 visibility: None,
@@ -263,6 +264,7 @@ fn build_gated(dir: &Path) -> std::path::PathBuf {
                 scoped_scalars: Vec::new(),
             },
             GroupDescriptor {
+                title: None,
                 name: "sealed".to_string(),
                 members_of: None,
                 // **The group's own gate, the outer bound over its whole roster.**

@@ -42,7 +42,8 @@ each naming what is absent per
 
 ⊘ A `title` on a view, an attribute or a vocabulary is compiled and **not yet published** — the
 manifest carries no slot for one, and adding three is a contracts change; a level's title and a
-layer's are served today, as is each vocabulary *value*'s.
+layer's are served today, as is each vocabulary *value*'s, and a **view group's** is since
+2026-08-31 (contracts §3.2 r61, `/v1/meta`'s `groups` entry).
 
 ## 1. The surface in full
 
@@ -119,7 +120,7 @@ no `fields` map and so has no way to say otherwise; it is `(entity_id, term_id)`
 | Key | | Value |
 |---|---|---|
 | `name` | R | identity; tombstoned on drop, never reused |
-| `title` | O | human-readable, served on `/v1/meta` |
+| `title` | O | human-readable. ⊘ On a plain view it is compiled and published nowhere; **on a `[[view_group]]` it is served** on `/v1/meta`'s `groups` entry (contracts §3.2 r61) |
 | `projection` | D `none` | `web_mercator`, `equirectangular`, `plate_carree`, `gall_isographic` or `none` — what turns this view's input coordinates into positions in its frame ([`projections.md`](projections.md) §5). See below |
 | `source` | D | a `[sources]` key; `[defaults].source` where absent |
 | `fields` | D | canonical `entity_id`, and `x`, `y` or `morton` + `residual` — or `lon`, `lat` under a projection. The geometry shapes are mutually exclusive (§8). `entity_id` defaults to `[defaults].entity_id_field` |
@@ -130,7 +131,8 @@ no `fields` map and so has no way to say otherwise; it is `(entity_id, term_id)`
 **`[[view_group]]`** — a set of views sharing every setting, differing by a key and per-view
 metadata ([`views.md`](views.md) §3,
 [decision 0108](../decisions/0108-a-view-group-grows-by-its-roster.md)). Repeatable. **It takes
-every `[[view]]` key above, with the same meaning**, and adds the four below. A group is not a
+every `[[view]]` key above, with the same meaning**, and adds the four below. Its `title` is the
+one served on `/v1/meta`'s `groups` entry — a view's own is still compiled and published nowhere. A group is not a
 view: it cannot be named on a viewer verb and has no row space of its own; its views are, each
 addressed `<group>:<key>`, which is a view's only address (decision 0113).
 
