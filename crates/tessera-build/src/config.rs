@@ -6109,7 +6109,16 @@ impl Config {
                                     (false, ScalarType::F32) | (false, ScalarType::F64) => {
                                         ViewMetadataType::Float
                                     }
-                                    (false, ScalarType::Utf8) => ViewMetadataType::Text,
+                                    // `text` and `keyword` both hold a string; the served
+                                    // type is what a client renders, and both render as text.
+                                    // The fallthrough to the integer arm they took before was
+                                    // caught by the conformance work (2026-08-31): a build
+                                    // looked right because `/v1/meta` types off the stored
+                                    // value, and what would have bitten is the create
+                                    // operation's type check refusing a text value.
+                                    (false, ScalarType::Utf8)
+                                    | (false, ScalarType::Text)
+                                    | (false, ScalarType::Keyword) => ViewMetadataType::Text,
                                     (false, ScalarType::TimestampUs) => {
                                         ViewMetadataType::TimestampUs
                                     }

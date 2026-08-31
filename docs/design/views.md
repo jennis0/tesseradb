@@ -810,7 +810,7 @@ No new verb; one new accepted register row (the ordinal gap), and the C15/C17 no
 | Configuration §1, §8 | `[[view_group]]` with `[[view_group.view]]`, `[view_group.views]`, `members`, `metadata` and per-view `visibility` on the roster; `fields.view` on a group source, a scoped attribute and a scoped layer; `scope` on `[[attribute]]` and `[[layer]]` |
 | Write-path §2, §4, §5 | The create record; the join rule at admission; one pending segment per view touched restated for several views; `delete_dangling` as submitted deletions |
 | Compaction | Reclamation of a dropped view; the attribute pass over a family |
-| Appendix C | **Done for the gate at r15**: the `views`/`groups` fields and the scoped `filter_operands` entries of `/v1/meta` gate-filtered under C11's precedent, and view existence under C4's closure. ⊘ Still to make: the new accepted row for the **ordinal gap** (spec §9), the C17 note (cross-view linkage) and the C15 note (a group's view's size via timing) |
+| Appendix C | **Made 2026-08-31**: C27 (the ordinal gap, decision 0110), the C15 and C17 annotations, and the gate's enforcement under C4's closure — nothing of this row remains owed |
 | Conformance | A two-view differential: the oracle answers per view; the pinned-leaf cases, the gate-failed pin among them; the gate's work-indistinguishability |
 | Decisions | ~~The allocation key~~ — ruled, decision 0112 |
 
