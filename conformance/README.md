@@ -26,9 +26,18 @@ CI runs it on every pull request and every push to `main`, alongside the rest of
 (`.github/workflows/ci.yml`). That is conformance §6's per-PR tier; the nightly and release tiers
 it also specifies do not exist.
 
-**673 pass and 4 skip, over 677 cases (2026-08-31)** — `conformance/tests` and
-`conformance/suite` together, the split CI's own case-count step compares against `conformance.md`
-§0's marker line. The 39 that arrived on that date are the multi-view differential.
+**675 pass, 4 skip and 2 fail, over 681 cases (2026-08-31, measured serially)** —
+`conformance/tests` and `conformance/suite` together, the split CI's own case-count step compares
+against `conformance.md` §0's marker line. The 39 that arrived on that date are the multi-view
+differential; six more are the scoped category added to it, and two of the marker's cases were
+never collected.
+
+**The two failures are the machine, not the suite.** Both are
+`test_text_differential.py::…[phrase on … -full_100pct]`, and both are a 30-second HTTP **read
+timeout** rather than a disagreement about entities: the box carried a load average above 30 from
+concurrent work, and the same two cases fail the same way on `main` in a clean checkout. Recorded
+as measured rather than rounded to green — the number is only worth having if it is the one that
+was observed.
 
 They had not passed at all, for the weeks between the configuration rework and 2026-08-20: `tessera serve` took `--deployment` in place of `-c` and `harness.spawn_server` still
 passed the old spelling, so every server-backed module died at startup and nothing noticed. With

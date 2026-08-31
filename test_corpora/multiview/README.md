@@ -42,7 +42,9 @@ computes it first):
 - `quarter`'s four per-quarter layouts (`quarter-2026-Q*.parquet` `x`/`y`) are an abstract
   embedding with no geographic meaning — a base 2D point per entity, put through a different
   rotation/scale/translation per quarter. `projection = "none"` in `corpus.toml` says exactly this.
-- `sentiment`, the group-scoped attribute, is a seeded normal, clipped to `[-1, 1]`.
+- `sentiment`, the group-scoped attribute, is a seeded normal, clipped to `[-1, 1]`; `mood`,
+  `note` and `coverage`, the other three families, are seeded hashes of the entity id and the
+  quarter.
 - The access term's presence (~4% of entities carry none) and the four entity-overlap buckets are
   seeded coin flips over a hash of the entity id, not the source data's own distribution.
 - `collections` and `quarter_clusters`, the two layers' membership.
@@ -68,9 +70,11 @@ Output goes to `$TESSERA_LADDER/multiview/` (default `data/ladder/multiview/`, `
 |---|---|---|
 | `corpus.toml` | — | the declaration; committed here, copied beside the derived data |
 | `world.parquet` | 12,816 | the plain views `world` and `world_flat`, which read the same file through different projections: `entity_id, lon, lat, access` |
-| `quarter-2026-Q1..Q4.parquet` | ~8,200 each | the `quarter` group, form A: `entity_id, x, y, access, sentiment` |
+| `quarter-2026-Q1..Q4.parquet` | ~8,200 each | the `quarter` group, form A: `entity_id, x, y, access, sentiment, mood, note` |
+
 | `quarter-alt.parquet` | 32,833 | the `quarter_alt` group, form B: `entity_id, quarter, lon, lat, access` |
 | `attrs-constant.parquet` | 21,300 | the two entity-scoped attributes: `entity_id, importance, kind` |
+| `attrs-scoped.parquet` | ~32,800 | `coverage`, a scoped attribute's own source: `entity_id, quarter, coverage` |
 | `vocab-kind.parquet` | 9 | `kind`'s closed vocabulary: `key, code, title` |
 | `collections.parquet` | 6 | the unscoped layer: `key, contents, members, access` |
 | `clusters-quarter.parquet` | 24 (6 × 4 quarters) | the scoped layer: `key, quarter, contents, members` |
@@ -96,6 +100,9 @@ This table is the fixture's point — read it as the implementation's checklist,
 | A constant attribute, category, with a closed vocabulary (§5) | `kind`, `vocabulary = "kind"` |
 | A constant attribute's own `source`, distinct from `[defaults].source` (§5, §8) | `attrs_constant`, needed because bucket D entities never appear in `world` |
 | A group-scoped attribute (§5) | `sentiment`, `scope = { group = "quarter" }` |
+| A group-scoped **category**, whose value list `/v1/categories` derives per view (§5) | `mood`, over a closed `derived` vocabulary; a quarter uses three of its four values and which three rotates |
+| A group-scoped **text** column, matched from that view's own postings (§5) | `note`; each quarter's prose carries its own word, so a `match` against another view's index is empty |
+| A group-scoped attribute reading its **own `source`** through `fields.view` (§5) | `coverage`, one row per `(entity, view)` in `attrs-scoped.parquet` |
 | A group-scoped attribute read from each view's own file, no `source` declared (§5, Appendix A) | `sentiment` has no `source` key; it is a column of each `quarter-2026-Q*.parquet` |
 | Presence bitmap on a group-scoped attribute — some entities missing a value in some views (§5, decision 0064) | ~15% of each quarter's rows carry `sentiment = null` |
 | An unscoped layer over a view and a group at once (§3.5) | `collections`, `views = ["world", "quarter"]`, default `scope = "entity"` |
@@ -112,8 +119,13 @@ filter grammar (§5's `name@key`) — a filter surface, not a corpus declaration
 
 ## `validate.py` output
 
-Structural checks over the parquets and `corpus.toml` as written — no build, no engine. Latest run
-at the default scale:
+Structural checks over the parquets and `corpus.toml` as written — no build, no engine.
+
+**The transcript below predates the three families added on 2026-08-31** — the scoped category, the
+scoped text column and the attribute reading its own source — and their three checks are not in it:
+`data/ladder/geonames/points.parquet` was not on the machine that added them, so `prepare.py` could
+not be re-run and the numbers could not be regenerated. Re-running it replaces this block, and the
+count moves from 17 to 20. Latest run at the default scale:
 
 ```
 validating data/ladder/multiview

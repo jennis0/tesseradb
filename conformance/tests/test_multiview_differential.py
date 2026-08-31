@@ -564,6 +564,67 @@ def test_a_pinned_leaf_reads_the_pinned_views_column_in_entity_space(
     assert expected, "the predicate matched nothing, so this case checked no membership"
 
 
+@pytest.fixture(scope="module")
+def mood(multiview_bundle: Bundle):
+    """The scoped **category** family as the fixture planted it, `{view: CategoryColumn}`."""
+    from oracle.filters import CategoryColumn  # noqa: PLC0415 — one case needs the type
+
+    return {
+        view: CategoryColumn(values=values, codes=dict(mv.MOOD_CODES))
+        for view, values in mv.mood_columns(multiview_bundle).items()
+    }
+
+
+@pytest.mark.parametrize(
+    ("request_view", "leaf", "column_view"),
+    [
+        (f"{mv.GROUP}:2026-Q2", "mood", f"{mv.GROUP}:2026-Q2"),
+        (mv.WORLD_VIEW, "mood@2026-Q3", f"{mv.GROUP}:2026-Q3"),
+        (f"{mv.GROUP}:2026-Q3", "mood@2026-Q1", f"{mv.GROUP}:2026-Q1"),
+    ],
+)
+@pytest.mark.parametrize("principal", ["narrow", "wide"])
+def test_a_scoped_category_leaf_reads_the_pinned_views_postings(
+    multiview_server,
+    masks,
+    members,
+    tokens,
+    entity_of_fx,
+    mood,
+    principal,
+    request_view,
+    leaf,
+    column_view,
+):
+    """The numeric family's rule, over the family whose per-view artefact is **postings**.
+
+    Same equality, same two views in one answer, and a different route beneath it: a category's
+    `eq` is answered by intersecting one view's postings rather than by scanning a value column, so
+    an implementation that resolved the column correctly for a value scan and read the family's
+    first postings file here is caught by exactly this case and by no case above it.
+    """
+    mask = masks[principal]
+    raw = multiview_server.viewport(
+        tokens[principal],
+        request_view,
+        ZOOM,
+        _full_bbox(request_view),
+        k=K,
+        filters={leaf: {"eq": "calm"}},
+    )
+    served = _served_entities(raw, entity_of_fx)
+
+    column = mood[column_view]
+    matched = {e for e in mask if column.matches(e, "calm")}
+    expected = matched & members[request_view]
+
+    assert served == expected, (
+        f"{principal}: '{leaf}' under '{request_view}' served {len(served)} entities, the oracle's "
+        f"column for '{column_view}' projected into '{request_view}' gives {len(expected)}"
+    )
+    assert expected, "the predicate matched nothing, so this case checked no membership"
+
+
 def test_an_entity_with_no_value_in_the_pinned_view_never_matches(
     multiview_server, masks, members, tokens, entity_of_fx, sentiment
 ):

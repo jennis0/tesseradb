@@ -278,6 +278,7 @@ fn the_accepted_key_set_is_configuration_ms_table() {
             "render_in",
             "analyser",
             "scope",
+            "fields",
         ],
     );
     expect_keys(
@@ -3519,6 +3520,96 @@ fn a_scope_naming_a_members_group_points_at_the_owner() {
         message.contains("scope = { group = \"quarter\" }"),
         "the refusal must point at the owner: {message}"
     );
+}
+
+/// **A scoped attribute may declare its own `source`, and that file carries the discriminator**
+/// (`views.md` §5): one row per `(entity, view)`, `fields.view` saying which view each row's value
+/// is for. Without it the file would be read as entity space, which would take one arbitrary
+/// view's values as every view's.
+#[test]
+fn a_scoped_attribute_may_read_its_own_source_through_fields_view() {
+    let text = with_group(
+        "\n[[attribute]]\nname = \"sentiment\"\ntype = \"f32\"\n\
+         scope = { group = \"quarter\" }\nindex = true\nsource = \"other\"\n\
+         fields = { view = \"quarter\" }\nentity_id_field = \"doc\"\n",
+    );
+    let config = ok(&text);
+    let scoped = &config.scoped_attributes[0];
+    assert_eq!(scoped.group, "quarter");
+    let source = scoped.source.as_ref().expect("its own source is recorded");
+    assert_eq!(source.view_field, "quarter");
+    assert_eq!(source.entity_id, "doc");
+    assert!(source.path.ends_with("other.parquet"));
+    assert!(
+        !config
+            .schema
+            .attributes
+            .iter()
+            .any(|a| a.name == "sentiment"),
+        "a family is not one of the declared scalars, whatever it reads from"
+    );
+
+    // `fields.view` is optional and defaults to `view`, the same default a scoped layer's
+    // artifacts source takes — one word, one meaning, across the declaration.
+    let defaulted = text.replace("fields = { view = \"quarter\" }\n", "");
+    assert_eq!(
+        ok(&defaulted).scoped_attributes[0]
+            .source
+            .as_ref()
+            .unwrap()
+            .view_field,
+        "view"
+    );
+}
+
+/// `fields` names the view discriminator and nothing else, so the two declarations that have
+/// nothing to say with it are refused rather than reading it as a default.
+#[test]
+fn fields_on_an_attribute_that_has_no_view_to_choose_is_refused() {
+    let entity_scope = with_group(
+        "\n[[attribute]]\nname = \"weight\"\ntype = \"f32\"\nindex = true\n\
+         source = \"other\"\nfields = { view = \"quarter\" }\n",
+    );
+    assert!(
+        err(&entity_scope).contains("entity scope"),
+        "{}",
+        err(&entity_scope)
+    );
+
+    let no_source = with_group(
+        "\n[[attribute]]\nname = \"sentiment\"\ntype = \"f32\"\n\
+         scope = { group = \"quarter\" }\nindex = true\nfields = { view = \"quarter\" }\n",
+    );
+    assert!(
+        err(&no_source).contains("there is no `source` here"),
+        "{}",
+        err(&no_source)
+    );
+
+    let stray = with_group(
+        "\n[[attribute]]\nname = \"sentiment\"\ntype = \"f32\"\n\
+         scope = { group = \"quarter\" }\nindex = true\nsource = \"other\"\n\
+         fields = { entity_id = \"doc\" }\n",
+    );
+    assert!(
+        err(&stray).contains("`fields.entity_id` is not a field"),
+        "{}",
+        err(&stray)
+    );
+}
+
+/// **A scoped `text` column must be indexed**: the record blob is one bundle-wide list addressed
+/// by a column's position in it, and a family has no position — so the token index is the only
+/// home its prose has, and a declaration without one stores nothing at all.
+#[test]
+fn a_scoped_text_column_without_an_index_is_refused() {
+    let text = with_group(
+        "\n[[attribute]]\nname = \"note\"\ntype = \"text\"\n\
+         scope = { group = \"quarter\" }\n",
+    );
+    let message = err(&text);
+    assert!(message.contains("`index = true`"), "{message}");
+    assert!(message.contains("record blob"), "{message}");
 }
 
 /// A layer may be drawn on a whole group, and a **scoped** layer only on that group's views.

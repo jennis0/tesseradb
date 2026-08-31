@@ -47,7 +47,7 @@ use common::*;
 use parquet::arrow::ArrowWriter;
 use serde_json::{json, Value};
 use tempfile::TempDir;
-use tessera_build::config::{AccessInput, AccessSource, Attribute, Fields};
+use tessera_build::config::{AccessInput, AccessSource, Attribute, Fields, ValueSet};
 use tessera_build::{
     build, BuildArgs, GroupDescriptor, GroupViewDescriptor, Quantisation, ScopedColumnFamily,
     ViewArgs,
@@ -97,6 +97,13 @@ fn position(view: &str, e: u64) -> (f64, f64) {
     }
 }
 
+/// `mood`'s value set, and the word each view's prose carries.
+const MOODS: [&str; 3] = ["calm", "tense", "wild"];
+
+/// The analyser identity the manifest records for the text family — spelt here because this
+/// fixture is built programmatically rather than parsed from TOML.
+const ANALYSER: &str = "unicode/icu4x-2.2/p1";
+
 /// The `sentiment` value an entity carries in the `sealed` view at `ordinal`, or `None` where it
 /// carries none.
 fn sentiment(ordinal: usize, e: u64) -> Option<f32> {
@@ -106,8 +113,20 @@ fn sentiment(ordinal: usize, e: u64) -> Option<f32> {
     }
 }
 
+/// The `mood` value an entity carries in the `sealed` view at `ordinal` — the **category** family,
+/// which owes per-view postings and a `/v1/categories` value list besides.
+fn mood(ordinal: usize, e: u64) -> &'static str {
+    MOODS[((e + ordinal as u64) % MOODS.len() as u64) as usize]
+}
+
+/// The prose an entity carries there — the **text** family, whose only artefacts are a per-view
+/// token dictionary and the postings over it.
+fn note(ordinal: usize, e: u64) -> String {
+    format!("sealed {} note for {e}", MOODS[ordinal % MOODS.len()])
+}
+
 /// A points file: geometry, the entity's own access label, and — for a view of `sealed` — that
-/// view's own `sentiment` column.
+/// view's own columns of the three scoped families.
 fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>, scoped: Option<usize>) {
     let mut fields = vec![
         Field::new("entity_id", DataType::UInt64, false),
@@ -117,6 +136,8 @@ fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>, scoped: Opti
     ];
     if scoped.is_some() {
         fields.push(Field::new("sentiment", DataType::Float32, true));
+        fields.push(Field::new("mood", DataType::Utf8, true));
+        fields.push(Field::new("note", DataType::Utf8, true));
     }
     let schema = Arc::new(Schema::new(fields));
     let ids: Vec<u64> = ids.collect();
@@ -137,6 +158,12 @@ fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>, scoped: Opti
             ids.iter()
                 .map(|&e| sentiment(ordinal, e))
                 .collect::<Vec<_>>(),
+        )));
+        columns.push(Arc::new(StringArray::from(
+            ids.iter().map(|&e| mood(ordinal, e)).collect::<Vec<_>>(),
+        )));
+        columns.push(Arc::new(StringArray::from(
+            ids.iter().map(|&e| note(ordinal, e)).collect::<Vec<_>>(),
         )));
     }
     let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
@@ -170,6 +197,15 @@ fn view_args(view: &str, points: &Path, visibility: Option<&str>) -> ViewArgs {
             default: "public".to_string(),
         },
         visibility: visibility.map(str::to_string),
+    }
+}
+
+fn sealed_family(attribute: Attribute, views: Vec<usize>) -> ScopedColumnFamily {
+    ScopedColumnFamily {
+        attribute,
+        group: "sealed".to_string(),
+        views,
+        source: None,
     }
 }
 
@@ -238,21 +274,53 @@ fn build_gated(dir: &Path) -> std::path::PathBuf {
                 scoped_scalars: Vec::new(),
             },
         ],
-        scoped_attributes: vec![ScopedColumnFamily {
-            attribute: Attribute {
-                name: "sentiment".to_string(),
-                title: None,
-                field: None,
-                ty: ScalarType::F32,
-                analyser: None,
-                vocabulary: None,
-                value_set: None,
-                index: true,
-                render: false,
-            },
-            group: "sealed".to_string(),
-            views: family_views,
-        }],
+        // **Three families, one gate.** The collapse is one site ahead of the pin/bare split
+        // (`views.md` §5), so a second family taking a different answer from the first would be
+        // the defect this fixture exists to catch.
+        scoped_attributes: vec![
+            sealed_family(
+                Attribute {
+                    name: "sentiment".to_string(),
+                    title: None,
+                    field: None,
+                    ty: ScalarType::F32,
+                    analyser: None,
+                    vocabulary: None,
+                    value_set: None,
+                    index: true,
+                    render: false,
+                },
+                family_views.clone(),
+            ),
+            sealed_family(
+                Attribute {
+                    name: "mood".to_string(),
+                    title: None,
+                    field: None,
+                    ty: ScalarType::U8,
+                    analyser: None,
+                    vocabulary: Some("mood".to_string()),
+                    value_set: Some(ValueSet::Closed),
+                    index: true,
+                    render: false,
+                },
+                family_views.clone(),
+            ),
+            sealed_family(
+                Attribute {
+                    name: "note".to_string(),
+                    title: None,
+                    field: None,
+                    ty: ScalarType::Text,
+                    analyser: Some(ANALYSER.to_string()),
+                    vocabulary: None,
+                    value_set: None,
+                    index: true,
+                    render: false,
+                },
+                family_views.clone(),
+            ),
+        ],
         attribute_sources: Vec::new(),
         out: out.clone(),
         limit: None,
@@ -268,7 +336,29 @@ fn build_gated(dir: &Path) -> std::path::PathBuf {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema: tessera_build::config::Schema {
+            attributes: Vec::new(),
+            // The value set `mood`'s codes index. `public`, so the list is authored and
+            // `/v1/categories` filters nothing — which is what makes the gate the *only* thing
+            // that can withhold it from the outsider below.
+            vocabularies: std::collections::HashMap::from([(
+                "mood".to_string(),
+                tessera_build::config::Vocabulary {
+                    name: "mood".to_string(),
+                    title: None,
+                    value_set: ValueSet::Closed,
+                    visibility: tessera_build::config::Visibility::Public,
+                    width: ScalarType::U8,
+                    codes: MOODS
+                        .iter()
+                        .enumerate()
+                        .map(|(i, key)| (key.to_string(), i as u32 + 1))
+                        .collect(),
+                    titles: std::collections::BTreeMap::new(),
+                    reserved: Vec::new(),
+                },
+            )]),
+        },
     })
     .expect("a gated eight-view build succeeds");
     out
@@ -697,6 +787,71 @@ async fn a_scoped_attribute_collapses_whole_outside_its_groups_gate() {
         200,
         "and a pinned leaf answers"
     );
+}
+
+/// **The collapse is one site, so a second family cannot take a different answer from the first**
+/// (`views.md` §5). `mood` is a category and `note` is text, and for a principal who cannot reach
+/// `sealed` both are undeclared exactly as `sentiment` is — absent from `filter_operands`, the
+/// unknown-column `422` for either spelling, and for the category the same `404`
+/// `/v1/categories` gives a name that is nothing at all. A category is the family where getting
+/// this wrong costs most: its value list is a second surface, and one gated at the filter and not
+/// at the list would publish a gated group's value names to anyone with a session.
+#[tokio::test]
+async fn the_category_and_text_families_collapse_at_the_same_site() {
+    let served = serve().await;
+    let outsider = token(&served, &[]).await;
+    let holder = token(&served, &["finance"]).await;
+
+    let operands = |m: &Value| -> Vec<String> {
+        m["filter_operands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["column"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let held = operands(&meta(&served, &holder).await);
+    let out = operands(&meta(&served, &outsider).await);
+    for column in ["mood", "note"] {
+        assert!(held.contains(&column.to_string()), "{column}: {held:?}");
+        assert!(!out.contains(&column.to_string()), "{column}: {out:?}");
+    }
+
+    for (spelling, body) in [
+        ("mood", json!({"mood": {"eq": "calm"}})),
+        ("mood@s1", json!({"mood@s1": {"eq": "calm"}})),
+        ("note", json!({"note": {"match": "calm"}})),
+        ("note@s1", json!({"note@s1": {"match": "calm"}})),
+    ] {
+        let (status, answer) = viewport(&served, &outsider, "world", Some(body)).await;
+        assert_eq!(status, 422, "{spelling}");
+        let detail = answer["detail"].as_str().unwrap_or_default().to_string();
+        assert!(
+            detail.contains("not a filterable column"),
+            "{spelling}: {detail}"
+        );
+        assert!(!detail.contains("sealed"), "{spelling}: {detail}");
+    }
+
+    // The value list, the surface a category has and no other family does. The outsider gets the
+    // `404` an unknown column gets, whichever spelling names the view; the holder gets the list.
+    let list = |token: &str, path: &str| {
+        let url = served.server.viewer_url(&format!("/v1/categories/{path}"));
+        let client = served.server.client.clone();
+        let token = token.to_string();
+        async move { client.get(url).bearer_auth(token).send().await.unwrap() }
+    };
+    for path in ["mood?view=sealed:s1", "mood@s1", "mood"] {
+        assert_eq!(
+            list(&outsider, path).await.status().as_u16(),
+            404,
+            "{path} must be unknown to a principal outside the group"
+        );
+    }
+    let resp = list(&holder, "mood?view=sealed:s1").await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["values"].as_array().unwrap().len(), MOODS.len());
 }
 
 // ---------------------------------------------------------------------------------------------

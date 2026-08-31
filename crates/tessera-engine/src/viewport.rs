@@ -1367,6 +1367,51 @@ impl EngineMeta {
         }
     }
 
+    /// Resolve a **`/v1/categories` column spelling** — [`Self::resolve_filter_column`]'s question
+    /// asked by the value-list route, whose admission is not the filter surface's.
+    ///
+    /// **A category has a value list whether or not it is filterable**, and that difference is the
+    /// whole reason this is a second function. An entity-scoped category declared with neither
+    /// `render` nor `index` is *blob-resident* (records §3): no hot column, no entity-space
+    /// structure, no operand — and `/v1/meta` still publishes its `category` block, drill-down
+    /// still returns its code, and the code still needs a key. Resolving such a name through the
+    /// filter admission would answer `404` for a column the schema declares and the rest of the
+    /// surface talks about.
+    ///
+    /// So the entity-scoped columns are resolved here **by declaration alone**, ahead of that
+    /// admission, and everything else — every group-scoped family, the gate that collapses one,
+    /// the pin, the bare leaf with nothing to decide it — falls through to
+    /// [`Self::resolve_filter_column`] unchanged. The scoped surface therefore keeps exactly one
+    /// site deciding what a principal may reach, which is what `views.md` §5 requires of it; what
+    /// is widened is only the entity-scoped half, where there is no view and no gate to widen.
+    ///
+    /// A name that is a declared *non-category* resolves to itself and its own family, and the
+    /// caller refuses it as it refuses a name that is nothing at all — this route must not become
+    /// a finer answer than `/v1/meta`'s about which columns are categories.
+    pub fn resolve_category_column(
+        &self,
+        leaf: &str,
+        view: &str,
+        visible: &crate::gate::VisibleViews,
+    ) -> LeafColumn {
+        let (name, pin) = match leaf.split_once(crate::filter::PIN) {
+            Some((name, pin)) => (name, Some(pin)),
+            None => (leaf, None),
+        };
+        if let Some(declared) = self.declared_scalars.iter().find(|d| d.name == name) {
+            return match pin {
+                None => LeafColumn::Resolved {
+                    column: name.to_string(),
+                    family: crate::filter::Family::of(declared),
+                },
+                Some(_) => LeafColumn::PinOnUnscoped {
+                    column: name.to_string(),
+                },
+            };
+        }
+        self.resolve_filter_column(leaf, view, visible)
+    }
+
     /// The key `view` holds in `group`'s roster — its own if it is a view of that group, and the
     /// key it shares if its group declares `members` of it (`views.md` §3.3). `None` for a plain
     /// view, or a view of an unrelated group.

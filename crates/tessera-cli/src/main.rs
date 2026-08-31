@@ -1594,6 +1594,7 @@ fn main() -> ExitCode {
                         })
                         .map(|(index, _)| index)
                         .collect(),
+                    source: scoped.source.clone(),
                 })
                 .collect();
             // **A layer naming a group is drawn on every view of it** (`views.md` §2, §3.5),

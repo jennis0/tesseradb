@@ -774,6 +774,7 @@ fn a_group_scoped_attribute_is_one_column_per_view_of_the_group() {
             attribute: sentiment,
             group: "quarter_alt".to_string(),
             views: vec![0, 1],
+            source: None,
         }],
         attribute_sources: Vec::new(),
         out: out.clone(),

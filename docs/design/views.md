@@ -1,7 +1,14 @@
 # Views — design
 
 **Date:** 2026-08-30
-**Status:** Normative (r19) — **first-batch-creates is withdrawn** (r19, 2026-08-31, owner
+**Status:** Normative (r20) — **every family of a group-scoped attribute answers, and such an
+attribute may declare its own `source`** (r20, 2026-08-31, owner ruling; contracts r60): §5's two
+⊘ markers are discharged. A scoped **category** carries per-view keyed postings — the filter route,
+and what `/v1/categories` derives a per-view value list from — and a scoped **text** column carries
+a per-view token dictionary and positional postings and no value column at all; a scoped `text`
+column now requires `index = true`, the record blob having no slot for a family. An attribute's own
+`source` carries one row per `(entity, view)`, routed by `fields.view`. No design changes: the
+markers do, and `render` and the ingest half stay marked. **Status:** Normative (r19) — **first-batch-creates is withdrawn** (r19, 2026-08-31, owner
 ruling): a batch naming an unknown key is a 404 for **every** group, record-less ones included;
 creation is `PUT /control/views/{group}/{key}` and nothing else. **a group with no roster mints
 its views** (r18, 2026-08-31, owner
@@ -46,7 +53,11 @@ spec §5's evaluation rule is built end to end — the family is recorded in the
 roster, `/v1/meta`'s `filter_operands` carries its scope, and a leaf resolves to one view's column
 by the request's own view or by a pin, `name@key`, with a `422` naming the group where
 nothing decides and the unknown-view `404` for a pin naming no view of it (contracts §2.2, §3.2
-r55). ⊘ Two named gaps remain at that claim: a category or text family, and `render`.
+r55). **All four families answer, and a scoped attribute may declare its own `source`** (r17,
+2026-08-31, owner ruling; contracts r60): a category's per-view postings and a text column's
+per-view dictionary and postings are written and opened, `/v1/categories` is view-addressed for a
+scoped category, and a source of the attribute's own is routed per view by `fields.view`. ⊘ What
+remains at that claim is `render`, and the ingest half.
 **the roster is served** (r12, 2026-08-31): `/v1/meta` publishes
 every view of every group with its key and typed metadata, in creation order, beside the
 groups' own orderings; every one of them answers a viewer verb, by its key
@@ -590,7 +601,8 @@ argument — a gate at some surfaces and not others is fail-open — is the rule
 **Ingest.** A batch into a group's view carries that view's values for every attribute scoped to
 the group, under the attribute's plain name; the view is known from the header, so the column
 is not qualified. At a build the attribute's own `source` carries the value and, unless that
-source is a `[[view_group.view]]` file, `fields.view` says which view each row's value is for. A
+source is a `[[view_group.view]]` file, `fields.view` says which view each row's value is for
+(built at r17; `fields.view` defaults to `view`). A
 batch into a plain view may not carry a group-scoped attribute at all: there is no view of the
 group for the value to belong to.
 
@@ -630,18 +642,49 @@ an attribute. The two are kept apart so that neither grows the other's surface.
 > a group that *does* pass resolves through the session's visible-view set, so a pin naming a view
 > this principal may not reach is the same `404` a key no view holds gets.
 >
-> ⊘ **Two things remain unbuilt, each named here.** A **category** or **text** scoped family is stored
-> and on no filter surface: the per-view postings each is answered from are not written, and a
-> category's value list is `/v1/categories`' own surface besides — the build prints what the
-> declaration did not buy. **`render` on a scoped attribute renders nothing**, in any view: the hot
-> column is per row space and a scoped column is in none of them, so the paragraph below is
-> specification and not behaviour; the build prints that too. The ingest rule is unimplemented with
-> the rest of the write half.
+> **Every family is served, built 2026-08-31** (contracts §2.2, §3.2 r59). What a view's directory
+> holds is what the family's entity-scoped counterpart holds bundle-wide: values and presence for a
+> number, those and a dictionary for a keyword, those and the keyed `postings.arrow` an `eq` or an
+> `in` is answered from for a **category**, and for **text** a token dictionary and positional
+> postings with no value column at all. Each is written by the writer the entity-scoped pass calls,
+> pointed at `attrs/<column>/<group>/<key>/`, and opened by the opener that reads it. A scoped
+> `text` column is **refused without `index = true`**: the record blob is bundle-wide and addressed
+> by a column's position in `declared_scalars`, which a family has none of, so the token index is
+> the only home its prose has — and by the same absence a scoped text value is returned by no
+> drill-down, which is the one thing its entity-scoped counterpart does that this one cannot.
 >
-> ⊘ **A scoped attribute declaring its own `source` is refused by name**: that file needs
-> `fields.view` to say which view each row's value is for, and reading it as entity space would
-> take one view's values as every view's. Declaring none — Appendix A's `sentiment`, and the
-> fixture's — is the shape that builds.
+> **A category's value list is `/v1/categories`' own surface, and it is view-addressed**
+> (contracts §3.2). One column per view is one value set per view, so the route takes the view the
+> same two ways a leaf does — `?view=<group>:<key>` for the request's own, `{column}@{key}` in the
+> path for a pin — resolved at the same site, with the same `422` naming the group where nothing
+> decides, the same unknown-view `404`, and the same collapse to the route's own unknown-column
+> answer for a principal whose group gate fails. `?view=` is resolved *before* the column is and
+> whatever the column's scope, so the gate is the route's first act rather than a check on one
+> branch of it; an entity-scoped category's list is unaffected by which view asked, but a `view`
+> naming nothing still refuses. Note the one asymmetry with the filter surface, which is the
+> vocabulary's rather than the scope's: a category has a value list whether or not it is an
+> operand, so a blob-resident one — neither `render` nor `index` — is answered here and appears in
+> no `filter_operands` entry. A `derived` vocabulary's list is then derived from
+> that view's postings inside `M_auth`: two views of one group offer two lists, and each is that
+> view's.
+>
+> **A scoped attribute may declare its own `source`, built 2026-08-31.** That file carries one row
+> per `(entity, view)` and its `fields.view` — defaulting to `view`, the same key and default a
+> scoped layer's artifacts source takes — says which view each row's value is for. Each view's
+> column is the rows whose discriminator is that view's key, selected through the same
+> `ViewSelector` form B's roster is read through: a row naming a key the roster does not carry is a
+> refusal naming the key and the roster, and a view with no rows in the file simply has no values.
+> Declaring no source — Appendix A's `sentiment`, and the fixture's — reads each view's own points
+> file and remains the shape most declarations want.
+>
+> ⊘ **`render` on a scoped attribute renders nothing**, in any view: the hot column is per row space
+> and a scoped column is in none of them, so the `Render` paragraph above is specification and not
+> behaviour; the build prints that where an operator can read it. The **ingest** rule is
+> unimplemented with the rest of the write half — a buffered row's scalars are positional against
+> `MANIFEST.declared_scalars`, which a family is deliberately absent from, so a batch naming a
+> scoped column is refused as an unknown column by construction and every column of a family is
+> the build's. A view created after the build therefore has no column of any family until one is
+> written for it, which is what `scoped_scalars[..].views` naming the views that *have* one records.
 
 ## 6. The gate
 
@@ -1031,6 +1074,19 @@ each view under spec §4's rule.
 
 ## Appendix R — review trail
 
+- **r20 (2026-08-31)** — spec §5's two ⊘ markers are discharged and no design content changed.
+  Built: a scoped **category**'s per-view keyed postings, which are both the filter route on a
+  `public` vocabulary and what `/v1/categories` derives a value list from on a `derived` one; a
+  scoped **text** column's per-view token dictionary and positional postings, that family owing no
+  value column; `/v1/categories` addressed by view — `?view=` or the pinned path — through the same
+  resolution and the same gate collapse the filter leaf takes; and an attribute's own `source`,
+  one row per `(entity, view)` routed by `fields.view`. Two refusals are new and both are
+  declaration-time: a scoped `text` column without `index = true`, whose prose would otherwise have
+  no home at all — the record blob is bundle-wide and a family has no slot in it — and `fields` on
+  an attribute with no view to choose between. Still marked, each at its claim: `render` on a
+  scoped attribute, and the ingest half, which is absent by construction rather than by omission —
+  a buffered row's scalars are positional against `MANIFEST.declared_scalars`, and a family is
+  deliberately not in it.
 - **r19 (2026-08-31)** — first-batch-creates is withdrawn (owner ruling): §3.2's exception for a
   record-less group is deleted, a batch naming an unknown key being a 404 for every group, and the
   §3.2 marker keeps only its category-metadata item. Creation is the explicit operation, so a

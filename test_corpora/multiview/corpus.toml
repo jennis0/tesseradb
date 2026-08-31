@@ -13,7 +13,8 @@
 # `prepare.py`'s docstring); `quarter`'s per-quarter layouts are synthetic, an abstract embedding
 # with no geographic meaning, which is exactly what `projection = "none"` says about it. `access`,
 # `importance` and `kind` are the GeoNames sample's own `country`, `population` and `feature_class`
-# columns, carried through unchanged. `sentiment` is synthetic throughout.
+# columns, carried through unchanged. `sentiment`, `mood`, `note` and `coverage` are synthetic
+# throughout.
 
 [sources]
 world           = "world.parquet"           # entity_id, lon, lat, access — the plain view's points
@@ -23,6 +24,7 @@ quarter_2026_q3 = "quarter-2026-Q3.parquet"
 quarter_2026_q4 = "quarter-2026-Q4.parquet"
 quarter_alt_pts = "quarter-alt.parquet"      # entity_id, quarter, lon, lat, access — form B
 attrs_constant  = "attrs-constant.parquet"   # entity_id, importance, kind
+attrs_scoped    = "attrs-scoped.parquet"     # entity_id, quarter, coverage — a scoped attribute's own source
 vocab_kind      = "vocab-kind.parquet"
 collections     = "collections.parquet"      # key, contents, members, access
 clusters_q      = "clusters-quarter.parquet" # key, quarter, contents, members
@@ -177,6 +179,45 @@ type   = "f32"
 scope  = { group = "quarter" }
 index  = true
 render = true
+
+# The category and text families of the same scope (spec §5): `mood`'s per-view postings answer an
+# `eq`/`in` and are what `/v1/categories` derives its per-view value list from; `note`'s per-view
+# token dictionary and postings answer a `match` and are its only home — the record blob is one
+# bundle-wide list with no slot for a family, which is why `index = true` is required on it.
+[[vocabulary]]
+name       = "mood"
+title      = "Mood"
+width      = "u8"
+value_set  = "closed"
+# `derived`, unlike `kind` above: a value is offered only where a visible entity carries it, so the
+# list is a per-(principal, view) answer rather than an authored one.
+visibility = "derived"
+values     = ["calm", "tense", "wild", "still"]
+
+[[attribute]]
+name       = "mood"
+type       = "category"
+vocabulary = "mood"
+scope      = { group = "quarter" }
+index      = true
+
+[[attribute]]
+name  = "note"
+type  = "text"
+scope = { group = "quarter" }
+index = true
+
+# The other way a scoped family's values arrive (spec §5): one file, one row per (entity, view),
+# and `fields.view` naming the discriminator that says which view each row's value is for. The
+# families above read each quarter's own points file; this one reads this file under each view's
+# key, which is the same selection form B's roster is read through.
+[[attribute]]
+name   = "coverage"
+type   = "f32"
+scope  = { group = "quarter" }
+index  = true
+source = "attrs_scoped"
+fields = { view = "quarter" }
 
 # ---------------------------------------------------------------------------------------------
 # Two layers: one unscoped, drawn on the plain view and on every quarter alike (spec §3.5's

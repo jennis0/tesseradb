@@ -151,11 +151,12 @@ pub struct ViewArgs {
 /// One group-scoped attribute, and the views of its group whose values this build reads
 /// (`views.md` §5).
 ///
-/// **The values are the views' own.** Where the attribute declares no source of its own — the
-/// only shape the build reads today — each view's column is read from that view's points file,
-/// which for a form B group is the group's shared source under that view's own selection. So the
-/// family needs no file of its own: it names the views, and each view already says where its rows
-/// are.
+/// **The values are the views' own**, read one of two ways. Where the attribute declares no source
+/// of its own, each view's column is read from that view's points file — which for a form B group
+/// is the group's shared source under that view's own selection — so the family needs no file of
+/// its own: it names the views, and each view already says where its rows are. Where it declares
+/// one, that file carries one row per `(entity, view)` and its `fields.view` discriminator says
+/// which view each row's value is for.
 #[derive(Debug, Clone)]
 pub struct ScopedColumnFamily {
     /// The column, exactly as an entity-scoped one is declared.
@@ -164,6 +165,10 @@ pub struct ScopedColumnFamily {
     pub group: String,
     /// Indices into [`BuildArgs::views`], one per view of that group, in registry order.
     pub views: Vec<usize>,
+    /// The attribute's **own** source (`views.md` §5), or `None` to read each view's column from
+    /// that view's points file. The keys a stray discriminator value is refused against are the
+    /// group's own and are derived from `views` rather than carried, so the two cannot disagree.
+    pub source: Option<crate::config::ScopedAttributeFile>,
 }
 
 /// One layer whose artifacts are a different set per view of a group (`views.md` §3.5).

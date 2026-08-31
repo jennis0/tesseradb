@@ -384,6 +384,29 @@ async fn meta(
                     "family": family.as_str(),
                     "operands": family.operands(),
                     "scope": {"group": f.group},
+                    // **A scoped category's vocabulary, here and not in `declared_scalars`**,
+                    // which is the entity-scoped list and has no slot for a family (contracts
+                    // §2.2). A client draws a dropdown from `/v1/categories/{column}` and needs
+                    // the same three facts an entity-scoped category's entry gives it: which value
+                    // set the codes index, whether it is closed or discovered, and whether the
+                    // list is authored or derived per principal. Deployment schema, identical for
+                    // every principal who can reach the group at all — the same class as `family`
+                    // beside it. `null` for every other family, which has no value set.
+                    "category": f.vocabulary.as_deref().and_then(|name| {
+                        let vocabulary = meta.vocabularies.get(name)?;
+                        Some(serde_json::json!({
+                            "vocabulary": name,
+                            "kind": match vocabulary.kind() {
+                                tessera_engine::VocabularyKind::Declared => "declared",
+                                tessera_engine::VocabularyKind::Discovered => "discovered",
+                            },
+                            "visibility": vocabulary.visibility().as_str(),
+                        }))
+                    }),
+                    // The analyser a scoped `text` family's terms were produced by, for the reason
+                    // `declared_scalars` publishes one: an empty `match` is otherwise
+                    // indistinguishable from a query that segmented differently from the index.
+                    "analyser": f.analyser,
                 })
             })
         ).collect::<Vec<_>>(),
@@ -503,6 +526,16 @@ async fn meta(
 /// `GET /v1/categories/{column}`'s query string.
 #[derive(Debug, Deserialize)]
 struct CategoriesQuery {
+    /// **The request's own view**, for a group-scoped category (`views.md` §5): one column per
+    /// view means one value set per view, so the view is part of the address exactly as it is for
+    /// a filter leaf naming the family. Absent is the ordinary case — an entity-scoped column has
+    /// one value set for the corpus and no view decides anything about it — and a scoped column
+    /// named bare with no view is the same `422` a bare leaf takes.
+    ///
+    /// Resolved through the session's visible-view set before it decides anything, so it is the
+    /// same 404 a viewer verb gives a view this principal may not reach.
+    #[serde(default)]
+    view: Option<String>,
     /// Comma-separated codes to resolve. Present means bulk lookup; absent means enumerate.
     #[serde(default)]
     codes: Option<String>,
@@ -537,6 +570,59 @@ async fn categories(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let token = bearer_token(&headers).ok_or(ApiError::BadCredential)?;
     let entry = state.authenticated_session(token)?;
+
+    // **The column, resolved the way a filter leaf naming it is resolved** (`views.md` §5): an
+    // entity-scoped column is its own name and takes no view; a group-scoped family resolves to
+    // one view's column, by the request's own view or by a pin, `sentiment@2026-Q3`. One site and
+    // one gate for the scoped half of both surfaces — a value list served for a group whose gate
+    // this principal fails would be the discovery half of exactly what the filter parse refuses.
+    //
+    // `resolve_category_column` and not the filter's own: a category has a value list whether or
+    // not it is an *operand*, and a blob-resident one — neither `render` nor `index`, the default
+    // placement — is exactly that. It resolves the entity-scoped names by declaration, ahead of
+    // the filter admission, and hands everything scoped to the one site unchanged.
+    //
+    // The request's view is itself resolved through the visible-view set first, so a principal who
+    // may reach the *group* but not one of its views cannot name that view here and read its
+    // column: without that the `view` parameter would be a route around the per-view gate that the
+    // viewport route closes.
+    let meta = state.engine.meta();
+    let visible = &entry.session.visible_views;
+    let view = match query.view.as_deref() {
+        None => "",
+        Some(requested) => match meta.resolve_visible_view(requested, visible) {
+            Some(view) => view.id.as_str(),
+            None => return Err(ApiError::Unknown(format!("unknown view '{requested}'"))),
+        },
+    };
+    let resolved = match meta.resolve_category_column(&column, view, visible) {
+        // A non-category column is the same `404` a name that is nothing at all gets, which is
+        // this route's own rule and the reason it cannot be used to probe which columns are
+        // categories beyond what `/v1/meta` already says.
+        tessera_engine::LeafColumn::Resolved {
+            column,
+            family: tessera_engine::filter::Family::Category,
+        } => column,
+        tessera_engine::LeafColumn::Unpinned { group } => {
+            return Err(ApiError::Contract(format!(
+                "'{column}' is scoped to view group '{group}' and this request names no view of \
+                 it, so the name decides no value set. Pass `view=` a view of that group, or pin \
+                 the one it means — '{column}@<key>'"
+            )))
+        }
+        tessera_engine::LeafColumn::UnknownPin { group, pin } => {
+            return Err(ApiError::Unknown(format!(
+                "unknown view '{pin}' of group '{group}'"
+            )))
+        }
+        tessera_engine::LeafColumn::PinOnUnscoped { column } => {
+            return Err(ApiError::Contract(format!(
+                "'{column}' is not scoped to a view group, so there is nothing for the pin to \
+                 choose between: it is one value set for the corpus"
+            )))
+        }
+        _ => return Err(ApiError::Unknown("unknown category column".to_string())),
+    };
 
     // Clamped, not refused: the ceiling is a response bound rather than a disclosure control, so a
     // caller asking for more than the deployment serves gets the deployment's answer plus a cursor
@@ -579,12 +665,16 @@ async fn categories(
 
     let page = state
         .engine
-        .categories(&entry.session, &column, query)
+        .categories(&entry.session, &resolved, query)
         .map_err(map_engine_error)?
         .ok_or_else(|| ApiError::Unknown("unknown category column".to_string()))?;
 
     Ok(Json(serde_json::json!({
-        "column": page.column,
+        // **The caller's own spelling**, not the resolved one: a scoped family's resolved column
+        // is an engine-internal name (`sentiment@quarter:2026-Q3`) that no request writes, and
+        // echoing it would publish a second address for a column whose address is its name plus a
+        // view.
+        "column": column,
         "values": page.values.iter().map(|v| serde_json::json!({
             "code": v.code,
             "key": v.key,
@@ -1115,10 +1205,20 @@ fn run_viewport_stream(
     let filter = match &req.filters {
         None => None,
         Some(value) => {
+            // **Keyed by the leaf's bare name**, the entity-scoped columns and the group-scoped
+            // families alike: a family's columns are one declaration and share one vocabulary, so
+            // a key resolves to the same code whichever view's column reads it. Names are unique
+            // across the two lists — the build refuses a family sharing a declared column's name —
+            // so one map cannot answer two things.
             let vocab_of: std::collections::HashMap<&str, &str> = meta
                 .declared_scalars
                 .iter()
                 .filter_map(|d| Some((d.name.as_str(), d.vocabulary.as_deref()?)))
+                .chain(
+                    meta.scoped_scalars
+                        .iter()
+                        .filter_map(|f| Some((f.name.as_str(), f.vocabulary.as_deref()?))),
+                )
                 .collect();
             // A `region` leaf is canonicalised here, against the view's own extent — the one
             // `/v1/meta` publishes — so the engine sees a grid-unit shape and the vertex cap and
@@ -1143,7 +1243,14 @@ fn run_viewport_stream(
                 // on the discovery document (`views.md` §5).
                 &|leaf| meta.resolve_filter_column(leaf, &view_id, &session.visible_views),
                 &|column, key| {
-                    let vocabulary = vocab_of.get(column)?;
+                    // The caller's own spelling reaches here, which for a scoped family may pin a
+                    // view (`views.md` §5). The pin decides which *column* is read and never which
+                    // value set the key is in — that is the family's — so it is dropped before the
+                    // lookup rather than being a second key space.
+                    let name = column
+                        .split_once(tessera_engine::filter::PIN)
+                        .map_or(column, |(name, _)| name);
+                    let vocabulary = vocab_of.get(name)?;
                     meta.vocabularies.get(vocabulary)?.code_of(key)
                 },
                 &region,

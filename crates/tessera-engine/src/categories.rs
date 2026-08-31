@@ -11,10 +11,18 @@
 //! `finance` under `reviewing_department` may see nothing under `owner_department`. §3.2 makes
 //! that normative, so the gate is applied per column even where the values behind it are shared.
 //!
-//! **View is not part of the address**, and deliberately. Membership is an *entity-space*
-//! question and entity ids are bundle-global, so a column rendered in several views has one
-//! member set and one correct answer; adding view to the key would invent a distinction the
-//! predicate does not have.
+//! **View is not part of the address for an entity-scoped column**, and deliberately. Membership
+//! is an *entity-space* question and entity ids are bundle-global, so a column rendered in several
+//! views has one member set and one correct answer; adding view to the key would invent a
+//! distinction the predicate does not have.
+//!
+//! **A group-scoped category is the one column where it is** (`views.md` §5), and for the opposite
+//! reason: the family is one column *per view*, so two views have two value sets and two member
+//! sets, and answering either from the other would be a wrong answer rather than a redundant key.
+//! The address is the resolved column — the request's own view under a view of the group, or a pin
+//! anywhere else — resolved at the same site, through the same gate, as a filter leaf naming it.
+//! Membership stays entity space and the mask still meets it there; what the view decides is which
+//! column's postings are read.
 //!
 //! ## What is gated, and what is not
 //!
@@ -111,6 +119,32 @@ pub struct CategoryPage {
     pub next: Option<String>,
 }
 
+/// The vocabulary a **resolved** column's codes index — the entity-scoped column's own name, or one
+/// view's column of a group-scoped family (`views.md` §5), which is the `name@<group>:<key>` form
+/// `filter::scoped_column_name` mints and `EngineMeta::resolve_filter_column` returns.
+///
+/// **The caller has already resolved and gated it.** This function reads a manifest and nothing
+/// else: which spellings a principal may turn into which resolved column — the group's gate, the
+/// pin, the request's own view — is decided at the one site `views.md` §5 puts it, ahead of here.
+/// A scoped family that is on no filter surface is not a value list either: the same `index`
+/// licence decides both, so a name that resolves to nothing here is the `None` an undeclared
+/// column gets.
+fn vocabulary_of(manifest: &tessera_store::manifest::Manifest, column: &str) -> Option<String> {
+    if let Some(scalar) = manifest.declared_scalars.iter().find(|s| s.name == column) {
+        return scalar.vocabulary.clone();
+    }
+    let (name, view_id) = column.split_once(crate::filter::PIN)?;
+    manifest
+        .scoped_scalars()
+        .into_iter()
+        .find(|f| {
+            f.name == name
+                && crate::filter::scoped_is_filterable(f)
+                && f.views.iter().any(|v| v == view_id)
+        })
+        .and_then(|f| f.vocabulary)
+}
+
 impl Engine {
     /// Every category column this bundle declares, for `/v1/meta`.
     ///
@@ -144,6 +178,10 @@ impl Engine {
     /// for a name that is nothing at all and for a name that is a *plain* scalar, so the route
     /// cannot be used to probe which columns are categories beyond what `/v1/meta` already says.
     ///
+    /// **`column` is a resolved column**, which for a group-scoped family is one view's
+    /// ([`vocabulary_of`]): the caller resolves and gates the spelling a request carried before it
+    /// reaches here.
+    ///
     /// **The generation is loaded once** (lifecycle §1.1), and the bindings come from it rather
     /// than from `MANIFEST.vocabularies` directly, so a value minted since the last build — living
     /// in a `SEGMENTS-<n>.json` extension — resolves like any other. A legend missing exactly the
@@ -155,19 +193,10 @@ impl Engine {
         query: CategoryQuery<'_>,
     ) -> Result<Option<CategoryPage>> {
         let generation = self.generation.load_full();
-        let Some(scalar) = generation
-            .bundle
-            .manifest
-            .declared_scalars
-            .iter()
-            .find(|s| s.name == column)
-        else {
+        let Some(vocabulary_name) = vocabulary_of(&generation.bundle.manifest, column) else {
             return Ok(None);
         };
-        let Some(vocabulary_name) = scalar.vocabulary.as_deref() else {
-            return Ok(None);
-        };
-        let Some(vocabulary) = generation.vocabularies.get(vocabulary_name) else {
+        let Some(vocabulary) = generation.vocabularies.get(&vocabulary_name) else {
             return Ok(None);
         };
 

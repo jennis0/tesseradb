@@ -2,7 +2,8 @@
 and `corpus.toml` `prepare.py` wrote. Asserts the claims a two-view build would refuse to violate
 (views.md §4/§7's label byte-agreement, per-(entity, view) row uniqueness) and the shape claims
 this fixture exists to exercise (the entity-overlap pattern, the roster/discriminator agreement,
-the presence bitmap on the group-scoped attribute).
+the presence bitmap on each group-scoped family, and the per-view disagreement that makes a scoped
+category's value list and a scoped text column's index say anything).
 
     python -m test_corpora.multiview.validate
 """
@@ -158,6 +159,51 @@ def main() -> None:
         assert n_present > 0 and n_absent > 0, f"{q}: sentiment should have both present and absent values"
     checks += 1
     print(f"  [{checks}] sentiment (group-scoped) has both present and absent values in every quarter: OK")
+
+    # --- the category family (mood): every value is in the declared set, and the sets a quarter
+    # uses differ between quarters — which is what makes a per-view value list say anything.
+    (mood_vocab,) = [v for v in corpus["vocabulary"] if v["name"] == "mood"]
+    declared_moods = set(mood_vocab["values"])
+    used = {}
+    for q in QUARTERS:
+        values = [v for v in quarters[q]["mood"].to_pylist() if v is not None]
+        assert values, f"{q}: mood carries no value at all"
+        assert len(values) < quarters[q].num_rows, f"{q}: mood should have absent values too"
+        unknown = set(values) - declared_moods
+        assert not unknown, f"{q}: mood values outside the closed vocabulary: {unknown}"
+        used[q] = set(values)
+    assert len({frozenset(v) for v in used.values()}) > 1, (
+        "every quarter uses the same mood values, so a per-view value list would prove nothing"
+    )
+    checks += 1
+    print(f"  [{checks}] mood (group-scoped category) is closed and differs by quarter: {[sorted(used[q]) for q in QUARTERS]}")
+
+    # --- the text family (note): each quarter's prose carries its own word and no other's, so a
+    # `match` answered from the wrong view's index answers the empty set.
+    words = {q: f"the {w}" for q, w in zip(QUARTERS, ["alpha", "beta", "gamma", "delta"])}
+    for q in QUARTERS:
+        prose = [v for v in quarters[q]["note"].to_pylist() if v is not None]
+        assert prose, f"{q}: note carries no prose"
+        assert all(words[q] in p for p in prose), f"{q}: prose does not carry this quarter's word"
+        for other in QUARTERS:
+            if other != q:
+                assert not any(words[other] in p for p in prose), f"{q}: prose carries {other}'s word"
+    checks += 1
+    print(f"  [{checks}] note (group-scoped text) carries each quarter's own word and no other's: OK")
+
+    # --- a scoped attribute's own source: one row per (entity, view), the discriminator closed
+    # over the roster, and every entity it names in that quarter's own row space.
+    scoped_src = pq.read_table(out / "attrs-scoped.parquet")
+    scoped_pairs = list(zip(scoped_src["entity_id"].to_pylist(), scoped_src["quarter"].to_pylist()))
+    assert len(scoped_pairs) == len(set(scoped_pairs)), "attrs_scoped: duplicate (entity_id, quarter) pair"
+    assert set(scoped_src["quarter"].to_pylist()) == set(QUARTERS), "attrs_scoped: discriminator outside the roster"
+    for q in QUARTERS:
+        rows = {eid for eid, qq in scoped_pairs if qq == q}
+        assert rows == set(quarters[q]["entity_id"].to_pylist()), f"{q}: attrs_scoped's rows are not this view's"
+    coverage = scoped_src["coverage"].to_pylist()
+    assert any(v is None for v in coverage) and any(v is not None for v in coverage)
+    checks += 1
+    print(f"  [{checks}] attrs_scoped is one row per (entity, view) with a closed discriminator: OK")
 
     # --- typed metadata in corpus.toml: label/starts/ends on every [[view_group.view]] block ---
     (group,) = [g for g in corpus["view_group"] if g["name"] == "quarter"]
