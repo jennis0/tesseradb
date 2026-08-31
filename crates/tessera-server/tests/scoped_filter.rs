@@ -237,6 +237,9 @@ fn build_scoped(dir: &Path) -> std::path::PathBuf {
             },
             group: "quarter".to_string(),
             views: family_views,
+            // No `source` of its own: each view's column is read from that view's own points file,
+            // which is the shape most declarations want (`views.md` §5).
+            source: None,
         }],
         attribute_sources: Vec::new(),
         out: out.clone(),
