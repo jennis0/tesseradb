@@ -714,8 +714,8 @@ need arrives the design is in git.
 > spec §3.1's one-frame rule.
 >
 > **⊘ What a build still cannot enumerate is a group with no roster at all** — its keys minted
-> from the discriminator's distinct values — which refuses by name. Populating a view at ingest is
-> spec §4's join rule, still unimplemented.
+> from the discriminator's distinct values — which refuses by name. Populating a view at ingest —
+> spec §4's join rule — is built (2026-08-31), §4's own markers saying what remains inside it.
 >
 > **The registry's order is the declaration's, block kind by block kind**: the plain `[[view]]`
 > blocks in declaration order, then each `[[view_group]]` in declaration order with its views in
