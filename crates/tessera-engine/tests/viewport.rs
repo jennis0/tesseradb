@@ -789,6 +789,7 @@ fn item_drill_down_works_on_a_bundle_with_no_external_id_sidecar() {
     write_pairs_n(&tmp.path().join("pairs.parquet"), N_ITEMS);
     let args = BuildArgs {
         views: vec![tessera_build::ViewArgs {
+            visibility: None,
             view_id: "s0".to_string(),
             projection: tessera_spatial::Projection::None,
             extent: extent(),
@@ -1306,6 +1307,7 @@ fn latency_sanity_at_2_4m_p99_under_50ms() {
     if !bundle_root.join("CURRENT").exists() {
         let args = BuildArgs {
             views: vec![tessera_build::ViewArgs {
+                visibility: None,
                 view_id: "s0".to_string(),
                 projection: tessera_spatial::Projection::None,
                 // Identity extent (contracts §2.5 grid): `geometry.parquet` stores Morton codes,

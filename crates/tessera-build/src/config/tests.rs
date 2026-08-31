@@ -39,6 +39,10 @@ fn err(text: &str) -> String {
     format!("{}", parse_str(text).expect_err("expected a refusal"))
 }
 
+fn ok(text: &str) -> Config {
+    parse_str(text).expect("expected the declaration to compile")
+}
+
 /// One view, one closed vocabulary, one category over it.
 ///
 /// **`[sources]` names files nothing here reads**, and that is what a source table is: the paths
@@ -907,16 +911,29 @@ fn a_point_default_may_not_be_inherited() {
     );
 }
 
-/// A view's own gate is specified and not implemented, so it is refused rather than recorded.
+/// A view's own gate is a label the manifest records and `Engine::authorise` evaluates
+/// (`views.md` §6). What is refused is a label the plugin cannot read, or one that names no terms
+/// at all — a gate satisfied by nobody, the view being reachable by no principal including the
+/// author.
 #[test]
-fn a_views_own_visibility_is_refused_as_unbuilt() {
+fn a_views_own_visibility_is_a_label_the_plugin_can_read() {
     let text = with_line(SEVERITY, "").replace(
         "name             = \"s0\"",
         "name             = \"s0\"\nvisibility       = \"ir:analyst\"",
     );
-    let message = err(&text);
-    assert!(message.contains("specified and not built"), "{message}");
-    assert!(message.contains("views §6"), "{message}");
+    let config = ok(&text);
+    assert_eq!(
+        config.views[0].visibility.as_deref(),
+        Some("ir:analyst"),
+        "the label reaches the compiled view"
+    );
+
+    let empty = with_line(SEVERITY, "").replace(
+        "name             = \"s0\"",
+        "name             = \"s0\"\nvisibility       = \" , , \"",
+    );
+    let message = err(&empty);
+    assert!(message.contains("names no terms"), "{message}");
 }
 
 /// `public` is the documented default and the current behaviour, so writing it records nothing
@@ -3424,25 +3441,36 @@ fn a_metadata_timestamp_needs_an_offset() {
     );
 }
 
-/// A group's own gate takes the same two readings a view's does.
+/// A group's own gate and a roster record's own are stored where the evaluation reads them: the
+/// group's on the group, the record's on its view (`views.md` §6).
 #[test]
-fn a_groups_gate_and_a_roster_records_gate_are_refused_as_unbuilt() {
+fn a_groups_gate_and_a_roster_records_gate_are_both_recorded() {
     let text = with_group("").replace(
         "visibility       = \"public\"",
         "visibility       = \"ir:analyst\"",
     );
-    let message = err(&text);
-    assert!(message.contains("specified and not built"), "{message}");
+    let config = ok(&text);
+    assert_eq!(
+        config.view_groups[0].visibility.as_deref(),
+        Some("ir:analyst")
+    );
 
     let text = with_group("").replace(
         "key    = \"2026-Q2\"",
         "key    = \"2026-Q2\"\nvisibility = \"ir:analyst\"",
     );
-    assert!(
-        err(&text).contains("specified and not built"),
-        "{}",
-        err(&text)
-    );
+    let config = ok(&text);
+    let gated = config
+        .view_groups
+        .iter()
+        .filter_map(|g| match &g.roster {
+            crate::config::Roster::Inline(views) => Some(views),
+            _ => None,
+        })
+        .flatten()
+        .filter(|v| v.visibility.as_deref() == Some("ir:analyst"))
+        .count();
+    assert_eq!(gated, 1, "one roster record carries the gate, and one only");
 }
 
 #[test]

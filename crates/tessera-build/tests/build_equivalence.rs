@@ -358,6 +358,7 @@ fn write_attributed_points(path: &Path) {
 fn args_for(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
     BuildArgs {
         views: vec![tessera_build::ViewArgs {
+            visibility: None,
             view_id: "s0".to_string(),
             projection: tessera_spatial::Projection::None,
             extent: extent(),
@@ -1022,6 +1023,7 @@ fn reference_build_at_scale() {
     let _ = std::fs::remove_dir_all(&out);
     let report = build_in_memory(&BuildArgs {
         views: vec![tessera_build::ViewArgs {
+            visibility: None,
             view_id: "s0".to_string(),
             projection: tessera_spatial::Projection::None,
             extent: Bounds {

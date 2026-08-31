@@ -646,6 +646,7 @@ components:
           description: The identity set the `tessera_id`s were minted under. The identity **key** appears in no response on any plane.
         views:
           type: array
+          description: "The views this principal may reach, in serving order. **Per-principal**: a view whose own `visibility` label — or whose group's — the principal does not satisfy is absent, and naming it on a viewer verb is the same `404` a name nobody declared gets (`views.md` §6). Ordinals are **not** densified: a gap means a view exists there that this principal may not reach, which is accepted (decision 0110)."
           items:
             type: object
             additionalProperties: false
@@ -711,7 +712,7 @@ components:
                       type: [boolean, number, string]
         groups:
           type: array
-          description: "The view groups, in manifest order, each listing its view ids in ordinal order — what lets a client offer previous-and-next without interpreting a key. A group is not a view: it cannot be named on a viewer verb (`views.md` §3.1). Empty where the declaration carries plain views alone."
+          description: "The view groups this principal may reach, in manifest order, each listing its reachable view ids in ordinal order — what lets a client offer previous-and-next without interpreting a key. A group is not a view: it cannot be named on a viewer verb (`views.md` §3.1). **Per-principal**: a group whose gate the principal fails is absent, and takes its whole roster with it (`views.md` §6). Empty where the declaration carries plain views alone."
           items:
             type: object
             additionalProperties: false
@@ -733,7 +734,7 @@ components:
             $ref: "#/components/schemas/DeclaredScalar"
         filter_operands:
           type: array
-          description: The columns a request may filter on and each one's operator names. `family` is what tells a client which control to draw — a category has a value set `/v1/categories/{column}` fills; a keyword has none. `scope` is present only on a **group-scoped** attribute, whose values differ per view of the group it names.
+          description: "The columns a request may filter on and each one's operator names. `family` is what tells a client which control to draw — a category has a value set `/v1/categories/{column}` fills; a keyword has none. `scope` is present only on a **group-scoped** attribute, whose values differ per view of the group it names. **Per-principal in its scoped entries**: a family whose group this principal cannot reach is omitted, and a leaf naming it — bare or pinned — is the ordinary unknown-column `422` (`views.md` §5, §6)."
           items:
             type: object
             additionalProperties: false
@@ -767,7 +768,7 @@ components:
           $ref: "#/components/schemas/Selection"
         layers:
           type: array
-          description: The annotation layers this principal may know exist, and what each declared. **The only per-principal field on this document.** Never the artifact cardinality.
+          description: The annotation layers this principal may know exist, and what each declared. Per-principal, as `views`, `groups` and `filter_operands`' scoped entries are; each layer's own `views` list is filtered by the view gate too. Never the artifact cardinality.
           items:
             $ref: "#/components/schemas/Layer"
 

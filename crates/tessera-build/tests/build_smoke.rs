@@ -184,6 +184,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
 
     let args = BuildArgs {
         views: vec![tessera_build::ViewArgs {
+            visibility: None,
             view_id: "s0".to_string(),
             projection: tessera_spatial::Projection::None,
             extent: extent(),
@@ -487,6 +488,7 @@ fn build_refuses_to_clobber_an_existing_bundle() {
     write_pairs(&pairs);
     let args = BuildArgs {
         views: vec![tessera_build::ViewArgs {
+            visibility: None,
             view_id: "s0".to_string(),
             projection: tessera_spatial::Projection::None,
             extent: extent(),
@@ -532,6 +534,7 @@ fn build_rejects_an_empty_selection() {
     write_pairs(&pairs);
     assert!(build(&BuildArgs {
         views: vec![tessera_build::ViewArgs {
+            visibility: None,
             view_id: "s0".to_string(),
             projection: tessera_spatial::Projection::None,
             extent: extent(),
@@ -577,6 +580,7 @@ fn morton_input_requires_the_identity_extent() {
 
     let args = |extent| BuildArgs {
         views: vec![tessera_build::ViewArgs {
+            visibility: None,
             view_id: "s0".to_string(),
             projection: tessera_spatial::Projection::None,
             extent,
@@ -633,6 +637,7 @@ fn morton_input_requires_the_identity_extent() {
     let out = tmp.path().join("bundle-ok");
     build(&BuildArgs {
         views: vec![tessera_build::ViewArgs {
+            visibility: None,
             view_id: "s0".to_string(),
             projection: tessera_spatial::Projection::None,
             extent: identity,
@@ -688,6 +693,7 @@ fn build_rejects_an_unsafe_view_id() {
     write_pairs(&pairs);
     assert!(build(&BuildArgs {
         views: vec![tessera_build::ViewArgs {
+            visibility: None,
             view_id: "../escape".to_string(),
             projection: tessera_spatial::Projection::None,
             extent: extent(),
@@ -742,6 +748,7 @@ fn limit_filters_the_source_entity_id_prefix() {
 
     let report = build(&BuildArgs {
         views: vec![tessera_build::ViewArgs {
+            visibility: None,
             view_id: "s0".to_string(),
             projection: tessera_spatial::Projection::None,
             extent: extent(),
@@ -790,6 +797,7 @@ fn verify_accepts_a_freshly_built_bundle() {
 
     build(&BuildArgs {
         views: vec![tessera_build::ViewArgs {
+            visibility: None,
             view_id: "s0".to_string(),
             projection: tessera_spatial::Projection::None,
             extent: extent(),
@@ -841,6 +849,7 @@ fn verify_rejects_a_columns_file_whose_tessera_ids_do_not_match_the_key() {
 
     let report = build(&BuildArgs {
         views: vec![tessera_build::ViewArgs {
+            visibility: None,
             view_id: "s0".to_string(),
             projection: tessera_spatial::Projection::None,
             extent: extent(),
@@ -1157,6 +1166,7 @@ fn entity_ids_break_signature_ties_on_the_morton_code() {
 
         let args = BuildArgs {
             views: vec![tessera_build::ViewArgs {
+                visibility: None,
                 view_id: "s0".to_string(),
                 projection: tessera_spatial::Projection::None,
                 extent: tessera_build::input::IDENTITY_EXTENT,

@@ -152,6 +152,7 @@ fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>, ordinal: Opt
 
 fn view_args(view: &str, points: &Path, pairs: &Path) -> ViewArgs {
     ViewArgs {
+        visibility: None,
         view_id: view.to_string(),
         projection: tessera_spatial::Projection::None,
         extent: extent(),
@@ -204,6 +205,7 @@ fn build_scoped(dir: &Path) -> std::path::PathBuf {
         anchor: 0,
         groups: vec![
             GroupDescriptor {
+                visibility: None,
                 name: "quarter".to_string(),
                 members_of: None,
                 views: roster(),
@@ -215,6 +217,7 @@ fn build_scoped(dir: &Path) -> std::path::PathBuf {
                 scoped_scalars: Vec::new(),
             },
             GroupDescriptor {
+                visibility: None,
                 name: "quarter_alt".to_string(),
                 members_of: Some("quarter".to_string()),
                 views: roster(),

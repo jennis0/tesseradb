@@ -79,6 +79,7 @@ fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>) {
 
 fn view_args(view: &str, points: &Path, pairs: &Path) -> ViewArgs {
     ViewArgs {
+        visibility: None,
         view_id: view.to_string(),
         projection: tessera_spatial::Projection::None,
         extent: extent(),
@@ -165,6 +166,7 @@ render = true
         anchor: 0,
         groups: vec![
             GroupDescriptor {
+                visibility: None,
                 scoped_scalars: Vec::new(),
                 name: "quarter".to_string(),
                 members_of: None,
@@ -185,6 +187,7 @@ render = true
                 views: roster(true),
             },
             GroupDescriptor {
+                visibility: None,
                 scoped_scalars: Vec::new(),
                 name: "quarter_map".to_string(),
                 members_of: Some("quarter".to_string()),
@@ -243,6 +246,18 @@ async fn open(tmp: TempDir) -> Served {
     let auth = authorise(&server, &["0", "1"]).await;
     let token = auth["token"].as_str().unwrap().to_string();
     Served { server, token, tmp }
+}
+
+/// **Take a fresh session** (`views.md` §6). The visible-view set is resolved once at authorise
+/// and is fixed for the session's life, so a view created since is a 404 to a session that
+/// predates it — deliberately, and the owner's ruling. A test that creates a view and then reads
+/// it therefore re-authorises first, exactly as a client would; `tests/views_gate.rs` is where
+/// the *not*-re-authorising case is asserted.
+async fn reauthorise(served: &mut Served) {
+    served.token = authorise(&served.server, &["0", "1"]).await["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
 }
 
 /// Reopen the same bundle and the same WAL — the restart every durability claim below is made
@@ -437,7 +452,7 @@ fn view_ids(meta: &Value) -> Vec<String> {
 /// from the segments manifest and the log.
 #[tokio::test]
 async fn a_created_view_is_served_ingested_flushed_and_survives_a_restart() {
-    let served = serve().await;
+    let mut served = serve().await;
 
     let resp = create(
         &served,
@@ -453,6 +468,9 @@ async fn a_created_view_is_served_ingested_flushed_and_survives_a_restart() {
         body["ordinal"], 1,
         "the ordinal continues the build's roster rather than restarting at 0"
     );
+    // The visible-view set is fixed per session (`views.md` §6), so a reader of the newly created
+    // view takes a new session, exactly as a client would.
+    reauthorise(&mut served).await;
 
     // On `/v1/meta`, in ordinal order, with its typed record — and on the sharing group too,
     // because keys and ordinals belong to the group that owns them (`views.md` §3.3).
@@ -591,12 +609,13 @@ async fn a_create_refuses_a_taken_key_a_bad_key_a_wrong_record_and_an_unknown_gr
             &served,
             "quarter",
             "2026-Q5",
-            json!({ "visibility": "finance", "metadata": { "label": "Q5", "starts": 1 } })
+            json!({ "visibility": " , , ", "metadata": { "label": "Q5", "starts": 1 } })
         )
         .await
         .status(),
         422,
-        "no gate is evaluated (views §6), so a label would be a control accepted and never enforced"
+        "a gate naming no terms is satisfied by nobody, so the view would be reachable by no \
+         principal at all (views §6)"
     );
 
     // None of the refusals created anything, and the ordinal they would have taken is still free.
@@ -681,13 +700,16 @@ async fn a_drop_burns_the_key_and_the_ordinal_and_survives_a_restart() {
 /// update — and the arms below are the ways a caller could try to make it an update by accident.
 #[tokio::test]
 async fn a_known_external_id_joins_a_second_view_and_is_placed_in_each() {
-    let served = serve().await;
+    let mut served = serve().await;
     assert_eq!(
         create(&served, "quarter", "2026-Q5", q_record("Q5", 1))
             .await
             .status(),
         201
     );
+    // The visible-view set is fixed per session (`views.md` §6), so a reader of the
+    // newly created view takes a new session, exactly as a client would.
+    reauthorise(&mut served).await;
 
     let id = b"joiner".to_vec();
     assert_eq!(
@@ -841,13 +863,16 @@ async fn a_join_refuses_a_second_row_a_relabel_and_a_changed_attribute() {
 /// the suppressed entity creates no copy. **The suppression retires only by unsuppress** (Rule S).
 #[tokio::test]
 async fn a_suppressed_holder_joins_a_view_and_stays_hidden_until_it_is_unsuppressed() {
-    let served = serve().await;
+    let mut served = serve().await;
     assert_eq!(
         create(&served, "quarter", "2026-Q5", q_record("Q5", 1))
             .await
             .status(),
         201
     );
+    // The visible-view set is fixed per session (`views.md` §6), so a reader of the
+    // newly created view takes a new session, exactly as a client would.
+    reauthorise(&mut served).await;
     let id = b"hidden".to_vec();
     let resp = ingest(&served, "first", "world", &[(id.clone(), 10.0, 10.0, "0", Some(7))]).await;
     assert_eq!(resp.status(), 200);

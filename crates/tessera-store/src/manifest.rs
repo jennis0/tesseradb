@@ -465,6 +465,24 @@ pub struct ViewDescriptor {
     /// as `none` is the misread again.
     #[serde(with = "projection_name")]
     pub projection: Projection,
+    /// **This view's own gate** (`views.md` §6): an access label a principal must satisfy to reach
+    /// the view at all, or `None` for `public` — the label every principal holds by construction
+    /// ([decision 0088](../../../docs/decisions/0088-visibility-is-two-axes-and-the-membership-test-is-one.md)),
+    /// which is why the ordinary case stores nothing rather than storing the word.
+    ///
+    /// **The one input the gate evaluation reads for a view's own half.** For a view of a group
+    /// this is the roster record's own label ([`GroupViewDescriptor::visibility`]) and the two are
+    /// checked equal at [`Manifest::validate_groups`], on the discipline
+    /// [`ScopedScalar::group`] already sets: the roster is what `/v1/meta` publishes and this is
+    /// what `Engine::authorise` evaluates, so a manifest whose two copies disagree refuses at open
+    /// rather than serving a view under a gate nobody wrote. The group's own half is
+    /// [`GroupDescriptor::visibility`], and the two are conjunctive — a view's gate narrows its
+    /// group's and never widens it.
+    ///
+    /// **Required, not `default`.** A gate that went missing would read as `public`, which is the
+    /// one direction a disclosure control must not fail in; a manifest omitting it is malformed
+    /// rather than ungated. No bundle predates the field (decision 0048).
+    pub visibility: Option<String>,
 }
 
 /// `groups` entry: one view group and its roster (`views.md` §3.1, §3.2).
@@ -500,6 +518,17 @@ pub struct GroupDescriptor {
     /// a `members` group, whose metadata belongs to the owner, and on a group whose views carry
     /// none — which is the one group a first ingest batch may create a view of (`views.md` §3.2).
     pub metadata: Vec<GroupMetadataField>,
+    /// **The group's gate, the outer bound over every view of it** (`views.md` §6): a view of a
+    /// group is reachable only where its group is, so this is conjunctive with each view's own
+    /// label and a view gate can narrow it and can never widen it — the relation decision 0089
+    /// gives an artifact to its layer, and the I12 direction. `None` is `public`.
+    ///
+    /// **A `members` group carries its own**, not the owner's: two groups sharing one key set are
+    /// two layouts, and which principals may see each layout is a fact about the layout
+    /// (`views.md` §3.3).
+    ///
+    /// Required, for the reason [`ViewDescriptor::visibility`] gives.
+    pub visibility: Option<String>,
     /// The roster, in ordinal order.
     pub views: Vec<GroupViewDescriptor>,
     /// The **group-scoped attribute column families** this group owns (`views.md` §5): one
@@ -575,12 +604,13 @@ pub struct GroupViewDescriptor {
     /// Creation order within the group — monotone, never reused, an alias for the key. At a build
     /// this is roster order (`views.md` §3.2).
     pub ordinal: u32,
-    /// This view's own gate; `None` takes the group's.
+    /// This view's own gate, as the roster records it and as `/v1/meta` publishes the roster;
+    /// `None` is `public` (`views.md` §6).
     ///
-    /// ⊘ **Recorded and never evaluated** (`views.md` §6). No gate is evaluated anywhere and no
-    /// visible-view set exists, so a reader must not count this as a means of restricting
-    /// reachability; the declaration refuses a non-`public` label, which is why every entry a
-    /// build writes is `None`.
+    /// **Evaluated through [`ViewDescriptor::visibility`], which carries the same label**, the two
+    /// being checked equal at [`Manifest::validate_groups`]: one input decides a view's own half
+    /// of the gate whether the view is a plain one or a group's, and the copy that would otherwise
+    /// drift is refused at open instead.
     pub visibility: Option<String>,
     /// The typed per-view values this view carries, one per name the owning group declared.
     /// Empty on a `members` group's views, whose metadata belongs to the owner.
@@ -704,11 +734,26 @@ impl Manifest {
             }
             for view in &group.views {
                 let id = format!("{}{}{}", group.name, crate::GROUP_SEPARATOR, view.key);
-                if !self.views.iter().any(|v| v.id == id) {
+                let Some(descriptor) = self.views.iter().find(|v| v.id == id) else {
                     return Err(format!(
                         "the roster of group '{}' names view '{id}', which the manifest does not \
                          declare",
                         group.name
+                    ));
+                };
+                // **The gate is written twice and must be written once** (`views.md` §6): the
+                // roster record is what `/v1/meta` publishes and `ViewDescriptor::visibility` is
+                // what `Engine::authorise` evaluates, so a manifest whose two copies disagree
+                // would serve a view under a gate nobody wrote — and the direction that matters
+                // is the one where the descriptor says `public` and the roster says otherwise,
+                // which is a control accepted and never enforced. Refused at open, in the
+                // direction that costs a load rather than a disclosure.
+                if descriptor.visibility != view.visibility {
+                    return Err(format!(
+                        "view '{id}' records the gate {:?} and the roster of group '{}' records \
+                         {:?}; a view's gate is one label, published on the roster and evaluated \
+                         from the view (views §6)",
+                        descriptor.visibility, group.name, view.visibility
                     ));
                 }
                 rostered.push(id);
@@ -832,6 +877,10 @@ impl Manifest {
                     manifest.views.push(ViewDescriptor {
                         display_name: id.clone(),
                         id,
+                        // **The record's own gate, on both copies** (`views.md` §6): the roster
+                        // entry above and this descriptor carry one label, which
+                        // `Manifest::validate_groups` holds them to.
+                        visibility: view.visibility.clone(),
                         // **The group's frame and the group's projection**: a view of a group
                         // shares every setting with its siblings, which is what makes a key set
                         // one coordinate system observed at several keys.

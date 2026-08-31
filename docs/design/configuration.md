@@ -31,11 +31,11 @@ by the source's own name. `--extent`, `--id-key`, `--id-key-file`, `--points`, `
 each naming what is absent per
 [decision 0013](../decisions/0013-mark-specified-vs-implemented.md):
 
-- **A view's or a view group's own `visibility` where it names a label** (`views.md` §6), and
-  `withdraw_on_member_deletion = true` on a **layer** (not on its content, which needs a fold
-  path) — each refused at parse rather than accepted and ignored. `visibility = "public"` compiles:
-  it is the default and the current behaviour, so writing it records nothing that is not already
-  true.
+- **`withdraw_on_member_deletion = true` on a *layer*** (not on its content, which needs a fold
+  path) — refused at parse rather than accepted and ignored. A view's or a view group's own
+  `visibility` **is built and no longer refused** (2026-08-31, `views.md` §6): a label compiles,
+  is checked at parse against the plugin that will evaluate it, and gates the view for every
+  principal whose satisfied terms it does not meet.
 - **A `[[view_group]]`, at the *build*** (`views.md` §7): the whole declaration parses, is checked
   and is reported by `tessera check`, and `tessera build` against a declaration carrying one
   refuses — there is no multi-view build, so a group is a set of coordinate systems with nothing
@@ -126,7 +126,7 @@ no `fields` map and so has no way to say otherwise; it is `(entity_id, term_id)`
 | `fields` | D | canonical `entity_id`, and `x`, `y` or `morton` + `residual` — or `lon`, `lat` under a projection. The geometry shapes are mutually exclusive (§8). `entity_id` defaults to `[defaults].entity_id_field` |
 | `extent` | R | the quantisation frame: `"auto"`, `{ auto = true, margin = f }`, `{ min, max }` or `{ x = [a,b], y = [c,d] }` — and under a projection, `"auto"` or `{ lon = [a,b], lat = [c,d] }`. See below |
 | `point_visibility` | R | `{ field, default }`, or `{ source, default }` — where each point's label is, and what a point carrying none gets. See below |
-| `visibility` | D `public` | the view's own gate — an access label, or `public` ([`views.md`](views.md) §6). ⊘ No gate is evaluated, so a label is refused at parse and `public` is the only value that compiles |
+| `visibility` | D `public` | the view's own gate — an access label, or `public` ([`views.md`](views.md) §6). A label is resolved to its term set by the plugin and satisfied where that set meets the principal's; `public` is the label every principal holds and compiles to no gate. A label the plugin cannot read, or one naming no terms, is refused at parse — it would gate the view against everybody |
 
 **`[[view_group]]`** — a set of views sharing every setting, differing by a key and per-view
 metadata ([`views.md`](views.md) §3,
@@ -1327,6 +1327,14 @@ disclosing nothing.
 
 
 ## Appendix R — review trail
+
+**2026-08-31 — a view's `visibility` is a gate, not a refusal.** `views.md` §6 is built, so the two
+places this document said a label was refused at parse now say what a label does: it is resolved
+through the plugin to a term set and satisfied where that set meets the principal's, the group's
+gate being the outer bound over each of its views. What is still refused is a label the plugin
+cannot read, or one naming no terms — a gate satisfied by nobody, the view reachable by no
+principal at all. Nothing else in this surface moves: `public` is still the default and still
+compiles to no gate.
 
 **2026-08-30 — a view declares a projection, and its frame is then written in degrees.** One key is
 added, `projection`, from the closed set [`projections.md`](projections.md) §5 enumerates and

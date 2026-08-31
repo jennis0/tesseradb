@@ -138,6 +138,14 @@ pub struct ViewArgs {
     /// sets a view's rows carry over every view an entity appears in, and a disagreement is a
     /// refusal naming the entity and the files.
     pub access: crate::config::AccessInput,
+    /// **This view's own gate** (`views.md` §6), compiled from the declaration
+    /// (`config::compile_view_gate`): an access label, or `None` for `public`. It reaches
+    /// the manifest as [`tessera_store::manifest::ViewDescriptor::visibility`], which is the one
+    /// input `Engine::authorise` evaluates a view's own half of the gate from.
+    ///
+    /// For a view of a group this is the **roster record's** label — the group's own half is on
+    /// [`BuildArgs::groups`], and the two are conjunctive.
+    pub visibility: Option<String>,
 }
 
 /// One group-scoped attribute, and the views of its group whose values this build reads
@@ -1863,6 +1871,10 @@ fn write_manifests(
                 // differential oracle both have to be told about out of band
                 // (`projections.md` §3).
                 projection: view.projection,
+                // **The view's own gate** (`views.md` §6), the roster's copy of which is on the
+                // group descriptor above; `Manifest::validate_groups` refuses a bundle whose two
+                // copies disagree.
+                visibility: view.visibility.clone(),
             })
             .collect(),
         partitions: vec![PartitionDescriptor {
@@ -2471,6 +2483,7 @@ mod tests {
         const KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
         let args = BuildArgs {
             views: vec![crate::ViewArgs {
+                visibility: None,
                 view_id: "s0".to_string(),
                 projection: tessera_spatial::Projection::None,
                 extent: Bounds {

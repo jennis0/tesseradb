@@ -227,22 +227,15 @@ impl ViewRoster {
                 key: key.to_string(),
             });
         }
-        // **`public` or nothing** (`views.md` §6). No gate is evaluated anywhere and no
-        // visible-view set exists, so accepting a label would register a view reachable by every
-        // principal under a record saying otherwise — a disclosure control accepted and never
-        // enforced, which is the one thing the fail-closed posture refuses outright. It is the
-        // same refusal the declaration parser makes, for the same reason.
-        if let Some(label) = &visibility {
-            if label != "public" {
-                return Err(RosterError::Refused(format!(
-                    "visibility = '{label}'. A view's gate is specified and not implemented \
-                     (views §6): no visible-view set is resolved at authorise and no view-valued \
-                     surface is filtered, so a label here would be a control accepted and never \
-                     enforced. `public` — the default, and what every view already is — is what \
-                     this build can honour"
-                )));
-            }
-        }
+        // **`public` compiles to no gate** (`views.md` §6, decision 0088): it is the label every
+        // principal holds inside the trust boundary, so the word and the absence are one
+        // statement and the record keeps the shorter of them — which is also what makes a stored
+        // label always a term to look up rather than sometimes the reserved word.
+        //
+        // A real label is **not checked here**: whether the plugin can read it is a question only
+        // the engine can ask, and `Engine::create_view` asks it before this record is prepared, on
+        // the same route an item's `access` bytes take at ingest.
+        let visibility = visibility.filter(|label| label != "public");
         // **A `timestamp_us` arrives as an integer, and the declaration is what says so.** JSON
         // carries no date type, so a record's `starts` is microseconds since the epoch as a
         // number; typing it from the wire alone would make every timestamp an `int` and refuse
@@ -606,24 +599,30 @@ mod tests {
             .is_err());
     }
 
+    /// **`public` and no gate are one statement, and the record keeps the shorter** (`views.md`
+    /// §6, decision 0088): every principal holds the label inside the trust boundary, so a record
+    /// storing the word would make the roster's `visibility` sometimes a term to look up and
+    /// sometimes a reserved one. A real label is stored as written — whether the plugin can read
+    /// it is `Engine::create_view`'s question, this crate holding no plugin.
     #[test]
-    fn a_gate_that_is_not_public_is_refused_rather_than_recorded() {
+    fn public_is_recorded_as_no_gate_and_a_label_is_recorded_as_written() {
         let roster = ViewRoster::new();
-        assert!(roster
-            .prepare_create(
-                facts("quarter", &[]),
-                "k",
-                Some("finance".to_string()),
-                BTreeMap::new()
-            )
-            .is_err());
-        assert!(roster
-            .prepare_create(
-                facts("quarter", &[]),
-                "k",
-                Some("public".to_string()),
-                BTreeMap::new()
-            )
-            .is_ok());
+        let gate_of = |declared: Option<&str>| {
+            let record = roster
+                .prepare_create(
+                    facts("quarter", &[]),
+                    "k",
+                    declared.map(str::to_string),
+                    BTreeMap::new(),
+                )
+                .expect("a well-formed record");
+            match record {
+                WalRecord::ViewCreate { view } => view.visibility,
+                other => panic!("expected a create record, got {other:?}"),
+            }
+        };
+        assert_eq!(gate_of(Some("finance")).as_deref(), Some("finance"));
+        assert_eq!(gate_of(Some("public")), None);
+        assert_eq!(gate_of(None), None);
     }
 }

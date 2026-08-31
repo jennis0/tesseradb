@@ -102,6 +102,7 @@ fn write_points(path: &Path, access: impl Fn(u64) -> Option<Vec<&'static str>>) 
 fn args(points: &Path, out: &Path, default: &str) -> BuildArgs {
     BuildArgs {
         views: vec![tessera_build::ViewArgs {
+            visibility: None,
             view_id: "s0".to_string(),
             projection: tessera_spatial::Projection::None,
             extent: extent(),

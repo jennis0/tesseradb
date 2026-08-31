@@ -164,13 +164,18 @@ async fn meta(
 
     let meta = state.engine.meta();
     let selection = state.engine.config();
-    // **Gate-filtered per principal, and this is the only per-principal field on the document.**
-    // Everything else here is a deployment constant identical for every caller; the layer list is
-    // not, and a shared cache over this response would hand one principal another's registry. The
+    // **Gate-filtered per principal, and this document has three such surfaces.** Everything else
+    // here is a deployment constant identical for every caller; the layer list is not, and a
+    // shared cache over this response would hand one principal another's registry. The
     // filtering is two steps in the engine — reachability by terms, then a live suppression check
     // on each layer's own entity — so a layer this caller may not know about is absent by the same
     // route a name nobody registered is.
     let layers = state.engine.visible_layers(&entry.session);
+    // **The views, the groups and the scoped families this principal may reach** (`views.md` §6),
+    // resolved at authorise and fixed for the session's life. Read here rather than recomputed:
+    // this document is the discovery surface, and a roster that disagreed with what a viewer verb
+    // will answer is an existence oracle by subtraction.
+    let visible = &entry.session.visible_views;
     Ok(Json(serde_json::json!({
         "api_version": meta.api_version,
         "bundle_format": meta.bundle_format,
@@ -192,7 +197,17 @@ async fn meta(
         // aligned to a square tiling no server publishes, so `null` here on an aligned frame is the
         // ordinary answer and not a defect. `tessera_spatial::frame::tile_scheme` is the one
         // derivation; `null` means draw the points and draw no basemap.
-        "views": meta.views.iter().map(|v| serde_json::json!({
+        //
+        // **Gate-filtered** (`views.md` §6): a view whose own label — or whose group's — this
+        // principal does not satisfy is absent, and a request naming it is the same 404 a name
+        // nobody declared gets. **Ordinals are not densified and the gaps are not hidden**
+        // (`views.md` §9, decision 0110): a principal seeing ordinals 0, 1, 3 learns that *a* view
+        // exists at #2. That is accepted on C15's argument — knowing something was created is not
+        // knowing whose or what, a gap and a dropped key are indistinguishable, and a deployment
+        // whose roster shape is itself sensitive gates the *group*, which hides the whole roster,
+        // gaps included. The alternatives — per-principal-dense ordinals, or none — re-open the
+        // per-session handle machinery decision 0006 retired, for one bit per creation.
+        "views": meta.views.iter().filter(|v| visible.contains_view(&v.id)).map(|v| serde_json::json!({
             "id": v.id,
             "display_name": v.display_name,
             // The frame this view's positions are quantised against, and the one a client
@@ -241,14 +256,15 @@ async fn meta(
         // not on a view: it says that two groups are two layouts over one key set
         // (`views.md` §3.3), which is exactly the fact a client pairing them needs.
         //
-        // **No gate filtering.** The gate is unbuilt (`views.md` §6): every view this bundle
-        // declares is reachable by every principal, and a roster that pretended otherwise would
-        // be a disclosure control accepted and never enforced. The layer list below is the one
-        // per-principal field on this document.
-        "groups": meta.groups.iter().map(|g| serde_json::json!({
+        // **Gate-filtered, group and roster alike** (`views.md` §6). A gate-failed group takes its
+        // whole roster with it: the row is absent and so is every view of it, which is what makes
+        // gating the group the answer for a deployment whose roster *shape* is sensitive. A group
+        // that passes lists only the views this principal may reach, so the ids here and the
+        // `views` entries above are one filtered set rather than two.
+        "groups": meta.groups.iter().filter(|g| visible.contains_group(&g.name)).map(|g| serde_json::json!({
             "name": g.name,
             "members_of": g.members_of,
-            "views": g.views,
+            "views": g.views.iter().filter(|id| visible.contains_view(id)).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
         // The column schema, and the **whole** of it: name, storage type, and — for a category —
         // the vocabulary it draws from, that vocabulary's kind and its `visibility`. Without the
@@ -352,11 +368,12 @@ async fn meta(
         // `sentiment@#3`, and an unpinned leaf there is a `422` rather than an empty answer. An
         // absent `scope` is entity scope, which is the ordinary case and needs no key to say so.
         //
-        // ⊘ **Not gate-filtered, because there is no gate** (`views.md` §6): every view this
-        // bundle declares is reachable by every principal, so the roster this list is keyed to is
-        // deployment-constant. The day spec §6 lands, a family whose group a principal cannot
-        // reach is omitted here — the entry is the only place this document names a group — and
-        // the omission has one site because the list has one.
+        // **A family whose group this principal cannot reach is omitted** (`views.md` §5, §6) —
+        // this entry is the only place the document names a group, so the omission has one site
+        // because the list has one. It is the discovery half of the collapse the filter parse
+        // makes: for such a principal the whole attribute is undeclared, and a leaf naming it,
+        // bare or pinned, takes the unknown-column 422 rather than a refusal that would confirm
+        // the group or its keys.
         "filter_operands": meta.declared_scalars.iter().filter(|d| tessera_engine::filter::is_filterable(d)).map(|d| {
             let family = family_of(d);
             serde_json::json!({
@@ -365,7 +382,7 @@ async fn meta(
                 "operands": family.operands(),
             })
         }).chain(
-            meta.scoped_scalars.iter().filter(|f| tessera_engine::filter::scoped_is_filterable(f)).map(|f| {
+            meta.scoped_scalars.iter().filter(|f| tessera_engine::filter::scoped_is_filterable(f) && visible.contains_group(&f.group)).map(|f| {
                 let family = tessera_engine::filter::Family::of_scoped(f);
                 serde_json::json!({
                     "column": f.name,
@@ -444,7 +461,10 @@ async fn meta(
             serde_json::json!({
                 "name": d.name,
                 "title": d.title,
-                "views": d.views,
+                // **Gate-filtered** (`views.md` §6): the gate governs every view-valued surface,
+                // not only discovery, so a layer served to a principal lists the views of it that
+                // principal may reach and no others.
+                "views": d.views.iter().filter(|id| visible.contains_view(id)).collect::<Vec<_>>(),
                 "membership": d.membership,
                 "hierarchy": {
                     "kind": d.hierarchy.kind,
@@ -1047,12 +1067,14 @@ fn run_viewport_stream(
     // the frame a `region` leaf is canonicalised in cannot come from a different generation than
     // the view the request was answered for.
     let meta = state.engine.meta();
-    // **The one resolution of a caller's view id** (`views.md` §3.2), shared with the ingest
-    // plane: a declared id, or a group's `<group>:#<ordinal>` alias. Everything below takes the
-    // canonical id, so no alias reaches a row space. Unknown is the 404 the engine would have
-    // given for an unknown id — the same answer for an absent key, an ordinal no view holds and a
-    // name that was never declared.
-    let Some(view) = meta.resolve_view(&req.view) else {
+    // **The one resolution of a caller's view id** (`views.md` §3.2), through this session's
+    // visible-view set (`views.md` §6): a declared id, or a group's `<group>:#<ordinal>` alias.
+    // Everything below takes the canonical id, so no alias reaches a row space. Unknown is the 404
+    // the engine would have given for an unknown id — the same answer, from the same construction
+    // site, for an absent key, an ordinal no view holds, a name that was never declared and a view
+    // this principal's gate fails. `resolve_visible_view` makes the same one set-membership probe
+    // on all of them, so the four cost the same work as well as reading the same.
+    let Some(view) = meta.resolve_visible_view(&req.view, &session.visible_views) else {
         if let Some(tx) = sink.first_tx.take() {
             let _ = tx.send(Err(ApiError::Unknown(format!("unknown view '{}'", req.view))));
         }
@@ -1125,7 +1147,7 @@ fn run_viewport_stream(
                 // through — so a column a client was told about parses, a column it was not stays
                 // the unknown-column 422, and a pinned leaf cannot mean one thing here and another
                 // on the discovery document (`views.md` §5).
-                &|leaf| meta.resolve_filter_column(leaf, &view_id),
+                &|leaf| meta.resolve_filter_column(leaf, &view_id, &session.visible_views),
                 &|column, key| {
                     let vocabulary = vocab_of.get(column)?;
                     meta.vocabularies.get(vocabulary)?.code_of(key)
@@ -1880,14 +1902,15 @@ async fn artifact(
 
     let served = tokio::task::spawn_blocking(move || {
         let _gate_permits = gate_permits;
-        // **The same view resolution the viewport takes** (`views.md` §3.2), so a client that
-        // addressed a view by ordinal on one verb may address it that way on all of them. The
-        // engine call below loads its own generation; a view that went away between the two is
-        // the 404 an unknown view already is, which is the answer either order produces.
+        // **The same view resolution the viewport takes** (`views.md` §3.2, §6), gate included, so
+        // a client that addressed a view by ordinal on one verb may address it that way on all of
+        // them and a view its gate fails is the same 404 on all of them. The engine call below
+        // loads its own generation; a view that went away between the two is the 404 an unknown
+        // view already is, which is the answer either order produces.
         let view = state
             .engine
             .meta()
-            .resolve_view(&req.view)
+            .resolve_visible_view(&req.view, &entry.session.visible_views)
             .map(|v| v.id.clone())
             .ok_or_else(|| ApiError::Unknown(format!("unknown view '{}'", req.view)))?;
         state

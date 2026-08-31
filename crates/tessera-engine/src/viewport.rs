@@ -1250,6 +1250,33 @@ impl EngineMeta {
         self.views.iter().find(|v| v.id == requested)
     }
 
+    /// [`Self::resolve_view`] **through the session's visible-view set** (`views.md` §6) — the one
+    /// place a viewer verb's `view` is resolved, and the only gate check the request path makes.
+    ///
+    /// **One set-membership lookup, on both outcomes, and that is the point.** The probe is made
+    /// whether or not a view was found: a gate-failed name and a name nobody ever declared reach
+    /// the caller as the same `None`, having cost the same work — no plugin call, no roster scan,
+    /// no second branch. That is r23's work-indistinguishability standard, and the closure
+    /// Appendix C's C4 records for `/v1/items`, applied to a view id. Making the probe conditional
+    /// on a hit would put one hash lookup on the gate-failed path and none on the unknown one,
+    /// which is the difference a timing test is built to find.
+    ///
+    /// The set itself was resolved at authorise and is fixed for the session's life, so a view
+    /// created since is a `None` here until the session re-authorises — the owner ruling
+    /// [`crate::Session::visible_views`] records.
+    pub fn resolve_visible_view(
+        &self,
+        requested: &str,
+        visible: &crate::gate::VisibleViews,
+    ) -> Option<&MetaView> {
+        let resolved = self.resolve_view(requested);
+        let probe = resolved.map_or(crate::gate::NO_SUCH_VIEW, |v| v.id.as_str());
+        match visible.contains_view(probe) {
+            true => resolved,
+            false => None,
+        }
+    }
+
     /// Resolve a **filter leaf's column spelling** under the view a request names
     /// (`views.md` §5) — the one place the `@` forms are read, on both the meta surface's side and
     /// the parser's.
@@ -1270,12 +1297,25 @@ impl EngineMeta {
     /// The resolved column is an ordinary entity-space one and evaluates as its family's unscoped
     /// columns do — the scope decides which file, never how the values are read.
     ///
-    /// ⊘ **No gate is applied here, because none exists** (`views.md` §6): every view this bundle
-    /// declares is reachable by every principal, so there is nothing to filter a pin against. When
-    /// the gate lands, the session's visible-view set is checked in exactly one place — the
-    /// `resolve_view` call below — and a gate-failed pin becomes [`LeafColumn::UnknownPin`], which
-    /// is already indistinguishable from a key no view holds.
-    pub fn resolve_filter_column(&self, leaf: &str, view: &str) -> LeafColumn {
+    /// **The scoped surface is inside the gate** (`views.md` §5, §6), and it collapses in one
+    /// direction: for a principal whose group gate fails, the whole attribute is **undeclared**.
+    /// Bare and pinned uses alike take [`LeafColumn::Unknown`] — the ordinary unknown-column
+    /// refusal, which names no group — rather than the `Unpinned` 422 that names one or the
+    /// `UnknownPin` 404 that confirms the key space. Without that the pinned leaf is a route
+    /// around the gate: a principal failing `quarter`'s gate could filter their visible entities
+    /// by a Q3 value, which is per-entity membership of a gated view. Decision 0090's argument —
+    /// a gate at some surfaces and not others is fail-open — is the rule applied here, and
+    /// `/v1/meta`'s `filter_operands` omits the family on the same test.
+    ///
+    /// Where the group *is* reachable, a **pin** resolves through
+    /// [`EngineMeta::resolve_visible_view`], so a pin naming a view of the group this principal
+    /// may not reach is the `UnknownPin` a key no view holds already gets.
+    pub fn resolve_filter_column(
+        &self,
+        leaf: &str,
+        view: &str,
+        visible: &crate::gate::VisibleViews,
+    ) -> LeafColumn {
         let (name, pin) = match leaf.split_once(crate::filter::PIN) {
             Some((name, pin)) => (name, Some(pin)),
             None => (leaf, None),
@@ -1304,6 +1344,11 @@ impl EngineMeta {
         else {
             return LeafColumn::Unknown;
         };
+        // **The group's gate, ahead of the pin/bare split**, so both spellings take the same
+        // unknown-column answer and neither confirms the group or its keys (`views.md` §5).
+        if !visible.contains_group(&family.group) {
+            return LeafColumn::Unknown;
+        }
         let resolved = |view_id: &str| LeafColumn::Resolved {
             column: crate::filter::scoped_column_name(name, view_id),
             family: crate::filter::Family::of_scoped(family),
@@ -1311,11 +1356,10 @@ impl EngineMeta {
         match pin {
             Some(pin) => {
                 let requested = format!("{}{}{}", family.group, tessera_store::GROUP_SEPARATOR, pin);
-                match self.resolve_view(&requested) {
+                match self.resolve_visible_view(&requested, visible) {
                     // A view of the group that has no column — one created since the build — is
-                    // the same answer as a key nobody declared, and for the same reason a
-                    // gate-failed one will be: what a caller learns is only that the pin names
-                    // nothing to read.
+                    // the same answer as a key nobody declared, and the same answer a gate-failed
+                    // one gets: what a caller learns is only that the pin names nothing to read.
                     Some(view) if family.views.contains(&view.id) => resolved(&view.id),
                     _ => LeafColumn::UnknownPin {
                         group: family.group.clone(),
