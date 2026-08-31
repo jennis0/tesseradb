@@ -1178,6 +1178,28 @@ pub struct EngineMeta {
     pub idset: u32,
 }
 
+/// **The one statement of §3.3's ownership rule**: the key `view` holds in `group`'s roster,
+/// given the roster record `view` carries — `(its own group, its key)` — and a lookup for what a
+/// group declares `members` of.
+///
+/// A view of `group` holds its own key; a view of a group declaring `members` of `group` holds the
+/// same key, the keys being the owner's by construction; anything else holds none. Two callers ask
+/// it of different data — [`EngineMeta::owning_key`] of the meta document's roster records,
+/// [`scoped_render_scalars`] of the manifest's — and the rule itself lives here so it cannot come
+/// to mean two things. The build asks the same question of its own arguments
+/// (`pipeline::scoped_render_targets`), across a crate boundary, and says so at that site.
+pub(crate) fn owning_key_of<'a>(
+    roster: (&'a str, &'a str),
+    members_of: impl FnOnce(&str) -> Option<&'a str>,
+    group: &str,
+) -> Option<&'a str> {
+    let (own_group, key) = roster;
+    if own_group == group {
+        return Some(key);
+    }
+    (members_of(own_group)? == group).then_some(key)
+}
+
 /// What a filter leaf's column spelling resolves to under a request's view
 /// ([`EngineMeta::resolve_filter_column`], `views.md` §5).
 ///
@@ -1417,16 +1439,60 @@ impl EngineMeta {
     /// view, or a view of an unrelated group.
     fn owning_key(&self, view: &str, group: &str) -> Option<&str> {
         let roster = self.resolve_view(view)?.roster.as_ref()?;
-        if roster.group == group {
-            return Some(&roster.key);
-        }
-        let owner = self
+        owning_key_of(
+            (&roster.group, &roster.key),
+            |name| {
+                self.groups
+                    .iter()
+                    .find(|g| g.name == name)?
+                    .members_of
+                    .as_deref()
+            },
+            group,
+        )
+    }
+
+    /// Every view id whose row space carries one column of `family` — the owning group's own
+    /// ids, and the same keys under every group declaring `members` of it (`views.md` §3.3, §5).
+    ///
+    /// **`ScopedScalar::views` is the owner's list and is not the answer a client needs.** A
+    /// request names a view, and under `quarter_map:2026-Q1` the column arrives though only
+    /// `quarter:2026-Q1` is named there — so publishing the stored list alone would tell a client
+    /// reading a sharing group's map that the column it is receiving does not exist. This is the
+    /// same expansion [`scoped_render_scalars`] makes at the request; there it resolves one view,
+    /// here it enumerates them.
+    ///
+    /// Unfiltered: the caller applies the gate, `/v1/meta`'s per-principal narrowing being the
+    /// server's own (`views.md` §6).
+    pub fn scoped_family_views(
+        &self,
+        family: &tessera_store::manifest::ScopedScalar,
+    ) -> Vec<String> {
+        let keys: Vec<&str> = family
+            .views
+            .iter()
+            .filter_map(|id| {
+                id.strip_prefix(family.group.as_str())?
+                    .strip_prefix(tessera_store::GROUP_SEPARATOR)
+            })
+            .collect();
+        let mut out = family.views.clone();
+        for group in self
             .groups
             .iter()
-            .find(|g| g.name == roster.group)?
-            .members_of
-            .as_deref()?;
-        (owner == group).then_some(roster.key.as_str())
+            .filter(|g| g.members_of.as_deref() == Some(family.group.as_str()))
+        {
+            for id in &group.views {
+                let holds = id
+                    .strip_prefix(group.name.as_str())
+                    .and_then(|rest| rest.strip_prefix(tessera_store::GROUP_SEPARATOR))
+                    .is_some_and(|key| keys.contains(&key));
+                if holds {
+                    out.push(id.clone());
+                }
+            }
+        }
+        out
     }
 
     pub fn projection_of(&self, view: &str) -> Option<Projection> {
@@ -6242,24 +6308,41 @@ fn scoped_render_scalars(
     view: &str,
     visible: &crate::gate::VisibleViews,
 ) -> Vec<DeclaredScalar> {
-    let Some((group, key)) = view.split_once(tessera_store::GROUP_SEPARATOR) else {
+    // This view's roster record — the group it belongs to and the key it holds there. Matched
+    // against the roster rather than parsed out of the id: a view id is `<group>:<key>` by
+    // construction, and the roster is what decides which group and which key that is.
+    let Some(roster) = manifest.groups.iter().find_map(|g| {
+        let key = view
+            .strip_prefix(g.name.as_str())?
+            .strip_prefix(tessera_store::GROUP_SEPARATOR)?;
+        g.views
+            .iter()
+            .any(|v| v.key == key)
+            .then_some((g.name.as_str(), key))
+    }) else {
         return Vec::new();
     };
-    // The group whose roster owns this key — the view's own group, or the one it declares
-    // `members` of. `EngineMeta::owning_key`'s rule, read off the manifest the request loaded.
-    let owner = manifest
-        .groups
-        .iter()
-        .find(|g| g.name == group)
-        .and_then(|g| g.members_of.as_deref())
-        .unwrap_or(group);
-    let id = format!("{owner}{}{key}", tessera_store::GROUP_SEPARATOR);
+    let members_of = |name: &str| {
+        manifest
+            .groups
+            .iter()
+            .find(|g| g.name == name)?
+            .members_of
+            .as_deref()
+    };
     manifest
         .groups
         .iter()
         .flat_map(|g| g.scoped_scalars.iter())
-        .filter(|f| f.render && f.group == owner && f.views.contains(&id))
-        .filter(|f| visible.contains_group(&f.group))
+        .filter(|f| f.render && visible.contains_group(&f.group))
+        .filter(|f| {
+            // §3.3's rule, stated once in `owning_key_of`, and then the family's own list: a view
+            // of the group that has no column — one created since the build — renders nothing.
+            owning_key_of(roster, members_of, &f.group).is_some_and(|key| {
+                f.views
+                    .contains(&format!("{}{}{key}", f.group, tessera_store::GROUP_SEPARATOR))
+            })
+        })
         .map(|f| DeclaredScalar {
             name: f.name.clone(),
             arrow_type: f.arrow_type,

@@ -704,3 +704,192 @@ fn append_dict_extent_repeating_first_descriptor(root: &Path, k: usize) {
     )
     .unwrap();
 }
+
+/// **A rendered group-scoped family's lane is verified per (build segment, view)** (`views.md`
+/// §5). The lane is the placement `render` buys, and it is the one artefact whose absence is
+/// *silent*: a segment that does not hold the column is served as a row with no value, which is a
+/// legitimate state for a flushed segment and indistinguishable, at the wire, from a build that
+/// wrote no lane at all. Nothing else in either pass would notice — the digests match, the row
+/// space is a bijection, the identity column is untouched.
+///
+/// Both directions, on one fixture: the intact bundle verifies and counts the lanes it checked,
+/// and the same bundle with one view's column dropped out of `columns.arrow` is refused by name.
+#[test]
+fn a_missing_scoped_render_lane_is_refused_and_an_intact_one_is_counted() {
+    use arrow::array::{Float32Array, StringArray};
+    use tessera_spatial::tiler::ScalarType;
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path();
+    // One points file, a `quarter` discriminator, one value column: the group's two views are two
+    // selections of it (`views.md` §3.1's form B).
+    let points = dir.join("quarters.parquet");
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("quarter", DataType::Utf8, false),
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+        Field::new("heat", DataType::Float32, true),
+    ]));
+    let (mut ids, mut keys) = (Vec::new(), Vec::new());
+    let (mut xs, mut ys, mut heat) = (Vec::new(), Vec::new(), Vec::new());
+    for (slot, key) in ["2026-Q1", "2026-Q2"].into_iter().enumerate() {
+        for e in 0..N_ITEMS {
+            ids.push(e);
+            keys.push(key.to_string());
+            xs.push(((e * 37) % 1000) as f64);
+            ys.push(((e * 53 + slot as u64 * 7) % 1000) as f64);
+            heat.push((e % 3 != 0).then_some(e as f32 + slot as f32));
+        }
+    }
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(ids)),
+            Arc::new(StringArray::from(keys)),
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(Float32Array::from(heat)),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(File::create(&points).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+    let pairs = dir.join("pairs.parquet");
+    write_pairs(&pairs);
+
+    let view = |key: &str| tessera_build::ViewArgs {
+        visibility: None,
+        view_id: format!("quarter:{key}"),
+        projection: tessera_spatial::Projection::None,
+        extent: extent(),
+        points: points.clone(),
+        point_fields: Default::default(),
+        select: Some(tessera_build::config::ViewSelector {
+            column: "quarter".to_string(),
+            value: key.to_string(),
+            keys: vec!["2026-Q1".to_string(), "2026-Q2".to_string()],
+            view_id: format!("quarter:{key}"),
+        }),
+        access: tessera_build::config::AccessInput::relation(pairs.clone()),
+    };
+    let out = dir.join("bundle");
+    build(&BuildArgs {
+        views: vec![view("2026-Q1"), view("2026-Q2")],
+        anchor: 0,
+        groups: vec![tessera_build::GroupDescriptor {
+            visibility: None,
+            name: "quarter".to_string(),
+            members_of: None,
+            views: ["2026-Q1", "2026-Q2"]
+                .into_iter()
+                .map(|key| tessera_build::GroupViewDescriptor {
+                    key: key.to_string(),
+                    visibility: None,
+                    metadata: Default::default(),
+                })
+                .collect(),
+            quantisation: tessera_build::Quantisation {
+                x_min: extent().x_min,
+                x_max: extent().x_max,
+                y_min: extent().y_min,
+                y_max: extent().y_max,
+            },
+            projection: tessera_spatial::Projection::None,
+            metadata: Vec::new(),
+            scoped_scalars: Vec::new(),
+        }],
+        scoped_attributes: vec![tessera_build::ScopedColumnFamily {
+            attribute: tessera_build::config::Attribute {
+                name: "heat".to_string(),
+                title: None,
+                field: None,
+                ty: ScalarType::F32,
+                analyser: None,
+                vocabulary: None,
+                value_set: None,
+                index: false,
+                render: true,
+            },
+            group: "quarter".to_string(),
+            views: vec![0, 1],
+            source: None,
+        }],
+        attribute_sources: Vec::new(),
+        out: out.clone(),
+        limit: None,
+        identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        idset: 1,
+        shard_id: 0,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
+        mint_external_ids: false,
+        emit_oracle_pairs: false,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema: Default::default(),
+    })
+    .expect("a rendered scoped family builds");
+
+    let report = verify_deep(&out, &VerifyOpts::default()).expect("the intact bundle verifies");
+    assert_eq!(
+        report.scoped_render_lanes, 2,
+        "one lane per (build segment, view of the group)"
+    );
+
+    // The damage: the same rows, the same identities, the same row count — with the family's
+    // column dropped out of one view's tail.
+    let rel = "partitions/default/views/quarter/2026-Q1/segments/seg-0/columns.arrow";
+    let path = out.join("v00000").join(rel);
+    let reader = arrow::ipc::reader::FileReader::try_new(File::open(&path).unwrap(), None).unwrap();
+    let batches: Vec<RecordBatch> = reader.map(|b| b.unwrap()).collect();
+    assert_eq!(batches.len(), 1);
+    let held = batches[0].schema();
+    let keep: Vec<usize> = held
+        .fields()
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f.name() != "heat")
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(keep.len(), held.fields().len() - 1, "the lane was there");
+    let stripped = Arc::new(Schema::new(
+        keep.iter()
+            .map(|&i| held.field(i).clone())
+            .collect::<Vec<_>>(),
+    ));
+    let columns = keep
+        .iter()
+        .map(|&i| batches[0].column(i).clone())
+        .collect::<Vec<_>>();
+    let without = RecordBatch::try_new(stripped.clone(), columns).unwrap();
+    let mut writer =
+        arrow::ipc::writer::FileWriter::try_new(File::create(&path).unwrap(), &stripped).unwrap();
+    writer.write(&without).unwrap();
+    writer.finish().unwrap();
+
+    // The digest follows the damage, so what refuses is the missing lane and not the hash.
+    let bytes = fs::read(&path).unwrap();
+    let manifest_path = out.join("v00000").join("MANIFEST.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["files"][rel] =
+        serde_json::json!({ "size": bytes.len(), "sha256": hex_sha256(&bytes) });
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest).unwrap();
+    fs::write(&manifest_path, &manifest_bytes).unwrap();
+    fs::write(
+        out.join("CURRENT"),
+        serde_json::to_vec_pretty(&CurrentPointer {
+            prefix: "v00000".to_string(),
+            manifest_digest: hex_sha256(&manifest_bytes),
+        })
+        .unwrap(),
+    )
+    .unwrap();
+
+    expect_refusal(&out, "does not hold it");
+}

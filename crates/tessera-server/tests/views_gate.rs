@@ -795,6 +795,69 @@ async fn a_scoped_attribute_collapses_whole_outside_its_groups_gate() {
 
 /// **The collapse is one site, so a second family cannot take a different answer from the first**
 /// (`views.md` §5). `mood` is a category and `note` is text, and for a principal who cannot reach
+/// `sealed` both are undeclared exactly as `sentiment` is — absent from `filter_operands`, the
+/// unknown-column `422` for either spelling, and for the category the same `404`
+/// `/v1/categories` gives a name that is nothing at all. A category is the family where getting
+/// this wrong costs most: its value list is a second surface, and one gated at the filter and not
+/// at the list would publish a gated group's value names to anyone with a session.
+#[tokio::test]
+async fn the_category_and_text_families_collapse_at_the_same_site() {
+    let served = serve().await;
+    let outsider = token(&served, &[]).await;
+    let holder = token(&served, &["finance"]).await;
+
+    let operands = |m: &Value| -> Vec<String> {
+        m["filter_operands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["column"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let held = operands(&meta(&served, &holder).await);
+    let out = operands(&meta(&served, &outsider).await);
+    for column in ["mood", "note"] {
+        assert!(held.contains(&column.to_string()), "{column}: {held:?}");
+        assert!(!out.contains(&column.to_string()), "{column}: {out:?}");
+    }
+
+    for (spelling, body) in [
+        ("mood", json!({"mood": {"eq": "calm"}})),
+        ("mood@s1", json!({"mood@s1": {"eq": "calm"}})),
+        ("note", json!({"note": {"match": "calm"}})),
+        ("note@s1", json!({"note@s1": {"match": "calm"}})),
+    ] {
+        let (status, answer) = viewport(&served, &outsider, "world", Some(body)).await;
+        assert_eq!(status, 422, "{spelling}");
+        let detail = answer["detail"].as_str().unwrap_or_default().to_string();
+        assert!(
+            detail.contains("not a filterable column"),
+            "{spelling}: {detail}"
+        );
+        assert!(!detail.contains("sealed"), "{spelling}: {detail}");
+    }
+
+    // The value list, the surface a category has and no other family does. The outsider gets the
+    // `404` an unknown column gets, whichever spelling names the view; the holder gets the list.
+    let list = |token: &str, path: &str| {
+        let url = served.server.viewer_url(&format!("/v1/categories/{path}"));
+        let client = served.server.client.clone();
+        let token = token.to_string();
+        async move { client.get(url).bearer_auth(token).send().await.unwrap() }
+    };
+    for path in ["mood?view=sealed:s1", "mood@s1", "mood"] {
+        assert_eq!(
+            list(&outsider, path).await.status().as_u16(),
+            404,
+            "{path} must be unknown to a principal outside the group"
+        );
+    }
+    let resp = list(&holder, "mood?view=sealed:s1").await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["values"].as_array().unwrap().len(), MOODS.len());
+}
+
 /// **A sealed family's rendered column is on no surface a gate-failed principal touches**
 /// (`views.md` §5, §6). The collapse is about *naming*: `sentiment` renders in the row tail of
 /// `sealed`'s views, so the two things to check are that a holder gets it there and that an
@@ -878,69 +941,6 @@ async fn points_schema(served: &Served, token: &str, view: &str) -> Vec<String> 
         }
     }
     names
-}
-
-/// `sealed` both are undeclared exactly as `sentiment` is — absent from `filter_operands`, the
-/// unknown-column `422` for either spelling, and for the category the same `404`
-/// `/v1/categories` gives a name that is nothing at all. A category is the family where getting
-/// this wrong costs most: its value list is a second surface, and one gated at the filter and not
-/// at the list would publish a gated group's value names to anyone with a session.
-#[tokio::test]
-async fn the_category_and_text_families_collapse_at_the_same_site() {
-    let served = serve().await;
-    let outsider = token(&served, &[]).await;
-    let holder = token(&served, &["finance"]).await;
-
-    let operands = |m: &Value| -> Vec<String> {
-        m["filter_operands"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|o| o["column"].as_str().unwrap().to_string())
-            .collect()
-    };
-    let held = operands(&meta(&served, &holder).await);
-    let out = operands(&meta(&served, &outsider).await);
-    for column in ["mood", "note"] {
-        assert!(held.contains(&column.to_string()), "{column}: {held:?}");
-        assert!(!out.contains(&column.to_string()), "{column}: {out:?}");
-    }
-
-    for (spelling, body) in [
-        ("mood", json!({"mood": {"eq": "calm"}})),
-        ("mood@s1", json!({"mood@s1": {"eq": "calm"}})),
-        ("note", json!({"note": {"match": "calm"}})),
-        ("note@s1", json!({"note@s1": {"match": "calm"}})),
-    ] {
-        let (status, answer) = viewport(&served, &outsider, "world", Some(body)).await;
-        assert_eq!(status, 422, "{spelling}");
-        let detail = answer["detail"].as_str().unwrap_or_default().to_string();
-        assert!(
-            detail.contains("not a filterable column"),
-            "{spelling}: {detail}"
-        );
-        assert!(!detail.contains("sealed"), "{spelling}: {detail}");
-    }
-
-    // The value list, the surface a category has and no other family does. The outsider gets the
-    // `404` an unknown column gets, whichever spelling names the view; the holder gets the list.
-    let list = |token: &str, path: &str| {
-        let url = served.server.viewer_url(&format!("/v1/categories/{path}"));
-        let client = served.server.client.clone();
-        let token = token.to_string();
-        async move { client.get(url).bearer_auth(token).send().await.unwrap() }
-    };
-    for path in ["mood?view=sealed:s1", "mood@s1", "mood"] {
-        assert_eq!(
-            list(&outsider, path).await.status().as_u16(),
-            404,
-            "{path} must be unknown to a principal outside the group"
-        );
-    }
-    let resp = list(&holder, "mood?view=sealed:s1").await;
-    assert_eq!(resp.status().as_u16(), 200);
-    let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["values"].as_array().unwrap().len(), MOODS.len());
 }
 
 // ---------------------------------------------------------------------------------------------

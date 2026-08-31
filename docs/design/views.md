@@ -625,9 +625,17 @@ has for `render_in`, with the view set decided by the scope instead of listed.
 > value arrives in the points batch under a view of the group and the column is not in the schema
 > anywhere else — a view outside every scope writes the bytes it wrote before the family was
 > declared. A request's render list is therefore per view, and `/v1/meta`'s `scoped_scalars` entry
-> publishes the family's `render` flag and the view ids that have a column, which is what tells a
-> client where to expect it. The gate is inside this as it is inside the filter surface: a family
-> whose group this principal cannot reach is named in no response they receive.
+> publishes the family's `render` flag and **every view id whose rows carry the column and that
+> this principal may reach** — the owning group's and every sharing group's alike, since a client
+> under a shared view receives the column under an id the family's own list does not name. The
+> gate is inside this as it is inside the filter surface: a family whose group this principal
+> cannot reach is named in no response they receive, and a view they cannot reach is on no list.
+>
+> **`tessera verify --deep` checks the lane per (build segment, view)**, because its absence is the
+> one defect here that is silent: a segment with no column of the family is served as a row with no
+> value, which is exactly what a flushed segment legitimately is. Only the build's own segments are
+> checked — a segment named in `MANIFEST.files` — so a bundle that has ingested is not refused for
+> the write half's deliberate absence.
 >
 > ⊘ **A rendered family is still not a filter operand** — `index` is the whole licence
 > (§5's filter paragraph). A leaf resolves to one *entity-space* column, and a pin may make that
@@ -1114,7 +1122,12 @@ each view under spec §4's rule.
   counterpart to `declared_scalars`, carrying the type, the vocabulary, the analyser, the two
   placement flags and the view ids that have a column — the vocabulary and the analyser moving
   there from the operand entry, which is the operand surface and carries neither for an
-  entity-scoped column either. What stays marked: the **ingest** half, so a view created while the
+  entity-scoped column either. Review (2026-08-31) added three things and changed one: the
+  published view list **expands** to every group sharing the family's views and is gate-filtered
+  per id, without which a client under a shared view reads that the column it is receiving does not
+  exist; `tessera verify --deep` checks the lane per build segment, the one defect here that
+  serving cannot distinguish from an absent value; and the flushed-segment path — the one that
+  turns a missing column into silence — is driven by a test rather than only described. What stays marked: the **ingest** half, so a view created while the
   service runs has no column until a rebuild; a merge or fold, which takes its writer schema from
   the bundle-wide list and so drops the column from a segment it rewrites; and the filter surface,
   where `index` remains the whole licence — a leaf resolves to one entity-space column and a pin

@@ -364,15 +364,25 @@ async fn meta(
                 "analyser": f.analyser,
                 "render": f.render,
                 "index": f.index,
-                // **The views that have a column**, in the owning group's own ids and filtered
-                // through this principal's visible set. Not derivable from the roster: a view
-                // created while the service runs has no column of any family until a rebuild
-                // writes one — no batch can supply one, a buffered row's scalars being positional
-                // against `declared_scalars` — so this list is what separates *this view renders
-                // it* from *this view is one of the group's*. A view of a group declaring
-                // `members` of this one renders the column under its **own** id where the key it
-                // shares is named here (`views.md` §3.3).
-                "views": f.views.iter().filter(|id| visible.contains_view(id)).collect::<Vec<_>>(),
+                // **Every view whose rows carry the column and that this principal may reach.**
+                // Two narrowings, and each answers a question the other cannot. The **expansion**
+                // is `views.md` §3.3's: a group declaring `members` of this family's group renders
+                // it under that group's own ids, so a client under `quarter_map:2026-Q1` must find
+                // that id here or conclude the column it is being served does not exist. The
+                // **filter** is §6's: a view of the group this principal cannot reach is absent
+                // from `views` above and is absent here for the same reason, so a list that named
+                // it would be the one place the document mentioned it.
+                //
+                // Neither is derivable from the roster a client already holds: a view created while
+                // the service runs has no column of any family until a rebuild writes one — no
+                // batch can supply one, a buffered row's scalars being positional against
+                // `declared_scalars` — so this list is what separates *this view renders it* from
+                // *this view is one of the group's*.
+                "views": meta
+                    .scoped_family_views(f)
+                    .into_iter()
+                    .filter(|id| visible.contains_view(id))
+                    .collect::<Vec<_>>(),
             })
         }).collect::<Vec<_>>(),
         // Reference Sheet R5: **which columns a client may filter on, and with which operators**

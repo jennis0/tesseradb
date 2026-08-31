@@ -881,7 +881,7 @@ components:
           description: The family's columns carry an entity-space value column a filter may be answered from — which is the whole of whether it is an operand, a scoped column having no row route.
         views:
           type: array
-          description: The view ids that have a column, in the owning group's own `group:key` form, filtered by the view gate. A view created while the service runs has none until a rebuild, so this is not the group's roster.
+          description: "Every view id whose rows carry this column and that this principal may reach: the owning group's own `group:key` ids, **and** the same keys under every group sharing those views via `members` — a client under a sharing group's view receives the column under that group's id, which the family's own list does not name. Gate-filtered per id, so a view this principal cannot reach is absent here as it is absent from `views`. Not the group's roster: a view created while the service runs has no column until a rebuild."
           items: { type: string }
 
     Selection:

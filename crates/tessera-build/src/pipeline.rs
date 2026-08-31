@@ -2247,6 +2247,19 @@ fn write_scoped_columns(
             // text column answers `match` and is returned by no drill-down — the same restriction
             // `render` has here, and for the same reason.
             if attribute.ty == ScalarType::Text {
+                // **And it therefore writes no row lane**, which is only sound because `render`
+                // on `text` is refused at the declaration (`config::compile_attributes`'s
+                // "`render` on `text` is refused" arm). A `BuildArgs` assembled programmatically
+                // could still carry one, and it would publish `render: true` on `/v1/meta` while
+                // no view's tail ever held the column — the one shape serving reads as ordinary
+                // absence and could not tell from a build that failed. Fenced here rather than
+                // trusted from the parser.
+                debug_assert!(
+                    !attribute.render,
+                    "attribute '{}': `render` on a scoped `text` family — refused at the \
+                     declaration, and this pass writes no row lane for it (views §5)",
+                    attribute.name
+                );
                 // `index = false` is refused at the declaration for exactly this reason — with no
                 // blob row and no index the prose would have no home at all — so the guard here is
                 // against a `Schema` built programmatically rather than parsed.
@@ -2333,9 +2346,16 @@ struct ScopedRenderColumn {
 /// **The view set is the scope's**, which is the whole of what `render` on a scoped attribute
 /// means: a view of the family's own group renders it, so does a view of a group declaring
 /// `members` of that group — the keys being the owner's by construction (`views.md` §3.3) — and
-/// no other view gets a slot for it at all. This is `EngineMeta::owning_key`'s rule, asked of the
-/// build's own arguments; the two must agree, or a column is written into a row space no request
-/// reads it from.
+/// no other view gets a slot for it at all.
+///
+/// **This is `viewport::owning_key_of`'s rule, asked of the build's own arguments**, and the two
+/// must agree: a column written into a row space no request reads it from is a silent nothing, and
+/// one a request reads from a row space no build wrote is served as absence. It is stated twice
+/// rather than shared because the serving side's inputs are a manifest and this side's are
+/// `BuildArgs`, in a crate that does not depend on the engine. What keeps the one case where they
+/// could differ unreachable is a **declaration refusal**: `scope` naming a group that declares
+/// `members` is refused at parse (`config::compile_scope`), so a family is always the owner
+/// group's and `members_of` is only ever followed in one direction.
 fn scoped_render_targets(args: &BuildArgs, columns: &[ScopedRenderColumn]) -> Vec<Vec<usize>> {
     args.views
         .iter()

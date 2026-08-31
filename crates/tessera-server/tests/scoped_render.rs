@@ -121,9 +121,19 @@ fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>, slot: Option
     w.close().unwrap();
 }
 
-fn view_args(view: &str, points: &Path, pairs: &Path) -> ViewArgs {
+/// The gate on `quarter:2026-Q2`, and on nothing else: the term a principal must hold to reach
+/// that one view. Access is a relation here, so the descriptors the dictionary carries are the
+/// relation's own integers and `"1"` is one of them (`common::terms_of` grants it on `e % 3 == 0`).
+///
+/// It exists for the case a sharing group makes possible and nothing else does: a principal who
+/// reaches `quarter_map:2026-Q2` and **not** `quarter:2026-Q2`, for whom the column arrives under
+/// an id the family's own list does not name (`views.md` §3.3, §6).
+const GATED_QUARTER: &str = "2026-Q2";
+const GATE_TERM: &str = "1";
+
+fn view_args(view: &str, points: &Path, pairs: &Path, visibility: Option<&str>) -> ViewArgs {
     ViewArgs {
-        visibility: None,
+        visibility: visibility.map(str::to_string),
         view_id: view.to_string(),
         projection: tessera_spatial::Projection::None,
         extent: extent(),
@@ -134,12 +144,15 @@ fn view_args(view: &str, points: &Path, pairs: &Path) -> ViewArgs {
     }
 }
 
-fn roster() -> Vec<GroupViewDescriptor> {
+/// The group's roster. `gated` says whether this roster is the owning group's, whose
+/// `2026-Q2` carries a gate — the view's own `visibility` and the roster's record of it are checked
+/// equal at open, so the two say the same thing here.
+fn roster(gated: bool) -> Vec<GroupViewDescriptor> {
     QUARTERS
         .iter()
         .map(|(key, _)| GroupViewDescriptor {
             key: key.to_string(),
-            visibility: None,
+            visibility: (gated && *key == GATED_QUARTER).then(|| GATE_TERM.to_string()),
             metadata: Default::default(),
         })
         .collect()
@@ -155,20 +168,23 @@ fn build_bundle(dir: &Path, declared: bool) -> std::path::PathBuf {
     write_pairs_n(&pairs, ENTITIES);
     let world_points = dir.join("world.parquet");
     write_points(&world_points, "world", WORLD, None);
-    let mut views = vec![view_args("world", &world_points, &pairs)];
+    let mut views = vec![view_args("world", &world_points, &pairs, None)];
     let mut family_views = Vec::new();
     for (slot, (key, range)) in QUARTERS.iter().enumerate() {
         let id = format!("quarter:{key}");
         let points = dir.join(format!("quarter-{key}.parquet"));
         write_points(&points, &id, range.clone(), Some(slot));
         family_views.push(views.len());
-        views.push(view_args(&id, &points, &pairs));
+        let gate = (*key == GATED_QUARTER).then_some(GATE_TERM);
+        views.push(view_args(&id, &points, &pairs, gate));
     }
+    // The sharing group's views are public throughout, including the one whose owner counterpart
+    // is gated — which is what makes the mixed case reachable at all.
     for (slot, (key, range)) in QUARTERS.iter().enumerate() {
         let id = format!("quarter_map:{key}");
         let points = dir.join(format!("map-{key}.parquet"));
         write_points(&points, &id, range.clone(), Some(slot));
-        views.push(view_args(&id, &points, &pairs));
+        views.push(view_args(&id, &points, &pairs, None));
     }
     let out = dir.join("bundle");
     build(&BuildArgs {
@@ -179,7 +195,7 @@ fn build_bundle(dir: &Path, declared: bool) -> std::path::PathBuf {
                 visibility: None,
                 name: "quarter".to_string(),
                 members_of: None,
-                views: roster(),
+                views: roster(true),
                 quantisation: group_frame(),
                 projection: tessera_spatial::Projection::None,
                 metadata: Vec::new(),
@@ -191,7 +207,7 @@ fn build_bundle(dir: &Path, declared: bool) -> std::path::PathBuf {
                 // The same keys, a second layout: a family over these views belongs to the group
                 // that owns them, and renders under both.
                 members_of: Some("quarter".to_string()),
-                views: roster(),
+                views: roster(false),
                 quantisation: group_frame(),
                 projection: tessera_spatial::Projection::None,
                 metadata: Vec::new(),
@@ -282,6 +298,59 @@ async fn viewport_bytes(served: &Served, token: &str, view: &str) -> (u16, Vec<u
         .unwrap();
     let status = resp.status().as_u16();
     (status, resp.bytes().await.unwrap().to_vec())
+}
+
+/// One ingest batch into `view` — the fixture declares no entity-scoped attribute, so a row is its
+/// external id, its position and its access label, and carries **no scoped value**: a family has no
+/// slot in `declared_scalars`, which is what a batch's scalars are positional against.
+async fn ingest(served: &Served, batch_id: &str, view: &str, rows: &[(Vec<u8>, f32, f32, &str)]) {
+    let body = build_ingest_batch_optional(
+        &rows
+            .iter()
+            .map(|(id, x, y, access)| (Some(id.as_slice()), *x, *y, *access))
+            .collect::<Vec<_>>(),
+    );
+    let resp = served
+        .server
+        .client
+        .post(served.server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", batch_id)
+        .header("x-tessera-view", view)
+        .header("content-type", "application/octet-stream")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200, "the batch is accepted");
+}
+
+/// Flush until the buffer is empty — a flush unit is one view, so a batch that landed in two needs
+/// two ticks (`views_write.rs` carries the same helper and the same argument).
+async fn flush(served: &Served) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let before = served.server.state.engine.write_executor_stats().flushes;
+        let resp = served
+            .server
+            .client
+            .post(served.server.control_url("/control/flush"))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 202);
+        while served.server.state.engine.write_executor_stats().flushes == before {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the flush never published"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        if served.server.state.engine.buffered_items() == 0 {
+            break;
+        }
+    }
 }
 
 /// The points frames' column names, and `heat` per `tessera_id` where the frame carries it.
@@ -432,9 +501,9 @@ async fn a_view_outside_the_group_is_byte_identical_to_a_build_without_the_famil
 
     let tmp = TempDir::new().unwrap();
     let without = build_bundle(tmp.path(), false);
-    // `v00000/partitions/<phash>/views/world/segments/<seg>/columns.arrow` — walked rather than
-    // spelt, the partition hash and the segment id being the build's to choose.
-    let segment = |root: &Path| {
+    // `v00000/partitions/<phash>/views/world/segments/<seg>/` — walked rather than spelt, the
+    // partition hash and the segment id being the build's to choose.
+    let segment_dir = |root: &Path| {
         let one = |dir: &Path| {
             std::fs::read_dir(dir)
                 .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
@@ -444,12 +513,41 @@ async fn a_view_outside_the_group_is_byte_identical_to_a_build_without_the_famil
                 .path()
         };
         let phash = one(&root.join("v00000").join("partitions"));
-        let seg = one(&phash.join("views").join("world").join("segments"));
-        std::fs::read(seg.join("columns.arrow")).unwrap()
+        one(&phash.join("views").join("world").join("segments"))
     };
+    // **The listing as well as the bytes.** A presence bitmap is a file *beside* `columns.arrow`
+    // (decision 0064), so a lane leaking into a view outside the scope could leave
+    // `presence/heat.roaring` behind while the column file itself stayed byte-equal — an artefact
+    // the manifest digests and nothing else would notice.
+    let listing = |dir: &Path| {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(next) = stack.pop() {
+            for entry in std::fs::read_dir(&next).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path.clone());
+                }
+                out.push(
+                    path.strip_prefix(dir)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+        }
+        out.sort();
+        out
+    };
+    let (with, plain) = (segment_dir(&served.bundle), segment_dir(&without));
     assert_eq!(
-        segment(&served.bundle),
-        segment(&without),
+        listing(&with),
+        listing(&plain),
+        "declaring a scoped render family leaves no file in a segment it does not reach"
+    );
+    assert_eq!(
+        std::fs::read(with.join("columns.arrow")).unwrap(),
+        std::fs::read(plain.join("columns.arrow")).unwrap(),
         "declaring a scoped render family changes no byte of a row space it does not reach"
     );
 }
@@ -546,10 +644,17 @@ async fn meta_publishes_the_render_placement_and_the_views_that_have_a_column() 
     assert_eq!(heat["render"], true);
     // Render-only: on no filter surface, so it is on this list and on no other.
     assert_eq!(heat["index"], false);
+    // **Every view whose rows carry the column**, the owning group's and the sharing group's
+    // alike: a client under `quarter_map:2026-Q1` receives the column and must find that id here.
     assert_eq!(
         heat["views"],
-        json!(["quarter:2026-Q1", "quarter:2026-Q2"]),
-        "the views that have a column, in the owning group's own ids"
+        json!([
+            "quarter:2026-Q1",
+            "quarter:2026-Q2",
+            "quarter_map:2026-Q1",
+            "quarter_map:2026-Q2"
+        ]),
+        "the ids of every view that renders the family, this principal reaching them all"
     );
     assert!(
         !body["filter_operands"]
@@ -606,7 +711,134 @@ async fn a_view_created_at_runtime_renders_no_scoped_column() {
         .unwrap();
     assert_eq!(
         meta["scoped_scalars"][0]["views"],
-        json!(["quarter:2026-Q1", "quarter:2026-Q2"]),
+        json!([
+            "quarter:2026-Q1",
+            "quarter:2026-Q2",
+            "quarter_map:2026-Q1",
+            "quarter_map:2026-Q2"
+        ]),
         "the created view is on the roster and not on the family's list"
     );
+}
+
+/// **A segment the write path produced carries no lane, and its rows read as absence** — the one
+/// path that turns [`gather_tile_columns`]'s `Malformed` into silence, driven here.
+///
+/// The write half is deliberately absent (`views.md` §5): a batch's scalars are positional against
+/// `declared_scalars`, which a family has no slot in, so a flush writes the bundle-wide tail and
+/// nothing per family. A view of the group therefore ends up holding **two** kinds of segment at
+/// once, and one response gathers across both: the build's rows keep their values, and the flushed
+/// row takes the type's zero, which is what an entity with no value in that view already takes.
+/// Nothing about the response's schema changes — the column is the manifest's, not the segment's.
+#[tokio::test]
+async fn a_flushed_segment_of_a_group_view_serves_the_scoped_column_as_absence() {
+    let served = serve().await;
+    // An entity the corpus has never seen, ingested into a view of the group.
+    const NEW: u64 = 9_001;
+    ingest(
+        &served,
+        "heat-flush",
+        "quarter:2026-Q1",
+        &[(external_id_of(NEW), 250.0, 250.0, "0")],
+    )
+    .await;
+    flush(&served).await;
+
+    // The flush's publication and a session's sight of what it minted are two events, the second
+    // following the first by an asynchronous refresh with no wire signal — so wait for the settled
+    // count rather than asserting the first response.
+    let expected = members(0).count() + 1;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let (mut names, mut values) = (Vec::new(), BTreeMap::new());
+    while std::time::Instant::now() < deadline {
+        // A `429` is the admission gate shedding under machine load (contracts §3.1) and is not
+        // the answer under test — ask again, as every other polling test here does.
+        let (status, body) = viewport_bytes(&served, &served.token, "quarter:2026-Q1").await;
+        if status == 200 {
+            let read = points_columns(&body);
+            if read.1.len() == expected {
+                (names, values) = read;
+                break;
+            }
+        } else {
+            assert_eq!(status, 429, "a served view answers or sheds");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(values.len(), expected, "the flushed row is served");
+    assert!(
+        names.contains(&"heat".to_string()),
+        "the column is the manifest's, so a flushed segment does not take it off the schema: \
+         {names:?}"
+    );
+
+    let by_entity = by_entity(&served, &served.token, &values).await;
+    assert_eq!(
+        by_entity[&NEW], 0.0,
+        "a row no build wrote a lane for carries the render placeholder"
+    );
+    for entity in members(0) {
+        assert_eq!(
+            by_entity[&entity],
+            heat_on_the_wire(0, entity),
+            "the build's own rows are untouched by the segment beside them, entity {entity}"
+        );
+    }
+}
+
+/// **A principal who reaches a sharing group's view and not the owner's is told the truth about
+/// both** (`views.md` §3.3, §6). `quarter:2026-Q2` is gated and `quarter_map:2026-Q2` is not, so
+/// for a principal holding neither term the column arrives under an id the family's own
+/// `views` list does not name — and the list must say so, or a client reading it would conclude
+/// the column it is being served does not exist.
+///
+/// The gated id is absent from the same list on the same test the roster is filtered by: it is a
+/// view this principal cannot reach, and this list must not become the one place the document
+/// names it.
+#[tokio::test]
+async fn a_sharing_groups_view_is_listed_where_the_owners_gated_one_is_not() {
+    let served = serve().await;
+    // Term `0` alone: every entity carries it, so this principal's mask is the whole corpus and
+    // what it cannot reach is a *view* rather than an item. `quarter:2026-Q2`'s gate names term
+    // `1`, which it does not hold, and every `quarter_map` view is public.
+    let outsider = authorise(&served.server, &["0"]).await["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let meta: Value = served
+        .server
+        .client
+        .get(served.server.viewer_url("/v1/meta"))
+        .bearer_auth(&outsider)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let heat = &meta["scoped_scalars"][0];
+    assert_eq!(heat["render"], true);
+    assert_eq!(
+        heat["views"],
+        json!([
+            "quarter:2026-Q1",
+            "quarter_map:2026-Q1",
+            "quarter_map:2026-Q2"
+        ]),
+        "the sharing group's ids are listed; the gated owner view is not"
+    );
+
+    // And the list is not a promise about a column that fails to arrive: the id it names under the
+    // sharing group serves the gated quarter's own values.
+    let (status, body) = viewport_bytes(&served, &outsider, "quarter_map:2026-Q2").await;
+    assert_eq!(status, 200);
+    let (names, values) = points_columns(&body);
+    assert!(names.contains(&"heat".to_string()), "{names:?}");
+    for (entity, value) in by_entity(&served, &outsider, &values).await {
+        assert_eq!(value, heat_on_the_wire(1, entity), "entity {entity}");
+    }
+
+    // The owner's own view stays unreachable, and its 404 is the one an unknown name gets.
+    let (status, _) = viewport_bytes(&served, &outsider, "quarter:2026-Q2").await;
+    assert_eq!(status, 404);
 }
