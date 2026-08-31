@@ -740,8 +740,12 @@ pub fn extent_column_name(column: &str, view: Option<&str>) -> String {
 /// declaration, so the combination reaches no manifest a build wrote — and a manifest that
 /// carried it would name a token index no pass produced, which this predicate would otherwise
 /// demand at open.
+///
+/// **The rule itself is `ScopedScalar::is_filterable`**, one crate down, because the build decides
+/// what to *write* on the same licence and `check-layers.sh` denies the build this crate. This is
+/// the engine's name for it and nothing more.
 pub fn scoped_is_filterable(scoped: &tessera_store::manifest::ScopedScalar) -> bool {
-    scoped.index || (scoped.render && Family::of_scoped(scoped) != Family::Text)
+    scoped.is_filterable()
 }
 
 /// Does this scoped family's per-view column carry keyed postings — the build's
