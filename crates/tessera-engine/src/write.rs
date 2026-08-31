@@ -4459,7 +4459,9 @@ fn dangling_entities(generation: &Generation, view: &str) -> Vec<EntityId> {
             }
         }
     }
-    for (entity, item) in generation.buffer.iter() {
+    // **Every buffered row, joins included** (`rows()`, not `iter()`): the question here is which
+    // entities have a row *in this view*, which is geometry, and a join is a row.
+    for (entity, item) in generation.buffer.rows() {
         if item.view == view {
             candidates.push(*entity);
         }
@@ -4480,7 +4482,7 @@ fn dangling_entities(generation: &Generation, view: &str) -> Vec<EntityId> {
         });
         let buffered_elsewhere = generation
             .buffer
-            .iter()
+            .rows()
             .any(|(buffered, item)| buffered == entity && item.view != view);
         !in_another_view && !buffered_elsewhere
     });
@@ -9794,14 +9796,17 @@ impl Executor {
             Arc::clone(&generation.buffer)
         } else {
             let mut buffer = (*generation.buffer).clone();
-            let orphaned: Vec<EntityId> = generation
+            // Rows, not entities, and by (entity, view): an entity whose row in the dropped view
+            // was a join keeps the row it holds elsewhere, and `rows()` is what sees the join at
+            // all.
+            let orphaned: Vec<(EntityId, String)> = generation
                 .buffer
-                .iter()
+                .rows()
                 .filter(|(_, item)| dropped.contains(&item.view))
-                .map(|(entity, _)| *entity)
+                .map(|(entity, item)| (*entity, item.view.clone()))
                 .collect();
-            for entity in orphaned {
-                buffer.remove(entity);
+            for (entity, view) in orphaned {
+                buffer.remove_in_view(entity, &view);
             }
             self.health
                 .buffered_items

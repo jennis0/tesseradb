@@ -1039,6 +1039,68 @@ async fn delete_dangling_deletes_only_the_entities_this_view_alone_held() {
         "the buffered row's entity was deleted with the rest"
     );
 
+    // **A buffered join row goes with the view it named, and its entity does not.** The row is
+    // geometry for a coordinate system that no longer exists, so nothing would ever give it a
+    // place; left in the buffer it would pin the WAL's reclaim bound for the life of the process.
+    assert_eq!(
+        create(&served, "quarter", "2026-Q7", q_record("Q7", 7))
+            .await
+            .status(),
+        201
+    );
+    let both = b"both".to_vec();
+    let buffered_before = served.server.state.engine.buffered_items();
+    assert_eq!(
+        ingest(
+            &served,
+            "both-world",
+            "world",
+            &[(both.clone(), 60.0, 60.0, "0", Some(6))]
+        )
+        .await
+        .status(),
+        200
+    );
+    assert_eq!(
+        ingest(
+            &served,
+            "both-q7",
+            "quarter:2026-Q7",
+            &[(both.clone(), 800.0, 300.0, "0", Some(6))]
+        )
+        .await
+        .status(),
+        200
+    );
+    assert_eq!(
+        served.server.state.engine.buffered_items(),
+        buffered_before + 2,
+        "one row per (entity, view), both awaiting a flush"
+    );
+    let body = drop_view(&served, "quarter", "2026-Q7", true).await;
+    assert_eq!(
+        body["deleted"], 0,
+        "the entity holds a row in `world`, so it is not dangling: {body}"
+    );
+    assert_eq!(
+        served.server.state.engine.buffered_items(),
+        buffered_before + 1,
+        "the dropped view's buffered row went with it, and the other stayed"
+    );
+    flush(&served).await;
+    assert_eq!(
+        ingest(
+            &served,
+            "both-again",
+            "world",
+            &[(both.clone(), 70.0, 70.0, "0", Some(6))]
+        )
+        .await
+        .status(),
+        409,
+        "and the entity is alive, in `world`"
+    );
+
     // And the drop without the option deletes nothing at all, which is the default.
     assert_eq!(
         create(&served, "quarter", "2026-Q6", q_record("Q6", 2))
