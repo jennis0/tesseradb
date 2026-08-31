@@ -2423,12 +2423,14 @@ fn scoped_render_targets(args: &BuildArgs, columns: &[ScopedRenderColumn]) -> Ve
 /// keyword's are a dictionary, so for either a posting per value is a second copy of the column
 /// (this module's [`write_filter_postings`]).
 ///
-/// **`index` is the whole condition**, where the entity-scoped rule is `index` *or* a `derived`
-/// vocabulary: an unindexed scoped family is on no surface at all, so postings written for one
-/// would be read by nothing. It must agree with the engine's `filter::scoped_owes_postings`, or
-/// the open demands a file no pass wrote.
+/// **The family's filter admission is the whole condition** — `index` or `render`, the engine's
+/// `filter::scoped_is_filterable` (2026-08-31) — where the entity-scoped rule is `index` *or* a
+/// `derived` vocabulary. The difference is that a scoped family's admission decides both surfaces
+/// at once: a family on no filter surface has no `/v1/categories` answer either, so postings
+/// written for one would be read by nothing. It must agree with the engine's
+/// `filter::scoped_owes_postings`, or the open demands a file no pass wrote.
 fn scoped_postings_are_owed(attribute: &crate::config::Attribute) -> bool {
-    attribute.vocabulary.is_some() && attribute.index
+    attribute.vocabulary.is_some() && (attribute.index || attribute.render)
 }
 
 /// Printed per column of the family, where an entity-scoped column's coverage is printed: a scoped

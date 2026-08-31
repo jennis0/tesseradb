@@ -719,21 +719,29 @@ pub fn extent_column_name(column: &str, view: Option<&str>) -> String {
 /// Is this group-scoped family on the filter surface — published by `/v1/meta`'s
 /// `filter_operands` and resolvable by a leaf (`views.md` §5)?
 ///
-/// `index = true`, and nothing else — every one of the four families is served, the build writing
-/// per view exactly what its entity-scoped counterpart writes bundle-wide: a value column and a
-/// presence bitmap for a number, those and a dictionary for a keyword, those and keyed postings for
-/// a category, and a token dictionary with positional postings — no value column at all — for
-/// text.
+/// **`index`, or `render`** — [`is_filterable`]'s licence, asked of a family, and the two are the
+/// same rule since the asymmetry between them was closed (2026-08-31, owner ruling). Every one of
+/// the four families is served, the build writing per view exactly what its entity-scoped
+/// counterpart writes bundle-wide: a value column and a presence bitmap for a number, those and a
+/// dictionary for a keyword, those and keyed postings for a category, and a token dictionary with
+/// positional postings — no value column at all — for text.
 ///
-/// **No `render` clause, where [`is_filterable`] has one.** A rendered entity-scoped column is
-/// filterable over the request's own rows whatever its `index` — the row route decision 0068
-/// gives it. A rendered *scoped* column has a row tail too, in each view of its group
-/// (`views.md` §5), and is deliberately not filterable through it: the leaf a request writes
-/// resolves to one **entity-space** column, which a pin may make some other view's, and a row
-/// scan can only ever answer over the rows in front of it. So the two routes would answer
-/// different questions under the same spelling, and `index` stays the whole licence.
+/// **What `render` licences here is the entity-space column, not the row tail.** A rendered
+/// entity-scoped column has no entity-space column of its own — `owes_value_column` is `index`
+/// or a `derived` vocabulary — so decision 0068 answers it over the request's own rows. A scoped
+/// family's per-view column *is* entity space and is written whatever the family's flags, so a
+/// rendered one is answered from it by the ordinary scan, which is what makes a **pin** work:
+/// a leaf naming another view's column is read where it lives rather than from rows the request
+/// does not hold. The row tail a rendered family also occupies answers no filter at all
+/// ([`open_scoped_column`]'s placement).
+///
+/// **`text` is excluded from the render arm** rather than assumed away, as [`is_filterable`]
+/// excludes the string families from its own: `render` on a scoped `text` family is refused at the
+/// declaration, so the combination reaches no manifest a build wrote — and a manifest that
+/// carried it would name a token index no pass produced, which this predicate would otherwise
+/// demand at open.
 pub fn scoped_is_filterable(scoped: &tessera_store::manifest::ScopedScalar) -> bool {
-    scoped.index
+    scoped.index || (scoped.render && Family::of_scoped(scoped) != Family::Text)
 }
 
 /// Does this scoped family's per-view column carry keyed postings — the build's
@@ -744,11 +752,13 @@ pub fn scoped_is_filterable(scoped: &tessera_store::manifest::ScopedScalar) -> b
 /// `derived` one. The two functions must agree, or the open demands a file no pass wrote — a
 /// refusal — or leaves one no reader touches.
 ///
-/// **`index` is the whole condition, where an entity-scoped column's is `index` *or* a `derived`
-/// vocabulary.** The difference is that a scoped family has one licence and not two: an unindexed
-/// scoped family is on no surface at all — no operand, and no `/v1/categories` answer, since that
-/// route resolves a scoped column through the same admission the filter parse makes — so postings
-/// written for one would be read by nothing.
+/// **[`scoped_is_filterable`] is the whole condition, where an entity-scoped column's is `index`
+/// *or* a `derived` vocabulary.** The difference is that a scoped family's admission decides both
+/// surfaces at once: a family on no filter surface has no `/v1/categories` answer either, that
+/// route resolving a scoped column through the same admission the filter parse makes — so
+/// postings written for one would be read by nothing. A **rendered** category is therefore on
+/// both surfaces and owes them, which is where this parts from the entity-scoped rendered
+/// category: that one has no entity-space column for postings to key, and this one always has.
 pub(crate) fn scoped_owes_postings(scoped: &tessera_store::manifest::ScopedScalar) -> bool {
     scoped.vocabulary.is_some() && scoped_is_filterable(scoped)
 }
@@ -793,8 +803,9 @@ fn open_scoped_column(
         entity: true,
         // **Never the row route**, though a rendered family does occupy a row tail
         // (`views.md` §5): a leaf resolves to one entity-space column and a pin may make that
-        // another view's, which no scan of *these* rows can answer. The entity route is the whole
-        // filter surface — see [`scoped_is_filterable`].
+        // another view's, which no scan of *these* rows can answer. A rendered family is an
+        // operand through the entity column beside that tail rather than through it, so the
+        // entity route is the whole filter surface — see [`scoped_is_filterable`].
         row: false,
         family: scoped_family,
     };
