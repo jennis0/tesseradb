@@ -76,9 +76,14 @@ pub fn parse(
 /// **Three refusals, two codes, and the split is contracts §3.1's closed list.** An unknown column
 /// and an ambiguous one are both `422`: the caller wrote something this schema cannot answer, and
 /// can be told so. A **pin naming nothing** is the `404` an unknown view already gets, and is
-/// deliberately the same answer for a key nobody declared, an ordinal no view holds and — when
-/// `views.md` §6's gate lands — a view this principal may not reach: a `422` there would make the
-/// filter surface an existence oracle over a roster the viewer plane refuses to enumerate.
+/// deliberately the same answer for a key nobody declared, an ordinal no view holds and a view
+/// this principal's gate fails (`views.md` §6): a `422` there would make the filter surface an
+/// existence oracle over a roster the viewer plane refuses to enumerate.
+///
+/// **A principal who cannot reach the attribute's group at all reaches none of the three**: the
+/// family is undeclared for them, so `EngineMeta::resolve_filter_column` answers
+/// [`LeafColumn::Unknown`] for both spellings and the leaf takes the ordinary unknown-column `422`
+/// below — which names no group and confirms no key space (`views.md` §5).
 fn resolve_leaf(leaf: &str, column: LeafColumn) -> Result<(String, Family), ApiError> {
     match column {
         LeafColumn::Resolved { column, family } => Ok((column, family)),

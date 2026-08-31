@@ -20,6 +20,7 @@ pub mod derived;
 pub mod derived_cache;
 pub mod filter;
 mod flush;
+pub mod gate;
 mod geometry;
 pub mod histogram;
 pub mod layout;
@@ -56,6 +57,7 @@ pub use compose::{compose, denied_rows_of, visible_to, EffectiveMask, RowProject
 // The publication guard's refusal, which a publisher outside this crate must handle.
 // `check_publishable` itself stays private: whether a geometry may be published is this crate's
 // judgement, and a caller that could ask separately could also act on a stale answer.
+pub use gate::VisibleViews;
 pub use geometry::{GeometryPublication, GeometryRefused, GeometryRefusedReason};
 pub use session::{
     default_compute_threads, Engine, EngineConfig, EngineError, PartitionStatus, Session,

@@ -719,6 +719,7 @@ require_member_visibility = "none"
         let parsed = crate::config::Config::parse(&config_path, &Default::default()).unwrap();
         let args = crate::BuildArgs {
             views: vec![crate::ViewArgs {
+                visibility: None,
                 view_id: "s0".into(),
                 projection: parsed.views[0].projection,
                 extent: tessera_spatial::Bounds {

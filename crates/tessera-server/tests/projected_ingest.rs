@@ -120,6 +120,7 @@ fn build_projected(out: &Path, tmp: &Path, points: &[(f64, f64)]) {
     write_pairs_n(&pairs_path, points.len() as u64);
     build(&BuildArgs {
         views: vec![tessera_build::ViewArgs {
+            visibility: None,
             view_id: "s0".to_string(),
             projection: Projection::WebMercator,
             extent: world_frame(),

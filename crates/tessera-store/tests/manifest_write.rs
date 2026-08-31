@@ -166,6 +166,7 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
         },
         groups: Vec::new(),
         views: vec![ViewDescriptor {
+            visibility: None,
             id: "main".to_string(),
             display_name: "Main".to_string(),
             // The frame is the view's, not the bundle's (decision 0040).

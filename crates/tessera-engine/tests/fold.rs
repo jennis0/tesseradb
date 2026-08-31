@@ -111,6 +111,7 @@ fn build_fixture_with_sparse_term(out: &Path, points_path: &Path, pairs_path: &P
     write_pairs_with_sparse_term(pairs_path, N_ITEMS);
     let args = BuildArgs {
         views: vec![tessera_build::ViewArgs {
+            visibility: None,
             view_id: "s0".to_string(),
             projection: tessera_spatial::Projection::None,
             extent: extent(),

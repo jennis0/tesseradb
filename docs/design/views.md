@@ -1,20 +1,31 @@
 # Views — design
 
 **Date:** 2026-08-30
-**Status:** Normative (r14) — **a group grows while the service runs** (r14, 2026-08-31):
+**Status:** Normative (r15) — **the gate is built** (r15, 2026-08-31): spec §6 is end to end.
+`visibility` is accepted on a view, a group and a roster record, checked at acceptance against the
+plugin that will evaluate it, and stored on the manifest; a session's **visible-view set** is
+resolved once at authorise — every view of every group, whatever the outcome, by intersection of
+the label's term set with the principal's, the group's gate conjunctive with the view's own — and
+is fixed for the session's life. Every view-valued serving surface is filtered by it: `/v1/meta`'s
+`views` and `groups`, a gate-failed group taking its whole roster; each served layer's `views`;
+`filter_operands`' scoped entries and the filter leaf that names one, bare or pinned, which
+collapses to the unknown-column `422` (spec §5); and both viewer verbs that name a view, where a
+gate-failed name is the *same* 404 a never-declared one gets, from the same site, at the same cost
+— one set-membership lookup, made on both outcomes. The control plane is not gated. Two things
+the gate deliberately does not do, both ruled: a view created after a session authorised is a 404
+to it until re-authorisation, and ordinal gaps stay visible (spec §9, decision 0110). **a group grows while the service runs** (r14, 2026-08-31):
 `PUT /control/views/{group}/{key}` creates a view of a declared group and `DELETE` drops it,
 burning the key and its ordinal; the roster's durable home is the segments manifest, carried
 forward for ever as `layer_tombstones` is; a created view answers a viewer verb empty and takes
 its first row space at the next flush; and a known `external_id` naming a view the entity is not
 in is a **join** (spec §4), the row landing in that view with the entity, its label and its
-attributes untouched. `delete_dangling` is built, as sugar over the deny lane. What is still
-unbuilt is the gate (spec §6) and the serving surfaces a scoped column needs; spec §3.2's and
+attributes untouched. `delete_dangling` is built, as sugar over the deny lane. Spec §3.2's and
 §4's markers say what remains inside what is built. **a group-scoped attribute answers filters** (r13, 2026-08-31):
 spec §5's evaluation rule is built end to end — the family is recorded in the manifest beside the
 roster, `/v1/meta`'s `filter_operands` carries its scope, and a leaf resolves to one view's column
 by the request's own view or by a pin, `name@key` or `name@#n`, with a `422` naming the group where
 nothing decides and the unknown-view `404` for a pin naming no view of it (contracts §2.2, §3.2
-r55). ⊘ Three named gaps remain at that claim: a category or text family, `render`, and the gate.
+r55). ⊘ Two named gaps remain at that claim: a category or text family, and `render`.
 **the roster is served** (r12, 2026-08-31): `/v1/meta` publishes
 every view of every group with its key, ordinal and typed metadata, in ordinal order, beside the
 groups' own orderings; every one of them answers a viewer verb, by key or by ordinal
@@ -103,7 +114,7 @@ non-sentinel, never a stored set.
 > and nothing else.
 >
 > What remains is a group whose views are **minted from a discriminator** with no roster at all
-> (spec §3.1), the gate (spec §6), and the serving surfaces a scoped **layer** would need. A
+> (spec §3.1), and the serving surfaces a scoped **layer** would need. A
 > scoped **attribute** is served: since 2026-08-31 a numeric or keyword family is a filter operand
 > carrying its scope, and a leaf reads the view the request names or the one it pins (spec §5,
 > contracts §3.2 r55) — what remains of it is a category or text family, and `render`, which spec
@@ -560,18 +571,21 @@ an attribute. The two are kept apart so that neither grows the other's surface.
 > the resolved column: a value scan under the candidate, the presence bitmap for absence, an entity
 > bitmap the mask meets before any count.
 >
-> ⊘ **Three things remain unbuilt, each named here.** A **category** or **text** scoped family is stored
+> **The scoped surface is inside the gate, built 2026-08-31** (spec §6). A family whose group this
+> principal's gate fails is **undeclared**: `filter_operands` omits its entry — the only place the
+> document names a group — and a leaf naming it, bare or pinned, takes the ordinary unknown-column
+> `422`, never the `422` that names the group nor the `404` that would confirm the key space. The
+> check is one site, ahead of the pin/bare split, so the two spellings cannot diverge; a pin under
+> a group that *does* pass resolves through the session's visible-view set, so a pin naming a view
+> this principal may not reach is the same `404` a key no view holds gets.
+>
+> ⊘ **Two things remain unbuilt, each named here.** A **category** or **text** scoped family is stored
 > and on no filter surface: the per-view postings each is answered from are not written, and a
 > category's value list is `/v1/categories`' own surface besides — the build prints what the
 > declaration did not buy. **`render` on a scoped attribute renders nothing**, in any view: the hot
 > column is per row space and a scoped column is in none of them, so the paragraph below is
-> specification and not behaviour; the build prints that too. And the **gate** is unbuilt (spec
-> §6), so no pin is filtered against a visible-view set today — the check has one site when it
-> lands, the view resolution a pin goes through. What it must produce there is the normative
-> paragraph above, not the absent-key 404: for a gate-failed principal the whole attribute is
-> undeclared, so every use — bare or pinned — takes the unknown-column refusal, and neither the
-> group's name nor the key space is ever confirmed. The ingest rule is unimplemented with the
-> rest of the write half.
+> specification and not behaviour; the build prints that too. The ingest rule is unimplemented with
+> the rest of the write half.
 >
 > ⊘ **A scoped attribute declaring its own `source` is refused by name**: that file needs
 > `fields.view` to say which view each row's value is for, and reading it as entity space would
@@ -619,10 +633,31 @@ on exactly what the gate protects. Intersection gives a disjunctive gate its int
 - The gate is conjunctive with item labels, never substitutive: an item inside a gated view is
   still governed by its own label.
 
-> **⊘ Specified, not implemented.** `visibility` on a view is parsed and refused; no gate is
-> evaluated and no visible-view set exists. Every declared view is reachable by every principal
-> that authorises at all, and a reader must not count gating as an available means of
-> restricting reachability.
+> **Implemented 2026-08-31 — the gate, end to end** (contracts §3.2, §3.4 r57). `visibility` is
+> accepted on a `[[view]]`, a `[[view_group]]`, an inline roster block, a `[view_group.views]`
+> table row and `PUT /control/views/{group}/{key}`, and is stored on the manifest — the group's on
+> its `GroupDescriptor`, each view's on its `ViewDescriptor` with the roster record carrying the
+> published copy and a disagreement between the two refused at open. `public` compiles to the
+> absence of a gate; any other label is put through the plugin's `terms_of_label` at acceptance —
+> the same call an item's `access` bytes take at ingest — and a label the plugin cannot read, or
+> one naming no terms at all, is refused where its author can read the message rather than stored
+> as a gate nobody could satisfy.
+>
+> At authorise, after the mask is materialised, **every view of every group is evaluated whatever
+> the outcome** and the result is an immutable per-session visible-view set: the label's term set
+> against the principal's satisfied set, by intersection, the group's conjunctive with the view's
+> own. The request path then makes **one set-membership lookup**, on both outcomes — no plugin call,
+> no roster scan, and the probe is made whether or not a name resolved, so a gate-failed view and a
+> never-declared one cost the same work as well as reading the same. Filtered: `/v1/meta`'s `views`
+> and `groups` (a gate-failed group taking its whole roster), each served layer's `views` list,
+> `filter_operands`' scoped entries, `/v1/viewport`'s and `/v1/artifacts`' view resolution, and a
+> filter leaf's pin. The **control plane is not gated** — it holds the operator credential and is
+> the single authority that writes the roster.
+>
+> **The set is fixed and a view created since is a 404 to a session already authorised**, until it
+> re-authorises — the owner ruling this section records, and the price of the lookup above.
+> **Ordinal gaps are visible and are not hidden** (spec §9, decision 0110), which is the accepted
+> channel and not an unbuilt one.
 
 ## 7. Build and populate
 
@@ -770,12 +805,12 @@ No new verb; one new accepted register row (the ordinal gap), and the C15/C17 no
 | Contracts §2.1 | A bundle carries several views, `views/<view>/` and `views/<group>/<key>/`; the `group:key` and `group:#n` id forms; the roster, ordinal high-water and key tombstones in the segments manifest, carried for ever |
 | Contracts §2.2, §2.5 | The quantisation extent moves onto the view descriptor — first, ahead of any multi-view build |
 | Contracts §2.2 | **Done at contracts r55** for the attribute: a `groups` row carrying the roster and each group's `scoped_scalars`, with the column families under `attrs/<column>/<group>/<key>/`. ⊘ A layer's `scope` still has no manifest field — it is compiled beside the declaration and never written |
-| Contracts §3.2 | `/v1/meta`: per-view `extent` (r52), groups with their rosters and typed metadata (r53–r54), `filter_operands` carrying the scope and the pinned leaf `name@key` / `name@#n` in the filter grammar (r55) — all done, ⊘ none of it gate-filtered, the gate being unbuilt |
-| Contracts §3.4 | The duplicate rule amended per spec §4; `PUT /control/views/{group}/{key}` and its drop with `delete_dangling`; identifier forms with mandatory idset on the `tessera_id` form; `--view` withdrawn |
+| Contracts §3.2 | `/v1/meta`: per-view `extent` (r52), groups with their rosters and typed metadata (r53–r54), `filter_operands` carrying the scope and the pinned leaf `name@key` / `name@#n` in the filter grammar (r55), and every one of them gate-filtered per principal (r56) — all done |
+| Contracts §3.4 | The duplicate rule amended per spec §4; `PUT /control/views/{group}/{key}` and its drop with `delete_dangling`, the create taking a gate label checked against the plugin (r57); identifier forms with mandatory idset on the `tessera_id` form; `--view` withdrawn |
 | Configuration §1, §8 | `[[view_group]]` with `[[view_group.view]]`, `[view_group.views]`, `members`, `metadata` and per-view `visibility` on the roster; `fields.view` on a group source, a scoped attribute and a scoped layer; `scope` on `[[attribute]]` and `[[layer]]` |
 | Write-path §2, §4, §5 | The create record; the join rule at admission; one pending segment per view touched restated for several views; `delete_dangling` as submitted deletions |
 | Compaction | Reclamation of a dropped view; the attribute pass over a family |
-| Appendix C | **New accepted row: the ordinal gap** (spec §9); C17 note (cross-view linkage), C15 note (a group's view's size via timing); the `views` field and the scoped `filter_operands` entries of `/v1/meta` gate-filtered under C11's precedent |
+| Appendix C | **Done for the gate at r15**: the `views`/`groups` fields and the scoped `filter_operands` entries of `/v1/meta` gate-filtered under C11's precedent, and view existence under C4's closure. ⊘ Still to make: the new accepted row for the **ordinal gap** (spec §9), the C17 note (cross-view linkage) and the C15 note (a group's view's size via timing) |
 | Conformance | A two-view differential: the oracle answers per view; the pinned-leaf cases, the gate-failed pin among them; the gate's work-indistinguishability |
 | Decisions | ~~The allocation key~~ — ruled, decision 0112 |
 
@@ -931,6 +966,25 @@ each view under spec §4's rule.
 
 ## Appendix R — review trail
 
+- **r15 (2026-08-31)** — the gate is built, and spec §5's and §6's markers record it. `visibility`
+  is accepted on every surface that declares one and evaluated at authorise into a per-session
+  visible-view set, by the intersection semantics this document has specified since r1 — *not* the
+  conservative label join, whose required-set reading passes every principal on a disjunctive gate.
+  Three properties are structural rather than incidental, and each is written at its site: the set
+  is resolved **once**, over every view whatever the outcome, so the request path makes one
+  set-membership lookup and asks the plugin nothing; that lookup is made on **both** outcomes, so a
+  gate-failed name and a never-declared one cost the same work rather than merely reading the same;
+  and the acceptance check is the plugin call an item's label already gets at ingest, so a gate no
+  principal could satisfy is refused where its author can read the message instead of stored. A
+  view's gate is written twice — the roster record publishes it, the view descriptor is what the
+  evaluation reads — and a manifest whose two copies disagree refuses at open, which is the
+  fail-closed direction for the one disagreement that matters. Not moved, and stated rather than
+  assumed: the set is **fixed** for the session's life, so a view created since is a 404 until
+  re-authorisation (owner ruling, spec §6); ordinal gaps are **visible and not hidden** (spec §9,
+  decision 0110); and the control plane is ungated, holding the operator credential that writes the
+  roster. Appendix C's amendments for the gate are made — C11's precedent for `/v1/meta`'s view
+  fields, C4's closure for view existence; the ordinal gap's own accepted row (spec §11) is not,
+  and the table says so. No design content changed in this revision.
 - **r14 (2026-08-31)** — the write half is built, and the markers at spec §1, §3.2, §3.4 and §4
   record it. `PUT`/`DELETE /control/views/{group}/{key}` create and drop a view of a declared
   group; the roster's durable home is `SegmentsManifest.views`/`view_tombstones`, carried forward

@@ -159,6 +159,7 @@ fn build_fixture_with_attributes(out: &Path, tmp: &Path, n: u64) {
     let schema = parse_schema(tmp);
     let args = BuildArgs {
         views: vec![tessera_build::ViewArgs {
+            visibility: None,
             view_id: "s0".to_string(),
             projection: tessera_spatial::Projection::None,
             extent: extent(),
@@ -389,6 +390,7 @@ fn both_build_implementations_write_the_same_tail() {
     let schema = parse_schema(tmp.path());
     let args_for = |out: &Path| BuildArgs {
         views: vec![tessera_build::ViewArgs {
+            visibility: None,
             view_id: "s0".to_string(),
             projection: tessera_spatial::Projection::None,
             extent: extent(),
@@ -882,6 +884,7 @@ fn build_non_prefix_fixture(out: &Path, tmp: &Path, n: u64) {
         .expect("the non-prefix fixture schema parses");
     let args = BuildArgs {
         views: vec![tessera_build::ViewArgs {
+            visibility: None,
             view_id: "s0".to_string(),
             projection: tessera_spatial::Projection::None,
             extent: extent(),
@@ -1291,6 +1294,7 @@ fn build_record_fixture(out: &Path, tmp: &Path, n: u64) {
         .expect("the record fixture schema parses");
     let args = BuildArgs {
         views: vec![tessera_build::ViewArgs {
+            visibility: None,
             view_id: "s0".to_string(),
             projection: tessera_spatial::Projection::None,
             extent: extent(),

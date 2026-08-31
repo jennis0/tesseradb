@@ -176,6 +176,7 @@ fn build_fixture_with_schema(out: &Path, points: &Path, pairs: &Path) {
         .schema;
     let args = BuildArgs {
         views: vec![tessera_build::ViewArgs {
+            visibility: None,
             view_id: "s0".to_string(),
             projection: tessera_spatial::Projection::None,
             extent: extent(),

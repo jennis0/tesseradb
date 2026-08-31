@@ -76,7 +76,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `annotation-representation.md` | Normative for the annotation representat | 40 |
 | `annotation-write-cycle.md` | Normative for the annotation write cycle | 18 |
 | `annotations.md` | Normative — r43 | 18 |
-| `architecture.md` | Normative — r52 | 39 |
+| `architecture.md` | Normative — r53 | 39 |
 | `artifact-fetch-protocol.md` | Normative — r3 | 7 |
 | `artifact-serving-at-scale.md` | Ruled, reviewed, amended, and re-measure | 21 |
 | `artifact-shapes.md` | Normative — r7 |  |
@@ -89,9 +89,9 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `client-obligations.md` | Provisional — under review |  |
 | `compaction.md` | Normative — r12 | 9 |
 | `concurrency-lifecycle.md` | Normative — r11 | 13 |
-| `configuration.md` | Normative for the build-time configurati | 29 |
+| `configuration.md` | Normative for the build-time configurati | 28 |
 | `conformance.md` | Normative — r15 | 19 |
-| `contracts.md` | Normative — r56 | 34 |
+| `contracts.md` | Normative — r57 | 33 |
 | `core-access-expressions.md` | Provisional — under review | 1 |
 | `correctness-suite.md` | Provisional — under review | 13 |
 | `deferred-index-ordinal-split.md` | Deferred |  |
@@ -112,5 +112,5 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `streamed-serving.md` | Normative — r2 |  |
 | `system-architecture.md` | Normative — r17 | 28 |
 | `tile-addressed-integration.md` | Provisional — under review |  |
-| `views.md` | Normative — r14 | 15 |
+| `views.md` | Normative — r15 | 14 |
 | `write-path.md` | Normative for the write path. Owner sign | 20 |

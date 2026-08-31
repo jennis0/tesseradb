@@ -166,6 +166,7 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
         },
         groups: Vec::new(),
         views: vec![ViewDescriptor {
+            visibility: None,
             id: "main".to_string(),
             display_name: "Main".to_string(),
             // The frame is the view's, not the bundle's (decision 0040).

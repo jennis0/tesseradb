@@ -156,6 +156,7 @@ fn args(config: &Config, out: PathBuf) -> BuildArgs {
         tessera_build::config::acquire_view(&registry[0]).expect("the view acquires its inputs");
     BuildArgs {
         views: vec![tessera_build::ViewArgs {
+            visibility: None,
             view_id: "s0".to_string(),
             projection: tessera_spatial::Projection::None,
             extent: Bounds {

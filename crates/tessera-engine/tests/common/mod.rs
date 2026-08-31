@@ -170,6 +170,7 @@ pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64
     write_pairs_n(pairs_path, n);
     let args = BuildArgs {
         views: vec![tessera_build::ViewArgs {
+            visibility: None,
             view_id: "s0".to_string(),
             projection: tessera_spatial::Projection::None,
             extent: extent(),
@@ -228,6 +229,7 @@ pub fn build_corpus_fixture(
         .expect("the generator's config parses");
     let args = BuildArgs {
         views: vec![tessera_build::ViewArgs {
+            visibility: None,
             view_id: "s0".to_string(),
             projection: tessera_spatial::Projection::None,
             extent: corpus.extent(),
@@ -286,6 +288,7 @@ pub fn build_corpus_fixture_with_layers(
         .expect("the generator's config parses");
     let args = BuildArgs {
         views: vec![tessera_build::ViewArgs {
+            visibility: None,
             view_id: "s0".to_string(),
             projection: tessera_spatial::Projection::None,
             extent: corpus.extent(),
@@ -335,6 +338,7 @@ pub fn build_with_layers(
 ) {
     let args = BuildArgs {
         views: vec![tessera_build::ViewArgs {
+            visibility: None,
             view_id: "s0".to_string(),
             projection: tessera_spatial::Projection::None,
             extent: corpus.extent(),

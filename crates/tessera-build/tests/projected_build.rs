@@ -408,6 +408,7 @@ fn build_bundle(
     let out = tmp.join("bundle");
     let args = BuildArgs {
         views: vec![tessera_build::ViewArgs {
+            visibility: None,
             view_id: "world".to_string(),
             projection,
             extent,

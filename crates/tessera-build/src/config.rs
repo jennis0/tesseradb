@@ -152,6 +152,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use tessera_plugin::Plugin;
 use tessera_spatial::frame::{snap_outward, Snap};
 use tessera_spatial::tiler::ScalarType;
 use tessera_spatial::{cell, Bounds, Projection};
@@ -3184,13 +3185,23 @@ fn check_view_name(object: &str, name: &str) -> Result<()> {
 
 /// A `[[view]]`'s, a `[[view_group]]`'s or a roster record's own `visibility` (`views.md` §6).
 ///
-/// **`public` compiles and a label is refused**, which is the fail-closed reading of a control
-/// that is specified and not implemented ([decision 0013](../../../docs/decisions/0013-mark-specified-vs-implemented.md)).
-/// `public` is the documented default and the current behaviour — every view a principal can reach
-/// at all is reachable — so accepting the word records nothing that is not already true. A real
-/// label is the opposite: no visible-view set is resolved at authorise and no view-valued surface
-/// is filtered, so accepting one would register a view reachable by every principal under a
-/// declaration saying otherwise, which is a disclosure control accepted and never enforced.
+/// **`public` compiles to `None`**, which is what every downstream reader takes as *no gate*: it
+/// is the label every principal holds inside the trust boundary (decision 0088), so storing the
+/// word and storing nothing are the same statement and the shorter one cannot be misread as a
+/// term to look up.
+///
+/// **Any other label is compiled after the plugin has been asked to read it** — the same question
+/// an item's `access` bytes are put through at ingest ([`Plugin::terms_of_label`]), because a view
+/// gate is satisfied by exactly the item-visibility predicate (`views.md` §6) and a label the
+/// plugin cannot parse is one no principal could ever satisfy. Refusing it here is the difference
+/// between a typo an author fixes at the build and a view that is silently reachable by nobody.
+/// A label that parses to **no descriptors at all** is refused for the same reason: its term set
+/// is empty, it intersects nothing, and it gates the view against every principal including the
+/// one who wrote it.
+///
+/// The plugin asked is `builtin:passthrough`, which is the only one a build runs
+/// (`tessera_build::build`); a deployment serving the bundle under a different plugin is a
+/// mismatch the gate fails closed on rather than one this check could anticipate.
 fn compile_view_gate(object: &str, declared: Option<&str>) -> Result<Option<String>> {
     let Some(label) = declared else {
         return Ok(None);
@@ -3199,13 +3210,24 @@ fn compile_view_gate(object: &str, declared: Option<&str>) -> Result<Option<Stri
         return Ok(None);
     }
     check_label(object, "visibility", label)?;
-    Err(declaration_error(format!(
-        "{object}: `visibility = \"{label}\"` is specified and not built (views §6 — the gate). No \
-         visible-view set is resolved at authorise and nothing filters a view-valued surface, so \
-         accepting a label would register a view reachable by every principal that authorises at \
-         all, under a declaration saying otherwise. `public` is the default and the current \
-         behaviour; the gate on the items themselves is `point_visibility`, which is built"
-    )))
+    let descriptors = tessera_plugin::Passthrough::new()
+        .terms_of_label(label.as_bytes())
+        .map_err(|e| {
+            declaration_error(format!(
+                "{object}: `visibility = \"{label}\"` is not a label the plugin can read ({e}). A \
+                 view's gate is satisfied by the item-visibility predicate (views §6), so a label \
+                 the plugin cannot turn into terms is one no principal could satisfy"
+            ))
+        })?;
+    if descriptors.is_empty() {
+        return Err(declaration_error(format!(
+            "{object}: `visibility = \"{label}\"` names no terms. A gate is satisfied where its \
+             term set meets the principal's, so an empty one is satisfied by nobody and the view \
+             would be reachable by no principal at all — including this build's author. Write \
+             `public`, or a label naming terms"
+        )));
+    }
+    Ok(Some(label.to_string()))
 }
 
 /// Compile every `[[view_group]]` (`views.md` §3, decision 0108).
@@ -6065,6 +6087,11 @@ impl Config {
                         y_max: frame.y_max,
                     },
                     projection: declared.projection,
+                    // **The group's own gate, the outer bound over every view of it**
+                    // (`views.md` §6). The *declared* group's, not the owner's: two groups sharing
+                    // one key set are two layouts, and which principals may see each layout is a
+                    // fact about the layout (`views.md` §3.3).
+                    visibility: declared.visibility.clone(),
                     // A `members` group declares none: keys, ordinals and metadata belong to the
                     // group that owns the views (`views.md` §3.3), so a create against the owner
                     // is what supplies them and this group's copies carry none.

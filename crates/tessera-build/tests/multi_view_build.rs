@@ -107,6 +107,7 @@ fn write_pairs(path: &Path) {
 
 fn view_args(view: &str, points: &Path, pairs: &Path) -> ViewArgs {
     ViewArgs {
+        visibility: None,
         view_id: view.to_string(),
         projection: tessera_spatial::Projection::None,
         extent: extent(),
@@ -139,6 +140,7 @@ fn two_views_are_two_row_spaces_over_one_entity_space() {
         groups: vec![tessera_store::manifest::GroupDescriptor {
             name: "quarter".to_string(),
             members_of: None,
+            visibility: None,
             scoped_scalars: Vec::new(),
             quantisation: group_frame(),
             projection: tessera_spatial::Projection::None,
@@ -277,6 +279,7 @@ fn a_label_that_disagrees_between_views_refuses() {
     write(&b, &|e| if e == 5 { "finance" } else { "public" });
 
     let field_view = |view: &str, points: &Path| ViewArgs {
+        visibility: None,
         view_id: view.to_string(),
         projection: tessera_spatial::Projection::None,
         extent: extent(),
@@ -469,6 +472,7 @@ fn alt_group(keys: &[&str]) -> tessera_store::manifest::GroupDescriptor {
     tessera_store::manifest::GroupDescriptor {
         name: "quarter_alt".to_string(),
         members_of: None,
+        visibility: None,
         scoped_scalars: Vec::new(),
         quantisation: group_frame(),
         projection: tessera_spatial::Projection::None,
@@ -918,6 +922,7 @@ fn a_sparse_views_permutation_costs_its_pages_and_not_its_bound() {
         groups: vec![tessera_store::manifest::GroupDescriptor {
             name: "quarter".to_string(),
             members_of: None,
+            visibility: None,
             scoped_scalars: Vec::new(),
             quantisation: group_frame(),
             projection: tessera_spatial::Projection::None,

@@ -1562,6 +1562,10 @@ fn main() -> ExitCode {
                 .zip(acquired_views)
                 .zip(&extents)
                 .map(|((view, acquired_view), extent)| tessera_build::ViewArgs {
+                    // **This view's own gate** (`views.md` §6), as the declaration compiled it:
+                    // the plain view's `visibility`, or — for a view of a group — its roster
+                    // record's own. The group's half travels on the group descriptor beside it.
+                    visibility: view.visibility.clone(),
                     view_id: view.id.clone(),
                     projection: view.projection,
                     extent: *extent,

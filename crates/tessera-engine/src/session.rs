@@ -257,6 +257,22 @@ pub struct Session {
     /// `Arc` so the row-projection cache's entry can carry it for the background refresh, which
     /// has no session registry to look it up in — see [`crate::cache::SessionGeometry`].
     pub(crate) satisfied_sorted: Arc<Vec<TermId>>,
+    /// **The visible-view set** (`views.md` §6): every view of every group this principal may
+    /// reach, resolved once here at authorise and **fixed for this session's life**.
+    ///
+    /// Fixed is a guarantee rather than an oversight. Every view is evaluated at authorise
+    /// whatever the outcome, so the request-time check is one set-membership lookup and a
+    /// gate-failed name costs the same work as a name nobody declared — r23's
+    /// work-indistinguishability standard, and the closure Appendix C's C4 records for
+    /// `/v1/items`. A view **created after** this session authorised is therefore a 404 to it
+    /// until it re-authorises (owner ruling 2026-08-30): creation is rare, tokens expire, and the
+    /// alternatives — a per-request gate evaluation, or a lazily-evaluated miss — each cost
+    /// exactly the property this field exists to hold. Roster immutability (`views.md` §3.2) is
+    /// the other half: a gate, once written, never changes, so a fixed set can never hold a stale
+    /// *widening*.
+    ///
+    /// `Arc` because every request path reads it and none of them may clone the set.
+    pub visible_views: Arc<crate::gate::VisibleViews>,
     /// `sha256(auth_data)` — the cache's caller obligation, kept for the same reason.
     ///
     /// A digest of the credential, never the credential: this lives for the session's lifetime in
@@ -1721,6 +1737,17 @@ impl Engine {
             satisfied.insert(term);
         }
 
+        // **The visible-view set, resolved here and never again** (`views.md` §6) — after the
+        // credential has been resolved and `public` added, and before anything is masked with the
+        // result, because the gate is satisfied by exactly the terms an item's label is. Every
+        // view of every group is evaluated whatever the outcome; see `crate::gate`.
+        let visible_views = Arc::new(crate::gate::resolve(
+            &generation.bundle.manifest,
+            &generation.dict,
+            &satisfied,
+            self.plugin.as_ref(),
+        ));
+
         let mut satisfied_sorted: Vec<TermId> = satisfied.iter().copied().collect();
         satisfied_sorted.sort_unstable();
         let satisfied_sorted = Arc::new(satisfied_sorted);
@@ -1762,6 +1789,7 @@ impl Engine {
             satisfied,
             fragment,
             satisfied_sorted,
+            visible_views,
             auth_data_hash,
             expires_at,
             unresolved_count,
@@ -3103,9 +3131,18 @@ impl Engine {
     /// Create a view of a view group while the service runs, returning its ordinal
     /// (`views.md` §3.2, decision 0108).
     ///
-    /// **Nothing is validated here**, on `register_layer`'s rule: whether the key is free, and the
-    /// ordinal that follows, are state only the write executor may read — a handler that checked
-    /// first could be overtaken between its check and the enqueue.
+    /// **Almost nothing is validated here**, on `register_layer`'s rule: whether the key is free,
+    /// and the ordinal that follows, are state only the write executor may read — a handler that
+    /// checked first could be overtaken between its check and the enqueue.
+    ///
+    /// The **gate label** is the exception, and it is here because only the engine holds the
+    /// plugin. A view's gate is satisfied by exactly the item-visibility predicate
+    /// (`views.md` §6), so the label is put through the same [`Plugin::terms_of_label`] call an
+    /// item's `access` bytes take at `/control/ingest`, and a label the plugin cannot read — or
+    /// one that names no terms at all — is refused rather than stored. Stored, it would be a gate
+    /// no principal could ever satisfy: a view created and reachable by nobody, including the
+    /// operator who created it. `public` is not asked about — it is the label every principal
+    /// holds inside the trust boundary (decision 0088), and the roster stores its absence.
     pub fn create_view(
         &self,
         group: String,
@@ -3113,6 +3150,30 @@ impl Engine {
         visibility: Option<String>,
         metadata: std::collections::BTreeMap<String, tessera_types::view::ViewMetadataValue>,
     ) -> std::result::Result<u32, crate::write::AcceptError> {
+        if let Some(label) = visibility.as_deref().filter(|l| {
+            *l != std::str::from_utf8(tessera_authz::PUBLIC_LABEL).expect("the label is ASCII")
+        }) {
+            let refused = |detail: String| {
+                crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::LayerRefused {
+                    detail,
+                })
+            };
+            let descriptors = self.plugin.terms_of_label(label.as_bytes()).map_err(|e| {
+                refused(format!(
+                    "visibility = '{label}' is not a label the plugin can read ({e}). A view's \
+                     gate is satisfied by the item-visibility predicate (views §6), so a label the \
+                     plugin cannot turn into terms is one no principal could satisfy"
+                ))
+            })?;
+            if descriptors.is_empty() {
+                return Err(refused(format!(
+                    "visibility = '{label}' names no terms. A gate is satisfied where its term \
+                     set meets the principal's, so an empty one is satisfied by nobody and the \
+                     view would be reachable by no principal at all. Write `public`, or a label \
+                     naming terms"
+                )));
+            }
+        }
         self.write.create_view(group, key, visibility, metadata)
     }
 
