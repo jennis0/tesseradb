@@ -1,7 +1,14 @@
 # Views — design
 
 **Date:** 2026-08-30
-**Status:** Normative (r20) — **every family of a group-scoped attribute answers, and such an
+**Status:** Normative (r21) — **a fold after a drop is tested, and it did not work** (r21,
+2026-08-31): §3.4's last ⊘ is discharged, and discharging it found the mechanism it described to be
+half-built. The drop retained the view out of the bundle, so the fold planned no base for it — and
+the fold's *publication* then carried its segments forward from the live side-manifest, found no
+base for them and discarded the fold, every time, so a bundle a view had ever been dropped from
+compacted no further and retired nothing. The carry-forward now omits a segment whose view the
+bundle no longer declares. No design content changed: §3.4 said reclamation is by omission, and it
+now is. **Status:** Normative (r20) — **every family of a group-scoped attribute answers, and such an
 attribute may declare its own `source`** (r20, 2026-08-31, owner ruling; contracts r60): §5's two
 ⊘ markers are discharged. A scoped **category** carries per-view keyed postings — the filter route,
 and what `/v1/categories` derives a per-view value list from — and a scoped **text** column carries
@@ -446,12 +453,20 @@ with the count.
 > one step on the write executor, so no acked batch can interleave between them; the count is in
 > the acknowledgement.
 >
-> ⊘ **Row-space reclamation is the fold's, and no test drives one after a drop.** The dropped
-> view is absent from the bundle the fold plans over, so its segments are not carried into the new
-> prefix and the old one is reclaimed at the rotation — reclamation by omission rather than by a
-> sweep. Until a fold runs, its files stay on disc, named by a side-manifest and reachable by
-> nothing: the view is not in the manifest a request resolves against, and a reopened bundle
-> re-applies the tombstone before it serves anything.
+> **Row-space reclamation is the fold's, and a fold after a drop is tested** (2026-08-31,
+> `tests/views_write.rs`). The dropped view is absent from the bundle the fold plans over, so it
+> has no base in the plan and no segment in the new prefix, and the superseded prefix — files and
+> all — is reclaimed when its last reader lets go, the startup sweep taking any that stands:
+> reclamation by omission rather than by a sweep. Until a fold runs its files stay on disc, named
+> by a side-manifest and reachable by nothing: the view is not in the manifest a request resolves
+> against, and a reopened bundle re-applies the tombstone before it serves anything.
+>
+> **The test found the omission incomplete, and it is fixed.** The drop retains the view out of the
+> *bundle* but leaves its `SegmentDescriptor`s in the live side-manifest, so the fold's publication
+> carried them forward, found no base for a view its plan did not have, and **discarded the whole
+> fold** — every fold after a drop of a view that held rows, for the life of the bundle, so
+> nothing retired either. The carry-forward now omits a segment whose view the bundle no longer
+> declares, which is the same omission the plan already made.
 
 ### 3.5 Layers over a group
 
@@ -1074,6 +1089,18 @@ each view under spec §4's rule.
 
 ## Appendix R — review trail
 
+- **r21 (2026-08-31)** — §3.4's ⊘ is discharged by a test, and the test found a defect. What the
+  section claims is reclamation *by omission*: a dropped view is absent from the bundle the fold
+  plans over, so its segments are not carried into the new prefix and its files go with the
+  superseded one. The first half held; the second did not. A drop removes the view from the bundle
+  and from the roster, and leaves its `SegmentDescriptor`s in the partition's side-manifest until
+  something rewrites it — so the fold's publication treated them as *not consumed*, tried to carry
+  them forward, and discarded itself on the check that every carried segment must have a base in
+  the plan. The effect was that **no fold ever published again** on a bundle a non-empty view had
+  been dropped from: no segments merged, no deletions retired, no disc reclaimed, and only a
+  warning to say so. The fix is one filter in the carry-forward, which is the omission the plan had
+  already made. `tests/views_write.rs` drives the whole claim — the plan's omission, the files, a
+  restart serving the survivors, and the tombstone outliving the fold's manifest rewrite.
 - **r20 (2026-08-31)** — spec §5's two ⊘ markers are discharged and no design content changed.
   Built: a scoped **category**'s per-view keyed postings, which are both the filter route on a
   `public` vocabulary and what `/v1/categories` derives a value list from on a `derived` one; a
@@ -1162,7 +1189,7 @@ each view under spec §4's rule.
   one step on the executor. Three things are recorded rather than assumed, each at its marker: a
   category-typed metadata name has no create that can satisfy it, the join's label and attribute
   arms are exact only while the entity's own row is still buffered, and a dropped view's files are
-  reclaimed by the fold's omission rather than by a sweep, which no test drives. Two defects the
+  reclaimed by the fold's omission rather than by a sweep, which no test drove until r21. Two defects the
   work surfaced and fixed, both older than it: a group's view laid its flush and merge files down
   at `views/<group>/<key>/` while naming them `views/<group>:<key>` in the manifest — every file
   under the view unverifiable at the next open — and the bundle-wide watermark was `entity_hi + 1`

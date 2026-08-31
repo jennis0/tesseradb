@@ -1386,3 +1386,230 @@ async fn a_minted_group_takes_a_create_a_drop_and_a_join() {
         "a dropped key is never reused"
     );
 }
+
+/// Request a compaction fold and block until it has published (`POST /control/compact`,
+/// contracts §3.4). The counter is the only "done" there is: the fold runs on its own thread and
+/// publishes at the executor's next loop iteration, so the acceptance code says nothing about
+/// completion.
+async fn fold(served: &Served) {
+    let before = served.server.state.engine.write_executor_stats().folds;
+    let resp = served
+        .server
+        .client
+        .post(served.server.control_url("/control/compact"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202, "a fold is accepted at any time");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        let stats = served.server.state.engine.write_executor_stats();
+        assert_eq!(
+            stats.fold_failures, 0,
+            "the fold failed rather than publishing"
+        );
+        if stats.folds > before {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the fold never published: {} folds, {} discarded",
+            stats.folds,
+            stats.fold_failures
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// The prefix `CURRENT` names, and the directory it is.
+fn live_prefix(served: &Served) -> (String, std::path::PathBuf) {
+    let root = served.tmp.path().join("bundle");
+    let current: Value =
+        serde_json::from_slice(&std::fs::read(root.join("CURRENT")).unwrap()).unwrap();
+    let prefix = current["prefix"].as_str().unwrap().to_string();
+    let dir = root.join(&prefix);
+    (prefix, dir)
+}
+
+/// The views the newest `SEGMENTS-<n>.json` of `prefix`'s only partition names a segment for.
+fn segment_views(prefix_dir: &Path) -> Vec<String> {
+    let partition = prefix_dir.join("partitions/default");
+    let mut manifests: Vec<std::path::PathBuf> = std::fs::read_dir(&partition)
+        .expect("the partition directory")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("SEGMENTS-") && n.ends_with(".json"))
+        })
+        .collect();
+    manifests.sort();
+    let newest = manifests.last().expect("a side-manifest per partition");
+    let document: Value = serde_json::from_slice(&std::fs::read(newest).unwrap()).unwrap();
+    let mut views: Vec<String> = document["segments"]
+        .as_array()
+        .expect("the segment list")
+        .iter()
+        .map(|s| s["view"].as_str().unwrap().to_string())
+        .collect();
+    views.sort();
+    views.dedup();
+    views
+}
+
+/// Every directory under `root` whose path names `view_id`'s own two components — the shape
+/// `tessera_store::view_rel` lays a group's view down in, `views/<group>/<key>`.
+fn view_dirs(root: &Path, group: &str, key: &str) -> Vec<std::path::PathBuf> {
+    fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>, want: &Path) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            if path.ends_with(want) {
+                out.push(path.clone());
+            }
+            walk(&path, out, want);
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, &mut out, &Path::new("views").join(group).join(key));
+    out
+}
+
+/// **A fold after a drop reclaims the dropped view, by omission** (`views.md` §3.4). The claim had
+/// no test: the drop's own coverage stops at the roster and the 404, and the fold's stops at a
+/// bundle nothing was dropped from — so between them nothing drove a fold over a bundle a view had
+/// left, which is where the reclamation actually happens.
+///
+/// Four things are asserted, and each is a different mechanism:
+///
+/// - **The plan omits it.** The fold plans over the bundle the drop published, from which the view
+///   was retained out, so the new prefix carries a segment for every surviving view and none for
+///   the dropped one. There is no sweep and nothing that names the dropped view — omission is the
+///   whole mechanism, which is why a test that only checked the files were gone would pass over a
+///   fold that had copied them and then deleted them.
+/// - **The files go with the old prefix.** The new prefix has no directory for the view at all,
+///   and the superseded prefix — which still holds them, mapped, until every reader of it is gone
+///   — is reclaimed whole. A restart's orphan sweep is the deterministic end of that: after it, no
+///   prefix under the bundle root names the view.
+/// - **A restart serves the survivors**, so the omission took the dropped view and nothing else.
+/// - **The tombstone outlives the fold.** The fold rewrites the manifest; a key burnt before it
+///   that came back free after it would be decision 0029's silent repointing, reached the long way
+///   round.
+#[tokio::test]
+async fn a_fold_after_a_drop_reclaims_the_dropped_view_and_keeps_its_tombstone() {
+    let mut served = serve().await;
+
+    // A second key, so the group still has a view after the drop and the survivors are a set
+    // rather than one plain view. Its rows arrive through ingest, so the dropped view is not the
+    // only one whose files the fold has to carry.
+    assert_eq!(
+        create(&served, "quarter", "2026-Q2", q_record("Q2 2026", 2))
+            .await
+            .status(),
+        201
+    );
+    reauthorise(&mut served).await;
+    let rows: Vec<Row<'_>> = (0..4)
+        .map(|i| {
+            (
+                format!("q2-{i}").into_bytes(),
+                100.0 + i as f32,
+                200.0,
+                "0",
+                Some(i),
+            )
+        })
+        .collect();
+    assert_eq!(
+        ingest(&served, "q2-batch", "quarter:2026-Q2", &rows)
+            .await
+            .status(),
+        200
+    );
+    flush(&served).await;
+
+    let (_, base_dir) = live_prefix(&served);
+    assert_eq!(
+        segment_views(&base_dir),
+        vec![
+            "quarter:2026-Q1".to_string(),
+            "quarter:2026-Q2".to_string(),
+            "quarter_map:2026-Q1".to_string(),
+            "world".to_string(),
+        ],
+        "before the drop the bundle carries a segment for every view"
+    );
+
+    let body = drop_view(&served, "quarter", "2026-Q1", false).await;
+    assert_eq!(body["deleted"], 0, "a drop by itself deletes no entity");
+
+    fold(&served).await;
+    let (folded, folded_dir) = live_prefix(&served);
+    assert_ne!(folded, "v00000", "the fold published a new prefix");
+
+    // (a) The plan omitted the dropped view — on the owner and on the group sharing its key.
+    assert_eq!(
+        segment_views(&folded_dir),
+        vec!["quarter:2026-Q2".to_string(), "world".to_string()],
+        "the fold carries no segment for a view the bundle no longer has"
+    );
+
+    // (b) And wrote no files for it: the new prefix has no directory of its own for the key,
+    // under either group.
+    for group in ["quarter", "quarter_map"] {
+        assert!(
+            view_dirs(&folded_dir, group, "2026-Q1").is_empty(),
+            "the folded prefix lays down nothing for {group}:2026-Q1"
+        );
+    }
+    assert!(
+        !view_dirs(&folded_dir, "quarter", "2026-Q2").is_empty(),
+        "and does lay down the view that survived"
+    );
+
+    // (c) A restart serves the survivors and still 404s the dropped key. The restart is also what
+    // makes the reclamation deterministic: the superseded prefix is reclaimed when its last reader
+    // lets go, and the startup sweep takes any that stands.
+    let served = restart(served).await;
+    let root = served.tmp.path().join("bundle");
+    assert!(
+        view_dirs(&root, "quarter", "2026-Q1").is_empty(),
+        "after the fold and the sweep no prefix under the bundle root holds the dropped view"
+    );
+    let document = meta(&served).await;
+    assert_eq!(
+        view_ids(&document),
+        vec![
+            "world".to_string(),
+            "quarter:2026-Q2".to_string(),
+            "quarter_map:2026-Q2".to_string(),
+        ],
+        "the survivors are served, and the dropped key is on no group"
+    );
+    assert_eq!(
+        points(&served, "quarter:2026-Q2").await.len(),
+        4,
+        "the surviving view kept its rows across the fold"
+    );
+    assert_eq!(
+        viewport(&served, "quarter:2026-Q1").await.status(),
+        404,
+        "the dropped view is the 404 a name nobody declared gets"
+    );
+
+    // (d) The tombstone survived the fold's manifest rewrite.
+    assert_eq!(
+        create(&served, "quarter", "2026-Q1", q_record("Q1 again", 1))
+            .await
+            .status(),
+        409,
+        "a key burnt before the fold is still burnt after it"
+    );
+}

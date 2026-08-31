@@ -5965,10 +5965,19 @@ impl Executor {
         // Listed order is preserved in every one of these: for segments it is entity order, which
         // `RowSpace::with_extent` requires; for runs it is recency, which decision 0047's
         // newest-first resolution reads.
+        //
+        // **A dropped view's segments are carried by nothing** (`views.md` §3.4): the drop retains
+        // the view out of the bundle, so the plan has no base for it and never consumed its
+        // segments — and carrying them would name a view the new manifest does not declare. This
+        // filter is the whole of "reclamation by omission": the descriptors are left behind with
+        // the superseded prefix's files, which the reclaim then deletes. Without it every fold
+        // after a drop of a view that held rows is *discarded* by the base check below, so
+        // compaction stops for the life of the bundle and nothing ever retires.
         let carried_segments: Vec<&tessera_store::manifest::SegmentDescriptor> = live_manifest
             .segments
             .iter()
             .filter(|d| !consumed_segments.contains(&(d.view.as_str(), d.seg_id.as_str())))
+            .filter(|d| partition_data.views.contains_key(&d.view))
             .collect();
         let carried_tiers: Vec<String> = live_manifest
             .deltas
