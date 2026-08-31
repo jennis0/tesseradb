@@ -62,7 +62,20 @@ const MOODS: [&str; 3] = ["calm", "tense", "wild"];
 
 /// `sector`'s value set: closed, `derived`, so a value is offered only where a visible entity
 /// carries it — which makes the list a **per-view** answer over the per-view postings.
-const SECTORS: [&str; 3] = ["north", "south", "east"];
+///
+/// `rare` is carried by exactly **one** entity in each quarter ([`rare_entity`]), which is what
+/// makes the derivation observable at the value: one entity leaving the principal's visible set —
+/// because it was suppressed, or because the principal never held its term — takes that value off
+/// the list and no other. A value several entities carry cannot tell a derivation that works from
+/// one that returns the authored set.
+const SECTORS: [&str; 4] = ["north", "south", "east", "rare"];
+
+/// The one entity carrying `rare` in a quarter. `+ 1` off the low end, so it is neither a multiple
+/// of 5 (which [`sector`] gives no value at all) nor, for `2026-Q1`, an entity the narrow
+/// principal below can see — `terms_of` grants term 1 on `e % 3 == 0`.
+fn rare_entity(slot: usize) -> u64 {
+    QUARTERS[slot].1.start + 1
+}
 
 /// The word every quarter's prose carries, one per quarter, so a `match` that read the wrong
 /// view's postings answers the empty set rather than a plausible one.
@@ -82,6 +95,9 @@ fn mood(slot: usize, entity: u64) -> Option<&'static str> {
 /// uses two of the three, and which two rotates, so a value list derived from Q1's postings differs
 /// from one derived from Q3's.
 fn sector(slot: usize, entity: u64) -> Option<&'static str> {
+    if entity == rare_entity(slot) {
+        return Some("rare");
+    }
     if entity.is_multiple_of(5) {
         return None;
     }
@@ -140,7 +156,22 @@ fn over_threshold(slot: usize) -> BTreeSet<u64> {
 /// The `sector` values a quarter's entities carry at all — what a `derived` list may offer under
 /// that view, before any mask narrows it.
 fn sectors_in(slot: usize) -> BTreeSet<&'static str> {
-    members(slot).filter_map(|e| sector(slot, e)).collect()
+    sectors_visible_to(slot, &|_| true)
+}
+
+/// The `sector` values a quarter's entities carry **that this principal can see** — §3.3's
+/// membership predicate, written from the fixture's own arrays.
+fn sectors_visible_to(slot: usize, visible: &dyn Fn(u64) -> bool) -> BTreeSet<&'static str> {
+    members(slot)
+        .filter(|&e| visible(e))
+        .filter_map(|e| sector(slot, e))
+        .collect()
+}
+
+/// The entities a principal holding term `1` alone can see — `common::terms_of` grants it on
+/// `e % 3 == 0` and term `0` on everything, so this is a proper, non-trivial slice of the corpus.
+fn narrow_mask(entity: u64) -> bool {
+    entity.is_multiple_of(3)
 }
 
 /// A view's own layout: the same entity sits somewhere different in each.
@@ -470,11 +501,35 @@ async fn ids(served: &Served, view: &str, filters: Option<Value>) -> BTreeSet<u6
 }
 
 async fn categories(served: &Served, path: &str) -> reqwest::Response {
+    categories_as(served, &served.token, path).await
+}
+
+async fn categories_as(served: &Served, token: &str, path: &str) -> reqwest::Response {
     served
         .server
         .client
         .get(served.server.viewer_url(&format!("/v1/categories/{path}")))
-        .bearer_auth(&served.token)
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+}
+
+/// A session holding exactly these label descriptors.
+async fn token(served: &Served, terms: &[&str]) -> String {
+    authorise(&served.server, terms).await["token"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+async fn post_changes(served: &Served, body: &Value) -> reqwest::Response {
+    served
+        .server
+        .client
+        .post(served.server.control_url("/control/changes"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(body)
         .send()
         .await
         .unwrap()
@@ -482,7 +537,11 @@ async fn categories(served: &Served, path: &str) -> reqwest::Response {
 
 /// The keys a value list offers, in the order it offers them.
 async fn keys(served: &Served, path: &str) -> Vec<String> {
-    let resp = categories(served, path).await;
+    keys_as(served, &served.token, path).await
+}
+
+async fn keys_as(served: &Served, token: &str, path: &str) -> Vec<String> {
+    let resp = categories_as(served, token, path).await;
     assert_eq!(
         resp.status().as_u16(),
         200,
@@ -683,6 +742,131 @@ async fn the_value_list_is_the_views_own() {
     assert_eq!(
         pinned,
         sectors_in(2).into_iter().map(str::to_string).collect()
+    );
+}
+
+/// **A `derived` list narrows per principal *and* per view** — the C11 channel this change opens
+/// over a per-view column (per-point-attributes §3.3).
+///
+/// The list is derived from that view's postings intersected with the principal's own mask, so
+/// two principals under one view are offered two lists. The narrow principal holds term `1`
+/// alone, which `terms_of` grants on `e % 3 == 0`; `rare` is carried by one entity per quarter and
+/// that entity is not one of them, so the value is on the wide principal's list and off the narrow
+/// one's — a difference at a named value, not merely a shorter list.
+///
+/// Both directions matter. Serving the authored set to the narrow principal is the disclosure;
+/// serving it empty to a principal who does have members is the availability failure on the other
+/// side, and only an exact expectation tells the two apart.
+#[tokio::test]
+async fn a_derived_value_list_narrows_per_principal_under_each_view() {
+    let served = serve().await;
+    let narrow = token(&served, &["1"]).await;
+
+    for (slot, (key, _)) in QUARTERS.iter().enumerate() {
+        let path = format!("sector?view=quarter:{key}");
+        let listed: BTreeSet<String> = keys_as(&served, &narrow, &path).await.into_iter().collect();
+        let expected: BTreeSet<String> = sectors_visible_to(slot, &narrow_mask)
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(listed, expected, "quarter:{key}, narrow principal");
+        assert!(
+            !listed.is_empty(),
+            "quarter:{key}: the narrow principal has members here"
+        );
+    }
+
+    // The named value, in both directions and under one view: the wide principal is offered
+    // `rare`, the narrow one is not, and the entity that separates them is the only one carrying
+    // it.
+    let wide: BTreeSet<String> = keys(&served, "sector?view=quarter:2026-Q1")
+        .await
+        .into_iter()
+        .collect();
+    let narrow_q1: BTreeSet<String> = keys_as(&served, &narrow, "sector?view=quarter:2026-Q1")
+        .await
+        .into_iter()
+        .collect();
+    assert!(wide.contains("rare"), "{wide:?}");
+    assert!(!narrow_q1.contains("rare"), "{narrow_q1:?}");
+    assert!(
+        narrow_q1.is_subset(&wide) && narrow_q1 != wide,
+        "the narrow list is a proper subset: {narrow_q1:?} vs {wide:?}"
+    );
+    assert!(!narrow_mask(rare_entity(0)), "the fixture's premise");
+}
+
+/// **A suppression retires a value and a term from the scoped routes, with no third rule.**
+///
+/// Suppression is entity space and the scoped columns are entity space, so a suppressed entity
+/// leaves both surfaces by the same arithmetic that already governs the unscoped ones: its tokens
+/// stop matching, and the `derived` value only it carried stops being offered. That second half is
+/// §3.3's self-retirement — the reason a maintained union of visible values was rejected — and it
+/// is the property most worth pinning here, because a per-view postings file is a second place a
+/// membership set could have been cached.
+#[tokio::test]
+async fn a_suppression_reaches_both_scoped_routes() {
+    let served = serve().await;
+    let view = "quarter:2026-Q1";
+
+    // The victim: the one entity carrying `rare` in Q1, which also carries Q1's prose. Named by
+    // the served answer rather than by an entity id, which is the only name a client has (I10).
+    let rare = ids(&served, view, Some(json!({"sector": {"eq": "rare"}}))).await;
+    assert_eq!(rare.len(), 1, "`rare` is carried by exactly one entity");
+    let victim = *rare.iter().next().unwrap();
+    let matched = ids(&served, view, Some(json!({"note": {"match": "alpha"}}))).await;
+    assert!(
+        matched.contains(&victim),
+        "the fixture's premise: the victim carries Q1's prose too"
+    );
+    assert!(
+        keys(&served, "sector?view=quarter:2026-Q1")
+            .await
+            .contains(&"rare".to_string()),
+        "and is what puts `rare` on the list"
+    );
+
+    let resp = post_changes(
+        &served,
+        &json!([{ "tessera_id": victim.to_string(), "idset": FIXTURE_IDSET, "op": "suppress" }]),
+    )
+    .await;
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "{}",
+        resp.text().await.unwrap_or_default()
+    );
+
+    // The text route: the suppressed entity's tokens answer nothing, and the rest of the match is
+    // untouched — a suppression narrows, it does not blank.
+    let after = ids(&served, view, Some(json!({"note": {"match": "alpha"}}))).await;
+    assert!(
+        !after.contains(&victim),
+        "a suppressed entity still matched"
+    );
+    assert_eq!(
+        after.len(),
+        matched.len() - 1,
+        "exactly the suppressed entity left the answer"
+    );
+
+    // The value list: `rare`'s last visible member is gone, so the value is gone with it, and the
+    // values other entities carry stay.
+    let listed: BTreeSet<String> = keys(&served, "sector?view=quarter:2026-Q1")
+        .await
+        .into_iter()
+        .collect();
+    assert!(!listed.contains("rare"), "{listed:?}");
+    assert!(!listed.is_empty(), "{listed:?}");
+    assert!(
+        listed.is_subset(
+            &sectors_in(0)
+                .into_iter()
+                .map(str::to_string)
+                .collect::<BTreeSet<_>>()
+        ),
+        "{listed:?}"
     );
 }
 
