@@ -1,7 +1,7 @@
 """multiview — a cheap fixture exercising every shape `docs/design/views.md` r6 adds.
 
 Not a rung on the dataset ladder: it measures nothing and is not part of the ingest campaign.
-Its only job is to be a `corpus.toml` a two-view build can be pointed at once one exists — one
+Its only job is to be the `corpus.toml` a multi-view build is pointed at — one
 plain view, two view groups (one sharing the other's views, in each of the two roster forms), a
 constant and a group-scoped attribute, and an unscoped and a scoped layer — small enough to
 prepare and validate in seconds, at a default of about 100,000 rows total across every file.

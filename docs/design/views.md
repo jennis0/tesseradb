@@ -1,10 +1,14 @@
 # Views — design
 
 **Date:** 2026-08-30
-**Status:** Normative (r9) — **spec §7's two passes are built for the point half** (r9,
-2026-08-30): a build materialises every plain view and every inline-declared view of a group,
-over one entity space unioned from their sources, ordered by the declared anchor (decision 0112).
-What the build cannot yet enumerate refuses by name; the markers at spec §1, §7 and §8 say which.
+**Status:** Normative (r10) — **the build is complete for a declaration** (r10, 2026-08-31):
+every plain view and every view of every group, whichever roster form declared it, over one entity
+space unioned from their sources and ordered by the declared anchor (decision 0112); a group's
+points selected out of a shared file by `fields.view`; one frame per group under `auto`; a
+group-scoped attribute's column family on disc; and a layer drawn on a group or scoped to one.
+What remains is above the build — the ingest join (spec §4), the gate (spec §6), and the serving
+surfaces a scoped column and a scoped layer will need; the markers at spec §1, §5, §7 and §8 say
+which.
 Spec §2's per-view extent was built at r7 (contracts r52, decision 0040): the extent moved off the
 bundle onto `ViewDescriptor` and into each `/v1/meta` `views` entry, with no fallback. No design
 changes in either revision; the markers do. Promoted at r6 on 2026-08-30 after the
@@ -61,17 +65,20 @@ non-sentinel, never a stored set.
 > segment and one fold plan per view, `view` on every viewer verb, `(view, layer, level)` on every
 > artifact extent, a per-view projection. The per-view extent (spec §2) is **built** — it was
 > taken first, so the manifest shape was settled before anything depended on it — and so, since
-> 2026-08-30, is **the two-pass build of the point half** (spec §7): `tessera build` materialises
-> every plain `[[view]]` and every inline-declared view of every `[[view_group]]`, unions entity
-> space over their sources, refuses a label that disagrees between them, allocates against the
-> declared anchor (decision 0112), and writes a row space each. The roster is published in the
-> manifest and validated at open.
+> 2026-08-31, is **the whole build of a declaration** (spec §7): `tessera build` materialises
+> every plain `[[view]]` and every view of every `[[view_group]]` — inline blocks or the rows of a
+> roster table — unions entity space over their sources, refuses a label that disagrees between
+> them, allocates against the declared anchor (decision 0112), and writes a row space each. A
+> group's views may share one points file behind `fields.view`; a group's `auto` frame is fitted
+> over every one of them; a group-scoped attribute is a column family on disc (spec §5); and a
+> layer names a group or is scoped to one (spec §3.5). The roster is published in the manifest and
+> validated at open.
 >
-> What remains of the build is named at spec §3.1, §5 and §3.5: a roster **table** or a
-> **discriminator** group (the keys are rows of a file, not blocks of the declaration), a group's
-> points selected out of a shared file by `fields.view`, a group-scoped attribute's column family,
-> and a layer drawn on a group. Each refuses by name. Above the build, the second-view join
-> (spec §4) and the gate (spec §6) are untouched.
+> What remains is above the build, and each refuses or is absent by name: a group whose views are
+> **minted from a discriminator** with no roster at all (spec §3.1), the second-view join at
+> ingest (spec §4), the gate (spec §6), and every *serving* surface a scoped column or a scoped
+> layer would need — a scoped attribute is stored and is on no filter surface, which spec §5's
+> marker states.
 
 ## 2. A view
 
@@ -94,11 +101,14 @@ grid, which is why the extent is per view and not per bundle.
 > was settled before anything depended on it; the artifacts are recreated rather than migrated
 > (decision 0048), and `bundle_format` did not move — the required field is the loud guard.
 >
-> **⊘ Two consumers still read one frame for a layer's several views.** A shape publication
-> canonicalises against the layer's *first* view's extent (`canonical_shapes`, and
-> `/control/layers`' own resolution), which is exactly right while a build materialises one view
-> and is what `polygon-membership.md` §4.3 says must eventually be per view: a layer's views must
-> share a projection, but need not share a frame. That waits on a bundle that carries two.
+> **⊘ Three consumers still read one frame for a layer's several views, and a bundle carrying
+> several now exists.** A shape publication canonicalises against one view's extent — the layer's
+> *first* at `canonical_shapes` and at `/control/layers`' own resolution, the build's **anchor**
+> view at the build's own read — where `polygon-membership.md` §4.3 wants it per view: a layer's
+> views must share a projection, but need not share a frame. A group's views do share one by
+> construction (spec §3.1), so a shape layer scoped to a group is exact; one spanning a plain view
+> and a group is not, and nothing refuses it. No fixture carries a shape layer over several
+> frames, so this is untested rather than known-wrong.
 
 **Addressing.** Every viewer verb names its view in the request body (contracts §3.2); an ingest
 batch names it in `x-tessera-view`, optional only while the bundle has one view (write-path
@@ -430,9 +440,20 @@ has for `render_in`, with the view set decided by the scope instead of listed.
 on the roster, filters nothing and is served typed on `/v1/meta`. A per-(entity, view) value is
 an attribute. The two are kept apart so that neither grows the other's surface.
 
-> **⊘ Specified, not implemented — scope, the column family, the pinned leaf and the ingest
-> rule.** `scope` is not a key the parser knows and would be refused under `deny_unknown_fields`,
-> which is the right behaviour meanwhile.
+> **⊘ Partially implemented — the column family is written and is on no serving surface**
+> (2026-08-31). `scope` parses; a build writes one entity-space column per view of the group, each
+> with its own presence bitmap, at `attrs/<column>/<group>/<key>/`, read from that view's own
+> points — under the view's own selection where a group's views share one file — and every file is
+> digested, so `tessera verify` walks them. A scoped column is deliberately **not** in
+> `MANIFEST.declared_scalars`, which is one flat bundle-wide list with no slot for a family: so
+> there is no filter operand, no postings, no hot column and no pinned leaf, and `index` and
+> `render` on a scoped attribute have nothing to act on until contracts §2.3 carries the scope
+> (spec §11). The ingest rule is unimplemented with the rest of the write half.
+>
+> ⊘ **A scoped attribute declaring its own `source` is refused by name**: that file needs
+> `fields.view` to say which view each row's value is for, and reading it as entity space would
+> take one view's values as every view's. Declaring none — Appendix A's `sentiment`, and the
+> fixture's — is the shape that builds.
 
 ## 6. The gate
 
@@ -514,17 +535,21 @@ ingest is what groups are for. r4's `--attach-view` — a build-plane backfill o
 existing corpus, the other views carried by manifest reference — is withdrawn with it; if the
 need arrives the design is in git.
 
-> **⊘ Partially implemented — the two passes are built for the point half.** `--view` is gone and
-> a build materialises every view the declaration enumerates: pass one unions `(external_id,
-> label)` over every view's source, refuses a disagreement naming the entity and the files, and
-> allocates against `[defaults].allocation_view`, whose absence is a refusal listing the
-> candidates; pass two transforms, quantises against each view's own frame, Morton-sorts and
-> writes each row space, a view's permutation being sentinel wherever it does not hold the entity.
-> What a build cannot yet enumerate it **refuses by name** rather than dropping: a roster table, a
-> discriminator group, a group's points behind a `fields.view` discriminator, a group-scoped
-> attribute (spec §5), a layer naming a group (spec §3.5), and an `auto` frame on a group — which
-> is fitted per file and would give each of a group's views its own box, where spec §3.1 gives
-> them one. Populating a view at ingest is spec §4's join rule, still unimplemented.
+> **⊘ Partially implemented — the build is complete for a declaration; ingest is not.** `--view`
+> is gone and a build materialises every view the declaration enumerates: pass one unions
+> `(external_id, label)` over every view's source, refuses a disagreement naming the entity and
+> the files, and allocates against `[defaults].allocation_view`, whose absence is a refusal
+> listing the candidates; pass two transforms, quantises against each view's own frame,
+> Morton-sorts and writes each row space, a view's permutation being sentinel wherever it does not
+> hold the entity. A group's views come from inline blocks or from a roster table read before pass
+> two; their points from a file each, or from one file selected by `fields.view` — a row naming a
+> key the roster does not carry being a refusal naming both, and a listed key with no rows an
+> empty view. A group's `auto` frame is surveyed over every view's source and fitted once, per
+> spec §3.1's one-frame rule.
+>
+> **⊘ What a build still cannot enumerate is a group with no roster at all** — its keys minted
+> from the discriminator's distinct values — which refuses by name. Populating a view at ingest is
+> spec §4's join rule, still unimplemented.
 >
 > **The registry's order is the declaration's, block kind by block kind**: the plain `[[view]]`
 > blocks in declaration order, then each `[[view_group]]` in declaration order with its views in
@@ -779,6 +804,17 @@ each view under spec §4's rule.
 
 ## Appendix R — review trail
 
+- **r10 (2026-08-31)** — the build is complete for a declaration, and the markers at spec §1, §5
+  and §7 record it. Built since r9: form B's selection (a view's rows picked out of a shared
+  points file by `fields.view`, with a stray key refused naming the roster); a roster read from a
+  `[view_group.views]` table, under the inline block's own rules; `extent = "auto"` on a group,
+  surveyed over every view's source and fitted once; a group-scoped attribute's column family at
+  `attrs/<column>/<group>/<key>/`, storage only; and layers over a group — a group name in `views`
+  expanded to its views, and a scoped layer's artifacts drawn each in its own view. Not moved, and
+  each refusing or absent by name: a group whose views are minted from a discriminator, a scoped
+  attribute with its own `source`, a scoped layer reusing one key in two views (the store keys an
+  artifact per `(layer, key)`), every serving surface for a scoped column, and the paged
+  permutation (spec §8). No design content changed in this revision.
 - **r9 (2026-08-30)** — spec §7's two passes are implemented for the point half, and the markers
   at spec §1, §7 and §8 record what did and did not move. `tessera build` materialises every
   plain view and every inline-declared view of a group; `[defaults].allocation_view` is read and

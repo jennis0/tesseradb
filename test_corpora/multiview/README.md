@@ -2,19 +2,22 @@
 
 **Status:** Working code, never normative, like every other directory in `test_corpora/` (see the
 parent README). Not a rung on the dataset ladder — it measures nothing and is outside the ingest
-campaign. Its job is to be a `corpus.toml` a two-view build can be pointed at, once one exists.
+campaign. Its job is to be the `corpus.toml` a multi-view build is pointed at.
 
-**`tessera check` passes against it; `tessera build` refuses it, and the refusal has moved.** The
-declaration surface — `[[view_group]]`, both roster forms, `members`, typed metadata, `scope` on
-an attribute and on a layer — parses and validates, and `check` reports the group shape beside the
-views. The multi-view build's two passes are now built for the point half (views.md §7), so
-`world` and `quarter`'s four inline views build together — with one entity space over their five
-files, and a row space each. ⊘ What this file still reaches past the build is named at the
-refusal, in the order the build meets them: the group-scoped attribute `sentiment` (§5's column
-family), `quarter_alt`'s points behind a `fields.view` discriminator (§3.1's form B), and the two
-layers, one of which names a group and one of which is scoped to it (§3.5). Removing those three
-things from a copy of this declaration is what builds today, and is how the five-view shape below
-was measured.
+**`tessera check` and `tessera build` both pass against it, unmodified** (2026-08-31). The whole
+declaration builds: nine row spaces over one entity space of 21,300 — `world`, `quarter`'s four
+inline views and `quarter_alt`'s four selected out of one file by its `quarter` discriminator —
+with `sentiment`'s four entity-space columns under `attrs/sentiment/quarter/<key>/`, `collections`
+drawn on all five of the views it names, and `quarter_clusters`' six clusters per quarter each
+resolved only in its own view. `tessera verify` and `tessera verify --deep` pass on the result.
+
+**Two things in this fixture were wrong against the readers and were corrected** (2026-08-31),
+neither of them a views.md question: the `members` lists on both layer files were `int64` where an
+entity id is `u64` everywhere else, and the `contents` column was a list of strings where a ranked
+content is a list *of lists* — one entry per rank, each carrying a value per supplied kind, as the
+GeoNames rung writes it. The second needed the declaration to say what that value is, so both
+layers now carry a `[layer.content]` block with one supplied `tag`. The data and the declaration
+agreed with each other before and with the build's readers now.
 
 ## What is real-derived and what is synthetic
 
