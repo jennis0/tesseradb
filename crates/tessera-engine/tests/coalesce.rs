@@ -66,6 +66,7 @@ fn ingest_novel(engine: &Engine, i: usize) -> EntityId {
     let row = UnallocatedRow {
         external_id: Some(format!("ext-{i}").into_bytes()),
         view: "s0".to_string(),
+        join: None,
         descriptors: vec![descriptor.clone()],
         x: 5.0,
         y: 5.0,

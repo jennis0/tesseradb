@@ -324,6 +324,7 @@ fn ingest_with_descriptors(
     let row = UnallocatedRow {
         external_id: Some(external_id),
         view: "s0".to_string(),
+        join: None,
         descriptors: descriptors.to_vec(),
         x: 5.0,
         y: 5.0,
@@ -1983,6 +1984,7 @@ fn term_ordinals_are_stable_across_a_fold() {
     let novel_row = UnallocatedRow {
         external_id: Some(b"novel-holder".to_vec()),
         view: "s0".to_string(),
+        join: None,
         descriptors: vec![b"novel".to_vec()],
         x: 5.0,
         y: 5.0,

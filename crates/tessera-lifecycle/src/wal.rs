@@ -186,6 +186,16 @@ pub struct WalRow {
     pub external_id: Option<Vec<u8>>,
     pub entity_id: EntityId,
     pub view: String,
+    /// **This row joined an existing entity to a second view** (`views.md` §4): geometry, and
+    /// nothing else. `descriptors` is empty on such a row and stays empty — the entity's label is
+    /// the one it already has, and a join that carried terms would be a re-label with no overlay
+    /// entry, which decision 0047 makes a delete plus a re-ingest instead.
+    ///
+    /// Durable rather than derived, because the whole difference between a first row and a join is
+    /// what the *rest of the write path* may do with it: a join contributes no postings and no
+    /// filter-column value, and replay has to reproduce that decision rather than re-take it
+    /// against a live map that has moved on.
+    pub join: bool,
     pub descriptors: Vec<Vec<u8>>,
     pub x: f64,
     pub y: f64,
@@ -329,6 +339,35 @@ pub enum WalRecord {
         /// The reserved runs backing each level, in level order. A layer declaring no levels has
         /// exactly one entry — its level 0.
         runs: Vec<ReservedRuns>,
+    },
+    /// A view of a group **created while the service runs** (`views.md` §3.2), carrying the whole
+    /// roster record: the key, the ordinal it was given, its gate and its typed metadata.
+    ///
+    /// **This record is for replay, and the segments manifest is the durable home.** Rotation
+    /// reclaims WAL records, so a roster that lived only here is lost at the first rotation — and
+    /// a reused ordinal or key silently repoints every client cache keyed on the view
+    /// (decision 0029). `SegmentsManifest::views` is where it survives; this is what puts it back
+    /// between a publication and a restart, in the order it happened.
+    ///
+    /// **The ordinal is recorded, never re-derived.** Replay applies what was decided: a
+    /// re-derivation would renumber every view above a drop the log no longer carries.
+    ///
+    /// **It names the owner group only.** Groups sharing these views (`members`, `views.md` §3.3)
+    /// take their copies from this one record, because the key and the ordinal are the owner's.
+    ViewCreate { view: tessera_types::view::CreatedView },
+    /// An accepted view drop. **The key is tombstoned, not freed** — for `LayerDrop`'s reason,
+    /// stated for a view in `views.md` §3.4: a recreated `2026-Q3` with different contents would
+    /// silently repoint every bookmark, every cached θ and every client cache keyed on the view.
+    ///
+    /// **The ordinal travels with it** because it is burnt too: a high-water recovered from the
+    /// live views alone would reissue the newest ordinal the moment it was the one dropped.
+    ///
+    /// **This record removes no entity.** An entity whose only view was dropped still exists, with
+    /// its label, its attributes and its memberships, in no view; `delete_dangling` submits
+    /// ordinary deletions through the deny lane and is not a second retirement route
+    /// (`views.md` §3.4, write-path §5.4).
+    ViewDrop {
+        view: tessera_types::view::TombstonedView,
     },
     /// An accepted layer drop. **The name is tombstoned, not freed**: it is refused on recreation
     /// for ever, because bookmarks, edges and suppressions all travel by it and a name that once
@@ -1814,6 +1853,7 @@ mod tests {
                 external_id: None,
                 entity_id: EntityId::new(1),
                 view: "s0".to_string(),
+                join: false,
                 descriptors: Vec::new(),
                 x: 0.5,
                 y: 0.5,

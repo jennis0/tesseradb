@@ -20,6 +20,7 @@ fn row(key: &str, terms: &[u32]) -> UnallocatedRow {
     UnallocatedRow {
         external_id: Some(key.as_bytes().to_vec()),
         view: "default".to_string(),
+        join: None,
         descriptors: Vec::new(),
         x: 0.0,
         y: 0.0,

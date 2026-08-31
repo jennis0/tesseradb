@@ -25,7 +25,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine as _;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use sha2::{Digest, Sha256};
 
 use tessera_engine::{
@@ -36,6 +36,7 @@ use tessera_lifecycle::{
     BatchArtifacts, BatchEdge, BatchMembership, ChangeOp, UnallocatedRow, WalScalar,
 };
 
+use tessera_types::view::ViewMetadataValue;
 use tessera_types::{EntityId, TermId, TesseraId};
 
 use crate::error::{
@@ -255,6 +256,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         // refused rather than repeated if it is taken; there is no server-minted name to `POST` to.
         .route("/control/layers", axum::routing::put(register_layer))
         .route("/control/layers/{name}", axum::routing::delete(drop_layer))
+        // **`PUT` and `DELETE` on the view itself, spelled as a layer's are** (`views.md` §3.2,
+        // §3.4): the key is the identity, so the operation is refused rather than repeated if it
+        // is taken, and there is no server-minted name to `POST` to. A roster record is small and
+        // takes no body limit of its own.
+        .route(
+            "/control/views/{group}/{key}",
+            axum::routing::put(create_view).delete(drop_view),
+        )
         .route(
             "/control/layers/{name}/artifacts",
             axum::routing::put(publish_artifacts),
@@ -1564,23 +1573,92 @@ fn run_ingest(
         .engine
         .resolve_external_ids(&supplied_ids)
         .map_err(map_store_error)?;
-    // **A deleted holder is not a duplicate** (decision 0047: edit is delete + re-ingest, and our
-    // retention of a dead binding must never refuse a user's write). A **suppressed** holder
-    // still is one — suppression is temporary hiding, and re-ingesting a byte-identical copy past
-    // it is the exact hole this check exists to close. Resolution is newest-binding-first, so a
-    // re-ingested id's live holder is the one consulted here.
+    // **A known external id naming a view the entity is not in is a JOIN, not a duplicate**
+    // (`views.md` §4). The same point in two views is the caller saying so at ingest: two batches,
+    // two views, one `external_id`. What each arm below refuses, it refuses loudly.
+    //
+    // **A deleted holder is not a duplicate either** (decision 0047: edit is delete + re-ingest,
+    // and our retention of a dead binding must never refuse a user's write) — it allocates fresh.
+    // A **suppressed** holder takes the same arms as a live one and stays hidden: the new row
+    // lands on the *same* entity, suppression composes in entity space, and the entity is
+    // invisible in the new view as in every other from the moment the row exists. What
+    // write-path §2.1 refuses is a byte-identical *re-ingest past* a suppression — a second copy
+    // under a fresh entity — and attaching a view to the suppressed entity creates no copy.
+    // Resolution is newest-binding-first, so a re-ingested id's live holder is the one consulted.
     let overlay_generation = state.engine.generation();
-    let existing_ids: Vec<String> = resolved
-        .iter()
-        .zip(&supplied)
-        .filter(|(entity, _)| entity.is_some_and(|e| !overlay_generation.overlay.is_deleted(e)))
-        .map(|(_, (_, id))| base64::engine::general_purpose::STANDARD.encode(id))
-        .collect();
-    if !existing_ids.is_empty() {
+    let mut duplicate_ids: Vec<String> = Vec::new();
+    let mut joins: Vec<(usize, EntityId)> = Vec::new();
+    for (entity, (index, id)) in resolved.iter().zip(&supplied) {
+        let Some(entity) = *entity else { continue };
+        if overlay_generation.overlay.is_deleted(entity) {
+            continue;
+        }
+        if state.engine.view_holds(entity, &view) {
+            duplicate_ids.push(base64::engine::general_purpose::STANDARD.encode(id));
+            continue;
+        }
+        joins.push((*index, entity));
+    }
+    if !duplicate_ids.is_empty() {
+        duplicate_ids.sort_unstable();
         return Err(ApiError::Conflict(format!(
-            "duplicate external ids already known to this deployment: {}",
-            existing_ids.join(", ")
+            "these external ids already have a row in view '{view}': {}. Positions are not \
+             updated in place — a re-placed point is a new view, or for a group a new one \
+             (views §2) — and the permutation is single-valued, so it cannot hold two rows for \
+             one entity in one view",
+            duplicate_ids.join(", ")
         )));
+    }
+    // The two arms that guard **entity space** on a join. A joining row carries geometry and
+    // nothing else, so what is checked here is that the caller is not trying to change anything
+    // else through it.
+    for (index, entity) in &joins {
+        let Some(buffered) = state.engine.buffered_row(*entity) else {
+            // Nothing to compare against: the entity's own row was flushed before this batch
+            // arrived. The comparison is unavailable rather than passed — see
+            // `Engine::buffered_row` for why it cannot be made against a segment, and
+            // `BufferedItem::join` for what makes a supplied label inert either way.
+            continue;
+        };
+        let mut supplied_terms: Vec<u32> = terms_per_item[*index].iter().map(|t| t.raw()).collect();
+        supplied_terms.sort_unstable();
+        supplied_terms.dedup();
+        let mut held_terms: Vec<u32> = buffered.terms.iter().map(|t| t.raw()).collect();
+        held_terms.sort_unstable();
+        held_terms.dedup();
+        if supplied_terms != held_terms {
+            return Err(ApiError::Conflict(format!(
+                "row {index} joins an entity this deployment already holds, under a different \
+                 access label. A re-label is a delete plus a re-ingest (decision 0047), never a \
+                 field carried in on a second view's row: the alternative is a widening with no \
+                 overlay entry, or a narrowing that bypasses the deny lanes (views §4)"
+            )));
+        }
+        // An entity-scoped attribute is one value per entity, so a joining row must carry the
+        // stored value or leave it null. A differing one is refused naming the column — silently
+        // keeping either value would make the answer depend on which view a filter was asked
+        // under, which is exactly what a *scoped* attribute is for and this is not one.
+        for (position, declared) in meta.declared_scalars.iter().enumerate() {
+            let Some(supplied) = items[*index].scalars.get(position) else {
+                continue;
+            };
+            if matches!(supplied, WalScalar::Null) {
+                continue;
+            }
+            match buffered.scalars.get(position) {
+                Some(WalScalar::Null) | None => continue,
+                Some(held) if held == supplied => continue,
+                Some(_) => {
+                    return Err(ApiError::Conflict(format!(
+                        "row {index} joins an entity this deployment already holds, with a \
+                         different value for column '{}'. An entity-scoped attribute is one value \
+                         per entity, so a joining row byte-matches the stored value or omits it \
+                         (views §4, §5)",
+                        declared.name
+                    )));
+                }
+            }
+        }
     }
 
     // **The buffer-occupancy bound (§1.3).** Checked here, before submission, and distinct from
@@ -1615,18 +1693,31 @@ fn run_ingest(
     // concurrent handlers, which is the term `INGEST_RESIDENT_CEILING_BYTES`'s arithmetic is about.
     // Moving also deletes four per-row allocations on the path that must sustain 10⁹-scale ingest;
     // the three source vectors drop at the end of this statement.
+    // Which rows join, by position. Empty for every batch of new items, which is most of them.
+    let join_of: FxHashMap<usize, EntityId> = joins.into_iter().collect();
     let rows: Vec<UnallocatedRow> = items
         .into_iter()
         .zip(terms_per_item)
         .zip(descriptor_lists)
-        .map(|((item, terms), descriptors)| UnallocatedRow {
-            external_id: item.external_id,
-            view: view.clone(),
-            descriptors,
-            x: item.x,
-            y: item.y,
-            scalars: item.scalars,
-            terms,
+        .enumerate()
+        .map(|(index, ((item, terms), descriptors))| {
+            let join = join_of.get(&index).copied();
+            UnallocatedRow {
+                external_id: item.external_id,
+                view: view.clone(),
+                join,
+                // **A joining row carries no descriptors, and that is what makes the join
+                // geometry-only** (`views.md` §4). The entity's label is the one it already has:
+                // its terms are already in the postings, put there by the flush that gave it its
+                // first row, and re-writing them from this row is how a second view would come to
+                // re-label an entity with no overlay entry. The terms resolved above are still
+                // computed — the label arm compares against them — and dropped here.
+                descriptors: if join.is_some() { Vec::new() } else { descriptors },
+                x: item.x,
+                y: item.y,
+                scalars: item.scalars,
+                terms: if join.is_some() { Vec::new() } else { terms },
+            }
         })
         .collect();
 
@@ -2336,6 +2427,152 @@ async fn drop_layer(
         .map_err(crate::error::map_join_error)?
         .map_err(crate::error::map_accept_error)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `PUT /control/views/{group}/{key}`'s body: the roster record, which is the inline
+/// `[[view_group.view]]` block written as a request (`views.md` §3.2).
+///
+/// **`deny_unknown_fields`, because a misspelt metadata name must not be silently absent.** The
+/// record is immutable, so a value that did not land is one that can never be supplied; a typo
+/// answered 201 would leave a view carrying a default nobody wrote.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ViewRecord {
+    /// This view's own gate; absent takes the group's. ⊘ Only `"public"` is accepted — no gate is
+    /// evaluated anywhere (`views.md` §6), so a label would be a control accepted and never
+    /// enforced. The refusal is the write executor's, beside every other roster rule.
+    #[serde(default)]
+    visibility: Option<String>,
+    /// One entry per name the group declared, typed against it. `timestamp_us` is **microseconds
+    /// since the epoch as a JSON integer**: JSON carries no date type, and a string would have to
+    /// name a format the roster does not otherwise have.
+    #[serde(default)]
+    metadata: serde_json::Map<String, serde_json::Value>,
+}
+
+/// `DELETE /control/views/{group}/{key}`'s query: `?delete_dangling=true`.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DropViewQuery {
+    /// Also delete the entities of this view that hold a row in **no other view**
+    /// (`views.md` §3.4). Sugar over the ordinary deletion path — the entities enter the overlay
+    /// and retire at the fold, like any deletion — and off by default, because dropping a view
+    /// deletes no entity.
+    #[serde(default)]
+    delete_dangling: bool,
+}
+
+/// One supplied metadata value as the roster stores it.
+///
+/// **The JSON shape decides the type, and the group's declaration decides whether that type
+/// belongs** — checked on the executor, against the manifest, beside every other roster rule. A
+/// float and an integer are told apart here rather than coerced: the roster is served typed, and a
+/// client reading `starts` as a float because one record happened to carry one is a client the
+/// declaration cannot help.
+fn metadata_value(name: &str, value: &serde_json::Value) -> Result<ViewMetadataValue, ApiError> {
+    match value {
+        serde_json::Value::Bool(v) => Ok(ViewMetadataValue::Bool(*v)),
+        serde_json::Value::String(v) => Ok(ViewMetadataValue::Text(v.clone())),
+        serde_json::Value::Number(n) => {
+            if let Some(v) = n.as_i64() {
+                // An integer stands for `int`, for a category's code and for `timestamp_us`; which
+                // one it is is the declaration's to say, so the value is carried as both and the
+                // roster picks. A `timestamp_us` is microseconds since the epoch.
+                Ok(ViewMetadataValue::Int(v))
+            } else if let Some(v) = n.as_f64() {
+                Ok(ViewMetadataValue::Float(v))
+            } else {
+                Err(ApiError::Contract(format!(
+                    "metadata '{name}' is a number this build cannot store"
+                )))
+            }
+        }
+        serde_json::Value::Null => Err(ApiError::Contract(format!(
+            "metadata '{name}' is null. Every name a view group declares is required and a roster \
+             record is immutable, so an absent value is one that can never be supplied \
+             (views §3.2)"
+        ))),
+        _ => Err(ApiError::Contract(format!(
+            "metadata '{name}' is an array or an object, and view metadata is one typed scalar \
+             per name (views §3.1). A per-(entity, view) value is an attribute, not metadata"
+        ))),
+    }
+}
+
+/// `PUT /control/views/{group}/{key}` — create a view of a group while the service runs
+/// (`views.md` §3.2, decision 0108).
+///
+/// **Nothing is checked here.** Whether the group exists, whether the key is free or burnt, and
+/// what ordinal it takes are all state only the write executor may read — a handler that checked
+/// first could be overtaken between its check and the enqueue, and would then have acked two views
+/// onto one key. The one thing this function does is turn JSON into the typed record the roster
+/// stores, and refuse a shape that is not a scalar.
+///
+/// The three answers are the executor's: **404** for a group or key this deployment does not
+/// carry, **409** for a key already taken or already dropped — a roster record is immutable, so
+/// there is no resubmission that would make it land — and **422** for a record refused on its own
+/// terms.
+async fn create_view(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path((group, key)): axum::extract::Path<(String, String)>,
+    body: Json<ViewRecord>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let record = body.0;
+    let mut metadata = std::collections::BTreeMap::new();
+    for (name, value) in &record.metadata {
+        metadata.insert(name.clone(), metadata_value(name, value)?);
+    }
+    let visibility = record.visibility;
+    let (group_name, view_key) = (group.clone(), key.clone());
+    // The **shared** blocking pool, not the deny runtime beside it, on `register_layer`'s rule: a
+    // creation is not a deny, and delaying one under ingest load is backpressure working rather
+    // than a security operation refused.
+    let ordinal = tokio::task::spawn_blocking(move || {
+        state
+            .engine
+            .create_view(group_name, view_key, visibility, metadata)
+    })
+    .await
+    .map_err(crate::error::map_join_error)?
+    .map_err(crate::error::map_accept_error)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "view": format!("{group}:{key}"),
+            "group": group,
+            "key": key,
+            // The view's second address, `<group>:#<ordinal>`, which the caller cannot derive:
+            // it is creation order across every create this deployment has taken, drops included.
+            "ordinal": ordinal,
+        })),
+    ))
+}
+
+/// `DELETE /control/views/{group}/{key}` — drop a view and tombstone its key for ever
+/// (`views.md` §3.4).
+///
+/// **The key never comes back**, and that is the operation rather than a side effect of it: a
+/// recreated `2026-Q3` with different contents would silently repoint every bookmark, every cached
+/// θ and every client cache keyed on the view (decision 0029). The ordinal is burnt with it.
+///
+/// **Dropping a view deletes no entity.** `?delete_dangling=true` is for the caller who did mean
+/// "and the items that were only here": the entities of this view that hold a row in no other one
+/// — the commit-window buffer included — are submitted as **ordinary deletions**, which enter the
+/// overlay and retire at the fold like any other (Rule F, write-path §5.4). It is not a second
+/// retirement route. The count is in the body, because a deletion is not undoable and the caller
+/// who asked for it is told what it did, in the same response that accepted the drop.
+async fn drop_view(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path((group, key)): axum::extract::Path<(String, String)>,
+    axum::extract::Query(query): axum::extract::Query<DropViewQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let deleted = tokio::task::spawn_blocking(move || {
+        state.engine.drop_view(group, key, query.delete_dangling)
+    })
+    .await
+    .map_err(crate::error::map_join_error)?
+    .map_err(crate::error::map_accept_error)?;
+    Ok(Json(serde_json::json!({ "deleted": deleted })))
 }
 
 /// Turn a flat member offset back into `(artifact index, member index)`, so a refusal names the

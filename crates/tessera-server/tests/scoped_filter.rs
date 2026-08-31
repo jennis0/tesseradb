@@ -39,7 +39,8 @@ use serde_json::{json, Value};
 use tempfile::TempDir;
 use tessera_build::config::{Attribute, Fields};
 use tessera_build::{
-    build, BuildArgs, GroupDescriptor, GroupViewDescriptor, ScopedColumnFamily, ViewArgs,
+    build, BuildArgs, GroupDescriptor, GroupViewDescriptor, Quantisation, ScopedColumnFamily,
+    ViewArgs,
 };
 use tessera_spatial::tiler::ScalarType;
 
@@ -67,6 +68,16 @@ const THRESHOLD: f64 = 0.5;
 /// column where Q3's was asked for is observable; and one entity in three carries **no value at
 /// all** in a given quarter, which is the presence bitmap's ordinary case (decision 0064) rather
 /// than a hole to fill.
+fn group_frame() -> Quantisation {
+    let e = extent();
+    Quantisation {
+        x_min: e.x_min,
+        x_max: e.x_max,
+        y_min: e.y_min,
+        y_max: e.y_max,
+    }
+}
+
 fn sentiment(ordinal: usize, entity: u64) -> Option<f32> {
     if (entity + ordinal as u64).is_multiple_of(3) {
         return None;
@@ -128,7 +139,9 @@ fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>, ordinal: Opt
     ];
     if let Some(ordinal) = ordinal {
         columns.push(Arc::new(Float32Array::from(
-            ids.iter().map(|&e| sentiment(ordinal, e)).collect::<Vec<_>>(),
+            ids.iter()
+                .map(|&e| sentiment(ordinal, e))
+                .collect::<Vec<_>>(),
         )));
     }
     let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
@@ -194,6 +207,9 @@ fn build_scoped(dir: &Path) -> std::path::PathBuf {
                 name: "quarter".to_string(),
                 members_of: None,
                 views: roster(),
+                quantisation: group_frame(),
+                projection: tessera_spatial::Projection::None,
+                metadata: Vec::new(),
                 // Derived at the manifest write from `scoped_attributes` below, so the family list
                 // has one origin.
                 scoped_scalars: Vec::new(),
@@ -202,6 +218,9 @@ fn build_scoped(dir: &Path) -> std::path::PathBuf {
                 name: "quarter_alt".to_string(),
                 members_of: Some("quarter".to_string()),
                 views: roster(),
+                quantisation: group_frame(),
+                projection: tessera_spatial::Projection::None,
+                metadata: Vec::new(),
                 scoped_scalars: Vec::new(),
             },
         ],
@@ -267,7 +286,12 @@ async fn serve() -> Served {
     }
 }
 
-async fn viewport(served: &Served, token: &str, view: &str, filters: Option<Value>) -> reqwest::Response {
+async fn viewport(
+    served: &Served,
+    token: &str,
+    view: &str,
+    filters: Option<Value>,
+) -> reqwest::Response {
     let mut body = json!({"view": view, "zoom": 8, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200});
     if let Some(filters) = filters {
         body["filters"] = filters;
@@ -358,7 +382,10 @@ async fn a_pin_projects_one_views_column_into_another_views_rows() {
     let world = ids(&served, "world", None).await;
     let q3 = ids(&served, "quarter:2026-Q3", Some(range("sentiment"))).await;
     let both: BTreeSet<u64> = world.intersection(&q3).copied().collect();
-    assert_eq!(pinned, both, "the entities in `world` that were positive in Q3");
+    assert_eq!(
+        pinned, both,
+        "the entities in `world` that were positive in Q3"
+    );
     assert!(
         !pinned.is_empty() && pinned.len() < world.len(),
         "the projection is a proper, non-empty subset of the plain view"

@@ -197,6 +197,7 @@ fn ingest_and_flush(engine: &Engine, root: &Path) -> Vec<EntityId> {
         let row = UnallocatedRow {
             external_id: Some(external.as_bytes().to_vec()),
             view: "s0".to_string(),
+            join: None,
             descriptors: vec![b"0".to_vec()],
             x: 10.0 + i as f64,
             y: 10.0 + i as f64,
@@ -549,6 +550,7 @@ fn a_text_extent_published_after_the_snapshot_is_carried_and_digested() {
         let row = UnallocatedRow {
             external_id: Some(external.as_bytes().to_vec()),
             view: "s0".to_string(),
+            join: None,
             descriptors: vec![b"0".to_vec()],
             x: 20.0,
             y: 20.0,
@@ -621,6 +623,7 @@ fn a_flush_with_no_text_value_publishes_no_text_layer() {
         let row = UnallocatedRow {
             external_id: Some(name.as_bytes().to_vec()),
             view: "s0".to_string(),
+            join: None,
             descriptors: vec![b"0".to_vec()],
             x: 30.0,
             y: 30.0,

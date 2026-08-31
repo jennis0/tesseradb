@@ -235,6 +235,7 @@ fn row(engine: &Engine, external_id: &str, x: f64, y: f64) -> UnallocatedRow {
     UnallocatedRow {
         external_id: Some(external_id.as_bytes().to_vec()),
         view: "s0".to_string(),
+        join: None,
         x,
         y,
         scalars: Vec::new(),

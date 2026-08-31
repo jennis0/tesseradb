@@ -24,6 +24,7 @@ fn row(engine: &Engine, external_id: &[u8]) -> UnallocatedRow {
     UnallocatedRow {
         external_id: Some(external_id.to_vec()),
         view: "s0".to_string(),
+        join: None,
         descriptors: vec![b"0".to_vec()],
         x: 0.5,
         y: 0.5,

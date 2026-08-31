@@ -3175,35 +3175,11 @@ fn check_label(object: &str, key: &str, label: &str) -> Result<()> {
 /// key is not read as one, and `@` pins a group-scoped attribute to a view (`views.md` §5). Each
 /// is refused here and again at manifest load, which are the two halves decision 0108 asks for.
 fn check_view_name(object: &str, name: &str) -> Result<()> {
-    if name.trim().is_empty() {
-        return Err(declaration_error(format!(
-            "{object}: the name is empty. A view's name is its identity — it addresses the view on \
-             every verb and names its directory in the bundle"
-        )));
-    }
-    for reserved in [':', '#', '@'] {
-        if name.contains(reserved) {
-            return Err(declaration_error(format!(
-                "{object}: `{reserved}` is reserved out of a view name and a view key \
-                 (views §3.2). A view of a group is addressed `<group>:<key>` or \
-                 `<group>:#<ordinal>`, and a filter leaf pins a group-scoped attribute as \
-                 `<column>@<key>` — so a name carrying one of `:`, `#` or `@` would make a request \
-                 mean two things"
-            )));
-        }
-    }
-    if !name
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-    {
-        return Err(declaration_error(format!(
-            "{object}: a view name is limited to the column-name charset — ASCII letters, digits, \
-             `_` and `-` (views §3.2). It is a path segment in the bundle \
-             (`views/<group>/<key>/`) and an identifier on the wire, so the set is closed here \
-             rather than escaped at every use site"
-        )));
-    }
-    Ok(())
+    // **The charset lives with the roster records** (`tessera_types::view::check_view_key`), so
+    // the declaration and the create operation coin keys under one rule rather than two copies of
+    // it — decision 0091's reading applied to a name.
+    tessera_types::view::check_view_key(name)
+        .map_err(|detail| declaration_error(format!("{object}: {detail}")))
 }
 
 /// A `[[view]]`'s, a `[[view_group]]`'s or a roster record's own `visibility` (`views.md` §6).
@@ -6037,17 +6013,85 @@ impl Config {
     ///
     /// **The roster's durable home is the manifest** — one place, carried forward for ever, for
     /// the reason `entity_id_low_water` and `layer_tombstones` are there (decision 0029).
-    pub fn group_registry(registry: &[BuildView]) -> Vec<tessera_store::manifest::GroupDescriptor> {
-        use tessera_store::manifest::{GroupDescriptor, GroupViewDescriptor, ViewMetadataValue};
+    pub fn group_registry(
+        &self,
+        registry: &[BuildView],
+        resolved: &[crate::ViewArgs],
+    ) -> Vec<tessera_store::manifest::GroupDescriptor> {
+        use tessera_store::manifest::{
+            GroupDescriptor, GroupMetadataField, GroupViewDescriptor, ViewMetadataType,
+            ViewMetadataValue,
+        };
         let mut groups: Vec<GroupDescriptor> = Vec::new();
         for view in registry {
             let Some(membership) = &view.group else {
                 continue;
             };
             if !groups.iter().any(|g| g.name == membership.group) {
+                // **The group's own settings, published beside the roster** — the frame, the
+                // projection and the declared metadata names. A view created while the service
+                // runs is minted from them (`views.md` §3.2), and a group whose roster is empty
+                // has no view to read them off.
+                let declared = self
+                    .view_groups
+                    .iter()
+                    .find(|g| g.name == membership.group)
+                    .expect("every group in the registry was compiled from a declaration");
+                let owner = match &declared.members {
+                    None => declared,
+                    Some(name) => self
+                        .view_groups
+                        .iter()
+                        .find(|g| &g.name == name)
+                        .expect("a members chain is refused at the declaration"),
+                };
+                let frame = resolved
+                    .iter()
+                    .find(|v| v.view_id == view.id)
+                    .map(|v| v.extent)
+                    .expect("every view in the registry is materialised by this build");
                 groups.push(GroupDescriptor {
                     name: membership.group.clone(),
                     members_of: membership.members_of.clone(),
+                    // **The frame as resolved, not as declared**: a group's `auto` extent is
+                    // fitted over every view of it, so the declaration may say `auto` where the
+                    // manifest must say numbers. Every view of a group shares one frame by
+                    // construction (`views.md` §3.1), so any of them answers — and this view is
+                    // one of them.
+                    quantisation: tessera_store::manifest::Quantisation {
+                        x_min: frame.x_min,
+                        x_max: frame.x_max,
+                        y_min: frame.y_min,
+                        y_max: frame.y_max,
+                    },
+                    projection: declared.projection,
+                    // A `members` group declares none: keys, ordinals and metadata belong to the
+                    // group that owns the views (`views.md` §3.3), so a create against the owner
+                    // is what supplies them and this group's copies carry none.
+                    metadata: if declared.members.is_some() {
+                        Vec::new()
+                    } else {
+                        owner
+                            .metadata
+                            .iter()
+                            .map(|field| GroupMetadataField {
+                                name: field.name.clone(),
+                                ty: match (field.vocabulary.is_some(), field.ty) {
+                                    (true, _) => ViewMetadataType::Category,
+                                    (false, ScalarType::Bool) => ViewMetadataType::Bool,
+                                    (false, ScalarType::F32) | (false, ScalarType::F64) => {
+                                        ViewMetadataType::Float
+                                    }
+                                    (false, ScalarType::Utf8) => ViewMetadataType::Text,
+                                    (false, ScalarType::TimestampUs) => {
+                                        ViewMetadataType::TimestampUs
+                                    }
+                                    (false, _) => ViewMetadataType::Int,
+                                },
+                                vocabulary: field.vocabulary.clone(),
+                            })
+                            .collect()
+                    },
                     views: Vec::new(),
                     // Filled at the manifest write from the declaration's scoped attributes
                     // (`tessera_build::build`), so the family list has one origin.

@@ -340,10 +340,17 @@ pub fn replay<'a>(
             // An artifact's own entity is an ordinary entity here too, on the same argument: its
             // suppression arrives as a `ChangeByEntity`. The membership the record carries belongs
             // to the artifact store, rebuilt in that same second pass.
+            // A view create and a drop are the roster's, rebuilt by the caller in that same
+            // second pass. Neither names an entity: **dropping a view deletes no entity**
+            // (`views.md` §3.4), and `delete_dangling`'s deletions arrive here as the ordinary
+            // `ChangeByEntity` records the arm above applies — which is what keeps the drop from
+            // being a second retirement route.
             WalRecord::LayerCreate { .. }
             | WalRecord::LayerDrop { .. }
             | WalRecord::ArtifactPublish { .. }
-            | WalRecord::ArtifactGrow { .. } => {}
+            | WalRecord::ArtifactGrow { .. }
+            | WalRecord::ViewCreate { .. }
+            | WalRecord::ViewDrop { .. } => {}
         }
     }
 
@@ -552,6 +559,7 @@ mod tests {
                     external_id: None,
                     entity_id: EntityId::new(100),
                     view: "default".to_string(),
+                    join: false,
                     descriptors: Vec::new(),
                     x: 0.0,
                     y: 0.0,
@@ -561,6 +569,7 @@ mod tests {
                     external_id: None,
                     entity_id: EntityId::new(101),
                     view: "default".to_string(),
+                    join: false,
                     descriptors: Vec::new(),
                     x: 0.0,
                     y: 0.0,

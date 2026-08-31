@@ -1423,6 +1423,10 @@ pub(crate) struct LiveState {
     /// large and — until the packaging question is settled — lives only in the log. Folding them
     /// into one structure would put the second's durability problem onto the first.
     artifacts: Mutex<ArtifactStore>,
+    /// The view roster, on the registry's contract: **written only by the executor** — a create is
+    /// a WAL append followed by an apply, on the one thread that also holds the allocator — and
+    /// read by the request path, which resolves a view id against the manifest the roster made.
+    roster: Mutex<tessera_lifecycle::ViewRoster>,
 }
 
 impl LiveState {
@@ -1648,6 +1652,23 @@ impl LiveState {
         lock_recover(&self.registry).set_layout(layer, level, layout)
     }
 
+    /// Run `f` with the roster held — the create and drop preparations, and nothing else.
+    fn with_roster<R>(&self, f: impl FnOnce(&mut tessera_lifecycle::ViewRoster) -> R) -> R {
+        let mut roster = lock_recover(&self.roster);
+        f(&mut roster)
+    }
+
+    /// What a publication carries forward: the creations and the tombstones, complete current
+    /// state — [`Self::registry_for_publication`]'s contract, for the roster.
+    fn roster_for_publication(
+        &self,
+    ) -> (
+        Vec<tessera_types::view::CreatedView>,
+        Vec<tessera_types::view::TombstonedView>,
+    ) {
+        lock_recover(&self.roster).snapshot()
+    }
+
     fn registry_for_publication(
         &self,
     ) -> (Vec<tessera_types::layer::RegisteredLayer>, Vec<String>, u64) {
@@ -1720,17 +1741,40 @@ impl LiveState {
     /// must never refuse a user's write). A *suppressed* holder still collides: suppression is
     /// temporary hiding, and re-ingesting past one is the byte-identical-copy hole this check
     /// exists to close.
+    /// The apply-adjacent backstop for the check-to-apply race, **rewritten as the join rule**
+    /// (`views.md` §4): a known external id is a collision only where the entity it names already
+    /// has a row in the view this batch names. Anywhere else it is a join, and the row is stamped
+    /// with the entity it joins — here rather than in the handler's answer, because this map and
+    /// this generation are the ones the apply will clone from.
+    ///
+    /// **A deleted holder is neither** (decision 0047): the binding is dead bookkeeping and the
+    /// row allocates fresh, which is what makes a re-ingest under the same external id land.
     fn established_collisions(
         &self,
-        rows: &[UnallocatedRow],
+        rows: &mut [UnallocatedRow],
         is_deleted: impl Fn(EntityId) -> bool,
+        holds: impl Fn(EntityId, &str) -> bool,
     ) -> usize {
         let established = lock_recover(&self.established);
-        rows.iter()
-            .filter_map(|r| r.external_id.as_ref())
-            .filter_map(|id| established.get(id.as_slice()))
-            .filter(|entity| !is_deleted(**entity))
-            .count()
+        let mut collisions = 0;
+        for row in rows.iter_mut() {
+            let Some(id) = row.external_id.as_ref() else {
+                continue;
+            };
+            let Some(entity) = established.get(id.as_slice()).copied() else {
+                continue;
+            };
+            if is_deleted(entity) {
+                row.join = None;
+                continue;
+            }
+            if holds(entity, &row.view) {
+                collisions += 1;
+                continue;
+            }
+            row.join = Some(entity);
+        }
+        collisions
     }
 
     /// Drop every retired entity's external-id binding from the live map — **the other half of
@@ -1993,6 +2037,10 @@ pub(crate) struct WritePathState {
     accepted_batches: AcceptedBatches,
     pub(crate) registry: LayerRegistry,
     pub(crate) artifacts: ArtifactStore,
+    /// The view roster — which views of which groups exist, and which keys are burnt
+    /// (`views.md` §3.2). Rebuilt exactly as the layer registry beside it is: seeded from the
+    /// manifests, then the log replayed on top.
+    pub(crate) roster: tessera_lifecycle::ViewRoster,
 }
 
 /// The manifest state a reconstruction starts from, before WAL replay unions what was written
@@ -2012,6 +2060,14 @@ pub(crate) struct ManifestSeed<'a> {
     pub low_water: u64,
     pub layers: &'a [tessera_types::layer::RegisteredLayer],
     pub tombstones: &'a [String],
+    /// Every view created since the build, across every partition's manifest (`views.md` §3.2),
+    /// and every key ever dropped. The build's own roster is not here: it is in `MANIFEST.json`
+    /// and is seeded separately, because its ordinals are the sequence these continue.
+    pub created_views: &'a [tessera_types::view::CreatedView],
+    pub view_tombstones: &'a [tessera_types::view::TombstonedView],
+    /// The views a build declared, as `(group, key, ordinal)` — what makes a created view's
+    /// ordinal the *next* one rather than a second `0`.
+    pub declared_views: Vec<(String, String, u32)>,
     /// Every published membership extent, across every partition's manifest, with the prefix
     /// directory their paths are relative to.
     pub membership_extents: &'a [tessera_store::manifest::MembershipExtent],
@@ -2165,7 +2221,7 @@ impl WritePath {
         dict: &Dict,
         initial_deny: &[(EntityId, ChangeOp)],
         vocabularies: &mut Vocabularies,
-        has_row: impl Fn(EntityId) -> bool,
+        has_row: impl Fn(EntityId, &str) -> bool,
     ) -> Result<(Overlay, IngestBuffer, WritePathState), EngineError> {
         let (wal, records) = Wal::open(wal_path).map_err(EngineError::Wal)?;
 
@@ -2235,6 +2291,18 @@ impl WritePath {
         // retired the highest-numbered layer. Reseeding costs at most one block per restart, out
         // of 65 536, and a durable cursor would buy back an id space nothing is short of.
         registry.reseed_entity_cursor();
+
+        // **The roster, on the registry's ordering rule and for the same reason**: the manifests
+        // are the starting point and every WAL record postdates them, so seeding afterwards would
+        // resurrect a view that was dropped since the last publication. The build's declared views
+        // are seeded first because their ordinals are the sequence a create continues — a roster
+        // that forgot them would hand the next create an ordinal a declared view already holds.
+        let mut roster = tessera_lifecycle::ViewRoster::new();
+        roster.seed_declared(seed.declared_views.iter().cloned());
+        roster.seed(seed.created_views, seed.view_tombstones);
+        for record in &records {
+            roster.apply(record);
+        }
 
         // **The manifests' membership extents are the starting point, and replay unions what came
         // after** — the registry's ordering rule above, for the same reason: every WAL record
@@ -2355,10 +2423,16 @@ impl WritePath {
         // It is also what `compose::verdict` now relies on. That function used to gate rule 4 on
         // `entity < watermark` to stop a stale buffer answering for an entity the fragment already
         // covers; the gate is gone, and this invariant is what replaces it.
-        let already_flushed: Vec<EntityId> = buffer
-            .iter()
-            .map(|(entity, _)| *entity)
-            .filter(|entity| has_row(*entity))
+        // **Per (entity, view), because an entity may hold a row in several views** (`views.md`
+        // §4). The question is not "does this entity have geometry" — a joined entity has some,
+        // in the view it was first ingested into — but "does this *row* have geometry", and a
+        // predicate over the entity alone would drop a second view's pending row from the buffer
+        // while no segment held it. Every row is in one view, so the two questions coincide
+        // exactly while a corpus has one view, which is why the narrower one costs nothing.
+        let already_flushed: Vec<(EntityId, String)> = buffer
+            .rows()
+            .map(|(entity, item)| (*entity, item.view.clone()))
+            .filter(|(entity, view)| has_row(*entity, view))
             .collect();
         if !already_flushed.is_empty() {
             tracing::debug!(
@@ -2366,8 +2440,8 @@ impl WritePath {
                 "WAL rows that already have geometry were not re-buffered"
             );
         }
-        for entity in already_flushed {
-            buffer.remove(entity);
+        for (entity, view) in already_flushed {
+            buffer.remove_in_view(entity, &view);
         }
 
         // **Where each surviving row sits in the log**, so a rotation knows what it may reclaim
@@ -2382,7 +2456,7 @@ impl WritePath {
         for (record, position) in records.iter().zip(wal.replayed_positions()) {
             if let WalRecord::IngestBatch { rows, .. } = record {
                 for row in rows {
-                    buffer.set_wal_pos(row.entity_id, *position);
+                    buffer.set_wal_pos(row.entity_id, &row.view, *position);
                 }
             }
         }
@@ -2418,6 +2492,7 @@ impl WritePath {
                 accepted_batches,
                 registry,
                 artifacts,
+                roster,
             },
         ))
     }
@@ -2437,6 +2512,7 @@ impl WritePath {
                 accepted_batches: Mutex::new(state.accepted_batches),
                 registry: Mutex::new(state.registry),
                 artifacts: Mutex::new(state.artifacts),
+                roster: Mutex::new(state.roster),
             }),
             wal: Some(state.wal),
             handle: None,
@@ -2833,6 +2909,48 @@ impl WritePath {
         match receipt.outcome {
             Ok(Ack::LayerDropped) => Ok(()),
             Ok(other) => unreachable!("a DropLayer command answers LayerDropped, not {other:?}"),
+            Err(e) => Err(AcceptError::Exec(e)),
+        }
+    }
+
+    /// Create a view of a view group while the service runs (`views.md` §3.2), returning the
+    /// ordinal it was given.
+    pub(crate) fn create_view(
+        &self,
+        group: String,
+        key: String,
+        visibility: Option<String>,
+        metadata: std::collections::BTreeMap<String, tessera_types::view::ViewMetadataValue>,
+    ) -> Result<u32, AcceptError> {
+        let receipt = self.handle()?.submit(Command::CreateView {
+            group,
+            key,
+            visibility,
+            metadata,
+        })?;
+        match receipt.outcome {
+            Ok(Ack::ViewCreated { ordinal }) => Ok(ordinal),
+            Ok(other) => unreachable!("a CreateView command answers ViewCreated, not {other:?}"),
+            Err(e) => Err(AcceptError::Exec(e)),
+        }
+    }
+
+    /// Drop a view, tombstoning its key for ever, and answer how many entities `delete_dangling`
+    /// submitted for deletion (`views.md` §3.4).
+    pub(crate) fn drop_view(
+        &self,
+        group: String,
+        key: String,
+        delete_dangling: bool,
+    ) -> Result<u64, AcceptError> {
+        let receipt = self.handle()?.submit(Command::DropView {
+            group,
+            key,
+            delete_dangling,
+        })?;
+        match receipt.outcome {
+            Ok(Ack::ViewDropped { deleted }) => Ok(deleted),
+            Ok(other) => unreachable!("a DropView command answers ViewDropped, not {other:?}"),
             Err(e) => Err(AcceptError::Exec(e)),
         }
     }
@@ -3895,6 +4013,8 @@ mod vocabulary_extensions_tests {
             entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
             layers: Vec::new(),
             layer_tombstones: Vec::new(),
+            views: Vec::new(),
+            view_tombstones: Vec::new(),
             membership_extents: Vec::new(),
             level_versions: Vec::new(),
             containment_extents: Vec::new(),
@@ -4280,6 +4400,93 @@ fn live_segments_of(generation: &Generation) -> usize {
         .map(|view| view.segments.len())
         .max()
         .unwrap_or(0)
+}
+
+/// The refusal a roster error is answered with — the three the wire tells apart
+/// (`views.md` §3.2, and this module's `ExecError` doc for why the caller's remedy decides).
+fn roster_error(e: tessera_lifecycle::RosterError) -> ExecError {
+    use tessera_lifecycle::RosterError;
+    let detail = e.to_string();
+    match e {
+        RosterError::Exists { .. } | RosterError::Tombstoned { .. } => {
+            ExecError::ViewConflict { detail }
+        }
+        RosterError::Unknown { .. } => ExecError::ViewUnknown { detail },
+        RosterError::Refused(_) => ExecError::ViewRefused { detail },
+    }
+}
+
+/// The entities of `view` that hold a row in **no other view** — the commit-window buffer
+/// included (`views.md` §3.4's `delete_dangling`).
+///
+/// **The buffer counts as a view's rows.** A row accepted but not yet flushed is in no
+/// permutation, so a probe that read the permutations alone would call an entity dangling that a
+/// caller was told had landed elsewhere — and then delete it.
+///
+/// **Row space is walked, entity space only where it cannot be.** A view's rows invert to their
+/// entities directly wherever the row space can be inverted, which is every view a flush created
+/// and every built view that published a `row-entity.u32`; where it cannot, the fallback asks
+/// each entity below the high-water whether this view holds it, which is `O(entity space)` and is
+/// reported rather than hidden, because a silent one would look like an idle service.
+fn dangling_entities(generation: &Generation, view: &str) -> Vec<EntityId> {
+    let mut candidates: Vec<EntityId> = Vec::new();
+    for partition in generation.bundle.partitions.values() {
+        let Some(view_data) = partition.views.get(view) else {
+            continue;
+        };
+        let rows = view_data.row_space.total_rows();
+        if view_data.row_space.can_invert() {
+            for row in 0..rows {
+                if let Some(entity) =
+                    view_data.row_space.entity_of(tessera_types::RowId::new(row as u32))
+                {
+                    candidates.push(entity);
+                }
+            }
+        } else {
+            let bound = view_data.row_space.base().bound();
+            tracing::warn!(
+                view = %view,
+                entities = bound,
+                "this view publishes no row→entity table, so delete_dangling walks entity space \
+                 to enumerate its rows"
+            );
+            for raw in 0..bound {
+                let entity = EntityId::new(raw);
+                if view_data.row_space.row_of(entity).is_some() {
+                    candidates.push(entity);
+                }
+            }
+        }
+    }
+    // **Every buffered row, joins included** (`rows()`, not `iter()`): the question here is which
+    // entities have a row *in this view*, which is geometry, and a join is a row.
+    for (entity, item) in generation.buffer.rows() {
+        if item.view == view {
+            candidates.push(*entity);
+        }
+    }
+    candidates.sort_unstable_by_key(|e| e.raw());
+    candidates.dedup();
+    candidates.retain(|entity| {
+        // Already deleted is already gone: a second deletion of the same entity is a no-op the
+        // overlay would absorb, and counting it would report work the drop did not do.
+        if generation.overlay.is_deleted(*entity) {
+            return false;
+        }
+        let in_another_view = generation.bundle.partitions.values().any(|partition| {
+            partition
+                .views
+                .iter()
+                .any(|(id, data)| id != view && data.row_space.row_of(*entity).is_some())
+        });
+        let buffered_elsewhere = generation
+            .buffer
+            .rows()
+            .any(|(buffered, item)| buffered == entity && item.view != view);
+        !in_another_view && !buffered_elsewhere
+    });
+    candidates
 }
 
 fn views_of(generation: &Generation) -> Vec<String> {
@@ -6086,6 +6293,10 @@ impl Executor {
         // The online publication path takes the same posture for the same reason.
         let (registered_layers, registered_tombstones, registry_low_water) =
             self.live.registry_for_publication();
+        // The roster, from the live roster rather than from the fold's own inputs, on exactly the
+        // argument above it: the manifest a fold planned against may be several publications
+        // behind, and a view created since must not be dropped by the publication that lands.
+        let (created_views, view_tombstones) = self.live.roster_for_publication();
 
         let mut segments_manifest = SegmentsManifest {
             // The flight's text extents, and the pass merged every other one into the new base
@@ -6110,6 +6321,8 @@ impl Executor {
             entity_id_low_water: live_manifest.entity_id_low_water.min(registry_low_water),
             layers: registered_layers,
             layer_tombstones: registered_tombstones,
+            views: created_views,
+            view_tombstones,
             // **The pass's own output, not the live list.** The paths are prefix-relative and the
             // fold publishes a *new* prefix, so what step 3a wrote is the only list that names
             // files this prefix contains. The content extents beside it are carried by link, their
@@ -8135,9 +8348,22 @@ impl Executor {
         // apply below will clone from, on the same thread, so the deleted-holder exemption cannot
         // race its own delete.
         let generation = self.generation.load();
-        let collisions = self
-            .live
-            .established_collisions(&rows, |e| generation.overlay.is_deleted(e));
+        let mut rows = rows;
+        let collisions = self.live.established_collisions(
+            &mut rows,
+            |e| generation.overlay.is_deleted(e),
+            |entity, view| {
+                // The same predicate the handler answered with, read from the generation this
+                // apply will clone from: the view's permutation, and the buffer beside it for the
+                // rows an earlier window accepted and no flush has taken yet.
+                generation.bundle.partitions.values().any(|partition| {
+                    partition
+                        .views
+                        .get(view)
+                        .is_some_and(|data| data.row_space.row_of(entity).is_some())
+                }) || generation.buffer.contains_in_view(entity, view)
+            },
+        );
         drop(generation);
         if collisions > 0 {
             self.ack_failed(
@@ -9072,6 +9298,17 @@ impl Executor {
                 |_| Ack::LayerDropped,
                 respond,
             ),
+            Command::CreateView {
+                group,
+                key,
+                visibility,
+                metadata,
+            } => self.commit_view_create(group, key, visibility, metadata, respond),
+            Command::DropView {
+                group,
+                key,
+                delete_dangling,
+            } => self.commit_view_drop(group, key, delete_dangling, respond),
             Command::PublishArtifacts {
                 layer,
                 level,
@@ -9355,6 +9592,253 @@ impl Executor {
         respond.ack(ack, &published);
     }
 
+    /// `PUT /control/views/{group}/{key}` — create a view of a group while the service runs
+    /// (`views.md` §3.2, decision 0108).
+    ///
+    /// **The shape is `commit_registry`'s**, because the obligation is: prepare against state only
+    /// this thread may write, append, fsync, apply, publish, ack. What differs is that a view has
+    /// a *row space* — an empty one — so the apply reaches the bundle rather than stopping at a
+    /// live-state map, and the ack therefore rides a generation swap rather than a registry token.
+    ///
+    /// **The ordinal is spent whatever happens next.** A create whose append fails is refused with
+    /// its ordinal unreturned, exactly as a failed registration keeps its ids: an ordinal reissued
+    /// after a torn append that replay might still apply is two views under one alias, which is
+    /// worse than a gap in a sequence nothing counts.
+    fn commit_view_create(
+        &mut self,
+        group: String,
+        key: String,
+        visibility: Option<String>,
+        metadata: std::collections::BTreeMap<String, tessera_types::view::ViewMetadataValue>,
+        respond: Responder,
+    ) {
+        let started = std::time::Instant::now();
+        let generation = self.generation.load_full();
+        let Some(descriptor) = generation
+            .bundle
+            .manifest
+            .groups
+            .iter()
+            .find(|g| g.name == group)
+        else {
+            // The same 404 an unknown view id is, and for the same reason: a group nobody declared
+            // and a key no view holds must be one answer, or the difference between them is an
+            // existence oracle over the roster.
+            respond.fail(ExecError::ViewUnknown {
+                detail: format!(
+                    "unknown view group '{group}'. A group is declared at a build and its views \
+                     grow at a running service (views §3.1); there is no create that mints a group"
+                ),
+            });
+            self.health.note_work_refused();
+            return;
+        };
+        let facts = tessera_lifecycle::GroupFacts {
+            name: &descriptor.name,
+            members_of: descriptor.members_of.as_deref(),
+            metadata: &descriptor.metadata,
+        };
+        let prepared = self
+            .live
+            .with_roster(|roster| roster.prepare_create(facts, &key, visibility, metadata));
+        let record = match prepared {
+            Ok(record) => record,
+            Err(e) => {
+                respond.fail(roster_error(e));
+                self.health.note_work_refused();
+                return;
+            }
+        };
+        let ordinal = match &record {
+            WalRecord::ViewCreate { view } => view.ordinal,
+            _ => unreachable!("prepare_create returns a ViewCreate"),
+        };
+        if let Err(e) = self.wal.append(&record).and_then(|()| self.wal.fsync()) {
+            tracing::error!(
+                error = %e,
+                view = %format!("{group}:{key}"),
+                "ALARM: a view creation could not be made durable; the view does not exist and \
+                 its ordinal is spent"
+            );
+            respond.fail(ExecError::Wal(e));
+            return;
+        }
+        self.live.with_roster(|roster| roster.apply(&record));
+        let published = self.publish_roster(&generation, started, &[]);
+        // Durable in the log and not yet in a manifest, and a rotation reclaims the log — so the
+        // roster reaches `SEGMENTS-<n>.json` on the mechanism a deny already uses (`views.md`
+        // §3.2: the durable home is the segments manifest).
+        self.deny_dirty = true;
+        respond.ack(Ack::ViewCreated { ordinal }, &published);
+    }
+
+    /// `DELETE /control/views/{group}/{key}` — drop a view, tombstoning its key for ever
+    /// (`views.md` §3.4).
+    ///
+    /// **Dropping a view deletes no entity.** An entity whose only view was dropped still exists,
+    /// with its label, its attributes and its artifact memberships, in no view — and a later batch
+    /// into a new view picks it up by `external_id` under the join rule. `delete_dangling` is the
+    /// caller who *did* mean "and the items that were only here", and it is **sugar and nothing
+    /// else**: the entities are submitted as ordinary deletions, which enter the overlay and
+    /// retire at the fold that executes them (Rule F, write-path §5.4). It is not a second
+    /// retirement route, and the two removal rules are untouched by anything here.
+    ///
+    /// **The probe and the submission are one step on this thread**, which is what the
+    /// serialisation is for: a batch acked between them could re-add an entity the probe had
+    /// already found dangling, and the deletion would then destroy a row the caller was told had
+    /// landed.
+    fn commit_view_drop(
+        &mut self,
+        group: String,
+        key: String,
+        delete_dangling: bool,
+        respond: Responder,
+    ) {
+        let started = std::time::Instant::now();
+        let generation = self.generation.load_full();
+        let id = format!("{group}{}{key}", tessera_store::GROUP_SEPARATOR);
+        // The owner's key, whatever group the request named: keys and ordinals belong to the group
+        // that owns the views, and dropping the key takes the view out of every group sharing them
+        // (`views.md` §3.3).
+        let owner = generation
+            .bundle
+            .manifest
+            .groups
+            .iter()
+            .find(|g| g.name == group)
+            .and_then(|g| g.members_of.clone())
+            .unwrap_or_else(|| group.clone());
+        let declared_ordinal = generation
+            .bundle
+            .manifest
+            .groups
+            .iter()
+            .find(|g| g.name == owner)
+            .and_then(|g| g.views.iter().find(|v| v.key == key))
+            .map(|v| v.ordinal);
+        let prepared = self
+            .live
+            .with_roster(|roster| roster.prepare_drop(&owner, &key, declared_ordinal));
+        let record = match prepared {
+            Ok(record) => record,
+            Err(e) => {
+                respond.fail(roster_error(e));
+                self.health.note_work_refused();
+                return;
+            }
+        };
+        // **Computed before the drop applies**, because the probe reads the row space the drop is
+        // about to take away — and on this thread, with no yield between it and the submission.
+        let dangling = if delete_dangling {
+            dangling_entities(&generation, &id)
+        } else {
+            Vec::new()
+        };
+        if let Err(e) = self.wal.append(&record).and_then(|()| self.wal.fsync()) {
+            tracing::error!(
+                error = %e,
+                view = %id,
+                "ALARM: a view drop could not be made durable; the view still exists"
+            );
+            respond.fail(ExecError::Wal(e));
+            return;
+        }
+        self.live.with_roster(|roster| roster.apply(&record));
+        let published = self.publish_roster(&generation, started, std::slice::from_ref(&id));
+        self.deny_dirty = true;
+        // **Ordinary deletions, through the ordinary lane.** They are appended, fsynced and
+        // applied by the same path a `/control/changes` delete takes, so they retire at the fold
+        // under Rule F and nowhere else. A failure here is reported the way that lane reports one
+        // — in force, and possibly not durable — and does not un-drop the view, which is already
+        // acknowledged as far as the log is concerned.
+        let deleted = dangling.len() as u64;
+        if !dangling.is_empty() {
+            let mut entries: Vec<DenyEntry> = dangling
+                .into_iter()
+                .map(|entity| DenyEntry {
+                    record: WalRecord::ChangeByEntity {
+                        entity_id: entity,
+                        op: tessera_lifecycle::ChangeOp::Delete,
+                    },
+                    entity,
+                    op: tessera_lifecycle::ChangeOp::Delete,
+                    respond: None,
+                })
+                .collect();
+            self.cascade_dependents(&mut entries);
+            self.commit_denies(entries);
+        }
+        respond.ack(Ack::ViewDropped { deleted }, &published);
+    }
+
+    /// Publish the generation a create or a drop makes: the bundle as the live roster describes
+    /// it, the deny mask re-derived over the views it now has, and every buffered row of a view
+    /// that has gone.
+    ///
+    /// **The buffered rows of a dropped view are discarded, and that is not a deletion.** They
+    /// name a coordinate system that no longer exists, so nothing will ever give them geometry —
+    /// and a row left in the buffer for a view no flush will plan pins `oldest_wal_pos`, and with
+    /// it every WAL member after it, for the life of the process. Their entities are untouched:
+    /// an entity left in no view is exactly what `views.md` §3.4 says a drop produces.
+    fn publish_roster(
+        &self,
+        generation: &Arc<Generation>,
+        started: std::time::Instant,
+        dropped: &[String],
+    ) -> Published {
+        let (created, tombstones) = self.live.roster_for_publication();
+        let manifest = generation
+            .bundle
+            .manifest
+            .with_roster(&created, &tombstones);
+        let bundle = generation.bundle.with_views(manifest);
+        let buffer = if dropped.is_empty() {
+            Arc::clone(&generation.buffer)
+        } else {
+            let mut buffer = (*generation.buffer).clone();
+            // Rows, not entities, and by (entity, view): an entity whose row in the dropped view
+            // was a join keeps the row it holds elsewhere, and `rows()` is what sees the join at
+            // all.
+            let orphaned: Vec<(EntityId, String)> = generation
+                .buffer
+                .rows()
+                .filter(|(_, item)| dropped.contains(&item.view))
+                .map(|(entity, item)| (*entity, item.view.clone()))
+                .collect();
+            for (entity, view) in orphaned {
+                buffer.remove_in_view(entity, &view);
+            }
+            self.health
+                .buffered_items
+                .store(buffer.len(), Ordering::SeqCst);
+            Arc::new(buffer)
+        };
+        // **Re-derived, never carried**: the mask holds one entry per view of the bundle and its
+        // own contract is that a missing one means the mask and the bundle disagree — which is
+        // exactly the state carrying it forward across a create would produce.
+        let denied = Arc::new(crate::compose::derive_denied(&generation.overlay, &bundle));
+        let next = Generation {
+            prefix: generation.prefix.clone(),
+            // **Unmoved**: no row moved, so every row-projection cache keyed on it stays valid.
+            // The coalesce publication is the precedent — a new bundle at the same version.
+            segments_version: generation.segments_version,
+            watermark: generation.watermark,
+            bundle,
+            dict: Arc::clone(&generation.dict),
+            postings: Arc::clone(&generation.postings),
+            fragments: Arc::clone(&generation.fragments),
+            external_index: Arc::clone(&generation.external_index),
+            delta_postings: generation.delta_postings.clone(),
+            overlay_version: generation.overlay_version,
+            overlay: Arc::clone(&generation.overlay),
+            buffer,
+            vocabularies: Arc::clone(&generation.vocabularies),
+            filter_columns: Arc::clone(&generation.filter_columns),
+            denied,
+        };
+        self.publish(next, started)
+    }
+
     /// Clone the buffer **once**, insert every entry in the window, publish **once**.
     ///
     /// The amortisation this buys is the one that grows: the clone is O(total buffered items) and
@@ -9430,7 +9914,7 @@ impl Executor {
                 }
                 buffer.insert_row_with_terms(row, row_terms);
                 let m = self.health.lap(WriteStage::RowBufferInsert, m);
-                buffer.set_wal_pos(row.entity_id, *wal_pos);
+                buffer.set_wal_pos(row.entity_id, &row.view, *wal_pos);
                 self.health.lap(WriteStage::RowWalPos, m);
             }
         }
@@ -9438,9 +9922,10 @@ impl Executor {
         drop(established_inverse);
         mark = self.health.lap(WriteStage::ApplyRows, mark);
 
-        // Published here, at the one place buffer occupancy changes, so `/control/ingest`'s
-        // occupancy bound reads a figure the executor maintains rather than one a handler derives
-        // from a generation it would have to load.
+        // Published here, and at every other place buffer occupancy changes — the flush's
+        // publication and the deny lane's — so `/control/ingest`'s occupancy bound reads a figure
+        // the executor maintains rather than one a handler derives from a generation it would
+        // have to load.
         self.health
             .buffered_items
             .store(buffer.len(), Ordering::SeqCst);
@@ -9660,6 +10145,13 @@ impl Executor {
             manifest.entity_id_low_water = manifest.entity_id_low_water.min(low_water);
             manifest.layers = layers;
             manifest.layer_tombstones = layer_tombstones;
+            // **The roster's durable home, restated from the live roster and never from the
+            // clone** (`views.md` §3.2): the manifest this was cloned from may be several
+            // publications behind, and a create that landed since would be dropped by carrying it
+            // forward — which a rotation then makes permanent.
+            let (created_views, view_tombstones) = self.live.roster_for_publication();
+            manifest.views = created_views;
+            manifest.view_tombstones = view_tombstones;
             // **Membership extents are written before the manifest that names them**, which is the
             // whole of their durability contract: a manifest naming a missing extent refuses at
             // open, so the file has to be durable first. A failure here abandons the publication
@@ -11031,7 +11523,27 @@ impl Executor {
 
         let mut manifest = partition_data.manifest.clone();
         let manifest_n = self.allocate_manifest_n();
-        manifest.watermark = completed.watermark;
+        // **The watermark advances at every flush publication, and never regresses** — a
+        // publication coordinate, which is the only reading left of it.
+        //
+        // `entity_hi + 1` of *this view's* flush was the whole definition while a bundle had one
+        // view, and under several it is neither monotone nor sufficient. Not monotone: views flush
+        // one per tick, so a view holding older entities publishes after one holding newer ones
+        // and offers a lower number — which `check_manifest_publishable` refuses, leaving those
+        // rows buffered for ever with nothing but a `warn!` to say so. Not sufficient: fragment
+        // freshness is `fragment.watermark >= generation.watermark` (`Engine::fragment_for`), so a
+        // publication that did not move it would let a session keep a fragment built before this
+        // flush's postings tier — its entities in no fragment and no buffer, invisible until the
+        // session re-authorised.
+        //
+        // The entity-threshold reading is already gone: `compose::verdict` dropped its
+        // `entity < watermark` gate when the buffer became exactly the rows without geometry, and
+        // its own note records that removing it took a silent multi-view hazard with it. What is
+        // left reads this as *has anything been published since* — `check_publishable`,
+        // `check_manifest_publishable`, and the fragment test above — and all three want a
+        // coordinate that strictly advances. Single-view behaviour is unchanged: ids are issued
+        // monotonically, so `entity_hi + 1` was already above the live value there.
+        manifest.watermark = completed.watermark.max(manifest.watermark + 1);
         manifest.entity_id_high_water = manifest
             .entity_id_high_water
             .max(completed.entity_id_high_water);
@@ -11044,6 +11556,10 @@ impl Executor {
         manifest.entity_id_low_water = manifest.entity_id_low_water.min(low_water);
         manifest.layers = layers;
         manifest.layer_tombstones = layer_tombstones;
+        // The roster beside them, on the same rule and for the same reason (`views.md` §3.2).
+        let (created_views, view_tombstones) = self.live.roster_for_publication();
+        manifest.views = created_views;
+        manifest.view_tombstones = view_tombstones;
         manifest.segments.push(completed.descriptor);
         manifest.deltas.push(completed.tier_path);
         manifest.external_id_runs.push(completed.external_id_run);
@@ -11179,8 +11695,19 @@ impl Executor {
         // design adds rather than one it avoids.
         let mut buffer = (*live.buffer).clone();
         for entity in &completed.consumed {
-            buffer.remove(*entity);
+            // **By (entity, view), never by entity.** A flush consumes one view's rows; an entity
+            // that also holds a row awaiting flush in another view keeps it, and removing the
+            // entity outright would lose a row that is in no segment and no buffer (`views.md`
+            // §4).
+            buffer.remove_in_view(*entity, &completed.view);
         }
+        // **The gauge follows the buffer here too.** A flush is the other place occupancy changes,
+        // and until it was stated here the figure only ever came down at the next apply — so a
+        // node that flushed and then took no ingest reported a backlog it had already written, and
+        // `/control/ingest`'s occupancy bound was measured against it.
+        self.health
+            .buffered_items
+            .store(buffer.len(), Ordering::SeqCst);
 
         let watermark = next_bundle
             .partitions
@@ -11856,6 +12383,7 @@ mod dispatch_rules_tests {
         let item = BufferedItem {
             terms: Vec::new(),
             view: "s".to_string(),
+            join: false,
             x: 0.5,
             y: 0.5,
             scalars: Vec::new(),

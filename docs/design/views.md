@@ -1,7 +1,15 @@
 # Views — design
 
 **Date:** 2026-08-30
-**Status:** Normative (r13) — **a group-scoped attribute answers filters** (r13, 2026-08-31):
+**Status:** Normative (r14) — **a group grows while the service runs** (r14, 2026-08-31):
+`PUT /control/views/{group}/{key}` creates a view of a declared group and `DELETE` drops it,
+burning the key and its ordinal; the roster's durable home is the segments manifest, carried
+forward for ever as `layer_tombstones` is; a created view answers a viewer verb empty and takes
+its first row space at the next flush; and a known `external_id` naming a view the entity is not
+in is a **join** (spec §4), the row landing in that view with the entity, its label and its
+attributes untouched. `delete_dangling` is built, as sugar over the deny lane. What is still
+unbuilt is the gate (spec §6) and the serving surfaces a scoped column needs; spec §3.2's and
+§4's markers say what remains inside what is built. **a group-scoped attribute answers filters** (r13, 2026-08-31):
 spec §5's evaluation rule is built end to end — the family is recorded in the manifest beside the
 roster, `/v1/meta`'s `filter_operands` carries its scope, and a leaf resolves to one view's column
 by the request's own view or by a pin, `name@key` or `name@#n`, with a `422` naming the group where
@@ -18,9 +26,9 @@ every plain view and every view of every group, whichever roster form declared i
 space unioned from their sources and ordered by the declared anchor (decision 0112); a group's
 points selected out of a shared file by `fields.view`; one frame per group under `auto`; a
 group-scoped attribute's column family on disc; and a layer drawn on a group or scoped to one.
-What remains is above the build — the ingest join (spec §4), the gate (spec §6), and the serving
-surfaces a scoped column and a scoped layer will need; the markers at spec §1, §5, §7 and §8 say
-which.
+What remained above the build at r10 was the ingest join (spec §4, built at r13), the gate
+(spec §6) and the serving surfaces a scoped column and a scoped layer will need; the markers at
+spec §1, §5, §7 and §8 say which.
 Spec §2's per-view extent was built at r7 (contracts r52, decision 0040): the extent moved off the
 bundle onto `ViewDescriptor` and into each `/v1/meta` `views` entry, with no fallback. No design
 changes in either revision; the markers do. Promoted at r6 on 2026-08-30 after the
@@ -88,13 +96,18 @@ non-sentinel, never a stored set.
 > roster record and the groups with their orderings, and every one of them answers a viewer verb,
 > by key or by ordinal (spec §3.2, contracts §3.2 r53).
 >
-> What remains is above the build, and each refuses or is absent by name: a group whose views are
-> **minted from a discriminator** with no roster at all (spec §3.1), the second-view join at
-> ingest (spec §4), the gate (spec §6), and the serving surfaces a scoped **layer** would need. A
+> **The write half is built too** (2026-08-31): a view of a group is created and dropped while
+> the service runs (spec §3.2, §3.4), the roster's durable home is the segments manifest, a
+> created view serves empty and takes its first row space at the next flush, and the second-view
+> join at ingest is the rule spec §4 states — its arms refusing, its joining row carrying geometry
+> and nothing else.
+>
+> What remains is a group whose views are **minted from a discriminator** with no roster at all
+> (spec §3.1), the gate (spec §6), and the serving surfaces a scoped **layer** would need. A
 > scoped **attribute** is served: since 2026-08-31 a numeric or keyword family is a filter operand
 > carrying its scope, and a leaf reads the view the request names or the one it pins (spec §5,
 > contracts §3.2 r55) — what remains of it is a category or text family, and `render`, which spec
-> §5's marker states.
+> §5's marker states. Each refuses or is absent by name.
 
 ## 2. A view
 
@@ -261,20 +274,30 @@ declared metadata names, so it is parsed by the manual route the `extent` spelli
 take rather than by `deny_unknown_fields` alone; the discipline's guarantee — an unknown key is
 refused — is preserved by checking against the declared set.
 
-> **⊘ Partially implemented — the roster is built and served; creation is not** (2026-08-31).
-> The group object, the roster and the ordinal exist: they are published in the segments manifest
-> at a build, validated against the view registry at open, and served on `/v1/meta` — the plain
-> views in manifest order, then each group's views in ordinal order, each carrying its `group`,
-> `key`, `ordinal` and typed `metadata`, beside a `groups` array giving each group's view ids in
-> ordinal order (contracts §3.2 r53). Both addressing forms resolve, `<group>:<key>` and
-> `<group>:#<ordinal>`, in one place for both planes, so an unknown name, an absent key and an
-> ordinal no view holds are one 404.
+> **Implemented 2026-08-31** (contracts §3.4 r55). `PUT /control/views/{group}/{key}` takes the
+> roster record — `visibility` and the declared metadata, typed — and creates the view: the key's
+> charset is checked, an existing or tombstoned key is a `409`, an unknown group and a group that
+> takes another's views are a `404` and a `422`, and a `visibility` that is not `public` is
+> refused for spec §6's reason. The ordinal is assigned from a high-water that counts the build's
+> roster, every create and every drop. The record is a WAL entry (`ViewCreate`) replayed before
+> any row referencing it, and **the roster's durable home is the segments manifest**:
+> `SegmentsManifest.views` and `view_tombstones` are published at every flush and every deny
+> publication and carried forward for ever, exactly as `layer_tombstones` is; the served roster is
+> the build's plus those, with the WAL's own records replayed on top at open. Creating a key on
+> the owner creates it, empty, on every group sharing its views (spec §3.3).
 >
-> **What is not built is creation while the service runs**: there is no `PUT
-> /control/views/{group}/{key}`, no drop (spec §3.4), no WAL create or tombstone record, no
-> ordinal high-water carried across a flush, and no first-batch-creates route for a group whose
-> views carry nothing. Every view that exists was declared and built, so every ordinal is roster
-> order and no key has ever been retired.
+> A created view **is a view from the acknowledgement**: it is in `/v1/meta` with its record, it
+> answers a viewer verb with an empty result — a view with no files now has an empty row space
+> rather than being absent from the bundle, which is what a 404 and a missing deny-mask entry used
+> to be made of — and its first flush gives it a row space, every segment of it an extent over
+> that empty base.
+>
+> ⊘ **Two things this does not do.** A group whose views carry nothing has no
+> *first-batch-creates* route: a batch naming an unknown key is a 404, and the view is created by
+> the operation above like any other. And a group declaring a **category**-typed metadata name has
+> no create that can satisfy it: the wire carries a key and nothing resolves it to a code here, so
+> such a create is refused by the type check rather than accepted with an unresolved value — no
+> declaration in the corpus uses one.
 
 ### 3.3 Sharing views
 
@@ -331,6 +354,31 @@ retirement route and must not become one; a drop that removed an entity any othe
 the fail-open the two removal rules exist to prevent. The cost is one permutation probe per
 other view per row of the view, paid once at the drop and reported in its acknowledgement
 with the count.
+
+> **Implemented 2026-08-31** (contracts §3.4 r55). `DELETE /control/views/{group}/{key}` appends a
+> `ViewDrop` record carrying the key **and its ordinal**, and the view leaves `/v1/meta` and every
+> group sharing it at the acknowledgement; a request naming it is the same 404 as one that never
+> existed, and both the key and the ordinal are refused for ever — the ordinal travels in the
+> tombstone because a high-water recovered from the live views alone would reissue the newest one
+> the moment it was the one dropped. Any view of a group may be dropped, a declared one included.
+> The rows the buffer held for it are discarded with it: they name a coordinate system that no
+> longer exists, so nothing would ever give them geometry, and a row left in the buffer for a view
+> no flush will plan pins the WAL's reclaim bound for the life of the process. Their **entities**
+> are untouched, which is what this section says a drop produces.
+>
+> `delete_dangling` is built as the sugar defined above: the probe walks the dropped view's rows —
+> inverting its row space where it can, and asking entity space where a built view published no
+> `row-entity.u32` — unions the buffer's rows for that view, and submits the entities that hold a
+> row nowhere else as ordinary `Delete` records on the deny lane. The probe and the submission are
+> one step on the write executor, so no acked batch can interleave between them; the count is in
+> the acknowledgement.
+>
+> ⊘ **Row-space reclamation is the fold's, and no test drives one after a drop.** The dropped
+> view is absent from the bundle the fold plans over, so its segments are not carried into the new
+> prefix and the old one is reclaimed at the rotation — reclamation by omission rather than by a
+> sweep. Until a fold runs, its files stay on disc, named by a side-manifest and reachable by
+> nothing: the view is not in the manifest a request resolves against, and a reopened bundle
+> re-applies the tombstone before it serves anything.
 
 ### 3.5 Layers over a group
 
@@ -395,10 +443,35 @@ Which views an entity is in is not stored anywhere but the permutations, and is 
 `/v1/items` answers for the view it was asked about, and a point's absence from a view is
 indistinguishable from its invisibility there (C4's closure).
 
-> **⊘ Specified, not implemented.** A known `external_id` is a 409 whatever view the batch
-> names (`/control/ingest`'s duplicate check consults every run). With one view per bundle the
-> two rules agree, so nothing is wrong today; the amendment is what makes a second view
-> populatable at all.
+> **Implemented 2026-08-31** (contracts §3.4 r55). `/control/ingest`'s duplicate check is this
+> rule: a known `external_id` naming a view the entity is not in is accepted, and the row lands in
+> that view's pending segment carrying the entity it joins. "In the view" is the view's
+> permutation **union** the commit window's buffer, at the handler and again at the executor's
+> apply-adjacent backstop, which reads the live map beside the generation its apply will clone
+> from. Each other arm refuses loudly: already in the named view is a 409 naming the ids, a
+> different label on a known id is a 409, and an entity-scoped value that neither matches nor is
+> null is a 409 naming the column. A suppressed holder takes the same arms and stays hidden; a
+> deleted one allocates fresh, as decision 0047 requires.
+>
+> **A joining row carries geometry and nothing else, structurally.** It arrives with its entity
+> already decided, so the allocation is sized by the rows that need an id; it carries no
+> descriptors, so it promotes nothing into the dictionary and contributes no postings; and the
+> flush's entity-space passes — postings, attribute columns, prose, record fields — skip it, so it
+> writes no value for any of them. That is what makes a label supplied on a second view's row
+> *inert* rather than a widening with no overlay entry.
+>
+> ⊘ **The label and attribute arms are exact only while the entity's own row is still buffered.**
+> The refusals above compare against the buffer, which holds the entity's first row until its
+> flush; there is no entity→label oracle to compare against afterwards, because a bundle stores
+> labels as postings term by term and reading one back is a scan of every term. So a join naming
+> an already-flushed entity with a *different* label or attribute value is accepted rather than
+> refused — and changes nothing, the row carrying neither. What is lost is the report, not the
+> rule; an oracle for it would be a new entity-space read surface, which is an owner ruling rather
+> than an omission to fix in passing.
+>
+> A **group-scoped** attribute is refused on every batch by construction rather than by this rule:
+> a scoped column is deliberately absent from `MANIFEST.declared_scalars` (spec §5), so a column
+> named for one is an undeclared column, which ingest already refuses naming it.
 
 ## 5. Attribute scope
 
@@ -858,6 +931,23 @@ each view under spec §4's rule.
 
 ## Appendix R — review trail
 
+- **r14 (2026-08-31)** — the write half is built, and the markers at spec §1, §3.2, §3.4 and §4
+  record it. `PUT`/`DELETE /control/views/{group}/{key}` create and drop a view of a declared
+  group; the roster's durable home is `SegmentsManifest.views`/`view_tombstones`, carried forward
+  at every publication as `layer_tombstones` is, with the WAL's `ViewCreate`/`ViewDrop` replayed
+  over it at open; a created view answers a viewer verb empty — a view with no files now has an
+  empty row space rather than being absent from the bundle — and takes its first row space at the
+  next flush; the ingest join is spec §4's rule, with a joining row carrying geometry and nothing
+  else; and `delete_dangling` submits ordinary deletions on the deny lane, probe and submission in
+  one step on the executor. Three things are recorded rather than assumed, each at its marker: a
+  category-typed metadata name has no create that can satisfy it, the join's label and attribute
+  arms are exact only while the entity's own row is still buffered, and a dropped view's files are
+  reclaimed by the fold's omission rather than by a sweep, which no test drives. Two defects the
+  work surfaced and fixed, both older than it: a group's view laid its flush and merge files down
+  at `views/<group>/<key>/` while naming them `views/<group>:<key>` in the manifest — every file
+  under the view unverifiable at the next open — and the bundle-wide watermark was `entity_hi + 1`
+  of whichever view flushed, which under several views regresses and is refused, leaving those rows
+  buffered for ever. No design content changed in this revision.
 - **r13 (2026-08-31)** — a group-scoped attribute answers filters, and spec §5's marker moves
   from *on no serving surface* to *served, with three named gaps*. Built since r12: the family's
   record in `MANIFEST.groups[..].scoped_scalars` — the group is where it belongs, beside the

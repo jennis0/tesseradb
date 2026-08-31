@@ -455,6 +455,7 @@ fn an_ingested_row_carries_the_declared_tail_through_a_flush() {
             vec![UnallocatedRow {
                 external_id: Some(b"ingested-1".to_vec()),
                 view: "s0".to_string(),
+                join: None,
                 descriptors: vec![b"0".to_vec()],
                 x: 5.0,
                 y: 5.0,
@@ -517,6 +518,7 @@ fn a_merge_carries_every_inputs_tail_forward_against_the_right_identities() {
                 vec![UnallocatedRow {
                     external_id: Some(format!("merged-{batch}").into_bytes()),
                     view: "s0".to_string(),
+                    join: None,
                     descriptors: vec![b"0".to_vec()],
                     // Spread across the extent so the merge genuinely interleaves in Morton order
                     // rather than appending one segment after another.
@@ -601,6 +603,7 @@ fn a_fold_rewrites_the_whole_corpus_without_losing_the_tail() {
             vec![UnallocatedRow {
                 external_id: Some(b"folded-1".to_vec()),
                 view: "s0".to_string(),
+                join: None,
                 descriptors: vec![b"0".to_vec()],
                 x: 500.0,
                 y: 500.0,
@@ -699,6 +702,7 @@ fn a_served_point_carries_its_own_tail_across_segments_and_tiles() {
             vec![UnallocatedRow {
                 external_id: Some(b"ingested-read-path".to_vec()),
                 view: "s0".to_string(),
+                join: None,
                 descriptors: vec![b"0".to_vec()],
                 x: 5.0,
                 y: 5.0,
@@ -915,6 +919,7 @@ fn non_prefix_row(engine: &Engine, audit: i64, band_code: u8, score: f32) -> Una
     UnallocatedRow {
         external_id: Some(b"non-prefix-flushed".to_vec()),
         view: "s0".to_string(),
+        join: None,
         descriptors: vec![b"0".to_vec()],
         x: 5.0,
         y: 5.0,
@@ -1355,6 +1360,7 @@ fn record_row(engine: &Engine, external: &str, note: &str, revision: i64) -> Una
     UnallocatedRow {
         external_id: Some(external.as_bytes().to_vec()),
         view: "s0".to_string(),
+        join: None,
         descriptors: vec![b"0".to_vec()],
         x: 5.0,
         y: 5.0,

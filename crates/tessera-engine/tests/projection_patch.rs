@@ -62,6 +62,7 @@ fn ingest(engine: &Engine, external_id: &str, x: f64, y: f64) {
     let row = UnallocatedRow {
         external_id: Some(external_id.as_bytes().to_vec()),
         view: "s0".to_string(),
+        join: None,
         descriptors: vec![b"0".to_vec()],
         x,
         y,

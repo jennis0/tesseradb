@@ -10,6 +10,11 @@ pub use identity::{IdentityError, IdentityKey, TesseraId, IDENTITY_CONSTRUCTION,
 #[cfg(feature = "serde")]
 pub mod layer;
 
+/// The view roster — the record a create makes durable and the tombstone a drop leaves. Behind
+/// `serde` for [`layer`]'s reason, and here for the crate-graph reason its own doc gives.
+#[cfg(feature = "serde")]
+pub mod view;
+
 /// Macro for creating ID newtypes with no cross-space conversions (invariant I4).
 /// Each type gets new(raw) and raw(self) methods, with derives Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug.
 /// Under the (off-by-default) `serde` feature, also derives `Serialize`/`Deserialize`

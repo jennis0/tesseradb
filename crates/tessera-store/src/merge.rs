@@ -388,7 +388,8 @@ pub fn execute_merge(
 
     let rel = |name: &str| {
         format!(
-            "partitions/{partition}/views/{view}/segments/{}/{name}",
+            "partitions/{partition}/{}/segments/{}/{name}",
+            crate::view_rel(view),
             spec.seg_id
         )
     };

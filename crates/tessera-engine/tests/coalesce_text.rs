@@ -192,6 +192,7 @@ fn ingest_and_flush(engine: &Engine, root: &Path, tag: &str, prose: String) -> u
     let row = UnallocatedRow {
         external_id: Some(tag.as_bytes().to_vec()),
         view: "s0".to_string(),
+        join: None,
         descriptors: vec![b"0".to_vec()],
         x: 10.0,
         y: 10.0,

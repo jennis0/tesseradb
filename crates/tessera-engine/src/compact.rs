@@ -695,7 +695,8 @@ pub(crate) fn plan_fold(
                 .iter()
                 .map(|segment| PlannedSegment {
                     dir: format!(
-                        "partitions/{partition}/views/{view}/segments/{}",
+                        "partitions/{partition}/{}/segments/{}",
+                        tessera_store::view_rel(view),
                         segment.seg_id
                     ),
                     seg_id: segment.seg_id.clone(),

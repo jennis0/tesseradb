@@ -523,6 +523,7 @@ fn flush_interleaved_segments(engine: &Engine) -> Vec<EntityId> {
                 tessera_lifecycle::UnallocatedRow {
                     external_id: Some(format!("ext-{s}-{t}").into_bytes()),
                     view: "s0".to_string(),
+                    join: None,
                     x: flushed_x(s, t),
                     y: FLUSHED_Y,
                     scalars: Vec::new(),
@@ -552,6 +553,7 @@ fn flush_filler_segment(engine: &Engine, n: usize) {
         .map(|i| tessera_lifecycle::UnallocatedRow {
             external_id: Some(format!("filler-{n}-{i}").into_bytes()),
             view: "s0".to_string(),
+            join: None,
             x: (700 + i * 20) as f64,
             y: 900.0,
             scalars: Vec::new(),
