@@ -1,7 +1,11 @@
 # Views — design
 
 **Date:** 2026-08-30
-**Status:** Normative (r11) — **the permutation is paged** (r11, 2026-08-31): spec §8's
+**Status:** Normative (r12) — **the roster is served** (r12, 2026-08-31): `/v1/meta` publishes
+every view of every group with its key, ordinal and typed metadata, in ordinal order, beside the
+groups' own orderings; every one of them answers a viewer verb, by key or by ordinal
+(contracts §3.2 r54). What is still unbuilt above the build is creation and drop while the service
+runs, and the gate. **the permutation is paged** (r11, 2026-08-31): spec §8's
 representation ruling is built, for every view, and its marker is discharged; contracts r53 carries
 the encoding. **The build is complete for a declaration** (r10, 2026-08-31):
 every plain view and every view of every group, whichever roster form declared it, over one entity
@@ -73,8 +77,10 @@ non-sentinel, never a stored set.
 > them, allocates against the declared anchor (decision 0112), and writes a row space each. A
 > group's views may share one points file behind `fields.view`; a group's `auto` frame is fitted
 > over every one of them; a group-scoped attribute is a column family on disc (spec §5); and a
-> layer names a group or is scoped to one (spec §3.5). The roster is published in the manifest and
-> validated at open.
+> layer names a group or is scoped to one (spec §3.5). The roster is published in the manifest,
+> validated at open, and — since 2026-08-31 — **served**: `/v1/meta` publishes every view with its
+> roster record and the groups with their orderings, and every one of them answers a viewer verb,
+> by key or by ordinal (spec §3.2, contracts §3.2 r53).
 >
 > What remains is above the build, and each refuses or is absent by name: a group whose views are
 > **minted from a discriminator** with no roster at all (spec §3.1), the second-view join at
@@ -247,9 +253,20 @@ declared metadata names, so it is parsed by the manual route the `extent` spelli
 take rather than by `deny_unknown_fields` alone; the discipline's guarantee — an unknown key is
 refused — is preserved by checking against the declared set.
 
-> **⊘ Specified, not implemented — the whole of this section.** There is no group object, no
-> roster, no ordinal, no create operation and no creation record. Every view that exists was
-> declared and built.
+> **⊘ Partially implemented — the roster is built and served; creation is not** (2026-08-31).
+> The group object, the roster and the ordinal exist: they are published in the segments manifest
+> at a build, validated against the view registry at open, and served on `/v1/meta` — the plain
+> views in manifest order, then each group's views in ordinal order, each carrying its `group`,
+> `key`, `ordinal` and typed `metadata`, beside a `groups` array giving each group's view ids in
+> ordinal order (contracts §3.2 r53). Both addressing forms resolve, `<group>:<key>` and
+> `<group>:#<ordinal>`, in one place for both planes, so an unknown name, an absent key and an
+> ordinal no view holds are one 404.
+>
+> **What is not built is creation while the service runs**: there is no `PUT
+> /control/views/{group}/{key}`, no drop (spec §3.4), no WAL create or tombstone record, no
+> ordinal high-water carried across a flush, and no first-batch-creates route for a group whose
+> views carry nothing. Every view that exists was declared and built, so every ordinal is roster
+> order and no key has ever been retired.
 
 ### 3.3 Sharing views
 
@@ -810,6 +827,17 @@ each view under spec §4's rule.
 
 ## Appendix R — review trail
 
+- **r12 (2026-08-31)** — the roster is served, and spec §1's and §3.2's markers record it. Built
+  since r10: `/v1/meta` publishes every view in roster order with its `group`, `key`, `ordinal` and
+  typed `metadata`, and a `groups` array giving each group's view ids in ordinal order; every view
+  of every group answers a viewer verb; and `<group>:#<ordinal>` resolves wherever a view id goes,
+  in one place both planes take, so an unknown name, an absent key and an ordinal no view holds are
+  one 404. The wire shape is contracts §3.2 r54. Not moved: creation and drop while the service
+  runs — no control route, no WAL create or tombstone record, no ordinal high-water across a flush
+  — and no gate (spec §6), so every declared view is reachable by every principal, which the served
+  roster says rather than pretends otherwise. **A group's `title` is on no surface**: no title
+  survives the build for any view either, so publishing a group's would be the only one on the
+  document. No design content changed in this revision.
 - **r11 (2026-08-31)** — the paged permutation is built, and spec §8's marker is discharged.
   Every view's `permutation.bin` is a directory over 2¹⁶-entry pages with the payload holding only
   the pages the view occupies; the representation stayed behind `Permutation`, so no consumer

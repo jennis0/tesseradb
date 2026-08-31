@@ -45,6 +45,7 @@
 //! See [`SERIAL_FALLBACK_MAX_ROWS`]'s doc for the predictor argument and the sweep data, and the
 //! calibration report for the full method.
 
+use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -56,7 +57,7 @@ use tessera_authz::FrozenFragment;
 use tessera_spatial::projection::Projection;
 use tessera_spatial::tiler::ScalarType;
 use tessera_spatial::{tiles_for_bbox, tiles_for_bbox_count, Bounds, Tile};
-use tessera_store::manifest::{DeclaredScalar, Quantisation};
+use tessera_store::manifest::{DeclaredScalar, Quantisation, ViewMetadataValue};
 use tessera_store::read::{ScalarSlice, SegmentData};
 use tessera_store::vocabulary::Vocabularies;
 use tessera_store::{tile_ranges_all, tile_ranges_within};
@@ -1087,6 +1088,45 @@ pub struct MetaView {
     /// tiles to ask for. The wire publishes them as two (`projections.md` §9) and they are absent
     /// together.
     pub tile: Option<TileAddress>,
+    /// Where this view sits in its group's roster (`views.md` §3.2), or `None` for a plain view.
+    ///
+    /// **A plain view has no roster entry, and that is a fact rather than an omission**: keys and
+    /// ordinals are a group's, so a plain view carrying an empty one would invite a client to
+    /// order a set of one.
+    pub roster: Option<MetaRoster>,
+}
+
+/// One view's roster record, as `GET /v1/meta` publishes it beside the view (`views.md` §3.2).
+///
+/// The key is the caller's own and the ordinal is creation order — an alias, never reused — and
+/// the metadata is the group's declared names with this view's typed values. Together they are
+/// what lets a client order a group's views and offer previous-and-next **without interpreting a
+/// key**, which is the whole reason the ordinal is published beside the key rather than left
+/// implicit in the list's order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MetaRoster {
+    pub group: String,
+    pub key: String,
+    pub ordinal: u32,
+    /// Typed, one entry per name the owning group declared. Empty on a `members` group's views,
+    /// whose metadata belongs to the owner (`views.md` §3.3).
+    pub metadata: BTreeMap<String, ViewMetadataValue>,
+}
+
+/// One view group, as `GET /v1/meta` publishes it: the name and its views in ordinal order.
+///
+/// **A group is not a view** — it cannot be named on a viewer verb and has no row space — so what
+/// is published here is the ordering and nothing else: every setting a group holds is already on
+/// each of its views, and a second copy of the frame beside the roster is a second thing to
+/// disagree with the first.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MetaGroup {
+    pub name: String,
+    /// The group whose keys and ordinals these are, where this group declares `members`
+    /// (`views.md` §3.3); `None` where it owns them.
+    pub members_of: Option<String>,
+    /// This group's view ids — the joined `group:key` form a request names — in ordinal order.
+    pub views: Vec<String>,
 }
 
 /// The tile a view's frame corresponds to, and the scheme it is a tile of.
@@ -1106,10 +1146,17 @@ pub struct TileAddress {
 pub struct EngineMeta {
     pub api_version: u32,
     pub bundle_format: u32,
-    /// The declared views, in manifest order — each with its own frame (decision 0040). There is
-    /// no bundle-level extent: [`EngineMeta::quantisation_of`] answers for a named view, and a
-    /// caller with no view id is asking a question the bundle cannot answer.
+    /// The declared views, **in serving order** (`views.md` §3.2): the plain views in manifest
+    /// order, then each group's views in ordinal order. Each carries its own frame (decision
+    /// 0040) and, for a group's view, its roster record. There is no bundle-level extent:
+    /// [`EngineMeta::quantisation_of`] answers for a named view, and a caller with no view id is
+    /// asking a question the bundle cannot answer.
     pub views: Vec<MetaView>,
+    /// The view groups, in manifest order, each listing its views in ordinal order.
+    ///
+    /// Empty is the ordinary case — a declaration of plain views alone — and it is the same
+    /// answer as "this bundle has no group", there being nothing else empty could mean.
+    pub groups: Vec<MetaGroup>,
     pub declared_scalars: Vec<DeclaredScalar>,
     /// The live category bindings, from the same generation as `declared_scalars`.
     ///
@@ -1139,6 +1186,35 @@ impl EngineMeta {
     ///
     /// An unknown name is `None` and the caller refuses. Defaulting it to [`Projection::None`]
     /// would put a degree through the identity transform and quantise it as a frame coordinate.
+    /// The view a request's id names — the declared id itself, or a group's `<group>:#<ordinal>`
+    /// alias resolved to the view holding that ordinal (`views.md` §3.2).
+    ///
+    /// **One resolution for both planes.** A viewer verb's `view`, `x-tessera-view` and this
+    /// document's own `views` are one namespace, and two resolutions of it would eventually
+    /// disagree about what a `404` is — which contracts §3.1's closed code list does not allow.
+    /// `#` is what keeps a numeric-looking key from being read as an ordinal, so `quarter:#3` is
+    /// the ordinal and `quarter:3` is the key `3`; a key that is not declared and an ordinal no
+    /// view holds are the same `None`, and the caller's 404 says no more than "unknown view".
+    ///
+    /// Everything downstream takes [`MetaView::id`] — the canonical joined form — so no alias
+    /// reaches a row space, a WAL row or a manifest lookup.
+    pub fn resolve_view(&self, requested: &str) -> Option<&MetaView> {
+        if let Some((group, ordinal)) = requested
+            .split_once(':')
+            .and_then(|(group, rest)| Some((group, rest.strip_prefix('#')?)))
+        {
+            // A non-numeric tail after `#` names no ordinal, and `#` is reserved out of keys, so
+            // there is nothing else it could be: `None`, not a fallback to the literal id.
+            let ordinal: u32 = ordinal.parse().ok()?;
+            return self.views.iter().find(|v| {
+                v.roster
+                    .as_ref()
+                    .is_some_and(|r| r.group == group && r.ordinal == ordinal)
+            });
+        }
+        self.views.iter().find(|v| v.id == requested)
+    }
+
     pub fn projection_of(&self, view: &str) -> Option<Projection> {
         self.views
             .iter()
@@ -1171,39 +1247,85 @@ impl Engine {
     pub fn meta(&self) -> EngineMeta {
         let generation = self.generation.load_full();
         let manifest = &generation.bundle.manifest;
+        // **One derivation of what a client is looking at** (`projections.md` §9). The scheme is a
+        // function of the view's projection and the view's own frame together — both declared per
+        // view — and it is derived here rather than at the wire so that the ingest plane, which
+        // reads this same structure, cannot come to a different answer about the same bundle.
+        let meta_view = |s: &tessera_store::manifest::ViewDescriptor, roster: Option<MetaRoster>| {
+            MetaView {
+                id: s.id.clone(),
+                display_name: s.display_name.clone(),
+                quantisation: s.quantisation,
+                projection: s.projection,
+                tile: tessera_spatial::frame::tile_scheme(
+                    s.projection,
+                    &Bounds {
+                        x_min: s.quantisation.x_min,
+                        x_max: s.quantisation.x_max,
+                        y_min: s.quantisation.y_min,
+                        y_max: s.quantisation.y_max,
+                    },
+                )
+                .map(|(scheme, square)| TileAddress {
+                    scheme,
+                    z: square.z,
+                    x: square.x,
+                    y: square.y,
+                }),
+                roster,
+            }
+        };
+        // **Serving order is the roster's order** (`views.md` §3.2): the plain views in manifest
+        // order, then each group's views by ordinal. Ordered here rather than left to the
+        // manifest's own sequence because the ordinal is what a client offers previous-and-next
+        // over, and a build's declaration order is not the ordinal order the moment a view is
+        // created at ingest.
+        let rostered: std::collections::HashSet<String> = manifest
+            .groups
+            .iter()
+            .flat_map(|g| g.views.iter().map(move |v| format!("{}:{}", g.name, v.key)))
+            .collect();
+        let mut views: Vec<MetaView> = manifest
+            .views
+            .iter()
+            .filter(|v| !rostered.contains(&v.id))
+            .map(|v| meta_view(v, None))
+            .collect();
+        let mut groups: Vec<MetaGroup> = Vec::with_capacity(manifest.groups.len());
+        for group in &manifest.groups {
+            let mut roster: Vec<&tessera_store::manifest::GroupViewDescriptor> =
+                group.views.iter().collect();
+            roster.sort_by_key(|v| v.ordinal);
+            let mut ids = Vec::with_capacity(roster.len());
+            for entry in roster {
+                let id = format!("{}:{}", group.name, entry.key);
+                // A roster entry with no declared view is refused at open
+                // (`Manifest::validate_groups`), so this cannot silently drop one.
+                let Some(descriptor) = manifest.views.iter().find(|v| v.id == id) else {
+                    continue;
+                };
+                ids.push(id);
+                views.push(meta_view(
+                    descriptor,
+                    Some(MetaRoster {
+                        group: group.name.clone(),
+                        key: entry.key.clone(),
+                        ordinal: entry.ordinal,
+                        metadata: entry.metadata.clone(),
+                    }),
+                ));
+            }
+            groups.push(MetaGroup {
+                name: group.name.clone(),
+                members_of: group.members_of.clone(),
+                views: ids,
+            });
+        }
         EngineMeta {
             api_version: API_VERSION,
             bundle_format: manifest.bundle_format,
-            views: manifest
-                .views
-                .iter()
-                // **One derivation of what a client is looking at** (`projections.md` §9). The
-                // scheme is a function of the view's projection and the view's own frame together
-                // — both declared per view — and it is derived here rather than at the wire so
-                // that the ingest plane, which reads this same structure, cannot come to a
-                // different answer about the same bundle.
-                .map(|s| MetaView {
-                    id: s.id.clone(),
-                    display_name: s.display_name.clone(),
-                    quantisation: s.quantisation,
-                    projection: s.projection,
-                    tile: tessera_spatial::frame::tile_scheme(
-                        s.projection,
-                        &Bounds {
-                            x_min: s.quantisation.x_min,
-                            x_max: s.quantisation.x_max,
-                            y_min: s.quantisation.y_min,
-                            y_max: s.quantisation.y_max,
-                        },
-                    )
-                    .map(|(scheme, square)| TileAddress {
-                        scheme,
-                        z: square.z,
-                        x: square.x,
-                        y: square.y,
-                    }),
-                })
-                .collect(),
+            views,
+            groups,
             // The **full** compiled schema, including `filter`-only columns: `/v1/meta` describes
             // what a caller may declare and supply on the ingest plane, not what occupies a row.
             // The segment-facing readers narrow to `render_scalars` at their own sites.

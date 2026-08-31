@@ -80,9 +80,9 @@ pub use tessera_authz::fragment::CacheStats as FragmentCacheStats;
 pub use timing::{Probe, StageTimings};
 pub use viewport::{
     ArtifactOut, ArtifactRows, ColumnBuf, ComputedSelection, EngineMeta, ItemOut, LayerSelection,
-    LevelSelection, MetaView, PointColumns, ScalarOut, SinkClosed, SinkResult, SubCellCount,
-    TileAddress, TileCount, ViewCoordinates, ViewportHead, ViewportOut, ViewportRequest,
-    ViewportSink,
+    LevelSelection, MetaGroup, MetaRoster, MetaView, PointColumns, ScalarOut, SinkClosed,
+    SinkResult, SubCellCount, TileAddress, TileCount, ViewCoordinates, ViewportHead, ViewportOut,
+    ViewportRequest, ViewportSink,
 };
 // `EngineMeta::declared_scalars`' element type, re-exported for the same layering reason
 // `FragmentCacheStats` is: `check-layers.sh` denies a `tessera-server → tessera-store` edge
@@ -96,6 +96,10 @@ pub use tessera_store::manifest::{
     ManifestVocabulary, ManifestVocabularyValue, Visibility, VocabularyKind,
 };
 pub use tessera_store::vocabulary::{Vocabularies, VocabularyMinter, ABSENT_CODE};
+// `MetaRoster::metadata`'s value type. `/v1/meta` publishes a view's roster metadata typed
+// (`views.md` §3.2), so the server has to name the variants to write the wire's `type` tag —
+// re-exported for the same layering reason `DeclaredScalar` is.
+pub use tessera_store::manifest::ViewMetadataValue;
 // `DeclaredScalar::arrow_type`'s type, and `wire_type`'s. The server names it to widen a code to
 // its column's storage width, and reaches it here rather than transcribing the table again.
 pub use tessera_spatial::tiler::ScalarType;

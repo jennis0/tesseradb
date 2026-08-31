@@ -1260,10 +1260,15 @@ fn project_columns(projection: Projection, x: &mut [f64], y: &mut [f64]) -> Resu
 /// silently joins the wrong row space the day partitioning lands. A bundle declaring no view at
 /// all has no row space to ingest into, so it is refused here rather than accepted into nothing.
 ///
-/// No build path emits a multi-view bundle (`tessera-build` writes exactly one `ViewDescriptor`),
-/// so the second row is unreachable. It is implemented rather than asserted-away because it is a
-/// contract clause and it costs one comparison.
-fn resolve_view<'a>(view: Option<&str>, views: &'a [MetaView]) -> Result<&'a MetaView, ApiError> {
+/// **A named view is resolved by [`tessera_engine::EngineMeta::resolve_view`]**, the one
+/// resolution both planes take, so `x-tessera-view: quarter:#3` names the same view a viewport
+/// request naming it does — and an unknown id, an absent key and an ordinal no view holds are one
+/// 404 here as they are there.
+fn resolve_view<'a>(
+    view: Option<&str>,
+    meta: &'a tessera_engine::EngineMeta,
+) -> Result<&'a MetaView, ApiError> {
+    let views = &meta.views;
     match view {
         None if views.len() > 1 => Err(ApiError::Contract(format!(
             "this bundle has {} views ({}), so x-tessera-view is required — which one a batch \
@@ -1278,9 +1283,8 @@ fn resolve_view<'a>(view: Option<&str>, views: &'a [MetaView]) -> Result<&'a Met
         None => views
             .first()
             .ok_or_else(|| ApiError::Contract("this bundle declares no view to ingest into".into())),
-        Some(id) => views
-            .iter()
-            .find(|v| v.id == id)
+        Some(id) => meta
+            .resolve_view(id)
             .ok_or_else(|| ApiError::Unknown(format!("unknown view '{id}'"))),
     }
 }
@@ -1398,7 +1402,7 @@ fn run_ingest(
     // narrower accessor on purpose: it is the one definition of what this bundle declares, the one
     // `/v1/meta` publishes, and a second accessor is a second definition that can drift from it.
     let meta = state.engine.meta();
-    let view = resolve_view(view, &meta.views)?;
+    let view = resolve_view(view, &meta)?;
     // **The projection is the view's, read from the bundle manifest, and it decides both what the
     // coordinate columns are called and what the numbers in them mean** (`projections.md` §3).
     // Read once per batch beside the scalar tail, from the same `meta()` snapshot, so the two

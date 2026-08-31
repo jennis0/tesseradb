@@ -65,7 +65,11 @@ use tessera_types::{
 pub use deep::{verify_deep, VerifyDeepReport, VerifyOpts};
 pub use disclosure::write_disclosure_report;
 pub use error::{BuildError, Result};
+// [`BuildArgs::groups`]' own types. A caller assembling build arguments has to name them, and a
+// caller that cannot reach `tessera-store` — every test above the store layer — could not
+// otherwise declare a group at all (`views.md` §3.2).
 pub use observer::{BuildObserver, BuildStage, NoopObserver};
+pub use tessera_store::manifest::{GroupDescriptor, GroupViewDescriptor, ViewMetadataValue};
 
 /// The single bundle prefix a batch build writes. Later publications get their own prefix; the
 /// batch build always starts a bundle from scratch.

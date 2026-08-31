@@ -263,7 +263,7 @@ def materialise_corpus(
     )
 
 
-def build_bundle(files: CorpusFiles, bundle_root: Path, *, view_id: str = "s0") -> None:
+def build_bundle(files: CorpusFiles, bundle_root: Path) -> None:
     """`tessera build` over the materialised inputs — the same invocation shape as the catalogue's
     (`oracle.catalogue._build_argv`): a deployment file naming the declaration and the output,
     external ids minted from the source entity id (the denies address items by exactly those
@@ -271,7 +271,10 @@ def build_bundle(files: CorpusFiles, bundle_root: Path, *, view_id: str = "s0") 
 
     Nothing names a source or an extent here: the generator's own declaration sits beside the two
     parquet files it names, and carries the grid extent this corpus's expected answers are stated
-    in (`configuration.md` §1, §3). `view_id` is the view that declaration declares.
+    in (`configuration.md` §1, §3) — the view it declares included, which is why nothing here names
+    one either: `tessera build` materialises every view the declaration carries and takes no
+    `--view` (fixed 2026-08-31; this function had kept the flag after the catalogue's own
+    invocation dropped it, so every caller of it died at `build` with exit 2).
     """
     ensure_cli_built()
     deployment = write_deployment(
@@ -281,7 +284,6 @@ def build_bundle(files: CorpusFiles, bundle_root: Path, *, view_id: str = "s0") 
         [
             str(CLI_BIN), "build",
             "--deployment", str(deployment),
-            "--view", view_id,
             "--out", str(bundle_root),
             "--mint-external-ids",
         ],
@@ -681,6 +683,54 @@ def check_meta(canon: Json, declaration: Declaration, reasons: list[str]) -> Non
         if (extent["x_min"], extent["x_max"], extent["y_min"], extent["y_max"]) != GRID_EXTENT:
             reasons.append(
                 f"/v1/meta view {view['id']!r} quantisation {extent} is not the fixture's extent"
+            )
+    check_roster(canon, reasons)
+
+
+def check_roster(canon: Json, reasons: list[str]) -> None:
+    """The roster and the views agree (`views.md` §3.2).
+
+    The fixture declares plain views alone, so what this asserts on it is that *nothing* claims a
+    group — which is the case the shape could get wrong in the quiet direction, a served view
+    carrying a key no group lists. The other direction is checked too, and both bite the moment a
+    grouped fixture exists: a view a client can see and cannot address, or an ordinal that
+    resolves to nothing, is a picker that offers a view the server will 404.
+    """
+    views = {view["id"]: view for view in canon.payload["views"]}
+    rostered: set[str] = set()
+    for group in canon.payload["groups"]:
+        ordinals = []
+        for view_id in group["views"]:
+            rostered.add(view_id)
+            view = views.get(view_id)
+            if view is None:
+                reasons.append(
+                    f"/v1/meta group {group['name']!r} lists {view_id!r}, which it does not serve"
+                )
+                continue
+            if view["group"] != group["name"]:
+                reasons.append(
+                    f"/v1/meta view {view_id!r} is listed by group {group['name']!r} and names "
+                    f"group {view['group']!r}"
+                )
+            if view["id"] != f"{view['group']}:{view['key']}":
+                reasons.append(
+                    f"/v1/meta view {view_id!r} is not the join of its group and its key"
+                )
+            ordinals.append(view["ordinal"])
+        if ordinals != sorted(ordinals) or len(set(ordinals)) != len(ordinals):
+            reasons.append(
+                f"/v1/meta group {group['name']!r} serves ordinals {ordinals}, which are not "
+                f"ascending and distinct — a client cannot offer previous-and-next over them"
+            )
+    for view_id, view in views.items():
+        record = [view["group"], view["key"], view["ordinal"], view["metadata"]]
+        if view_id in rostered:
+            if any(field is None for field in record):
+                reasons.append(f"/v1/meta view {view_id!r} is on a roster with a partial record")
+        elif any(field is not None for field in record):
+            reasons.append(
+                f"/v1/meta view {view_id!r} carries a roster record and is on no group's roster"
             )
 
 

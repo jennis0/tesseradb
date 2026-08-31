@@ -8,7 +8,7 @@ import {
 import {createDecoder, type Decoder, type HeadFrames} from './decoder.js';
 import {parseRegionVerdict} from './region.js';
 import {FRAME_ARTIFACTS, FRAME_POINTS, FRAME_SUB_CELLS, FRAME_TILES, FRAME_TRAILER, FrameReader} from './frame.js';
-import type {ArrowType, ArtifactDetail, CategoryValue, FilterOperandSet, ItemDetail, Layer, Meta, ProjectionName, Session, Shape, ShapeKind, TileCounts, TileScheme, ViewportPart, ViewportRequest, ViewportResponse, ViewportResult} from './types.js';
+import type {ArrowType, ArtifactDetail, CategoryValue, FilterOperandSet, ItemDetail, Layer, Meta, ProjectionName, Session, Shape, ShapeKind, TileCounts, TileScheme, ViewMetadataValue, ViewportPart, ViewportRequest, ViewportResponse, ViewportResult} from './types.js';
 
 /** Where a streamed response's points go, one frame's worth at a time. */
 export type PartSink = (part: ViewportPart) => void | Promise<void>;
@@ -194,7 +194,18 @@ export class TesseraClient {
         projection: s.projection,
         worldAspect: s.world_aspect,
         tileScheme: s.tile_scheme,
-        tile: s.tile
+        tile: s.tile,
+        // The four roster fields are one record on the wire and one object here — a plain view
+        // has all four null, and `group` alone decides which case this is (`views.md` §3.2).
+        roster: s.group === null ? null : {group: s.group, key: s.key!, ordinal: s.ordinal!, metadata: s.metadata ?? {}}
+      })),
+      // The orderings, so a client can offer previous-and-next without interpreting a key. Empty
+      // is what a deployment of plain views alone publishes, and it wants the same rendering as
+      // "no groups here" — no group picker.
+      groups: m.groups.map((g) => ({
+        name: g.name,
+        membersOf: g.members_of,
+        views: g.views
       })),
       declaredScalars: m.declared_scalars.map((s) => ({
         name: s.name,
@@ -698,7 +709,14 @@ type RawMeta = {
     world_aspect: number | null;
     tile_scheme: TileScheme | null;
     tile: {z: number; x: number; y: number} | null;
+    /** The roster record (`views.md` §3.2); all four null together on a plain view. */
+    group: string | null;
+    key: string | null;
+    ordinal: number | null;
+    metadata: Record<string, ViewMetadataValue> | null;
   }[];
+  /** The view groups, each its view ids in ordinal order. Empty where there are none. */
+  groups: {name: string; members_of: string | null; views: string[]}[];
   declared_scalars: {
     name: string;
     arrow_type: ArrowType;

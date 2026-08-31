@@ -340,6 +340,7 @@
       ]
     }
   ],
+  "groups": [],
   "idset": 1,
   "layers": [
     {
@@ -372,7 +373,11 @@
   "views": [
     {
       "display_name": "s0",
+      "group": null,
       "id": "s0",
+      "key": null,
+      "metadata": null,
+      "ordinal": null,
       "quantisation": {
         "x_max": 65536,
         "x_min": 0,
