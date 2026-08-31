@@ -248,13 +248,79 @@ export type ViewInfo = {
   tileScheme: TileScheme | null;
   /** The tile this view's frame is under {@link tileScheme}. Present exactly when it is. */
   tile: {z: number; x: number; y: number} | null;
+  /**
+   * Where this view sits in its group's roster (`views.md` §3.2), or `null` for a plain view —
+   * which has no group, no key and no ordinal, so the four fields are null together.
+   */
+  roster: ViewRoster | null;
+};
+
+/**
+ * One view's roster record: its group, the caller's key, the creation-order ordinal, and the
+ * typed per-view metadata its group declared.
+ *
+ * The **ordinal** is what orders a group's views — creation order, never reused — and
+ * `<group>:#<ordinal>` addresses the view wherever a view id goes. A client offering
+ * previous-and-next should walk {@link Meta.groups} rather than compare keys: a key is the
+ * caller's own string and means nothing to a client.
+ */
+export type ViewRoster = {
+  group: string;
+  key: string;
+  ordinal: number;
+  /**
+   * One entry per metadata name the group declared, typed. Empty on a `members` group's views,
+   * whose metadata belongs to the group that owns the keys (`views.md` §3.3).
+   */
+  metadata: Record<string, ViewMetadataValue>;
+};
+
+/**
+ * One roster metadata value, typed as the declaration typed it. `timestamp_us` is microseconds
+ * since the Unix epoch — the one unit that type may hold, so a client need not guess whether a
+ * large integer is a count or an instant.
+ *
+ * **Not an attribute**: one value per view rather than one per (entity, view), and it filters
+ * nothing.
+ */
+export type ViewMetadataValue =
+  | {type: 'bool'; value: boolean}
+  | {type: 'int'; value: number}
+  | {type: 'float'; value: number}
+  | {type: 'text'; value: string}
+  | {type: 'timestamp_us'; value: number};
+
+/**
+ * One view group: its name and its view ids in ordinal order (`views.md` §3.2).
+ *
+ * **A group is not a view** — it cannot be named on a viewer verb — and it carries no frame,
+ * projection or gate of its own here: every one of those is already on each of its views, and a
+ * second copy would be a second thing to disagree with the first.
+ */
+export type ViewGroup = {
+  name: string;
+  /**
+   * The group whose keys and ordinals these are, where this group is a second layout over
+   * another's views (`views.md` §3.3); `null` where it owns them.
+   */
+  membersOf: string | null;
+  /** This group's view ids, in ordinal order — the `group:key` form a request names. */
+  views: string[];
 };
 
 export type Meta = {
   apiVersion: number;
   idset: number;
-  /** The declared views, each carrying its own frame — see {@link ViewInfo.quantisation}. */
+  /**
+   * The declared views in serving order (`views.md` §3.2) — the plain views first, then each
+   * group's views by ordinal — each carrying its own frame, see {@link ViewInfo.quantisation}.
+   */
   views: ViewInfo[];
+  /**
+   * The view groups and their orderings — see {@link ViewGroup}. Empty where the deployment
+   * declares plain views alone, which is the ordinary case.
+   */
+  groups: ViewGroup[];
   /** The column schema in full — see {@link DeclaredScalar}. Order is the declaration order. */
   declaredScalars: DeclaredScalar[];
   /**

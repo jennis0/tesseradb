@@ -94,7 +94,7 @@ def run(tmp_path_factory) -> SimpleNamespace:
     files = materialise_corpus(SEED, N, work / "corpus", ingest=INGEST)
     declaration = Declaration.load(files.schema)
     bundle_root = work / "bundle"
-    build_bundle(files, bundle_root, view_id=VIEW_ID)
+    build_bundle(files, bundle_root)
 
     server, proc = spawn_server(bundle_root, work)
     try:

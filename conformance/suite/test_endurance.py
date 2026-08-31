@@ -865,7 +865,7 @@ def test_endurance_long_life(tmp_path_factory):
     files = materialise_corpus(p.seed, p.base, work / "corpus", ingest=p.ingest_range)
     declaration = Declaration.load(files.schema)
     bundle_root = work / "bundle"
-    build_bundle(files, bundle_root, view_id=VIEW_ID)
+    build_bundle(files, bundle_root)
 
     with ipc.open_stream(io.BytesIO(files.ingest.read_bytes())) as reader:
         ingest_table = reader.read_all().combine_chunks()

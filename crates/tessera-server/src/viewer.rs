@@ -133,6 +133,23 @@ impl Drop for CancelGuard {
     }
 }
 
+/// One roster metadata value on the wire: `{"type": …, "value": …}` (`views.md` §3.2).
+///
+/// **Written out here rather than derived**, so that the published shape is this file's
+/// statement and not a serde attribute in another crate: the tag names the declared type, and a
+/// `timestamp_us` is microseconds since the epoch as a number, the one unit that type may hold.
+fn metadata_value(value: &tessera_engine::ViewMetadataValue) -> serde_json::Value {
+    use tessera_engine::ViewMetadataValue as V;
+    let (tag, value) = match value {
+        V::Bool(v) => ("bool", serde_json::json!(v)),
+        V::Int(v) => ("int", serde_json::json!(v)),
+        V::Float(v) => ("float", serde_json::json!(v)),
+        V::Text(v) => ("text", serde_json::json!(v)),
+        V::TimestampUs(v) => ("timestamp_us", serde_json::json!(v)),
+    };
+    serde_json::json!({"type": tag, "value": value})
+}
+
 async fn meta(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -196,6 +213,42 @@ async fn meta(
             "world_aspect": v.projection.world_aspect(),
             "tile_scheme": v.tile.map(|t| t.scheme),
             "tile": v.tile.map(|t| serde_json::json!({"z": t.z, "x": t.x, "y": t.y})),
+            // **The roster record, on the view it belongs to** (`views.md` §3.2), and `null` on
+            // a plain view, which has no group, no key and no ordinal — `null` rather than absent
+            // because that is what `tile` and `world_aspect` beside it do, and one document should
+            // not spell "this view has none" two ways. The four keys travel together because they
+            // are one record: a key without its ordinal cannot be ordered, and an ordinal without
+            // its group names nothing.
+            //
+            // `metadata` is **typed**, one entry per name the group declared, each
+            // `{type, value}`. A bare value would leave a client guessing whether a large integer
+            // is a count or an instant, and the declaration already knows which.
+            "group": v.roster.as_ref().map(|r| &r.group),
+            "key": v.roster.as_ref().map(|r| &r.key),
+            "ordinal": v.roster.as_ref().map(|r| r.ordinal),
+            "metadata": v.roster.as_ref().map(|r| r.metadata.iter().map(|(name, value)| {
+                (name.clone(), metadata_value(value))
+            }).collect::<serde_json::Map<_, _>>()),
+        })).collect::<Vec<_>>(),
+        // **The groups, in manifest order, each its views by ordinal** (`views.md` §3.2) — what
+        // lets a client offer previous-and-next **without interpreting a key**, which is the one
+        // thing this structure exists for. The ids are the joined `group:key` form a request
+        // names, so a client steps from one view to the next by taking the id beside its own.
+        //
+        // **Nothing else of the group is here.** Every setting a group holds — its frame, its
+        // projection, its point visibility — is already on each of its views, and a second copy
+        // would be a second thing to disagree with the first. `members_of` is here because it is
+        // not on a view: it says that two groups are two layouts over one key set
+        // (`views.md` §3.3), which is exactly the fact a client pairing them needs.
+        //
+        // **No gate filtering.** The gate is unbuilt (`views.md` §6): every view this bundle
+        // declares is reachable by every principal, and a roster that pretended otherwise would
+        // be a disclosure control accepted and never enforced. The layer list below is the one
+        // per-principal field on this document.
+        "groups": meta.groups.iter().map(|g| serde_json::json!({
+            "name": g.name,
+            "members_of": g.members_of,
+            "views": g.views,
         })).collect::<Vec<_>>(),
         // The column schema, and the **whole** of it: name, storage type, and — for a category —
         // the vocabulary it draws from, that vocabulary's kind and its `visibility`. Without the
@@ -966,6 +1019,30 @@ fn run_viewport_stream(
     shared: Arc<AtomicU8>,
 ) {
     let stamp = req.pin.map(GenerationStamp::from);
+    // **One `Engine::meta()` for the whole request** (lifecycle §1.1), read before any compute:
+    // the view id is resolved against it, and the filter parse below reads the same snapshot, so
+    // the frame a `region` leaf is canonicalised in cannot come from a different generation than
+    // the view the request was answered for.
+    let meta = state.engine.meta();
+    // **The one resolution of a caller's view id** (`views.md` §3.2), shared with the ingest
+    // plane: a declared id, or a group's `<group>:#<ordinal>` alias. Everything below takes the
+    // canonical id, so no alias reaches a row space. Unknown is the 404 the engine would have
+    // given for an unknown id — the same answer for an absent key, an ordinal no view holds and a
+    // name that was never declared.
+    let Some(view) = meta.resolve_view(&req.view) else {
+        if let Some(tx) = sink.first_tx.take() {
+            let _ = tx.send(Err(ApiError::Unknown(format!("unknown view '{}'", req.view))));
+        }
+        return;
+    };
+    let view_id = view.id.clone();
+    let view_extent = tessera_engine::shapes::Bounds {
+        x_min: view.quantisation.x_min,
+        x_max: view.quantisation.x_max,
+        y_min: view.quantisation.y_min,
+        y_max: view.quantisation.y_max,
+    };
+    let view_projection = view.projection;
     // Contracts §3.2's default. It is the deployment's own overplot ceiling rather than a
     // literal, so a client that expresses no preference gets the full budget this deployment will
     // serve and §7.2's proportional window is realised in full — at the old default of 30 against a
@@ -999,7 +1076,6 @@ fn run_viewport_stream(
     let filter = match &req.filters {
         None => None,
         Some(value) => {
-            let meta = state.engine.meta();
             // The same predicate `/v1/meta`'s operand list publishes — the engine's
             // `filter::is_filterable` — so a column a client was told about parses and a column
             // it was not stays the unknown-column 422.
@@ -1023,23 +1099,9 @@ fn run_viewport_stream(
             // the points it selects (`polygon-membership.md` R12), against the same grid — and
             // reading any other view's would hold the wrong rows with nothing saying so. Both are
             // taken from one lookup, so they cannot come from different views.
-            let Some(view) = meta.views.iter().find(|v| v.id == req.view) else {
-                if let Some(tx) = sink.first_tx.take() {
-                    let _ = tx.send(Err(ApiError::Unknown(format!(
-                        "unknown view '{}'",
-                        req.view
-                    ))));
-                }
-                return;
-            };
             let region = crate::filter_dto::RegionContext {
-                extent: tessera_engine::shapes::Bounds {
-                    x_min: view.quantisation.x_min,
-                    x_max: view.quantisation.x_max,
-                    y_min: view.quantisation.y_min,
-                    y_max: view.quantisation.y_max,
-                },
-                projection: view.projection,
+                extent: view_extent,
+                projection: view_projection,
                 max_vertices: state.max_region_vertices,
             };
             match crate::filter_dto::parse(
@@ -1068,8 +1130,10 @@ fn run_viewport_stream(
     // **Owned copies of what names the request**, taken before the engine borrows `req`, so the
     // shed log below can say which request it was without extending a borrow across the call.
     // Three coordinates and no principal: a view id, a zoom and the layer names the caller asked
-    // for, all of them the caller's own words back.
-    let named_view = req.view.clone();
+    // for. The view is the **resolved** id rather than the caller's spelling of it, so a log line
+    // about a request naming `quarter:#3` says which view it was actually answered for; the layer
+    // names are the caller's own words back.
+    let named_view = view_id.clone();
     let named_zoom = req.zoom;
     let named_layers = match &req.layers {
         Some(LayersReq::All(_)) => tessera_types::layer::RESERVED_LAYER_SELECTION.to_string(),
@@ -1123,7 +1187,7 @@ fn run_viewport_stream(
         Some(ArtifactRowsReq::Full) | None => tessera_engine::ArtifactRows::Full,
     };
     sink.artifact_rows = artifact_rows;
-    let mut request = ViewportRequest::new(&req.view, req.zoom, bbox, k)
+    let mut request = ViewportRequest::new(&view_id, req.zoom, bbox, k)
         .tiles(tiles.as_deref())
         .stamp(stamp)
         .underlay_offset(req.underlay_offset)
@@ -1797,13 +1861,23 @@ async fn artifact(
 
     let served = tokio::task::spawn_blocking(move || {
         let _gate_permits = gate_permits;
+        // **The same view resolution the viewport takes** (`views.md` §3.2), so a client that
+        // addressed a view by ordinal on one verb may address it that way on all of them. The
+        // engine call below loads its own generation; a view that went away between the two is
+        // the 404 an unknown view already is, which is the answer either order produces.
+        let view = state
+            .engine
+            .meta()
+            .resolve_view(&req.view)
+            .map(|v| v.id.clone())
+            .ok_or_else(|| ApiError::Unknown(format!("unknown view '{}'", req.view)))?;
         state
             .engine
             .artifact(
                 &entry.session,
                 TesseraId::new(raw),
                 req.idset,
-                &req.view,
+                &view,
                 req.zoom,
             )
             .map_err(crate::error::map_engine_error)

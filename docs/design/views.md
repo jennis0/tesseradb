@@ -1,7 +1,11 @@
 # Views — design
 
 **Date:** 2026-08-30
-**Status:** Normative (r10) — **the build is complete for a declaration** (r10, 2026-08-31):
+**Status:** Normative (r11) — **the roster is served** (r11, 2026-08-31): `/v1/meta` publishes
+every view of every group with its key, ordinal and typed metadata, in ordinal order, beside the
+groups' own orderings; every one of them answers a viewer verb, by key or by ordinal
+(contracts §3.2 r53). What is still unbuilt above the build is creation and drop while the service
+runs, and the gate. **The build is complete for a declaration** (r10, 2026-08-31):
 every plain view and every view of every group, whichever roster form declared it, over one entity
 space unioned from their sources and ordered by the declared anchor (decision 0112); a group's
 points selected out of a shared file by `fields.view`; one frame per group under `auto`; a
@@ -71,8 +75,10 @@ non-sentinel, never a stored set.
 > them, allocates against the declared anchor (decision 0112), and writes a row space each. A
 > group's views may share one points file behind `fields.view`; a group's `auto` frame is fitted
 > over every one of them; a group-scoped attribute is a column family on disc (spec §5); and a
-> layer names a group or is scoped to one (spec §3.5). The roster is published in the manifest and
-> validated at open.
+> layer names a group or is scoped to one (spec §3.5). The roster is published in the manifest,
+> validated at open, and — since 2026-08-31 — **served**: `/v1/meta` publishes every view with its
+> roster record and the groups with their orderings, and every one of them answers a viewer verb,
+> by key or by ordinal (spec §3.2, contracts §3.2 r53).
 >
 > What remains is above the build, and each refuses or is absent by name: a group whose views are
 > **minted from a discriminator** with no roster at all (spec §3.1), the second-view join at
@@ -245,9 +251,20 @@ declared metadata names, so it is parsed by the manual route the `extent` spelli
 take rather than by `deny_unknown_fields` alone; the discipline's guarantee — an unknown key is
 refused — is preserved by checking against the declared set.
 
-> **⊘ Specified, not implemented — the whole of this section.** There is no group object, no
-> roster, no ordinal, no create operation and no creation record. Every view that exists was
-> declared and built.
+> **⊘ Partially implemented — the roster is built and served; creation is not** (2026-08-31).
+> The group object, the roster and the ordinal exist: they are published in the segments manifest
+> at a build, validated against the view registry at open, and served on `/v1/meta` — the plain
+> views in manifest order, then each group's views in ordinal order, each carrying its `group`,
+> `key`, `ordinal` and typed `metadata`, beside a `groups` array giving each group's view ids in
+> ordinal order (contracts §3.2 r53). Both addressing forms resolve, `<group>:<key>` and
+> `<group>:#<ordinal>`, in one place for both planes, so an unknown name, an absent key and an
+> ordinal no view holds are one 404.
+>
+> **What is not built is creation while the service runs**: there is no `PUT
+> /control/views/{group}/{key}`, no drop (spec §3.4), no WAL create or tombstone record, no
+> ordinal high-water carried across a flush, and no first-batch-creates route for a group whose
+> views carry nothing. Every view that exists was declared and built, so every ordinal is roster
+> order and no key has ever been retired.
 
 ### 3.3 Sharing views
 
@@ -804,6 +821,17 @@ each view under spec §4's rule.
 
 ## Appendix R — review trail
 
+- **r11 (2026-08-31)** — the roster is served, and spec §1's and §3.2's markers record it. Built
+  since r10: `/v1/meta` publishes every view in roster order with its `group`, `key`, `ordinal` and
+  typed `metadata`, and a `groups` array giving each group's view ids in ordinal order; every view
+  of every group answers a viewer verb; and `<group>:#<ordinal>` resolves wherever a view id goes,
+  in one place both planes take, so an unknown name, an absent key and an ordinal no view holds are
+  one 404. The wire shape is contracts §3.2 r53. Not moved: creation and drop while the service
+  runs — no control route, no WAL create or tombstone record, no ordinal high-water across a flush
+  — and no gate (spec §6), so every declared view is reachable by every principal, which the served
+  roster says rather than pretends otherwise. **A group's `title` is on no surface**: no title
+  survives the build for any view either, so publishing a group's would be the only one on the
+  document. No design content changed in this revision.
 - **r10 (2026-08-31)** — the build is complete for a declaration, and the markers at spec §1, §5
   and §7 record it. Built since r9: form B's selection (a view's rows picked out of a shared
   points file by `fields.view`, with a stray key refused naming the roster); a roster read from a
