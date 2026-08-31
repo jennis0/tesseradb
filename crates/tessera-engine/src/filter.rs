@@ -790,6 +790,12 @@ fn open_scoped_column(
     mmap: bool,
 ) -> std::io::Result<(String, Placement, Layers)> {
     let scoped_family = Family::of_scoped(family);
+    // **A family with neither flag is opened and is not filterable** (owner ruling 2026-09-01).
+    // Its per-view column is on disc exactly as an indexed one's is, and the drill-down reads one
+    // entity's value out of it — so the column is held here, `filterable: false`, which is the
+    // same standing an entity-scoped `derived` category with neither flag already has: `resolve`
+    // refuses it by name and `FilterColumns::stored_value` answers from it.
+    let filterable = family.is_filterable();
     // The analyser a text family's terms were produced by: an analyser this binary does not carry
     // is the same refusal an entity-scoped text column's is — a `match` answered from a different
     // segmentation is a wrong answer wearing a correct one's clothes.
@@ -840,7 +846,7 @@ fn open_scoped_column(
                 declared_index,
                 layers: Vec::new(),
                 covered: Bitmap::new(),
-                filterable: true,
+                filterable,
                 postings: None,
                 analyser,
                 text,
@@ -880,7 +886,7 @@ fn open_scoped_column(
                 dict,
             }],
             covered,
-            filterable: true,
+            filterable,
             postings,
             analyser: None,
             text: Vec::new(),
@@ -1715,17 +1721,28 @@ impl FilterColumns {
         // unchanged, every value being indexed by entity and every predicate answering a bitmap
         // in entity space that the mask meets before any permutation.
         //
-        // A family this build serves no route for is skipped rather than half-opened
-        // ([`scoped_is_filterable`]): its columns are on disc and on no surface, and a leaf
-        // naming it is refused as an undeclared column is.
+        // **Every family with a value column on disc is opened; only a filterable one takes a
+        // placement.** The drill-down serves a scoped family's values whatever its flags (owner
+        // ruling 2026-09-01), which is what gives a declaration with neither `index` nor `render`
+        // its meaning — stored, served at `POST /v1/items`, on no filter surface and in no row
+        // tail. Holding a column without a placement is exactly the standing an entity-scoped
+        // `derived` category with neither flag already has: `placement` is `None`, `resolve`
+        // refuses the name as undeclared, and `stored_value` answers from it.
+        //
+        // `text` is the one family skipped, and skipped because there is nothing to read: it has
+        // no per-entity value slot at all, so no drill-down could serve it either. An unindexed
+        // scoped `text` column is refused at the declaration, so a text family here is always
+        // filterable and always takes the branch below.
         for family in scoped {
-            if !scoped_is_filterable(family) {
+            if !family.has_value_column() && !scoped_is_filterable(family) {
                 continue;
             }
             for view_id in &family.views {
                 let (name, placement, layers) =
                     open_scoped_column(&partition_dir, family, view_id, vocabularies, mmap)?;
-                placements.insert(name.clone(), placement);
+                if scoped_is_filterable(family) {
+                    placements.insert(name.clone(), placement);
+                }
                 columns.insert(name, layers);
             }
         }

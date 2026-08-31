@@ -1344,3 +1344,226 @@ async fn an_ingested_value_of_a_render_only_family_filters_after_a_flush_and_a_f
         "and the fold's rewritten column answers it too"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// The drill-down: every view the point is in, and every scoped value, that this principal may see
+// ---------------------------------------------------------------------------------------------
+
+/// Every `tessera_id` a view's points frames carry, in the order they arrive.
+fn served_ids(body: &[u8]) -> Vec<u64> {
+    let frames = tessera_wire::split_frames(body).expect("well-formed frames");
+    let mut out = Vec::new();
+    for (kind, payload) in frames {
+        if kind != tessera_wire::FRAME_POINTS {
+            continue;
+        }
+        let reader =
+            arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(payload.to_vec()), None)
+                .unwrap();
+        for batch in reader {
+            let batch = batch.unwrap();
+            let ids = batch.column(0).clone();
+            let ids = ids.as_any().downcast_ref::<UInt64Array>().unwrap().clone();
+            for row in 0..batch.num_rows() {
+                out.push(ids.value(row));
+            }
+        }
+    }
+    out
+}
+
+/// The `tessera_id` one source entity is served under, found through the drill-down's external id
+/// — the identity permutation is the server's alone (I10), so a test cannot compute one.
+async fn id_of(served: &Served, token: &str, view: &str, entity: u64) -> u64 {
+    let (status, body) = viewport_bytes(served, token, view).await;
+    assert_eq!(status, 200, "{view}");
+    for id in served_ids(&body) {
+        if entity_of(served, token, id).await == entity {
+            return id;
+        }
+    }
+    panic!("entity {entity} is not served in {view}");
+}
+
+/// `POST /v1/items/{id}`'s body.
+async fn item(served: &Served, token: &str, id: u64) -> Value {
+    served
+        .server
+        .client
+        .post(served.server.viewer_url(&format!("/v1/items/{id}")))
+        .bearer_auth(token)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+/// Where a view puts an entity, in that view's own grid units — the quantiser the build applied,
+/// against the frame every view of this fixture declares.
+fn expected_position(view: &str, e: u64) -> (u32, u32) {
+    let (x, y) = position(view, e);
+    let f = extent();
+    (
+        tessera_spatial::fixed32(x, f.x_min, f.x_max),
+        tessera_spatial::fixed32(y, f.y_min, f.y_max),
+    )
+}
+
+/// The views entity `e` holds a row in, sorted — the array the drill-down owes a principal who can
+/// reach all of them.
+fn views_of(e: u64) -> Vec<String> {
+    let mut out = Vec::new();
+    if WORLD.contains(&e) {
+        out.push("world".to_string());
+    }
+    for (key, range) in QUARTERS.iter() {
+        if range.contains(&e) {
+            out.push(format!("quarter:{key}"));
+            out.push(format!("quarter_map:{key}"));
+        }
+    }
+    out.sort();
+    out
+}
+
+/// **The drill-down names every view the point is in, with the position that view puts it at**
+/// (contracts §3.2, owner ruling 2026-09-01).
+///
+/// The entity is in five views across three rosters — the plain view, both quarters, and both of
+/// the sharing group's layouts over the same keys — and each places it somewhere different. So a
+/// response that served one position for the point, or the same position five times, fails here
+/// rather than passing on the count: a position is a fact about a **view**, its frame and its
+/// projection being the view's own (decision 0040).
+#[tokio::test]
+async fn the_drill_down_names_every_view_the_point_is_in_with_its_position_there() {
+    let served = serve().await;
+    // In the plain view and in both quarters, so the sharing group's two layouts hold it as well.
+    const ENTITY: u64 = 10;
+    let id = id_of(&served, &served.token, "world", ENTITY).await;
+    let body = item(&served, &served.token, id).await;
+
+    let names: Vec<String> = body["views"]
+        .as_array()
+        .expect("the views array")
+        .iter()
+        .map(|v| v["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(names, views_of(ENTITY), "every view, sorted by id");
+
+    for view in body["views"].as_array().unwrap() {
+        let name = view["id"].as_str().unwrap();
+        let (x, y) = expected_position(name, ENTITY);
+        assert_eq!(
+            (view["x"].as_u64().unwrap(), view["y"].as_u64().unwrap()),
+            (x as u64, y as u64),
+            "{name} places the point where its own points file put it"
+        );
+    }
+    // And the positions differ, which is the whole reason the array is per view rather than one
+    // position beside the record.
+    let distinct: BTreeSet<(u64, u64)> = body["views"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| (v["x"].as_u64().unwrap(), v["y"].as_u64().unwrap()))
+        .collect();
+    assert!(
+        distinct.len() > 1,
+        "the layouts differ, so the served positions must: {distinct:?}"
+    );
+}
+
+/// **The scoped values reach the drill-down keyed by the group's key** (`views.md` §5, decision
+/// 0113): one entry per key the principal may reach, and the value is that key's own.
+///
+/// `heat` is declared `render = true, index = false`, so what is read here is the entity-space
+/// column beside the row tail rather than the tail — the same column a pinned leaf resolves to.
+/// The two keys carry different values for one entity, which is what a scope buys: a response
+/// serving the same number twice would be reading a bundle-wide column under a scoped name.
+#[tokio::test]
+async fn the_drill_down_serves_the_scoped_values_keyed_by_the_groups_key() {
+    let served = serve().await;
+    const ENTITY: u64 = 10;
+    let id = id_of(&served, &served.token, "world", ENTITY).await;
+    let body = item(&served, &served.token, id).await;
+
+    let served_heat = body["scoped"]["heat"]
+        .as_object()
+        .expect("the scoped family, by name");
+    let expected: BTreeMap<String, f64> = QUARTERS
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, (key, range))| {
+            range
+                .contains(&ENTITY)
+                .then(|| heat(slot, ENTITY).map(|v| (key.to_string(), v as f64)))
+                .flatten()
+        })
+        .collect();
+    let served_values: BTreeMap<String, f64> = served_heat
+        .iter()
+        .map(|(key, value)| (key.clone(), value.as_f64().unwrap()))
+        .collect();
+    assert_eq!(
+        served_values, expected,
+        "one entry per key, and each key's own value"
+    );
+    // A key the sharing group holds is one key, not two: the value belongs to the `(entity, key)`
+    // pair and the column is the owning group's.
+    assert_eq!(served_values.len(), 2);
+}
+
+/// **A view the gate refuses is named nowhere on the drill-down, and its key is served only if
+/// another roster reaches it** (`views.md` §5, §6, §3.3).
+///
+/// The principal holds term `0`, which every entity of this fixture carries — so nothing here is
+/// about item visibility — and fails `quarter:2026-Q2`'s gate, which is term `1`. What they must
+/// see: no `quarter:2026-Q2` in `views`, and the key `2026-Q2` in `scoped` all the same, because
+/// `quarter_map:2026-Q2` is public, is a view of that same key, and is already in their roster.
+/// The value is not a second fact about a view they cannot reach; it is the value of a key they
+/// can.
+#[tokio::test]
+async fn a_gate_failed_view_is_absent_from_the_drill_down_and_its_key_is_not() {
+    let served = serve().await;
+    let narrow = authorise(&served.server, &["0"]).await["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    const ENTITY: u64 = 10;
+    let id = id_of(&served, &narrow, "world", ENTITY).await;
+    let body = item(&served, &narrow, id).await;
+
+    let names: Vec<String> = body["views"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["id"].as_str().unwrap().to_string())
+        .collect();
+    let mut expected = views_of(ENTITY);
+    expected.retain(|v| v != "quarter:2026-Q2");
+    assert_eq!(
+        names, expected,
+        "the gated view is absent exactly as a view nobody declared is"
+    );
+    // The gate is the only thing withheld: the same request under the full token names it.
+    assert!(item(&served, &served.token, id).await["views"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v["id"] == "quarter:2026-Q2"));
+
+    let keys: Vec<String> = body["scoped"]["heat"]
+        .as_object()
+        .expect("the family is reachable through the sharing group")
+        .keys()
+        .cloned()
+        .collect();
+    assert_eq!(
+        keys,
+        vec!["2026-Q1".to_string(), "2026-Q2".to_string()],
+        "the key is a view's address, and `quarter_map:2026-Q2` holds it"
+    );
+}

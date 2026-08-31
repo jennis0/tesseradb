@@ -304,6 +304,38 @@ attribute is undeclared to them entirely, and both spellings collapse to the pla
 `?view=quarter:2026-Q3` or the pinned path `mood@2026-Q3` — two views of a group hold two value
 sets, and each is genuinely that view's own.
 
+**Reading one point's values.** `POST /v1/items/{tessera_id}` returns every scoped family's value
+for that point, by family name and then by **key**:
+
+```json
+{
+  "fields": {"title": "…"},
+  "labels": ["public"],
+  "views": [
+    {"id": "quarter:2026-Q1", "x": 2199023255, "y": 1717986918},
+    {"id": "quarter:2026-Q3", "x": 1932735283, "y": 1717986918},
+    {"id": "world",           "x":  858993459, "y":  429496729}
+  ],
+  "scoped": {"sentiment": {"2026-Q1": 0.5, "2026-Q3": -0.25}}
+}
+```
+
+`views` is every view the point is in **that you may reach**, each with the position that view
+places it at, in that view's own grid units — decode it against the frame `/v1/meta` publishes for
+*that* view, never a neighbour's. A view your gate refuses is simply not there, exactly as a view
+nobody declared is not, so `views: []` means "none of this point's views is one you can reach" and
+never "this point is in no view".
+
+`scoped` is keyed by the group's key rather than by the view, because the value belongs to the
+`(point, key)` pair: `quarter_alt:2026-Q1` shares `quarter:2026-Q1`'s key and therefore its value,
+and you would otherwise read one fact as two. Which group a family's keys belong to is on
+`/v1/meta`'s `scoped_scalars`.
+
+**This is what a family with neither `index` nor `render` is for**: it is stored, it is served
+here, and it is on no filter surface and in no row tail — a note you can read on a point but cannot
+search or draw. `text` is the exception in the other direction: it has no per-entity value slot, so
+it answers `match` and appears in no drill-down.
+
 ### Populating one by ingest
 
 A batch into a view of the group carries the group's scoped columns **under their plain names** —
@@ -460,6 +492,10 @@ quarter — before that a request under it simply has no `sentiment`.
   `quater`; creation is always the explicit `PUT` first.
 - **There are no ordinals.** Sort a group's views by your own metadata (`starts`, a numeric key you
   minted) — creation order is served order and nothing else.
+- **A scoped family with neither `index` nor `render` is served from the build only.** A flush
+  writes per-view extents for the families on the filter surface, so a value ingested for a
+  neither-flag family after the build reaches no reader. Declare `index = true` if you will write
+  it while the service runs.
 - **A sharing group's views take no scoped value on ingest.** A group declaring `members` renders
   the owner's family but cannot be written through: send the value to the owning group's view,
   where it is entity space and reaches both. A segment flushed under a sharing view carries the

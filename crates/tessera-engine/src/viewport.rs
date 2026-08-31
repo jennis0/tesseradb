@@ -1067,6 +1067,66 @@ pub struct ItemOut {
     /// interning order, which is a fact about the whole dictionary rather than about this
     /// principal; sorting the strings is deterministic and says nothing the set does not.
     pub labels: Vec<String>,
+    /// **The views this item holds a row in that this session may reach**, sorted by id, each with
+    /// the position that view places it at (owner ruling 2026-09-01).
+    ///
+    /// A view the gate refuses is absent, exactly as a view nobody declared is (`views.md` §6): the
+    /// array is built from the session's own [`crate::Session::visible_views`], so it can never
+    /// become the one place a gate-failed view is named. Empty is therefore two different facts
+    /// wearing one shape — an item held only in views this principal cannot reach, and an item in
+    /// no view at all — and that is deliberate: distinguishing them is precisely the disclosure
+    /// the gate exists to prevent. (An item in no view at all is a `404` before this is built, so
+    /// what a client actually sees is the first case alone.)
+    ///
+    /// **A position is a fact about a view, not about an item.** Two views of one bundle quantise
+    /// against different frames and may be projected differently (decision 0040), so the same item
+    /// sits at a different `(x, y)` in each and there is no bundle-wide position to serve instead.
+    pub views: Vec<ItemView>,
+    /// **The group-scoped attribute values this principal may see** (`views.md` §5, owner ruling
+    /// 2026-09-01), one entry per family, sorted by family name.
+    ///
+    /// **Keyed by the group's key, because the key is a view's only address**
+    /// ([decision 0113](../../../docs/decisions/0113-ordinals-are-removed-and-the-key-is-the-only-address.md)):
+    /// a family's value belongs to a `(entity, key)` pair, and two views sharing a key through a
+    /// `members` group share the value. Gate-filtered per key on the same set `views` is: a key
+    /// whose views this principal cannot reach is absent, and a family with no reachable key is
+    /// absent whole.
+    ///
+    /// **Every family with a per-view value column, whatever its flags** — which is what a
+    /// declaration with neither `index` nor `render` means: stored, served here, on no filter
+    /// surface and in no row tail. A `text` family is the one absent kind, having no per-entity
+    /// value slot to read (`views.md` §5).
+    pub scoped: Vec<ItemScoped>,
+}
+
+/// One view a drill-down's item holds a row in, and where that view puts it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemView {
+    /// The view's id — a plain view's name or `<group>:<key>`, the same address `/v1/meta` and
+    /// every viewer verb use.
+    pub id: String,
+    /// The horizontal axis in **this view's own grid units**, 32-bit fixed point against the frame
+    /// `/v1/meta` publishes for this view. The same units the viewport's Morton codes decode to,
+    /// deinterleaved server-side because a drill-down carries one point and a JSON number cannot
+    /// hold a 64-bit code exactly.
+    pub x: u32,
+    /// The vertical axis, on [`Self::x`]'s terms.
+    pub y: u32,
+}
+
+/// One group-scoped attribute family's values for a drill-down's item, keyed by the group's key.
+///
+/// **No group name here**, though the keys are one group's: `/v1/meta`'s `scoped_scalars` already
+/// says which group each family is scoped to, and a second copy beside the values is a second
+/// thing to disagree with the first.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ItemScoped {
+    /// The family's name, as a filter leaf spells it before any pin.
+    pub name: String,
+    /// The values this item carries, by key, sorted by key. A key the item carries no value under
+    /// is absent rather than null, the same rule the record's fields follow; a key this principal
+    /// cannot reach is absent for a different reason, and the two are deliberately one shape.
+    pub values: Vec<(String, ScalarOut)>,
 }
 
 /// One declared field of a drill-down record: the column's declared name and its value.
@@ -1839,102 +1899,157 @@ impl Engine {
         // a 32-bit half; checked rather than cast so a violated invariant fails loudly.
         let entity_raw =
             u32::try_from(entity.raw()).expect("entity ids are capped at u32::MAX by I9");
+        // **Every view this item holds a row in, resolved in one pass.** The record below is
+        // assembled from the first of them and the `views` array is the gate-filtered rest, so a
+        // second walk would be a second chance to disagree about which rows exist.
+        //
+        // **Proportionate for one point**: the permutation is the only entity→row bridge (I4,
+        // §5.1) — an O(1) bounds-checked slot read per view, not a scan — and a view holds more
+        // than one segment once anything has flushed, so the *view*-space row must be resolved to
+        // the segment that owns it and to that segment's local index before anything is read
+        // ([`segment_row_of`], which is that resolution's one definition). A position is then two
+        // indexed reads and a bit permutation. So the whole `views` array costs O(views), with no
+        // per-view file read at all, and membership is never served without its position.
+        let mut rows: Vec<(&str, &SegmentData, usize)> = Vec::new();
         for partition in generation.bundle.partitions.values() {
             for (view, view_data) in &partition.views {
-                // The permutation is the only entity→row bridge (I4, §5.1) — an O(1)
-                // bounds-checked slot read, not a scan — and a view holds more than one segment
-                // once anything has flushed, so the *view*-space row must be resolved to the
-                // segment that owns it and to that segment's local index before anything is read
-                // ([`segment_row_of`], which is that resolution's one definition).
                 let Some((segment, local)) = segment_row_of(view, view_data, entity)? else {
                     continue;
                 };
-
-                // One value slot per declared column, filled home by home; a column no home
-                // holds a value in stays `None` and is omitted — absence is absence.
-                let mut values: Vec<Option<ScalarOut>> =
-                    vec![None; manifest.declared_scalars.len()];
-
-                // Home 1: the row. The same `resolve_scalars` the viewport gather uses, so the
-                // two read paths cannot disagree about what a stored type decodes to.
-                let resolved = resolve_scalars(segment, &render_scalars);
-                for (slot, declared_index) in manifest.render_indices().enumerate() {
-                    let Some(view) = &resolved[slot] else {
-                        continue;
-                    };
-                    let d = &manifest.declared_scalars[declared_index];
-                    values[declared_index] =
-                        row_field_out(view, local, d, &generation.vocabularies);
-                }
-
-                // Home 2: entity space — every non-rendered column with a value column (indexed
-                // columns, and the per-viewer vocabulary floor), at drill-down cadence.
-                for (declared_index, d) in manifest.declared_scalars.iter().enumerate() {
-                    if d.render || values[declared_index].is_some() {
-                        continue;
-                    }
-                    if let Some(stored) =
-                        generation.filter_columns.stored_value(&d.name, entity_raw)
-                    {
-                        values[declared_index] =
-                            stored_field_out(stored, d, &generation.vocabularies);
-                    }
-                }
-
-                // Home 3: the record blob — one block read, strictly after the verdict (see this
-                // method's doc). Fail-closed: a malformed row, a tag past the schema or an
-                // addressing defect refuses the request rather than serving a neighbour's field
-                // under this item's identity (records §3, review B6).
-                if let Some(blob_fields) = generation
-                    .filter_columns
-                    .records()
-                    .fields_of(entity_raw)
-                    .map_err(|e| EngineError::Malformed(e.to_string()))?
-                {
-                    for field in blob_fields {
-                        let declared_index = field.tag as usize;
-                        let Some(d) = manifest.declared_scalars.get(declared_index) else {
-                            return Err(EngineError::Malformed(format!(
-                                "a record-blob row carries field tag {} where the schema \
-                                 declares {} columns; the blob and the manifest disagree",
-                                field.tag,
-                                manifest.declared_scalars.len()
-                            )));
-                        };
-                        if values[declared_index].is_none() {
-                            values[declared_index] =
-                                stored_field_out(field.value, d, &generation.vocabularies);
-                        }
-                    }
-                }
-
-                let fields = manifest
-                    .declared_scalars
-                    .iter()
-                    .zip(values)
-                    .filter_map(|(d, value)| {
-                        value.map(|value| ItemField {
-                            name: d.name.clone(),
-                            value,
-                        })
-                    })
-                    .collect();
-                return Ok(Some(ItemOut {
-                    fields,
-                    labels: self.labels_for(&generation, session, entity_raw)?,
-                    // N-3: propagate, never swallow. `EngineError::Store`, the same wrapping
-                    // every other store-backed call in this crate uses (see `Engine::open`).
-                    // Against the generation this request loaded, never a second `load()`: the
-                    // sidecar is per-generation now, and a fold rewrites it.
-                    external_id: self
-                        .external_id_of_in(&generation, entity)
-                        .map_err(EngineError::Store)?,
-                }));
+                rows.push((view.as_str(), segment, local));
             }
         }
-        // Visible in entity space but with no row anywhere: a buffered item awaiting flush. Same
-        // `Ok(None)`, same 404 — it has no geometry to return.
-        Ok(None)
+        // **Sorted, because the maps above are hash maps.** Both the partitions and a partition's
+        // views iterate in an arbitrary order, so without this the record's home view — and the
+        // `views` array's order — would differ between two identical requests to one process.
+        rows.sort_unstable_by(|a, b| a.0.cmp(b.0));
+
+        // **The positions, gate-filtered** (`views.md` §6, owner ruling 2026-09-01): one entry per
+        // view of this item's that the session may reach, and nothing at all for the views it may
+        // not. A view failing the gate is absent exactly as a view nobody declared is, so the
+        // array never becomes the one place a gate-failed view is named.
+        //
+        // The position is the view's own grid units — the 64-bit interleave the row stores split
+        // across `morton.u32` and the residual column, deinterleaved through the inverse of what
+        // wrote it. It decodes against the frame `/v1/meta` publishes **for that view** and no
+        // other (decision 0040), which is the whole reason a per-view position is a different
+        // quantity per view rather than one position repeated.
+        let views: Vec<ItemView> = rows
+            .iter()
+            .filter(|(view, _, _)| session.visible_views.contains_view(view))
+            .map(|&(view, segment, local)| {
+                let (x, y) = tessera_spatial::unsplit32(
+                    tessera_types::MortonCode::new(segment.morton.u32()[local]),
+                    segment.columns.residual()[local],
+                );
+                ItemView {
+                    id: view.to_string(),
+                    x,
+                    y,
+                }
+            })
+            .collect();
+
+        let Some(&(_view, segment, local)) = rows.first() else {
+            // Visible in entity space but with no row anywhere: a buffered item awaiting flush.
+            // Same `Ok(None)`, same 404 — it has no geometry to return.
+            return Ok(None);
+        };
+
+        // **The scoped values, gate-filtered by the same set and keyed by the group's key** — the
+        // key being a view's only address (decision 0113). See [`scoped_values_of`].
+        let scoped = scoped_values_of(&generation, &session.visible_views, entity_raw);
+
+        // One value slot per declared column, filled home by home; a column no home
+        // holds a value in stays `None` and is omitted — absence is absence.
+        let mut values: Vec<Option<ScalarOut>> =
+            vec![None; manifest.declared_scalars.len()];
+
+        // Home 1: the row. The same `resolve_scalars` the viewport gather uses, so the
+        // two read paths cannot disagree about what a stored type decodes to.
+        let resolved = resolve_scalars(segment, &render_scalars);
+        for (slot, declared_index) in manifest.render_indices().enumerate() {
+            let Some(view) = &resolved[slot] else {
+                continue;
+            };
+            let d = &manifest.declared_scalars[declared_index];
+            values[declared_index] =
+                row_field_out(view, local, d, &generation.vocabularies);
+        }
+
+        // Home 2: entity space — every non-rendered column with a value column (indexed
+        // columns, and the per-viewer vocabulary floor), at drill-down cadence.
+        for (declared_index, d) in manifest.declared_scalars.iter().enumerate() {
+            if d.render || values[declared_index].is_some() {
+                continue;
+            }
+            if let Some(stored) =
+                generation.filter_columns.stored_value(&d.name, entity_raw)
+            {
+                values[declared_index] = stored_field_out(
+                    stored,
+                    d.arrow_type,
+                    d.vocabulary.as_deref(),
+                    &generation.vocabularies,
+                );
+            }
+        }
+
+        // Home 3: the record blob — one block read, strictly after the verdict (see this
+        // method's doc). Fail-closed: a malformed row, a tag past the schema or an
+        // addressing defect refuses the request rather than serving a neighbour's field
+        // under this item's identity (records §3, review B6).
+        if let Some(blob_fields) = generation
+            .filter_columns
+            .records()
+            .fields_of(entity_raw)
+            .map_err(|e| EngineError::Malformed(e.to_string()))?
+        {
+            for field in blob_fields {
+                let declared_index = field.tag as usize;
+                let Some(d) = manifest.declared_scalars.get(declared_index) else {
+                    return Err(EngineError::Malformed(format!(
+                        "a record-blob row carries field tag {} where the schema \
+                         declares {} columns; the blob and the manifest disagree",
+                        field.tag,
+                        manifest.declared_scalars.len()
+                    )));
+                };
+                if values[declared_index].is_none() {
+                    values[declared_index] = stored_field_out(
+                        field.value,
+                        d.arrow_type,
+                        d.vocabulary.as_deref(),
+                        &generation.vocabularies,
+                    );
+                }
+            }
+        }
+
+        let fields = manifest
+            .declared_scalars
+            .iter()
+            .zip(values)
+            .filter_map(|(d, value)| {
+                value.map(|value| ItemField {
+                    name: d.name.clone(),
+                    value,
+                })
+            })
+            .collect();
+        Ok(Some(ItemOut {
+            fields,
+            labels: self.labels_for(&generation, session, entity_raw)?,
+            views,
+            scoped,
+            // N-3: propagate, never swallow. `EngineError::Store`, the same wrapping
+            // every other store-backed call in this crate uses (see `Engine::open`).
+            // Against the generation this request loaded, never a second `load()`: the
+            // sidecar is per-generation now, and a fold rewrites it.
+            external_id: self
+                .external_id_of_in(&generation, entity)
+                .map_err(EngineError::Store)?,
+        }))
     }
 }
 
@@ -1960,7 +2075,7 @@ fn row_field_out(
             // gather refuses on its own path. Absence is the honest answer here.
             _ => return None,
         };
-        return category_key_out(code, d, vocabularies);
+        return category_key_out(code, d.vocabulary.as_deref(), vocabularies);
     }
     // Generated for the flat members; `Bool` and `Utf8` read through their arrays because
     // neither is stored as a flat slice of itself.
@@ -2082,22 +2197,27 @@ pub(crate) fn flushed_row_scalar(
 /// One stored value's drill-down form, for the entity-space and blob homes: the storage-typed
 /// [`tessera_filter::RecordValue`] adapted through the declaration — a category code to its key,
 /// a `bool`'s `u8` storage back to `bool`, a `timestamp_us`'s `i64` back to its unit.
+///
+/// **Over the two facts rather than over the declaration**, because a group-scoped family is not
+/// one of `declared_scalars` and has no [`DeclaredScalar`] to pass: the storage type and the
+/// vocabulary it names are the whole of what this needs, and both records carry them.
 fn stored_field_out(
     value: tessera_filter::RecordValue,
-    d: &DeclaredScalar,
+    arrow_type: ScalarType,
+    vocabulary: Option<&str>,
     vocabularies: &Vocabularies,
 ) -> Option<ScalarOut> {
     use tessera_filter::RecordValue as RV;
-    if d.vocabulary.is_some() {
+    if vocabulary.is_some() {
         let code = match value {
             RV::U8(c) => c as u32,
             RV::U16(c) => c as u32,
             RV::U32(c) => c,
             _ => return None,
         };
-        return category_key_out(code, d, vocabularies);
+        return category_key_out(code, vocabulary, vocabularies);
     }
-    Some(match (d.arrow_type, value) {
+    Some(match (arrow_type, value) {
         (ScalarType::Bool, RV::U8(x)) => ScalarOut::Bool(x != 0),
         (ScalarType::Bool, RV::Bool(b)) => ScalarOut::Bool(b),
         (ScalarType::TimestampUs, RV::I64(x)) | (ScalarType::TimestampUs, RV::TimestampUs(x)) => {
@@ -2122,18 +2242,131 @@ fn stored_field_out(
     })
 }
 
+/// **Every group-scoped attribute value one item carries that this session may see**
+/// (`views.md` §5, owner ruling 2026-09-01) — one entry per family, keyed by the owning group's
+/// key, values read from the per-view entity-space columns.
+///
+/// # Why the key and not the view
+///
+/// A scoped family has one column per view, but the value belongs to the `(entity, key)` pair:
+/// two groups sharing a roster through `members` share the column, and a client that read the
+/// same value twice under two view ids would be reading one fact as two. So the address is the
+/// key ([decision 0113](../../../docs/decisions/0113-ordinals-are-removed-and-the-key-is-the-only-address.md)),
+/// resolved through [`owning_key_of`] — §3.3's ownership rule, stated once — from each visible
+/// view id to the key it holds in *this family's* group.
+///
+/// # The gate
+///
+/// A key is served only where the session may reach a view that holds it, its own group's or a
+/// sharing group's; a family no reachable view holds is absent whole rather than served empty.
+/// Nothing here can name a gate-failed view: the enumeration starts from the roster and every
+/// candidate is tested against [`crate::gate::VisibleViews`] before its key is minted, so the
+/// answer is a function of the views this principal already knows about.
+///
+/// # I2
+///
+/// Every value read is this **item's own**, at an entity the caller has already established
+/// visible, out of an entity-space column indexed by entity id. There is no aggregate here and no
+/// quantity derived from anything outside `M_auth`: the register's argument is the one C30 makes
+/// for the labels beside it.
+///
+/// # What it does not serve
+///
+/// A `text` family, which has no per-entity value slot — its entity-space artefacts are a token
+/// dictionary and the postings over it, so there is nothing to read for one entity
+/// ([`tessera_store::manifest::ScopedScalar::has_value_column`]).
+///
+/// ⊘ A value written by a **flush** for a family with neither `index` nor `render`: the flush
+/// writes no extent for one (`Engine::flush`'s scoped pass, on `filter::scoped_is_filterable`), so
+/// such a family serves the build's values and nothing since. Every other family — indexed,
+/// rendered, or both — takes its extents and is served live.
+fn scoped_values_of(
+    generation: &Generation,
+    visible: &crate::gate::VisibleViews,
+    entity: u32,
+) -> Vec<ItemScoped> {
+    let manifest = &generation.bundle.manifest;
+    let members_of = |name: &str| {
+        manifest
+            .groups
+            .iter()
+            .find(|g| g.name == name)?
+            .members_of
+            .as_deref()
+    };
+    // Every view of every group this session may reach, with the roster record that decides which
+    // key it holds where. Built once for all the families rather than per family: a corpus with
+    // eight families over one group of forty quarters would otherwise walk the roster eight times.
+    let reachable: Vec<(&str, &str)> = manifest
+        .groups
+        .iter()
+        .flat_map(|g| g.views.iter().map(move |v| (g.name.as_str(), v.key.as_str())))
+        .filter(|(group, key)| {
+            visible.contains_view(&format!("{group}{}{key}", tessera_store::GROUP_SEPARATOR))
+        })
+        .collect();
+
+    let mut out: Vec<ItemScoped> = Vec::new();
+    for family in manifest.groups.iter().flat_map(|g| g.scoped_scalars.iter()) {
+        if !family.has_value_column() {
+            continue;
+        }
+        // Sorted and deduplicated by key: two views sharing one key through a `members` group are
+        // one value, and a client reading the map has no order of its own to fall back on.
+        let mut values: std::collections::BTreeMap<String, ScalarOut> =
+            std::collections::BTreeMap::new();
+        for &(group, key) in &reachable {
+            let Some(owned) = owning_key_of((group, key), members_of, &family.group) else {
+                continue;
+            };
+            let id = format!(
+                "{}{}{owned}",
+                family.group,
+                tessera_store::GROUP_SEPARATOR
+            );
+            // The family's own list, not the roster: a view created since the build has no column
+            // until one is written for it, and asking for one would be asking for a file no pass
+            // wrote.
+            if !family.views.contains(&id) {
+                continue;
+            }
+            let column = crate::filter::scoped_column_name(&family.name, &id);
+            let Some(stored) = generation.filter_columns.stored_value(&column, entity) else {
+                continue;
+            };
+            if let Some(value) = stored_field_out(
+                stored,
+                family.arrow_type,
+                family.vocabulary.as_deref(),
+                &generation.vocabularies,
+            ) {
+                values.insert(owned.to_string(), value);
+            }
+        }
+        if values.is_empty() {
+            continue;
+        }
+        out.push(ItemScoped {
+            name: family.name.clone(),
+            values: values.into_iter().collect(),
+        });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
 /// A category code's drill-down value: its vocabulary **key**. Code 0 — the reserved absent
 /// sentinel — is absence, and a code no binding explains is omitted rather than served raw,
 /// the same rule `/v1/categories` applies to an unresolvable code.
 fn category_key_out(
     code: u32,
-    d: &DeclaredScalar,
+    vocabulary: Option<&str>,
     vocabularies: &Vocabularies,
 ) -> Option<ScalarOut> {
     if code == 0 {
         return None;
     }
-    let vocabulary = vocabularies.get(d.vocabulary.as_deref()?)?;
+    let vocabulary = vocabularies.get(vocabulary?)?;
     let (key, _) = vocabulary.bindings().find(|&(_, c)| c == code)?;
     Some(ScalarOut::Utf8(key.to_string()))
 }

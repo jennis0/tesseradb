@@ -1143,3 +1143,142 @@ async fn the_control_plane_reaches_a_gated_group() {
     let holder = token(&served, &["finance"]).await;
     assert!(view_ids(&meta(&served, &holder).await).contains("sealed:s3"));
 }
+
+// ---------------------------------------------------------------------------------------------
+// The drill-down, which the gate reaches for the same reason every other surface does
+// ---------------------------------------------------------------------------------------------
+
+/// The `tessera_id`s a view serves this principal.
+async fn point_ids(served: &Served, token: &str, view: &str) -> Vec<u64> {
+    let resp = served
+        .server
+        .client
+        .post(served.server.viewer_url("/v1/viewport"))
+        .bearer_auth(token)
+        .json(&json!({
+            "view": view, "zoom": 8, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200, "{view}");
+    let bytes = resp.bytes().await.unwrap();
+    let (_, points) = decode_viewport(&bytes);
+    points.into_iter().map(|(id, _)| id).collect()
+}
+
+/// The `tessera_id` one source entity is served under — found through the drill-down's external
+/// id, the identity permutation being the server's alone (I10).
+async fn id_of(served: &Served, token: &str, view: &str, entity: u64) -> u64 {
+    for id in point_ids(served, token, view).await {
+        let body: Value = post_item(&served.server, token, id)
+            .await
+            .json()
+            .await
+            .unwrap();
+        use base64::Engine as _;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(body["external_id"].as_str().expect("an external id"))
+            .unwrap();
+        if u64::from_le_bytes(bytes.try_into().expect("eight bytes")) == entity {
+            return id;
+        }
+    }
+    panic!("entity {entity} is not served in {view}");
+}
+
+/// `POST /v1/items/{id}`'s `views` array, by id.
+async fn item_views(served: &Served, token: &str, id: u64) -> Vec<String> {
+    let body: Value = post_item(&served.server, token, id)
+        .await
+        .json()
+        .await
+        .unwrap();
+    body["views"]
+        .as_array()
+        .expect("the views array is always present")
+        .iter()
+        .map(|v| v["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// **The drill-down names no view and no scoped value behind a gate** (`views.md` §5, §6; owner
+/// ruling 2026-09-01) — the fifth surface the collapse reaches, and the first that names a view
+/// without being asked for one.
+///
+/// The entity is labelled `public`, so both principals can see the item itself and nothing here is
+/// about item visibility. It holds a row in all eight views. The outsider must be served the four
+/// they can reach and an empty `scoped`; the holder, all eight and the family's values under both
+/// of `sealed`'s keys. A response that listed the item's views without the gate would name
+/// `sealed:s1` — the one place the whole document otherwise never names it — to a principal for
+/// whom the group does not exist.
+#[tokio::test]
+async fn the_drill_down_names_no_gate_failed_view_and_no_sealed_value() {
+    let served = serve().await;
+    let outsider = token(&served, &[]).await;
+    let holder = token(&served, &["finance"]).await;
+    // `public`, and in every view of this fixture: `world`/`atlas` (0..20), all four quarters, and
+    // both of `sealed`'s.
+    const ENTITY: u64 = 11;
+    assert_eq!(label_of(ENTITY), "public");
+    let id = id_of(&served, &outsider, "world", ENTITY).await;
+
+    assert_eq!(
+        item_views(&served, &outsider, id).await,
+        vec![
+            "quarter:2026-Q1".to_string(),
+            "quarter:2026-Q2".to_string(),
+            "quarter:2026-Q4".to_string(),
+            "world".to_string(),
+        ],
+        "the gated plain view, the gated key and the whole gated group are absent"
+    );
+    assert_eq!(
+        item_views(&served, &holder, id).await,
+        vec![
+            "atlas".to_string(),
+            "quarter:2026-Q1".to_string(),
+            "quarter:2026-Q2".to_string(),
+            "quarter:2026-Q3".to_string(),
+            "quarter:2026-Q4".to_string(),
+            "sealed:s1".to_string(),
+            "sealed:s2".to_string(),
+            "world".to_string(),
+        ],
+        "and the holder is served every one of them, so the assertion above is about the gate"
+    );
+
+    let outside: Value = post_item(&served.server, &outsider, id)
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        outside["scoped"],
+        json!({}),
+        "no family of a group this principal cannot reach, under any key"
+    );
+    let inside: Value = post_item(&served.server, &holder, id)
+        .await
+        .json()
+        .await
+        .unwrap();
+    // Every family with a per-view value column, keyed by the group's key. `note` is `text` and
+    // has no per-entity slot to read, so it is the one declared family absent here.
+    let mut families: Vec<&String> = inside["scoped"].as_object().unwrap().keys().collect();
+    families.sort();
+    assert_eq!(families, ["glow", "mood", "sentiment", "tint"]);
+    for (ordinal, (key, _)) in SEALED.iter().enumerate() {
+        assert_eq!(
+            inside["scoped"]["mood"][key], json!(mood(ordinal, ENTITY)),
+            "a category arrives as its vocabulary key, under the key of the view that holds it"
+        );
+        assert_eq!(inside["scoped"]["tint"][key], json!(tint(ordinal, ENTITY)));
+        assert_eq!(
+            inside["scoped"]["sentiment"][key],
+            json!(sentiment(ordinal, ENTITY)),
+            "an absence is an absent key, never a null"
+        );
+        assert_eq!(inside["scoped"]["glow"][key], json!(glow(ordinal, ENTITY)));
+    }
+}
