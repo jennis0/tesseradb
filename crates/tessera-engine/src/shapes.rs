@@ -69,8 +69,8 @@ use crate::row_column::RowColumn;
 pub use tessera_spatial::shape::{CanonError, CanonReport, Shape, ShapeF64, Space};
 pub use tessera_spatial::{Bounds, Projection};
 pub use tessera_store::derived::{
-    authored_shape_input, canonical_shapes, shape_input, CanonicalShapes, ShapeInput,
-    ShapeRefusal, ShapeSpace, ShapeStats,
+    authored_shape_input, canonical_shapes, check_shape_span, shape_input, CanonicalShapes,
+    ShapeInput, ShapeRefusal, ShapeSpace, ShapeStats, ViewFrame,
 };
 pub use tessera_types::layer::DrawnShape;
 

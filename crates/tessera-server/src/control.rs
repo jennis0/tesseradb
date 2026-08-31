@@ -370,33 +370,50 @@ async fn require_operator_credential(
     Ok(next.run(request).await)
 }
 
-/// The frame a layer's shapes are canonicalised in: the projection its declared views were placed
-/// under, and the extent they are quantised against.
+/// The frame **each** of a layer's views canonicalises its shapes in: the projection that placed
+/// that view's points, and the extent they are quantised against (decision 0040).
 ///
-/// A shape layer whose views declare different projections is refused at the declaration
-/// (`polygon-membership.md` §4.3), so every view here agrees and any one of them answers. What is
-/// not safe is reading the *bundle's* first view: a layer need not be declared on it, and a shape
-/// placed by a projection none of its own views declares holds the wrong rows with nothing saying
-/// so. The frame comes from the same view as the projection, so the two cannot be drawn from
-/// different views.
+/// **Per view, and never the layer's first view for all of them**
+/// ([decision 0111](../../../docs/decisions/0111-a-shape-spans-projected-views-through-wgs84.md)):
+/// a layer's views need share neither projection nor frame, and a `wgs84` shape goes through each
+/// view's own transform. What is refused rather than resolved is a layer mixing a projected view
+/// with a `projection = "none"` one, and — where the submission wrote `space = "view"` — a span
+/// over frames that are not identical; both are [`tessera_engine::shapes::check_shape_span`]'s,
+/// applied where the shape is canonicalised so the refusal can name the row.
 ///
-/// ⊘ The extent is the layer's **first** view's, and views of one layer are *not* required to
-/// share one (`polygon-membership.md` §4.3: a shape is clipped in each view's own frame). That
-/// reduction holds exactly while a bundle carries one view, which is what `tessera build` emits;
-/// canonicalising per view against per-view frames is `canonical_shapes`' own ⊘.
-fn layer_frame<'m>(
-    meta: &'m tessera_engine::EngineMeta,
+/// What is not safe is reading the *bundle's* views: a layer need not be drawn on all of them, and
+/// a shape placed by a projection none of its own views declares holds the wrong rows with nothing
+/// saying so.
+fn layer_frames(
+    meta: &tessera_engine::EngineMeta,
     views: &[&str],
-) -> Result<&'m tessera_engine::MetaView, ApiError> {
-    let first = views
-        .first()
-        .ok_or_else(|| {
-            ApiError::Contract("this layer declares no view to publish a shape into".into())
-        })?;
-    meta.views
+) -> Result<Vec<tessera_engine::shapes::ViewFrame>, ApiError> {
+    if views.is_empty() {
+        return Err(ApiError::Contract(
+            "this layer declares no view to publish a shape into".into(),
+        ));
+    }
+    views
         .iter()
-        .find(|v| &v.id == first)
-        .ok_or_else(|| ApiError::Unknown(format!("unknown view '{first}'")))
+        .map(|name| {
+            let view = meta
+                .views
+                .iter()
+                .find(|v| v.id == *name)
+                .ok_or_else(|| ApiError::Unknown(format!("unknown view '{name}'")))?;
+            let q = view.quantisation;
+            Ok(tessera_engine::shapes::ViewFrame::new(
+                &view.id,
+                view.projection,
+                tessera_engine::shapes::Bounds {
+                    x_min: q.x_min,
+                    x_max: q.x_max,
+                    y_min: q.y_min,
+                    y_max: q.y_max,
+                },
+            ))
+        })
+        .collect()
 }
 
 /// Every route [`router`] mounts, as `(method, path)` — the subject of
@@ -2395,6 +2412,18 @@ async fn register_layer(
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let declaration = body.0;
     let name = declaration.name.clone();
+    // **Decision 0111's layer-level span rule, at the declaration.** A shape layer whose views are
+    // a mix of projected and unprojected row spaces has no geometry that could span them, so it is
+    // refused here — naming the layer and both sides — rather than at the first artifact, where
+    // the caller would have to infer the declaration was the problem. The frames themselves are
+    // read per view at publication (`layer_frames`).
+    if declaration.membership == tessera_types::layer::MembershipSource::Spatial {
+        let views: Vec<&str> = declaration.views.iter().map(String::as_str).collect();
+        let meta = state.engine.meta();
+        let frames = layer_frames(&meta, &views)?;
+        tessera_engine::shapes::check_shape_span(&frames, tessera_engine::shapes::ShapeSpace::Wgs84)
+            .map_err(|e| ApiError::Contract(format!("layer '{name}': {e}")))?;
+    }
     // The **shared** blocking pool, not the deny runtime beside it. That runtime exists so a
     // suppression is never queued behind ingest; a registration is not a deny, and delaying one
     // under ingest load is backpressure working rather than a security operation refused.
@@ -2700,23 +2729,9 @@ fn canonical_authored_content(
     // projections is refused at the declaration, so the views agree and the first is the answer
     // for all of them; it must be *this layer's* first and not the bundle's, or a shape is placed
     // by a projection no view of it declares.
-    let frame = layer_frame(&meta, &views)?;
-    let q = frame.quantisation;
-    let extent = tessera_engine::shapes::Bounds {
-        x_min: q.x_min,
-        x_max: q.x_max,
-        y_min: q.y_min,
-        y_max: q.y_max,
-    };
-    let canonical = canonical_shapes(
-        &shape,
-        &views,
-        space,
-        frame.projection,
-        &extent,
-        state.max_shape_vertices,
-    )
-    .map_err(|e| refuse(e.to_string()))?;
+    let frames = layer_frames(&meta, &views)?;
+    let canonical = canonical_shapes(&shape, &frames, space, state.max_shape_vertices)
+        .map_err(|e| refuse(e.to_string()))?;
     let report: Vec<serde_json::Value> = canonical
         .reports
         .iter()
@@ -2831,23 +2846,9 @@ fn canonical_row_shape(
     // projections is refused at the declaration, so the views agree and the first is the answer
     // for all of them; it must be *this layer's* first and not the bundle's, or a shape is placed
     // by a projection no view of it declares.
-    let frame = layer_frame(&meta, &views)?;
-    let q = frame.quantisation;
-    let extent = tessera_engine::shapes::Bounds {
-        x_min: q.x_min,
-        x_max: q.x_max,
-        y_min: q.y_min,
-        y_max: q.y_max,
-    };
-    let canonical = canonical_shapes(
-        &shape,
-        &views,
-        space,
-        frame.projection,
-        &extent,
-        state.max_shape_vertices,
-    )
-    .map_err(|e| refuse(e.to_string()))?;
+    let frames = layer_frames(&meta, &views)?;
+    let canonical = canonical_shapes(&shape, &frames, space, state.max_shape_vertices)
+        .map_err(|e| refuse(e.to_string()))?;
     let report: Vec<serde_json::Value> = canonical
         .reports
         .iter()

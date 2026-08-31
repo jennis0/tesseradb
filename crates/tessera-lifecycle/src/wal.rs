@@ -1893,6 +1893,7 @@ mod tests {
 
         let create = WalRecord::LayerCreate {
             declaration: Box::new(LayerDeclaration {
+                scope: Default::default(),
                 name: "boundaries/uk-2026".into(),
                 title: Some("UK administrative boundaries".into()),
                 views: vec!["geographic".into()],

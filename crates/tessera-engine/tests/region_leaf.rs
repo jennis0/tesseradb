@@ -279,6 +279,7 @@ fn past_the_cell_budget_the_answer_is_a_cover_whose_verdict_is_the_shapes_alone(
 
 fn declaration(name: &str, criterion: Option<ExistenceCriterion>) -> LayerDeclaration {
     LayerDeclaration {
+        scope: Default::default(),
         name: name.into(),
         title: None,
         views: vec!["s0".into()],

@@ -1497,6 +1497,11 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // inside the attribute tail until the campaign's kills made the distinction worth having
     // (`residency.rs`).
     let view_ids: Vec<String> = args.views.iter().map(|v| v.view_id.clone()).collect();
+    let view_frames: Vec<tessera_store::derived::ViewFrame> = args
+        .views
+        .iter()
+        .map(|v| tessera_store::derived::ViewFrame::new(&v.view_id, v.projection, v.extent))
+        .collect();
     let mut published_layers = if args.layers.is_empty() {
         crate::layers::PublishedLayers::default()
     } else {
@@ -1505,13 +1510,11 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
                 &args.layers,
                 &args.layer_inputs,
                 &args.scoped_layers,
-                // ⊘ **One frame for a layer's several views** (`views.md` §2's marker): an
-                // authored shape canonicalises against the anchor view's projection and extent,
-                // which `polygon-membership.md` §4.3 wants per view. A layer's views must share a
-                // projection, and a group's share a frame by construction, so this is exact for
-                // every declaration the build can enumerate today.
-                args.views[args.anchor].projection,
-                &args.views[args.anchor].extent,
+                // **A frame per view, never the anchor's for all of them** (decision 0111): a
+                // shape layer is canonicalised in each view it is drawn in, against that view's
+                // own projection and extent, so a layer spanning frames stores a different
+                // canonical form under each view's name.
+                &view_frames,
                 tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
                 // The build's own `.build-tmp/`, which the member spill writes its runs into —
                 // still open here, and swept by the `close` below whether this stage succeeds or

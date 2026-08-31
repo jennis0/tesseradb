@@ -3623,7 +3623,7 @@ fn the_multiview_fixture_parses() {
             .iter()
             .map(|v| v.name.as_str())
             .collect::<Vec<_>>(),
-        ["world"]
+        ["world", "world_flat"]
     );
     assert_eq!(
         config
@@ -3642,6 +3642,23 @@ fn the_multiview_fixture_parses() {
     assert_eq!(config.scopes.attribute("sentiment"), Some("quarter"));
     assert_eq!(config.scopes.layer("quarter_clusters"), Some("quarter"));
     assert_eq!(config.scopes.layer("collections"), None);
+    // **The shape layer spans two frames** (decision 0111): its two views place their points by
+    // different functions, which the pre-0111 parse refused outright.
+    let regions = config
+        .layers
+        .iter()
+        .find(|l| l.name == "regions")
+        .expect("the shape layer");
+    assert_eq!(regions.views, ["world", "world_flat"]);
+    assert_eq!(
+        config
+            .views
+            .iter()
+            .filter(|v| regions.views.contains(&v.name))
+            .map(|v| v.projection.name())
+            .collect::<Vec<_>>(),
+        ["web_mercator", "equirectangular"]
+    );
     // The group-scoped attribute names no source of its own, so it is read from each view's own
     // points file rather than from `[defaults].source` (`views.md` §5).
     assert!(

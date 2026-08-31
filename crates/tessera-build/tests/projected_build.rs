@@ -858,6 +858,7 @@ fn a_morton_points_file_under_a_projected_view_is_refused_by_the_survey() {
 #[test]
 fn a_wgs84_shape_layer_holds_the_rows_of_its_curved_image() {
     use tessera_build::shapes::{ShapeContext, ShapeReader};
+    use tessera_store::derived::ViewFrame;
     use tessera_spatial::shape::{Shape, ShapeF64, Space};
     use tessera_store::derived::{ShapeInput, ShapeSpace};
     use tessera_types::layer::ShapeKind;
@@ -892,9 +893,7 @@ fn a_wgs84_shape_layer_holds_the_rows_of_its_curved_image() {
 
     let extent = AlignedSquare::WORLD.bounds();
     let ctx = ShapeContext {
-        extent,
-        projection: Projection::WebMercator,
-        views: vec!["world".to_string()],
+        views: vec![ViewFrame::new("world", Projection::WebMercator, extent)],
         max_vertices: tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
     };
     let mut reader = ShapeReader::new("regions/uk", ShapeKind::Polygon, ctx, ShapeSpace::View);
@@ -957,18 +956,21 @@ fn a_wgs84_shape_layer_holds_the_rows_of_its_curved_image() {
 #[test]
 fn a_wgs84_shape_on_an_unprojected_view_is_refused() {
     use tessera_build::shapes::{ShapeContext, ShapeReader};
+    use tessera_store::derived::ViewFrame;
     use tessera_store::derived::{ShapeInput, ShapeSpace};
     use tessera_types::layer::ShapeKind;
 
     let ctx = ShapeContext {
-        extent: Bounds {
-            x_min: 0.0,
-            x_max: 1000.0,
-            y_min: 0.0,
-            y_max: 1000.0,
-        },
-        projection: Projection::None,
-        views: vec!["s0".to_string()],
+        views: vec![ViewFrame::new(
+            "s0",
+            Projection::None,
+            Bounds {
+                x_min: 0.0,
+                x_max: 1000.0,
+                y_min: 0.0,
+                y_max: 1000.0,
+            },
+        )],
         max_vertices: tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
     };
     let mut reader = ShapeReader::new("regions/uk", ShapeKind::Bbox, ctx, ShapeSpace::View);
@@ -989,13 +991,16 @@ fn a_wgs84_shape_on_an_unprojected_view_is_refused() {
 #[test]
 fn a_wgs84_shape_coordinate_outside_the_range_is_refused() {
     use tessera_build::shapes::{ShapeContext, ShapeReader};
+    use tessera_store::derived::ViewFrame;
     use tessera_store::derived::{ShapeInput, ShapeSpace};
     use tessera_types::layer::ShapeKind;
 
     let ctx = ShapeContext {
-        extent: AlignedSquare::WORLD.bounds(),
-        projection: Projection::WebMercator,
-        views: vec!["world".to_string()],
+        views: vec![ViewFrame::new(
+            "world",
+            Projection::WebMercator,
+            AlignedSquare::WORLD.bounds(),
+        )],
         max_vertices: tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
     };
     let mut reader = ShapeReader::new("regions/uk", ShapeKind::Bbox, ctx, ShapeSpace::Wgs84);
@@ -1011,15 +1016,18 @@ fn a_wgs84_shape_coordinate_outside_the_range_is_refused() {
 }
 
 fn ctx_view() -> tessera_build::shapes::ShapeContext {
+    use tessera_store::derived::ViewFrame;
     tessera_build::shapes::ShapeContext {
-        extent: Bounds {
-            x_min: 0.0,
-            x_max: 1000.0,
-            y_min: 0.0,
-            y_max: 1000.0,
-        },
-        projection: Projection::None,
-        views: vec!["s0".to_string()],
+        views: vec![ViewFrame::new(
+            "s0",
+            Projection::None,
+            Bounds {
+                x_min: 0.0,
+                x_max: 1000.0,
+                y_min: 0.0,
+                y_max: 1000.0,
+            },
+        )],
         max_vertices: tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
     }
 }

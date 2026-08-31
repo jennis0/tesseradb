@@ -52,6 +52,24 @@ visibility       = "public"                                        # spec §6, d
 point_visibility = { field = "access", default = "public" }
 
 # ---------------------------------------------------------------------------------------------
+# A second plain view over the *same* points file and a **different frame**: equirectangular
+# rather than Web Mercator, so the same longitude and latitude land at a different y and the
+# declared lon/lat box snaps to a different extent. Its only job in this fixture is to give the
+# shape layer below two frames to span (decision 0111): a `wgs84` boundary is densified, projected
+# and quantised once per view, and a build that canonicalised it against one frame for both would
+# place it wrong here with nothing saying so.
+# ---------------------------------------------------------------------------------------------
+
+[[view]]
+name             = "world_flat"
+title            = "Whole corpus, equirectangular"
+projection       = "equirectangular"
+source           = "world"
+extent           = { lon = [-180.0, 180.0], lat = [-85.0511287798066, 85.0511287798066] }
+visibility       = "public"
+point_visibility = { field = "access", default = "public" }
+
+# ---------------------------------------------------------------------------------------------
 # One view group, form A (spec §3.1): one file per quarter, each an inline `[[view_group.view]]`
 # block. `extent` and `projection` are the group's own — an abstract embedding, not a map, so
 # `projection = "none"` and the box is the layout's own coordinate range rather than a geographic
@@ -215,3 +233,31 @@ name                      = "tag"
 type                      = "text"
 require_member_visibility = "inherited"
 
+# ---------------------------------------------------------------------------------------------
+# A shape layer spanning two frames (decision 0111, `polygon-membership.md` §4.3). Its geometry is
+# declared **once**, in `wgs84`, and is resolved per view: through Web Mercator against `world`'s
+# extent, and through the equirectangular transform against `world_flat`'s. The two canonical
+# forms are different byte sequences and different decompositions — which is the whole of what
+# spanning frames means — and the membership each holds is that view's own.
+#
+# `space = "wgs84"` on every row is not decoration: `view` space over these two frames is refused,
+# since a coordinate written in one frame names a different place in the other.
+# ---------------------------------------------------------------------------------------------
+
+[[layer]]
+name                      = "regions"
+title                     = "Regions"
+views                     = ["world", "world_flat"]
+membership                = "spatial"
+hierarchy                 = { kind = "flat" }
+visibility                = "public"
+artifact_visibility       = { default = "inherited" }
+require_member_visibility = "none"
+artifacts = [
+  { key = "europe_nw", wkt = "POLYGON ((-11 49, 3 49, 3 61, -11 61, -11 49))", space = "wgs84" },
+  { key = "iberia",    wkt = "POLYGON ((-10 36, 3 36, 3 44, -10 44, -10 36))", space = "wgs84" },
+  { key = "japan",     wkt = "POLYGON ((129 31, 146 31, 146 46, 129 46, 129 31))", space = "wgs84" },
+]
+
+  [layer.shape]
+  kind = "polygon"

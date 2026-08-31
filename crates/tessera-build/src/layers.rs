@@ -522,8 +522,10 @@ pub fn read(
     inputs: &[LayerSources],
     // Which layers are scoped to a group, by name (`views.md` §3.5).
     scoped: &BTreeMap<String, crate::ScopedLayer>,
-    projection: tessera_spatial::Projection,
-    extent: &tessera_spatial::Bounds,
+    // **Every view this build materialises, each with its own frame** (decision 0111): a shape
+    // layer is canonicalised against the frame of each view it is drawn in, and a layer spanning
+    // views whose frames differ therefore stores a different canonical form under each name.
+    frames: &[tessera_store::derived::ViewFrame],
     max_shape_vertices: u64,
     scratch: &Path,
     memory_budget: u64,
@@ -562,14 +564,30 @@ pub fn read(
             Some(ArtifactSource::File { default_space, .. }) => *default_space,
             _ => tessera_store::derived::ShapeSpace::View,
         };
+        // **This layer's own views, each with its own frame** — never the build's first, which a
+        // layer need not be drawn on at all. A view the layer names and this build does not
+        // materialise is absent here, and the layer is canonicalised for the views that exist.
+        let layer_frames: Vec<tessera_store::derived::ViewFrame> = declaration
+            .views
+            .iter()
+            .filter_map(|name| frames.iter().find(|f| &f.view == name))
+            .cloned()
+            .collect();
+        // Decision 0111's layer-level rule, at the declaration and before a row is read: a mix of
+        // projected and unprojected row spaces is a refusal naming the layer and the views.
+        if shape_declared(declaration).is_some() {
+            tessera_store::derived::check_shape_span(
+                &layer_frames,
+                tessera_store::derived::ShapeSpace::Wgs84,
+            )
+            .map_err(|e| BuildError::Invalid(format!("layer '{}': {e}", input.name)))?;
+        }
         let mut shapes = shape_declared(declaration).map(|kind| {
             ShapeReader::new(
                 &input.name,
                 kind,
                 ShapeContext {
-                    extent: *extent,
-                    projection,
-                    views: declaration.views.clone(),
+                    views: layer_frames.clone(),
                     max_vertices: max_shape_vertices,
                 },
                 default_space,
@@ -659,9 +677,7 @@ pub fn read(
                 ),
                 kind,
                 ShapeContext {
-                    extent: *extent,
-                    projection,
-                    views: declaration.views.clone(),
+                    views: layer_frames.clone(),
                     max_vertices: max_shape_vertices,
                 },
                 default_space,
@@ -3347,8 +3363,9 @@ mod tests {
             &declarations,
             &sources,
             &BTreeMap::new(),
-            projection,
-            &extent,
+            &[tessera_store::derived::ViewFrame::new(
+                "world", projection, extent,
+            )],
             DEFAULT_MAX_SHAPE_VERTICES,
             scratch.path(),
             1 << 30,
@@ -3421,6 +3438,49 @@ mod tests {
 
     /// The drawing layer on its own, so that a refusal below is the authored path's own and not
     /// the membership shape beside it reaching the same check first.
+    /// **The mix of a projected view and an embedding is refused at the layer's declaration**
+    /// (decision 0111), before a row is read — so the message names the layer and both views and
+    /// not a key nobody asked about.
+    #[test]
+    fn a_shape_layer_over_a_projected_and_an_unprojected_view_is_refused_by_name() {
+        let (mut declarations, sources) = two_layers(Some("wgs84"));
+        for declaration in &mut declarations {
+            declaration.views = vec!["world".to_string(), "embedding".to_string()];
+        }
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let error = read(
+            &declarations,
+            &sources,
+            &BTreeMap::new(),
+            &[
+                tessera_store::derived::ViewFrame::new(
+                    "world",
+                    Projection::WebMercator,
+                    AlignedSquare::WORLD.bounds(),
+                ),
+                tessera_store::derived::ViewFrame::new(
+                    "embedding",
+                    Projection::None,
+                    Bounds {
+                        x_min: -40.0,
+                        x_max: 40.0,
+                        y_min: -40.0,
+                        y_max: 40.0,
+                    },
+                ),
+            ],
+            DEFAULT_MAX_SHAPE_VERTICES,
+            scratch.path(),
+            1 << 30,
+        )
+        .err()
+        .expect("no geometry spans the two kinds of space");
+        let message = error.to_string();
+        assert!(message.contains("regions/selects"), "{message}");
+        assert!(message.contains("'world'"), "{message}");
+        assert!(message.contains("'embedding'"), "{message}");
+    }
+
     fn draws_only(wkt: &str, projection: Projection, extent: Bounds) -> BuildError {
         let (declarations, mut sources) = two_layers(Some("wgs84"));
         sources.retain(|s| s.name == "regions/draws");
@@ -3433,8 +3493,9 @@ mod tests {
             &declarations,
             &sources,
             &BTreeMap::new(),
-            projection,
-            &extent,
+            &[tessera_store::derived::ViewFrame::new(
+                "world", projection, extent,
+            )],
             DEFAULT_MAX_SHAPE_VERTICES,
             scratch.path(),
             1 << 30,

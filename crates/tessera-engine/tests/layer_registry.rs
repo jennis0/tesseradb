@@ -18,6 +18,7 @@ use tessera_types::layer::{
 
 fn declaration(name: &str, visibility: Option<&str>) -> LayerDeclaration {
     LayerDeclaration {
+        scope: Default::default(),
         name: name.into(),
         title: Some(format!("{name} (title)")),
         views: vec!["s0".into()],

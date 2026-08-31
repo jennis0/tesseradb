@@ -1,6 +1,10 @@
 # Tessera — Contracts Specification
 
-**Status:** Draft r58 — **ordinals are removed** (r58, 2026-08-31, owner ruling; `views.md` §3.2,
+**Status:** Draft r59 — **a layer's scope is written and a shape is canonicalised per view**
+(r59, 2026-08-31; `views.md` §3.5, `polygon-membership.md` §4.3, decisions 0109 and 0111): §2.3
+gains the `layers` row it never carried, the declaration in it gains `scope`, and a shape layer's
+geometry is canonicalised against each of its views' own frames rather than one for all of them.
+**Ordinals are removed** (r58, 2026-08-31, owner ruling; `views.md` §3.2,
 decision 0113): a view of a group is addressed `<group>:<key>` and by nothing else. `/v1/meta`'s
 `views` entry loses `ordinal`; §2.2's `groups` roster and §2.3's `views`/`view_tombstones` lose it
 too; `PUT /control/views/{group}/{key}`'s `201` body no longer carries it; and §3.2's filter
@@ -9,7 +13,7 @@ roster-record order, so the ordering a client walks needs no stored number. **Ke
 unchanged** — a dropped key is refused for ever. `api_version` stays at 1 and `bundle_format` does
 not move (owner direction), so a stale bundle carrying the old field is recreated rather than
 read. Leak register: the ordinal gap's row is **deleted**, not accepted — with no position served,
-a gate-filtered roster is a shorter list and nothing else. **the view gate is enforced** (r57, 2026-08-31; `views.md` §5, §6): §3.2's
+a gate-filtered roster is a shorter list and nothing else. **The view gate is enforced** (r57, 2026-08-31; `views.md` §5, §6): §3.2's
 view-valued fields become per-principal. A session's visible-view set is resolved once at authorise
 — every view of every group, by intersection of the label's term set with the principal's, the
 group's gate conjunctive with the view's own — and `/v1/meta`'s `views`, its `groups` (a
@@ -201,6 +205,7 @@ Each is **complete** for its partition — full current state, not a diff — so
 | `tombstones` | array | deleted entity IDs, ascending (this partition's only — isolation holds; folded away at compaction, **⊘ unbuilt — today the list only grows**) |
 | `vocabulary_extensions` | array | `[{name, values: [{key, code}]}]` — the category bindings minted since the build or fold that wrote `MANIFEST.vocabularies` *(r24)*. **Carried forward and appended to, never restated**, which is the opposite discipline to `deny` and `tombstones` below and for a reason that decides it: `deny` is re-derived at every write *because it must be able to shrink* — an unsuppress has to reach disc — and a binding must never shrink. Restate-fresh is the one shape that can silently drop one, and a dropped binding leaves every row carrying its code with no key to explain it. The loader seeds the live bindings from `MANIFEST.vocabularies` plus this, before WAL replay, which is what keeps a minted code out of the next draw. The fold folds these into the next prefix's `MANIFEST.vocabularies` **verbatim** and writes an empty set. **⊘ Written by nobody yet** ([#82](https://github.com/jennis0/tessera-index/issues/82)): nothing mints between builds until the commit window does |
 | `deny` | array | `[{entity_id, cause: "suppress"}]` — the current suppression set. **Publication rule:** any accepted deny-disposition change (delete, suppress, unsuppress) triggers publication of a new side-manifest at the close of the deny drain — never deferred to the next flush, with a liveness floor under sustained arrival — because a syncing replica must never reconstruct a state in which a suppressed item is visible (SA §6.2's fail-open, at the interchange layer). `unsuppress` removes the entry in the manifest its own drain publishes |
+| `layers` · `layer_tombstones` | array | the annotation layer registry as of this publication, complete current state — `[{declaration, entity, runs, version, layouts}]` — and every layer name ever dropped *(r59)*. `declaration` is the object `PUT /control/layers` takes, verbatim, so the two entry points record the same thing (decision 0091). **`declaration.scope` is `"entity"` or `{"group": "<name>"}`** *(r59, `views.md` §3.5, [decision 0109](../decisions/0109-scope-binds-an-attribute-or-layer-to-a-groups-views.md))*: one artifact set drawn on every view the layer names, or a different set per view of that group. It was compiled beside the declaration and written nowhere, so a bundle reopened without its build configuration could not tell the two apart — and they answer differently on every view. `#[serde(default)]` is `"entity"`, which is a statement rather than an omission: a layer that names no group has one set. Tombstones are carried for ever and never pruned — bookmarks, edges and suppressions all travel by name |
 | `views` · `view_tombstones` | array | the **roster's runtime half** *(r55; `views.md` §3.2, §3.4)* — every view created while the service runs, `[{group, key, visibility, metadata}]`, and every key ever dropped, `[{group, key}]`. Complete current state, as every field here is. **This is the roster's durable home and the WAL is not**: the create and drop records are log entries for replay, and rotation reclaims them, so a roster that lived only there is lost at the first rotation — a reused key then silently repoints every client cache keyed on the view ([decision 0029](../decisions/0029-view-key.md)). The views a **build** declared are in `MANIFEST.json` and are not restated here; the served roster is the two together. Tombstones are carried for ever and never pruned, on `layer_tombstones`' rule, and each carries the key it burnt, which is the whole of a view's address *(r58)* |
 | `files` | object | path → `{size, sha256}` for files added since MANIFEST |
 
@@ -722,6 +727,8 @@ alias reaches a row space, a WAL row or a manifest lookup. Additive on the wire:
 stays at 1, `bundle_format` does not move, and a client that never reads the new fields is
 unaffected.
 
+**r59 writes a layer's scope, and the shape it canonicalises is per view** (2026-08-31; `views.md` §3.5, §11, [decision 0111](../decisions/0111-a-shape-spans-projected-views-through-wgs84.md), [decision 0109](../decisions/0109-scope-binds-an-attribute-or-layer-to-a-groups-views.md)). §2.3 gains the `layers` · `layer_tombstones` row it never carried, and the declaration in it gains `scope`. The gap this closes is small and total: the scope decided whether a layer's artifacts were one set or one set per view, it lived only in the build's configuration, and nothing in the bundle recorded it — so a reader could not tell a per-view layer from a shared one, and the two answer differently on every view. `scope` is on the **declaration** rather than beside it, unlike a scoped attribute's `scoped_scalars`, and the asymmetry is the two contracts' own: a scoped attribute is a *family* of columns with no slot in the one flat `declared_scalars` list, while a layer's scope is a single word about one layer that both entry points can state. Beside it, `canonical_shapes` takes a frame per view — the layer's views need share neither projection nor extent, a `wgs84` shape going through each view's own transform — so nothing on disc changes shape: an artifact's shapes were already `(view, bytes)` pairs, and what changes is that the bytes under two names can now legitimately differ. Two refusals are stated where they fire: a shape layer mixing a projected view with a `projection = "none"` one is refused at the declaration on both entry points (`422` from `PUT /control/layers`, a parse refusal at the build), and a `space = "view"` row over frames that are not identical is the `422` §4.3 already specifies for a space the view cannot honour. Additive; `api_version` stays at 1 and `bundle_format` does not move — a manifest without `scope` reads as entity scope, which is what every existing declaration means. No leak-register row: the scope decides which artifact set a view draws and the frame decides where a boundary lands, neither of which is a quantity a principal observes across the mask.
+
 **r53 pages the permutation** (2026-08-31). The owner ruled on 2026-08-30 (`views.md` §12) that the two-level paged permutation is every view's representation, a flat array being the degenerate all-pages-present case; §2.6 records the encoding and the multi-view build writes it. What forced it is the cost `views.md` §8 states: the array is sized by the **maximum entity id**, not by the view's population, so a group of forty quarterly views over one entity space is forty flat arrays, each 4 GB at 10⁹ and mostly sentinel. The two levels are the smallest thing that fixes it while keeping the file mappable and sliceable: a directory entry per 2¹⁶ ids, and pages stored only where the view lands.
 
 Three choices are worth recording. The page width is **16** and is written into the header rather than assumed, so a file at another width is a refusal and not a misread. The encoding is **canonical** — ascending slots, zero padding, a sentinel tail — because two producers write it: the build, which knows its pages before it starts, and the compaction fold, which scatters in Morton order and cannot; without canonicity those two could write different bytes for one mapping and the digests would disagree. And the paging shrinks what a view **stores and maps**, not what the fold transiently dirties: the scatter still lays out every page of `[0, bound)` and compacts at the end, which is the 4 GB compaction §3's pre-flight budget already carries.
@@ -741,12 +748,10 @@ address for every point, and nothing downstream re-quantises to notice. `bundle_
 4 by owner direction (version numbers are frozen until launch); the required field is itself the
 loud refusal a bump would have provided, and decision 0048 means the artifacts are recreated.
 
-Two things did **not** move with it, and are marked where they are claimed rather than left to be
-discovered. `canonical_shapes` still canonicalises a layer's views against one extent and one
-projection: a layer's views must share a projection (`polygon-membership.md` §4.3) but need not
-share a frame, and the per-view form waits on a bundle that carries two views. And the extent an
-`/control/layers` publication uses is the layer's **first** view's, on the same argument the
-projection beside it already took.
+Two things did **not** move with it, and were carried as marked claims until r59 discharged both:
+`canonical_shapes` canonicalised a layer's views against one extent and one projection, and a
+`/control/layers` publication used the layer's **first** view's extent. Both are now per view
+(decision 0111).
 
 **r51 builds §2.1's refusal of a non-canonical side-manifest name** (2026-08-30). The ruling is
 r21's and the writer has always conformed; the reader did not, and the shape of the miss was the

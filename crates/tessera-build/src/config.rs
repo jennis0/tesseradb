@@ -5087,13 +5087,14 @@ fn compile_layers(
         // bounds, the circle's three, the ellipse's five, the polygon's WKB `geometry` column
         // (GeoParquet's own name) — so naming a field of another kind is refused as a field the
         // layer never declared.
-        // **A shape layer's views must share a coordinate system** (`polygon-membership.md` §4.3):
-        // the geometry is declared once and resolved per view, so two views placing their points
-        // by different functions cannot share it. Two views both declaring `projection = "none"`
-        // are warned rather than refused, at the build's shape report — nothing then says whether
-        // they share a space, and a warning is the right weight for a thing that might be true.
-        // An authored shape content is under the same rule and for the same reason: it is placed
-        // by the view's own projection whenever its row declares `wgs84`.
+        // **A shape layer's views need share neither projection nor frame**
+        // ([decision 0111](../../../docs/decisions/0111-a-shape-spans-projected-views-through-wgs84.md),
+        // superseding the 2026-08-29 refusal that stood here): a `wgs84` shape is densified,
+        // projected and quantised through each view's own declaration, once per view. What is
+        // refused is the *mix* of a projected view and a `projection = "none"` one — `wgs84` means
+        // nothing in an embedding — and that check is `check_shape_span`'s, applied at the build's
+        // layer read and at `PUT /control/layers` alike, so there is one implementation of it. A
+        // `view`-space row over unequal frames is refused too, where the row's own space is known.
         if carries_geometry {
             let mut named: Vec<(&str, Projection)> = Vec::new();
             for name in declared_views {
@@ -5101,21 +5102,17 @@ fn compile_layers(
                     named.push((name.as_str(), view.projection));
                 }
             }
-            if let Some((first, projection)) = named.first().copied() {
-                if let Some((other, differs)) =
-                    named.iter().find(|(_, p)| *p != projection).copied()
-                {
-                    return Err(declaration_error(format!(
-                        "{object}: view '{first}' declares `projection = \"{}\"` and view \
-                         '{other}' declares `projection = \"{}\"`. A shape layer's geometry is \
-                         declared once and resolved in every view it is drawn in, so the views \
-                         must place their points by the same function; draw the layer in one of \
-                         them, or declare the same projection on both \
-                         (polygon-membership.md §4.3)",
-                        projection.name(),
-                        differs.name()
-                    )));
-                }
+            let projected = |p: &Projection| *p != Projection::None;
+            if let (Some((a, _)), Some((b, _))) = (
+                named.iter().find(|(_, p)| projected(p)).copied(),
+                named.iter().find(|(_, p)| !projected(p)).copied(),
+            ) {
+                return Err(declaration_error(format!(
+                    "{object}: view '{a}' declares a projection and view '{b}' declares \
+                     `projection = \"none\"`. A `wgs84` coordinate means nothing in an \
+                     embedding, so no geometry spans the two kinds of space (decision 0111); \
+                     draw the layer on one kind or the other"
+                )));
             }
         }
 
@@ -5377,6 +5374,13 @@ fn compile_layers(
         };
 
         let declaration = LayerDeclaration {
+            // **The scope reaches the manifest on the declaration** (contracts §2.3): it was
+            // compiled into `Scopes` alone, which is a build-time structure, so a bundle carried
+            // no record of which of its layers were per-view (`views.md` §11).
+            scope: match &scope {
+                Scope::Entity => tessera_types::layer::LayerScope::Entity,
+                Scope::Group(group) => tessera_types::layer::LayerScope::Group(group.clone()),
+            },
             name: block.name.clone(),
             title: block.title.clone(),
             views: declared_views.clone(),

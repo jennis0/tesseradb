@@ -64,6 +64,7 @@ const WAIT: Duration = Duration::from_secs(60);
 /// kind would make every minting case a refusal at admission rather than an interleaving.
 fn declaration(name: &str, value_set: ValueSet) -> LayerDeclaration {
     LayerDeclaration {
+        scope: Default::default(),
         name: name.into(),
         title: Some(format!("{name} (title)")),
         views: vec!["s0".into()],

@@ -28,6 +28,7 @@ const LABELS: &str = "topics/x";
 /// The cluster layer. `visibility` is the access label a viewer must hold to reach it at all.
 fn clusters(visibility: Option<&str>) -> LayerDeclaration {
     LayerDeclaration {
+        scope: Default::default(),
         name: CLUSTERS.into(),
         title: Some("clusters".into()),
         views: vec!["s0".into()],
@@ -54,6 +55,7 @@ fn clusters(visibility: Option<&str>) -> LayerDeclaration {
 /// from the label layer's own gate, or the test would pass with the term deleted.
 fn labels() -> LayerDeclaration {
     LayerDeclaration {
+        scope: Default::default(),
         name: LABELS.into(),
         title: Some("topics".into()),
         views: vec!["s0".into()],
