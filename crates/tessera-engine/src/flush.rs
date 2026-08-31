@@ -277,6 +277,13 @@ pub(crate) struct CompletedFlush {
     /// unlike a filter extent, no live reader composes it, because drill-down opens the stack
     /// from the manifest.
     pub(crate) record_extent: Option<RecordExtent>,
+    /// This flush's slice of the entity→term transpose — the term lists of the entities it
+    /// minted (contracts §2.4). **Never `None`**, unlike the record extent: the blob's shape is a
+    /// function of the schema and a corpus may declare no blob-resident column, while every
+    /// entity has a label set, the empty one included. A flush that published only joins writes
+    /// an empty layer rather than none, so the manifest's list stays a complete history of what
+    /// each flush minted.
+    pub(crate) entity_terms_extent: tessera_store::manifest::EntityTermsExtent,
     /// This flush's text layers, one per indexed `text` column. Composed onto the live generation
     /// at publication, exactly as a filter extent is: a `match` over a batch flushed since the
     /// build must see it without waiting for a fold.
@@ -445,6 +452,21 @@ pub(crate) fn execute_flush(
         }
     }
 
+    // ---- the entity→term transpose extent (contracts §2.4) ----------------------------------
+    //
+    // Written from the promotion, so its ordinals are the durable ones the tier beside it carries.
+    let entity_terms_extent = write_entity_terms_extent(&promotion.per_entity, &ctx)?;
+    for rel in [
+        &entity_terms_extent.hasrow,
+        &entity_terms_extent.offsets,
+        &entity_terms_extent.terms,
+    ] {
+        files.insert(
+            rel.clone(),
+            digest_of(&ctx.prefix_dir.join(rel)).map_err(FlushFailed)?,
+        );
+    }
+
     // ---- the record-blob extent (records §7) ------------------------------------------------
     let record_extent = write_record_extent(&plan, &ctx)?;
     let text_extents = write_text_extents(&plan, &ctx)?;
@@ -528,6 +550,7 @@ pub(crate) fn execute_flush(
         dict_extent,
         filter_extents,
         record_extent,
+        entity_terms_extent,
         text_extents,
         files,
         tier,
@@ -559,6 +582,15 @@ struct Promotion {
     extent: Option<DictExtent>,
     /// `(term, entities)` ascending by term — [`write_delta_tier`]'s contract.
     postings: Vec<(TermId, Vec<u32>)>,
+    /// The same relation transposed: `(entity, terms)` ascending by entity, each list sorted and
+    /// deduplicated — [`tessera_store::EntityTermsWriter`]'s contract, and the extent this flush
+    /// owes `entities/terms/` (contracts §2.4).
+    ///
+    /// **Built here rather than beside the extent write, because this is where the ordinals are.**
+    /// A term still carrying an extension id is process-local; promotion is what turns it into the
+    /// durable ordinal a later session resolves against, and a transpose assembled from
+    /// `item.terms` afterwards would store the process-local number.
+    per_entity: Vec<(u32, Vec<u32>)>,
 }
 
 /// Promote every extension-id descriptor the plan carries to a durable dictionary ordinal, and
@@ -589,6 +621,9 @@ fn promote(plan: &FlushPlan, ctx: &FlushContext) -> Result<Promotion, FlushFaile
     let mut interned: Vec<Vec<u8>> = Vec::new();
     let mut assigned: FxHashMap<u32, u32> = FxHashMap::default();
 
+    // One entry per entity-space item, in the plan's order — including an item whose label set is
+    // empty, which is a value and not an absence (`tessera_store::entity_terms`).
+    let mut per_entity: Vec<(u32, Vec<u32>)> = Vec::with_capacity(plan.items.len());
     for (entity, item) in plan.entity_space_items() {
         let Ok(entity) = u32::try_from(entity.raw()) else {
             return Err(FlushFailed(format!(
@@ -596,6 +631,7 @@ fn promote(plan: &FlushPlan, ctx: &FlushContext) -> Result<Promotion, FlushFaile
                 entity.raw()
             )));
         };
+        let mut mine: Vec<u32> = Vec::with_capacity(item.terms.len());
         for term in &item.terms {
             // Below the dictionary's length: already a durable ordinal, nothing to do.
             let ordinal = if term.raw() < dict_len {
@@ -641,8 +677,18 @@ fn promote(plan: &FlushPlan, ctx: &FlushContext) -> Result<Promotion, FlushFaile
                 ordinal
             };
             by_term.entry(ordinal).or_default().push(entity);
+            mine.push(ordinal);
         }
+        // A buffered row's descriptors are not deduplicated on the write path, so this is the same
+        // required-not-defensive normalisation the postings below get.
+        mine.sort_unstable();
+        mine.dedup();
+        per_entity.push((entity, mine));
     }
+    // The plan's items are the buffer's, which is entity-ascending; sorted anyway because the
+    // extent's ranks address its lists and a writer that trusted the caller's order would produce
+    // a layer whose every answer is one entity out.
+    per_entity.sort_unstable_by_key(|(entity, _)| *entity);
 
     let mut postings = Vec::with_capacity(by_term.len());
     for (term, mut entities) in by_term {
@@ -660,6 +706,7 @@ fn promote(plan: &FlushPlan, ctx: &FlushContext) -> Result<Promotion, FlushFaile
             dict: Arc::clone(&ctx.dict),
             extent: None,
             postings,
+            per_entity,
         });
     }
 
@@ -689,6 +736,7 @@ fn promote(plan: &FlushPlan, ctx: &FlushContext) -> Result<Promotion, FlushFaile
             records: interned.len() as u64,
         }),
         postings,
+        per_entity,
     })
 }
 
@@ -1145,6 +1193,43 @@ fn write_text_extents(
         });
     }
     Ok(out)
+}
+
+/// This flush's slice of `entities/terms/` — the term lists of the entities it minted, in the
+/// promoted ordinals (contracts §2.4, `tessera_store::entity_terms`).
+///
+/// **Always written, even for a flush that minted nothing.** An empty layer costs three tiny files
+/// and keeps the manifest's list a complete record of what each flush published; a conditional
+/// write would make "no extent" mean either "no entities" or "an older writer", which is the
+/// ambiguity the record blob avoids by making its own absence a function of the schema alone.
+fn write_entity_terms_extent(
+    per_entity: &[(u32, Vec<u32>)],
+    ctx: &FlushContext,
+) -> Result<tessera_store::manifest::EntityTermsExtent, FlushFailed> {
+    let extents_rel = format!("partitions/{}/entities/terms/extents", ctx.partition);
+    let extents_dir = ctx.prefix_dir.join(&extents_rel);
+    std::fs::create_dir_all(&extents_dir)
+        .map_err(|e| FlushFailed(format!("entity-terms extent dir: {e}")))?;
+    let extent = tessera_store::manifest::EntityTermsExtent {
+        hasrow: format!("{extents_rel}/{}.hasrow.roaring", ctx.seg_id),
+        offsets: format!("{extents_rel}/{}.offsets.u32", ctx.seg_id),
+        terms: format!("{extents_rel}/{}.terms.u32", ctx.seg_id),
+    };
+    let mut writer = tessera_store::EntityTermsWriter::create_at(
+        &ctx.prefix_dir.join(&extent.hasrow),
+        &ctx.prefix_dir.join(&extent.offsets),
+        &ctx.prefix_dir.join(&extent.terms),
+    )
+    .map_err(|e| FlushFailed(format!("entity-terms extent: {e}")))?;
+    for (entity, terms) in per_entity {
+        writer
+            .push(*entity, terms)
+            .map_err(|e| FlushFailed(format!("entity-terms extent: {e}")))?;
+    }
+    writer
+        .finish()
+        .map_err(|e| FlushFailed(format!("entity-terms extent: {e}")))?;
+    Ok(extent)
 }
 
 fn write_record_extent(

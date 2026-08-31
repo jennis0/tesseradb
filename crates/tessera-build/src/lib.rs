@@ -1208,6 +1208,34 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         other_paths.push(pairs_path);
     }
 
+    // ---- the entity->term transpose (contracts §2.4) --------------------------------------
+    //
+    // The postings answer *which entities carry term t*; this answers the other direction, which
+    // is what the drill-down's `labels` array intersects with the session's satisfied set
+    // (decision 0114) and what the join rule's label arm compares a second view's row against
+    // (`views.md` §4). Written from `staged` rather than by transposing `per_term`: `signature`
+    // *is* the item's sorted, deduplicated term list, and `position` is its entity id, so the base
+    // layer falls out of the same walk in the order the writer requires.
+    //
+    // **Unconditional, unlike `pairs.parquet`.** That file is an oracle input a deployment may
+    // legitimately omit; this one backs a request path and the write path's refusal, so a bundle
+    // without it would answer a drill-down short and accept a re-label through a second view.
+    let entity_terms_dir = partition_dir.join(tessera_store::ENTITY_TERMS_DIR);
+    let mut entity_terms = tessera_store::EntityTermsWriter::create(&entity_terms_dir)
+        .map_err(|e| BuildError::Invalid(format!("entity-terms transpose: {e}")))?;
+    for (position, item) in staged.iter().enumerate() {
+        entity_terms
+            .push(position as u32, &item.signature)
+            .map_err(|e| BuildError::Invalid(format!("entity-terms transpose: {e}")))?;
+    }
+    for path in entity_terms
+        .finish()
+        .map_err(|e| BuildError::Invalid(format!("entity-terms transpose: {e}")))?
+    {
+        fsync_file(&path)?;
+        other_paths.push(path);
+    }
+
     // Minting is opt-in (see `BuildArgs::mint_external_ids`): with it off, no extent and no
     // locator exist, which the reader treats as "no item has an external ID" — the ordinary
     // case, not a degraded one.
@@ -1724,6 +1752,9 @@ fn write_manifests(
         dict_extents,
         attr_extents: Vec::new(),
         record_extents: Vec::new(),
+        // The base transpose covers every entity the build knows about, exactly as the base
+        // record blob does; a flush's slices are the extents.
+        entity_terms_extents: Vec::new(),
         text_extents: Vec::new(),
         external_id_runs,
         locator_extents: Vec::new(),

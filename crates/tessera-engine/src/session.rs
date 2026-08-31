@@ -16,7 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use arc_swap::ArcSwap;
 use rand::rngs::OsRng;
 use rand::RngCore;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use sha2::{Digest, Sha256};
 
 use tessera_authz::{
@@ -257,6 +257,24 @@ pub struct Session {
     /// `Arc` so the row-projection cache's entry can carry it for the background refresh, which
     /// has no session registry to look it up in — see [`crate::cache::SessionGeometry`].
     pub(crate) satisfied_sorted: Arc<Vec<TermId>>,
+    /// **The descriptor this session's credential presented for each satisfied term** — the one
+    /// route by which a term ordinal becomes a string a viewer is shown (decision 0114).
+    ///
+    /// The drill-down's `labels` array is built from this map alone: an entity's own term list is
+    /// intersected with it, and a term the map does not hold has no name here and cannot be
+    /// served. That is the satisfied-only rule expressed as a data structure rather than as a
+    /// filter — a bug in the intersection can lose a label the viewer holds, and cannot invent one
+    /// they do not.
+    ///
+    /// **This is also why the bundle carries no reverse dictionary.** Resolving an ordinal to its
+    /// descriptor globally would need an index over every term the corpus knows — at the plugin's
+    /// declared 2×10⁸ terms, gigabytes of it — for a surface that may only ever name terms the
+    /// caller already handed in. The credential's own descriptors are bounded by
+    /// `max_terms_per_token` and are already in hand at authorise.
+    ///
+    /// `public` is here with a descriptor no credential supplied, exactly as it is in
+    /// [`Session::satisfied`] and for the same reason: it is the label every principal holds.
+    pub(crate) satisfied_descriptors: Arc<FxHashMap<TermId, Vec<u8>>>,
     /// **The visible-view set** (`views.md` §6): every view of every group this principal may
     /// reach, resolved once here at authorise and **fixed for this session's life**.
     ///
@@ -1293,6 +1311,14 @@ impl Engine {
                 .get(&partition)
                 .map(|p| p.manifest.text_extents.clone())
                 .unwrap_or_default();
+            // The entity→term transpose rides the same open (contracts §2.4): the base the build
+            // always writes plus every extent the side-manifest names, so a restart composes the
+            // labels of everything flushed since the build rather than answering "unknown" for it.
+            let entity_terms_extents = bundle
+                .partitions
+                .get(&partition)
+                .map(|p| p.manifest.entity_terms_extents.clone())
+                .unwrap_or_default();
             Arc::new(
                 crate::filter::FilterColumns::open(
                     &prefix_dir,
@@ -1306,6 +1332,7 @@ impl Engine {
                     &extents,
                     &record_extents,
                     &artifact_record_extents,
+                    &entity_terms_extents,
                     &text_extents,
                     // Mapped, for the reason `FilterColumns::open` gives: the engine opens every
                     // declared column at once and holds them for the process lifetime, so the
@@ -1701,11 +1728,16 @@ impl Engine {
         // descriptor that does not exist. Only `> 0` is ever read (`Session::is_stale`), but a
         // count that can be wrong for a reason unrelated to the dictionary is not one to keep.
         let mut satisfied: FxHashSet<TermId> = FxHashSet::default();
+        // The descriptor beside each ordinal, kept for the drill-down's `labels` array — see
+        // `Session::satisfied_descriptors`. Populated from the credential's own bytes and from
+        // nothing else, which is what makes the surface satisfied-only by construction.
+        let mut satisfied_descriptors: FxHashMap<TermId, Vec<u8>> = FxHashMap::default();
         let mut unresolved_count = 0usize;
         for descriptor in &auth_terms.terms {
             match generation.dict.lookup(descriptor) {
                 Some(term) => {
                     satisfied.insert(term);
+                    satisfied_descriptors.insert(term, descriptor.clone());
                 }
                 // An unknown descriptor is simply unsatisfied, never an error — and §3.3's
                 // observation is that the ones that drop out here are precisely this session's
@@ -1735,6 +1767,7 @@ impl Engine {
                 "`public` is reserved at term 0 by every build"
             );
             satisfied.insert(term);
+            satisfied_descriptors.insert(term, tessera_authz::PUBLIC_LABEL.to_vec());
         }
 
         // **The visible-view set, resolved here and never again** (`views.md` §6) — after the
@@ -1789,6 +1822,7 @@ impl Engine {
             satisfied,
             fragment,
             satisfied_sorted,
+            satisfied_descriptors: Arc::new(satisfied_descriptors),
             visible_views,
             auth_data_hash,
             expires_at,
@@ -2564,14 +2598,61 @@ impl Engine {
     /// a flush, for the join rule's label and attribute arms (`views.md` §4).
     ///
     /// `None` means the buffer has nothing to compare against, which is the ordinary case for an
-    /// entity ingested before the last flush. ⊘ **There is no entity→label oracle behind it**: the
-    /// bundle stores labels as postings, term by term, so what an already-flushed entity's label
-    /// *is* cannot be read back without a scan of every term. What keeps that gap from being a
-    /// hole is structural rather than procedural — a joining row carries no descriptors and no
-    /// filter-column value at all (`BufferedItem::join`), so a label supplied on one can neither
-    /// widen nor narrow anything.
+    /// entity ingested before the last flush — and for the label half of that comparison the
+    /// caller falls through to [`Engine::flushed_terms`], which reads the entity→term transpose.
     pub fn buffered_row(&self, entity: EntityId) -> Option<tessera_lifecycle::BufferedItem> {
         self.generation().buffer.get(entity).cloned()
+    }
+
+    /// An already-flushed entity's **full** term set, ascending, from the entity→term transpose
+    /// (contracts §2.4) — the join rule's label arm, once the entity's own row has left the buffer
+    /// (`views.md` §4).
+    ///
+    /// **The full set, and it never leaves the server.** This is the opposite surface from the
+    /// drill-down's `labels`, which serves the intersection with the asking session: this compares
+    /// a *writer's* batch against what the deployment already holds, and equality is the whole
+    /// question — an arm that compared only the terms the writer named would accept a batch that
+    /// dropped one. Nothing derived from it is returned; the refusal names the row, never a term.
+    ///
+    /// `None` where no layer holds a list for the entity, which is *unknown* rather than *empty*
+    /// and leaves the comparison unavailable exactly as an empty buffer does. `Some(vec![])` is a
+    /// real answer: an item may legitimately carry no label.
+    ///
+    /// **A malformed layer is `None`, not a wrong answer — and it is logged, not swallowed.** The
+    /// transpose refuses a bad offset pair rather than truncating
+    /// (`tessera_store::entity_terms`), and this is a *report*, not an authorisation: the join it
+    /// guards is inert either way (a joining row carries no descriptors), so a corrupt artefact
+    /// loses the refusal rather than turning a caller's batch into a server error. That is the
+    /// recoverable-and-discloses-nothing side of the line, where the posture is *report loudly and
+    /// let the operator decide* — so the warning below fires, and the same corruption is a hard
+    /// error on the drill-down path, which propagates it.
+    ///
+    /// **The warning names the artefact and not the entity** (**I10**, contracts §4). The
+    /// byte-scanner sweeps payloads *and logs* for entity ids, and `crate`'s store follows the
+    /// external-ID sidecar's rule at the same standard: the error carries the file and the shape
+    /// of the inconsistency, which is what an operator chasing a systematic build or flush defect
+    /// needs, and naming the slot buys nothing an entity-independent message does not.
+    pub fn flushed_terms(&self, entity: EntityId) -> Option<Vec<TermId>> {
+        let entity = u32::try_from(entity.raw()).ok()?;
+        let terms = match self
+            .generation()
+            .filter_columns
+            .entity_terms()
+            .terms_of(entity)
+        {
+            Ok(terms) => terms?,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "the entity->term transpose could not answer, so the join rule's label arm \
+                     has nothing to compare against and this batch's joins are accepted \
+                     unchecked (views §4). The artefact is a build or flush defect and the error \
+                     names the file; a fold rewrites it."
+                );
+                return None;
+            }
+        };
+        Some(terms.into_iter().map(TermId::new).collect())
     }
 
     pub fn resolve_external_ids(
@@ -3534,6 +3615,7 @@ pub(crate) fn open_rotation(
             // fold rewrites it, and the superseded prefix's files are pre-blanking.
             &partition.manifest.record_extents,
             &partition.manifest.artifact_record_extents,
+            &partition.manifest.entity_terms_extents,
             &partition.manifest.text_extents,
             true,
         )

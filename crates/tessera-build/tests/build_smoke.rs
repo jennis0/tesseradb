@@ -268,6 +268,11 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
         "partitions/default/terms/pairs.parquet",
         "partitions/default/entities/external-ids-0.arrow",
         "partitions/default/entities/ext-locator.u32",
+        // The entity→term transpose (contracts §2.4), unconditional: every entity has a label
+        // set, so a build always writes one, and a bundle without it refuses at open.
+        "partitions/default/entities/terms/hasrow.roaring",
+        "partitions/default/entities/terms/offsets.u32",
+        "partitions/default/entities/terms/terms.u32",
         "partitions/default/views/s0/permutation.bin",
         "partitions/default/views/s0/row-entity.u32",
         "partitions/default/views/s0/segments/seg-0/columns.arrow",
@@ -281,7 +286,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
     }
     assert_eq!(
         bundle.manifest.files.len(),
-        9,
+        12,
         "MANIFEST.json must list every build-written file and nothing else"
     );
 

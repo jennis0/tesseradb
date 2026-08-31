@@ -4,6 +4,7 @@
 
 pub mod coalesce;
 pub mod derived;
+pub mod entity_terms;
 pub mod error;
 pub mod flush;
 pub mod fold;
@@ -26,6 +27,10 @@ pub mod write;
 
 pub use coalesce::coalesce_external_id_runs;
 pub use coalesce::fold_external_id_runs;
+pub use entity_terms::{
+    EntityTerms, EntityTermsExtentPaths, EntityTermsStack, EntityTermsWriter, ENTITY_TERMS_DIR,
+    ENTITY_TERMS_HASROW_FILE, ENTITY_TERMS_OFFSETS_FILE, ENTITY_TERMS_TERMS_FILE,
+};
 pub use error::{Result, StoreError};
 pub use flush::{digest_of, write_flush_segment, FlushInput, FlushOutput, FlushRow};
 pub use fold::{fold_row_space, FoldRowSpaceOutput, FoldRowSpaceSpec, FoldSegmentInput};

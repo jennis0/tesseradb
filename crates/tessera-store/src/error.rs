@@ -129,6 +129,12 @@ pub enum StoreError {
     /// on purpose (see `crate::sidecar`'s module doc) — a `None` here would read as "no such
     /// external id" and could turn a WAL-resident suppression into a silent no-op.
     InvalidSidecar { path: PathBuf, detail: String },
+    /// The entity→term transpose (`entities/terms/`, contracts §2.4) failed closed: a has-row
+    /// bitmap that is not portable Roaring, an offsets array of the wrong length or not
+    /// ascending, or a terms file that does not end where the last offset says. Fail-closed
+    /// because a short answer here is a label the join rule's `409` would not see — see
+    /// `crate::entity_terms`'s module doc.
+    InvalidEntityTerms { path: PathBuf, detail: String },
     /// A directory entry in a partition directory is spelled like a `SEGMENTS-<n>.json` but is
     /// not the canonical name of any `n` (contracts §2.1): a leading zero, an empty or
     /// non-numeric part, a sign, whitespace, or a value past `u64`.
@@ -250,6 +256,13 @@ impl fmt::Display for StoreError {
             }
             StoreError::InvalidIdentity { detail } => {
                 write!(f, "invalid identity descriptor: {detail}")
+            }
+            StoreError::InvalidEntityTerms { path, detail } => {
+                write!(
+                    f,
+                    "invalid entity-terms transpose at {}: {detail}",
+                    path.display()
+                )
             }
             StoreError::InvalidSidecar { path, detail } => {
                 write!(

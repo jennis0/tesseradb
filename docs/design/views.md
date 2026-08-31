@@ -1,6 +1,13 @@
 # Views — design
 
 **Date:** 2026-08-30
+**Status:** Normative (r23) — **§4's join rule refuses a re-label past the entity's own flush**
+(r23, 2026-08-31; `contracts.md` §2.4 r63,
+[decision 0114](../decisions/0114-the-drill-down-serves-the-satisfied-labels-only.md)). The label
+arm's ⊘ is discharged: the bundle now carries the entity→term transpose the marker said did not
+exist, so the arm compares against the buffer and then against the transpose, and a second view's
+row naming a different label is the `409` the rule always specified rather than an accepted, inert
+row. The attribute half stays marked, with the cost of closing it stated. Nothing else moves.
 **Status:** Normative (r22) — **`render` on a group-scoped attribute reaches the row tail of each
 view of its group** (r22, 2026-08-31, owner ruling; contracts r62): the value is carried in the
 points batch of every view of the group, and of any group sharing those views via `members`, and
@@ -558,14 +565,26 @@ indistinguishable from its invisibility there (C4's closure).
 > writes no value for any of them. That is what makes a label supplied on a second view's row
 > *inert* rather than a widening with no overlay entry.
 >
-> ⊘ **The label and attribute arms are exact only while the entity's own row is still buffered.**
-> The refusals above compare against the buffer, which holds the entity's first row until its
-> flush; there is no entity→label oracle to compare against afterwards, because a bundle stores
-> labels as postings term by term and reading one back is a scan of every term. So a join naming
-> an already-flushed entity with a *different* label or attribute value is accepted rather than
-> refused — and changes nothing, the row carrying neither. What is lost is the report, not the
-> rule; an oracle for it would be a new entity-space read surface, which is an owner ruling rather
-> than an omission to fix in passing.
+> **The label arm is exact past the flush** (2026-08-31, `contracts.md` §2.4 r61,
+> [decision 0114](../decisions/0114-the-drill-down-serves-the-satisfied-labels-only.md)). The
+> entity→label oracle this marker said did not exist now does: the bundle carries the postings'
+> transpose, `entities/terms/`, written by the build and by every flush. So the arm compares
+> against the buffer while the entity's own row is still there and against the transpose
+> afterwards, and a join naming an already-flushed entity with a *different* label is the `409`
+> above rather than an accepted, inert row. A novel descriptor resolves to a process-local
+> extension id, which no stored ordinal can equal — so a batch naming a label this deployment has
+> never interned is a mismatch, which is right: the flushed entity cannot be carrying it. The read
+> is the **full** set and is server-side; the drill-down's `labels` array over the same artefact
+> serves the *intersection* with the asking session, which is a different question with a different
+> answer.
+>
+> ⊘ **The attribute arm is still exact only while the entity's own row is buffered.** An
+> entity-scoped value's server-side home is the filter column or the record blob, and reading it
+> back to compare would be a second value oracle across every declared family — a wider surface
+> than the label arm's one transpose, and a pass the fold and the coalesce would each owe. So a
+> join naming a flushed entity with a *different* value is accepted rather than refused, and
+> changes nothing: the row carries no filter-column value either. What is lost is the report, not
+> the rule.
 >
 > A **group-scoped** attribute is refused on every batch by construction rather than by this rule:
 > a scoped column is deliberately absent from `MANIFEST.declared_scalars` (spec §5), so a column
@@ -1130,6 +1149,12 @@ each view under spec §4's rule.
 
 ## Appendix R — review trail
 
+- **r23 (2026-08-31)** — §4's label arm is exact past a flush and its ⊘ is discharged; the
+  attribute half stays marked, with what it would cost stated. No design content changed: the rule
+  §4 states is the one it always stated, and what moved is that the deployment can now enforce it.
+  The oracle is `contracts.md` §2.4's `entities/terms/`, built for the drill-down's `labels` array
+  ([decision 0114](../decisions/0114-the-drill-down-serves-the-satisfied-labels-only.md)) and read
+  here for the full set it also holds.
 - **r22 (2026-08-31)** — spec §5's `render` marker is discharged and no design content changed.
   Built: each view's column of a rendered family permuted into that view's row space at the build,
   with its presence bitmap; a per-view, per-principal render list at the one site the head's names

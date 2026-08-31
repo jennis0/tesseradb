@@ -1950,6 +1950,52 @@ fn item_lookup_answers_exactly_m_auth_across_a_fold() {
     );
 }
 
+/// **The drill-down's satisfied labels survive a fold, and a folded-away entity's list is gone**
+/// (contracts §2.4's `entities/terms/`, [decision 0114](../../../docs/decisions/0114-the-drill-down-serves-the-satisfied-labels-only.md)).
+///
+/// The transpose stores **ordinals**, and the fold rewrites it while carrying the dictionary
+/// forward by hard link — so the failure this pins is a fold that renumbered, truncated or simply
+/// did not write the new base: an item's labels would come back wrong or empty against a
+/// dictionary that still means what it always did, and every other post-fold assertion in this
+/// file would stay green. The pre-fold answer is captured rather than written as a literal, so the
+/// test is about the fold and not about the fixture's labelling.
+#[test]
+fn an_items_labels_survive_a_fold_and_a_folded_away_entitys_list_goes_with_it() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
+
+    // Source 6 is a multiple of 3, so it carries both terms — the only shape where a fold that
+    // dropped or renumbered one ordinal is visible in this array rather than in its emptiness.
+    let kept = entity_of_source(&root, "v00000", 3);
+    let deleted = entity_of_source(&root, "v00000", 6);
+    let full = engine.authorise(&full_coverage_credential()).unwrap();
+    let kept_id: TesseraId = engine.tessera_id_of(kept).unwrap();
+    let deleted_id: TesseraId = engine.tessera_id_of(deleted).unwrap();
+
+    let before = engine.item(&full, kept_id, None).unwrap().unwrap().labels;
+    assert!(
+        !before.is_empty(),
+        "the fixture must label this item, or the assertion below holds vacuously"
+    );
+
+    engine
+        .accept_change(deleted, ChangeOp::Delete)
+        .expect("a delete is accepted");
+    fold(&engine);
+    assert_eq!(engine.generation().prefix, "v00001");
+
+    assert_eq!(
+        engine.item(&full, kept_id, None).unwrap().unwrap().labels,
+        before,
+        "the folded base carries the same ordinals against the same dictionary"
+    );
+    assert!(
+        engine.item(&full, deleted_id, None).unwrap().is_none(),
+        "and the folded-away entity answers nothing at all, list included"
+    );
+}
+
 /// **Obligation 11: an individual term ordinal is unchanged across a fold, not merely the total.**
 ///
 /// `prefix_rotation.rs`'s `dict.len()` equality is a headcount: a rotation that renumbered every
