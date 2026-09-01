@@ -21,7 +21,7 @@ export type Dataset = {
 
 export type ViewerConfig = {
   /**
-   * Every dataset a server is running for, from `datasets.json`.
+   * Every dataset a server is running for, from the document `?datasets=` names.
    *
    * Never empty: with no document to read, this falls back to a single entry built from the
    * environment, which is the shape every earlier version of this viewer had.
@@ -69,16 +69,20 @@ export function readConfig(): ViewerConfig {
 }
 
 /**
- * Load the dataset list — `datasets.json` if `run_demo.sh` wrote one, else the single server the
+ * Load the dataset list — the document `?datasets=<url>` names, else the single server the
  * environment names.
  *
  * **Fetched rather than imported**, and that is the point: a bundled import would fix the list at
  * build time, so restarting the demo against a different set of bundles would need a viewer rebuild.
- * It also means this file no longer has to be rewritten in the repository to change what is served —
- * the previous shape rewrote a *tracked* `presets.json` on every run.
  *
- * A missing or malformed document is not an error. Falling back keeps `npm run dev` against a
- * hand-started server working, which is what the environment variables are for.
+ * **The URL carries the location, and no path here is fixed.** `run_demo.sh` writes its document
+ * outside this package — the demo writes nothing into the source tree — and prints a URL naming it
+ * through Vite's `/@fs/` route. A viewer that fetched a fixed `/datasets.json` could only ever read
+ * a document sitting in `public/`, which is one slot per checkout and the reason two sessions
+ * overwrote each other's picker.
+ *
+ * A missing, unreachable or malformed document is not an error. Falling back keeps `npm run dev`
+ * against a hand-started server working, which is what the environment variables are for.
  */
 export async function loadDatasets(): Promise<Dataset[]> {
   const env = import.meta.env;
@@ -91,8 +95,13 @@ export async function loadDatasets(): Promise<Dataset[]> {
     sessionUrl: env.VITE_TESSERA_SESSION_URL ?? 'http://127.0.0.1:49303',
     presets: []
   };
+  const source =
+    typeof location === 'undefined'
+      ? null
+      : new URLSearchParams(location.search).get('datasets');
+  if (!source) return [fallback];
   try {
-    const response = await fetch('/datasets.json', {cache: 'no-store'});
+    const response = await fetch(source, {cache: 'no-store'});
     if (!response.ok) return [fallback];
     const body = (await response.json()) as {datasets?: Dataset[]};
     const datasets = (body.datasets ?? []).filter((d) => d.id && d.viewerUrl && d.sessionUrl);

@@ -132,13 +132,15 @@ above the explorer in the DOM still finds its store.
 
 Write a `tessera.toml` in this directory (untracked). **Every path in it resolves against the file
 itself**, and `tessera serve` finds it by walking up from wherever you run it — so the paths below
-are relative to `clients/ts/`:
+are relative to `clients/ts/`. What the run produces goes under `tessera-demo/` at the checkout
+root, which is gitignored: nothing a run writes belongs in the source tree, for the reason
+`run_demo.sh` gives at its head.
 
 ```toml
 [bundle]
 path = "../../data/bench-fixtures/2m4"
-cache = ".dev/cache"
-wal = ".dev/wal.log"
+cache = "../../tessera-demo/manual/cache"
+wal = "../../tessera-demo/manual/wal.log"
 
 [plugin]
 module = "builtin:passthrough"
@@ -157,30 +159,34 @@ operator_credential_env = "TESSERA_OPERATOR_CRED"
 dev_cors_origins = ["http://localhost:5173"]
 ```
 
-and `clients/ts/viewer/.env.local` (untracked):
-
-```
-VITE_TESSERA_VIEWER_URL=http://127.0.0.1:37585
-VITE_TESSERA_SESSION_URL=http://127.0.0.1:49303
-VITE_TESSERA_SESSION_CREDENTIAL=dev-session-credential
-```
-
-Then:
+Then, with the viewer's own configuration in the environment — Vite exposes `VITE_`-prefixed
+process variables to `import.meta.env` just as it does the ones in a file, and an exported variable
+leaves nothing behind under `clients/` for the next run to read:
 
 ```bash
 cargo build --release
-mkdir -p clients/ts/.dev
+mkdir -p tessera-demo/manual
 export TESSERA_SESSION_CRED=dev-session-credential
 export TESSERA_OPERATOR_CRED=dev-operator-credential
 ./target/release/tessera serve --deployment clients/ts/tessera.toml &
 
+export VITE_TESSERA_VIEWER_URL=http://127.0.0.1:37585
+export VITE_TESSERA_SESSION_URL=http://127.0.0.1:49303
+export VITE_TESSERA_SESSION_CREDENTIAL=dev-session-credential
+
 cd clients/ts && npm install
-node scripts/measure-principals.mjs --terms 0..200   # writes viewer/presets.json
+node scripts/measure-principals.mjs --terms 0..200 --out ../../tessera-demo/presets/manual.json
 npm run dev -w @tesseradb/viewer                       # http://localhost:5173
 ```
 
+One server needs no dataset document: with no `?datasets=` in the URL the viewer serves the single
+entry those three variables name. `run_demo.sh` is the route that measures several and offers a
+picker.
+
 The Vite port is `strictPort`: the origin is enumerated in `dev_cors_origins`, so a silent
-fallback to 5174 would produce a CORS failure that reads as a broken server.
+fallback to another port would produce a CORS failure that reads as a broken server. `VITE_PORT`
+moves it deliberately, and `run_demo.sh` writes whichever port it is given into the deployments it
+generates.
 
 ## Regenerating the two generated artifacts
 
@@ -233,7 +239,7 @@ until something publishes one:
 
 ```bash
 TESSERA_SESSION_CRED=… TESSERA_OPERATOR_CRED=… node scripts/publish-clusters.mjs \
-  --presets .dev/presets/2m4.json --clusters 24 --layer clusters/kmeans-v1
+  --presets ../../tessera-demo/presets/2m4.json --clusters 24 --layer clusters/kmeans-v1
 # and again, for the same clusters under an existence criterion:
 … --layer clusters/kmeans-v1-min1000 --min-visible 1000
 ```
@@ -277,10 +283,10 @@ point path names the same layers, which is what puts the membership column on ea
 
 ```bash
 TESSERA_SESSION_CRED=… TESSERA_OPERATOR_CRED=… node scripts/publish-clusters.mjs \
-  --presets .dev/presets/stage3.json --clusters 24 --layer centroids/kmeans-2026-08 \
+  --presets ../../tessera-demo/presets/stage3.json --clusters 24 --layer centroids/kmeans-2026-08 \
   --labels topics/ctfidf-2026-08 --label-term 46
 TESSERA_SESSION_CRED=… TESSERA_OPERATOR_CRED=… node scripts/check-labels.mjs \
-  --presets .dev/presets/stage3.json
+  --presets ../../tessera-demo/presets/stage3.json
 ```
 
 The first publishes a second layer of labels **attached** to those clusters, each carrying two
@@ -298,7 +304,7 @@ traverses no edge and would otherwise go on describing what was just hidden.
 
 ```bash
 TESSERA_SESSION_CRED=… TESSERA_OPERATOR_CRED=… node scripts/write-cycle-demo.mjs \
-  --presets .dev/presets/stage3.json            # add --dry-run to see the plan first
+  --presets ../../tessera-demo/presets/stage3.json            # add --dry-run to see the plan first
 ```
 
 The two above are read-only about the corpus. This one changes it: it publishes a small cluster and

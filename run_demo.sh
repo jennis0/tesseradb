@@ -20,6 +20,20 @@
 #   ./run_demo.sh --no-viewer     # servers only (for curl, the golden capture, the smoke script)
 #   ./run_demo.sh --rebuild       # discard and rebuild the demo bundles
 #
+# ## Where it writes — `./tessera-demo/`, and nothing in the source tree
+#
+# Bundles, cache, WALs, the generated `tessera-<scale>.toml` deployments, the measured presets, the
+# build timings and the dataset document all live under `./tessera-demo/` at the checkout root,
+# which is gitignored. `TESSERA_DEMO_DIR` names somewhere else — a second session on one checkout
+# wants its own, because the layout holds one slot per scale and two runs sharing it overwrite each
+# other's picker.
+#
+# Nothing is written under `clients/`. The viewer is told where the dataset document is through the
+# URL this script prints (`?datasets=/@fs/<absolute path>`), and its session credential through the
+# environment of the `npm run dev` process rather than a `.env.local`. `VITE_PORT` moves the viewer
+# off 5173, and whatever port it lands on is what the generated deployments enumerate in
+# `serve.dev_cors_origins`.
+#
 # ## The five scales, and why they differ
 #
 #     scale         items          prose indexed        bundle
@@ -87,16 +101,16 @@
 # any other mark, and deliberately carrying no counts: the count channel is what stops a superset
 # being read as density) and the server's stage breakdown.
 #
-# `http://localhost:5173/?prefetch=0` turns look-ahead off and leaves the cache on. That is the A/B
-# the measurements use: the cache decides what a request is *answered from*, look-ahead decides
-# what is *asked for*, and they are worth judging separately.
+# Adding `&prefetch=0` to the URL this script prints turns look-ahead off and leaves the cache on.
+# That is the A/B the measurements use: the cache decides what a request is *answered from*,
+# look-ahead decides what is *asked for*, and they are worth judging separately.
 #
-# `?dataset=25m` opens straight onto a scale, skipping the switch.
+# `&dataset=25m` opens straight onto a scale, skipping the switch.
 #
 # ## Recording a session — `?trace=1`
 #
-# `http://localhost:5173/?trace=1` records what you did, what the client did about it, and how long
-# each frame took, into a file you can hand to someone else. It exists because the browser-free
+# Adding `&trace=1` to the printed URL records what you did, what the client did about it, and how
+# long each frame took, into a file you can hand to someone else. It exists because the browser-free
 # harness (`probes/2026-08-09-client-pipeline/`) cannot see the three costs a user actually feels:
 # GPU upload, frame scheduling, and the delay between an input and the paint answering it.
 #
@@ -146,17 +160,21 @@ REPO="$PWD"
 # `data/` is gitignored, so it exists in the primary checkout and not in a worktree. Point
 # TESSERA_DATA at wherever the fixtures actually live.
 DATA="${TESSERA_DATA:-$REPO/data}"
-DEV="$REPO/clients/ts/.dev"                     # gitignored: cache, WAL, and the built bundles
-ENV_LOCAL="$REPO/clients/ts/viewer/.env.local"  # gitignored
-# Served by Vite from `public/`, and gitignored: it names what is actually running, which is a fact
-# about this invocation rather than about the repository. The viewer fetches it at startup, so
-# restarting against a different set of scales needs no rebuild — and, unlike the `presets.json` it
-# replaces, nothing tracked is rewritten by running the demo.
-DATASETS="$REPO/clients/ts/viewer/public/datasets.json"
+# Everything this run produces: the bundles, their caches and WALs, the generated deployments, the
+# measured presets and the timings. Directory-local rather than under `$HOME`, and gitignored —
+# running the demo writes nothing into the source tree, which is what lets two checkouts, or two
+# sessions with `TESSERA_DEMO_DIR` set, run it without overwriting each other.
+DEMO="${TESSERA_DEMO_DIR:-$REPO/tessera-demo}"
+# What is actually running, which is a fact about this invocation rather than about the repository.
+# The viewer fetches it at startup — restarting against a different set of scales needs no rebuild —
+# and is told where it is by the `?datasets=` parameter in the URL printed at the end, because the
+# document lives outside the viewer's package and Vite serves it over `/@fs/`.
+DATASETS="$DEMO/datasets.json"
 
 # Vite is `strictPort`, and this origin is what gets written into `dev_cors_origins`. A silent
-# fallback to 5174 would surface as a CORS failure that reads like a broken server.
-VITE_PORT=5173
+# fallback to another port would surface as a CORS failure that reads like a broken server. Set
+# `VITE_PORT` to run a second viewer beside one already holding 5173.
+VITE_PORT="${VITE_PORT:-5173}"
 
 export TESSERA_SESSION_CRED="${TESSERA_SESSION_CRED:-dev-session-credential}"
 export TESSERA_OPERATOR_CRED="${TESSERA_OPERATOR_CRED:-dev-operator-credential}"
@@ -373,13 +391,13 @@ print(json.load(open(m[-1]))['entity_id_high_water'] if m else 0)
 fi
 
 bundle_of() {
-  if [[ -n "$bundle_override" ]]; then echo "$bundle_override"; else echo "$DEV/bundle-$1"; fi
+  if [[ -n "$bundle_override" ]]; then echo "$bundle_override"; else echo "$DEMO/bundle-$1"; fi
 }
 
 # Which `tessera.toml` a scale is built and served against: the operator's under `--deployment`,
 # and otherwise the one `write_deployment` generates below.
 deployment_of() {
-  if [[ -n "$deployment_override" ]]; then echo "$deployment_override"; else echo "$DEV/tessera-$1.toml"; fi
+  if [[ -n "$deployment_override" ]]; then echo "$deployment_override"; else echo "$DEMO/tessera-$1.toml"; fi
 }
 
 # ------------------------------------------------------------------------------------ the builds
@@ -395,12 +413,12 @@ write_deployment() {
   [[ -n "$deployment_override" ]] && return 0
   local scale="$1" bundle
   bundle="$(bundle_of "$scale")"
-  mkdir -p "$DEV/$scale"
-  cat > "$DEV/tessera-$scale.toml" <<EOF
+  mkdir -p "$DEMO/$scale"
+  cat > "$DEMO/tessera-$scale.toml" <<EOF
 [bundle]
 path  = "$bundle"
-cache = "$DEV/$scale/cache"
-wal   = "$DEV/$scale/wal.log"
+cache = "$DEMO/$scale/cache"
+wal   = "$DEMO/$scale/wal.log"
 
 [build]
 schema = "$(schema_of "$scale")"
@@ -472,7 +490,7 @@ build_scale() {
   done
 
   say "building the $scale bundle ($(items_of "$scale") items)"
-  mkdir -p "$DEV"
+  mkdir -p "$DEMO"
   write_deployment "$scale"
 
   # **Minting is dropped above 10⁸ items, and the reason is a pass the memory budget cannot
@@ -540,17 +558,17 @@ build_scale() {
            -p "MemorySwapMax=0")
   fi
   "${scope[@]}" \
-  /usr/bin/time -v -o "$DEV/build-$scale.time" \
+  /usr/bin/time -v -o "$DEMO/build-$scale.time" \
   "$BIN" build \
     --deployment "$(deployment_of "$scale")" \
     "${limit[@]}" \
     ${TESSERA_BUILD_MEMORY_BUDGET:+--memory-budget "$TESSERA_BUILD_MEMORY_BUDGET"} \
     $mint_external --mint-id-key --no-oracle-pairs
   local peak
-  peak=$(awk '/Maximum resident set size/ {printf "%.1f GiB", $NF / 1048576}' "$DEV/build-$scale.time")
+  peak=$(awk '/Maximum resident set size/ {printf "%.1f GiB", $NF / 1048576}' "$DEMO/build-$scale.time")
   printf 'built %s in %dm%02ds, peak %s, %s on disk\n' \
     "$scale" "$(( (SECONDS - t0) / 60 ))" "$(( (SECONDS - t0) % 60 ))" \
-    "$peak" "$(du -sh "$bundle" | cut -f1)" | tee -a "$DEV/build-times.txt"
+    "$peak" "$(du -sh "$bundle" | cut -f1)" | tee -a "$DEMO/build-times.txt"
 }
 
 if [[ -z "$bundle_override" ]]; then
@@ -613,11 +631,15 @@ start_scale() {
 
 for scale in "${scales[@]}"; do start_scale "$scale"; done
 
-cat > "$ENV_LOCAL" <<EOF
-VITE_TESSERA_VIEWER_URL=http://127.0.0.1:$(viewer_of "${scales[0]}")
-VITE_TESSERA_SESSION_URL=http://127.0.0.1:$(session_of "${scales[0]}")
-VITE_TESSERA_SESSION_CREDENTIAL=$TESSERA_SESSION_CRED
-EOF
+# The viewer's configuration, in the environment rather than in a `.env.local` under `clients/`:
+# Vite exposes `VITE_`-prefixed process variables to `import.meta.env` exactly as it does the ones
+# in a file, and a variable leaves nothing behind for the next run — or the next session — to read.
+# These name the *fallback* server, which is what the viewer uses when no dataset document reaches
+# it; the picker's entries come from `$DATASETS`.
+export VITE_TESSERA_VIEWER_URL="http://127.0.0.1:$(viewer_of "${scales[0]}")"
+export VITE_TESSERA_SESSION_URL="http://127.0.0.1:$(session_of "${scales[0]}")"
+export VITE_TESSERA_SESSION_CREDENTIAL="$TESSERA_SESSION_CRED"
+export VITE_PORT
 
 cd "$REPO/clients/ts"
 [[ -d node_modules ]] || { say "npm ci"; npm ci; }
@@ -633,7 +655,7 @@ cd "$REPO/clients/ts"
 # are counted from the same column here, in the same `[{term, pairs}]` shape, so the one script
 # composes the same five bands over both — narrow, sparse, medium, heavy, full.
 say "measuring principals per dataset"
-mkdir -p "$(dirname "$DATASETS")" "$DEV/presets"
+mkdir -p "$(dirname "$DATASETS")" "$DEMO/presets"
 RANKS="$DATA/scaled/pairs/categories-subclass.pairs.parquet.term-ranks.json"
 for scale in "${scales[@]}"; do
   terms="${terms_override:-0..200}"
@@ -641,7 +663,7 @@ for scale in "${scales[@]}"; do
   # merely unhelpful for it — it names terms this bundle does not have.
   ranks="${ranks_override:-$([[ -n "$terms_override" ]] && echo '' || echo "$RANKS")}"
   if [[ -n "$(notebook_dir_of "$scale")" ]]; then
-    ranks="$DEV/presets/$scale.term-ranks.json"
+    ranks="$DEMO/presets/$scale.term-ranks.json"
     terms="$(python3 - "$(notebook_dir_of "$scale")/points.parquet" "$ranks" <<'CANDIDATES'
 import collections, json, sys
 import pyarrow.parquet as pq
@@ -657,12 +679,12 @@ CANDIDATES
   node scripts/measure-principals.mjs \
     --viewer "http://127.0.0.1:$(viewer_of "$scale")" \
     --session "http://127.0.0.1:$(session_of "$scale")" \
-    --terms "$terms" --out "$DEV/presets/$scale.json" \
+    --terms "$terms" --out "$DEMO/presets/$scale.json" \
     $([[ -f "$ranks" ]] && echo --ranks "$ranks")
 done
 
 # This run's entries, one per scale, in the order given: the viewer opens on the first.
-fresh="$DEV/presets/datasets-this-run.json"
+fresh="$DEMO/presets/datasets-this-run.json"
 {
   echo '['
   first=1
@@ -683,7 +705,7 @@ fresh="$DEV/presets/datasets-this-run.json"
       "$scale" "$label" "$(items_of "$scale")" "$(prose_of "$scale")"
     printf '"viewerUrl":"http://127.0.0.1:%s","sessionUrl":"http://127.0.0.1:%s","presets":' \
       "$(viewer_of "$scale")" "$(session_of "$scale")"
-    cat "$DEV/presets/$scale.json"
+    cat "$DEMO/presets/$scale.json"
     printf '}'
   done
   echo ']'
@@ -718,7 +740,14 @@ if [[ $run_viewer -eq 0 ]]; then
   exit 0
 fi
 
-say "viewer on http://localhost:$VITE_PORT — Ctrl-C to stop everything"
+# **The whole URL matters, not just the port.** The dataset document is outside the viewer's
+# package, so the viewer is handed its location rather than fetching a fixed path: Vite serves any
+# file under an allowed root at `/@fs/<absolute path>` (`vite.config.ts` allows `$DEMO`), and
+# `?datasets=` names it. Opening the bare port still works and falls back to the single server the
+# environment above names — one entry, no picker.
+VIEWER_URL="http://localhost:$VITE_PORT/?datasets=/@fs$DATASETS"
+
+say "viewer on $VIEWER_URL — Ctrl-C to stop everything"
 echo "Opens on the broadest principal, the largest mark budget, coloured by archive."
 echo
 echo "Filters are in the left column, driven by what each bundle publishes as filterable."
@@ -727,6 +756,7 @@ echo "  Watch 'visible' hold and 'matched' fall in Counts — the filter never m
 echo "  'exact phrase' is ~200x the cost of 'all words'; reach for it deliberately."
 echo
 echo "To watch the replica: zoom in a few notches, then pan away and back."
-echo "To record a session for someone else: add ?trace=1, press m when it feels wrong, download."
-echo "http://localhost:$VITE_PORT/?prefetch=0 turns look-ahead off, cache still on, for comparison."
+echo "To record a session for someone else: add &trace=1, press m when it feels wrong, download."
+echo "Add &prefetch=0 to turn look-ahead off, cache still on, for comparison."
+echo "The smoke scripts take the whole URL: --url '$VIEWER_URL'"
 npm run dev -w @tesseradb/viewer

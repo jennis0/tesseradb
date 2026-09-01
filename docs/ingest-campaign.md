@@ -491,11 +491,14 @@ in three places and no selector exists. The design for holding and switching bet
 `design/view-switching.md`, on branch `client/view-switching` with its implementation tracks, not
 yet merged.
 
-⊘ **`run_demo.sh` writes into `clients/ts/`** — 5.5 GB of bundles, WAL and cache under `.dev/`, the
-viewer's `public/datasets.json`, an `.env.local` — and holds port 5173, so two sessions on one
-checkout overwrite each other's demo. **Ruled 2026-09-01: it moves to `./tessera-demo/` in the
-checkout, gitignored, and the viewer takes its dataset list from the URL.** Not done; its own
-change.
+**`run_demo.sh` wrote into `clients/ts/`** — 5.5 GB of bundles, WAL and cache under `.dev/`, the
+viewer's `public/datasets.json`, an `.env.local` — and held port 5173, so two sessions on one
+checkout overwrote each other's demo. **Ruled 2026-09-01, and done the same day**: everything it
+produces is under `./tessera-demo/` in the checkout (`TESSERA_DEMO_DIR` moves it), gitignored; the
+viewer is handed its dataset list by the URL the script prints (`?datasets=/@fs/<path>`, served
+through Vite's `fs.allow`) and its session credential through the environment of the `npm run dev`
+process; and `VITE_PORT` chooses the viewer's port, which is the one written into every
+`dev_cors_origins` the script generates.
 
 ## 5. The machinery this campaign built
 
@@ -623,7 +626,6 @@ depth, `parent_ids` on the wire and the client — the engine and client tracks'
 
 **Before rung 3**
 
-- **`run_demo.sh` out of `clients/ts/` and into `./tessera-demo/`** (§4.5), ruled and not done.
 - The DAG design above, reviewed and ruled.
 - Rung 0, still not taken. It confirms W1 and W2 reproduce and whether the pre-flight refuses rather
   than being killed. ⊘ Rung 2 passed without either wall firing (§3), which is a reason to want the

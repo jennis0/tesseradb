@@ -70,7 +70,8 @@ export const isSupersededAbort = (text) => /ERR_INCOMPLETE_CHUNKED_ENCODING/.tes
 /**
  * Add query parameters to a URL that may already carry some.
  *
- * `?dataset=<id>` is how a run chooses which of `datasets.json`'s servers to drive, and `?prefetch=0`
+ * `?dataset=<id>` is how a run chooses which of the dataset document's servers to drive (the
+ * document itself is named by `?datasets=`, which `run_demo.sh` prints), and `?prefetch=0`
  * is the look-ahead knob two of these scripts turn; a script given `--url …/?dataset=notebook-2m4`
  * has to add the second without dropping the first.
  *

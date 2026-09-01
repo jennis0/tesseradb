@@ -3,7 +3,7 @@
 // something to draw.
 //
 //   TESSERA_SESSION_CRED=… TESSERA_OPERATOR_CRED=… node clients/ts/scripts/publish-clusters.mjs \
-//     --presets clients/ts/.dev/presets/2m4.json --clusters 24 [--min-visible 400]
+//     --presets tessera-demo/presets/2m4.json --clusters 24 [--min-visible 400]
 //
 // The clustering is k-means over a sample of the corpus's own points, and it is deliberately
 // unremarkable: **what this exists to demonstrate is the masking, not the clustering.** Two
