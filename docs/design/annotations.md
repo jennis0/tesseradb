@@ -582,10 +582,11 @@ wherever one passing artifact is the nearest passing ancestor of another; depth 
 passing artifacts, and one with no passing ancestor is a root of that tree. So the served set at
 every depth is identical to the world in which the withheld artifact never existed, which is what
 C29's *indistinguishable from one that never existed* means for the cut, and substitution stays
-honest because containment is transitive. ⊘ **The implementation walks the whole level today** —
-a withheld artifact still occupies a rung and the climb passes through it, so a budget's settling
-depth is a function of artifacts the viewer may not see, one bit per budget sweep about a region's
-structure. Being corrected, not registered; [`dag-hierarchies.md`](dag-hierarchies.md) §6 carries the example and the fix. The rule holds
+honest because containment is transitive. **Until 2026-09-01 the implementation walked the whole level** —
+a withheld artifact occupied a rung and the climb passed through it, so a budget's settling depth
+was a function of artifacts the viewer may not see, one bit per budget sweep about a region's
+structure. Corrected that day rather than registered; [`dag-hierarchies.md`](dag-hierarchies.md) §6
+carries the example, the fix and its measured cost. The rule holds
 for the `dag` kind identically, where the nearest passing ancestor is a set.
 
 **What remains is frontier *selection*, which is a display concern.** Where a parent and a child both

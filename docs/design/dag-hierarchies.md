@@ -5,9 +5,11 @@
 is not in the viewer's tree. Reviewed once under two lenses and ruled by [decision 0117](../decisions/0117-a-child-may-name-several-parents.md) (2026-09-01); the
 rulings are folded into [`configuration.md`](configuration.md) (the `hierarchy` row and the kinds
 table), [`artifacts-from-points.md`](artifacts-from-points.md) §4, [`annotations.md`](annotations.md)
-§6 r9, [`contracts.md`](contracts.md) §3.2 r71 and `architecture.md` C29 r57. ⊘ **Nothing here is
-built yet**: a layer declaring the kind is refused at registration, a child naming two parents
-refuses the build and the batch, and the cut walks the whole level. Each is marked at its claim.
+§6 r9, [`contracts.md`](contracts.md) §3.2 r71 and `architecture.md` C29 r57. **Built 2026-09-01** on
+the server side — the kind, the record, the build and ingest sides (branch `dag/store`), and the cut
+over the viewer's tree, the membership column's rank and `parent_ids` on the wire (branch
+`dag/engine`), both reviewed and merged; the TypeScript client follows on `dag/client`. ⊘ No
+corpus declares the kind yet — rung 3's is the first, and `places/containment` the second.
 
 ## 1. What this answers
 
@@ -212,25 +214,30 @@ withheld is indistinguishable from one that never existed* means for the cut. Su
 honest because containment is transitive: the nearest passing ancestor contains everything the
 withheld node did.
 
-**The implementation does not do this today, on a tree either.** A lineage is built from every
-record of the level, deliberately — *an ancestor that failed its own criterion is still an
+**The implementation did not do this before 2026-09-01, on a tree either.** A lineage was built
+from every record of the level, deliberately — *an ancestor that failed its own criterion is still an
 ancestor* — so a withheld node still occupies a rung and the climb passes through it. Tree example:
 R→X→{C1, C2} and R→D, X withheld, everything else passing. Counts by depth are 1, 2, 3 with X and
 1, 3 without, so a budget of 2 serves {R, D} in one world and {R} in the other, and a viewer
 sweeping budgets learns that a coarser artifact sits between R and C1 which they may not see. A DAG
 widened it — a withheld *sibling path* moved the cut while the served parent was fully visible, and
 longest-path depth counted withheld nodes on the longer path — which is how the review found it.
-Under the rule above neither input exists. The fix is in the same pass: the plan is already a
+Under the rule above neither input exists. The fix is in the same pass, and is built: the plan is a
 per-request sweep of the level against the viewer's passing set, and counting depth in passing
 nodes is one more value in that pass, not a per-request structure; the per-generation lineage keeps
-the parent lists and the child index, and its cached depth is no longer what the cut reads. The
+the parent lists and the child index, and its cached depth is only the sweep's order. Measured at
+10⁷ treed artifacts, two thirds passing: the lineage build fell from 96 to 78 ms and the dense
+budgeted sweep rose from 173 to 218 ms, the whole of the rise being the one extra shallowest-first
+pass over passing nodes this rule requires. The
 top-down walk is unaffected, running only where everything above the cut passes. Treating a
 withheld node as a wall instead — its descendants unable to climb past it, served as fallbacks — was
 considered and is wrong twice: the output still differs from the world without the node, and the
 budget is exceeded.
 
 **The membership column** (`membership:<layer>`, contracts §3.2 item 3) names the deepest served
-artifact of the layer holding the point. On a tree that is unique; on a DAG and on a flat layer with
+artifact of the layer holding the point, **deepest by the response-local rung** — the review found
+the stored depth would rank two incomparable served artifacts by withheld nodes between them, the
+channel ruling E closes; the rung is computed over the served set before the column is resolved. On a tree that is unique; on a DAG and on a flat layer with
 multi-membership two served artifacts may hold the point at one depth. The artifact-major route
 iterates a `HashMap` of the served set and takes *the ordinal if it is deeper than what it holds*,
 so **the tie is decided by hash order today, on a flat multi-membership layer as much as on a
