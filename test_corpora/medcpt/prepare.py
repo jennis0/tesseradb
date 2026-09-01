@@ -208,7 +208,9 @@ def read_staged(out: Path, take: np.ndarray, columns) -> pa.Table:
     meta = json.loads((staging / "vectors.json").read_text())
     pieces = []
     for n in sources.CHUNKS:
-        held = meta["chunks"][str(n)]
+        held = meta["chunks"].get(str(n))
+        if held is None:  # not staged, so `take` names none of its rows; the row count is asserted
+            continue
         lo, hi = held["offset"], held["offset"] + held["rows"]
         first = int(np.searchsorted(take, lo))
         last = int(np.searchsorted(take, hi))
