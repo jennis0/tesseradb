@@ -66,7 +66,7 @@ function responseCovering(req: FakeRequest, served = 3): ViewportResponse {
       box: null,
       shape: null,
       content: [],
-      parentId: null,
+      parentIds: [],
       rung: 0,
       matched: null
     }
