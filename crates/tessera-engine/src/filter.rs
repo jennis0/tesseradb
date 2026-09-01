@@ -751,14 +751,18 @@ pub fn extent_column_name(column: &str, view: Option<&str>) -> String {
 /// [`scoped_is_filterable`] and answers `Unknown` before any column is looked up, so opening one
 /// here puts nothing on the filter surface.
 ///
-/// ⊘ **Pending `ScopedScalar::has_value_column()`**, which lands with the drill-down's own branch;
-/// the two say the same thing and the store's helper is the one to keep.
+/// The rule itself is [`ScopedScalar::has_value_column`], one crate down beside its licence
+/// sibling; this is the engine's name for it and nothing more.
 pub fn scoped_has_value_column(scoped: &tessera_store::manifest::ScopedScalar) -> bool {
-    scoped.arrow_type != tessera_spatial::tiler::ScalarType::Text
+    scoped.has_value_column()
 }
+///
+/// **The rule itself is `ScopedScalar::is_filterable`**, one crate down, because the build decides
+/// what to *write* on the same licence and `check-layers.sh` denies the build this crate. This is
+/// the engine's name for it and nothing more.
 
 pub fn scoped_is_filterable(scoped: &tessera_store::manifest::ScopedScalar) -> bool {
-    scoped.index || (scoped.render && Family::of_scoped(scoped) != Family::Text)
+    scoped.is_filterable()
 }
 
 /// Does this scoped family's per-view column carry keyed postings — the build's
@@ -803,6 +807,12 @@ fn open_scoped_column(
     mmap: bool,
 ) -> std::io::Result<(String, Placement, Layers)> {
     let scoped_family = Family::of_scoped(family);
+    // **A family with neither flag is opened and is not filterable** (owner ruling 2026-09-01).
+    // Its per-view column is on disc exactly as an indexed one's is, and the drill-down reads one
+    // entity's value out of it — so the column is held here, `filterable: false`, which is the
+    // same standing an entity-scoped `derived` category with neither flag already has: `resolve`
+    // refuses it by name and `FilterColumns::stored_value` answers from it.
+    let filterable = family.is_filterable();
     // The analyser a text family's terms were produced by: an analyser this binary does not carry
     // is the same refusal an entity-scoped text column's is — a `match` answered from a different
     // segmentation is a wrong answer wearing a correct one's clothes.
@@ -853,7 +863,7 @@ fn open_scoped_column(
                 declared_index,
                 layers: Vec::new(),
                 covered: Bitmap::new(),
-                filterable: true,
+                filterable,
                 postings: None,
                 analyser,
                 text,
@@ -1733,17 +1743,29 @@ impl FilterColumns {
         // unchanged, every value being indexed by entity and every predicate answering a bitmap
         // in entity space that the mask meets before any permutation.
         //
-        // A family this build serves no route for is skipped rather than half-opened
-        // ([`scoped_is_filterable`]): its columns are on disc and on no surface, and a leaf
-        // naming it is refused as an undeclared column is.
+        // **Every family with a value column on disc is opened; only a filterable one takes a
+        // placement.** The drill-down serves a scoped family's values whatever its flags (owner
+        // ruling 2026-09-01), which is what gives a declaration with neither `index` nor `render`
+        // its meaning — stored, served at `POST /v1/items`, on no filter surface and in no row
+        // tail. Holding a column without a placement is exactly the standing an entity-scoped
+        // `derived` category with neither flag already has: `placement` is `None`, `resolve`
+        // refuses the name as undeclared, and `stored_value` answers from it.
+        //
+        // `text` is the one family skipped, and skipped because there is nothing to read: it has
+        // no per-entity value slot at all, so no drill-down could serve it either. An unindexed
+        // scoped `text` column is refused at the declaration, so a text family here is always
+        // filterable and always takes the branch below.
         for family in scoped {
-            if !scoped_is_filterable(family) && !scoped_has_value_column(family) {
+            if !family.has_value_column() && !scoped_is_filterable(family) {
+
                 continue;
             }
             for view_id in &family.views {
                 let (name, placement, layers) =
                     open_scoped_column(&partition_dir, family, view_id, vocabularies, mmap)?;
-                placements.insert(name.clone(), placement);
+                if scoped_is_filterable(family) {
+                    placements.insert(name.clone(), placement);
+                }
                 columns.insert(name, layers);
             }
         }
@@ -1833,6 +1855,21 @@ impl FilterColumns {
     /// for why it lives here.
     pub fn entity_terms(&self) -> &tessera_store::EntityTermsStack {
         &self.entity_terms
+    }
+
+    /// The access mode every layer of this generation was opened with — what a re-derived stack
+    /// must be opened with too, or a publication would swap a mapped reader for a read one under
+    /// a live request.
+    pub(crate) fn access(&self) -> tessera_filter::Access {
+        self.access
+    }
+
+    /// How many layers the record blob's stack holds — the base, if the schema has a
+    /// blob-resident column, plus one per published extent. Operator- and test-facing: nothing on
+    /// the wire carries it, and it is how a coalesce's publication can be asserted to have
+    /// *shrunk* the live stack rather than merely the manifest.
+    pub fn record_layers(&self) -> usize {
+        self.records.layer_count()
     }
 
     /// The route affordances of one filterable column, or `None` where the column is not
@@ -2164,6 +2201,7 @@ impl FilterColumns {
         windows: &[CoalescedWindow],
         texts: &[CoalescedTextWindow],
         entity_terms: Option<Arc<tessera_store::EntityTermsStack>>,
+        records: Option<Arc<RecordStack>>,
     ) -> std::io::Result<FilterColumns> {
         let entity_terms = match entity_terms {
             None => Arc::clone(&self.entity_terms),
@@ -2186,11 +2224,25 @@ impl FilterColumns {
                 next
             }
         };
+        // **The record axis's stack is replaced, not carried through** — the same rule the
+        // transpose above takes, and it had the same defect the transpose was fixed for: a
+        // coalesce that folded a window of record extents into one edited the manifest and left
+        // the live stack holding the layers it had consumed, so the running process kept probing
+        // them until a restart while a reopen of the same bundle held one. Nothing served a wrong
+        // answer — the layers are disjoint in entity space (I9), so an extra layer answers for
+        // the entities it always answered for — but the cost the coalesce exists to remove stayed
+        // until a restart removed it, and the process and its own manifest disagreed about what
+        // it was serving from. `None` where the axis did not run, in which case the live stack
+        // rides through untouched, which is the ordinary case.
+        let records = match records {
+            None => Arc::clone(&self.records),
+            Some(next) => next,
+        };
         let mut next = FilterColumns {
             columns: self.columns.clone(),
             placements: self.placements.clone(),
             access: self.access,
-            records: Arc::clone(&self.records),
+            records,
             entity_terms,
         };
         for window in windows {

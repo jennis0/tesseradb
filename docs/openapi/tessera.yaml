@@ -413,6 +413,14 @@ paths:
         base64, present only where one exists — the only place a caller external id appears on
         this plane.
 
+        **The whole permitted picture of one point** (owner ruling 2026-09-01): beside the record,
+        `views` names every view the item is in **that this principal may reach**, with the
+        position each view places it at, and `scoped` carries the group-scoped attribute values
+        keyed by the group's key. Both are gate-filtered against the session's visible-view set, so
+        a point held only in views this principal cannot reach serves exactly what it served
+        before — an empty `views` and no scoped entries — and nothing on this route names a
+        gate-failed view.
+
         `404 unknown` is returned identically for *no such id* and *exists but not visible* — same
         status, same code, same detail, and the same work. Behind the compute-admission gate.
       security:
@@ -1338,7 +1346,7 @@ components:
     ItemResponse:
       type: object
       additionalProperties: false
-      required: [fields, labels]
+      required: [fields, labels, views, scoped]
       properties:
         fields:
           type: object
@@ -1359,6 +1367,53 @@ components:
             the item's full label set: a viewer must not learn a compartment they do not hold, so
             every string here is one the credential itself presented. Always present; empty where
             this principal satisfies none of the item's labels, which is a fact and not an absence.
+        views:
+          type: array
+          description: |
+            **The views this item is in that this principal may reach**, sorted by id, each with
+            the position that view places it at. **Gate-filtered**: a view the session's gate
+            refuses is absent exactly as a view nobody declared is, so this is never the place a
+            gate-failed view is named. Always present; `[]` says *none of this item's views is one
+            you may reach* and says nothing else — an item in no view at all is a `404` before this
+            field is built, so it is a different response rather than the other reading of an empty
+            array.
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, x, y]
+            properties:
+              id:
+                type: string
+                description: The view's id — a plain view's name or `<group>:<key>`.
+              x:
+                type: integer
+                minimum: 0
+                maximum: 4294967295
+                description: |
+                  The horizontal axis in **this view's own grid units** — 32-bit fixed point
+                  against the frame `/v1/meta` publishes for *this* view (decision 0040), which is
+                  the same quantity the viewport's Morton codes decode to. Deinterleaved
+                  server-side: a JSON number cannot carry a 64-bit code exactly.
+              y:
+                type: integer
+                minimum: 0
+                maximum: 4294967295
+                description: The vertical axis, on `x`'s terms.
+        scoped:
+          type: object
+          description: |
+            **The group-scoped attribute values, by family name and then by the group's key**
+            (`views.md` §5) — `{"mood": {"2026-Q1": "calm"}}`. The key is a view's only address
+            (decision 0113), so two views sharing a key through a `members` group share one entry.
+            Which group a family's keys belong to is on `/v1/meta`'s `scoped_scalars` and is not
+            repeated here. Gate-filtered per key on the same set `views` is; a family with no
+            reachable key, one this item carries no value under, and a `text` family — which has
+            no per-entity value slot — are all absent rather than empty. Always present; `{}` is
+            the ordinary answer for a corpus whose attributes are all entity-scoped.
+          additionalProperties:
+            type: object
+            additionalProperties:
+              type: [number, string, boolean]
 
     ArtifactRequest:
       type: object

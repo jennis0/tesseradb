@@ -1908,6 +1908,35 @@ struct ItemResp {
     /// different fact from an endpoint that does not answer the question, and a client rendering
     /// a "why can I see this" panel needs the first to be sayable. It costs two bytes.
     labels: Vec<String>,
+    /// **The views this item is in that this principal may reach**, sorted by id, each with the
+    /// position that view places it at (contracts §3.2 r68; owner ruling 2026-09-01).
+    ///
+    /// Gate-filtered: a view the session's gate refuses is absent exactly as a view nobody
+    /// declared is, so this array is never the place a gate-failed view is named. Always present,
+    /// empty included — `[]` says *none of this item's views is one you may reach*, and it says
+    /// nothing else: an item in no view at all is a `404` before this field is built, so it is not
+    /// the other reading of an empty array but a different response entirely.
+    views: Vec<ItemViewDto>,
+    /// **The group-scoped attribute values, by family name and then by the group's key**
+    /// (`views.md` §5) — `{"mood": {"2026-Q1": "calm"}}`. The key is a view's only address
+    /// (decision 0113), so two views sharing a key through a `members` group share one entry.
+    ///
+    /// Which group a family's keys belong to is on `/v1/meta`'s `scoped_scalars` and is not
+    /// repeated here. Gate-filtered per key on the same set `views` is; a family with no reachable
+    /// key, and one this item carries no value under, are both absent rather than empty.
+    scoped: serde_json::Map<String, serde_json::Value>,
+}
+
+/// One entry of [`ItemResp::views`]: a view this item is in, and where that view puts it.
+#[derive(Debug, Serialize)]
+struct ItemViewDto {
+    id: String,
+    /// The two axes in **this view's own grid units** — 32-bit fixed point against the frame
+    /// `/v1/meta` publishes for this view, which is the same quantity the viewport's Morton codes
+    /// decode to. Deinterleaved server-side rather than shipped as the 64-bit code: a JSON number
+    /// cannot carry one exactly, and the viewport's binary payload is the surface that ships codes.
+    x: u32,
+    y: u32,
 }
 
 /// `engine.item`'s sidecar read plus the scalar/external-id shaping that follows it — the CPU-bound
@@ -1965,22 +1994,36 @@ fn run_item(
         // value, not of its storage width, and a client reading `severity: 3` should not have to
         // know the column is a `u8`. The width is a residency decision (per-point-attributes
         // §3.6), and `/v1/meta` publishes it for a client that does care.
-        .map(|f| {
-            macro_rules! arms {
-                ($($v:ident),* $(,)?) => {
-                    match f.value {
-                        $(tessera_engine::ScalarOut::$v(v) => serde_json::json!(v),)*
-                        tessera_engine::ScalarOut::Utf8(v) => serde_json::json!(v),
-                    }
-                };
-            }
-            (f.name, scalar_families!(arms))
-        })
+        .map(|f| (f.name, scalar_out_json(f.value)))
         .collect();
 
     let external_id = item
         .external_id
         .map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes));
+
+    // Both gate-filtered inside the engine, against the session's own `visible_views` — this
+    // layer holds no gate and evaluates nothing; it renames the fields.
+    let views = item
+        .views
+        .into_iter()
+        .map(|v| ItemViewDto {
+            id: v.id,
+            x: v.x,
+            y: v.y,
+        })
+        .collect();
+    let scoped = item
+        .scoped
+        .into_iter()
+        .map(|family| {
+            let values: serde_json::Map<String, serde_json::Value> = family
+                .values
+                .into_iter()
+                .map(|(key, value)| (key, scalar_out_json(value)))
+                .collect();
+            (family.name, serde_json::Value::Object(values))
+        })
+        .collect();
 
     Ok(ItemResp {
         fields,
@@ -1988,7 +2031,26 @@ fn run_item(
         // Assembled inside the engine, against the session's own satisfied descriptors — this
         // layer neither resolves a term nor holds a dictionary to resolve one with.
         labels: item.labels,
+        views,
+        scoped,
     })
+}
+
+/// One drill-down value as JSON — every width on a number, as [`ItemResp::fields`] serves it.
+///
+/// **One function for the record's fields and the scoped values alike**, so the two cannot come to
+/// present a `u8` differently: the response is a presentation of the value and not of its storage
+/// width, which `/v1/meta` publishes for a client that does care.
+fn scalar_out_json(value: tessera_engine::ScalarOut) -> serde_json::Value {
+    macro_rules! arms {
+        ($($v:ident),* $(,)?) => {
+            match value {
+                $(tessera_engine::ScalarOut::$v(v) => serde_json::json!(v),)*
+                tessera_engine::ScalarOut::Utf8(v) => serde_json::json!(v),
+            }
+        };
+    }
+    scalar_families!(arms)
 }
 
 #[derive(Debug, Deserialize)]

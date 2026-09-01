@@ -2429,8 +2429,20 @@ fn scoped_render_targets(args: &BuildArgs, columns: &[ScopedRenderColumn]) -> Ve
 /// at once: a family on no filter surface has no `/v1/categories` answer either, so postings
 /// written for one would be read by nothing. It must agree with the engine's
 /// `filter::scoped_owes_postings`, or the open demands a file no pass wrote.
+///
+/// **So it is one predicate, called from both** — `manifest::ScopedScalar::licence_of`, over the
+/// four facts a declaration and a manifest record both carry. It lives at the record rather than
+/// in the engine because `check-layers.sh` denies this crate the engine. The two used to agree by
+/// argument: this pass spelled the licence `index || render` and the engine spelled it with the
+/// `text` arm the declaration refuses anyway, and either could have been edited alone.
 fn scoped_postings_are_owed(attribute: &crate::config::Attribute) -> bool {
-    attribute.vocabulary.is_some() && (attribute.index || attribute.render)
+    attribute.vocabulary.is_some()
+        && tessera_store::manifest::ScopedScalar::licence_of(
+            attribute.ty,
+            attribute.vocabulary.is_some(),
+            attribute.index,
+            attribute.render,
+        )
 }
 
 /// Printed per column of the family, where an entity-scoped column's coverage is printed: a scoped

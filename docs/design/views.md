@@ -1,5 +1,17 @@
 # Views — design
 
+**Status:** Normative (r28) — **the drill-down is the whole permitted picture of one point**
+(r28, 2026-09-01, owner ruling; `contracts.md` §3.2 r69). `POST /v1/items/{tessera_id}` names the
+views the item is in **that the principal may reach**, each with the position that view places it
+at, and carries the group-scoped attribute values keyed by the **group's key** — the key being a
+view's only address (decision 0113), so two views sharing a key through a `members` group are one
+entry. Both are gate-filtered against the session's own visible-view set (§6), so a gate-failed
+view is named nowhere and a point held only in such views serves exactly what it served before.
+§5's declaration with neither `index` nor `render` acquires its meaning here — stored, served at
+the drill-down, on no filter surface and in no row tail — and only a `text` family is absent,
+having no per-entity value slot. §9 gains the membership row's second half; no new register row,
+C30 widening to cover it. The paragraph in §4 that said which views an entity is in "is not
+served" is superseded.
 **Date:** 2026-09-01
 **Status:** Normative (r27) — **a scoped value's address is `(attribute → its group, key)`, and the
 join rule is decided on the serial writer** (r27, 2026-09-01, owner rulings;
@@ -607,9 +619,14 @@ The identifier forms are r4's, kept: `external_id` is canonical; `tessera_id` is
 stale identifier on a read misresolves one bounded answer; on a write it silently names another
 entity.
 
-Which views an entity is in is not stored anywhere but the permutations, and is not served:
-`/v1/items` answers for the view it was asked about, and a point's absence from a view is
-indistinguishable from its invisibility there (C4's closure).
+Which views an entity is in is stored nowhere but the permutations, and **is served for the views
+the asking principal may reach** *(r27, owner ruling 2026-09-01; contracts §3.2 r68)*:
+`POST /v1/items/{tessera_id}` names them, each with that view's own position for the item. It
+discloses nothing the viewport does not, because membership in a reachable view *is*
+`mask ∩ members(view)` — the equality the multi-view differential asserts — and every view outside
+the gate is absent from the array exactly as a view nobody declared is. What stays closed is the
+other direction: a point's absence from a view a principal *can* reach is still indistinguishable
+from its invisibility there, and a gate-failed view is named on no surface at all.
 
 > **Implemented 2026-08-31** (contracts §3.4 r55). `/control/ingest`'s duplicate check is this
 > rule: a known `external_id` naming a view the entity is not in is accepted, and the row lands in
@@ -859,7 +876,13 @@ an attribute. The two are kept apart so that neither grows the other's surface.
 > `text` column is **refused without `index = true`**: the record blob is bundle-wide and addressed
 > by a column's position in `declared_scalars`, which a family has none of, so the token index is
 > the only home its prose has — and by the same absence a scoped text value is returned by no
-> drill-down, which is the one thing its entity-scoped counterpart does that this one cannot.
+> drill-down, which is the one thing its entity-scoped counterpart does that this one cannot. Every
+> **other** family is returned by the drill-down, keyed by the group's key *(r27, owner ruling
+> 2026-09-01; contracts §3.2 r68)*, and that is what a declaration with neither `index` nor
+> `render` means: stored, served there, on no filter surface and in no row tail. ⊘ Such a family
+> serves the build's values and nothing a flush has written since — the flush writes per-view
+> extents on the filter-surface licence alone — where every other family takes its extents and is
+> served live.
 >
 > **A category's value list is `/v1/categories`' own surface, and it is view-addressed**
 > (contracts §3.2). One column per view is one value set per view, so the route takes the view the
@@ -1124,7 +1147,18 @@ row spaces, not channels. What has to be checked is what a viewer learns *from* 
   That is the point, and C17's acceptance of the identifier as a stable handle covers it.
 - **An item's presence in a view** is disclosed only through the mask: an entity the viewer
   cannot see is served in no view, and an entity absent from a view is indistinguishable from
-  one invisible there.
+  one invisible there. The drill-down names the views one item is in *(r27)* and adds no channel
+  to that: it lists exactly the views this principal may reach, and for each of those membership
+  is `mask ∩ members(view)`, which the viewport already serves — the equality the multi-view
+  differential asserts as an equality rather than an inclusion. A view outside the gate is absent
+  from the array, so the array is a function of what the principal already knows exists.
+- **A point's position in each view** is the same quantity the viewport ships for it, in the same
+  grid units, for a point the principal is already being served. Two views place it differently,
+  which is a fact about the layouts and not about the corpus's other items.
+- **The group-scoped values on the drill-down** are this item's own, read at an entity already
+  established visible from a column indexed by entity id — no aggregate, nothing outside `M_auth`.
+  A key is served where the principal may reach *a* view holding it, so the set of keys is the one
+  their own roster already gives them.
 - **Group-scoped filters** are entity-space bitmaps intersected with the mask before any count,
   so the I2 argument for filters (`filter-surface.md`) applies unchanged; a pinned leaf under
   another view is the same operand with the column chosen by the request rather than by the
@@ -1138,7 +1172,9 @@ row spaces, not channels. What has to be checked is what a viewer learns *from* 
   noted there rather than given a new row.
 
 No new verb, and no new register row: the ordinal gap that would have been one is gone with the
-ordinal (decision 0113). The C15/C17 notes stand.
+ordinal (decision 0113), and the drill-down's two new fields widen **C30** — the row that already
+covers what that endpoint serves about an item — rather than earning one of their own (r27). The
+C15/C17 notes stand.
 
 ## 10. What this design deliberately does not do
 

@@ -648,10 +648,18 @@ export class TesseraClient {
       fields: Record<string, unknown>;
       external_id?: string;
       labels: string[];
+      views: {id: string; x: number; y: number}[];
+      scoped: Record<string, Record<string, unknown>>;
     };
     return {
       fields: body.fields ?? {},
       externalId: body.external_id ?? null,
+      // **Not defaulted either**, on `labels`' argument below: both are required by the response
+      // schema and both are always present, empty included. An empty `views` is a real answer —
+      // *none of this item's views is one you can reach* — and `?? []` would give a server that
+      // omitted the field the same reading.
+      views: body.views,
+      scoped: body.scoped,
       // **Not defaulted.** `labels` is required by the response schema and is always present,
       // empty included — a principal satisfying none of the item's labels is a real answer with a
       // real shape. A `?? []` here would give a server that omitted the field the same reading as

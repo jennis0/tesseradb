@@ -474,7 +474,7 @@ fn a_coalesced_text_layer_that_does_not_cover_its_window_is_refused() {
         consumed: vec!["attrs/prose/extents/never-dict.bin".to_string()],
         paths: paths(&prefix.join(&extent.presence)),
     };
-    assert!(columns.with_coalesced(&[], &[stray], None).is_err());
+    assert!(columns.with_coalesced(&[], &[stray], None, None).is_err());
 
     // And a replacement short of its window: the same dictionary and postings, a presence bitmap
     // with one entity removed.
@@ -492,7 +492,7 @@ fn a_coalesced_text_layer_that_does_not_cover_its_window_is_refused() {
         paths: paths(&short_path),
     };
     let err = columns
-        .with_coalesced(&[], &[window], None)
+        .with_coalesced(&[], &[window], None, None)
         .expect_err("a replacement short of its window is refused");
     assert!(format!("{err}").contains("present for"), "{err}");
 }

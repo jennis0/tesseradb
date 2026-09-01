@@ -38,7 +38,7 @@ describe('<tessera-item-card>', () => {
     el.meta = META;
     // `archive` absent from the record, the extra `note` undeclared: order is declared-then-extra,
     // and the gap is named rather than shifting the fields after it.
-    el.item = {id: 12345678901234567890n, detail: {fields: {note: 'x', title: 'A title', submitted_at: 1_700_000_000_000_000}, externalId: null, labels: []}};
+    el.item = {id: 12345678901234567890n, detail: {fields: {note: 'x', title: 'A title', submitted_at: 1_700_000_000_000_000}, externalId: null, labels: [], views: [], scoped: {}}};
     await settle(host);
     const names = deepAll(host, '[part="field"]').map((f) => f.getAttribute('data-name'));
     // The title first, then the fields in declared-then-extra order, then the id; the absent
@@ -54,7 +54,7 @@ describe('<tessera-item-card>', () => {
   it('fires tessera-open with the id as a decimal string, bubbling and composed', async () => {
     const host = await mount('<tessera-item-card></tessera-item-card>');
     const el = host.querySelector('tessera-item-card') as TesseraItemCard;
-    el.item = {id: 2n ** 63n + 1n, detail: {fields: {}, externalId: null, labels: []}};
+    el.item = {id: 2n ** 63n + 1n, detail: {fields: {}, externalId: null, labels: [], views: [], scoped: {}}};
     await settle(host);
     let detail: {id?: string} | null = null;
     document.body.addEventListener('tessera-open', (e) => (detail = (e as CustomEvent).detail));
@@ -88,7 +88,7 @@ describe('<tessera-item-card>', () => {
     const store = fakeStore({meta: META, status: status({})});
     el.store = store;
     await settle(host);
-    store.set('selection', {item: {id: 5n, detail: {fields: {archive: 'cs'}, externalId: null, labels: []}}, itemRefusal: null, artifact: null, artifactRefusal: null});
+    store.set('selection', {item: {id: 5n, detail: {fields: {archive: 'cs'}, externalId: null, labels: [], views: [], scoped: {}}}, itemRefusal: null, artifact: null, artifactRefusal: null});
     await settle(host);
     expect(deep(host, '[part="field"][data-name="archive"] [part="value"]')?.textContent).toBe('cs');
   });

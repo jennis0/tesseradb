@@ -850,6 +850,29 @@ export type ItemDetail = {
   fields: Record<string, unknown>;
   externalId: string | null;
   /**
+   * **The views this item is in that this session may reach**, sorted by id, each with the
+   * position that view places it at (contracts §3.2).
+   *
+   * Gate-filtered by the server: a view the gate refuses is absent exactly as a view nobody
+   * declared is. So an empty array means *none of this item's views is one you can reach* and
+   * never *this item is in no view* — the two are deliberately one shape, and a client must not
+   * present the second.
+   *
+   * `x` and `y` are **that view's own grid units** — 32-bit fixed point against the frame
+   * {@link Meta.views} publishes for that view, which is what {@link dequantise} takes. Two views
+   * quantise differently, so the same item has a different position in each.
+   */
+  views: ItemViewPosition[];
+  /**
+   * **The group-scoped attribute values, by family name and then by the group's key**
+   * (`views.md` §5) — `{mood: {'2026-Q1': 'calm'}}`.
+   *
+   * The key is a view's only address, so two views sharing a key through a `members` group share
+   * one entry. Which group a family's keys belong to is on {@link Meta.scopedScalars}; it is not
+   * repeated here. Gate-filtered per key on the same set `views` is.
+   */
+  scoped: Record<string, Record<string, unknown>>;
+  /**
    * **The item's access labels that this session satisfies, and only those** (contracts §3.2,
    * decision 0114) — as the deployment's authorisation plugin presents them, sorted.
    *
@@ -859,6 +882,14 @@ export type ItemDetail = {
    * is a real answer and not a missing field.
    */
   labels: string[];
+};
+
+/** Where one view puts an item — see {@link ItemDetail.views}. */
+export type ItemViewPosition = {
+  /** The view's id: a plain view's name, or `<group>:<key>`. */
+  id: string;
+  x: number;
+  y: number;
 };
 
 /**

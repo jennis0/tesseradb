@@ -605,6 +605,61 @@ pub struct ScopedScalar {
     pub views: Vec<String>,
 }
 
+impl ScopedScalar {
+    /// Is this family on the filter surface — an operand `/v1/meta` publishes, a leaf may name,
+    /// and `/v1/categories` answers a value list for (`views.md` §5)?
+    ///
+    /// **`index`, or `render`**, the two being one rule since the asymmetry between them closed
+    /// (2026-08-31, owner ruling). `text` is excluded from the render arm because `render` on a
+    /// scoped `text` family is refused at the declaration — a manifest carrying the combination
+    /// would name a token index no pass produced.
+    ///
+    /// **Here, at the record, because the build and the engine both decide on it** and neither may
+    /// depend on the other: `check-layers.sh` denies the build the engine, so the engine's
+    /// `filter::scoped_is_filterable` calls this and the build's `scoped_postings_are_owed` calls
+    /// [`Self::licence_of`] over its own declaration. The two agreed by argument until this
+    /// existed — the build spelled it `index || render` and the engine spelled it with the `text`
+    /// arm — and a divergence would have the open demand a `postings.arrow` no pass wrote.
+    pub fn is_filterable(&self) -> bool {
+        Self::licence_of(
+            self.arrow_type,
+            self.vocabulary.is_some(),
+            self.index,
+            self.render,
+        )
+    }
+
+    /// [`Self::is_filterable`] over the four facts, rather than over the record that carries them
+    /// — what a build's own declaration, which is not a [`ScopedScalar`] yet, asks.
+    ///
+    /// `vocabulary` is whether the family names one, which is the category arm of the family
+    /// classification: a category over a `text` storage type is not the text family, and takes the
+    /// render arm like every other category.
+    pub fn licence_of(
+        arrow_type: ScalarType,
+        vocabulary: bool,
+        index: bool,
+        render: bool,
+    ) -> bool {
+        index || (render && (vocabulary || arrow_type != ScalarType::Text))
+    }
+
+    /// Does this family's per-view column have a **value column and a presence bitmap on disc** —
+    /// the pair a drill-down reads one entity's value out of (`views.md` §5)?
+    ///
+    /// **Every family but `text`**, whatever its flags, which is where this parts from
+    /// [`Self::is_filterable`]: the build writes `values.arrow` and `presence.roaring` per view
+    /// for a family with neither flag exactly as it does for an indexed one, and a `text` family
+    /// has no per-entity slot at all — its entity-space artefacts are a token dictionary and the
+    /// postings over it.
+    ///
+    /// This is what gives a neither-flag declaration its meaning (owner ruling 2026-09-01): stored,
+    /// served on `POST /v1/items/{tessera_id}`, on no filter surface and in no row tail.
+    pub fn has_value_column(&self) -> bool {
+        self.vocabulary.is_some() || self.arrow_type != ScalarType::Text
+    }
+}
+
 /// One entry of `scoped_columns`: a group-scoped family, and the view whose column of it a flush
 /// wrote (`views.md` §5).
 ///
