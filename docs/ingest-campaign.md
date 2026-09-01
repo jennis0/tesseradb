@@ -463,8 +463,29 @@ rather than an aggregate autocorrelation figure and a judgement about how the pi
 ships as a corpus rather than as a probe, so the two routes stay side by side instead of one being
 chosen and the other discarded.
 
-⊘ **Not run.** The GPU was held by a Windows-side process when the plan was written; on 2026-09-01
-it holds 3.7 of 10 GB and is usable.
+**Run, and it landed inside the arXiv rung rather than beside it** (owner direction, 2026-09-01):
+the rung's `corpus.toml` declares the two views `knn` and `pca64`, `prepare.py` runs both routes
+over one embedding matrix in one process, and every layer is named on both. Whole corpus,
+2,422,486 papers: `prepare.py` 19 m 39 s at 22.7 GB peak, `tessera build` 52.5 s to a 1.4 GB bundle
+carrying both views, `tessera verify --deep` clean. Figures and the build's own per-view report are
+in [`../test_corpora/arxiv/README.md`](../test_corpora/arxiv/README.md); two of its findings belong
+here.
+
+**The plan's premise is NOT confirmed by measurement.** PCA-64 does not lose neighbourhoods or
+scatter concepts relative to full dimension — 2D recall@15 of 9.85% against 8.30% and category
+purity of 72.60% against 72.29%, both marginally in *favour* of the reduced route and both too
+small to hang a direction on. An 8-10% recall is UMAP's own 1024 → 2 loss dominating, and it is what
+the two routes have in common. Do not carry "PCA-64 distorts the geometry" forward to rung 3.
+
+**What did separate them is the artifact layout, and it separates them completely.** The same 459
+artifacts over the same memberships: in `knn` the two clusterings sit at an `everywhere` fraction of
+0.31 and 0.39 with under 4 blocks per artifact; in `pca64` every level is at **1.000** with 26 to 30
+blocks. One layout keeps a cluster contiguous in row space and the other does not, and that is a
+property of the structure the engine serves from rather than a statistic about the point cloud —
+which is exactly what two views bought over two builds compared offline. The other separation is
+cost: the PCA route is **3.8×** the full-dimension one (574 s against 153 s), reducing to 64
+dimensions costing 211 s and then leaving UMAP a slower graph to build than the card had already
+built in full dimension.
 
 ## 5. The machinery this campaign built
 

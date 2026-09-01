@@ -1,29 +1,37 @@
 """arXiv — 2,422,486 preprints, the ladder's bottom rung and the only one with an embedding.
 
-One pass from the arXiv sources to a corpus `tessera build` consumes: the BGE embedding projected
-by PCA and UMAP, two clusterings over the projection, arXiv's own taxonomy beside them, and a
-TF-IDF label set over each clustering. A third clustering — Toponymy's layered one, named by a
-language model — is the rung's optional second stage, [`toponymy.py`][], because it needs a chat
-endpoint and costs an hour and a half over the whole corpus where this stage costs twenty minutes.
+One pass from the arXiv sources to a corpus `tessera build` consumes: the BGE embedding laid out
+**twice**, two clusterings over the first layout, arXiv's own taxonomy beside them, and a TF-IDF
+title on every cluster. A third clustering — Toponymy's layered one, named by a language model —
+is the rung's optional second stage, [`toponymy.py`][], because it needs a chat endpoint and costs
+an hour and a half over the whole corpus where this stage costs minutes.
 
 **This rung's source is derived, not staged.** `data/` in this checkout is what
 `probes/build_corpus.py` and `probes/build_embeddings.py` produced; the share holds a mirror of it
 rather than a publisher's bytes. See `sources.py` and `../README.md`.
 
+**Two views over one entity space** (owner direction, 2026-09-01), and they are the same papers
+positioned two ways rather than two corpora:
+
+- `knn` — a cosine kNN graph in **full dimension** on the GPU, handed to UMAP as a
+  `precomputed_knn` so UMAP does the layout and nothing else.
+- `pca64` — PCA to 64 components first, which is the route `data/geometry.parquet` was built on.
+
+Both run cuML's UMAP with a fixed `random_state` (`routes.py`). What that buys over comparing two
+separate builds offline is that a layer's `computed` content is resolved **per view**, so every
+cluster carries a centroid, a box and a hull in *each* projection over one membership: whether a
+route scatters a concept stops being an aggregate statistic about the point cloud and becomes a
+property of the artifacts the server serves. `compare.py` measures the two against each other.
+
 **This rung is the ladder's one irreproducible corpus, and it is worth being exact about which
 part.** A geographic rung's positions are a pure function of its input, so a frame change costs a
-rerun. Here the projection is not: `data/geometry.parquet` was built with cuML on a GPU and is
-bit-reproducible under no seed at all, and umap-learn is reproducible only when *seeded*, which
-also makes it single-threaded — hours for the whole corpus against minutes. So a run produces one
-of three geometries and the manifest says which:
-
-- ``--umap reuse`` reads `geometry.parquet`, which is the projection every figure in
-  `docs/evidence/` was taken against. Reach for it when a run has to be comparable with those.
-- ``--umap recompute`` **seeded** is reproducible bit for bit from this script alone.
-- ``--umap recompute`` **parallel** is a hashed artifact in the same sense `geometry.parquet` is:
-  computed once, kept, and named by what produced it rather than re-derived.
-
-``--seeded auto`` draws the line at 200,000 papers.
+rerun. Here they are not, and the seed only covers half of it: `pca64` reproduced bit for bit
+across two runs at 200,000 on 2026-09-01, PCA being deterministic and cuML's UMAP being seeded, and
+⊘ **`knn` did not** — CAGRA's index build is an approximate GPU construction that takes no seed, so
+the graph UMAP is handed differs run to run and the layout with it. Neither view is
+`data/geometry.parquet` either, which was built by a different UMAP under no seed at all. A figure
+taken against one geometry is not comparable with a figure taken against another, and the manifest
+records which run produced which. See the README for the two runs' bounds.
 
 Four other decisions this stage makes, each because the data forced it:
 
@@ -36,9 +44,11 @@ Four other decisions this stage makes, each because the data forced it:
   split. A node whose largest child holds more than 90% of its members is dropped and its children
   re-parented to the nearest kept ancestor; the root is kept whatever its shape, because a cut
   climbs to it, and a leaf has no child to be dominated by, so the selected clusters are intact.
-- **No distinctive terms is no label.** A placeholder string published as a topic is drawn as one;
-  the client shows nothing for a cluster with no label, which is the honest rendering.
-- **The access relation rides the points file.** One column of category names per paper, and the
+- **No distinctive terms is the fallback alone.** A cluster the labeller has nothing to say about
+  carries `a cluster of papers` and nothing above it. Dropping its content entirely is refused:
+  the layer declares a supplied kind, and an artifact served without content its layer declares
+  cannot be told apart from one whose content was withheld.
+- **The access relation rides the points file.** One column of category names per paper, and each
   view declares `point_visibility = { field = "categories" }`. The terms are the category names
   themselves, so a grant is written `math.GT` and the build interns each name into its own
   dictionary — which is the only place a term id is decided, and why this script writes none.
@@ -49,9 +59,10 @@ from __future__ import annotations
 import argparse
 import collections
 import json
-import os
+import resource
 import shutil
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -60,27 +71,44 @@ import pyarrow.parquet as pq
 
 from ..common.paths import ladder
 from ..common.timing import Steps
-from . import sources
+from . import routes, sources
 from .writer import ArtifactSet
 
 RUNG = "arxiv"
 SEED = 0
 
-KMEANS_LAYER, KMEANS_LABELS = "clusters/kmeans", "topics/kmeans"
-HDBSCAN_LAYER, HDBSCAN_LABELS = "clusters/hdbscan", "topics/hdbscan"
+KMEANS_LAYER = "clusters/kmeans"
+HDBSCAN_LAYER = "clusters/hdbscan"
 TAXONOMY_LAYER = "taxonomy/arxiv"
 
+#: The two views, in declaration order. The view name is the route name: a figure quoted against a
+#: view says which projection produced it without a lookup. The first is the **anchor**
+#: (`[defaults].allocation_view`, decision 0112) and carries the attribute columns.
+VIEWS = ("knn", "pca64")
+
 KMEANS_K = 64
-PCA_DIM = 64
-UMAP_PARAMS = dict(n_neighbors=15, min_dist=0.1, n_components=2)
 
 #: A node whose largest child holds more than this share of its members is not a level.
 CHAIN = 0.9
 
-LABEL_TERMS = 3  #: how many TF-IDF terms make up one label
-LABEL_SAMPLE = 200  #: documents a TF-IDF label is generated from — its generating set
+LABEL_TERMS = 3  #: how many TF-IDF terms make up one title
+LABEL_SAMPLE = 200  #: documents a title is generated from — its generating set
 MAX_CORPUS_SHARE = 0.02  #: above this a term is corpus vocabulary, not cluster vocabulary
 MIN_CLUSTER_SHARE = 0.02  #: below this it is a coincidence rather than a description
+
+#: The lowest-ranked content, served to a viewer who holds its narrower generating set but not the
+#: whole of the specific one's. It names the kind of thing without describing this one.
+FALLBACK = "a cluster of papers"
+
+
+def contents_of(text: str | None) -> list[list[str]]:
+    """A cluster's ranked contents: the description first where there is one, the fallback last.
+
+    Never empty. The clustering layers declare a supplied kind, and an artifact carrying none of a
+    kind its layer declares is refused at publication — it could not be told apart from one whose
+    content was withheld.
+    """
+    return [[text], [FALLBACK]] if text else [[FALLBACK]]
 
 
 def min_cluster_size(n: int) -> int:
@@ -88,41 +116,6 @@ def min_cluster_size(n: int) -> int:
     rather than dissolving into noise at the small end and into a handful of giants at the large
     one."""
     return max(50, n // 400)
-
-
-# ------------------------------------------------------------------------------------ geometry
-
-
-def project(X: np.ndarray, seeded: bool, steps: Steps) -> tuple[np.ndarray, float]:
-    """PCA to 64 components, then UMAP to 2 — the same shape as `probes/build_geometry.py`, on the
-    CPU rather than the GPU. Returns the positions and the variance PCA kept."""
-    n = len(X)
-    with steps.step("pca"):
-        # The covariance is accumulated in blocks: centring the whole matrix at once copies it.
-        mu = X.mean(axis=0)
-        cov = np.zeros((X.shape[1], X.shape[1]), dtype=np.float64)
-        for lo in range(0, n, 200_000):
-            d = (X[lo : lo + 200_000] - mu).astype(np.float64)
-            cov += d.T @ d
-        cov /= n
-        evals, evecs = np.linalg.eigh(cov)
-        basis = evecs[:, ::-1][:, :PCA_DIM].astype(np.float32)
-        reduced = np.empty((n, PCA_DIM), dtype=np.float32)
-        for lo in range(0, n, 200_000):
-            reduced[lo : lo + 200_000] = (X[lo : lo + 200_000] - mu) @ basis
-        kept = float(evals[::-1][:PCA_DIM].sum() / evals.sum())
-        print(f"{PCA_DIM} components keep {100 * kept:.1f}% of the variance")
-
-    with steps.step("umap"):
-        import umap
-
-        params = dict(UMAP_PARAMS, random_state=SEED) if seeded else dict(UMAP_PARAMS)
-        print(
-            f"umap-learn over {n:,} x {PCA_DIM}, "
-            f"{'seeded and single-threaded' if seeded else 'parallel and unseeded'}"
-        )
-        xy = np.asarray(umap.UMAP(**params).fit_transform(reduced), dtype=np.float32)
-    return xy, kept
 
 
 # ---------------------------------------------------------------------------------- the tree
@@ -140,28 +133,36 @@ class Tree:
     That second point is where the non-covering property comes from, and it is the property this
     corpus exists to exercise: a rollup that unions the children and calls the result the parent is
     wrong on every real hierarchy while passing on every planted one.
+
+    **It is given the tree and the labelling rather than the clusterer**, because the two HDBSCAN
+    implementations hand them over differently — cuML's `_condensed_tree` is the record array this
+    reads, and `hdbscan`'s `condensed_tree_.to_pandas()` has the same four columns. Nothing here
+    depends on which produced them.
     """
 
-    def __init__(self, clusterer, n: int):
-        tree = clusterer.condensed_tree_.to_pandas()
+    def __init__(self, condensed: np.ndarray, labels: np.ndarray, n: int):
         self.n = n
         self.root = n  # the first cluster node is numbered after the papers
-        self.noise_share = float((clusterer.labels_ == -1).mean())
-        self.selected = int(len(set(clusterer.labels_)) - 1)
+        self.noise_share = float((labels == -1).mean())
+        self.selected = int(len(set(labels.tolist())) - 1)
 
-        edges = tree[tree.child_size > 1]
-        self.parent_of = {int(r.child): int(r.parent) for r in edges.itertuples()}
+        parent = condensed["parent"].astype(np.int64)
+        child = condensed["child"].astype(np.int64)
+        size = condensed["child_size"].astype(np.int64)
+
+        edge = size > 1
+        self.parent_of = dict(zip(child[edge].tolist(), parent[edge].tolist()))
 
         # Where each paper detaches — exactly one cluster each.
-        leaves = tree[tree.child_size == 1]
+        leaf = ~edge
         detach = np.full(n, -1, dtype=np.int64)
-        detach[leaves.child.to_numpy().astype(np.int64)] = leaves.parent.to_numpy().astype(np.int64)
+        detach[child[leaf]] = parent[leaf]
         assert (detach >= 0).all(), (
             "a paper detaches from no cluster, which the condensed tree cannot produce"
         )
         self.own = collections.defaultdict(list)
-        for paper, at in enumerate(detach):
-            self.own[int(at)].append(paper)
+        for paper, at in enumerate(detach.tolist()):
+            self.own[at].append(paper)
 
         self._rebuild()
         # Members: the papers detaching at a cluster, plus everything under its descendants.
@@ -244,7 +245,7 @@ class Tree:
 
 
 class Labeller:
-    """TF-IDF labels over the titles, by term frequency *within* a cluster against document
+    """TF-IDF titles over the paper titles, by term frequency *within* a cluster against document
     frequency *across* the corpus.
 
     **Plain TF-IDF over each cluster treated as one long document gives unusable labels**, and it
@@ -263,9 +264,9 @@ class Labeller:
 
     **Label quality tracks the clustering, not this function.** These clusters are drawn in a 2D
     UMAP projection, so they are spatially coherent and only roughly topical, and the labels say
-    so. What the rung demonstrates is the mechanism — a label is an artifact with its own gate,
-    its own generating set and its own lifecycle — and that is unaffected by how good the words
-    are.
+    so. What the rung demonstrates is the mechanism — a title is supplied content with its own
+    gate, its own generating set and its own lifecycle — and that is unaffected by how good the
+    words are.
     """
 
     def __init__(self, titles: list[str]):
@@ -308,35 +309,31 @@ class Labeller:
 # --------------------------------------------------------------------------------- the outputs
 
 
-def write_points(out: Path, *, entity, xy, access, arxiv_id, archive, primary, created, title,
-                 abstract) -> None:
-    """One row per paper: identity, raw UMAP position, the attribute columns a client filters and
-    draws on, and the `categories` column that **is** the access control.
+def write_points(out: Path, view: str, *, entity, xy, access, extra=None) -> None:
+    """One view's positions, one row per paper.
 
-    **Raw coordinates, written as they are.** The frame is the view's own `extent = "auto"`, which
-    fits a square box around exactly these numbers, so there is nothing here to keep in step with a
-    number on a command line. Scaling by hand is what this pipeline used to do, and it is the
-    failure the extent moved into the declaration to prevent: coordinates spanning about -17..18
-    written against a stated frame of 0..65536 put the whole corpus in a speck in one corner, with
-    no clamps and no error anywhere.
+    **Every view file carries the access column.** `point_visibility` is declared per view and
+    reads the view's own source, so the column has to be on each. The attribute columns are
+    entity-space and sit on the anchor view's file alone, which `[defaults].source` names — a
+    paper's title is not a property of a projection.
+
+    **Raw coordinates, written as they are.** Each view's `extent = "auto"` fits a square box
+    around exactly these numbers, so there is nothing here to keep in step with a number on a
+    command line, and the two layouts have different ranges — which is precisely why the two views
+    cannot share a frame. Scaling by hand is what this pipeline used to do, and it is the failure
+    the extent moved into the declaration to prevent: coordinates spanning about -17..18 written
+    against a stated frame of 0..65536 put the whole corpus in a speck in one corner, with no
+    clamps and no error anywhere.
     """
-    pq.write_table(
-        pa.table(
-            {
-                "entity_id": pa.array(entity, pa.uint64()),
-                "x": pa.array(xy[:, 0].astype(np.float64), pa.float64()),
-                "y": pa.array(xy[:, 1].astype(np.float64), pa.float64()),
-                "categories": pa.array(access, pa.list_(pa.string())),
-                "arxiv_id": pa.array(arxiv_id, pa.string()),
-                "archive": pa.array(archive, pa.string()),
-                "primary_category": pa.array(primary, pa.string()),
-                "submitted_at": pa.array(created.astype("datetime64[us]"), pa.timestamp("us")),
-                "title": pa.array(title, pa.string()),
-                "abstract": pa.array(abstract, pa.string()),
-            }
-        ),
-        out / "points.parquet",
-    )
+    cols = {
+        "entity_id": pa.array(entity, pa.uint64()),
+        "x": pa.array(xy[:, 0].astype(np.float64), pa.float64()),
+        "y": pa.array(xy[:, 1].astype(np.float64), pa.float64()),
+        "categories": pa.array(access, pa.list_(pa.string())),
+    }
+    cols.update(extra or {})
+    name = "points.parquet" if view == VIEWS[0] else f"points-{view}.parquet"
+    pq.write_table(pa.table(cols), out / name)
 
 
 def write_vocabularies(out: Path, archive, primary) -> None:
@@ -353,6 +350,25 @@ def write_vocabularies(out: Path, archive, primary) -> None:
             ),
             out / f"{name}.parquet",
         )
+
+
+def write_demo_terms(out: Path, access) -> None:
+    """**The demo's candidate terms, ranked by coverage.** `run_demo.sh --ranks` composes its
+    sparse/medium/heavy principals out of this list, and `--terms` is the candidate set.
+
+    A term id names a different set in every dictionary, so a corpus with its own dictionary has to
+    name its own terms or every principal measures empty against the demo's synthetic `0..200` and
+    the viewer opens on a blank map with nothing to say why. The access term here is the arXiv
+    category, which is the same synthetic-policy-over-real-data shape the geographic rungs use: a
+    real column standing in for a compartment scheme the source does not carry.
+    """
+    counts = collections.Counter(t for row in access for t in row)
+    ranks = counts.most_common()
+    (out / "category-ranks.json").write_text(
+        json.dumps([{"term": t, "pairs": n} for t, n in ranks], indent=None) + "\n"
+    )
+    (out / "category-terms.txt").write_text(",".join(t for t, _ in ranks) + "\n")
+    print(f"{len(ranks)} terms; top five " + ", ".join(f"{t} {n:,}" for t, n in ranks[:5]))
 
 
 def write_deployment(out: Path) -> None:
@@ -389,19 +405,38 @@ control = "127.0.0.1:8093"
 max_k   = 5000
 session_credential_env  = "TESSERA_ARXIV_SESSION_CRED"
 operator_credential_env = "TESSERA_ARXIV_OPERATOR_CRED"
+
+# Development only: the origin the demo viewer is served from (client-interaction §7). Without
+# it the viewer loads and every request from it fails CORS, which reads like a broken server.
+dev_cors_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
 """
     )
 
-    # **Created once and never overwritten.** The identity key is what every `tessera_id` this
-    # corpus has ever served is derived from, so regenerating it on a rerun would invalidate every
-    # identifier a client holds and reorder every row (contracts §2.2).
-    env = out / ".env"
-    if not env.exists():
-        import secrets
+    # **The directory the WAL and the cache sit in**, which the server does not create: it refuses
+    # to start with `wal io error: No such file or directory` and names no path. The declaration
+    # above is the only place those two paths are written, so the `mkdir` belongs beside it.
+    (out / ".tessera").mkdir(exist_ok=True)
 
-        env.write_text(f"TESSERA_IDENTITY_KEY={secrets.token_hex(16)}\n")
+    # **The identity key is created once and never overwritten.** It is what every `tessera_id`
+    # this corpus has ever served is derived from, so regenerating it on a rerun would invalidate
+    # every identifier a client holds and reorder every row (contracts §2.2). The two plane
+    # credentials are ordinary secrets and are minted the same way, each only if absent — so a
+    # directory written before they existed gains them without losing its lineage.
+    import secrets
+
+    env = out / ".env"
+    lines = env.read_text().splitlines() if env.exists() else []
+    held = {line.split("=", 1)[0] for line in lines if "=" in line}
+    minted = [
+        f"{var}={secrets.token_hex(16)}"
+        for var in ("TESSERA_IDENTITY_KEY", "TESSERA_ARXIV_SESSION_CRED",
+                    "TESSERA_ARXIV_OPERATOR_CRED")
+        if var not in held
+    ]
+    if minted:
+        env.write_text("\n".join(lines + minted) + "\n")
         env.chmod(0o600)
-        print(f"minted a new identity key in {env} — this corpus's lineage starts here")
+        print(f"minted {', '.join(m.split('=')[0] for m in minted)} in {env}")
 
 
 # ------------------------------------------------------------------------------------- the run
@@ -411,13 +446,9 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--sample", type=int, default=200_000,
                     help="papers to take, uniformly; 0 takes all 2,422,486")
-    ap.add_argument("--umap", choices=("recompute", "reuse"), default="recompute",
-                    help="'reuse' reads data/geometry.parquet, the projection the measurement "
-                         "record was taken against")
-    ap.add_argument("--seeded", choices=("auto", "1", "0"), default="auto",
-                    help="seed UMAP, which also makes it single-threaded; 'auto' seeds 200,000 or "
-                         "fewer")
     ap.add_argument("--out", type=Path, default=None, help=f"default $TESSERA_LADDER/{RUNG}")
+    ap.add_argument("--no-half", action="store_true",
+                    help="build the kNN index in fp32; needs the vectors to fit the card")
     args = ap.parse_args()
 
     out = args.out or ladder(RUNG)
@@ -427,47 +458,65 @@ def main() -> None:
 
     # --------------------------------------------------------------------- the corpus and sample
     with steps.step("load metadata"):
-        corpus, prose = sources.load_metadata()
+        # The prose columns are *not* read here. They are Python-object columns of 2,422,486 rows
+        # and the routes below need none of them, so reading them now would hold several GB
+        # through both UMAP runs for nothing; only the entity-order check is wanted at this point.
+        corpus, _ = sources.load_metadata(prose_columns=())
         n_full = corpus.num_rows
-
-    with steps.step("sample"):
         take = sources.sample_rows(n_full, args.sample or None, SEED)
         n = len(take)
+    print(f"{n:,} papers sampled from {n_full:,}")
+
+    with steps.step("load embeddings"):
+        X = sources.load_embeddings(corpus, take)
+    print(f"{n:,} papers x {X.shape[1]} dimensions")
+
+    # ------------------------------------------------------------------------------ the two routes
+    #
+    # **Nothing else is materialised yet**, for the same reason: hold one large structure at a
+    # time, not two. The columns come after `del X`.
+    timings, positions = {}, {}
+    for view in VIEWS:
+        print(f"  route {view}", flush=True)
+        t, t0 = {}, time.time()
+        kw = {} if view == "pca64" else {"half": not args.no_half}
+        with steps.step(f"route {view}"):
+            positions[view] = routes.ROUTES[view](X, t, **kw)
+        t["total"] = time.time() - t0
+        timings[view] = t
+        xy = positions[view]
+        print(f"  route {view}: {t['total']:.0f}s  x [{xy[:, 0].min():.2f}, {xy[:, 0].max():.2f}] "
+              f"y [{xy[:, 1].min():.2f}, {xy[:, 1].max():.2f}]  (peak so far "
+              f"{resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**20:.1f} GB)", flush=True)
+    del X
+
+    # **The clusterings run over the anchor view's layout**, and are drawn in both. That is the
+    # experiment: one membership, resolved per view, so a cluster's spread in each projection is a
+    # property of the artifacts the server serves rather than a statistic about the point cloud.
+    xy = positions[VIEWS[0]]
+
+    with steps.step("materialise columns"):
         arxiv_id = np.asarray(corpus.column("id"))[take]
         categories = np.asarray(corpus.column("categories"))[take]
         created = corpus.column("v1_created").to_numpy(zero_copy_only=False)[take]
-        title = np.asarray(prose.column("title"))[take]
-        abstract = np.asarray(prose.column("abstract"))[take]
-    print(f"{n:,} papers sampled from {n_full:,}")
-
-    # ------------------------------------------------------------------------------- the geometry
-    # The embeddings are loaded whatever the geometry setting, because the optional Toponymy stage
-    # needs them and because reading them once here says early whether they are readable at all.
-    with steps.step("load embeddings"):
-        X = sources.load_embeddings(corpus, take)
-
-    if args.umap == "reuse":
-        with steps.step("umap (reused)"):
-            geo = pq.read_table(sources.DATA / "geometry.parquet", columns=["entity_id", "x", "y"])
-            assert geo.num_rows == n_full
-            xy = np.column_stack(
-                [geo.column("x").to_numpy()[take], geo.column("y").to_numpy()[take]]
-            ).astype(np.float32)
-        seeded, variance_kept = None, None
-    else:
-        seeded = {"1": True, "0": False}.get(args.seeded, n <= 200_000)
-        xy, variance_kept = project(X, seeded, steps)
-    print(
-        f"geometry {xy.shape}, x {xy[:, 0].min():.2f}..{xy[:, 0].max():.2f}, "
-        f"y {xy[:, 1].min():.2f}..{xy[:, 1].max():.2f}"
-    )
+        # `archive` is the part of a category before the dot (`math`), `primary_category` the whole
+        # of the first one (`math.GT`) — the two grains a client filters at.
+        primary = np.array([c.split()[0] if c else "unknown" for c in categories])
+        archive = np.array([p.split(".")[0] for p in primary])
+        access = [c.split() if c else [] for c in categories]
+        title = sources.load_prose_column("title", take)
+        abstract = sources.load_prose_column("abstract", take)
 
     # ---------------------------------------------------------------------------- the clusterings
-    from sklearn.cluster import KMeans
+    # **cuML's k-means and HDBSCAN**, on the GPU and in the same environment as the routes. The
+    # `hdbscan` package is what this rung used and it exposed `condensed_tree_`, which *is* the
+    # hierarchy; cuML exposes the same four columns as a record array (`Tree`), so nothing about
+    # the tree's shape or the non-covering property depends on which of the two ran.
+    from cuml.cluster import HDBSCAN, KMeans
 
     with steps.step("k-means"):
-        kmeans_label = (
-            KMeans(n_clusters=KMEANS_K, random_state=SEED, n_init="auto").fit(xy).labels_
+        kmeans_label = np.asarray(
+            KMeans(n_clusters=KMEANS_K, random_state=SEED, n_init=1).fit(xy).labels_
         ).astype(np.int32)
     sizes = np.bincount(kmeans_label, minlength=KMEANS_K)
     print(
@@ -475,17 +524,11 @@ def main() -> None:
         f"(median {int(np.median(sizes)):,})"
     )
 
-    import hdbscan
-
     with steps.step("hdbscan"):
-        # The `hdbscan` package rather than scikit-learn's, for one reason: it exposes
-        # `condensed_tree_`, which **is** the hierarchy. Reconstructing it from a single-linkage
-        # tree would be reimplementing the algorithm's own output.
         mcs = min_cluster_size(n)
-        clusterer = hdbscan.HDBSCAN(
-            min_cluster_size=mcs, min_samples=10, core_dist_n_jobs=os.cpu_count()
-        ).fit(xy)
-        tree = Tree(clusterer, n)
+        clusterer = HDBSCAN(min_cluster_size=mcs, min_samples=10).fit(xy)
+        tree = Tree(clusterer._condensed_tree, np.asarray(clusterer.labels_), n)
+        del clusterer
     print(
         f"min_cluster_size {mcs}, {tree.selected} selected clusters, "
         f"{tree.noise_share:.1%} of papers in none of them; "
@@ -504,32 +547,35 @@ def main() -> None:
         f"{(stray == 0).sum()} whose children exhaust them"
     )
 
-    # -------------------------------------------------------------------------------- the labels
+    # -------------------------------------------------------------------------------- the titles
     with steps.step("vectorise titles"):
         labeller = Labeller(title.tolist())
     print(f"{len(labeller.vocab):,} candidate terms after dropping corpus vocabulary")
 
-    with steps.step("labels"):
+    with steps.step("titles"):
         kmeans_groups = {
             int(k): np.flatnonzero(kmeans_label == k).tolist() for k in range(KMEANS_K)
         }
-        # Labelling every node of a deep tree means labelling near-duplicates of each other; the
-        # clusters worth naming are the ones with enough members to have a distinctive vocabulary.
+        # Naming every node of a deep tree means naming near-duplicates of each other; the clusters
+        # worth naming are the ones with enough members to have a distinctive vocabulary.
         hdbscan_groups = {c: tree.members_of[c] for c in tree.nodes if len(tree.members_of[c]) >= mcs}
         kmeans_text = labeller.label(kmeans_groups)
         hdbscan_text = labeller.label(hdbscan_groups)
-    print(f"{len(kmeans_text)} k-means labels, {len(hdbscan_text)} hdbscan labels")
+    print(f"{len(kmeans_text)} k-means titles, {len(hdbscan_text)} hdbscan titles")
 
     # -------------------------------------------------------------------------- the build inputs
     entity = np.arange(n, dtype=np.uint64)
     with steps.step("write points"):
-        # `archive` is the part of a category before the dot (`math`), `primary_category` the whole
-        # of the first one (`math.GT`) — the two grains a client filters at.
-        primary = np.array([c.split()[0] if c else "unknown" for c in categories])
-        archive = np.array([p.split(".")[0] for p in primary])
-        access = [c.split() if c else [] for c in categories]
-        write_points(out, entity=entity, xy=xy, access=access, arxiv_id=arxiv_id, archive=archive,
-                     primary=primary, created=created, title=title, abstract=abstract)
+        write_points(out, VIEWS[0], entity=entity, xy=positions[VIEWS[0]], access=access, extra={
+            "arxiv_id": pa.array(arxiv_id, pa.string()),
+            "archive": pa.array(archive, pa.string()),
+            "primary_category": pa.array(primary, pa.string()),
+            "submitted_at": pa.array(created.astype("datetime64[us]"), pa.timestamp("us")),
+            "title": pa.array(title, pa.string()),
+            "abstract": pa.array(abstract, pa.string()),
+        })
+        for view in VIEWS[1:]:
+            write_points(out, view, entity=entity, xy=positions[view], access=access)
     access_terms = sorted({t for cats in access for t in cats})
     print(f"{sum(len(c) for c in access):,} (paper, category) labels over {len(access_terms)} terms")
 
@@ -549,27 +595,30 @@ def main() -> None:
         for name in sorted(set(primary)):
             artifacts.artifact(TAXONOMY_LAYER, name, level=1, parent=name.split(".")[0])
 
+        # **A cluster carries its own title**, as ranked supplied content: the TF-IDF description
+        # first, the generic fallback second. A viewer is served the first whose generating set
+        # they hold entirely, or nothing — never the cluster's identity with its description
+        # missing. The title used to be an artifact of its own on a `topics/*` layer that the
+        # client joined by attachment; as content on the cluster it needs no join, and
+        # `clients/ts/deck/src/layer.ts` names an artifact from its own `content[0]`.
+        #
+        # **A cluster the labeller has nothing distinctive to say about carries the fallback and
+        # nothing above it**, rather than no content at all. The layer declares a supplied kind, so
+        # an artifact carrying none of it is refused at publication: an artifact served without
+        # content its layer declares cannot be told apart from one whose content was withheld. That
+        # refusal is the disclosure boundary doing its job, and the fallback is what the ranking
+        # was for — a true statement about the cluster that describes no document in it.
         for k in range(KMEANS_K):
-            artifacts.artifact(KMEANS_LAYER, cluster_key("km", k))
+            artifacts.artifact(KMEANS_LAYER, cluster_key("km", k),
+                               contents=contents_of(kmeans_text.get(k)))
         for c in tree.nodes:
             parent = tree.parent_of.get(c)
             artifacts.artifact(
                 HDBSCAN_LAYER,
                 cluster_key("hdb", c),
+                contents=contents_of(hdbscan_text.get(c)),
                 parent=cluster_key("hdb", parent) if parent is not None else None,
             )
-
-        # Labels, two ranked contents each: the specific description first, a generic fallback
-        # second. A viewer is served the first whose generating set they hold entirely, or nothing
-        # — never the cluster's identity with its description missing.
-        for k, text in kmeans_text.items():
-            artifacts.artifact(KMEANS_LABELS, f"kml-{k:06d}",
-                               contents=[[text], ["a cluster of papers"]],
-                               attached=(KMEANS_LAYER, 0, cluster_key("km", k)))
-        for c, text in hdbscan_text.items():
-            artifacts.artifact(HDBSCAN_LABELS, f"hdbl-{c:06d}",
-                               contents=[[text], ["a cluster of papers"]],
-                               attached=(HDBSCAN_LAYER, 0, cluster_key("hdb", c)))
 
     with steps.step("write members"):
         by_archive, by_primary = collections.defaultdict(list), collections.defaultdict(list)
@@ -581,18 +630,21 @@ def main() -> None:
         for name, rows in by_primary.items():
             artifacts.members(TAXONOMY_LAYER, name, rows, level=1)
 
+        # A cluster's own membership is the cluster; each content's generating set is a sample
+        # drawn from it, and so a subset of that membership by construction. The sample is what is
+        # recorded as the provenance a viewer must hold, and it is the same draw the label layers
+        # made — the TF-IDF ranking itself was computed over the whole cluster.
+        rng = np.random.default_rng(SEED)
         for k in range(KMEANS_K):
             artifacts.members(KMEANS_LAYER, cluster_key("km", k), kmeans_groups[k])
+            artifacts.generating_sets(KMEANS_LAYER, cluster_key("km", k), kmeans_groups[k],
+                                      rng=rng, sample=LABEL_SAMPLE,
+                                      ranks=len(contents_of(kmeans_text.get(k))))
         for c in tree.nodes:
             artifacts.members(HDBSCAN_LAYER, cluster_key("hdb", c), tree.members_of[c])
-
-        rng = np.random.default_rng(SEED)
-        for k in kmeans_text:
-            artifacts.label_members(KMEANS_LABELS, f"kml-{k:06d}", kmeans_groups[k],
-                                    rng=rng, sample=LABEL_SAMPLE)
-        for c in hdbscan_text:
-            artifacts.label_members(HDBSCAN_LABELS, f"hdbl-{c:06d}", tree.members_of[c],
-                                    rng=rng, sample=LABEL_SAMPLE)
+            artifacts.generating_sets(HDBSCAN_LAYER, cluster_key("hdb", c), tree.members_of[c],
+                                      rng=rng, sample=LABEL_SAMPLE,
+                                      ranks=len(contents_of(hdbscan_text.get(c))))
 
     # --------------------------------------------------------------------------------- the checks
     # A child's members are a subset of its parent's. This is what makes rollup sound under an
@@ -610,6 +662,9 @@ def main() -> None:
     print(f"{artifact_rows:,} artifacts, {member_rows:,} member rows across {len(artifacts.per_layer)} layers")
     print(f"{len(set(archive))} archives, {len(set(primary))} subject classes")
 
+    with steps.step("write the demo's terms"):
+        write_demo_terms(out, access)
+
     # ------------------------------------------------------------------- the declaration and manifest
     # The declaration is copied rather than referenced: `[sources]` is relative to the declaring
     # document (`configuration.md` §3), so the copy beside the parquets is what resolves. The git
@@ -618,22 +673,25 @@ def main() -> None:
     shutil.copy(Path(__file__).parent / "corpus.toml", out / "corpus.toml")
     write_deployment(out)
 
+    # `compare.py` reads this rather than the parquets: it wants the two layouts side by side in
+    # one array, in view order, over the sample the run drew.
+    np.save(out / "positions.npy", np.stack([positions[v] for v in VIEWS]))
+
     manifest = {
         "rung": RUNG,
         "sample": n,
         "corpus": n_full,
         "seed": SEED,
-        "umap": (
-            "reused from geometry.parquet"
-            if args.umap == "reuse"
-            else "computed here, " + ("seeded" if seeded else "parallel and unseeded")
-        ),
-        "umap_params": (
-            None if args.umap == "reuse"
-            else dict(UMAP_PARAMS, pca=PCA_DIM, seed=SEED if seeded else None,
-                      variance_kept=round(variance_kept, 4))
-        ),
-        "kmeans": {"k": KMEANS_K, "labels": len(kmeans_text)},
+        "views": list(VIEWS),
+        "umap": dict(routes.UMAP_PARAMS, seed=routes.SEED, pca=routes.PCA_DIM,
+                     implementation="cuml"),
+        "routes": timings,
+        "bounds": {
+            v: {"x": [float(positions[v][:, 0].min()), float(positions[v][:, 0].max())],
+                "y": [float(positions[v][:, 1].min()), float(positions[v][:, 1].max())]}
+            for v in VIEWS
+        },
+        "kmeans": {"k": KMEANS_K, "titles": len(kmeans_text)},
         "hdbscan": {
             "min_cluster_size": int(mcs),
             "clusters_in_tree": len(tree.nodes),
@@ -641,19 +699,16 @@ def main() -> None:
             "max_depth": int(max(tree.depth_of.values())),
             "noise_share": round(tree.noise_share, 4),
             "stray_share_mean": round(float(stray.mean()), 4),
-            "labels": len(hdbscan_text),
+            "titles": len(hdbscan_text),
             "chains_collapsed": collapsed,
         },
         "access_terms": len(access_terms),
         "access_labels": sum(len(c) for c in access),
-        "bounds": {
-            "x": [float(xy[:, 0].min()), float(xy[:, 0].max())],
-            "y": [float(xy[:, 1].min()), float(xy[:, 1].max())],
-        },
         "artifact_rows": artifact_rows,
         "member_rows": member_rows,
         "seconds": dict(steps),
         "total_seconds": steps.total(),
+        "peak_rss_gb": round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**20, 2),
     }
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
@@ -661,7 +716,11 @@ def main() -> None:
     for f in sorted(out.iterdir()):
         if f.is_file():
             print(f"  {f.name:34} {f.stat().st_size / 1e6:8.2f} MB")
-    print(f"\nnext:\n  cd {out}\n  tessera check\n  tessera build")
+    print(f"\nnext:\n  cd {out} && tessera check --payloads && tessera build\n"
+          f"  python -m test_corpora.arxiv.compare\n"
+          f"  ./run_demo.sh --deployment {out}/tessera.toml \\\n"
+          f"      --terms \"$(cat {out}/category-terms.txt)\" --ranks {out}/category-ranks.json \\\n"
+          f"      --label 'arXiv: two projections' --prose title,abstract")
     print(f"\nor, for the named-topic layer first:\n"
           f"  python -m test_corpora.arxiv.toponymy --out {out}")
 

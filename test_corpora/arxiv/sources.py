@@ -31,22 +31,39 @@ DATA = Path(os.environ.get("TESSERA_DATA", _REPO_ROOT / "data"))
 EMBED_DIM = 1024
 
 
-def load_metadata(data: Path = DATA):
+def load_metadata(data: Path = DATA, prose_columns: tuple[str, ...] = ("title", "abstract")):
     """The corpus and its prose, checked to be in one entity order.
 
     Both tables are in `entity_id` order over the same dense `0..n` space, which
     `build_corpus.py` assigns in `(v1_created, id)` order. Asserted rather than assumed: a silent
     misalignment here would attach every paper's title to a different paper's position.
+
+    **`prose_columns` is a memory dial and nothing else.** The abstracts are ~2.4 GB of the
+    2,422,486-row table, and `prepare.py` needs none of them until after the two projection routes
+    have run and the 9.9 GB embedding matrix is gone — so it asks for the alignment check alone
+    here and reads each prose column afterwards with [`load_prose_column`].
     """
     corpus = pq.read_table(
         data / "corpus.parquet", columns=["entity_id", "id", "categories", "v1_created"]
     )
-    prose = pq.read_table(data / "demo" / "prose.parquet", columns=["entity_id", "title", "abstract"])
+    prose = pq.read_table(
+        data / "demo" / "prose.parquet", columns=["entity_id", *prose_columns]
+    )
     assert prose.num_rows == corpus.num_rows
     assert np.array_equal(
         corpus.column("entity_id").to_numpy(), prose.column("entity_id").to_numpy()
     ), "corpus and prose disagree about entity order"
     return corpus, prose
+
+
+def load_prose_column(name: str, take: np.ndarray, data: Path = DATA) -> np.ndarray:
+    """One prose column, for the sample's rows, read on its own.
+
+    The alignment `load_metadata` asserts is what makes this safe to read separately: `take`
+    indexes the same entity order in both files.
+    """
+    column = pq.read_table(data / "demo" / "prose.parquet", columns=[name]).column(name)
+    return np.asarray(column)[take]
 
 
 def sample_rows(n_full: int, sample: int | None, seed: int) -> np.ndarray:
