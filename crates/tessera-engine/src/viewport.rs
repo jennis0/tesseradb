@@ -1899,9 +1899,9 @@ impl Engine {
         // a 32-bit half; checked rather than cast so a violated invariant fails loudly.
         let entity_raw =
             u32::try_from(entity.raw()).expect("entity ids are capped at u32::MAX by I9");
-        // **Every view this item holds a row in, resolved in one pass.** The record below is
-        // assembled from the first of them and the `views` array is the gate-filtered rest, so a
-        // second walk would be a second chance to disagree about which rows exist.
+        // **Every view this item holds a row in, resolved in one pass.** The `views` array is the
+        // gate-filtered part of this list and the record below is assembled from one row of it, so
+        // a second walk would be a second chance to disagree about which rows exist.
         //
         // **Proportionate for one point**: the permutation is the only entity→row bridge (I4,
         // §5.1) — an O(1) bounds-checked slot read per view, not a scan — and a view holds more
@@ -1922,6 +1922,13 @@ impl Engine {
         // **Sorted, because the maps above are hash maps.** Both the partitions and a partition's
         // views iterate in an arbitrary order, so without this the record's home view — and the
         // `views` array's order — would differ between two identical requests to one process.
+        //
+        // **One entry per view id, without deduplicating for it.** A view id is a key of one
+        // partition's map, and an entity lives in exactly one partition (I5 splits entity space),
+        // so `segment_row_of` can answer for at most one partition and no id can appear twice. The
+        // sort is therefore a total order on distinct ids rather than a grouping, and `views` is a
+        // set. A partitioning that put one entity in two partitions would break that here as it
+        // would break every other entity-space read.
         rows.sort_unstable_by(|a, b| a.0.cmp(b.0));
 
         // **The positions, gate-filtered** (`views.md` §6, owner ruling 2026-09-01): one entry per
@@ -1950,7 +1957,23 @@ impl Engine {
             })
             .collect();
 
-        let Some(&(_view, segment, local)) = rows.first() else {
+        // **The record's three homes read a row of a view this principal may reach, where one
+        // exists.** Home 1 is a row read, and the rows are ordered by view id — so without this
+        // the field values would come from whichever view sorts first, a gate-failed one included,
+        // and a sealed view named `a…` would supply the record every principal is served.
+        //
+        // Nothing is disclosed either way: home 1 reads the *declared* render scalars, which are
+        // entity-scoped and hold the same value in every view (a scoped family has no slot in
+        // `declared_scalars`). What the choice buys is that the served record is a fact about a
+        // view the principal knows exists, so nothing about the answer traces back to a view they
+        // may not reach. The fallback is deliberate rather than a fail-closed refusal: a point
+        // held only in views this principal cannot reach is served today and stays served
+        // (`ItemOut::views`), and its record is what it always was.
+        let Some(&(_view, segment, local)) = rows
+            .iter()
+            .find(|(view, _, _)| session.visible_views.contains_view(view))
+            .or_else(|| rows.first())
+        else {
             // Visible in entity space but with no row anywhere: a buffered item awaiting flush.
             // Same `Ok(None)`, same 404 — it has no geometry to return.
             return Ok(None);
@@ -2255,13 +2278,28 @@ fn stored_field_out(
 /// resolved through [`owning_key_of`] — §3.3's ownership rule, stated once — from each visible
 /// view id to the key it holds in *this family's* group.
 ///
-/// # The gate
+/// # The gate, which is two tests and not one
 ///
-/// A key is served only where the session may reach a view that holds it, its own group's or a
-/// sharing group's; a family no reachable view holds is absent whole rather than served empty.
-/// Nothing here can name a gate-failed view: the enumeration starts from the roster and every
-/// candidate is tested against [`crate::gate::VisibleViews`] before its key is minted, so the
-/// answer is a function of the views this principal already knows about.
+/// **The owning group's gate first, and it is the whole family's** (`views.md` §5, §6). A family
+/// belongs to the group that owns the views it has a column per, and for a principal who cannot
+/// reach that group the *whole attribute is undeclared*: `/v1/meta` omits it from both
+/// `scoped_scalars` and `filter_operands`, and a leaf naming it takes the unknown-column `422`
+/// that confirms neither group nor key. Serving its name and its values here would be the one
+/// surface that told them otherwise.
+///
+/// **It is reachable and it is not the per-view test.** A group declaring `members` of the owner
+/// carries its own gate, and nothing requires the two to agree — a sealed owner shared under a
+/// public roster is the ordinary way to publish a second layout of someone else's quarters. A
+/// principal failing the owner's gate then reaches the *sharer's* views, `owning_key_of` resolves
+/// each to the owner's key, and every per-view test below passes. The family's own gate is the
+/// only thing standing between that principal and a sealed group's attribute.
+///
+/// **Then the per-view test, per key.** A key is served only where the session may reach a view
+/// that holds it, its own group's or a sharing group's; a family no reachable view holds is absent
+/// whole rather than served empty. Nothing here can name a gate-failed view: the enumeration
+/// starts from the roster and every candidate is tested against [`crate::gate::VisibleViews`]
+/// before its key is minted, so the answer is a function of the views this principal already knows
+/// about.
 ///
 /// # I2
 ///
@@ -2308,6 +2346,13 @@ fn scoped_values_of(
 
     let mut out: Vec<ItemScoped> = Vec::new();
     for family in manifest.groups.iter().flat_map(|g| g.scoped_scalars.iter()) {
+        // **The owning group's gate, before anything about a view** — the test every other scoped
+        // surface makes (`EngineMeta::resolve_filter_column`, `/v1/meta`'s two lists,
+        // `scoped_render_families`), and see this function's doc for the shape that reaches it: a
+        // sealed owner shared under a public `members` roster passes every per-view test below.
+        if !visible.contains_group(&family.group) {
+            continue;
+        }
         if !family.has_value_column() {
             continue;
         }

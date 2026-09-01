@@ -1282,3 +1282,266 @@ async fn the_drill_down_names_no_gate_failed_view_and_no_sealed_value() {
         assert_eq!(inside["scoped"]["glow"][key], json!(glow(ordinal, ENTITY)));
     }
 }
+
+
+// ---------------------------------------------------------------------------------------------
+// A sealed owner shared under a public roster — the shape where the family's own gate is the
+// only thing standing (`views.md` §3.3, §5, §6)
+// ---------------------------------------------------------------------------------------------
+
+/// The entity this fixture asks about: `public`, so item visibility decides nothing here; held by
+/// every view of the fixture; and carrying a `sentiment` value under **both** of `sealed`'s keys,
+/// so the key whose owning view is gated is served with a value rather than absent for a second
+/// reason.
+const SHARED_ENTITY: u64 = 14;
+
+/// A points file for the shared-sealed fixture: geometry, the access label, and — for a view of
+/// `sealed` itself — that view's own `sentiment`.
+fn write_shared_points(path: &Path, view: &str, ids: std::ops::Range<u64>, scoped: Option<usize>) {
+    let mut fields = vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+        Field::new("access", DataType::Utf8, false),
+    ];
+    if scoped.is_some() {
+        fields.push(Field::new("sentiment", DataType::Float32, true));
+    }
+    let schema = Arc::new(Schema::new(fields));
+    let ids: Vec<u64> = ids.collect();
+    let mut columns: Vec<arrow::array::ArrayRef> = vec![
+        Arc::new(UInt64Array::from(ids.clone())),
+        Arc::new(Float64Array::from(
+            ids.iter().map(|&e| position(view, e).0).collect::<Vec<_>>(),
+        )),
+        Arc::new(Float64Array::from(
+            ids.iter().map(|&e| position(view, e).1).collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            ids.iter().map(|&e| label_of(e)).collect::<Vec<_>>(),
+        )),
+    ];
+    if let Some(ordinal) = scoped {
+        columns.push(Arc::new(Float32Array::from(
+            ids.iter()
+                .map(|&e| sentiment(ordinal, e))
+                .collect::<Vec<_>>(),
+        )));
+    }
+    let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
+    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+}
+
+/// **A group-gated owner whose views a *public* group shares** (`views.md` §3.3): `sealed` is
+/// gated on `finance` and carries the `sentiment` family; `sealed_map` declares `members` of it,
+/// is public, and its two views are public. `sealed:s2` additionally carries a view gate of its
+/// own, so the fixture holds a key reachable through the sharer and not through its owner.
+///
+/// This is the shape that separates the two gates a scoped family passes. A principal failing
+/// `sealed`'s **group** gate still reaches `sealed_map:s1` and `sealed_map:s2`; `owning_key_of`
+/// resolves each to the owner's key, the family's `views` list holds that key, and every *per-view*
+/// test passes. Only the family's own group gate refuses them.
+fn build_shared_sealed(dir: &Path) -> std::path::PathBuf {
+    let world_points = dir.join("shared-world.parquet");
+    write_shared_points(&world_points, "world", 0..20, None);
+    let mut views = vec![view_args("world", &world_points, None)];
+
+    let mut family_views = Vec::new();
+    for (ordinal, (key, members)) in SEALED.iter().enumerate() {
+        let id = format!("sealed:{key}");
+        let points = dir.join(format!("shared-sealed-{key}.parquet"));
+        write_shared_points(&points, &id, members.clone(), Some(ordinal));
+        family_views.push(views.len());
+        // `s2` carries a view gate inside the group, so a `finance` holder reaches its key only
+        // through the public sharer.
+        let gate = (*key == "s2").then_some("legal");
+        views.push(view_args(&id, &points, gate));
+    }
+    // The sharer's views: public, a different layout over the same keys, and carrying no scoped
+    // column of their own — the column is the owner's and is reached through the key.
+    for (key, members) in SEALED.iter() {
+        let id = format!("sealed_map:{key}");
+        let points = dir.join(format!("shared-map-{key}.parquet"));
+        write_shared_points(&points, &id, members.clone(), None);
+        views.push(view_args(&id, &points, None));
+    }
+
+    let out = dir.join("shared-bundle");
+    build(&BuildArgs {
+        views,
+        anchor: 0,
+        groups: vec![
+            GroupDescriptor {
+                title: None,
+                name: "sealed".to_string(),
+                members_of: None,
+                visibility: Some("finance".to_string()),
+                views: roster(&[("s1", None), ("s2", Some("legal"))]),
+                quantisation: group_frame(),
+                projection: tessera_spatial::Projection::None,
+                metadata: Vec::new(),
+                scoped_scalars: Vec::new(),
+            },
+            GroupDescriptor {
+                title: None,
+                name: "sealed_map".to_string(),
+                members_of: Some("sealed".to_string()),
+                // **Public, and nothing requires it to agree with the owner's gate.** Publishing a
+                // second layout of someone else's quarters is the ordinary reason to declare
+                // `members`, and the sharer's own audience is its own question.
+                visibility: None,
+                views: roster(&SEALED.map(|(key, _)| (key, None))),
+                quantisation: group_frame(),
+                projection: tessera_spatial::Projection::None,
+                metadata: Vec::new(),
+                scoped_scalars: Vec::new(),
+            },
+        ],
+        scoped_attributes: vec![sealed_family(
+            Attribute {
+                name: "sentiment".to_string(),
+                title: None,
+                field: None,
+                ty: ScalarType::F32,
+                analyser: None,
+                vocabulary: None,
+                value_set: None,
+                index: true,
+                render: true,
+            },
+            family_views,
+        )],
+        attribute_sources: Vec::new(),
+        out: out.clone(),
+        limit: None,
+        identity_key: test_key(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        idset: FIXTURE_IDSET,
+        shard_id: 0,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
+        mint_external_ids: true,
+        emit_oracle_pairs: false,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema: Default::default(),
+    })
+    .expect("a sealed owner shared under a public roster builds");
+    out
+}
+
+async fn serve_shared() -> Served {
+    let tmp = TempDir::new().unwrap();
+    let bundle = build_shared_sealed(tmp.path());
+    let server = spawn_server(
+        &bundle,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+    Served { server, _tmp: tmp }
+}
+
+/// **The family's own group gate is tested, and the per-view gate does not stand in for it**
+/// (`views.md` §5, §6; owner ruling 2026-09-01).
+///
+/// The regression this pins: `scoped_values_of` tested `contains_view` and resolved keys through
+/// §3.3's ownership rule, and never tested `contains_group`. A principal failing `sealed`'s group
+/// gate reaches `sealed_map`'s public views, each of which resolves to one of `sealed`'s keys —
+/// so every per-view test passed and the drill-down served the sealed family's **name** and its
+/// **values** to a principal for whom `/v1/meta` omits the family from both its lists and a filter
+/// leaf naming it takes the unknown-column `422`. That is the collapse this file exists to hold,
+/// arriving on the one surface that had not been given the test.
+///
+/// Three principals, because the two gates must be seen to be different:
+///
+/// - the **outsider** fails the group gate: the family is absent whole, though they can reach two
+///   views that hold its columns;
+/// - the **`finance` holder** passes the group gate and fails `sealed:s2`'s own view gate: they
+///   are served both keys, `s2`'s through the public sharer's view of it, which is the per-view
+///   case and is correct — the key is a view's address and they hold a view of it;
+/// - the **`finance, legal` holder** reaches every view, which is what makes the first two
+///   assertions about the gates rather than about an empty fixture.
+///
+/// ⊘ **The record's home view is not asserted here**, and cannot be from a build: `Engine::item`
+/// prefers a row of a view the principal may reach, but home 1 reads the *declared* scalars, which
+/// are entity space — one value per entity, permuted into every view's tail — so no build can give
+/// two views different values for one entity. The difference arises only from a **join** at
+/// ingest, whose row carries geometry and nothing else (`views.md` §4). A join was written for
+/// this fixture and withdrawn: it is accepted with a `200` and its flush never completes and never
+/// fails, which wedges the executor's flush loop — a write-path finding, reported rather than
+/// worked around here.
+#[tokio::test]
+async fn a_sealed_familys_values_need_the_groups_gate_and_not_only_a_reachable_view() {
+    let served = serve_shared().await;
+    let outsider = token(&served, &[]).await;
+    let holder = token(&served, &["finance"]).await;
+    let both = token(&served, &["finance", "legal"]).await;
+    assert_eq!(label_of(SHARED_ENTITY), "public");
+    let id = id_of(&served, &outsider, "world", SHARED_ENTITY).await;
+
+    let outside: Value = post_item(&served.server, &outsider, id)
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        outside["scoped"],
+        json!({}),
+        "the family belongs to a group this principal cannot reach, and reaching two views that \
+         hold its columns is not the same question"
+    );
+    assert_eq!(
+        item_views(&served, &outsider, id).await,
+        vec![
+            "sealed_map:s1".to_string(),
+            "sealed_map:s2".to_string(),
+            "world".to_string(),
+        ],
+        "the sharer's views are public and the owner's are not"
+    );
+
+    // The holder: the group is reachable, so the family is — and `s2`'s key comes through the
+    // public sharer though its owner's view is gated.
+    let inside: Value = post_item(&served.server, &holder, id)
+        .await
+        .json()
+        .await
+        .unwrap();
+    // Every key the fixture holds a value under — `s2`'s absence for this entity is an absent
+    // key rather than a null, the same rule the record's fields follow.
+    let expected: serde_json::Map<String, Value> = SEALED
+        .iter()
+        .enumerate()
+        .filter_map(|(ordinal, (key, _))| {
+            sentiment(ordinal, SHARED_ENTITY).map(|v| (key.to_string(), json!(v)))
+        })
+        .collect();
+    assert_eq!(
+        inside["scoped"]["sentiment"],
+        Value::Object(expected),
+        "each key carrying its own view's value, `s2`'s reached through the public sharer"
+    );
+    // The fixture's premise: `s2` is the key whose owning view this principal cannot reach, and
+    // it carries a value — so the assertion above is about the sharer resolving the key and not
+    // about an entity that has nothing under it.
+    assert!(sentiment(1, SHARED_ENTITY).is_some());
+    assert!(sentiment(0, SHARED_ENTITY).is_some());
+    assert_eq!(
+        item_views(&served, &holder, id).await,
+        vec![
+            "sealed:s1".to_string(),
+            "sealed_map:s1".to_string(),
+            "sealed_map:s2".to_string(),
+            "world".to_string(),
+        ],
+        "`sealed:s2` fails its own view gate; its key does not"
+    );
+    assert!(item_views(&served, &both, id)
+        .await
+        .contains(&"sealed:s2".to_string()));
+}
