@@ -38,6 +38,28 @@ serial writer, not a closed door:
 - the cell holds a **different** value → 409 naming the column and the key, before the WAL append,
   whole batch without effect.
 
+**A `text` family past a flush is refused rather than compared, and that is the whole rule for it.**
+Nothing can compare prose across a flush boundary: a text column stores a token dictionary,
+positional postings and a presence bitmap, and no value per entity to read back. The blob-resident
+analogy the entity-scoped arm makes does not carry — there a lost comparison costs only the report,
+a joining row writing no record field, but here the row's value **is** written, as a second text
+layer stamped with the same view. Text layers carry no coverage check (their disjointness rested on
+I9, which two doors onto one cell invalidate for a scoped column) and `match` unions across them, so
+an admitted disagreement would put two sets of words under one column with no symptom anywhere.
+
+So the arm asks **occupancy** instead of equality, from the layers' presence bitmaps: a cell some
+flushed layer already holds prose for takes no second value — equal or not, equality being exactly
+what cannot be established — and the refusal says so, naming the column and the key and pointing at
+decision 0047's shape (a change is a delete plus a re-ingest). Omitting the column still passes and
+leaves the cell as it stands; in one window the buffer holds the value and text compares exactly,
+so this is the cost of a flush and not the rule for text.
+
+⊘ **The build's base is not covered.** It writes no presence file at all
+(issue [#123](https://github.com/jennis0/tessera-index/issues/123)), so a cell whose only prose came
+from the build reads as unoccupied and a second value through the other door is admitted. That is an
+under-refusal, stated rather than hidden; closing it needs the base's presence bitmap, not a change
+to this rule.
+
 The refusal names no group. A caller writing through a sharing group's view learns that the key
 already holds a value — its own request measured against the published schema — and nothing about
 who owns the family.
@@ -105,14 +127,33 @@ and the batch leaves no WAL record, spends no entity id and moves nothing.
 mapped through a new `ExecError::JoinRefused` whose detail is passed to the caller unchanged — the
 same standing `LayerRefused` and the view verbs' refusals have, and for the same reason: a row
 index, a column name and a view key are the caller's own request measured against the published
-schema. There are byte-identity tests over these bodies and they are unchanged.
+schema. Two tests hold it: one asserts the two *sources* of the attribute arm produce equal bodies,
+and one pins a whole body against a literal, so the text cannot drift while the site moves.
+
+**A refused batch now reaches the executor before it is refused.** It occupies a work-queue slot,
+so it can meet the queue's 429 or the ingest buffer's backpressure first, and — where it names an
+external id the open commit window holds — it forces a lawful window close before its own refusal.
+Nothing else about the refusal changed: it is still taken before the WAL append, still leaves no
+record, still spends no entity id, and still reaches the caller synchronously in the same request.
 
 ### Cost
 
-The oracle reads the arms make — the entity→term transpose, and `flushed_scalar`'s three homes —
-now happen on the writer thread rather than on a `spawn_blocking` handler. The write-latency budget
-is seconds and more for both ingest and denies, so this is inside it; the reads are one per joining
-row and most batches carry no join at all, which is the branch that skips the whole pass.
+The oracle reads the arms make — the entity→term transpose, and the three homes an entity-scoped
+value can be in — now happen on the writer thread rather than on a `spawn_blocking` handler. The
+write-latency budget is seconds and more for both ingest and denies, so this is inside it; the reads
+are one per joining row and most batches carry no join at all, which is the branch that skips the
+whole pass. Within a joining row the buffered row is fetched once and the record blob decompressed
+at most once, however many blob-resident columns the schema declares.
+
+### What the race test proves, and what it does not
+
+`a_row_promoted_to_a_join_after_its_handler_pass_still_meets_the_arms` submits eight pairs of
+concurrent batches and asserts the property that holds under **every** interleaving: exactly one is
+taken and the other meets the label arm. The promoted ordering is the executor's to produce and the
+test does not force it, so this is a probabilistic regression test over eight orderings rather than
+a deterministic one. It does reach the ordering — with the arms stubbed out it fails on the first
+pair — but a run in which it did not would pass, and that is the honest description of its
+coverage.
 
 ## What this does not change
 

@@ -479,3 +479,7 @@ quarter — before that a request under it simply has no `sentiment`.
   cell, an identical second write is deduped, and a differing one is a `409` naming the column and
   the key. What that refusal is telling you is that the key already holds a value — not that you
   used the wrong door.
+- **A `text` scoped column cannot be rewritten once it has flushed.** Its stored prose is a
+  dictionary and postings with no value to compare against, so a second batch naming that cell is
+  refused whether the string agrees or not. Change it with a delete and a re-ingest; omit the column
+  to leave it alone.

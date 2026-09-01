@@ -646,7 +646,7 @@ indistinguishable from its invisibility there (C4's closure).
 > per column, because a declared column's value already has exactly three homes and the
 > declaration says which (records §3, decision 0068) — the entity-space **value column** where the
 > column owes one, the **record blob** where it is blob-resident, and the **hot column** where
-> `render = true` is the value's only store. `Engine::flushed_scalar` reads the one that applies
+> `render = true` is the value's only store. `session::flushed_scalar_of` reads the one that applies
 > and normalises it to the shape a batch carries, so the flushed arm and the buffered arm make the
 > same comparison and produce the same refusal, byte for byte.
 >
@@ -768,6 +768,16 @@ one — is deduped where the value agrees and refused with a 409 naming the colu
 it does not. One claimant per cell, so the extents stay disjoint in entity space; the "two layers
 claiming one entity" argument that carried the old one-door rule is dissolved rather than
 overridden.
+
+**A `text` family past a flush is refused rather than compared.** Its column stores a token
+dictionary, positional postings and a presence bitmap and no value per entity, so there is nothing
+to compare a supplied string against once the cell has flushed — and admitting it would write a
+second text layer stamped with the same view, which `match` unions across with no symptom. The arm
+therefore asks occupancy: a cell that already holds prose takes no second value, equal or not,
+equality being what cannot be established. Omitting the column passes; within one window the buffer
+holds the value and text compares exactly. ⊘ The build's **base** writes no presence file
+([#123](https://github.com/jennis0/tessera-index/issues/123)), so a cell whose only prose came from
+the build reads as unoccupied and is not covered by this refusal.
 
 **Render.** A `render = true` group-scoped attribute is rendered in the views of its group and
 of any group sharing them, and in no other view — the rule `per-point-attributes.md` §3.9 already
@@ -912,7 +922,8 @@ an attribute. The two are kept apart so that neither grows the other's surface.
 > plain names, its flush writes the extent into the **owner's** directory —
 > `attrs/<column>/<owner group>/<key>/`, the cell's address — and its own rows carry the value in
 > their lane. The single-claimant property that the old refusal protected is kept by the cell
-> comparison above rather than by the refusal.
+> comparison above rather than by the refusal, and for a `text` family by that comparison's
+> fail-closed form: an occupied cell takes no second string.
 >
 > ⊘ **What a flush cannot do is fill in a row that has already been written.** A cell's value
 > reaches the row tails of the rows that carried it, and the backfill that fills a join's omitted
@@ -1317,6 +1328,18 @@ each view under spec §4's rule. Either batch may carry `sentiment`: the two vie
 `2026-Q4`, and the key is the value's address (decision 0116).
 
 ## Appendix R — review trail
+
+- **r27a (2026-09-01)** — review round on r27's implementation. One finding was a hole and the rest
+  were cleanups. **The hole**: a scoped `text` family escaped the cell arm across a flush boundary —
+  its column has no value per entity to compare against, so a second door's differing prose was
+  neither deduped nor refused, and the flush wrote a second text layer stamped with the same view
+  for `match` to union silently. The arm now asks occupancy from the layers' presence bitmaps and
+  refuses a supplied string for an occupied cell, equal or not; the build's base writes no presence
+  file and is not covered, which is stated at the claim. Also: the label and attribute arms, the
+  descriptor drop and the render backfill are one pass per joining row, sharing one buffer lookup and
+  one record-blob decompression; the refusal body is pinned whole by a test as well as compared
+  across its two sources; and the demotion direction — a row that stops being a join keeps its label
+  — is covered.
 
 - **r27 (2026-09-01)** — **two owner rulings, implemented together.** (1) A scoped value's address
   is `(attribute → its group, key)`: §5's one-door rule is withdrawn, a batch through any view
