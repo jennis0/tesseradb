@@ -15,9 +15,8 @@ Three things it does are worth knowing before reading the code.
 ladder of minimum cluster sizes — the finest rung at `--min-cluster`, each coarser rung at the 85th
 percentile of the previous rung's sizes — and every rung is kept. A cluster on one rung is claimed
 by the cluster on a coarser rung holding most of its points, so the edges run *between* levels.
-Unlike `taxonomy/arxiv` it is not covering — a paper that is noise on a rung belongs to nothing
-there — and unlike the condensed tree a point can be noise on a fine rung and a member on a coarser
-one.
+It is not covering — a paper that is noise on a rung belongs to nothing there — and unlike the
+condensed tree a point can be noise on a fine rung and a member on a coarser one.
 
 **It names from three things, and coarser rungs are named from finer ones.** For each cluster the
 prompt carries a handful of *exemplar* papers (the titles nearest the centroid in embedding space),
@@ -351,8 +350,7 @@ def main() -> None:
 
     def level(layer_index: int) -> int:
         """**Levels count down from the coarsest rung**, so a parent's level is always the smaller
-        number — the convention `taxonomy/arxiv` uses, and the direction the build resolves a
-        tiered edge in."""
+        number, which is the direction the build resolves a tiered edge in."""
         return rungs - 1 - layer_index
 
     sizes = [np.bincount(layer.cluster_labels[layer.cluster_labels >= 0]) for layer in layers]

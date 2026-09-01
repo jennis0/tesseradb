@@ -18,7 +18,7 @@ export type AppState = {
   meta: Meta | null;
   session: Session | null;
   view: string;
-  /** Which of `datasets.json`'s entries is being served — see `panels/source.ts`. */
+  /** Which of the dataset document's entries is being served — see `panels/source.ts`. */
   datasetId: string;
   /** Whether a dataset change is in flight — the interval with no session at all. */
   switching: boolean;

@@ -100,7 +100,7 @@ if ((meta.layers ?? []).length > 0) {
   // Pinned by the worked decodes' answer sheet (`wire-example/test/expected.json`, re-derived on
   // every capture), so capture it as the same principal every time: on the notebook corpus the
   // terms are arXiv categories and `--terms 0` sees nothing, so the r43 goldens were taken as its
-  // *medium* preset (`.dev/presets/notebook.json`, two terms).
+  // *medium* preset (`tessera-demo/presets/notebook.json`, two terms).
   const channel = await viewport({...base, k: 0, layers: [layer]});
   await writeFile(join(dir, 'viewport-artifacts.bin'), channel);
   console.log(`captured viewport-membership.bin (${membership.length} B) and viewport-artifacts.bin (${channel.length} B) for layer ${layer}`);

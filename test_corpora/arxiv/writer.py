@@ -1,9 +1,10 @@
 """The build inputs, in the shapes `tessera build` reads them (`annotation-write-cycle.md` §6.1).
 
-**One file per layer, one row per artifact.** A cluster is one row with no content; a label is one
-row whose `contents` is the ranking — best first, one entry per rank — and which names the cluster
-it hangs from. No row names its own layer: the layer's `source` does, and the discriminator column
-is gone, so there is no way for a layer to ingest another's rows.
+**One file per layer, one row per artifact.** A row's `contents` is its ranking — best first, one
+entry per rank, one value per supplied kind — and is null where the artifact carries none. No row
+names its own layer: the layer's `source` does, and the discriminator column is gone, so there is
+no way for a layer to ingest another's rows. `attached_*` is the edge a *label* artifact carries to
+the cluster it hangs from; the rung's clusterings carry their own titles as content and use none.
 
 **Members are named by source entity id** — the `entity_id` of the points file — and resolved
 through the build's own assignment. An id the build did not assign refuses the build rather than
@@ -63,19 +64,26 @@ class ArtifactSet:
             ranks.append(rank)
             entities.append(int(row))
 
-    def label_members(self, layer, key, pool, *, rng, sample, level=0):
-        """A label's membership is the documents it was generated from, and each content's
-        generating set is drawn from that same membership — a generating set naming a non-member
-        is a different object, and the model refuses it.
+    def generating_sets(self, layer, key, pool, *, rng, sample, ranks=2, level=0):
+        """One generating set per ranked content, drawn from an artifact's own membership.
 
-        The fallback content is generated from a third of them, so it is satisfiable by a narrower
-        principal than the specific one, which is the point of ranking them.
+        A generating set naming a non-member is a different object and the model refuses it, so
+        the draw is from `pool` — which the caller has already written as the artifact's
+        membership. **Each rank is generated from a third of the one above it**, so a lower rank is
+        satisfiable by a narrower principal than the rank above, which is the point of ranking
+        them: a viewer is served the first content whose set they hold entirely, or nothing.
+
+        `ranks` must be the number of contents the artifact carries. A member row at a rank the
+        artifact has no content for names a description that was never supplied, and the build
+        refuses it.
+
+        Returns the sample it drew, which is `contents[0]`'s generating set.
         """
         pool = np.asarray(pool)
         pick = pool if len(pool) <= sample else rng.choice(pool, sample, replace=False)
-        self.members(layer, key, pick, level=level)
-        self.members(layer, key, pick, rank=0, level=level)
-        self.members(layer, key, pick[: max(1, len(pick) // 3)], rank=1, level=level)
+        for rank in range(ranks):
+            self.members(layer, key, pick[: max(1, len(pick) // 3**rank)], rank=rank, level=level)
+        return pick
 
     # ------------------------------------------------------------------------------ writing out
 

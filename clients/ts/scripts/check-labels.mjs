@@ -3,7 +3,7 @@
 // whether a label outlives the cluster it labels.**
 //
 //   TESSERA_SESSION_CRED=… TESSERA_OPERATOR_CRED=… node clients/ts/scripts/check-labels.mjs \
-//     --presets .dev/presets/stage3.json --clusters centroids/kmeans-2026-08 \
+//     --presets ../../tessera-demo/presets/stage3.json --clusters centroids/kmeans-2026-08 \
 //     --labels topics/ctfidf-2026-08 --term 46
 //
 // Publish the two layers with `publish-clusters.mjs --labels … --label-term …` first; this reads
@@ -40,7 +40,7 @@ if (!operatorCred) throw new Error('set TESSERA_OPERATOR_CRED');
 const clusterLayer = args.clusters ?? 'centroids/kmeans-2026-08';
 const labelLayer = args.labels ?? 'topics/ctfidf-2026-08';
 const labelTerm = args.term ?? '46';
-const presets = JSON.parse(await readFile(args.presets ?? '.dev/presets/stage3.json', 'utf8'));
+const presets = JSON.parse(await readFile(args.presets ?? '../../tessera-demo/presets/stage3.json', 'utf8'));
 
 /** This deployment's one view and its idset — read from `/v1/meta`, as any client reads them. */
 async function metaOf(token) {

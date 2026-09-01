@@ -9,13 +9,15 @@ app = marimo.App()
 @app.cell
 def _():
     import json
+    import os
     import pathlib
 
     import marimo as mo
     import tesseradb
 
-    # What the demo is serving right now: `run_demo.sh` writes it (gitignored), presets included.
-    demo = json.loads(pathlib.Path("../../ts/viewer/public/datasets.json").read_text())["datasets"][0]
+    # What the demo is serving right now: `run_demo.sh` writes it under `tessera-demo/` at the
+    # checkout root (gitignored), presets included.
+    demo = json.loads((pathlib.Path(os.environ.get("TESSERA_DEMO_DIR", "../../../tessera-demo")) / "datasets.json").read_text())["datasets"][0]
     preset = next(p for p in demo["presets"] if p["label"].startswith("medium"))
     VIEWER = demo["viewerUrl"]
     # Operator-only: the credential mints any principal; the widget gets the token, never the credential.

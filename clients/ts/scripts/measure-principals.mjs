@@ -196,8 +196,8 @@ if (args.ranks) {
 
 // `--out` because presets are **per bundle** and the demo now serves more than one: a term id names
 // a different set in each dictionary, so one shared file would mislabel every principal on whichever
-// dataset it was not measured against. `run_demo.sh` composes the per-dataset files into
-// `datasets.json`.
+// dataset it was not measured against. `run_demo.sh` composes the per-dataset files
+// into the dataset document under `tessera-demo/`, which it hands the viewer in the URL it prints.
 const out =
   args.out ?? join(dirname(fileURLToPath(import.meta.url)), '..', 'viewer', 'presets.json');
 await writeFile(out, `${JSON.stringify(chosen, null, 2)}\n`);
