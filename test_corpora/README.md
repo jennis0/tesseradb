@@ -57,20 +57,30 @@ on this machine's root volume, and when a second one appears it is one value tha
 that 10^7-row passes never enter Python; PyArrow is for inspecting what came out. The `spatial`
 extension is not installed until rung 2 needs it for Overture's point-in-polygon join.
 
-`~/venvs/arxiv` — scikit-learn, umap-learn, hdbscan, and optionally toponymy and a CPU torch — is
-the **embedding** rung's, and it is separate because none of the geographic rungs want any of it.
-Its `requirements.txt` sits beside the rung.
+`~/venvs/projection` — cuVS, cuML and CuPy on the GPU, scikit-learn and SciPy on the CPU, and
+optionally toponymy and a CPU torch — is the **embedding** rung's, and it is separate because none
+of the geographic rungs want any of it. Its `requirements.txt` sits beside the rung, and it is
+named for the projection experiment that rung's two views came out of.
 
 ```bash
-python3 -m test_corpora.common.projection                    # the transform's own checks
-~/venvs/ingest/bin/python -m test_corpora.geonames.prepare    # one geographic rung
-~/venvs/arxiv/bin/python  -m test_corpora.arxiv.prepare       # the embedding rung
+python3 -m test_corpora.common.projection                        # the transform's own checks
+~/venvs/ingest/bin/python     -m test_corpora.geonames.prepare    # one geographic rung
+~/venvs/projection/bin/python -m test_corpora.arxiv.prepare       # the embedding rung
 ```
+
+## Two directories here are not rungs
+
+They measure nothing about a dataset and are outside the ingest campaign's sizing.
+
+| | |
+|---|---|
+| [`multiview/`](multiview/README.md) | the fixture [`docs/design/views.md`](../docs/design/views.md) is pointed at — ten row spaces over one entity space, both view-group forms, a shape layer spanning two frames. Synthetic but real-derived: it reads the GeoNames rung's built output and un-projects it |
+| `common/` | the transform, the paths and the timer the rungs share |
 
 ## Rungs
 
 | Rung | Points | Bundle | State |
 |---|---|---|---|
-| `arxiv` | 2,422,486 | 1.4 GB | the corpus the artifact catalogue is exercised against; ported from `notebooks/` on 2026-08-28 and re-measured at 20,000 |
+| `arxiv` | 2,422,486 | 1.4 GB | the corpus the artifact catalogue is exercised against, and the ladder's only **two-view** rung — one embedding laid out twice, every layer drawn in both, 2026-09-01 |
 | `geonames` | 13,463,857 | 1.34 GB | built and verified on a declared `web_mercator` projection, 2026-08-30 |
 | `overture` | 73,631,092 | 12.57 GB | built and verified on the same declared projection, with its division polygons declared in longitude and latitude, 2026-08-30 |

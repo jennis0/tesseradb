@@ -19,7 +19,7 @@ is the owner's to settle.
 
 | # | Rung | Points | State |
 |---|---|---|---|
-| — | arXiv | 2,422,486 | **Have, and now on the campaign's convention.** The pipeline that produces it was a notebook outside `test_corpora/`; ported to [`../test_corpora/arxiv/`](../test_corpora/arxiv/README.md) on 2026-08-28 as `prepare.py` plus an optional `toponymy.py`, and the notebook deleted. It is the ladder's only embedding corpus and the only one whose source is derived rather than staged |
+| — | arXiv | 2,422,486 | **Have, and now on the campaign's convention.** The pipeline that produces it was a notebook outside `test_corpora/`; ported to [`../test_corpora/arxiv/`](../test_corpora/arxiv/README.md) on 2026-08-28 as `prepare.py` plus an optional `toponymy.py`, and the notebook deleted. It is the ladder's only embedding corpus and the only one whose source is derived rather than staged. **Reworked 2026-09-01**: two views (`knn`, `pca64`) on cuML, both clusterings on both, clusters titled by their own text, taxonomy layer withdrawn (§4.5) |
 | 0 | Re-run the 5×10⁷ artifact tier | — | **Deferred, deliberately.** It confirms W1 and W2, which bite at rung 2 and not at rung 1, and it costs a ~45 GB build. Take it before rung 2, not before rung 1 |
 | **1** | **GeoNames** | **13,463,857** | **Built, verified and served**, and rebuilt 2026-08-30 on a declared `web_mercator` projection. Not done against §7.1's bar — see §2 |
 | **2** | **Overture places + divisions** | **7.4×10⁷** | **Built and verified**, and rebuilt 2026-08-30 on a declared projection with its boundary polygons in longitude and latitude — see §3 |
@@ -446,25 +446,56 @@ subject. The repair, if one is wanted, is the NLM's replacement-terms file and n
 **Ruled 2026-09-01: dropped, and said so** — the rung is a demonstrator and the slice is stated
 rather than repaired.
 
-### 4.5 The projection experiment becomes two views
+### 4.5 The projection experiment — run, folded into the arXiv rung, and re-scoped
 
-Plan §6.2 proposes building the arXiv geometry both ways — full-dimension cosine kNN into UMAP
-against the shipped PCA-64 route — and judging on the tile-occupancy table. **Owner direction,
-2026-09-01: run the two routes as two views of one entity space**, and develop it on arXiv's
-2.4×10⁶ (or a subset of it) so iteration is fast, rather than on rung 3.
+Plan §6.2 proposed building the arXiv geometry both ways — full-dimension cosine kNN into UMAP
+against the shipped PCA-64 route — and judging which distorts the geometry less. It was run over
+all 2,422,486 papers on 2026-09-01, as two views of one entity space (owner direction), both on
+cuML's GPU UMAP ("this is a demonstrator; speed wins over accuracy"). **Then the question was
+re-scoped by the owner**: the ladder's corpora are demos and speed benchmarks for Tessera, the
+layout exists to make a useful view, and how faithfully UMAP preserves neighbourhoods is not a
+question this campaign asks. The recall and purity apparatus built to answer it was deleted.
 
-The multi-view machinery takes this unmodified — several row spaces over one entity space, each with
-its own frame, `projection = "none"` for an abstract embedding, and a layer named on several views
-drawn in each ([`../test_corpora/multiview/`](../test_corpora/multiview/README.md), which builds and
-verifies as of 2026-08-31). What it adds over the plan's form is that **computed content is per
-view**, so every artifact gets a centroid and a box in each projection over the *same* membership.
-Whether PCA-64 scatters a concept that full dimension holds together becomes a number per artifact
-rather than an aggregate autocorrelation figure and a judgement about how the pictures look. It also
-ships as a corpus rather than as a probe, so the two routes stay side by side instead of one being
-chosen and the other discarded.
+What survives is what bears on Tessera. **The kNN route is the pipeline for the larger rungs**:
+CAGRA in fp16 builds the graph over 2.4×10⁶ × 1024 in about a minute on a 10 GB card, cuML lays it
+out in under half a minute, and the whole route is **3× faster** than PCA-then-UMAP (94 s against
+280 s on an idle box) — reducing to 64 dimensions leaves UMAP a slower graph to build than the card
+had already built in full dimension. **And the layout decides the serving cost of every artifact
+over it**: in the `knn` view a cluster is 3.5–4.1 contiguous row runs and most of each level sits
+under tile-index nodes (0.22–0.33 "everywhere"); in `pca64` the same clusters are 27–29 runs each
+and every one is "everywhere" — served on every request at the full masked probe. That is a
+property of the structure the engine serves from, visible only because the two layouts are two
+views over one membership, and it is why `knn` is the anchor.
 
-⊘ **Not run.** The GPU was held by a Windows-side process when the plan was written; on 2026-09-01
-it holds 3.7 of 10 GB and is usable.
+**The arXiv rung now carries the two views** — `knn` (*Topic map*) and `pca64` — both clustering
+layers on both, titles, abstracts and authors indexed, dates filterable, and each cluster titled by
+its own c-TF-IDF text as supplied content. Whole corpus: `prepare.py` 13 m 0 s at 22.9 GB peak,
+`tessera build` 54.5 s to a 1.5 GB bundle, `verify --deep` clean; the rung README carries the
+build's own per-view report verbatim.
+
+**A layer earns its place by drawing something in the view it is declared over** (the ruling that
+withdrew Overture's taxonomy, §3), and the arXiv taxonomy failed the same test on 2026-09-01.
+Measured in the `knn` view, the box holding the middle 90% of an artifact's members as a share of
+the map: k-means median **1.0%** and HDBSCAN **0.3%**, 94% of each under 5%; the taxonomy's
+archives median **13.7%** and subject classes **9.6%**, with `hep-th` and `gr-qc` at 34% and
+`physics.hist-ph` at 64%. 97–98% of its 209 artifacts were "everywhere" — served on every viewport
+for outlines that draw nothing, while `archive` and `primary_category` already give the same
+information as colour and filter. **Withdrawn** (owner ruling); the two indexed columns stay.
+
+⊘ **The `knn` route is not reproducible under a seed** — CAGRA's index build takes none, so UMAP is
+handed a different graph each run and the HDBSCAN tree differs with it (186, 192 and 200 clusters
+across three runs); `pca64` reproduces bit for bit. Stated at the claim in the rung.
+
+⊘ **The viewer cannot show the second view.** `clients/ts/viewer/src/main.ts` takes `meta.views[0]`
+in three places and no selector exists. The design for holding and switching between views is
+`design/view-switching.md`, on branch `client/view-switching` with its implementation tracks, not
+yet merged.
+
+⊘ **`run_demo.sh` writes into `clients/ts/`** — 5.5 GB of bundles, WAL and cache under `.dev/`, the
+viewer's `public/datasets.json`, an `.env.local` — and holds port 5173, so two sessions on one
+checkout overwrite each other's demo. **Ruled 2026-09-01: it moves to `./tessera-demo/` in the
+checkout, gitignored, and the viewer takes its dataset list from the URL.** Not done; its own
+change.
 
 ## 5. The machinery this campaign built
 
@@ -592,8 +623,7 @@ depth, `parent_ids` on the wire and the client — the engine and client tracks'
 
 **Before rung 3**
 
-- **The projection experiment as two views** (§4.5), developed on arXiv's 2.4×10⁶ or a subset of it.
-  This is what is being worked on.
+- **`run_demo.sh` out of `clients/ts/` and into `./tessera-demo/`** (§4.5), ruled and not done.
 - The DAG design above, reviewed and ruled.
 - Rung 0, still not taken. It confirms W1 and W2 reproduce and whether the pre-flight refuses rather
   than being killed. ⊘ Rung 2 passed without either wall firing (§3), which is a reason to want the
