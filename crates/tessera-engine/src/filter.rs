@@ -760,7 +760,6 @@ pub fn scoped_has_value_column(scoped: &tessera_store::manifest::ScopedScalar) -
 /// **The rule itself is `ScopedScalar::is_filterable`**, one crate down, because the build decides
 /// what to *write* on the same licence and `check-layers.sh` denies the build this crate. This is
 /// the engine's name for it and nothing more.
-
 pub fn scoped_is_filterable(scoped: &tessera_store::manifest::ScopedScalar) -> bool {
     scoped.is_filterable()
 }
