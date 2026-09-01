@@ -96,6 +96,19 @@ pub(crate) fn report_shapes(reports: &[crate::shapes::ShapeLayerReport]) {
     }
 }
 
+/// The treed layers' edges as graphs, printed beside the artifact pass's per-level lines: what a
+/// cut climbs, and on a `dag` layer how many artifacts sit under more than one parent
+/// (`dag-hierarchies.md` §3, decision 0092).
+pub(crate) fn report_hierarchies(shapes: &[crate::layers::HierarchyShape]) {
+    for s in shapes {
+        eprintln!(
+            "  {} level {} [{}]: {} artifact(s), {} edge(s), {} root(s), {} under more than one \
+             parent (at most {})",
+            s.layer, s.level, s.kind, s.artifacts, s.edges, s.roots, s.multi_parent, s.max_parents
+        );
+    }
+}
+
 /// One coordinate system a build materialises, and where its points come from
 /// (`views.md` §7).
 ///
@@ -413,6 +426,8 @@ pub struct BuildReport {
     /// visible here** (`views.md` §3.5): an artifact belongs to one view, so the artifact count
     /// with rows in a view is the layer's own set there and not the level's whole roster.
     pub artifact_levels: Vec<crate::artifact_pass::LevelLayoutReport>,
+    /// Per treed level, its edges as a graph (decision 0092's report, for the edges).
+    pub hierarchy_shapes: Vec<crate::layers::HierarchyShape>,
     /// What each declared attribute source's join met — the figures
     /// [`report_attribute_coverage`] prints, returned as well as printed.
     ///
@@ -1582,6 +1597,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     );
     drop(artifact_store);
     crate::artifact_pass::report(&artifact_pass);
+    report_hierarchies(&published_layers.hierarchy_shapes);
     published_layers
         .tile_index_extents
         .clone_from(&artifact_pass.tile_index_extents);
@@ -1635,6 +1651,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         std::slice::from_ref(&occupancy),
     )?;
     report.attribute_coverage = attribute_coverage;
+    report.hierarchy_shapes = published_layers.hierarchy_shapes.clone();
     Ok(report)
 }
 
@@ -1977,6 +1994,7 @@ fn write_manifests(
         minted_artifacts: published_layers.minted.values().sum(),
         // Filled by the caller: the join happened stages ago and this function digests files.
         artifact_levels: Vec::new(),
+        hierarchy_shapes: Vec::new(),
         attribute_coverage: Vec::new(),
     })
 }
@@ -2364,9 +2382,27 @@ pub(crate) fn write_containment_report(
         })
         .collect();
 
+    let hierarchies: Vec<serde_json::Value> = published
+        .hierarchy_shapes
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "layer": s.layer,
+                "level": s.level,
+                "kind": s.kind,
+                "artifacts": s.artifacts,
+                "edges": s.edges,
+                "roots": s.roots,
+                "multi_parent": s.multi_parent,
+                "max_parents": s.max_parents,
+            })
+        })
+        .collect();
+
     write_json(
         &dir.join("containment.json"),
         &serde_json::json!({
+            "hierarchies": hierarchies,
             "violations": rows,
             "splits": {
                 "total": splits.len(),

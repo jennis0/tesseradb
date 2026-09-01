@@ -423,6 +423,29 @@ pub struct SplitCoverage {
     pub stray_members: u64,
 }
 
+/// One treed level's shape as a graph — decision 0092's report, for the edges: what the cut will
+/// climb, and on a `dag` layer how far it is from a tree (`dag-hierarchies.md` §3). Rung 3's MeSH
+/// layer has 30% of its descriptors under more than one parent, and an operator reading a budget's
+/// behaviour there needs that number beside the layer, not in a probe.
+///
+/// It decides nothing. Reported for every layer whose kind carries edges — a tree's line reads
+/// `0 under more than one parent`, which is the cheap way of saying it is one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HierarchyShape {
+    pub layer: String,
+    pub level: u32,
+    pub kind: String,
+    pub artifacts: u64,
+    /// Parent edges, each once.
+    pub edges: u64,
+    /// Artifacts naming no parent.
+    pub roots: u64,
+    /// Artifacts naming more than one parent — nonzero only on a `dag` layer.
+    pub multi_parent: u64,
+    /// The most parents any artifact names.
+    pub max_parents: u64,
+}
+
 /// What a build's layer pass produced, for the manifest and for the digest map.
 pub struct PublishedLayers {
     /// For a layer scoped to a group, which view's artifact set each published artifact belongs
@@ -434,6 +457,8 @@ pub struct PublishedLayers {
     pub containment_violations: Vec<ContainmentViolation>,
     /// Per-parent coverage: how much of each split its children hold between them.
     pub split_coverage: Vec<SplitCoverage>,
+    /// Per treed level, its edges as a graph — reported beside the layer and in `containment.json`.
+    pub hierarchy_shapes: Vec<HierarchyShape>,
     /// One past the lowest entity the layers and their artifacts claimed. **The mark that must
     /// reach the manifest**: the WAL carries the same one in its records and rotation reclaims
     /// those, so a mark that lived only there is lost at the first rotation and the next
@@ -492,6 +517,7 @@ impl Default for PublishedLayers {
             artifact_views: BTreeMap::new(),
             containment_violations: Vec::new(),
             split_coverage: Vec::new(),
+            hierarchy_shapes: Vec::new(),
             low_water: tessera_types::layer::ROWLESS_CEILING,
             membership_extents: Vec::new(),
             level_versions: Vec::new(),
@@ -1391,7 +1417,8 @@ fn two_parents(path: &Path, child: &Address, first: &str, second: &str) -> Build
         "{}: {} in level {} of {} is named as a child of both {first} and {second}. A list key \
          column declares the edges, so two rows naming different parents for one artifact are two \
          hierarchies — and which of them was published would be the file's row order rather than \
-         anything the caller wrote",
+         anything the caller wrote. Declare `kind = \"dag\"` if a child may sit under several \
+         parents",
         path.display(),
         child.2,
         child.1,
@@ -1535,7 +1562,7 @@ pub fn publish(
     // publication that assigns permanent ids rather than after it. It is also the last reader of a
     // membership before the publication takes it — the memberships are the largest thing this stage
     // holds, and nothing after this point needs them whole.
-    let (violations, coverage) =
+    let (violations, coverage, hierarchy_shapes) =
         verify_hierarchies(&plan.declarations, &plan.artifacts, &resolved, &table)?;
 
     // Grouped by `(layer, level)`, each level's artifacts in key order — so a level's
@@ -1646,6 +1673,7 @@ pub fn publish(
         artifact_views,
         containment_violations: violations,
         split_coverage: coverage,
+        hierarchy_shapes,
         low_water: alloc.low_water(),
         unclustered: plan.unclustered.clone(),
         minted: plan.minted.clone(),
@@ -2005,7 +2033,11 @@ fn verify_hierarchies(
     index_of: &BTreeMap<Address, usize>,
     resolved: &[ResolvedArtifact],
     table: &spill::MemberTable,
-) -> Result<(Vec<ContainmentViolation>, Vec<SplitCoverage>)> {
+) -> Result<(
+    Vec<ContainmentViolation>,
+    Vec<SplitCoverage>,
+    Vec<HierarchyShape>,
+)> {
     // Which parent has claimed each child, so a second claim is a refusal rather than a silent
     // reparenting: a child with two parents has two lineages, and which one a cut walks would
     // depend on iteration order. **A `dag` layer's child holds several, and never enters this
@@ -2028,8 +2060,37 @@ fn verify_hierarchies(
         .map(|d| (d.name.as_str(), d.hierarchy.kind))
         .collect();
 
+    // The graph per treed level, counted as the edges are walked: every artifact of such a level
+    // counts once, its parents each once.
+    let mut shapes: BTreeMap<(&str, u32), HierarchyShape> = BTreeMap::new();
     for (address, index) in index_of {
         let (layer, level, key) = address;
+        if let Some(kind) = kind_of.get(layer.as_str()).filter(|k| {
+            !matches!(
+                k,
+                tessera_types::layer::HierarchyKind::Flat
+                    | tessera_types::layer::HierarchyKind::Stacked
+            )
+        }) {
+            let named = resolved[*index].parent_keys.len() as u64;
+            let shape = shapes
+                .entry((layer.as_str(), *level))
+                .or_insert_with(|| HierarchyShape {
+                    layer: layer.clone(),
+                    level: *level,
+                    kind: format!("{kind:?}").to_lowercase(),
+                    artifacts: 0,
+                    edges: 0,
+                    roots: 0,
+                    multi_parent: 0,
+                    max_parents: 0,
+                });
+            shape.artifacts += 1;
+            shape.edges += named;
+            shape.roots += u64::from(named == 0);
+            shape.multi_parent += u64::from(named > 1);
+            shape.max_parents = shape.max_parents.max(named);
+        }
         // Each parent an artifact names is one edge, checked on its own; the keys are already each
         // once, so a repeated edge cannot reach here.
         for parent_key in resolved[*index].parent_keys.iter().map(String::as_str) {
@@ -2110,7 +2171,8 @@ fn verify_hierarchies(
                     return Err(BuildError::Invalid(format!(
                         "{layer} level {level} artifact {key} is claimed by both {first} and \
                      {parent_key}; a child has one lineage or the cut that walks it depends on \
-                     iteration order"
+                     iteration order. Declare `kind = \"dag\"` if a child may sit under several \
+                     parents"
                     )));
                 }
             }
@@ -2215,7 +2277,7 @@ fn verify_hierarchies(
     }
 
     detect_cycles(index_of, resolved, &kind_of)?;
-    Ok((violations, coverage))
+    Ok((violations, coverage, shapes.into_values().collect()))
 }
 
 /// Refuse a hierarchy holding a cycle, which is neither a tree nor a DAG and has no root to descend

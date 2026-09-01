@@ -750,6 +750,13 @@ fn a_child_escaping_its_parent_is_reported_by_name() {
     );
     result.expect("an uncontained edge is a report, not a refusal");
     let report = containment_report(&out);
+    let shapes = report["hierarchies"].as_array().unwrap();
+    assert_eq!(shapes.len(), 1, "one treed level, reported as a graph");
+    assert_eq!(shapes[0]["kind"], "nested");
+    assert_eq!(shapes[0]["edges"], 1);
+    assert_eq!(shapes[0]["roots"], 1);
+    assert_eq!(shapes[0]["multi_parent"], 0);
+    assert_eq!(shapes[0]["max_parents"], 1);
     let violations = report["violations"].as_array().unwrap();
     assert_eq!(violations.len(), 1);
     assert_eq!(violations[0]["child"], "t-a");
@@ -2153,6 +2160,10 @@ fn a_child_named_under_two_parents_is_refused_naming_both() {
     assert!(message.contains("950"), "{message}");
     assert!(message.contains("900"), "{message}");
     assert!(message.contains("901"), "{message}");
+    assert!(
+        message.contains("Declare `kind = \"dag\"`"),
+        "the refusal names the remedy: {message}"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2244,6 +2255,16 @@ fn a_dag_layer_builds_from_a_parent_list_and_from_two_lineages_alike() {
         .collect();
     parents.sort_unstable();
     assert_eq!(parents, vec!["900", "901"]);
+    // The layer's shape as a graph, reported for the operator (decision 0092): two edges into one
+    // child, two roots, one artifact under more than one parent.
+    let shapes = report["hierarchies"].as_array().unwrap();
+    assert_eq!(shapes.len(), 1);
+    assert_eq!(shapes[0]["kind"], "dag");
+    assert_eq!(shapes[0]["artifacts"], 3);
+    assert_eq!(shapes[0]["edges"], 2);
+    assert_eq!(shapes[0]["roots"], 2);
+    assert_eq!(shapes[0]["multi_parent"], 1);
+    assert_eq!(shapes[0]["max_parents"], 2);
 
     let from_tables = format!("{}value_set = \"open\"\n{FROM_TREE_TABLES}", layer_of_dag());
     let (from_tables, _b) = build_spelling(&from_tables, |inputs| {
@@ -2335,6 +2356,10 @@ fn a_nested_layer_refuses_a_parent_list_of_two() {
     assert!(
         text.contains("t-c is claimed by both t-a and t-b"),
         "the refusal names both parents: {text}"
+    );
+    assert!(
+        text.contains("Declare `kind = \"dag\"`"),
+        "and the remedy: {text}"
     );
 }
 
