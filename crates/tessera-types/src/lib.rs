@@ -102,9 +102,14 @@ pub struct GenerationStamp {
 // projection at all — so a bundle at 3 read as unprojected would have every second reader
 // quantising a degree as though it were a frame coordinate. The key is required, which is what
 // makes a bundle at 3 refuse at open rather than open as `none`.
+// 5: an artifact record carries its parents as a list — a `dag` layer's child may name several
+// (`dag-hierarchies.md` §7, decision 0117) — in the record blob's hand-rolled encoding
+// (`tessera_lifecycle::membership`, decision 0077) and in the WAL row. The blob at 4 carried a
+// one-byte tag and one parent, so a reader at 5 would decode its first two bytes as a count and
+// read parents out of the shape bytes that follow; the number is what stops it opening.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility (decision 0048).
-pub const BUNDLE_FORMAT: u32 = 4;
+pub const BUNDLE_FORMAT: u32 = 5;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;
@@ -128,7 +133,7 @@ mod tests {
     }
     #[test]
     fn constants() {
-        assert_eq!(BUNDLE_FORMAT, 4);
+        assert_eq!(BUNDLE_FORMAT, 5);
         assert_eq!(ROW_ABSENT, 0xFFFF_FFFF);
     }
 }

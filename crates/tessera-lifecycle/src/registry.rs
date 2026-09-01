@@ -148,13 +148,34 @@ pub enum RegistryError {
     ///
     /// Two spellings of one edge, disagreeing: the same refusal a build makes when two points name
     /// different parents for one cluster. There is no correct output — choosing between them would
-    /// publish a hierarchy the caller did not write.
+    /// publish a hierarchy the caller did not write. **A `dag` layer never makes it**: there a
+    /// parent the child does not hold is an edge a growth cannot add, reported as
+    /// [`EdgeCheck::Unrecorded`] (`dag-hierarchies.md` §4).
     ContradictedParent {
         layer: String,
         level: u32,
         child: String,
         claimed: String,
         held: String,
+    },
+    /// A publication named several parents for one artifact on a layer whose kind gives a child
+    /// one — the build's `two_parents` refusal at this entry point, in the same words. A `dag`
+    /// layer records them instead (`dag-hierarchies.md` §4, decision 0117).
+    SeveralParents {
+        layer: String,
+        level: u32,
+        child: String,
+        parents: Vec<String>,
+        kind: String,
+    },
+    /// The edges a publication creates close a cycle — a self-edge being the cycle of length one.
+    /// A hierarchy has a root to descend a cut from and a cycle has none, so it is refused at every
+    /// kind and at both entry points (`dag-hierarchies.md` §4). The path is child → parent, the
+    /// first key repeated at the end.
+    Cycle {
+        layer: String,
+        level: u32,
+        cycle: Vec<String>,
     },
 }
 
@@ -177,6 +198,52 @@ pub enum EdgeCheck {
     /// by which the wire creates an edge**, and it creates it where the artifact is created — which
     /// is where lineage has always been settled.
     Mints,
+}
+
+/// The first cycle in a child → parents adjacency over batch positions, as the path that closes
+/// it — `[a, b, …, a]` — or `None` where every walk reaches a root.
+///
+/// One depth-first pass with three colours, started in position order so the cycle reported is the
+/// same one for the same batch: a node met while still on the chain being walked is the cycle, and
+/// the chain from its first occurrence is the path. A self-edge is `[a, a]`.
+fn first_cycle(adjacency: &[Vec<usize>]) -> Option<Vec<usize>> {
+    // 0 unvisited · 1 on the chain being walked · 2 known to reach a root
+    let mut state = vec![0u8; adjacency.len()];
+    let mut chain: Vec<(usize, usize)> = Vec::new();
+    for start in 0..adjacency.len() {
+        if state[start] != 0 {
+            continue;
+        }
+        state[start] = 1;
+        chain.push((start, 0));
+        while let Some((node, next)) = chain.last_mut() {
+            let node = *node;
+            match adjacency[node].get(*next) {
+                None => {
+                    state[node] = 2;
+                    chain.pop();
+                }
+                Some(&up) => {
+                    *next += 1;
+                    match state[up] {
+                        2 => {}
+                        1 => {
+                            let from = chain.iter().position(|(n, _)| *n == up)?;
+                            let mut cycle: Vec<usize> =
+                                chain[from..].iter().map(|(n, _)| *n).collect();
+                            cycle.push(up);
+                            return Some(cycle);
+                        }
+                        _ => {
+                            state[up] = 1;
+                            chain.push((up, 0));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 impl std::fmt::Display for RegistryError {
@@ -283,6 +350,29 @@ impl std::fmt::Display for RegistryError {
                 "a list column names {claimed} as the parent of {child} in level {level} of \
                  {layer}, which holds {held} as its parent. The two are spellings of one edge, so \
                  publishing either would state a hierarchy nobody wrote"
+            ),
+            RegistryError::SeveralParents {
+                layer,
+                level,
+                child,
+                parents,
+                kind,
+            } => write!(
+                f,
+                "{child} in level {level} of {layer} is named as a child of both {}. The layer is \
+                 declared {kind}, whose child has one parent — declare it dag if a child may sit \
+                 under several",
+                parents.join(" and ")
+            ),
+            RegistryError::Cycle {
+                layer,
+                level,
+                cycle,
+            } => write!(
+                f,
+                "{layer} level {level}: the edges hold a cycle — {}. A hierarchy has a root to \
+                 descend a cut from and a cycle has none, so the publication is refused",
+                cycle.join(" → ")
             ),
             RegistryError::Alloc(e) => write!(f, "{e}"),
         }
@@ -542,7 +632,7 @@ impl LayerRegistry {
                 members: croaring::Bitmap::new(),
                 contents: Vec::new(),
                 attached_to: None,
-                parent_key: None,
+                parent_keys: Vec::new(),
                 shape: None,
             })
             .collect();
@@ -791,23 +881,81 @@ impl LayerRegistry {
                 })
                 .or_else(|| pending(key))
         };
-        let parents: Vec<Option<crate::wal::ParentRef>> = incoming
+        // **Several parents are a `dag` layer's to hold and every other kind's to refuse**
+        // (`dag-hierarchies.md` §4, decision 0117). Ascending and deduplicated, so a key named
+        // twice is one edge and the record's list is the order every reader assumes.
+        let kind = layer.declaration.hierarchy.kind;
+        let name_of = |i: usize| {
+            incoming[i]
+                .key
+                .clone()
+                .unwrap_or_else(|| format!("the artifact at ordinal {}", first_ordinal + i as u64))
+        };
+        let parents: Vec<Vec<crate::wal::ParentRef>> = incoming
             .iter()
-            .map(|artifact| {
-                let Some(key) = artifact.parent_key.as_deref() else {
-                    return Ok(None);
-                };
-                self.parent_ref(
-                    layer_name,
-                    level,
-                    artifact.key.as_deref(),
-                    key,
-                    store,
-                    &batch_ordinal,
-                )
-                .map(Some)
+            .enumerate()
+            .map(|(i, artifact)| {
+                let mut resolved: Vec<crate::wal::ParentRef> = artifact
+                    .parent_keys
+                    .iter()
+                    .map(|key| {
+                        self.parent_ref(
+                            layer_name,
+                            level,
+                            artifact.key.as_deref(),
+                            key,
+                            store,
+                            &batch_ordinal,
+                        )
+                    })
+                    .collect::<Result<_, _>>()?;
+                resolved.sort_unstable();
+                resolved.dedup();
+                if resolved.len() > 1 && kind != tessera_types::layer::HierarchyKind::Dag {
+                    let mut named = artifact.parent_keys.clone();
+                    named.sort_unstable();
+                    named.dedup();
+                    return Err(RegistryError::SeveralParents {
+                        layer: layer_name.to_string(),
+                        level,
+                        child: name_of(i),
+                        parents: named,
+                        kind: format!("{kind:?}").to_lowercase(),
+                    });
+                }
+                Ok(resolved)
             })
             .collect::<Result<_, _>>()?;
+
+        // **The cycle check, over the edges this publication creates** (`dag-hierarchies.md` §4).
+        // A growth never adds lineage, so an edge into an artifact the layer already holds cannot
+        // close a cycle — every cycle is among the artifacts one publication mints, and the batch's
+        // own adjacency is the whole of what has to be walked. The ingest route's `mint_records`
+        // reaches this through `prepare_publish`, so the check holds at both entry points from one
+        // body. A tiered layer's parents sit at coarser levels and never in the batch, so its
+        // adjacency here is empty, which is the shape that cannot hold a cycle.
+        let batch_end = first_ordinal as u32 + incoming.len() as u32;
+        let adjacency: Vec<Vec<usize>> = parents
+            .iter()
+            .map(|resolved| {
+                resolved
+                    .iter()
+                    .filter(|p| {
+                        p.level == level
+                            && p.ordinal >= first_ordinal as u32
+                            && p.ordinal < batch_end
+                    })
+                    .map(|p| (p.ordinal - first_ordinal as u32) as usize)
+                    .collect()
+            })
+            .collect();
+        if let Some(cycle) = first_cycle(&adjacency) {
+            return Err(RegistryError::Cycle {
+                layer: layer_name.to_string(),
+                level,
+                cycle: cycle.into_iter().map(name_of).collect(),
+            });
+        }
 
         // Extend the level's reservation if the batch outgrows it. The runs are a list from the
         // start precisely so this is an append rather than a migration — see `ReservedRuns`.
@@ -859,7 +1007,7 @@ impl LayerRegistry {
                             ordinal: a.ordinal,
                             entity: a.entity,
                         }),
-                    parent: parents[i],
+                    parents: parents[i].clone(),
                     shape: artifact.shape.clone(),
                 }
             })
@@ -1069,6 +1217,12 @@ impl LayerRegistry {
     ///   [`EdgeCheck::Unrecorded`] as before; a child holding a different one is the contradiction,
     ///   because a parent that does not exist cannot be the parent it already has.
     ///
+    /// **On a `dag` layer the contradiction does not exist** (`dag-hierarchies.md` §4): a child
+    /// legitimately holds several parents, so a claimed parent among them is [`EdgeCheck::Agrees`]
+    /// and one not among them is an edge this route cannot add — [`EdgeCheck::Unrecorded`],
+    /// reported and the memberships still landing, exactly as a growth naming a parent for a
+    /// parentless child of a tree is.
+    ///
     /// **The child's is a fact and the parent's is a search**, which is why one is a `bool` and the
     /// other a closure. A child's level is the edge's own; a parent's is whatever the layer's shape
     /// says to look at — the child's level for a nested layer and any coarser one for a tiered
@@ -1094,9 +1248,21 @@ impl LayerRegistry {
         if child_mints {
             return Ok(EdgeCheck::Mints);
         }
+        let several = self
+            .layers
+            .get(layer)
+            .ok_or_else(|| RegistryError::NoSuchLayer(layer.to_string()))?
+            .declaration
+            .hierarchy
+            .kind
+            == tessera_types::layer::HierarchyKind::Dag;
         let ordinal = self.resolve_growth_key(layer, level, child, store)?;
-        let held = store.get(layer, level, ordinal).and_then(|r| r.parent);
-        let contradicted = |held| RegistryError::ContradictedParent {
+        let held: Vec<crate::wal::ParentRef> = store
+            .get(layer, level, ordinal)
+            .map(|r| r.parents.clone())
+            .unwrap_or_default();
+        // A tree's child holds at most one parent, so the one it holds is the one named.
+        let contradicted = |held: crate::wal::ParentRef| RegistryError::ContradictedParent {
             layer: layer.to_string(),
             level,
             child: child.clone(),
@@ -1104,16 +1270,20 @@ impl LayerRegistry {
             held: self.key_at(layer, held, store),
         };
         if parent_mints(parent) {
-            return match held {
+            return match held.first() {
                 None => Ok(EdgeCheck::Unrecorded),
-                Some(held) => Err(contradicted(held)),
+                Some(_) if several => Ok(EdgeCheck::Unrecorded),
+                Some(held) => Err(contradicted(*held)),
             };
         }
         let claimed = self.parent_ref(layer, level, Some(child), parent, store, &no_pending)?;
-        match held {
+        if held.contains(&claimed) {
+            return Ok(EdgeCheck::Agrees);
+        }
+        match held.first() {
             None => Ok(EdgeCheck::Unrecorded),
-            Some(held) if held == claimed => Ok(EdgeCheck::Agrees),
-            Some(held) => Err(contradicted(held)),
+            Some(_) if several => Ok(EdgeCheck::Unrecorded),
+            Some(held) => Err(contradicted(*held)),
         }
     }
 
@@ -1175,6 +1345,7 @@ impl LayerRegistry {
             || matches!(
                 layer.declaration.hierarchy.kind,
                 tessera_types::layer::HierarchyKind::Nested
+                    | tessera_types::layer::HierarchyKind::Dag
             );
         if !edges_allowed {
             return Err(RegistryError::EdgesOnUntreedLayer {
@@ -1182,13 +1353,18 @@ impl LayerRegistry {
                 kind: format!("{:?}", layer.declaration.hierarchy.kind).to_lowercase(),
             });
         }
-        // **Only a within-level edge can name itself.** A key is unique per `(layer, level)`, so a
-        // levelled taxonomy legitimately carries the same key at two levels — an arXiv archive with
-        // no subclass is `hep-ph` at both, and the level-1 artifact's parent is the level-0 one of
+        // **Only a within-level edge can name itself, and one that does is the cycle of length
+        // one** (`dag-hierarchies.md` §4). A key is unique per `(layer, level)`, so a levelled
+        // taxonomy legitimately carries the same key at two levels — an arXiv archive with no
+        // subclass is `hep-ph` at both, and the level-1 artifact's parent is the level-0 one of
         // the same name. Refusing that would force a caller to rename half their taxonomy to
         // satisfy a check meant for a tree.
         if !cross_level && child_key == Some(parent_key) {
-            return Err(missing());
+            return Err(RegistryError::Cycle {
+                layer: layer_name.to_string(),
+                level,
+                cycle: vec![parent_key.to_string(), parent_key.to_string()],
+            });
         }
         let ambiguous = || RegistryError::AmbiguousParent {
             layer: layer_name.to_string(),
@@ -1737,7 +1913,7 @@ mod tests {
             members: croaring::Bitmap::of(members),
             contents: Vec::new(),
             attached_to: None,
-            parent_key: None,
+            parent_keys: Vec::new(),
             shape: None,
         }
     }
@@ -1813,6 +1989,166 @@ mod tests {
                 entity: cluster,
             })
         );
+    }
+
+    fn treed(name: &str, kind: HierarchyKind) -> LayerDeclaration {
+        let mut d = declaration(name);
+        d.hierarchy.kind = kind;
+        d
+    }
+
+    fn under(key: &str, parents: &[&str]) -> IncomingArtifact {
+        let mut artifact = incoming(key, &[1, 2]);
+        artifact.parent_keys = parents.iter().map(|p| p.to_string()).collect();
+        artifact
+    }
+
+    /// **A `dag` layer records several parents, ascending and deduplicated; a `nested` layer
+    /// refuses them** (`dag-hierarchies.md` §4, decision 0117). The refusal is the build's
+    /// `two_parents` at this entry point, and it names both parents.
+    #[test]
+    fn a_dag_child_holds_every_parent_it_named_and_a_tree_refuses_a_second() {
+        let mut reg = LayerRegistry::new();
+        let mut store = ArtifactStore::new();
+        let mut alloc = Allocator::new(0);
+        register(&mut reg, &mut alloc, treed("mesh/d", HierarchyKind::Dag)).unwrap();
+        register(
+            &mut reg,
+            &mut alloc,
+            treed("clusters/t", HierarchyKind::Nested),
+        )
+        .unwrap();
+
+        // Parents named out of order, one of them twice: the record is ascending and holds each
+        // once, whatever the caller's spelling.
+        publish(
+            &mut reg,
+            &mut store,
+            &mut alloc,
+            "mesh/d",
+            &[
+                under("p1", &[]),
+                under("p0", &[]),
+                under("c", &["p1", "p0", "p1"]),
+            ],
+        )
+        .unwrap();
+        let child = store.get("mesh/d", 0, 2).unwrap();
+        assert_eq!(child.key.as_deref(), Some("c"));
+        assert_eq!(
+            child.parents,
+            vec![
+                crate::wal::ParentRef {
+                    level: 0,
+                    ordinal: 0
+                },
+                crate::wal::ParentRef {
+                    level: 0,
+                    ordinal: 1
+                }
+            ]
+        );
+
+        let refused = publish(
+            &mut reg,
+            &mut store,
+            &mut alloc,
+            "clusters/t",
+            &[
+                under("p0", &[]),
+                under("p1", &[]),
+                under("c", &["p1", "p0"]),
+            ],
+        )
+        .expect_err("a tree's child has one parent");
+        assert_eq!(
+            refused,
+            RegistryError::SeveralParents {
+                layer: "clusters/t".into(),
+                level: 0,
+                child: "c".into(),
+                parents: vec!["p0".into(), "p1".into()],
+                kind: "nested".into(),
+            }
+        );
+        // The same key twice is one edge, and a tree takes it.
+        publish(
+            &mut reg,
+            &mut store,
+            &mut alloc,
+            "clusters/t",
+            &[under("p0", &[]), under("c", &["p0", "p0"])],
+        )
+        .unwrap();
+        assert_eq!(store.get("clusters/t", 0, 1).unwrap().parents.len(), 1);
+    }
+
+    /// **A publication whose edges close a cycle is refused, naming the cycle**
+    /// (`dag-hierarchies.md` §4) — at every kind, a self-edge being the cycle of length one. A
+    /// growth never adds lineage, so the batch's own edges are the whole of what can close one.
+    #[test]
+    fn a_cycle_among_a_publications_own_edges_is_refused_naming_it() {
+        let mut reg = LayerRegistry::new();
+        let mut store = ArtifactStore::new();
+        let mut alloc = Allocator::new(0);
+        register(&mut reg, &mut alloc, treed("mesh/d", HierarchyKind::Dag)).unwrap();
+        register(
+            &mut reg,
+            &mut alloc,
+            treed("clusters/t", HierarchyKind::Nested),
+        )
+        .unwrap();
+
+        let three = [under("a", &["c"]), under("b", &["a"]), under("c", &["b"])];
+        for layer in ["mesh/d", "clusters/t"] {
+            let refused = publish(&mut reg, &mut store, &mut alloc, layer, &three)
+                .expect_err("a 3-cycle has no root");
+            assert_eq!(
+                refused,
+                RegistryError::Cycle {
+                    layer: layer.into(),
+                    level: 0,
+                    cycle: vec!["a".into(), "c".into(), "b".into(), "a".into()],
+                },
+                "the path is child → parent from the first key in batch order"
+            );
+            let refused = publish(
+                &mut reg,
+                &mut store,
+                &mut alloc,
+                layer,
+                &[under("s", &["s"])],
+            )
+            .expect_err("a self-edge is a cycle of length one");
+            assert_eq!(
+                refused,
+                RegistryError::Cycle {
+                    layer: layer.into(),
+                    level: 0,
+                    cycle: vec!["s".into(), "s".into()],
+                }
+            );
+            assert_eq!(
+                store.next_ordinal(layer, 0),
+                0,
+                "a refusal publishes nothing"
+            );
+        }
+
+        // A diamond is not a cycle: two paths to one root, every edge descending.
+        publish(
+            &mut reg,
+            &mut store,
+            &mut alloc,
+            "mesh/d",
+            &[
+                under("r", &[]),
+                under("l", &["r"]),
+                under("m", &["r"]),
+                under("c", &["l", "m"]),
+            ],
+        )
+        .expect("a diamond is the shape a dag layer exists for");
     }
 
     /// An edge into a layer nobody declared is an edge no replacement checks, so it is refused at
@@ -2040,7 +2376,7 @@ mod tests {
         for artifact in artifacts {
             assert!(artifact.contents.is_empty(), "a derived artifact has none");
             assert!(artifact.attached_to.is_none());
-            assert!(artifact.parent.is_none());
+            assert!(artifact.parents.is_empty());
             assert!(artifact.shape.is_none());
         }
         assert_eq!(store.ordinal_of_key("regions/uk", 0, "high"), Some(0));

@@ -218,7 +218,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
 
     // ---- (a) manifests present, digests verify (open_bundle is the read protocol) ----------
     let bundle = open_bundle(&out).expect("open_bundle must verify the freshly built bundle");
-    assert_eq!(bundle.manifest.bundle_format, 4);
+    assert_eq!(bundle.manifest.bundle_format, 5);
     assert_eq!(bundle.manifest.entity_id_high_water, N_ITEMS);
     assert_eq!(bundle.manifest.small_term_threshold, 32);
     assert_eq!(bundle.manifest.partitions.len(), 1);

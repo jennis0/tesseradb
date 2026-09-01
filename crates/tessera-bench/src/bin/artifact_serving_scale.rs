@@ -2231,7 +2231,7 @@ fn main() {
                 members: to_entities(&in_rows, &space),
                 contents,
                 attached_to: None,
-                parent: None,
+                parents: Vec::new(),
             }
         })
         .collect();

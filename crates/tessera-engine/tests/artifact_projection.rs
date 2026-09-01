@@ -138,7 +138,7 @@ impl Fixture {
     ) -> IncomingArtifact {
         let mut artifact =
             IncomingArtifact::from_entities(Some(key.into()), self.members(sources));
-        artifact.parent_key = parent.map(str::to_string);
+        artifact.parent_keys = parent.into_iter().map(str::to_string).collect();
         artifact
     }
 }

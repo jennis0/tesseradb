@@ -353,8 +353,8 @@ impl Bundle {
 }
 
 /// Open `root` (a bundle directory containing `CURRENT`) following the read protocol
-/// (contracts §2.3): `CURRENT` → digest-checked `MANIFEST.json` (refusing `bundle_format` newer
-/// than this reader) → per partition, the highest `SEGMENTS-<n>.json` whose listed files (and
+/// (contracts §2.3): `CURRENT` → digest-checked `MANIFEST.json` (refusing a `bundle_format` other
+/// than this reader's own) → per partition, the highest `SEGMENTS-<n>.json` whose listed files (and
 /// `MANIFEST.json`'s) all verify by size and SHA-256, stepping down on failure. Any failure at
 /// any stage is a typed error — fail-closed, per the invariant this method exists to uphold:
 /// serving must never treat a partially-verified bundle as ready.
@@ -421,7 +421,7 @@ enum Verification {
 /// parses are the ones it computed from the bytes it had in hand. Re-reading them proves nothing
 /// that the write did not already prove, and costs the whole bundle in IO.
 ///
-/// Kept, all of it: the `bundle_format` ceiling, `identity.validate()`, every path-component
+/// Kept, all of it: the `bundle_format` check, `identity.validate()`, every path-component
 /// sanitisation, the `ensure_verified` membership check (a file the loader reads must appear in a
 /// `files` map — cheap, and it catches a manifest that names a file it does not digest), the
 /// `row_count` agreement between the manifest and `morton.u32`/`columns.arrow`, and every extent's
@@ -456,10 +456,15 @@ fn open_prefix(
             source,
         })?;
 
-    if manifest.bundle_format > BUNDLE_FORMAT {
+    // **Exactly the current format, not at most.** A ceiling alone would open a bundle written at
+    // an earlier number, and the numbers exist because an earlier bundle's bytes decode as
+    // something else under this reader — format 4's artifact record reads its one-byte parent tag
+    // as the low byte of a parent count. No bundle predates the current format (decision 0048),
+    // so the refusal costs a rebuild and nothing more.
+    if manifest.bundle_format != BUNDLE_FORMAT {
         return Err(StoreError::UnsupportedBundleFormat {
             found: manifest.bundle_format,
-            max_supported: BUNDLE_FORMAT,
+            supported: BUNDLE_FORMAT,
         });
     }
 

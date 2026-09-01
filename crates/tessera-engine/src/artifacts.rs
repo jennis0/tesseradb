@@ -112,10 +112,12 @@ pub struct ArtifactRecords {
     /// on its layer's gate, neither of which is a row-space question, so a projection would be a
     /// second address for something already addressed.
     attachments: Vec<Option<Attachment>>,
-    /// Per ordinal, this artifact's parent edge as the registry holds it — read by the serving
-    /// path to name a parent that is *also* in the response, and by nothing in [`ArtifactView`].
-    /// It is not a visibility term: see [`ArtifactRecord::parent`].
-    parents: Vec<Option<ParentRef>>,
+    /// Per ordinal, this artifact's parent edges as the registry holds them — ascending by
+    /// `(level, ordinal)`, empty at a root, several on a `dag` layer (`dag-hierarchies.md` §7,
+    /// decision 0117). Read by the serving path to name a parent that is *also* in the response,
+    /// and by nothing in [`ArtifactView`]. It is not a visibility term: see
+    /// [`ArtifactRecord::parents`].
+    parents: Vec<Vec<ParentRef>>,
     /// Per ordinal, per rank: `|G|` in **entity space**, from the durable record.
     ///
     /// **Kept beside the projected set because a projection that lost a member must not read as
@@ -272,11 +274,11 @@ impl ArtifactRecords {
     fn put(&mut self, idx: usize, record: &ArtifactRecord) {
         if self.attachments.len() <= idx {
             self.attachments.resize_with(idx + 1, || None);
-            self.parents.resize_with(idx + 1, || None);
+            self.parents.resize_with(idx + 1, Vec::new);
             self.declared.resize_with(idx + 1, Vec::new);
         }
         self.attachments[idx] = record.attached_to.clone();
-        self.parents[idx] = record.parent;
+        self.parents[idx] = record.parents.clone();
         self.declared[idx] = record
             .contents
             .iter()
@@ -291,9 +293,12 @@ impl ArtifactRecords {
             .and_then(Option::as_ref)
     }
 
-    /// The artifact's parent edge, as the registry holds it.
-    pub(crate) fn parent(&self, ordinal: u32) -> Option<ParentRef> {
-        self.parents.get(ordinal as usize).copied().flatten()
+    /// The artifact's parent edges, as the registry holds them — ascending by `(level, ordinal)`,
+    /// and empty at a root and at a hole alike.
+    pub(crate) fn parents(&self, ordinal: u32) -> &[ParentRef] {
+        self.parents
+            .get(ordinal as usize)
+            .map_or(&[], Vec::as_slice)
     }
 
     /// `|G|` per rank, entity space. Empty for a hole and for an artifact with no contents alike —
@@ -354,7 +359,13 @@ impl MembershipRows {
 
     /// One artifact whose membership rows were resolved elsewhere — a shape's — with the
     /// generating sets projected exactly as [`Self::put`] projects them.
-    fn put_resolved(&mut self, idx: usize, record: &ArtifactRecord, rows: Bitmap, space: &RowSpace) {
+    fn put_resolved(
+        &mut self,
+        idx: usize,
+        record: &ArtifactRecord,
+        rows: Bitmap,
+        space: &RowSpace,
+    ) {
         if self.rows.len() <= idx {
             self.rows.resize_with(idx + 1, || None);
             self.generating.resize_with(idx + 1, Vec::new);
@@ -653,9 +664,9 @@ impl ArtifactRows {
         self.records.attachment(ordinal)
     }
 
-    /// The artifact's parent edge, as the registry holds it.
-    pub(crate) fn parent(&self, ordinal: u32) -> Option<ParentRef> {
-        self.records.parent(ordinal)
+    /// The artifact's parent edges, as the registry holds them — see [`ArtifactRecords::parents`].
+    pub(crate) fn parents(&self, ordinal: u32) -> &[ParentRef] {
+        self.records.parents(ordinal)
     }
 
     pub fn get(&self, ordinal: u32) -> Option<&Bitmap> {
@@ -1554,7 +1565,15 @@ impl ArtifactProjections {
             let column = if !layout.is_row_major() {
                 None
             } else if space.extent_count() == 0 {
-                self.column_for(prefix, view, layer, level, key.level_version, layout, &built)
+                self.column_for(
+                    prefix,
+                    view,
+                    layer,
+                    level,
+                    key.level_version,
+                    layout,
+                    &built,
+                )
             } else {
                 let composed =
                     RowColumn::compose(built.membership(), built.index().row_count(), layout)
@@ -2253,7 +2272,7 @@ mod tests {
         assembled(
             ArtifactRecords {
                 attachments: vec![None; sets.len()],
-                parents: vec![None; sets.len()],
+                parents: vec![Vec::new(); sets.len()],
                 declared: vec![Vec::new(); sets.len()],
             },
             MembershipRows {
@@ -2297,7 +2316,7 @@ mod tests {
         assembled(
             ArtifactRecords {
                 attachments: vec![None],
-                parents: vec![None],
+                parents: vec![Vec::new()],
                 declared: vec![contents.iter().map(|(_, declared)| *declared).collect()],
             },
             MembershipRows {
@@ -2671,7 +2690,7 @@ mod tests {
                     ordinal: 3,
                     entity: CLUSTER_ENTITY,
                 })],
-                parents: vec![None],
+                parents: vec![Vec::new()],
                 declared: vec![Vec::new()],
             },
             MembershipRows {

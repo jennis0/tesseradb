@@ -5719,8 +5719,9 @@ impl Engine {
                             crate::cut::Lineage::new(store.level(&name, level).map(
                                 |(ordinal, record)| {
                                     let within = record
-                                        .parent
-                                        .filter(|parent| parent.level == level)
+                                        .parents
+                                        .iter()
+                                        .find(|parent| parent.level == level)
                                         .map(|parent| parent.ordinal);
                                     (ordinal, within)
                                 },
@@ -5879,7 +5880,7 @@ impl Engine {
                     // ten million of them into a cached structure buys nothing the store's own
                     // lookup does not already answer. The key is payload, so the identity
                     // projection skips the lookup.
-                    let parent = rows.parent(ordinal);
+                    let parent = rows.parents(ordinal).first().copied();
                     let key = match artifact_rows {
                         ArtifactRows::Identity => None,
                         ArtifactRows::Full => self

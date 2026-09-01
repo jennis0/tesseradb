@@ -21,8 +21,11 @@ pub enum StoreError {
     },
     /// `CURRENT.manifest_digest` didn't match the SHA-256 of the fetched `MANIFEST.json`.
     ManifestDigestMismatch { expected: String, actual: String },
-    /// `MANIFEST.json`'s `bundle_format` is newer than this reader supports.
-    UnsupportedBundleFormat { found: u32, max_supported: u32 },
+    /// `MANIFEST.json`'s `bundle_format` is not the one this reader writes and reads. Newer or
+    /// older alike: no bundle predates the current format (decision 0048), so a stale local one is
+    /// recreated rather than opened, and the number is what makes that a refusal at open rather
+    /// than a misread of the record bytes it guards.
+    UnsupportedBundleFormat { found: u32, supported: u32 },
     /// A file named in a manifest's `files` map failed size or SHA-256 verification.
     FileVerificationFailed { path: PathBuf, reason: String },
     /// No `SEGMENTS-<n>.json` for a partition verified, at any `n` — the bundle is unusable
@@ -168,12 +171,10 @@ impl fmt::Display for StoreError {
                 f,
                 "MANIFEST.json digest mismatch: CURRENT said {expected}, computed {actual}"
             ),
-            StoreError::UnsupportedBundleFormat {
-                found,
-                max_supported,
-            } => write!(
+            StoreError::UnsupportedBundleFormat { found, supported } => write!(
                 f,
-                "bundle_format {found} is newer than this reader supports (max {max_supported})"
+                "bundle_format {found} is not the {supported} this reader supports; a bundle at \
+                 another format is recreated, not opened (decision 0048)"
             ),
             StoreError::FileVerificationFailed { path, reason } => {
                 write!(

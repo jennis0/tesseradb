@@ -2155,6 +2155,189 @@ fn a_child_named_under_two_parents_is_refused_naming_both() {
     assert!(message.contains("901"), "{message}");
 }
 
+// ---------------------------------------------------------------------------------------------
+// The dag shape: a child under several parents (`dag-hierarchies.md`, decision 0117)
+// ---------------------------------------------------------------------------------------------
+
+/// The treed layer at the `dag` kind — `nested` in every respect but the one the tests below are
+/// about.
+fn dag_layers_toml() -> String {
+    TREED_LAYERS_TOML.replace(r#"kind = "nested""#, r#"kind = "dag""#)
+}
+
+/// An artifact table whose `parent` cell is a **list** of keys — the spelling a `dag` layer's
+/// child needs, and one every kind reads (a scalar is a list of one).
+fn write_dag_artifacts(path: &Path, rows: &[(&str, &[&str])]) {
+    let mut offsets: Vec<i32> = vec![0];
+    let mut entries: Vec<&str> = Vec::new();
+    for (_, parents) in rows {
+        entries.extend(parents.iter().copied());
+        offsets.push(entries.len() as i32);
+    }
+    let parents: ArrayRef = Arc::new(ListArray::new(
+        Arc::new(Field::new("item", DataType::Utf8, true)),
+        OffsetBuffer::new(offsets.into()),
+        Arc::new(StringArray::from(entries)),
+        None,
+    ));
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("key", DataType::Utf8, false),
+        Field::new("parent", parents.data_type().clone(), true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(
+                rows.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
+            )) as ArrayRef,
+            parents,
+        ],
+    )
+    .unwrap();
+    write(path, schema, batch);
+}
+
+/// Build a `dag` fixture from a parent-list table, returning the result and the bundle root.
+fn dag_build(
+    rows: &[(&str, &[&str])],
+    membership: &[(&str, Vec<u64>)],
+) -> (tessera_build::error::Result<()>, PathBuf, tempfile::TempDir) {
+    let inputs = inputs();
+    std::fs::write(&inputs.config, format!("{VIEW_TOML}{}", dag_layers_toml())).unwrap();
+    write_dag_artifacts(&inputs.at("tree.parquet"), rows);
+    write_treed_members(&inputs.at("tree_members.parquet"), membership);
+    let out = inputs.dir.join("bundle");
+    let result = run(&inputs, &out).map(|_| ());
+    (result, out, inputs._tmp)
+}
+
+/// **A `dag` layer builds from a parent list, and from two lineages naming different parents for
+/// one child, and the two spellings are one bundle** (`dag-hierarchies.md` §4). The lists are the
+/// ones `a_child_named_under_two_parents_is_refused_naming_both` refuses under `nested`: the same
+/// data is a refusal on a tree and a graph on a DAG, which is what declaring the kind is for.
+///
+/// Containment is per edge: the child holds every point and each parent holds half, so both
+/// edges are reported violated, named by their parent — reported and published, never refused.
+#[test]
+fn a_dag_layer_builds_from_a_parent_list_and_from_two_lineages_alike() {
+    let lists: Vec<Vec<Option<i64>>> = (0..N_ITEMS)
+        .map(|e| vec![Some(if e % 2 == 0 { 900 } else { 901 }), Some(950)])
+        .collect();
+    let layer_of_dag = || layer_of_kind("dag");
+    let from_points = format!("{}value_set = \"open\"\n{FROM_LINEAGE}", layer_of_dag());
+    let (from_points, _a) = build_spelling(&from_points, |inputs| {
+        write_listed_points(&inputs.points, &lists, false, None);
+    });
+    let report = containment_report(&from_points);
+    let violations = report["violations"].as_array().unwrap();
+    assert_eq!(
+        violations.len(),
+        2,
+        "the child escapes each of its two parents by the other's half: {violations:?}"
+    );
+    let mut parents: Vec<&str> = violations
+        .iter()
+        .map(|v| {
+            assert_eq!(v["child"], "950");
+            v["parent"].as_str().unwrap()
+        })
+        .collect();
+    parents.sort_unstable();
+    assert_eq!(parents, vec!["900", "901"]);
+
+    let from_tables = format!("{}value_set = \"open\"\n{FROM_TREE_TABLES}", layer_of_dag());
+    let (from_tables, _b) = build_spelling(&from_tables, |inputs| {
+        write_listed_points(&inputs.points, &lists, false, None);
+        write_dag_artifacts(
+            &inputs.at("tree.parquet"),
+            &[("900", &[]), ("901", &[]), ("950", &["901", "900", "901"])],
+        );
+        let evens: Vec<u64> = (0..N_ITEMS).filter(|e| e % 2 == 0).collect();
+        let odds: Vec<u64> = (0..N_ITEMS).filter(|e| e % 2 == 1).collect();
+        write_treed_members(
+            &inputs.at("tree_members.parquet"),
+            &[
+                ("900", evens),
+                ("901", odds),
+                ("950", (0..N_ITEMS).collect()),
+            ],
+        );
+    });
+    assert_bundles_identical(
+        &from_points,
+        &from_tables,
+        "two lineages against a parent list naming both, one of them twice",
+    );
+}
+
+/// **A self-edge and a cycle refuse a `dag` build**, as they refuse a tree's
+/// (`dag-hierarchies.md` §4): the check is a depth-first search over parent lists, and the refusal
+/// names the cycle child → parent.
+#[test]
+fn a_self_edge_and_a_cycle_refuse_a_dag_build() {
+    fn members<'a>(keys: &[&'a str]) -> Vec<(&'a str, Vec<u64>)> {
+        keys.iter().map(|k| (*k, (0..10).collect())).collect()
+    }
+    let (result, _out, _tmp) = dag_build(&[("t-a", &["t-a"])], &members(&["t-a"]));
+    let err = result.expect_err("a self-edge is the cycle of length one");
+    assert!(format!("{err}").contains("names itself"), "{err}");
+
+    let (result, _out, _tmp) = dag_build(
+        &[
+            ("t-a", &["t-b"]),
+            ("t-b", &["t-c"]),
+            ("t-c", &["t-a"]),
+            ("t-r", &[]),
+            ("t-d", &["t-r", "t-c"]),
+        ],
+        &members(&["t-a", "t-b", "t-c", "t-r", "t-d"]),
+    );
+    let err = result.expect_err("a cycle has no root");
+    assert!(
+        format!("{err}").contains("cycle — t-a → t-b → t-c → t-a"),
+        "the cycle is named, child → parent, from the first key in order: {err}"
+    );
+
+    // A diamond is not a cycle: two paths to one root, every edge descending.
+    let (result, _out, _tmp) = dag_build(
+        &[
+            ("t-r", &[]),
+            ("t-l", &["t-r"]),
+            ("t-m", &["t-r"]),
+            ("t-c", &["t-l", "t-m"]),
+        ],
+        &members(&["t-r", "t-l", "t-m", "t-c"]),
+    );
+    result.expect("a diamond is the shape a dag layer exists for");
+}
+
+/// **A `nested` layer still refuses two parents**, whichever spelling names them: the artifact
+/// row's own list refuses at the hierarchy check, and two lineages refuse as
+/// `a_child_named_under_two_parents_is_refused_naming_both` asserts, in the words it always used.
+#[test]
+fn a_nested_layer_refuses_a_parent_list_of_two() {
+    let inputs = inputs();
+    std::fs::write(&inputs.config, format!("{VIEW_TOML}{TREED_LAYERS_TOML}")).unwrap();
+    write_dag_artifacts(
+        &inputs.at("tree.parquet"),
+        &[("t-a", &[]), ("t-b", &[]), ("t-c", &["t-a", "t-b"])],
+    );
+    write_treed_members(
+        &inputs.at("tree_members.parquet"),
+        &[
+            ("t-a", (0..10).collect()),
+            ("t-b", (0..10).collect()),
+            ("t-c", (0..10).collect()),
+        ],
+    );
+    let err = run(&inputs, &inputs.dir.join("bundle")).expect_err("a tree's child has one parent");
+    let text = format!("{err}");
+    assert!(
+        text.contains("t-c is claimed by both t-a and t-b"),
+        "the refusal names both parents: {text}"
+    );
+}
+
 /// **A variable-length list against a levelled declaration is refused.** Entry *k* means level *k*
 /// only because there are as many entries as levels; a row of another length is a lineage, and
 /// reading it as one would publish levels the layer did not declare.

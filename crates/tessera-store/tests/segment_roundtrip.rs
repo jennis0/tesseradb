@@ -2,10 +2,10 @@
 //! (contracts §2.6): sort a batch, write
 //! `columns.arrow` / `morton.u32` / `permutation.bin`, and read every byte back.
 
-use tessera_plugin::Plugin;
 use std::fs;
 use std::io::Read;
 use std::sync::Arc;
+use tessera_plugin::Plugin;
 
 use arrow::array::{Array, ArrayRef, Float32Array, UInt16Array, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
@@ -477,7 +477,7 @@ fn a_view_without_a_quantisation_extent_is_a_typed_error() {
     // of them silently. Pre-release there is no older shape to tolerate (decision 0048), so the
     // missing field refuses at open. This is the same rule `projection` beside it keeps.
     let json = serde_json::json!({
-        "bundle_format": 4,
+        "bundle_format": 5,
         "created_at": "2026-08-30T00:00:00Z",
         "data_plugin_hash": tessera_plugin::Passthrough::new().data_plugin_hash(),
         "vocabularies": [],
