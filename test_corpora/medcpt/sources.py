@@ -81,16 +81,35 @@ def chunk_offsets(share_dir: Path) -> tuple[list[int], list[int]]:
     return rows, offsets
 
 
-def vectors(out: Path | None = None) -> tuple[np.memmap, dict]:
+def staged_rows(meta: dict) -> int:
+    """Rows staged contiguously from row 0 — how much of the matrix a partial run may read.
+
+    The sidecar records chunks by name, and a chunk that is not written is a hole of zeros in a
+    sparse file rather than a short one. Nothing may read past the first hole, so the measurable
+    prefix is what the chunks written *in order from the first* add up to.
+    """
+    at = 0
+    for n in CHUNKS:
+        held = meta["chunks"].get(str(n))
+        if held is None or held["offset"] != at:
+            break
+        at += held["rows"]
+    return at
+
+
+def vectors(out: Path | None = None, *, complete: bool = True) -> tuple[np.memmap, dict]:
     """The staged matrix and its sidecar, opened read-only.
 
-    Refuses a matrix whose sidecar does not say every chunk is written: a partially staged run
-    reads as zeros, which is a silent wrong answer rather than a loud one.
+    **Refuses a partial matrix by default**: an unwritten chunk is a hole of zeros in a sparse
+    file, so reading one is a silent wrong answer rather than a loud one. `complete=False` is for
+    the measurement driver alone, which reads the prefix `staged_rows` reports while the staging
+    pass is still running, and says so in what it prints.
     """
     dirpath = staging(out)
     meta = json.loads((dirpath / "vectors.json").read_text())
     missing = [n for n in CHUNKS if str(n) not in meta["chunks"]]
-    assert not missing, f"staging is incomplete: chunks {missing} are not written"
+    if complete:
+        assert not missing, f"staging is incomplete: chunks {missing} are not written"
     return (
         np.memmap(
             dirpath / "vectors.f16",

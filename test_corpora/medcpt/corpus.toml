@@ -1,0 +1,142 @@
+# MedCPT / PubMed — 35,920,666 articles, the ladder's largest embedding rung.
+#
+# Produced by `prepare.py`, which writes an edited copy of this file next to the parquets;
+# `[sources]` is relative to the declaring document (configuration.md §3), so the copy beside the
+# data is what `tessera build` reads and this one is what gets reviewed.
+#
+# **Two markers are filled by the run rather than committed conditional.** `# <abstract-attribute>`
+# becomes the `abstract` column's declaration when `prepare.py` ran with `--abstracts`, which is
+# ⊘ an **open owner ruling** — 36M x ~1 kB of prose in an attribute pass that holds a text column
+# whole, and the streaming text column does not exist. `# <mesh-layer>` becomes the
+# `mesh/descriptors` block that `mesh.py` owns. Where a marker is not filled the copy says so in
+# place, so the declaration beside the data always states what it does and does not carry.
+#
+# **Every path is named once.** A `source` anywhere below names one of these keys rather than
+# repeating a path.
+
+[sources]
+points          = "points.parquet"
+branch          = "branch.parquet"
+kmeans          = "clusters-kmeans.parquet"
+kmeans_members  = "clusters-kmeans-members.parquet"
+mesh            = "mesh-descriptors.parquet"
+mesh_members    = "mesh-descriptors-members.parquet"
+
+[defaults]
+source          = "points"
+entity_id_field = "entity_id"
+
+# ---------------------------------------------------------------------------------------------
+# **One view.** MedCPT was trained on 255 million query-article click pairs for *retrieval*, and
+# the publisher says its geometry is organised for search relevance rather than for topic — so the
+# title is *Literature map* and this is not a topic map (`docs/ingest-campaign.md` §4).
+#
+# `projection = "none"` is the default and is written for clarity: an embedding layout is not a map
+# and there is no transform between these coordinates and any ground. `extent = "auto"` squares a
+# box around the coordinates the run produced; the build's frame report is the thing to read before
+# believing the map (`README.md`).
+#
+# **`point_visibility` reads `branches`**, the MeSH top-level letters an article's descriptors sit
+# under. `default` fires only on an **empty** list, and the column is never empty: an article with
+# no resolved descriptor carries the single term `unindexed` (`prepare.py`). The default is
+# declared because the field requires one, not because it is expected to be reached.
+# ---------------------------------------------------------------------------------------------
+
+[[view]]
+name             = "knn"
+title            = "Literature map"
+projection       = "none"
+extent           = "auto"
+source           = "points"
+visibility       = "public"
+point_visibility = { field = "branches", default = "public" }
+
+# MeSH's sixteen top-level branch letters are published taxonomy, so the value set discloses nothing
+# about this corpus's contents; `unindexed` is this rung's own and is in the set for the same
+# reason. Closed: a branch neither set names is a refusal rather than a quietly minted category.
+[[vocabulary]]
+name       = "branch"
+title      = "MeSH branch"
+width      = "u8"
+value_set  = "closed"
+visibility = "public"
+source     = "branch"
+
+# `timestamp_us` rather than `i64`, so the unit is a fact the client reads off `/v1/meta` rather
+# than a convention it has to be told. Indexed as well as rendered: a map of forty years of
+# literature is asked for a date range before it is asked for anything else, and a `render` column
+# answers no filter.
+[[attribute]]
+name   = "published"
+title  = "Published"
+type   = "timestamp_us"
+render = true
+index  = true
+
+# Prose lives in the record blob and reaches a client at drill-down: `render` on a text column is
+# refused, the hot column being a fixed-width slot per row. `index` builds the token index behind
+# `match` and `phrase`.
+[[attribute]]
+name  = "title"
+type  = "text"
+index = true
+
+# The article's **major-topic** MeSH descriptors, joined with `; `. Text rather than a category:
+# an article carries up to sixteen of them and 30,954 descriptors exist, which is a dictionary and
+# not a value set. It is what makes the MeSH indexing searchable without a join.
+[[attribute]]
+name  = "mesh_major"
+title = "MeSH major topics"
+type  = "text"
+index = true
+
+# <abstract-attribute>
+
+[[attribute]]
+name  = "pmid"
+title = "PMID"
+type  = "keyword"
+index = true
+
+# ---------------------------------------------------------------------------------------------
+# **The layer that certainly draws.** k-means over the 2D layout is compact in it by construction,
+# which is the test a layer has to pass to earn its place (the ruling that withdrew Overture's and
+# arXiv's taxonomies). The DAG below is the layer the rung exists for; this one is what guarantees
+# the view has something on it.
+#
+# **A cluster carries its own title** as ranked supplied content — the c-TF-IDF description first,
+# a generic fallback second — rather than a label artifact on a layer of its own that a client had
+# to join by attachment. A client names an artifact from its own first content.
+#
+# Both disclosure controls are stated, neither having a default: `visibility` is the label a viewer
+# must hold to know the layer exists, and `require_member_visibility` is how much of a cluster a
+# viewer must already see before that cluster is served to them. The content carries a third at its
+# own grain, and it is a **provenance declaration**: the text is a synthesis of the titles it was
+# drawn from, so `all`.
+# ---------------------------------------------------------------------------------------------
+
+[[layer]]
+name       = "clusters/kmeans"
+title      = "k-means clusters"
+source     = "kmeans"
+views      = ["knn"]
+membership = "enumerated"
+hierarchy  = { kind = "flat", prune_children = false }
+
+visibility          = "public"
+artifact_visibility = { default = "inherited" }
+# The absolute form: a fixed floor, whatever the cluster's size.
+require_member_visibility = { count = 50 }
+
+  [layer.members]
+  source = "kmeans_members"
+
+  [layer.content]
+  computed = ["centroid", "box", "hull"]
+
+    [[layer.content.supplied]]
+    name                      = "topic"
+    type                      = "text"
+    require_member_visibility = "all"
+
+# <mesh-layer>
