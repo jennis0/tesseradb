@@ -404,12 +404,102 @@ export type EvictionFocus = {
 };
 
 /**
+ * One byte budget over every view's bands (`view-switching.md` §3).
+ *
+ * A store holds one {@link BandCache} per view — bands are geometry quantised under one frame, so
+ * they cannot share an index — but **one number bounds the total**, and the victim is chosen
+ * least-recently-drawn across every view rather than within one. A view the user left an hour ago
+ * yields its bytes to the view they are in; the view they are in never yields the rectangle it is
+ * drawing.
+ *
+ * The accountant, rather than a view axis on the band key, because the per-depth indexes, the
+ * coverage rectangles and every band-key site then stay exactly as they are: what is shared is the
+ * arithmetic, not the storage. Registered caches are the whole of its state.
+ *
+ * **A held view is a bystander here, never a participant.** Eviction runs on the fetch that
+ * overflowed the budget, which is always the current view's — a view that is not current issues
+ * nothing (§8) — so `from` is the evicting cache and its protected rectangle is the one that
+ * applies.
+ */
+export class BandBudget {
+  private readonly caches = new Set<BandCache>();
+
+  constructor(readonly budgetBytes: number) {}
+
+  /** Called by {@link BandCache}'s constructor; a cache belongs to exactly one budget. */
+  register(cache: BandCache): void {
+    this.caches.add(cache);
+  }
+
+  /** Bytes held across every registered cache — the figure {@link budgetBytes} bounds. */
+  get bytes(): number {
+    let held = 0;
+    for (const cache of this.caches) held += cache.bytes;
+    return held;
+  }
+
+  /** How many caches hold any band — the `replica` projection's `views` (`view-switching.md` §3). */
+  get views(): number {
+    let n = 0;
+    for (const cache of this.caches) if (cache.bandCount > 0) n++;
+    return n;
+  }
+
+  /**
+   * Evict to the budget across every cache, deepest / least-recently-touched / farthest-from-focus
+   * first — see {@link BandCache.evict} for what a single eviction does and why it truncates.
+   *
+   * **Every other view's bands are offered before the evicting view's**, which is the cross-view
+   * half of least-recently-drawn: a view that is not current was, by construction, drawn less
+   * recently than the one being fetched for. Within each group the single-cache order stands, so a
+   * store with one view evicts byte for byte as it did before this existed.
+   */
+  evict(focus: EvictionFocus, from: BandCache, lowWaterFraction = 0.9): void {
+    if (this.bytes <= this.budgetBytes) return;
+    const target = this.budgetBytes * lowWaterFraction;
+
+    const held: {cache: BandCache; band: Band}[] = [];
+    for (const cache of this.caches) {
+      if (cache === from) continue;
+      for (const band of cache.heldBands()) held.push({cache, band});
+    }
+    held.sort((a, b) => evictionOrder(a.band, b.band, focus));
+
+    const order = held.concat(from.heldBands().map((band) => ({cache: from, band})).sort((a, b) => evictionOrder(a.band, b.band, focus)));
+
+    const protect = focus.protect;
+    for (const {cache, band} of order) {
+      if (this.bytes <= target) return;
+      // The protected rectangle is the evicting view's: another view's bands at the same tile
+      // coordinates are not what is on screen.
+      if (cache === from && protect && band.depth === protect.depth && rectContainsTile(protect.rect, band.x, band.y)) continue;
+      cache.shed(band);
+    }
+  }
+}
+
+/**
+ * The order eviction takes bands in: deepest first, then least recently touched, then farthest
+ * from the focus. Coarse points are the head of every band, so depth-first is what keeps overview
+ * rendering from blanking (`caching.md` §6).
+ */
+function evictionOrder(a: Band, b: Band, focus: EvictionFocus): number {
+  if (a.depth !== b.depth) return b.depth - a.depth;
+  if (a.touchedAt !== b.touchedAt) return a.touchedAt - b.touchedAt;
+  return Number(distance(b, focus) - distance(a, focus));
+}
+
+/**
  * The held bands for one principal, under one byte budget.
  *
  * Partitioned by identity key: a change of principal drops the whole partition rather than
  * filtering it, so cross-principal reuse is impossible by construction rather than by discipline
  * (`client-interaction.md` §10). A cache keyed too loosely here serves one principal's authorised
  * data to another — a disclosure, not a staleness bug (decision 0029).
+ *
+ * **One cache per view, one budget over them all** (`view-switching.md` §3): the budget is a
+ * {@link BandBudget} the caller may share between caches, or a plain number, which makes this
+ * cache its own budget's only member.
  */
 export class BandCache {
   private bands = new Map<BandKey, Band>();
@@ -460,11 +550,32 @@ export class BandCache {
   private held = 0;
   private heldPoints = 0;
 
+  /** The budget this cache is accounted against — its own where the caller passed a number. */
+  private readonly budget: BandBudget;
+
   constructor(
-    private readonly budgetBytes: number,
+    budget: number | BandBudget,
     /** The session table each band's membership holds references on; absent, nothing is named. */
     private readonly table: SessionArtifactTable | null = null
-  ) {}
+  ) {
+    this.budget = typeof budget === 'number' ? new BandBudget(budget) : budget;
+    this.budget.register(this);
+  }
+
+  /** The budget bounding this cache and every other view's — see {@link BandBudget}. */
+  get budgetBytes(): number {
+    return this.budget.budgetBytes;
+  }
+
+  /** Bytes held across every view sharing this cache's budget. */
+  get sharedBytes(): number {
+    return this.budget.bytes;
+  }
+
+  /** How many views hold any band — see {@link BandBudget.views}. */
+  get heldViews(): number {
+    return this.budget.views;
+  }
 
   /** Give back every reference a band's membership holds. */
   private releaseMembership(band: Band): void {
@@ -791,25 +902,29 @@ export class BandCache {
    *
    * Runs to a low-water mark rather than to the budget exactly, so a steady stream of `put`s does
    * not re-sort the whole cache on each one.
+   *
+   * The pass itself is the budget's, because the budget may span several views' caches
+   * (`view-switching.md` §3); this cache's protected rectangle is the one that applies, since this
+   * is the cache being fetched into.
    */
   evict(focus: EvictionFocus, lowWaterFraction = 0.9): void {
-    if (this.held <= this.budgetBytes) return;
-    const target = this.budgetBytes * lowWaterFraction;
+    this.budget.evict(focus, this, lowWaterFraction);
+  }
 
-    const order = [...this.bands.values()].sort((a, b) => {
-      if (a.depth !== b.depth) return b.depth - a.depth;
-      if (a.touchedAt !== b.touchedAt) return a.touchedAt - b.touchedAt;
-      return Number(distance(b, focus) - distance(a, focus));
-    });
+  /** Every held band, for the budget's cross-view ordering. */
+  heldBands(): Band[] {
+    return [...this.bands.values()];
+  }
 
-    const protect = focus.protect;
-    for (const band of order) {
-      if (this.held <= target) return;
-      if (protect && band.depth === protect.depth && rectContainsTile(protect.rect, band.x, band.y)) continue;
-      const keep = Math.max(1, Math.floor(band.ids.length / 2));
-      if (keep >= band.ids.length) continue;
-      this.truncate(band, keep);
-    }
+  /**
+   * Halve one band, keeping its head — the unit of eviction. False where the band is a single
+   * point and there is nothing left to give.
+   */
+  shed(band: Band): boolean {
+    const keep = Math.max(1, Math.floor(band.ids.length / 2));
+    if (keep >= band.ids.length) return false;
+    this.truncate(band, keep);
+    return true;
   }
 
   /** Cut a band to its first `keep` points, lowering its bound to match exactly. */

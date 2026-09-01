@@ -1,4 +1,4 @@
-import {BandCache, bandSplitter, type Band, type Resolved} from './bands.js';
+import {BandBudget, BandCache, bandSplitter, type Band, type Resolved} from './bands.js';
 import type {SessionArtifactTable} from './artifactTable.js';
 import {rectArea, type TileRect} from './rects.js';
 import {rectToRequestBbox, tileXY} from './coords.js';
@@ -20,10 +20,20 @@ import type {Quantisation, ViewportPart, ViewportResponse, RegionVerdict} from '
  * affordable at all.
  */
 
+/** The byte budget for held bands, absent another. `caching.md` §5 sizes C1 at 512 MB–1 GB. */
+export const DEFAULT_CACHE_BYTES = 512 * 1024 * 1024;
+
 export type ReplicaOptions = {
   view: string;
   /** The byte budget for held bands. `caching.md` §5 sizes C1 at 512 MB–1 GB. */
   cacheBytes?: number;
+  /**
+   * The budget to account this replica's bands against, shared with every other view's replica
+   * (`view-switching.md` §3) — one number bounds the total and eviction may take a band from any
+   * of them. Absent, the replica has {@link cacheBytes} to itself, which is what a consumer
+   * holding one view has.
+   */
+  budget?: BandBudget;
   /**
    * When false the store holds nothing: every ask becomes a request and the wire traffic is
    * byte-for-byte what a client without a replica produces. The A/B for the novelty-rate
@@ -235,7 +245,7 @@ export class Replica {
     private readonly quantisation: Quantisation,
     private readonly opts: ReplicaOptions
   ) {
-    this.cache = new BandCache(opts.cacheBytes ?? 512 * 1024 * 1024, opts.table ?? null);
+    this.cache = new BandCache(opts.budget ?? opts.cacheBytes ?? DEFAULT_CACHE_BYTES, opts.table ?? null);
     this.now = opts.now ?? (() => performance.now());
   }
 
@@ -262,8 +272,18 @@ export class Replica {
     return this.regionVerdict;
   }
 
+  /**
+   * Bytes held across every view sharing this replica's budget — the figure the budget bounds, and
+   * therefore the one a look-ahead sizes its ring against (`view-switching.md` §3). Identical to
+   * this view's own held bytes where the budget has one member.
+   */
   get bytes(): number {
-    return this.cache.bytes;
+    return this.cache.sharedBytes;
+  }
+
+  /** How many views hold any band — the `replica` projection's `views`. */
+  get heldViews(): number {
+    return this.cache.heldViews;
   }
 
   /** Points held, and over how many bands — see {@link BandCache.points}. */
@@ -302,7 +322,7 @@ export class Replica {
 
   /** The byte budget the store was given, so a caller can size its look-ahead against it. */
   get budgetBytes(): number {
-    return this.opts.cacheBytes ?? 512 * 1024 * 1024;
+    return this.cache.budgetBytes;
   }
 
   /** The content coordinate last observed, for a caller that wants to stale-mark against it. */
