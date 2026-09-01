@@ -143,6 +143,12 @@ export type StatusProjection = {
 };
 
 export type ViewProjection = {
+  /**
+   * The view the store is answering from — `''` before `meta`, then a view id `meta.views` lists
+   * (`view-switching.md` §3). A component that draws or lists compares this, not `frame()`, to
+   * learn that a switch happened; the frame is what it draws under once it has.
+   */
+  id: string;
   /** The composition on screen and the depth it is drawn at, by reference — the deck side's input. */
   composition: Composition | null;
   depth: number;
@@ -260,9 +266,12 @@ export type LegendProjection = {
 };
 
 export type ReplicaProjection = {
+  /** Bytes held across **every** view's bands — the figure the one budget bounds (`view-switching.md` §3). */
   bytes: number;
   points: number;
   bands: number;
+  /** How many views hold any band. */
+  views: number;
   lastPlan: {held: number; fetched: number} | null;
 };
 
@@ -287,6 +296,11 @@ export interface Store {
   setColourBy(column: string | null): void;
   setPalette(kind: PaletteKind): void;
   setBudget(budget: number): void;
+  /**
+   * Make `id` the view the store answers from (`view-switching.md` §3): a pointer change, never a
+   * rebuild. Queued before `meta` arrives; an id `meta.views` does not list is ignored and traced.
+   */
+  setCurrentView(id: string): void;
   /**
    * The extent this store's view is quantised against, or `null` before `meta` has arrived.
    *
@@ -391,7 +405,7 @@ export function createStore(options: StoreOptions): Store {
   const projections: Projections = {
     meta: null,
     status: NO_STATUS,
-    view: {composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, served: NO_COUNT, provisional: 0},
+    view: {id: '', composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, served: NO_COUNT, provisional: 0},
     marks: {bands: [], standIn: [], count: NO_COUNT},
     tiles: {tiles: []},
     artifacts: {layer: null, layers: [], served: [], lineage: servedLineage([]), status: 'idle', refusal: null, version: 0, held: 0, table, servedOrdinals: new Set(), shapes: new Map(), colours: new Map(), palette, coverage: {current: 0, stale: 0}},
@@ -399,7 +413,7 @@ export function createStore(options: StoreOptions): Store {
     region: null,
     filters: {draft: {}, expr: null, values: {}, valueErrors: {}},
     legend: {ranks: {}, domains: {}, categories: {}, categoryErrors: {}, colourBy: null},
-    replica: {bytes: 0, points: 0, bands: 0, lastPlan: null}
+    replica: {bytes: 0, points: 0, bands: 0, views: 0, lastPlan: null}
   };
 
   const all: Set<Listener> = new Set();
@@ -479,6 +493,7 @@ export function createStore(options: StoreOptions): Store {
     meta = await client.meta(t);
     if (!viewId) viewId = meta.views[0]?.id ?? '';
     replaceProjection('meta', meta);
+    replaceProjection('view', {...projections.view, id: viewId});
     // Seed the filter draft from what this bundle publishes as filterable — one control per
     // operand set, all empty. A bundle without an `abstract` simply has no abstract control.
     if (Object.keys(projections.filters.draft).length === 0) {
@@ -663,6 +678,7 @@ export function createStore(options: StoreOptions): Store {
     // status says about the request still streaming.
     if (!projections.status.sessionWarm && frame.exactDrawn + frame.provisional > 0) replaceProjection('status', {...projections.status, sessionWarm: true});
     replaceProjection('view', {
+      id: viewId,
       composition: frame,
       depth: frame.depth,
       visible: {value: Number(visible), exact: true},
@@ -694,6 +710,7 @@ export function createStore(options: StoreOptions): Store {
         bytes: replica.bytes,
         points: replica.points,
         bands: replica.bandCount,
+        views: replica.bandCount > 0 ? 1 : 0,
         lastPlan: fetched
           ? {held: fetched.plan.wanted - fetched.plan.novel, fetched: fetched.plan.novel}
           : projections.replica.lastPlan
@@ -953,6 +970,15 @@ export function createStore(options: StoreOptions): Store {
   }
 
   // ---- verbs --------------------------------------------------------------------------------
+
+  /**
+   * ⊘ The seam stub: the design's `setCurrentView` (`view-switching.md` §3) is built on the store
+   * track; until it lands a call is traced and nothing changes, so a component built against the
+   * interface neither throws nor switches.
+   */
+  function setCurrentView(id: string): void {
+    options.instruments?.onTrace?.('view-switch', {refused: 1, id, reason: 'not built'});
+  }
 
   function setView(input: ViewInput): void {
     lastView = {input};
@@ -1382,7 +1408,7 @@ export function createStore(options: StoreOptions): Store {
     table.clear();
     forgetShapes('all');
     contentKeyAtFrame = '';
-    replaceProjection('view', {composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, served: NO_COUNT, provisional: 0});
+    replaceProjection('view', {id: viewId, composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, served: NO_COUNT, provisional: 0});
     replaceProjection('marks', {...projections.marks, bands: [], count: NO_COUNT});
     replaceProjection('legend', {ranks: {}, domains: {}, categories: {}, categoryErrors: {}, colourBy});
     replaceProjection('status', {...NO_STATUS});
@@ -1435,6 +1461,7 @@ export function createStore(options: StoreOptions): Store {
     setColourBy,
     setPalette,
     setBudget,
+    setCurrentView,
     frame: frameOrNull,
     pick,
     openArtifact,
