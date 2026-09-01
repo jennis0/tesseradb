@@ -81,6 +81,18 @@ Read this section for the state; the tables below for what each step owes and wh
   test-side rewrite that strips their `hull_*` columns, until they are recaptured against a server
   serving r71.
 
+⊘ **A non-spatial artifact has nowhere to go** (2026-09-01, from serving the Overture rung). The
+client draws an artifact at its centroid and names it from its supplied content, and it lists it in
+`<tessera-artifact-list>` by the same name — so a layer whose artifacts are *dispersed across the
+frame* has no position worth drawing, and one that supplies no content reads as a column of
+*unnamed* beside counts. Both were true of that rung's category taxonomy, which is why it was
+withdrawn rather than fixed (its declaration carries the ruling: a layer earns its place by drawing
+something in the view it is declared over, and coherence is a property of an artifact in a view
+rather than of the concept). What is missing is a **surface for the counted, hierarchical,
+positionless artifact** — a drill-down that reads as a tree of counts rather than as a map that
+will not draw. No work is scheduled on it; it is recorded so the next corpus that wants one finds
+the reason it cannot have it.
+
 **The smoke scripts ran for steps 0–1 on a rebuilt demo bundle** (2026-08-25, integration). Every
 prebuilt bundle predated manifest fields the current binary requires (`vocabularies`, `visibility`),
 and the demo build declaration `data/demo/config-2m4.toml` had gone; it was regenerated from

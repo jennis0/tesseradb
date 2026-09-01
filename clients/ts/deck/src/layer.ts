@@ -162,11 +162,37 @@ const INK: Record<'light' | 'dark', [number, number, number]> = {light: [36, 39,
 /** The halo's own colour: the boards' 0.85 on both grounds (`gen.py`'s `datamap_layers`). */
 const HALO: Record<'light' | 'dark', [number, number, number, number]> = {light: [247, 247, 244, 217], dark: [12, 14, 17, 217]};
 /**
- * The halo's width as a fraction of the em, following the boards' 0.32 em stroke painted under
- * the fill — half of which shows outside the glyph, so about 0.16 em of outline: 1.9 px on a
- * 12 px name and 3.5 px on a 22 px one.
+ * The halo's width as a fraction of the em: 0.10, which is 1.2 px on a 12 px name and 2.2 px on a
+ * 22 px one — the range a slippy map's own labels halo at.
+ *
+ * **It is not the boards' 0.16, and the reason is that 0.16 cannot be drawn as a halo here.** The
+ * width a distance field can express is bounded by the field's reach ({@link HALO_RADIUS}); asking
+ * for more does not clamp, it saturates — every texel of the glyph's cell ends up outside the
+ * outline's threshold and each character comes out as a filled rectangle. That is what 0.16 was
+ * doing over the basemap. 0.10 sits at 36% of the field's reach, which is a ring.
  */
-const HALO_EM = 0.16;
+const HALO_EM = 0.1;
+/** The em the SDF atlas is baked at — deck's own `fontSettings.fontSize` default. */
+const ATLAS_PX = 64;
+/**
+ * The distance field's reach in atlas pixels, and the padding around each glyph that holds it.
+ *
+ * The reach has to exceed the halo it must express with room to spare: deck's fill sits at 0.75 of
+ * the field and the outline's threshold at `0.75 × (1 − outlineWidth / radius)`, so the halo is
+ * `0.75 × outlineWidth` atlas pixels wide and the ratio `outlineWidth / radius` is what must stay
+ * clear of 1. At 0.10 em it is 0.36. The padding need only cover the halo itself (6.4 px), and
+ * every pixel of it is atlas area per glyph, so it is not the reach.
+ */
+const HALO_RADIUS = 24;
+const HALO_BUFFER = 14;
+/**
+ * What deck wants for a halo of {@link HALO_EM}: it divides this by `fontSettings.radius` and
+ * turns the result into the outline's threshold, which lands the halo at `0.75 ×` this value in
+ * atlas pixels. Hence the `/ 0.75` — the previous spelling passed the atlas pixels straight in,
+ * which asked for 1.33× the halo it wanted and, at the old reach of 12, for more field than
+ * existed.
+ */
+const HALO_OUTLINE_WIDTH = (HALO_EM * ATLAS_PX) / 0.75;
 const CHROME: [number, number, number, number] = [234, 238, 243, 240];
 const PLATE: [number, number, number, number] = [13, 15, 18, 235];
 
@@ -1338,14 +1364,16 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
           getTextAnchor: (d: LabelDatum) => d.anchor,
           getAlignmentBaseline: 'center' as const,
           fontFamily: 'IBM Plex Sans, system-ui, -apple-system, Segoe UI, Roboto, sans-serif',
-          // **The halo is the distance field's, so it is bounded by the atlas's padding.** deck
-          // scales `outlineWidth` by `fontSettings.radius` and clips the field at `buffer` glyph
-          // pixels; with its defaults (buffer 4 at a 64 px atlas) the widest outline a 12 px name
-          // could draw was about a third of a pixel, whatever `outlineWidth` said — which is why
-          // the names read as unhaloed over the marks. A padded atlas buys the boards' outline
-          // (`gen.py` paints its labels with a stroke of 0.32 em under the fill).
-          fontSettings: {sdf: true, buffer: 12, radius: 12, cutoff: 0.25},
-          outlineWidth: HALO_EM * 64,
+          // **The halo is the distance field's, so both its width and its shape are the field's.**
+          // deck's defaults (buffer 4, radius 24 at a 64 px atlas) clip the field so tightly that
+          // the widest outline a 12 px name could draw was about a third of a pixel, whatever
+          // `outlineWidth` said, and the names read as unhaloed over the marks. Asking for more
+          // than the field can express is the opposite failure and looks worse: the threshold
+          // falls below every texel in the glyph's cell and each character is drawn as a filled
+          // rectangle. {@link HALO_RADIUS} and {@link HALO_OUTLINE_WIDTH} are sized so the halo is
+          // a ring at 36% of the field's reach.
+          fontSettings: {sdf: true, buffer: HALO_BUFFER, radius: HALO_RADIUS, cutoff: 0.25},
+          outlineWidth: HALO_OUTLINE_WIDTH,
           outlineColor: HALO[scheme],
           characterSet: 'auto',
           pickable: this.props.pickable && kind === 'name',

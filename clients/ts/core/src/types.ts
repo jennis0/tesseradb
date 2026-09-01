@@ -19,7 +19,14 @@ export type ArrowType =
   | 'f32'
   | 'f64'
   | 'timestamp_us'
-  | 'utf8';
+  | 'utf8'
+  // The two spellings a prose column takes, and they were missing: the server writes `keyword` and
+  // `text` for the two analysed string kinds (`ScalarType::arrow_type_name`), and a client whose
+  // union stopped at `utf8` could not name the column a corpus titles its points by. Nothing drew
+  // them, which is why the gap survived — a text column is refused `render` and never reaches the
+  // marks (records-and-search §3); it reaches `/v1/items`, which is where a name comes from.
+  | 'keyword'
+  | 'text';
 
 /**
  * What makes a column a category rather than a plain integer.

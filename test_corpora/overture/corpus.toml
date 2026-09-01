@@ -26,7 +26,6 @@ operating_status   = "vocab-operating-status.parquet"
 division_country   = "vocab-division-country.parquet"
 division_region    = "vocab-division-region.parquet"
 division_county    = "vocab-division-county.parquet"
-members_taxonomy   = "members-taxonomy.parquet"
 artifacts_divisions = "artifacts-divisions.parquet"
 
 [defaults]
@@ -238,58 +237,26 @@ vocabulary = "division_county"
 index      = true
 
 # ---------------------------------------------------------------------------------------------
-# Three layers, and the three membership kinds they use are the rung's real subject: an enumerated
-# tiered taxonomy, an enumerated nested tree, and an attribute predicate — over one point set.
+# Two layers over one point set: an enumerated nested tree whose membership is its own polygon, and
+# an attribute predicate. A third — the tiered category taxonomy — was declared, served and
+# withdrawn; the note below it says why, and it is the rung's most transferable result.
 # ---------------------------------------------------------------------------------------------
 
-# `tiered` is legal here because the category path is a clean tree, and that was measured rather
-# than assumed (2026-08-28, one part): every category appears at exactly one depth, every category
-# but the 13 roots has exactly one parent, and the last entry of the path is always
-# `taxonomy.primary`. So position *is* level, six levels deep, and the member file is a fixed
-# six-element list with nulls past the leaf.
-[[layer]]
-name                      = "places/taxonomy"
-title                     = "Place taxonomy"
-views                     = ["world"]
-membership                = "enumerated"
-value_set                 = "open"
-hierarchy                 = { kind = "tiered", prune_children = true }
-visibility                = "public"
-artifact_visibility       = { default = "inherited" }
-require_member_visibility = { count = 1 }
-
-[[layer.levels]]
-level = 0
-title = "Root"
-zoom  = [0, 4]
-
-[[layer.levels]]
-level = 1
-title = "Group"
-zoom  = [3, 7]
-
-[[layer.levels]]
-level = 2
-title = "Category"
-zoom  = [6, 10]
-
-[[layer.levels]]
-level = 3
-title = "Subcategory"
-zoom  = [9, 12]
-
-[[layer.levels]]
-level = 4
-title = "Detail"
-zoom  = [11, 14]
-
-[[layer.levels]]
-level = 5
-title = "Leaf"
-zoom  = [13, 16]
-
-[layer.members]
-source = "members_taxonomy"
+# ⊘ **`places/taxonomy` was declared here and is gone** (owner ruling, 2026-09-01). It was an
+# enumerated `tiered` layer over the category path, 2,097 artifacts across six levels, and it was
+# served: it drew nothing, and nothing it could have drawn would have meant anything. **A layer
+# earns its place by drawing something in the view it is declared over**, and spatial coherence is
+# a property of an artifact *in a view* rather than of the concept — the same taxonomy over an
+# embedding is a set of regions, because there the map is made of the concept; over the Earth,
+# the members of `restaurant` are everywhere and its box is the world.
+#
+# What was lost with it is a drill-down — `services_and_business` to `plumber` with a masked count
+# at each step — and it was not being had: an artifact is named from its supplied content, this
+# layer supplied none, and every row of it read as *unnamed* beside a number. The three category
+# columns carry the same information at three resolutions and filter on it.
+#
+# `members-taxonomy.parquet` is still written by `prepare.py`, so the layer is a declaration away
+# if the client ever grows a place to put a non-spatial artifact.
 
 # **`nested`, and the campaign plan's `tiered` reading of the same data is wrong.** The plan takes
 # Overture's division subtypes for levels. They are not: a division's hierarchy path runs 1 to 9
@@ -314,7 +281,7 @@ source = "members_taxonomy"
 # publisher's. The build reports the children whose bounds escape their parent's and proceeds.
 #
 # ⊘ **A nested layer has no levels, so it has no zoom bound**, and the artifact-response-volume
-# finding at rung 1 (`docs/ingest-campaign.md` §4) was precisely that a tiered layer returns every
+# finding at rung 1 (`docs/ingest-campaign.md` §6) was precisely that a tiered layer returns every
 # level whatever the zoom and the zoom→level map is what bounds it. This layer has no such map to
 # offer, at roughly 600,000 artifacts. Expect the finding to bite harder here, and expect it to be
 # this rung's first serving result.

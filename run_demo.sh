@@ -226,6 +226,16 @@ while [[ $# -gt 0 ]]; do
     *)            echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+# **`--ranks` is resolved here, against the working directory the operator typed it in.** The
+# measurement loop below runs from `clients/ts`, and a relative path that stops resolving there was
+# not an error: the loop passes `--ranks` only when the file is present, so the presets silently
+# came back as three single terms and no coverage bands at all. A path that names nothing is a
+# refusal now, since an operator who typed one asked for it.
+if [[ -n "$ranks_override" ]]; then
+  [[ -f "$ranks_override" ]] || { echo "no such ranks file: $ranks_override" >&2; exit 1; }
+  ranks_override="$(cd "$(dirname "$ranks_override")" && pwd)/$(basename "$ranks_override")"
+fi
+
 # `1b` is deliberately NOT in the default set, and the reason is the served side rather than the
 # build: its hot columns alone are 11.16 GiB resident (the figure the build prints), so on a
 # machine that does not have that to spare *on top of* the other scales, adding it to the picker
@@ -372,6 +382,17 @@ if [[ -n "$deployment_override" ]]; then
     echo "warning: $deployment_override does not list http://localhost:$VITE_PORT in [serve].dev_cors_origins;" >&2
     echo "         the viewer will load and every request from it will fail CORS." >&2
   fi
+
+  # The WAL and the cache the deployment names, whose *parents* the server does not create: it
+  # refuses with `wal io error: No such file or directory` and names no path, and a rung's
+  # `prepare.py` writes the deployment without ever opening one. `write_deployment` does the same
+  # `mkdir` for the demo scales a few lines below.
+  for relative in "$(toml_scalar bundle wal)" "$(toml_scalar bundle cache)"; do
+    [[ -n "$relative" ]] || continue
+    absolute="$relative"
+    [[ "$absolute" = /* ]] || absolute="$DEPLOY_DIR/$absolute"
+    mkdir -p "$(dirname "$absolute")"
+  done
 
   scales=(custom)
   items_of()   { python3 -c "
@@ -719,10 +740,19 @@ python3 - "$DATASETS" "$fresh" <<'MERGE'
 import json, pathlib, sys, urllib.request
 dest, fresh = pathlib.Path(sys.argv[1]), json.loads(pathlib.Path(sys.argv[2]).read_text())
 mine = {d["id"] for d in fresh}
+# **The port answering is not evidence the entry is true**, and taking it for evidence put a
+# `geonames` row in the picker pointing at an overture server: the ladder's rungs share one port
+# triple, so a rung served now answers `/readyz` on the address a rung served yesterday recorded.
+# An entry naming an address this run claimed is a stale entry whatever answers there.
+ours = {d["viewerUrl"] for d in fresh}
 kept = []
 if dest.exists():
     for d in json.loads(dest.read_text()).get("datasets", []):
         if d["id"] in mine:
+            continue
+        if d["viewerUrl"] in ours:
+            print(f"  dropping {d['id']}: {d['viewerUrl']} is served by this run's "
+                  + ", ".join(e["id"] for e in fresh if e["viewerUrl"] == d["viewerUrl"]))
             continue
         try:
             urllib.request.urlopen(d["viewerUrl"] + "/readyz", timeout=2)

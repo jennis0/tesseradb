@@ -48,6 +48,12 @@ import {chrome, tokens} from './tokens.js';
 
 /** How long after disconnection the `Deck` is finalised, unless the element reconnects. */
 const FINALIZE_SETTLE_MS = 250;
+/**
+ * How long the pointer must rest on a mark before its record is asked for — long enough that
+ * crossing a dense map asks for nothing, short enough that stopping on a point answers before the
+ * hand has settled.
+ */
+const HOVER_DESCRIBE_MS = 140;
 
 /** What the map publishes for an instrument or a smoke script — mutated in place, one object. */
 export type MapProbe = {
@@ -268,6 +274,16 @@ export class TesseraMap extends TesseraElement {
   /** A deck.gl layer drawn under the points — a geographic corpus's basemap (§5.3). */
   @property({attribute: false}) accessor basemap: Layer | null = null;
   /**
+   * The ground the map itself draws on, where that is not the host page's.
+   *
+   * **A light raster basemap under a dark page is what this exists for.** The label ink, its halo
+   * and the positional palette's lightness answer to what is actually behind them, and the chrome
+   * around the canvas answers to the page — one host can want both, and inferring either from the
+   * other draws white names haloed in black over a pale street map. Unset, which is the ordinary
+   * case, the host's `color-scheme` decides both.
+   */
+  @property({reflect: true}) accessor ground: 'light' | 'dark' | '' = '';
+  /**
    * Whether the single-hue density wash is drawn under the points. **Off by default** (owner
    * direction, 2026-08-26): how density should be rendered is its own conversation, and the wash
    * was confounding a pass over the map's hierarchy. The machinery is untouched — `wash` turns it
@@ -306,6 +322,8 @@ export class TesseraMap extends TesseraElement {
   readonly lut = new LookupTexture();
   private deck: Deck<OrthographicView> | null = null;
   private finalizeTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The pending hover-record request's dwell, cancelled by the next hover and by disconnection. */
+  private describeTimer: ReturnType<typeof setTimeout> | null = null;
   private viewState: ViewState = {target: [WORLD_SIZE / 2, WORLD_SIZE / 2, 0], zoom: 0, minZoom: -2, maxZoom: MAX_DEPTH};
   private selectedWorldXY: [number, number] | null = null;
   private regionWorld: [number, number, number, number] | null = null;
@@ -340,6 +358,10 @@ export class TesseraMap extends TesseraElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.removeEventListener('keydown', this.onKey);
+    if (this.describeTimer !== null) {
+      clearTimeout(this.describeTimer);
+      this.describeTimer = null;
+    }
     this.stopFrameLoop();
     this.finalizeTimer = setTimeout(() => {
       this.finalizeTimer = null;
@@ -359,8 +381,11 @@ export class TesseraMap extends TesseraElement {
       }
       if (changed.has('budget') && this.budget > 0) s.setBudget(this.budget);
       if (changed.has('palette')) s.setPalette(this.palette);
+      // The ground decides the positional palette's lightness as well as the labels', so a ground
+      // the host declared after the store was adopted has to reach it here.
+      if (changed.has('ground')) s.setScheme(this.scheme());
     }
-    if (changed.has('mode') || changed.has('drag') || changed.has('dragPolygon') || changed.has('basemap') || changed.has('wash') || changed.has('radius') || changed.has('clusterLevel') || changed.has('hoveredArtifact')) this.paint();
+    if (changed.has('mode') || changed.has('drag') || changed.has('dragPolygon') || changed.has('basemap') || changed.has('ground') || changed.has('wash') || changed.has('radius') || changed.has('clusterLevel') || changed.has('hoveredArtifact')) this.paint();
   }
 
   /**
@@ -368,6 +393,7 @@ export class TesseraMap extends TesseraElement {
    * else the system preference. The positional palette's lightness follows it (§5.10).
    */
   private scheme(): PaletteScheme {
+    if (this.ground === 'light' || this.ground === 'dark') return this.ground;
     if (typeof getComputedStyle === 'undefined') return 'dark';
     const declared = getComputedStyle(this).colorScheme ?? '';
     const dark = /dark/.test(declared);
@@ -736,7 +762,58 @@ export class TesseraMap extends TesseraElement {
     const title = values[0] ?? `#${idString(picked.id)}`;
     const lines = values.slice(1);
     this.hover = {x: info.x, y: info.y, title, lines};
+    // Nothing the marks carry names the thing under the pointer, so ask the record — see
+    // {@link describeHovered}. The id stands until the answer lands, and stands for good where
+    // the corpus has no text column or the record cannot be reached.
+    if (values.length === 0) this.describeHovered(picked.id, info.x, info.y);
     emit(this, 'tessera-hover', {id: idString(picked.id), x: info.x, y: info.y});
+  }
+
+  /**
+   * The hovered point's own name, fetched once the pointer rests on it.
+   *
+   * **A text column cannot be drawn**, so it is not in the response the marks came from: prose
+   * lives in the record blob and `render` on a text column is refused (records-and-search §3).
+   * The id is therefore the whole of what a mark knows about itself, and a tooltip reading
+   * `#31728047486770` is the honest rendering of that — and useless. One request per point, held
+   * by the store, is what turns it into a name.
+   *
+   * **After a dwell, not on the move.** A pointer crossing a dense map touches hundreds of marks a
+   * second and none of them is being looked at; {@link HOVER_DESCRIBE_MS} is the pause that says
+   * one of them is. A pointer that has moved on by the time the answer lands writes nothing.
+   */
+  private describeHovered(id: bigint, x: number, y: number): void {
+    const column = this.nameColumn();
+    if (column === null) return;
+    if (this.describeTimer !== null) clearTimeout(this.describeTimer);
+    this.describeTimer = setTimeout(() => {
+      this.describeTimer = null;
+      const store = this.resolvedStore;
+      if (!store) return;
+      void store.describe(id).then((fields) => {
+        const name = fields?.[column];
+        if (typeof name !== 'string' || name === '') return;
+        // The pointer may have left, or moved to another mark, while this was in flight.
+        if (!this.hover || this.hover.x !== x || this.hover.y !== y) return;
+        this.hover = {...this.hover, title: name};
+      });
+    }, HOVER_DESCRIBE_MS);
+  }
+
+  /**
+   * The column a hover names a point by: the first text column the bundle declares, or `null`
+   * where it declares none — every arXiv corpus answers `title`, this one answers `name`, and a
+   * corpus of bare points answers nothing and keeps its ids.
+   */
+  private nameColumn(): string | null {
+    const scalars = (this.resolvedStore?.get('meta') ?? null)?.declaredScalars ?? [];
+    // Prose first — a corpus with both a `text` title and a `keyword` code means the title — then
+    // whatever string column exists.
+    return (
+      scalars.find((d) => d.arrowType === 'text')?.name ??
+      scalars.find((d) => d.arrowType === 'utf8' || d.arrowType === 'keyword')?.name ??
+      null
+    );
   }
 
   private onClick(info: PickingInfo): void {

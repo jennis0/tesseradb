@@ -23,6 +23,10 @@ the division polygons declared in longitude and latitude.
 | `tessera verify` | OK in 5.98 s |
 | artifacts | 2,097 taxonomy minted · 625,754 division declared, every one with a polygon · 9 from the predicate layer |
 | in no artifact | 3,285,234 taxonomy (4.5%, no category path) · 46,844 places in no division (0.06%) |
+
+⊘ **The two taxonomy figures are from a build that declared a layer this rung no longer has** (see
+*What is declared*). Every other figure in the table is unaffected: the member file is still
+written and the categories are still three indexed columns.
 | points with a cell of their own | 12.1% of 73,631,092, in 8,895,128 distinct cells |
 
 ⊘ **The box was not idle.** Two other agents were building and testing on this machine throughout,
@@ -55,10 +59,10 @@ past the 5×10⁷ wall, and both of the campaign's build-side walls are expected
 - **W2** — `tessera build`'s peak RSS is not bounded by `--memory-budget`; above ~5×10⁷ points
   carrying artifacts it was OOM-killed at the machine's size, three runs, one number.
 
-Everything else it is the only source of: a **tiered category taxonomy six levels deep over 2,117
-categories**, a **boundary tree that is genuinely a tree rather than a ladder**, and a place set
-5.5× GeoNames' with the same synthetic country compartment, so the two rungs' access figures are
-directly comparable.
+Everything else it is the only source of: a **boundary tree that is genuinely a tree rather than a
+ladder**, and a place set 5.5× GeoNames' with the same synthetic country compartment, so the two
+rungs' access figures are directly comparable. It was also the only **tiered** layer over a
+geographic corpus, and that is the one the rung gave up — see the ruling below.
 
 ## What the source turned out to be
 
@@ -168,13 +172,32 @@ does not make.
 
 ## What is declared
 
-Three layers, and their three membership kinds are the rung's real subject.
+Two layers, and their membership kinds are the rung's real subject.
 
 | Layer | Membership | Hierarchy | What it tests |
 |---|---|---|---|
-| `places/taxonomy` | enumerated, fixed six-element list | `tiered`, 6 levels | a deep published taxonomy with a zoom→level map |
-| `boundaries/divisions` | enumerated, variable-length lineage | `nested` | a real tree in the edges, ~600,000 artifacts |
+| `boundaries/divisions` | spatial, the division's own polygon | `nested` | a real tree in the edges, ~600,000 artifacts |
 | `programmes/source` | `{ attribute = "source_dataset" }` | `flat` | a predicate membership — the tagged-programme case |
+
+**A third was declared, built, served, and withdrawn** (owner ruling, 2026-09-01):
+`places/taxonomy`, enumerated and `tiered`, 2,097 artifacts across six levels. **A layer earns its
+place by drawing something in the view it is declared over**, and this one could not: the members
+of a category are the whole world, so its box is the world and its centroid is a point in the
+middle of the corpus. Spatial coherence is a property of an artifact *in a view* rather than of the
+concept — the same taxonomy over an embedding is a set of regions, and the arXiv rung keeps the
+tiered coverage this one gave up.
+
+Two things the withdrawal settled that are worth carrying to the next rung. **It drew nothing for
+two separate reasons and only one was the geometry**: it declared no computed content, so there was
+no position at all, and no supplied content, so an artifact had no name — the client names one from
+its content and never from its key, and every row read as *unnamed* beside a count. And **the
+client has no surface for a counted, positionless artifact**, which is the gap recorded in
+[`docs/client-delivery.md`](../../docs/client-delivery.md); a corpus wanting a browsable tree of
+counts is asking for something that does not exist yet.
+
+The three category columns carry the same information at three resolutions and filter on it, so
+nothing about the categories left the corpus with the layer. `prepare.py` still writes
+`members-taxonomy.parquet`.
 
 Alongside them, `division_country`, `division_region` and `division_county` are lifted out of the
 lineage into indexed columns, so **the same containment can be asked for as an attribute predicate
@@ -196,7 +219,10 @@ rights or audience field, so each place's access term is the country of its firs
 principal here is a set of countries, and every figure this rung produces says *synthetic policy
 over real data*.
 
-## The three membership kinds all serve, and one build report said otherwise
+## The membership kinds all serve, and one build report said otherwise
+
+⊘ Written when three kinds were declared; the counts below are that build's, and the enumerated
+arm went with `places/taxonomy`.
 
 `programmes/source` is the attribute predicate. The build's artifact-pass report printed
 `0 artifact(s), 0.000 everywhere, 0.0 blocks/artifact` for it, which reads as a layer that is
@@ -220,7 +246,7 @@ so the kind's only end-to-end exercise is the one this rung brought.
 
 Rung 1's first serving finding was that **a tiered layer returns every level whatever the zoom**,
 and that the corpus's own zoom→level map is what bounds it — 254 artifacts against 464,655 at zoom
-0 (`docs/ingest-campaign.md` §4). `boundaries/divisions` is `nested`, which refuses
+0 (`docs/ingest-campaign.md` §6). `boundaries/divisions` is `nested`, which refuses
 `[[layer.levels]]` outright, so it has **no such map to offer** at roughly 600,000 artifacts.
 Expect that finding to bite harder here, and expect it to be this rung's first serving result. It
 is named in the declaration at the layer it applies to.

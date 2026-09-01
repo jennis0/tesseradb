@@ -1,8 +1,8 @@
 import '@tesseradb/components';
 import type {TesseraExplorer, MapProbe} from '@tesseradb/components';
-import {TesseraClient, createStore, type Store as DataStore} from '@tesseradb/client';
+import {TesseraClient, createStore, dataToWorldXY, type Store as DataStore} from '@tesseradb/client';
 import type {ViewInfo} from '@tesseradb/client';
-import {basemapLayer} from './basemap.js';
+import {basemapLayer, coverFor, type BasemapCover, type Camera} from './basemap.js';
 import {loadDatasets, readConfig, type Dataset} from './config.js';
 import {esc} from './html.js';
 import {renderErrors} from './panels/errors.js';
@@ -86,6 +86,12 @@ declare global {
 }
 
 /**
+ * How long the camera must sit still before the ground under it is recomposed. Long enough that a
+ * wheel gesture composes its destination and not every notch on the way.
+ */
+const BASEMAP_SETTLE_MS = 180;
+
+/**
  * Draw a basemap under the points where `/v1/meta` says one lines up, and none where it does not.
  *
  * The decision is `tile_scheme`'s and the demo does not second-guess it: no dataset entry says
@@ -93,17 +99,66 @@ declare global {
  * no network, a refused request — leaves the map exactly as it was, a basemap being an underlay
  * and not the picture.
  */
-async function installBasemap(view: ViewInfo): Promise<void> {
+async function installBasemap(view: ViewInfo, camera?: Camera): Promise<void> {
   await explorer.updateComplete;
   const map = explorer.map;
   if (!map) return;
   try {
-    map.basemap = await basemapLayer(view);
+    const basemap = await basemapLayer(view, camera);
+    map.basemap = basemap;
+    // **The ground under the labels is the basemap's, not the page's.** OpenStreetMap's standard
+    // style is a pale one, and the demo's chrome is dark — so with the ground left to
+    // `color-scheme` the names came out white in a black halo over a light street map, which is
+    // the one combination that reads as a rendering fault rather than a choice. The panels stay
+    // dark; only the canvas answers to what is behind it.
+    map.ground = basemap ? 'light' : '';
   } catch (error) {
     store.update((s) => {
       s.failures = [...s.failures.slice(-19), {code: 'basemap', detail: String(error), at: Date.now()}];
     });
   }
+}
+
+/**
+ * Keep the ground at the resolution the camera is at.
+ *
+ * **Composed per view, and only when the view left the tiles it was composed from.** A pan inside
+ * the covered box and a zoom that does not change the depth need no new texture, so a gesture that
+ * stays put costs nothing; what a recomposition costs is the tiles it has not already decoded.
+ *
+ * Debounced on the view *settling* rather than driven per frame: the wheel emits a view change per
+ * notch, and composing a texture per notch would fetch every level between the two ends of the
+ * gesture to draw none of them.
+ */
+function followCameraWithBasemap(view: ViewInfo): void {
+  let composed: BasemapCover | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  explorer.addEventListener('tessera-viewchange', (event) => {
+    const {bbox, zoom} = (event as CustomEvent<{bbox: [number, number, number, number]; zoom: number}>).detail;
+    const [x0, y0] = dataToWorldXY(bbox[0], bbox[1], view.quantisation);
+    const [x1, y1] = dataToWorldXY(bbox[2], bbox[3], view.quantisation);
+    const camera: Camera = {
+      worldBox: [Math.min(x0, x1), Math.min(y0, y1), Math.max(x0, x1), Math.max(y0, y1)],
+      zoom
+    };
+    const wanted = coverFor(view, camera);
+    if (
+      composed &&
+      composed.level === wanted.level &&
+      composed.x0 === wanted.x0 &&
+      composed.y0 === wanted.y0 &&
+      composed.x1 === wanted.x1 &&
+      composed.y1 === wanted.y1
+    ) {
+      return;
+    }
+    if (timer !== null) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      composed = wanted;
+      void installBasemap(view, camera);
+    }, BASEMAP_SETTLE_MS);
+  });
 }
 
 /** The first map's probe, published for the smoke scripts and the harness (§5.9). */
@@ -448,6 +503,7 @@ async function activate(dataset: Dataset): Promise<void> {
       s.switching = false;
     });
     void installBasemap(meta.views[0]!);
+    followCameraWithBasemap(meta.views[0]!);
     trace.event('session', {
       dataset: dataset.id,
       kMaxMarks: meta.selection.kMaxMarks,

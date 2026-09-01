@@ -296,6 +296,23 @@ export interface Store {
    */
   frame(): Quantisation | null;
   pick(id: bigint): Promise<void>;
+  /**
+   * One item's record for a *hint*, held once asked — what a hover wants, where {@link pick} is
+   * what a click wants.
+   *
+   * **It writes no projection.** `pick` puts the record in `selection`, which opens a card; a
+   * pointer crossing a map must not open anything, so this answers the caller and nothing else.
+   *
+   * **The reason it exists at all is that a name cannot be drawn from the marks.** A text column
+   * lives in the record blob and is refused `render` (records-and-search §3), so no viewport
+   * response can carry one — the id is genuinely all a mark has, and the alternative to a request
+   * here is a tooltip that names an opaque number.
+   *
+   * At most one request per id: the answer is held, and so is a refusal, so a hover that cannot
+   * be answered is not asked again on every pointer move. Held per principal — {@link clear}
+   * drops it, since an item this session cannot see is not a fact about the item.
+   */
+  describe(id: bigint): Promise<Record<string, unknown> | null>;
   openArtifact(id: bigint): Promise<void>;
   /**
    * Ask for one artifact's shape, if it is not already held.
@@ -1099,6 +1116,36 @@ export function createStore(options: StoreOptions): Store {
     }
   }
 
+  /**
+   * {@link Store.describe} — the hover's record, asked for once per id and held.
+   *
+   * A refusal is held as `null` for the same reason the shape cache holds one: the pointer will
+   * cross this mark again within the second, and an id that answered 404 once will answer 404
+   * every time until the principal changes.
+   */
+  const described = new Map<string, Record<string, unknown> | null>();
+  const describing = new Map<string, Promise<Record<string, unknown> | null>>();
+
+  async function describe(id: bigint): Promise<Record<string, unknown> | null> {
+    const key = id.toString();
+    const held = described.get(key);
+    if (held !== undefined) return held;
+    const inFlight = describing.get(key);
+    if (inFlight) return inFlight;
+    if (!token) return null;
+    const request = client
+      .item(token, id)
+      .then((detail) => detail.fields)
+      .catch(() => null)
+      .then((fields) => {
+        describing.delete(key);
+        if (!disposed) described.set(key, fields);
+        return fields;
+      });
+    describing.set(key, request);
+    return request;
+  }
+
   // ---- the drawn shape, fetched by identifier (`artifact-shapes.md` §9) -----------------------
 
   /**
@@ -1381,6 +1428,7 @@ export function createStore(options: StoreOptions): Store {
     replica?.reset();
     table.clear();
     forgetShapes('all');
+    described.clear();
     contentKeyAtFrame = '';
     replaceProjection('view', {composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, served: NO_COUNT, provisional: 0});
     replaceProjection('marks', {...projections.marks, bands: [], count: NO_COUNT});
@@ -1437,6 +1485,7 @@ export function createStore(options: StoreOptions): Store {
     setBudget,
     frame: frameOrNull,
     pick,
+    describe,
     openArtifact,
     needShape,
     clearSelection,

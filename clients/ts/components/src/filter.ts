@@ -79,6 +79,19 @@ export class TesseraFilter extends TesseraElement {
         text-overflow: ellipsis;
         white-space: nowrap;
       }
+      /**
+       * **The title leads and the key follows it, muted**, where the two differ. A value's key is
+       * what the filter is written in and it is not always what the value is called: a boundary
+       * set keys its divisions by uuid, so a key-then-title line put 36 characters of
+       * hexadecimal in front of every name and a column of them read as a column of nothing. Where a key is the name
+       * — an arXiv category, a country code — the two are one string and only it is drawn.
+       */
+      [part='tick'] .k {
+        margin-left: 0.45em;
+        opacity: 0.55;
+        font-size: 0.85em;
+        font-variant-numeric: tabular-nums;
+      }
       [part='more'] {
         text-align: left;
         height: 24px;
@@ -252,7 +265,11 @@ export class TesseraFilter extends TesseraElement {
                 const on = (e.target as HTMLInputElement).checked;
                 this.change({...draft, keys: on ? [...draft.keys, v.key] : draft.keys.filter((k) => k !== v.key)}, true);
               }} />
-            <span class="t">${v.title && v.title !== v.key ? `${v.key} — ${v.title}` : v.key}</span></label
+            <span class="t"
+              >${v.title && v.title !== v.key
+                ? html`${v.title}<span class="k">${v.key}</span>`
+                : v.key}</span
+            ></label
           >`
       )}
       ${hidden > 0

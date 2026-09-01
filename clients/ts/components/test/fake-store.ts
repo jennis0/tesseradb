@@ -68,6 +68,10 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
     pick: async (...args: unknown[]) => {
       calls.push({name: 'pick', args});
     },
+    describe: async (...args: unknown[]) => {
+      calls.push({name: 'describe', args});
+      return null;
+    },
     openArtifact: async (...args: unknown[]) => {
       calls.push({name: 'openArtifact', args});
     },
