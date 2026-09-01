@@ -106,6 +106,34 @@ async function installBasemap(view: ViewInfo): Promise<void> {
   }
 }
 
+/**
+ * The current view is URL state (`view-switching.md` §6.5): `?view=<id>` beside `?dataset=`, so a
+ * link means what it showed. Written with `replaceState` — a switch is not a page in the history,
+ * and a slider run through a group's roster would otherwise leave one entry per step behind it.
+ */
+function writeViewToUrl(id: string): void {
+  const url = new URL(location.href);
+  if (url.searchParams.get('view') === id) return;
+  url.searchParams.set('view', id);
+  history.replaceState(null, '', url);
+}
+
+/**
+ * Follow a switch: the basemap is decided **per switch** from the new view's `tile_scheme`, and
+ * the URL says which view it is. A scheme of `null` means the basemap goes, which is what
+ * `basemapLayer` answers with, so a switch from a geographic view to an embedding removes it
+ * rather than leaving tiles under points that cannot line up with them.
+ */
+function onViewChanged(id: string): void {
+  const view = store.state.meta?.views.find((v) => v.id === id);
+  if (!view) return;
+  store.update((s) => {
+    s.view = id;
+  });
+  writeViewToUrl(id);
+  void installBasemap(view);
+}
+
 /** The first map's probe, published for the smoke scripts and the harness (§5.9). */
 async function publishProbe(): Promise<void> {
   await explorer.updateComplete;
@@ -246,6 +274,11 @@ function mirror(): void {
   const view = ds.get('view');
   const replica = ds.get('replica');
 
+  // The store is the one place a switch is decided (§6.3): the pickers, the notebook and a host
+  // calling `setCurrentView` all land here, so the basemap and the URL follow the projection
+  // rather than any one control's event.
+  if (view.id && view.id !== store.state.view) onViewChanged(view.id);
+
   store.update((s) => {
     s.meta = meta;
     s.status = status.status === 'idle' && s.switching ? 'idle' : status.status;
@@ -294,6 +327,7 @@ function openSession(preset: Dataset['presets'][number]): void {
       return {token: session.token, expiresAt: session.expiresAt};
     },
     budget: store.state.budget,
+    view: store.state.view,
     prefetch,
     driver: {prefetchLayers: config.prefetchLayers},
     replica: {
@@ -360,7 +394,7 @@ function openSession(preset: Dataset['presets'][number]): void {
 /** Which `activate` is current: an earlier one that is still awaiting its meta stands down. */
 let activation = 0;
 
-async function activate(dataset: Dataset): Promise<void> {
+async function activate(dataset: Dataset, requestedView: string | null = null): Promise<void> {
   const mine = ++activation;
   unsubscribe?.();
   unsubscribe = null;
@@ -395,6 +429,8 @@ async function activate(dataset: Dataset): Promise<void> {
     s.datasetId = dataset.id;
     s.switching = true;
     s.meta = null;
+    // A view id belongs to a bundle; the next one's is not known until its meta arrives.
+    s.view = '';
     s.session = null;
     s.terms = first?.terms ?? [];
     s.termsLabel = first?.label ?? '';
@@ -433,10 +469,18 @@ async function activate(dataset: Dataset): Promise<void> {
     }
     if (mine !== activation) return;
     const rendered = meta.declaredScalars.filter((c) => c.render);
+    // **An id the bundle does not declare falls back to the first view and is reported** (§6.5).
+    // A wrong view discloses nothing and costs a rerun, so it is a line in the failures panel and
+    // never a refusal to open the dataset.
+    const asked = requestedView === null ? null : (meta.views.find((v) => v.id === requestedView) ?? null);
+    const opening = asked ?? meta.views[0]!;
     store.update((s) => {
       s.session = session;
       s.meta = meta;
-      s.view = meta.views[0]!.id;
+      s.view = opening.id;
+      if (requestedView !== null && asked === null) {
+        s.failures = [...s.failures.slice(-19), {code: 'unknown-view', detail: `this bundle declares no view '${requestedView}'`, at: Date.now()}];
+      }
       s.mTarget = meta.selection.thetaTargetMarks;
       s.artifactLayer = meta.layers[0]?.name ?? null;
       // The demo opens coloured by cluster where a layer exists (the boards), else by a column.
@@ -447,7 +491,8 @@ async function activate(dataset: Dataset): Promise<void> {
           : (rendered.find((c) => c.category)?.name ?? rendered[0]?.name ?? null);
       s.switching = false;
     });
-    void installBasemap(meta.views[0]!);
+    writeViewToUrl(opening.id);
+    void installBasemap(opening);
     trace.event('session', {
       dataset: dataset.id,
       kMaxMarks: meta.selection.kMaxMarks,
@@ -464,9 +509,12 @@ async function activate(dataset: Dataset): Promise<void> {
 
 async function start() {
   datasets = await loadDatasets();
-  const requested = new URLSearchParams(location.search).get('dataset');
+  const params = new URLSearchParams(location.search);
+  const requested = params.get('dataset');
   const chosen = datasets.find((d) => d.id === requested) ?? datasets[0]!;
-  await activate(chosen);
+  // `?view=` is read once, at the first activation: a view id belongs to a bundle, so carrying one
+  // across a dataset change from the picker would ask the next bundle for a view of the last.
+  await activate(chosen, params.get('view'));
 }
 
 start().catch((error) => {
