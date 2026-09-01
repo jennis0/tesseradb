@@ -1,4 +1,4 @@
-import {NO_COUNT, NO_MASKED, servedLineage, SessionArtifactTable, type Projections, type ProjectionName, type Store, type StatusProjection} from '@tesseradb/client';
+import {NO_COUNT, NO_MASKED, servedLineage, SessionArtifactTable, type Projections, type ProjectionName, type Quantisation, type Store, type StatusProjection} from '@tesseradb/client';
 
 /**
  * A store with no network and no driver: projections a test sets directly, and the subscription
@@ -6,6 +6,11 @@ import {NO_COUNT, NO_MASKED, servedLineage, SessionArtifactTable, type Projectio
  */
 export type FakeStore = Store & {
   set<K extends ProjectionName>(name: K, value: Projections[K]): void;
+  /**
+   * Move the frame `frame()` answers with — how a test drives a switch across frames
+   * (`view-switching.md` §4), which the store makes by pointing at another view's quantisation.
+   */
+  setFrame(q: Quantisation): void;
   calls: {name: string; args: unknown[]}[];
 };
 
@@ -24,6 +29,7 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
     replica: {bytes: 0, points: 0, bands: 0, views: 0, lastPlan: null},
     ...overrides
   };
+  let held: Quantisation = {xMin: 0, xMax: 1, yMin: 0, yMax: 1};
   const all = new Set<() => void>();
   const perName = new Map<ProjectionName, Set<() => void>>();
   const calls: {name: string; args: unknown[]}[] = [];
@@ -65,7 +71,10 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
     setCurrentView: spy('setCurrentView'),
     // The unit square, so a component's data↔world conversion is the identity here and a test
     // asserting on world coordinates is asserting on what it wrote.
-    frame: () => ({xMin: 0, xMax: 1, yMin: 0, yMax: 1}),
+    frame: () => held,
+    setFrame(q: Quantisation) {
+      held = q;
+    },
     pick: async (...args: unknown[]) => {
       calls.push({name: 'pick', args});
     },
