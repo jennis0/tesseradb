@@ -187,16 +187,25 @@ class Labeller:
 # --------------------------------------------------------------------------------- the inputs
 
 
-def read_staged(out: Path, take: np.ndarray, *, abstracts: bool) -> pa.Table:
-    """The sample's columns, read one staged chunk at a time.
+#: The columns every run needs. `mesh` is here and is dropped the moment it is resolved: the raw
+#: `m` field averages ~300 bytes an article, which is 11 GB at 36M rows and larger than the titles.
+BASE_COLUMNS = ("row", "pmid", "published", "title", "mesh")
+
+
+def read_staged(out: Path, take: np.ndarray, columns) -> pa.Table:
+    """Named columns for the sample's rows, read one staged chunk at a time.
 
     `take` is sorted global row indices, and a chunk's parquet is in global row order, so the rows
     wanted from each chunk are a contiguous span of `take` and a slice of the chunk. Nothing is
     read twice and no chunk is held after its rows are taken.
+
+    **This is a memory dial, which is why the columns are the caller's.** At 36M rows the abstracts
+    are ~30 GB of Arrow buffers and the raw MeSH field ~11 GB, against the titles' ~4 GB — so the
+    run reads the base columns before the route, drops `mesh` as soon as it is resolved, and reads
+    the abstracts, if it takes them at all, in the step that writes them.
     """
     staging = sources.staging(out)
     meta = json.loads((staging / "vectors.json").read_text())
-    columns = ["row", "pmid", "published", "title", "mesh"] + (["abstract"] if abstracts else [])
     pieces = []
     for n in sources.CHUNKS:
         held = meta["chunks"][str(n)]
@@ -205,7 +214,7 @@ def read_staged(out: Path, take: np.ndarray, *, abstracts: bool) -> pa.Table:
         last = int(np.searchsorted(take, hi))
         if first == last:
             continue
-        table = pq.read_table(staging / f"chunk_{n:02d}.parquet", columns=columns)
+        table = pq.read_table(staging / f"chunk_{n:02d}.parquet", columns=list(columns))
         pieces.append(table.take(pa.array(take[first:last] - lo)))
         del table
     return pa.concat_tables(pieces)
@@ -458,14 +467,9 @@ def main() -> None:
         n = len(take)
     print(f"{n:,} articles sampled from {n_full:,}")
 
-    with steps.step("read staged columns"):
-        table = read_staged(out, take, abstracts=args.abstracts)
-    assert table.num_rows == n, f"{table.num_rows} staged rows against {n} sampled"
-    assert np.array_equal(table.column("row").to_numpy(), take.astype(np.uint32)), (
-        "the staged chunks and the sample disagree about row order"
-    )
-
     # ------------------------------------------------------------------------------- the route
+    # **Before the columns.** The route holds the fit set and the graph; the columns are tens of
+    # gigabytes of Arrow buffers and are not wanted until it is done.
     timings: dict = {}
     with steps.step("route knn"):
         X = (
@@ -481,6 +485,13 @@ def main() -> None:
           f"y [{xy[:, 1].min():.2f}, {xy[:, 1].max():.2f}]  (peak so far "
           f"{resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**20:.1f} GB)", flush=True)
 
+    with steps.step("read staged columns"):
+        table = read_staged(out, take, BASE_COLUMNS)
+    assert table.num_rows == n, f"{table.num_rows} staged rows against {n} sampled"
+    assert np.array_equal(table.column("row").to_numpy(), take.astype(np.uint32)), (
+        "the staged chunks and the sample disagree about row order"
+    )
+
     # ---------------------------------------------------------------------------------- MeSH
     with steps.step("mesh"):
         if Mesh is None:
@@ -495,6 +506,8 @@ def main() -> None:
             closed = mesh.closure(explicit)
             access = branches_per_row(mesh, explicit)
             major_names = joined_names(mesh, major)
+            del major
+        table = table.drop_columns(["mesh"])
     counts = collections.Counter(t for row in access for t in row)
     print(f"MeSH: {mesh_stats}; {counts[UNINDEXED]:,} articles ({counts[UNINDEXED] / n:.1%}) "
           f"carry {UNINDEXED!r}")
@@ -541,9 +554,11 @@ def main() -> None:
         "title": table.column("title"),
         "mesh_major": major_names,
     }
-    if args.abstracts:
-        extra["abstract"] = table.column("abstract")
     with steps.step("write points"):
+        if args.abstracts:
+            # Read here rather than with the base columns: ~30 GB of Arrow buffers at 36M rows,
+            # wanted by the write and by nothing before it.
+            extra["abstract"] = read_staged(out, take, ["abstract"]).column("abstract")
         write_points(out, entity=entity, xy=xy, access=access, extra=extra)
     branch_terms = sorted(counts)
     print(f"{sum(len(a) for a in access):,} (article, branch) labels over "
