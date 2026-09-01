@@ -6,7 +6,7 @@
 //! served set after it is settled — after the verdicts, the cut and the dependent drop — and
 //! nothing else: it holds no route to an artifact the response withheld, so the column can name
 //! only an identifier the artifacts frame already carries. That is the same construction the
-//! parent identifier takes (architecture Appendix C, C29), inverted from artifact→artifact to
+//! parent identifiers take (architecture Appendix C, C29), inverted from artifact→artifact to
 //! point→artifact. Deepest served rather than the leaf is what keeps finer structure out: a point
 //! whose leaf cluster was cut to its parent names the parent, and says nothing about the leaf.
 //!
@@ -22,18 +22,19 @@
 //! whichever the level has, so a request never pays a second structure for it:
 //!
 //! - **Row-major** ([`crate::row_column`]): the column holds each row's leaf label (or list of
-//!   labels), so a served point's leaf is one read, and the walk up the lineage stops at the
-//!   first served ancestor — a few steps per point.
+//!   labels), so a served point's leaf is one read, and the search up the lineage over the
+//!   served ancestors — every path of them, on a DAG — is a few steps per point.
 //! - **Artifact-major** ([`crate::artifacts::MembershipRows`] — a spatial level's resolved
-//!   membership arrives in the same form): only artifact→rows exists. The inversion is done **by bitmap
-//!   intersection, never by testing points against artifacts**: the response's gathered rows
-//!   become one bitmap, each served artifact's rows are intersected with it — O(containers
-//!   touched), not O(points × artifacts) — and every row hit takes the ordinal if it is deeper
-//!   than what it holds. Served is bounded by the cut and the budget; rows by the viewport and `k`.
+//!   membership arrives in the same form): only artifact→rows exists. The inversion is done **by
+//!   bitmap intersection, never by testing points against artifacts**: the response's gathered
+//!   rows become one bitmap, each served artifact's rows are intersected with it — O(containers
+//!   touched), not O(points × artifacts) — and every row hit takes the artifact if it outranks
+//!   what it holds. Served is bounded by the cut and the budget; rows by the viewport and `k`.
 //!
 //! The two agree ordinal for ordinal wherever a level's memberships nest along its lineage, which
 //! a treed layer's do by construction; `tests/membership_column.rs` asserts it over the same
-//! corpus under both layouts.
+//! corpus under both layouts, and the tests below over a flat layer with overlapping artifacts
+//! and over a DAG.
 //!
 //! **"Deepest" across levels is the finest level first.** A tiered layer's edges run from a
 //! coarser level to a finer one and a stacked layer's levels are independent analyses; in both,
@@ -41,11 +42,20 @@
 //! levels names the one at the higher index, and within a level the one deeper in the lineage.
 //! A treed layer sits entirely at level 0 and has only the second half.
 //!
+//! **A tie is broken by the lowest `tessera_id`** (`dag-hierarchies.md` §6). On a tree the deepest
+//! served artifact holding a point is unique; on a DAG, and on a flat layer with multi-membership,
+//! two served artifacts may hold the point at one depth, and a rule that took whichever the
+//! artifact-major route's map iterated first would answer differently from one run to the next
+//! and differently from the row-major route. The identifier is the key the frame already
+//! carries, rather than an ordinal (C8), and it discloses nothing: both artifacts are in the
+//! response and both hold the point.
+//!
 //! **Rows above a level's base** — points ingested since the last fold — resolve through a
 //! row-major label column's live tail and are null on an artifact-major level, whose row form is
 //! the base projection. That is the same edge the masked count already has on that layout, and
 //! it closes at the fold.
 
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -121,10 +131,7 @@ impl Resolved {
                     .map(|row| {
                         // Every gathered row was in the list `new` was given, so a miss here is
                         // a caller bug; null is the fail-closed reading of it.
-                        self.rows
-                            .binary_search(row)
-                            .ok()
-                            .and_then(|i| ids[i])
+                        self.rows.binary_search(row).ok().and_then(|i| ids[i])
                     })
                     .collect(),
             })
@@ -143,30 +150,39 @@ impl Resolved {
     }
 }
 
-/// The rank a candidate wins by: the finest level first, then the deepest in its lineage.
-type Rank = (u32, u32);
+/// The rank a candidate wins by: the finest level first, then the deepest in its lineage, then
+/// the **lowest** identifier — a total order, so the answer is the same whichever route found
+/// the candidates and in whatever order it met them.
+type Rank = (u32, u32, Reverse<u64>);
 
 fn resolve_layer(rows: &[u32], bitmap: &Bitmap, layer: &ServedLayer) -> Vec<Option<u64>> {
-    let mut best: Vec<Option<(Rank, u64)>> = vec![None; rows.len()];
-    let mut consider = |i: usize, rank: Rank, id: TesseraId| match best[i] {
-        Some((held, _)) if held >= rank => {}
-        _ => best[i] = Some((rank, id.raw())),
+    let mut best: Vec<Option<Rank>> = vec![None; rows.len()];
+    let mut consider = |i: usize, rank: Rank| {
+        if best[i].is_none_or(|held| rank > held) {
+            best[i] = Some(rank);
+        }
     };
+    let mut scratch: Vec<u32> = Vec::new();
     for level in &layer.levels {
         if level.served.is_empty() {
             continue;
         }
-        let depth = |ordinal: u32| level.lineage.depth(ordinal);
+        let rank_of = |ordinal: u32| -> Option<Rank> {
+            level
+                .served
+                .get(&ordinal)
+                .map(|id| (level.level, level.lineage.depth(ordinal), Reverse(id.raw())))
+        };
         match level.rows.column() {
-            // Row-major: the point's leaf, then up to the first served ancestor.
+            // Row-major: the point's leaf, then the best-ranked served ancestor-or-self of it
+            // over every path.
             Some(column) => {
                 for (i, &row) in rows.iter().enumerate() {
                     column.for_each_label(row, |leaf| {
-                        if let Some(hit) = level
-                            .lineage
-                            .nearest(leaf, |o| level.served.contains_key(&o))
+                        if let Some((_, rank)) =
+                            level.lineage.select_ancestor(leaf, &mut scratch, rank_of)
                         {
-                            consider(i, (level.level, depth(hit)), level.served[&hit]);
+                            consider(i, rank);
                         }
                     });
                 }
@@ -178,15 +194,241 @@ fn resolve_layer(rows: &[u32], bitmap: &Bitmap, layer: &ServedLayer) -> Vec<Opti
                     let Some(members) = level.rows.get(ordinal) else {
                         continue;
                     };
-                    let rank = (level.level, depth(ordinal));
+                    let rank = (level.level, level.lineage.depth(ordinal), Reverse(id.raw()));
                     for row in members.and(bitmap).iter() {
                         if let Ok(i) = rows.binary_search(&row) {
-                            consider(i, rank, id);
+                            consider(i, rank);
                         }
                     }
                 }
             }
         }
     }
-    best.into_iter().map(|b| b.map(|(_, id)| id)).collect()
+    best.into_iter()
+        .map(|b| b.map(|(_, _, Reverse(id))| id))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::row_column::RowColumn;
+    use tessera_types::layer::ServingLayout;
+
+    /// Both routes over one level: the artifact-major form of `sets`, and the row-major form
+    /// composed from the same memberships — a label column where every row is in one artifact,
+    /// a list column otherwise.
+    fn both_routes(
+        sets: &[Option<&[u32]>],
+        row_count: u32,
+        lineage: &Arc<Lineage>,
+        served: &[(u32, u64)],
+    ) -> (ServedLayer, ServedLayer) {
+        let served_map = |_: ()| -> HashMap<u32, TesseraId> {
+            served
+                .iter()
+                .map(|&(o, id)| (o, TesseraId::new(id)))
+                .collect()
+        };
+        let artifact_major = Arc::new(ArtifactRows::synthetic(sets, None));
+        let overlapping = (0..row_count).any(|row| {
+            sets.iter()
+                .flatten()
+                .filter(|members| members.contains(&row))
+                .count()
+                > 1
+        });
+        let layout = if overlapping {
+            ServingLayout::RowMajorList
+        } else {
+            ServingLayout::RowMajorLabel
+        };
+        let column = RowColumn::compose(artifact_major.membership(), row_count, layout)
+            .expect("the memberships compose in the form chosen for them");
+        let row_major = Arc::new(ArtifactRows::synthetic(sets, Some(Arc::new(column))));
+        let layer = |rows: Arc<ArtifactRows>| ServedLayer {
+            name: "layer".into(),
+            levels: vec![ServedLevel {
+                level: 0,
+                rows,
+                lineage: Arc::clone(lineage),
+                served: served_map(()),
+            }],
+        };
+        (layer(artifact_major), layer(row_major))
+    }
+
+    /// The rule, written the obvious way: over the served artifacts holding the row, the deepest
+    /// by stored depth, then the lowest identifier.
+    fn expected(
+        sets: &[Option<&[u32]>],
+        lineage: &Lineage,
+        served: &[(u32, u64)],
+        row: u32,
+    ) -> Option<u64> {
+        served
+            .iter()
+            .filter(|&&(o, _)| sets[o as usize].is_some_and(|m| m.contains(&row)))
+            .map(|&(o, id)| (lineage.depth(o), Reverse(id), id))
+            .max()
+            .map(|(_, _, id)| id)
+    }
+
+    fn assert_both_routes_agree(
+        sets: &[Option<&[u32]>],
+        row_count: u32,
+        lineage: &Arc<Lineage>,
+        served: &[(u32, u64)],
+    ) {
+        let (artifact_major, row_major) = both_routes(sets, row_count, lineage, served);
+        let rows: Vec<u32> = (0..row_count).collect();
+        let a = Resolved::new(rows.clone(), &[artifact_major]);
+        let r = Resolved::new(rows.clone(), &[row_major]);
+        let a = &a.columns_for(&rows)[0].ids;
+        let r = &r.columns_for(&rows)[0].ids;
+        let want: Vec<Option<u64>> = rows
+            .iter()
+            .map(|&row| expected(sets, lineage, served, row))
+            .collect();
+        assert_eq!(a, &want, "the artifact-major route disagrees with the rule");
+        assert_eq!(r, &want, "the row-major route disagrees with the rule");
+    }
+
+    /// **A flat layer with overlapping artifacts ties by the lowest identifier**, on both routes.
+    /// The artifact-major route iterates a map of the served set, so without the rule the answer
+    /// on the overlap was whichever it met first.
+    #[test]
+    fn a_flat_overlap_names_the_lowest_identifier_on_both_routes() {
+        let sets: [Option<&[u32]>; 3] = [Some(&[0, 1, 2, 3]), Some(&[2, 3, 4]), Some(&[3, 5])];
+        let lineage = Arc::new(Lineage::new([(0, None::<u32>), (1, None), (2, None)]));
+        // Identifiers deliberately out of ordinal order: the lowest id is ordinal 1, not 0.
+        let served = [(0, 300), (1, 100), (2, 200)];
+        assert_both_routes_agree(&sets, 6, &lineage, &served);
+        let (artifact_major, _) = both_routes(&sets, 6, &lineage, &served);
+        let rows: Vec<u32> = (0..6).collect();
+        let ids = Resolved::new(rows.clone(), &[artifact_major]).columns_for(&rows)[0]
+            .ids
+            .clone();
+        assert_eq!(
+            ids,
+            vec![
+                Some(300),
+                Some(300),
+                Some(100),
+                Some(100),
+                Some(100),
+                Some(200)
+            ],
+            "row 2 is in ordinals 0 and 1 and names the lower identifier; row 3 is in all three"
+        );
+    }
+
+    /// **On a DAG two served artifacts may hold a point at one depth**, and the row-major search
+    /// reaches a served ancestor on a second path: `0 → {1, 2} → 3`, memberships closed upward,
+    /// so the row-major list column labels a row of `3` with every artifact holding it.
+    #[test]
+    fn a_dag_ties_by_depth_then_identifier_and_searches_every_path() {
+        let lineage = Arc::new(Lineage::dag([
+            (0, vec![]),
+            (1, vec![0]),
+            (2, vec![0]),
+            (3, vec![1, 2]),
+            (4, vec![1]),
+        ]));
+        // 3's members are in both 1 and 2; 4's are in 1 only; 0 holds everything and row 9.
+        let sets: [Option<&[u32]>; 5] = [
+            Some(&[0, 1, 2, 3, 4, 5, 9]),
+            Some(&[0, 1, 2, 4, 5]),
+            Some(&[0, 1, 2, 3]),
+            Some(&[0, 1, 2]),
+            Some(&[4, 5]),
+        ];
+        // The cut served 1 and 2 (the same depth) and the root; 3 and 4 were cut away.
+        let served = [(0, 10), (1, 22), (2, 21)];
+        assert_both_routes_agree(&sets, 10, &lineage, &served);
+        let (_, row_major) = both_routes(&sets, 10, &lineage, &served);
+        let rows: Vec<u32> = (0..10).collect();
+        let ids = Resolved::new(rows.clone(), &[row_major]).columns_for(&rows)[0]
+            .ids
+            .clone();
+        assert_eq!(
+            ids[0..3],
+            [Some(21), Some(21), Some(21)],
+            "a member of 3 is held by 1 and 2 at one depth, and 2 has the lower identifier"
+        );
+        assert_eq!(ids[3], Some(21), "a member of 2 alone");
+        assert_eq!(ids[4..6], [Some(22), Some(22)], "a member of 4 climbs to 1");
+        assert_eq!(ids[9], Some(10), "a member of the root alone");
+        assert_eq!(ids[6..9], [None, None, None], "held by nothing served");
+
+        // Serving 3 as well: it is deeper than both, so it wins where it holds the point.
+        let served = [(0, 10), (1, 22), (2, 21), (3, 99)];
+        assert_both_routes_agree(&sets, 10, &lineage, &served);
+    }
+
+    /// Random DAGs with memberships closed upward, random served subsets, both routes against the
+    /// rule — the agreement swept rather than argued.
+    #[test]
+    fn the_two_routes_agree_over_random_closed_dags() {
+        let mut state = 0x5EEDu64;
+        let mut next = move || {
+            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        };
+        for _ in 0..100 {
+            let n = 2 + (next() % 12) as u32;
+            let parents: Vec<Vec<u32>> = (0..n)
+                .map(|o| {
+                    let mut ups = Vec::new();
+                    if o > 0 && !next().is_multiple_of(4) {
+                        ups.push((next() % o as u64) as u32);
+                        if next().is_multiple_of(2) {
+                            ups.push((next() % o as u64) as u32);
+                        }
+                    }
+                    ups.sort_unstable();
+                    ups.dedup();
+                    ups
+                })
+                .collect();
+            let lineage = Arc::new(Lineage::dag(
+                parents
+                    .iter()
+                    .enumerate()
+                    .map(|(o, ups)| (o as u32, ups.clone())),
+            ));
+            // Each node's own rows, then the closure: a node holds its rows and its descendants'.
+            let own: Vec<Vec<u32>> = (0..n).map(|o| vec![o * 2, o * 2 + 1]).collect();
+            let mut closed: Vec<Vec<u32>> = own.clone();
+            for o in (0..n as usize).rev() {
+                let mine = closed[o].clone();
+                let mut stack = parents[o].clone();
+                let mut seen = Vec::new();
+                while let Some(up) = stack.pop() {
+                    if seen.contains(&up) {
+                        continue;
+                    }
+                    seen.push(up);
+                    closed[up as usize].extend_from_slice(&mine);
+                    stack.extend_from_slice(&parents[up as usize]);
+                }
+            }
+            for members in &mut closed {
+                members.sort_unstable();
+                members.dedup();
+            }
+            let sets: Vec<Option<&[u32]>> = closed.iter().map(|m| Some(m.as_slice())).collect();
+            let served: Vec<(u32, u64)> = (0..n)
+                .filter(|_| next().is_multiple_of(2))
+                .map(|o| (o, 1000 - o as u64))
+                .collect();
+            if served.is_empty() {
+                continue;
+            }
+            assert_both_routes_agree(&sets, n * 2, &lineage, &served);
+        }
+    }
 }

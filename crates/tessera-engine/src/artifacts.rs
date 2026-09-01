@@ -291,9 +291,14 @@ impl ArtifactRecords {
             .and_then(Option::as_ref)
     }
 
-    /// The artifact's parent edge, as the registry holds it.
-    pub(crate) fn parent(&self, ordinal: u32) -> Option<ParentRef> {
-        self.parents.get(ordinal as usize).copied().flatten()
+    /// The artifact's parent edges, as the registry holds them — ascending by ordinal, empty at
+    /// a root and at a hole. A tree's list is at most one long; a `dag` layer's may name several
+    /// (`dag-hierarchies.md` §4). **The only read the engine makes of the record's parents**, so
+    /// the serving path and the lineage see one shape whatever the record stores.
+    pub(crate) fn parents(&self, ordinal: u32) -> &[ParentRef] {
+        self.parents
+            .get(ordinal as usize)
+            .map_or(&[], Option::as_slice)
     }
 
     /// `|G|` per rank, entity space. Empty for a hole and for an artifact with no contents alike —
@@ -653,9 +658,34 @@ impl ArtifactRows {
         self.records.attachment(ordinal)
     }
 
-    /// The artifact's parent edge, as the registry holds it.
-    pub(crate) fn parent(&self, ordinal: u32) -> Option<ParentRef> {
-        self.records.parent(ordinal)
+    /// The artifact's parent edges, as the registry holds them — see [`ArtifactRecords::parents`].
+    pub(crate) fn parents(&self, ordinal: u32) -> &[ParentRef] {
+        self.records.parents(ordinal)
+    }
+
+    /// Row-space memberships and a serving column, with no `RowSpace` to project through — for
+    /// the membership column's own tests, which are about the resolver's two routes and not the
+    /// projection.
+    #[cfg(test)]
+    pub(crate) fn synthetic(sets: &[Option<&[u32]>], column: Option<Arc<RowColumn>>) -> Self {
+        let membership = MembershipRows {
+            rows: sets.iter().map(|s| s.map(Bitmap::of)).collect(),
+            generating: vec![Vec::new(); sets.len()],
+        };
+        let index = TileIndex::build(&membership, 0);
+        ArtifactRows {
+            records: ArtifactRecords {
+                attachments: vec![None; sets.len()],
+                parents: vec![None; sets.len()],
+                declared: vec![Vec::new(); sets.len()],
+            },
+            membership,
+            index,
+            partition: None,
+            layout: ServingLayout::ArtifactMajor,
+            column: None,
+        }
+        .with_column(column)
     }
 
     pub fn get(&self, ordinal: u32) -> Option<&Bitmap> {

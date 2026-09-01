@@ -11,7 +11,7 @@
 //!   full response withholds. Checked across a levelled layer, a treed layer under a budget cut,
 //!   and with and without a filter, for two principals.
 //! - **`rung` is the declared level on a levelled layer and the response-local parent-chain depth
-//!   on a treed one** — the depth in the forest the response's own `parent_id` links form, after
+//!   on a treed one** — the depth in the forest the response's own `parent_ids` links form, after
 //!   the cut, so a re-rooted subtree starts at 0. A rung read from the stored tree instead would
 //!   draw a pruned leaf at depth 2 of a response whose links say it is a root.
 //!
@@ -136,8 +136,7 @@ impl Fixture {
         parent: Option<&str>,
         sources: impl Iterator<Item = u64>,
     ) -> IncomingArtifact {
-        let mut artifact =
-            IncomingArtifact::from_entities(Some(key.into()), self.members(sources));
+        let mut artifact = IncomingArtifact::from_entities(Some(key.into()), self.members(sources));
         artifact.parent_key = parent.map(str::to_string);
         artifact
     }
@@ -150,7 +149,8 @@ impl Fixture {
 ///   response-local root;
 /// - [`TIERED`]: two declared levels, one country over two states.
 fn fixture() -> Fixture {
-    let corpus = Corpus::new(SEED, N, extent()).expect("the generator accepts the fixture's extent");
+    let corpus =
+        Corpus::new(SEED, N, extent()).expect("the generator accepts the fixture's extent");
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
     let points = tmp.path().join("points.parquet");
@@ -191,11 +191,7 @@ fn fixture() -> Fixture {
         .register_layer(tiered_declaration(TIERED, 2))
         .unwrap();
     fx.engine
-        .publish_artifacts(
-            TIERED.into(),
-            0,
-            vec![fx.node("country", None, 0..600)],
-        )
+        .publish_artifacts(TIERED.into(), 0, vec![fx.node("country", None, 0..600)])
         .unwrap();
     fx.engine
         .publish_artifacts(
@@ -232,9 +228,9 @@ fn artifacts(
         .artifacts
 }
 
-/// `(layer, tessera_id) → (rung, matched, masked_count, parent_id)` — everything §5.2's sentence
+/// `(layer, tessera_id) → (rung, matched, masked_count, parent_ids)` — everything §5.2's sentence
 /// quantifies over, plus the two row facts the engine also owes unchanged.
-type IdentityView = BTreeMap<(String, u64), (u32, Option<bool>, u64, Option<u64>)>;
+type IdentityView = BTreeMap<(String, u64), (u32, Option<bool>, u64, Vec<u64>)>;
 
 fn identity_view(served: &[ArtifactOut]) -> IdentityView {
     served
@@ -246,7 +242,7 @@ fn identity_view(served: &[ArtifactOut]) -> IdentityView {
                     a.rung,
                     a.matched,
                     a.masked_count,
-                    a.parent_id.map(|p| p.raw()),
+                    a.parent_ids.iter().map(|p| p.raw()).collect::<Vec<_>>(),
                 ),
             )
         })
@@ -367,7 +363,7 @@ fn rungs_are_declared_levels_on_levelled_layers_and_chain_depths_on_treed_ones()
 /// - the budget cut serves ancestors in place of descendants, so the served forest is the tree's
 ///   top and the rungs are the depths of what remains;
 /// - `prune_children` drops every covered ancestor, so the served forest is the leaves — seven
-///   stored depths collapsed to a response of roots, every `parent_id` null and every rung 0.
+///   stored depths collapsed to a response of roots, every `parent_ids` empty and every rung 0.
 ///
 /// A rung read from the stored lineage instead of the response's own links fails the second case
 /// with a plausible-looking 2.
@@ -379,14 +375,7 @@ fn a_cut_that_reroots_a_subtree_restarts_its_rungs_at_zero() {
         BTreeMap::from([("root".into(), 0), ("a".into(), 1), ("b".into(), 1)]),
         "the budget climbs, and what survives keeps its depth in what survives"
     );
-    let pruned = artifacts(
-        &fx.engine,
-        "0,1",
-        &[PRUNED],
-        None,
-        None,
-        ArtifactRows::Full,
-    );
+    let pruned = artifacts(&fx.engine, "0,1", &[PRUNED], None, None, ArtifactRows::Full);
     assert_eq!(
         pruned
             .iter()
@@ -400,8 +389,8 @@ fn a_cut_that_reroots_a_subtree_restarts_its_rungs_at_zero() {
     );
     for leaf in &pruned {
         assert_eq!(
-            (leaf.parent_id, leaf.rung),
-            (None, 0),
+            (leaf.parent_ids.as_slice(), leaf.rung),
+            (&[][..], 0),
             "{:?}: a leaf served without its ancestors is a root of the response's forest, \
              whatever its depth in the stored tree",
             leaf.key

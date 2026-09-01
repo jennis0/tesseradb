@@ -182,10 +182,10 @@ struct Served {
     layer: String,
     key: Option<String>,
     masked_count: u64,
-    /// The key of the parent, where one was named. `None` is *no parent named*, which covers a root
-    /// and a parent withheld from this viewer alike — the ambiguity is deliberate on the wire and is
-    /// kept here.
-    parent_key: Option<Option<String>>,
+    /// The keys of the parents named — every one in the same response. Empty is *no parent
+    /// named*, which covers a root and a parent withheld from this viewer alike — the ambiguity is
+    /// deliberate on the wire and is kept here.
+    parent_keys: Vec<Option<String>>,
     centroid: Option<[f64; 2]>,
     bbox: Option<[u32; 4]>,
     content: Vec<String>,
@@ -202,7 +202,11 @@ fn served(artifacts: &[ArtifactOut]) -> Vec<Served> {
             layer: a.layer.clone(),
             key: a.key.clone(),
             masked_count: a.masked_count,
-            parent_key: a.parent_id.map(|id| by_id.get(&id).cloned().flatten()),
+            parent_keys: a
+                .parent_ids
+                .iter()
+                .map(|id| by_id.get(id).cloned().flatten())
+                .collect(),
             centroid: a.derived.centroid,
             bbox: a.derived.bbox,
             content: a.content.clone(),

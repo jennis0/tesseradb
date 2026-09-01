@@ -948,7 +948,7 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                                 ]
                             }),
                             shape,
-                            // Column 12, after `content` at 10 and `parent_id` at 11 — read
+                            // Column 12, after `content` at 10 and `parent_ids` at 11 — read
                             // positionally here on purpose, because the fixed prefix's positions
                             // are contract and a test that read by name would not notice a column
                             // inserted ahead of it.

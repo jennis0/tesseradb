@@ -8,7 +8,7 @@ every payload a complete Arrow IPC stream (JSON for the trailer):
     kind 4  trailer    JSON                                   exactly one, last
     kind 5  artifacts  (layer dict<u16,utf8>, tessera_id,  at most one, after tiles and before
                         key, masked_count, the derived           any points; absent when none served
-                        geometry, content, parent_id,
+                        geometry, content, parent_ids,
                         rung, matched — then shape_x/shape_y,
                         in the schema only when a served
                         row carries a drawn geometry; §3.2 r45)
@@ -62,9 +62,14 @@ class Artifact(NamedTuple):
     content: list[str]
     #: The rung this artifact is drawn at (contracts §3.2 r44): the declared level on a levelled
     #: layer — a fact about the artifact, so two principals served it *do* agree on it — and the
-    #: response-local parent-chain depth on a treed one, the depth of this row in the forest the
-    #: response's own `parent_id` links form after the budget cut. `0` on a flat layer.
+    #: response-local depth on a treed one, the longest parent chain to this row in the forest the
+    #: response's own `parent_ids` links form after the budget cut. `0` on a flat layer.
     rung: int
+    #: The identifiers of this artifact's parents **that are in this same response**, ascending
+    #: (contracts §3.2 r71, `dag-hierarchies.md` §7): at most one on a tree, several on a `dag`
+    #: layer. Empty for a root, for a flat artifact, and for a parent the response withheld alike
+    #: — the wire does not distinguish them (C29, per entry), and neither may a reader.
+    parent_ids: list[int]
 
 
 FRAME_TILES = 1
@@ -233,6 +238,7 @@ def decode_frames(data: bytes):
                         "box_max_x",
                         "box_max_y",
                         "content",
+                        "parent_ids",
                         "rung",
                     )
                 }
@@ -268,6 +274,7 @@ def decode_frames(data: bytes):
                             shape=None if sx is None else _zip_shape(sx, sy),
                             content=list(columns["content"][row] or []),
                             rung=columns["rung"][row],
+                            parent_ids=list(columns["parent_ids"][row] or []),
                         )
                     )
             if not artifacts:
