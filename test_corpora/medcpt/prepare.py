@@ -211,6 +211,67 @@ def read_staged(out: Path, take: np.ndarray, *, abstracts: bool) -> pa.Table:
     return pa.concat_tables(pieces)
 
 
+# --------------------------------------------------------------------------------- the MeSH join
+
+
+def _flat(array):
+    """One Arrow `ListArray`, whether a chunked column or an array, was handed over."""
+    if isinstance(array, pa.ChunkedArray):
+        return array.combine_chunks()
+    return array
+
+
+def branches_per_row(mesh, explicit) -> list[list[str]]:
+    """The access column: each article's top-level MeSH branch letters, `unindexed` where none.
+
+    **`branches_of` is called once per descriptor, not once per article.** The interface takes a
+    set of descriptor ids and returns letters; calling it 36M times would be 36M Python calls over
+    a 30,954-entry lookup. Instead each descriptor's letters become a 16-bit mask, the per-article
+    mask is one `bitwise_or.reduceat` over the list's own offsets, and the masks are decoded
+    through a cache — so the returned lists are shared objects and the column is pointers.
+    """
+    values = _flat(explicit)
+    letters = sorted({b for d in range(len(mesh.descriptors))
+                      for b in mesh.branches_of(np.array([d]))})
+    bit = {letter: 1 << i for i, letter in enumerate(letters)}
+    mask_of = np.zeros(len(mesh.descriptors), dtype=np.uint32)
+    for d in range(len(mesh.descriptors)):
+        for letter in mesh.branches_of(np.array([d])):
+            mask_of[d] |= bit[letter]
+
+    ids = np.asarray(values.values)
+    offsets = np.asarray(values.offsets)
+    lengths = np.diff(offsets)
+    row_mask = np.zeros(len(values), dtype=np.uint32)
+    has = lengths > 0
+    if has.any():
+        # `reduceat` on an empty span returns the element at that index rather than the identity,
+        # so only the non-empty rows are reduced and the rest keep their zero.
+        row_mask[has] = np.bitwise_or.reduceat(mask_of[ids], offsets[:-1][has])
+
+    unindexed = [UNINDEXED]
+    cache = {0: unindexed}
+    for m in np.unique(row_mask):
+        if m:
+            cache[int(m)] = [letter for letter, b in bit.items() if int(m) & b]
+    return [cache[int(m)] for m in row_mask]
+
+
+def joined_names(mesh, major) -> pa.Array:
+    """`mesh_major`: the major-topic descriptor names joined with `; `, in Arrow throughout.
+
+    The names are taken by index and re-listed against the same offsets, so nothing materialises a
+    list of strings per row — the same trick the arXiv rung joins its author surnames with.
+    """
+    values = _flat(major)
+    names = pa.array(mesh.descriptors, pa.string())
+    taken = names.take(pa.array(np.asarray(values.values), pa.int32()))
+    listed = pa.ListArray.from_arrays(pa.array(np.asarray(values.offsets), pa.int32()), taken)
+    joined = pc.binary_join(listed, "; ")
+    return pc.if_else(pc.greater(pc.list_value_length(listed), 0), joined,
+                      pa.nulls(len(listed), pa.string()))
+
+
 # --------------------------------------------------------------------------------- the outputs
 
 
@@ -363,6 +424,8 @@ def main() -> None:
                     help="accepted for the arXiv rung's CLI shape; the staged matrix is float16")
     ap.add_argument("--abstracts", action="store_true",
                     help="take the abstracts — ⊘ an open owner ruling, off by default")
+    ap.add_argument("--fit", type=int, default=routes.FIT_ROWS,
+                    help="rows UMAP is fitted over; the rest are placed against the fit set")
     ap.add_argument("--shard", type=int, default=routes.SHARD_ROWS,
                     help="rows per CAGRA index in the sharded kNN graph")
     ap.add_argument("--managed", action="store_true",
@@ -411,7 +474,7 @@ def main() -> None:
             else routes.Vectors.gathered(matrix, take)
         )
         t: dict = {}
-        xy = routes.knn(X, t, shard_rows=args.shard, managed=args.managed)
+        xy = routes.knn(X, t, fit=args.fit, shard_rows=args.shard, managed=args.managed)
         timings["knn"] = t
         del X
     print(f"  route knn: x [{xy[:, 0].min():.2f}, {xy[:, 0].max():.2f}] "
@@ -422,7 +485,7 @@ def main() -> None:
     with steps.step("mesh"):
         if Mesh is None:
             mesh = None
-            explicit = major = closed = None
+            explicit = closed = None
             mesh_stats = {"module": "absent"}
             access = [[UNINDEXED]] * n
             major_names = pa.nulls(n, pa.string())
@@ -430,18 +493,8 @@ def main() -> None:
             mesh = Mesh()
             explicit, major, mesh_stats = mesh.resolve(table.column("mesh"))
             closed = mesh.closure(explicit)
-            access = [
-                mesh.branches_of(np.asarray(row.values)) or [UNINDEXED]
-                for row in explicit
-            ]
-            names = np.array(mesh.descriptors, dtype=object)
-            major_names = pa.array(
-                [
-                    "; ".join(names[np.asarray(row.values)]) if len(row) else None
-                    for row in major
-                ],
-                pa.string(),
-            )
+            access = branches_per_row(mesh, explicit)
+            major_names = joined_names(mesh, major)
     counts = collections.Counter(t for row in access for t in row)
     print(f"MeSH: {mesh_stats}; {counts[UNINDEXED]:,} articles ({counts[UNINDEXED] / n:.1%}) "
           f"carry {UNINDEXED!r}")
