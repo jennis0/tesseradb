@@ -1,6 +1,7 @@
 import {css, html, nothing} from 'lit';
 import {property} from 'lit/decorators.js';
-import type {DeclaredScalar, ItemDetail, Meta, Refusal} from '@tesseradb/client';
+import type {DeclaredScalar, ItemDetail, ItemViewPosition, Meta, Quantisation, Refusal} from '@tesseradb/client';
+import {GRID32} from '@tesseradb/client';
 import {TesseraElement, emit, idString} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
@@ -61,6 +62,22 @@ export class TesseraItemCard extends TesseraElement {
         display: inline-flex;
         color: var(--tessera-ink-3);
       }
+      .chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin: 4px 0 10px;
+      }
+      [part='view-chip'][aria-current='true'] {
+        background: var(--tessera-accent);
+        color: var(--tessera-accent-ink);
+      }
+      [part='scoped'] {
+        margin-top: 12px;
+      }
+      [part='key'] {
+        margin: 10px 0 4px;
+      }
     `
   ];
 
@@ -71,7 +88,9 @@ export class TesseraItemCard extends TesseraElement {
   @property({attribute: false}) accessor meta: Meta | null = null;
 
   private get shown(): {item: {id: bigint; detail: ItemDetail} | null; refusal: Refusal | null; meta: Meta | null} {
-    if (this.item || this.refusal) return {item: this.item, refusal: this.refusal, meta: this.meta};
+    // A host feeding the card by property still gets the store's schema where one is adopted: the
+    // declaration order, a view's own name and its frame are the bundle's, not the item's.
+    if (this.item || this.refusal) return {item: this.item, refusal: this.refusal, meta: this.meta ?? this.resolvedStore?.get('meta') ?? null};
     const s = this.resolvedStore;
     if (!s) return {item: null, refusal: null, meta: this.meta};
     const sel = s.get('selection');
@@ -107,15 +126,88 @@ export class TesseraItemCard extends TesseraElement {
     return html`<div class="panel">${heading}
       <span part="state" data-state="shown"></span>
       ${titleName ? html`<div part="field" class="card-title" data-name=${titleName}><slot name=${`field-${titleName}`}><span part="value">${String(fields[titleName])}</span></slot></div>` : nothing}
+      ${this.views(item.detail.views, meta)}
+      ${this.labels(item.detail.labels)}
       <div class="field">
         ${rest.map((name) => this.field(name, fields[name], declared.find((c) => c.name === name)))}
         <div part="field" data-name="tessera_id" style="display:contents"><span part="label" class="k">tessera_id</span><span part="value" class="v mono">${id}</span></div>
         ${externalId ? html`<div part="field" data-name="external_id" style="display:contents"><span part="label" class="k">external_id</span><span part="value" class="v mono">${externalId}</span></div>` : nothing}
       </div>
+      ${this.scoped(item.detail.scoped)}
       <div class="row actions">
         <button part="open" class="btn" type="button" @click=${() => emit(this, 'tessera-open', {id, fields, externalId})}>${icon('open', 14)}Open</button>
         <button part="copy" class="btn quiet" type="button" @click=${copy}>Copy id</button>
       </div>
+    </div>`;
+  }
+
+  /**
+   * **The views this item is in that this session may reach** (`view-switching.md` §6.4), as chips
+   * under the title, the current one marked. Clicking another follows the item into it: the detail
+   * already holds its position there, so the switch and the camera cost no request.
+   *
+   * An empty array draws nothing. It means *none of this item's views is one you can reach*, which
+   * the server serves in the same shape as *this item is in no view* — a card must not present the
+   * second (`ItemDetail.views`).
+   */
+  private views(positions: ItemViewPosition[], meta: Meta | null) {
+    if (positions.length === 0) return nothing;
+    const current = this.resolvedStore?.get('view').id ?? '';
+    return html`<span part="label" class="xs muted">In views</span>
+      <div class="chips">
+        ${positions.map((p) => {
+          const view = meta?.views.find((v) => v.id === p.id) ?? null;
+          const here = p.id === current;
+          return html`<button part="view-chip" class="chip" type="button" data-view=${p.id} aria-current=${here ? 'true' : 'false'} @click=${() => this.follow(p, view?.quantisation ?? null)}>
+            ${view?.displayName ?? p.id}
+          </button>`;
+        })}
+      </div>`;
+  }
+
+  /**
+   * Follow the item into another view: `tessera-viewfollow` with the position **dequantised under
+   * that view's frame** (decision 0040), so the host centres a camera on data coordinates rather
+   * than on grid units of the wrong extent.
+   */
+  private follow(position: ItemViewPosition, frame: Quantisation | null): void {
+    if (!frame) return;
+    emit(this, 'tessera-viewfollow', {
+      view: position.id,
+      x: frame.xMin + (position.x / GRID32) * (frame.xMax - frame.xMin),
+      y: frame.yMin + (position.y / GRID32) * (frame.yMax - frame.yMin)
+    });
+  }
+
+  /**
+   * **The labels this session satisfies, and only those** (contracts §3.2, decision 0114) — never
+   * the item's full label set, which is why the heading says which of my grants admit me rather
+   * than what this item is labelled. Empty is a real answer and draws nothing.
+   */
+  private labels(labels: string[]) {
+    if (labels.length === 0) return nothing;
+    return html`<span part="label" class="xs muted">Labels I hold</span>
+      <div class="chips">${labels.map((l) => html`<span part="label-chip" class="chip">${l}</span>`)}</div>`;
+  }
+
+  /**
+   * The group-scoped attribute values (`views.md` §5), as rows **headed by the key** in the order
+   * served — the key is a view's only address, so two views sharing one through a `members` group
+   * share one heading.
+   */
+  private scoped(scoped: Record<string, Record<string, unknown>>) {
+    const keys: string[] = [];
+    for (const family of Object.keys(scoped)) for (const key of Object.keys(scoped[family] ?? {})) if (!keys.includes(key)) keys.push(key);
+    if (keys.length === 0) return nothing;
+    return html`<div part="scoped">
+      ${keys.map(
+        (key) => html`<div part="key" class="hd" data-key=${key}>${key}</div>
+          <div class="field" data-key=${key}>
+            ${Object.keys(scoped)
+              .filter((family) => key in (scoped[family] ?? {}))
+              .map((family) => html`<div part="field" data-name=${family} data-key=${key} style="display:contents"><span part="label" class="k">${family}</span><span part="value" class="v">${present(scoped[family]![key], undefined)}</span></div>`)}
+          </div>`
+      )}
     </div>`;
   }
 

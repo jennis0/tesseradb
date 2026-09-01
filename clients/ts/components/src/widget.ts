@@ -28,8 +28,8 @@ import './explorer.js';
  * ended) sends `reauthorise` and awaits the next answer. A view rendered after a page reload is a
  * new model, so it sends `ready` again.
  *
- * **What crosses the kernel boundary is control and selection, never data.** `url` and `view` come
- * down (with `explorer_layout` and `height`, which are the cell's, not the store's); `bbox`,
+ * **What crosses the kernel boundary is control and selection, never data.** `url` comes down
+ * (with `explorer_layout` and `height`, which are the cell's, not the store's); `view`, `bbox`,
  * `layers`, `colour_by` and `filters` go both ways; `selected`, `selected_artifact`
  * and `region` go up. Up-syncs happen **at the settle** — when the store's status reaches `shown`
  * for a new composition, and when a region's counts arrive — never per frame, so the kernel is
@@ -327,6 +327,9 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
       if (settled) {
         lastComposition = view.composition;
         patch.bbox = v.lastBbox;
+        // The view the map is actually showing, up-synced with the other controls at the settle
+        // (§6.6), so `m.view` reads what is on screen whichever side switched it.
+        patch.view = view.id;
         patch.layers = store.get('artifacts').layers;
         patch.colour_by = store.get('legend').colourBy;
         patch.filters = store.get('filters').expr;
@@ -379,7 +382,17 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
     for (const v of state.views.values()) equip(v);
   };
   model.on('change:url', rebuildAll);
-  model.on('change:view', rebuildAll);
+  // **A view change is a pointer change, never a rebuild** (`view-switching.md` §3, §6.6): the
+  // store holds the machinery of several views at once, so a slider stepping through a group's
+  // roster costs one `setCurrentView` per step rather than a store torn down and reopened — which
+  // is correct and unusable under a slider. A `url` change is still a rebuild: a `tessera_id`
+  // minted by one bundle means nothing to another.
+  model.on('change:view', () => {
+    if (state.syncingUp) return;
+    const view = model.get('view');
+    if (typeof view !== 'string' || !view) return;
+    for (const v of state.views.values()) v.store?.setCurrentView(view);
+  });
   model.on('change:layers', () => {
     if (state.syncingUp) return;
     const layers = model.get('layers');

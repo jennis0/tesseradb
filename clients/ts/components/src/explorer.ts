@@ -8,6 +8,7 @@ import {TesseraElement} from './base.js';
 import {storeContext} from './context.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon, type IconName} from './icons.js';
+import {sameFrame} from './view-switch.js';
 import type {TesseraMap} from './map.js';
 import {chrome, tokens} from './tokens.js';
 import './map.js';
@@ -16,6 +17,8 @@ import './filter-panel.js';
 import './item-card.js';
 import './selection.js';
 import './layer-picker.js';
+import './view-picker.js';
+import './key-picker.js';
 import './artifact-list.js';
 import './artifact-card.js';
 import './legend.js';
@@ -307,6 +310,7 @@ export class TesseraExplorer extends TesseraElement {
   }
 
   override dispose(): void {
+    this.following?.();
     this.map?.dispose();
     super.dispose();
     this.provider.setValue(null);
@@ -338,7 +342,11 @@ export class TesseraExplorer extends TesseraElement {
     // The detail region shows whichever changed last.
     const showArtifact = this.lastDetail === 'artifact' && (selection?.artifact || selection?.artifactRefusal);
     const detail = html`<slot name="detail">${showArtifact ? html`<tessera-artifact-card></tessera-artifact-card>` : html`<tessera-item-card .pick=${this.map?.lastPick ?? null}></tessera-item-card>`}</slot>`;
-    const toolbar = html`<slot name="toolbar"><tessera-legend selectable .level=${this.level} .autoLevel=${autoLevel} @tessera-levelchange=${(e: CustomEvent<{level: number | null}>) => (this.level = e.detail.level)}></tessera-legend></slot>`;
+    // The two pickers sit at the top of the toolbar slot, above *Colour by* and *Layers*
+    // (`view-switching.md` §6.3) — in the docked sidebar, the overlay's left card and the narrow
+    // layout's *Layers* sheet alike, all three of which render this slot. Both draw nothing for
+    // the one-view corpus that every demo corpus is today.
+    const toolbar = html`<slot name="toolbar"><tessera-view-picker></tessera-view-picker><tessera-key-picker></tessera-key-picker><tessera-legend selectable .level=${this.level} .autoLevel=${autoLevel} @tessera-levelchange=${(e: CustomEvent<{level: number | null}>) => (this.level = e.detail.level)}></tessera-legend></slot>`;
     const layersPanel = html`<slot name="layers"><tessera-layer-picker></tessera-layer-picker></slot>`;
     const filters = html`<slot name="filters"><tessera-filter-panel></tessera-filter-panel></slot>`;
     const list = html`<slot name="artifacts"><tessera-artifact-list></tessera-artifact-list></slot>`;
@@ -387,7 +395,7 @@ export class TesseraExplorer extends TesseraElement {
     // slot counts as filled even when that slot has nothing in it, so forwarding unconditionally
     // suppressed the map's own fallback — the hover rendered as an empty bordered box beside the
     // pointer (the owner's review, 2026-08-28).
-    return html`<div part="frame" @tessera-artifactfit=${(e: CustomEvent<{id: string}>) => this.map?.fitTo(BigInt(e.detail.id))} @tessera-close=${() => this.closeDetail()}>
+    return html`<div part="frame" @tessera-artifactfit=${(e: CustomEvent<{id: string}>) => this.map?.fitTo(BigInt(e.detail.id))} @tessera-viewfollow=${(e: CustomEvent<{view: string; x: number; y: number}>) => this.followItem(e.detail)} @tessera-close=${() => this.closeDetail()}>
       <tessera-map
         colour-by=${this.colourBy || nothing}
         layers=${this.layers || nothing}
@@ -436,6 +444,57 @@ export class TesseraExplorer extends TesseraElement {
     for (let i = 0; i < counts.length; i++) counts[i] ??= 0;
     if (counts.length <= 1) return null;
     return levelForBudget(counts, artifactBudgetFor(this.map?.zoom ?? 0));
+  }
+
+  /** A follow in flight: dropped when it lands, when another starts, and at dispose. */
+  private following: (() => void) | null = null;
+
+  /**
+   * Follow an item into another view (`view-switching.md` §6.4): switch, then centre the camera on
+   * the position the item's detail already held for that view.
+   *
+   * **The wait is for the frame, not for a timer.** Across frames the map refits under the new
+   * view and the store answers a fresh viewport, so centring before that composition is drawn
+   * would put the camera where the *old* frame's extent said, and the refit would then move it
+   * again. Within one frame — a step along a group's roster — there is nothing to wait for and the
+   * camera moves at once.
+   */
+  private followItem(detail: {view: string; x: number; y: number}): void {
+    const s = this.resolvedStore;
+    const meta = s?.get('meta');
+    if (!s || !meta) return;
+    this.following?.();
+    this.following = null;
+    const target = meta.views.find((v) => v.id === detail.view);
+    if (!target) return;
+    const centre = () => void this.updateComplete.then(() => this.map?.lookAt(detail.x, detail.y));
+    if (s.get('view').id === detail.view) {
+      centre();
+      return;
+    }
+    const held = sameFrame(s.frame(), target.quantisation);
+    s.setCurrentView(detail.view);
+    if (held) {
+      centre();
+      return;
+    }
+    const stop = s.subscribe(() => {
+      const view = s.get('view');
+      // Another switch took over — the user chose elsewhere while this one was waiting.
+      if (view.id !== detail.view) {
+        this.following?.();
+        this.following = null;
+        return;
+      }
+      if (!view.composition) return;
+      this.following?.();
+      this.following = null;
+      centre();
+    });
+    this.following = () => {
+      stop();
+      this.following = null;
+    };
   }
 
   /** The card's `×`: drop the selection it shows. */

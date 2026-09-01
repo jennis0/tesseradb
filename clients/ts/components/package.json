@@ -15,6 +15,8 @@
     "./filter-panel": "./src/filter-panel.ts",
     "./selection": "./src/selection.ts",
     "./layer-picker": "./src/layer-picker.ts",
+    "./view-picker": "./src/view-picker.ts",
+    "./key-picker": "./src/key-picker.ts",
     "./artifact-list": "./src/artifact-list.ts",
     "./artifact-card": "./src/artifact-card.ts",
     "./legend": "./src/legend.ts",

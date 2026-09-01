@@ -45,7 +45,9 @@ function fakeModel(initial: Record<string, unknown>): WidgetModel & {sent: Sent[
 const META = {
   apiVersion: 1,
   idset: 0,
-  views: [{id: 's0', displayName: 'default', quantisation: {xMin: 0, xMax: 1, yMin: 0, yMax: 1}}],
+  views: [{id: 's0', displayName: 'default', quantisation: {xMin: 0, xMax: 1, yMin: 0, yMax: 1}, roster: null}],
+  // A one-view bundle declares no group; the explorer's pickers read this and draw nothing.
+  groups: [],
   declaredScalars: [],
   layers: [],
   selection: {kMin: 1, kMaxMarks: 500, maxK: 5000, thetaTargetMarks: 10, maxUnderlayOffset: 0, maxCategoryValues: 1000, maxRegionVertices: 10_000, maxRegionCells: 262_144},
@@ -186,6 +188,16 @@ describe('the up-sync', () => {
     expect((model.state.region as {held?: unknown}).held).toBeUndefined();
   });
 
+  it('the view the map shows is up-synced at the settle', () => {
+    const {model, store} = setUp();
+    store.set('view', {...store.get('view'), id: 'quarter:2026-Q3'});
+    shown(store, {});
+    expect(model.state.view).toBe('quarter:2026-Q3');
+    // And it does not come back down as a switch: the echo guard covers `view` as it does the
+    // other controls.
+    expect(store.calls.filter((c) => c.name === 'setCurrentView')).toHaveLength(0);
+  });
+
   it('the echo guard: an up-synced layers change does not come back down as setLayers', () => {
     const {model, store} = setUp();
     expect(store.calls.filter((c) => c.name === 'setLayers')).toHaveLength(0);
@@ -194,6 +206,29 @@ describe('the up-sync', () => {
     expect(store.calls.filter((c) => c.name === 'setLayers')).toHaveLength(0);
     model.set('layers', ['y']);
     expect(store.calls.filter((c) => c.name === 'setLayers').map((c) => c.args)).toEqual([[['y']]]);
+  });
+});
+
+describe('a view change', () => {
+  it('switches every mounted view\u2019s store rather than rebuilding it', () => {
+    const {model, stores, store} = setUp();
+    const el2 = document.createElement('div');
+    document.body.append(el2);
+    render({model, el: el2});
+    expect(stores).toHaveLength(2);
+    model.set('view', 'quarter:2026-Q3');
+    // A pointer change, never a rebuild (`view-switching.md` §3): no third store, and nothing
+    // disposed — which is what makes a slider through a group's roster usable.
+    expect(stores).toHaveLength(2);
+    expect(store.calls.filter((c) => c.name === 'dispose')).toHaveLength(0);
+    for (const s of stores) expect(s.calls.filter((c) => c.name === 'setCurrentView').map((c) => c.args)).toEqual([['quarter:2026-Q3']]);
+  });
+
+  it('a url change is still a rebuild: a tessera_id minted by one bundle means nothing to another', () => {
+    const {model, stores, store} = setUp();
+    model.set('url', 'http://other.test');
+    expect(stores).toHaveLength(2);
+    expect(store.calls.filter((c) => c.name === 'dispose')).toHaveLength(1);
   });
 });
 

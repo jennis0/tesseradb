@@ -11,12 +11,13 @@ import {
   type SelectionShape
 } from '@tesseradb/client';
 import {LookupTexture, MarkSlab, TesseraLayer, artifactOfMark, clusterLayerOf, contourShapes, encodingOf, encodingSignature, hoverAt, resolvePick, type ContourShape, type Picked} from '@tesseradb/deck';
-import type {PaletteKind, PaletteScheme} from '@tesseradb/client';
+import type {PaletteKind, PaletteScheme, Quantisation} from '@tesseradb/client';
 import {TesseraElement, emit, idString} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import type {PickOutcome} from './item-card.js';
 import {renderState, stateOf, type PanelState} from './states.js';
 import {icon} from './icons.js';
+import {sameFrame} from './view-switch.js';
 import {chrome, tokens} from './tokens.js';
 
 /**
@@ -318,6 +319,13 @@ export class TesseraMap extends TesseraElement {
   private dragStart: [number, number] | null = null;
   private dragPointer: number | null = null;
   private metaSeen = false;
+  /**
+   * The frame the camera was last fitted or scheduled under (`view-switching.md` §4) — what a
+   * switch is compared against to decide whether the camera moves.
+   */
+  private cameraFrame: Quantisation | null = null;
+  /** The view the camera last answered for; a change in it is a switch, not a pan. */
+  private cameraView = '';
   private frameGaps: number[] = [];
   private frameLoop: number | null = null;
   private lastFrameAt = 0;
@@ -399,6 +407,21 @@ export class TesseraMap extends TesseraElement {
       this.pushView();
     }
     const view = s.get('view');
+    // **A switch across frames refits; a switch within a group does not** (`view-switching.md`
+    // §4). Every view of a group shares one frame, so the same tiles at the same depth are the
+    // request in the next view and the store re-schedules the camera itself — moving it would
+    // throw away the position the user is reading. A frame the camera has never been fitted under
+    // is a different picture: fit it, which issues the `setView` the store is waiting for, and
+    // drop the hover, which was resolved against marks that are no longer on screen.
+    if (view.id !== this.cameraView) {
+      this.cameraView = view.id;
+      const frame = s.frame();
+      if (frame && !sameFrame(frame, this.cameraFrame)) {
+        this.hover = null;
+        this.hoveredArtifact = null;
+        this.fit();
+      }
+    }
     const status = s.get('status');
     const p = this.probe;
     p.view = {
@@ -572,6 +595,8 @@ export class TesseraMap extends TesseraElement {
   private pushView(): void {
     const s = this.resolvedStore;
     if (!s || !s.get('meta')) return;
+    this.cameraFrame = s.frame();
+    this.cameraView = s.get('view').id;
     const {width, height} = this.size;
     const v = this.viewState;
     const wb = worldBbox({target: [v.target[0], v.target[1]], zoom: v.zoom, width, height}, 1);
@@ -890,6 +915,19 @@ export class TesseraMap extends TesseraElement {
   fit(): void {
     const {width, height} = this.size;
     this.setViewState({target: [WORLD_SIZE / 2, WORLD_SIZE / 2, 0], zoom: Math.log2(Math.min(width, height) / WORLD_SIZE)});
+  }
+
+  /**
+   * Centre the camera on a **data coordinate** at the current zoom — what following an item into
+   * another view asks for (`view-switching.md` §6.4). `false` before `meta`, when there is no
+   * frame to convert against.
+   */
+  lookAt(x: number, y: number): boolean {
+    const q = this.resolvedStore?.frame();
+    if (!q) return false;
+    const [wx, wy] = dataToWorldXY(x, y, q);
+    this.setViewState({target: [wx, wy, 0]});
+    return true;
   }
 
   /** Fit an artifact's box, if the store holds one for it. */
