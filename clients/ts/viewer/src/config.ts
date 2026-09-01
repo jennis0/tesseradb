@@ -95,10 +95,12 @@ export async function loadDatasets(): Promise<Dataset[]> {
     sessionUrl: env.VITE_TESSERA_SESSION_URL ?? 'http://127.0.0.1:49303',
     presets: []
   };
+  // `?datasets=` on the address, else the document the demo named in the environment — so the
+  // bare address works for whoever typed it, without a file under `public/` to go stale.
   const source =
     typeof location === 'undefined'
       ? null
-      : new URLSearchParams(location.search).get('datasets');
+      : (new URLSearchParams(location.search).get('datasets') ?? env.VITE_TESSERA_DATASETS ?? null);
   if (!source) return [fallback];
   try {
     const response = await fetch(source, {cache: 'no-store'});

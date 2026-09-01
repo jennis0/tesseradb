@@ -622,8 +622,13 @@ async function activate(dataset: Dataset, requestedView: string | null = null): 
     });
     openSession(first);
   } else {
+    // A dataset with no principals cannot open a session, and a page that then says nothing reads
+    // as a server with no data. It is the bare address without a dataset document — say so.
     store.update((s) => {
       s.switching = false;
+      s.status = 'refused';
+      s.lastError = {code: 'no-principals', detail: `dataset '${dataset.id}' names no principal to authorise as — open the viewer with ?datasets=<document> (run_demo.sh prints the address), or set VITE_TESSERA_DATASETS`};
+      s.failures = [...s.failures.slice(-19), {...s.lastError, at: Date.now()}];
     });
   }
 }

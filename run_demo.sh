@@ -660,6 +660,9 @@ for scale in "${scales[@]}"; do start_scale "$scale"; done
 export VITE_TESSERA_VIEWER_URL="http://127.0.0.1:$(viewer_of "${scales[0]}")"
 export VITE_TESSERA_SESSION_URL="http://127.0.0.1:$(session_of "${scales[0]}")"
 export VITE_TESSERA_SESSION_CREDENTIAL="$TESSERA_SESSION_CRED"
+# The dataset document, through Vite's `/@fs/` route, so the bare address finds the picker's
+# entries without `?datasets=` — the address printed below still carries it for a link.
+export VITE_TESSERA_DATASETS="/@fs$DATASETS"
 export VITE_PORT
 
 cd "$REPO/clients/ts"
