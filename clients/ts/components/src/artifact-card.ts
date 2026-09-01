@@ -128,7 +128,9 @@ export class TesseraArtifactCard extends TesseraElement {
     // A live projection read: the artifact's own row and its children are whatever the channel
     // has served for the view *now*, and this renders again on every answer.
     const here = served.find((a) => a.tesseraId === artifact.id);
-    const children = served.filter((a) => a.parentId === artifact.id).sort((a, b) => (a.maskedCount < b.maskedCount ? 1 : a.maskedCount > b.maskedCount ? -1 : 0));
+    // The children are the served artifacts naming this one among their parents — on a `dag`
+    // layer a child appears on the card of each served parent (decision 0117).
+    const children = served.filter((a) => a.parentIds.includes(artifact.id)).sort((a, b) => (a.maskedCount < b.maskedCount ? 1 : a.maskedCount > b.maskedCount ? -1 : 0));
     const stale = s?.get('status').stale ?? false;
     const count: Masked = {value: Number(artifact.detail.maskedCount), exact: true};
     const id = idString(artifact.id);

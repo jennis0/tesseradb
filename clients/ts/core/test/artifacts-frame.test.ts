@@ -31,9 +31,11 @@ const u64 = (values: bigint[]) => makeVector(makeData({type: new Uint64(), data:
 const RINGS = new List(new Field('item', new List(new Field('item', new Uint32(), false)), true));
 const PARTS = new List(new Field('item', RINGS, true));
 const TEXTS = new List(new Field('item', new Utf8(), true));
+/** `parent_ids: list<uint64>` (contracts §3.2 r71): the served parents in this response, ascending. */
+const PARENTS = new List(new Field('item', new Uint64(), false));
 const LAYER = new Dictionary(new Utf8(), new Uint16());
 
-type Row = {layer: string; id: bigint; rung: number; matched: boolean | null; parentId?: bigint | null; shape?: number[][][] | null};
+type Row = {layer: string; id: bigint; rung: number; matched: boolean | null; parentIds?: bigint[]; shape?: number[][][] | null};
 
 const TILES = tableToIPC(new Table({tile: u64([0n]), visible: u64([1n]), matched: u64([1n]), served: u64([0n])}), 'stream');
 const TRAILER = new TextEncoder().encode(JSON.stringify({arrow_serialise_ns: 0, flushes: 0, points: 0, stream_us: 0}));
@@ -52,18 +54,23 @@ function fixedColumns(rows: Row[], layerType: unknown = LAYER) {
     box_max_x: vectorFromArray(rows.map(() => 9), new Uint32()),
     box_max_y: vectorFromArray(rows.map(() => 9), new Uint32()),
     content: vectorFromArray(rows.map(() => [] as string[]), TEXTS),
-    parent_id: vectorFromArray(rows.map((r) => r.parentId ?? null), new Uint64()),
+    parent_ids: vectorFromArray(rows.map((r) => r.parentIds ?? []), PARENTS),
     rung: vectorFromArray(rows.map((r) => r.rung), new Uint32()),
     matched: vectorFromArray(rows.map((r) => r.matched), new Bool())
   };
 }
 
 /** A full-projection body; the shape columns trail, and only when `shapes` says a layer draws one. */
-function fullBody(rows: Row[], opts: {shapes?: boolean; layerType?: unknown; oneAxis?: boolean; renameRung?: string; oldNames?: boolean} = {}): Uint8Array {
+function fullBody(rows: Row[], opts: {shapes?: boolean; layerType?: unknown; oneAxis?: boolean; renameRung?: string; oldParent?: boolean; oldNames?: boolean} = {}): Uint8Array {
   const columns: Record<string, unknown> = fixedColumns(rows, opts.layerType);
   if (opts.renameRung) {
     columns[opts.renameRung] = columns['rung'];
     delete columns['rung'];
+  }
+  if (opts.oldParent) {
+    // The scalar r70 column in the list's place.
+    columns['parent_id'] = vectorFromArray(rows.map((r) => r.parentIds?.[0] ?? null), new Uint64());
+    delete columns['parent_ids'];
   }
   if (opts.shapes) {
     const [x, y] = opts.oldNames ? ['hull_x', 'hull_y'] : ['shape_x', 'shape_y'];
@@ -90,7 +97,7 @@ function identityBody(rows: Row[]): Uint8Array {
 
 const ROWS: Row[] = [
   {layer: 'clusters/x', id: 1n, rung: 0, matched: true},
-  {layer: 'clusters/x', id: 2n, rung: 1, matched: false, parentId: 1n},
+  {layer: 'clusters/x', id: 2n, rung: 1, matched: false, parentIds: [1n]},
   {layer: 'labels/x', id: 3n, rung: 0, matched: null}
 ];
 
@@ -125,7 +132,7 @@ describe('the shape columns trail, and are absent when no served layer draws a s
     // The rest of the row is untouched by the absence: the box is still the box.
     expect(r.artifacts[0]!.box).toEqual([0, 0, 9, 9]);
     expect(r.artifacts[0]!.centroid).toEqual([4, 4]);
-    expect(r.artifacts[1]!.parentId).toBe(1n);
+    expect(r.artifacts[1]!.parentIds).toEqual([1n]);
   });
 
   it('reads a present pair after the fixed prefix — per-row null still meaning the layer declares none', () => {
@@ -137,7 +144,7 @@ describe('the shape columns trail, and are absent when no served layer draws a s
     const body = fullBody(rows, {shapes: true});
     const fields = tableFromIPC(splitFramedStreams(body).artifacts!).schema.fields.map((f) => f.name);
     // The layout the body carries is the contract's: fourteen fixed, then the two shape columns.
-    expect(fields.slice(0, 14)).toEqual(['layer', 'tessera_id', 'key', 'masked_count', 'centroid_x', 'centroid_y', 'box_min_x', 'box_min_y', 'box_max_x', 'box_max_y', 'content', 'parent_id', 'rung', 'matched']);
+    expect(fields.slice(0, 14)).toEqual(['layer', 'tessera_id', 'key', 'masked_count', 'centroid_x', 'centroid_y', 'box_min_x', 'box_min_y', 'box_max_x', 'box_max_y', 'content', 'parent_ids', 'rung', 'matched']);
     expect(fields.slice(14)).toEqual(['shape_x', 'shape_y']);
 
     const r = decodeViewport(body);
@@ -182,14 +189,33 @@ describe('the shape columns trail, and are absent when no served layer draws a s
 describe('the rung column', () => {
   it('is read as the rung every layer kind is drawn at, whatever the parent links say', () => {
     // A treed layer's rung is the response-local chain depth, computed server-side; a levelled
-    // layer's is its declared level. Both are simply read here — never counted from `parent_id`.
-    const r = decodeViewport(fullBody([{layer: 'admin', id: 1n, rung: 0, matched: null}, {layer: 'admin', id: 2n, rung: 2, matched: null, parentId: 1n}]));
+    // layer's is its declared level. Both are simply read here — never counted from `parent_ids`.
+    const r = decodeViewport(fullBody([{layer: 'admin', id: 1n, rung: 0, matched: null}, {layer: 'admin', id: 2n, rung: 2, matched: null, parentIds: [1n]}]));
     expect(r.artifacts.map((a) => a.rung)).toEqual([0, 2]);
   });
 
   it('refuses a body that still carries `level` — a server older than the rename', () => {
     // Reading a missing rung as 0 would draw a whole hierarchy at its coarsest and look like data.
     expect(() => decodeViewport(fullBody(ROWS, {renameRung: 'level'}))).toThrow(/no `rung` column/);
+  });
+});
+
+describe('the parent list (contracts §3.2 r71; decision 0117)', () => {
+  it('reads every served parent, in the wire’s ascending order — several on a `dag` layer, none for a root', () => {
+    const r = decodeViewport(
+      fullBody([
+        {layer: 'mesh', id: 1n, rung: 0, matched: null},
+        {layer: 'mesh', id: 3n, rung: 0, matched: null},
+        {layer: 'mesh', id: 7n, rung: 1, matched: null, parentIds: [1n, 3n]}
+      ])
+    );
+    expect(r.artifacts.map((a) => a.parentIds)).toEqual([[], [], [1n, 3n]]);
+  });
+
+  it('refuses a body that still carries the scalar `parent_id` — a server older than the list', () => {
+    // Read as *no links*, a `parent_id` body would draw a hierarchy as a flat set and look like
+    // data; the old column is not read beside the new one (decision 0048).
+    expect(() => decodeViewport(fullBody(ROWS, {oldParent: true}))).toThrow(/no `parent_ids` column/);
   });
 
   it('reads the filter bit beside it: true, false, and null where there was no question', () => {

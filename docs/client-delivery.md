@@ -65,6 +65,21 @@ Read this section for the state; the tables below for what each step owes and wh
   k-means (S8, deferred), a per-branch cut (S9, closed as not a defect), and — until 2026-08-28 — the tiered layer's
   `level` on the wire (S10, now built). The design is at **r5**, with what the building changed in its
   Appendix R; the owner's rulings are decisions 0095–0102.
+- **The wire's `parent_id` became `parent_ids: list<uint64>`** (2026-09-01, contracts §3.2 r71,
+  [decision 0117](decisions/0117-a-child-may-name-several-parents.md); track `dag/client`): every
+  served parent in the same response, ascending by id, empty for a root, a flat artifact and a
+  withheld parent — C29 per entry — and the client reads `parentIds: bigint[]` everywhere it read
+  `parentId`, with no shim for the old column (the decoder refuses a body without the list, as it
+  refuses one without `rung`). With several parents: the lineage lists a child under **every**
+  served parent, so the card's children are the served artifacts naming it; the artifact list
+  shows it **once**, beneath the first parent a count-then-id walk reaches (its presentation under
+  several is the components work's, undecided); and the colour walk takes the **first** entry at
+  each step, the wire's lowest id, so a texel resolves the same way on every rebuild. `rung` is
+  read off the wire as before — nothing counts links. On a tree the list has at most one entry and
+  every behaviour is what it was. The two recorded goldens (`viewport-artifacts.bin`,
+  `viewport-membership.bin`) still carry the scalar and are lifted into the list by the same
+  test-side rewrite that strips their `hull_*` columns, until they are recaptured against a server
+  serving r71.
 
 **The smoke scripts ran for steps 0–1 on a rebuilt demo bundle** (2026-08-25, integration). Every
 prebuilt bundle predated manifest fields the current binary requires (`vocabularies`, `visibility`),

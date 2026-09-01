@@ -4,7 +4,7 @@ import {LookupTexture, LUT_WIDTH, buildLut, dimmed} from '../src/lut.js';
 import {MarkSlab} from '../src/slab.js';
 import {fakeDevice} from './fake-device.js';
 
-const artifact = (id: bigint, x: number, parentId: bigint | null = null): Artifact => ({
+const artifact = (id: bigint, x: number, parent: bigint | null = null): Artifact => ({
   layer: 'l',
   tesseraId: id,
   key: `c-${id}`,
@@ -13,7 +13,7 @@ const artifact = (id: bigint, x: number, parentId: bigint | null = null): Artifa
   box: null,
   shape: null,
   content: [],
-  parentId,
+  parentIds: parent === null ? [] : [parent],
   rung: 0,
   matched: null
 });
@@ -49,9 +49,9 @@ function served() {
   // Rungs are the wire's, so a reference states one: the two children are served at rung 1,
   // which is what the level walk below resolves against.
   const [root, a, b] = table.take([
-    {tesseraId: 1n, layer: 'l', parentId: null, rung: 0},
-    {tesseraId: 2n, layer: 'l', parentId: 1n, rung: 1},
-    {tesseraId: 3n, layer: 'l', parentId: 1n, rung: 1}
+    {tesseraId: 1n, layer: 'l', parentIds: [], rung: 0},
+    {tesseraId: 2n, layer: 'l', parentIds: [1n], rung: 1},
+    {tesseraId: 3n, layer: 'l', parentIds: [1n], rung: 1}
   ]);
   const arts = [artifact(1n, 2 ** 31 + 100), artifact(2n, 2 ** 31 + 1e9, 1n), artifact(3n, 2 ** 31 - 1e9, 1n)];
   const named = [root!, a!, b!].map((ordinal, i) => ({ordinal, centroid: arts[i]!.centroid}));
@@ -92,6 +92,22 @@ describe('buildLut', () => {
     expect([...buildLut({artifacts: {table, colours: parentOnly}}).data.subarray(a * 4, a * 4 + 4)]).toEqual([...whole.get(root)!]);
   });
 
+  it('colours a node with two parents through the first of them — the wire’s lowest id (decision 0117)', () => {
+    const table = new SessionArtifactTable();
+    const [a, b, child] = table.take([
+      {tesseraId: 1n, layer: 'l', parentIds: [], rung: 0},
+      {tesseraId: 2n, layer: 'l', parentIds: [], rung: 0},
+      {tesseraId: 3n, layer: 'l', parentIds: [1n, 2n], rung: 1}
+    ]);
+    const arts = [artifact(1n, 2 ** 31 + 1e9), artifact(2n, 2 ** 31 - 1e9), {...artifact(3n, 2 ** 31), parentIds: [1n, 2n]}];
+    const colours = artifactColours([a!, b!, child!].map((ordinal, i) => ({ordinal, centroid: arts[i]!.centroid})), 'positional');
+    expect([...colours.get(a!)!]).not.toEqual([...colours.get(b!)!]);
+    // At its own rung the child wears its own colour; coarsened to rung 0 it wears the first
+    // parent's, and the second parent's colour is never what the walk lands on.
+    expect([...buildLut({artifacts: {table, colours}}).data.subarray(child! * 4, child! * 4 + 4)]).toEqual([...colours.get(child!)!]);
+    expect([...buildLut({artifacts: {table, colours}, level: 0}).data.subarray(child! * 4, child! * 4 + 4)]).toEqual([...colours.get(a!)!]);
+  });
+
   it('highlights the opened artifact and dims the rest', () => {
     const {table, a, b, named} = served();
     const colours = artifactColours(named, 'positional');
@@ -103,7 +119,7 @@ describe('buildLut', () => {
 
   it('grows in rows of a power of two with the table range', () => {
     const table = new SessionArtifactTable();
-    table.take(Array.from({length: 3000}, (_, i) => ({tesseraId: BigInt(i + 1), layer: 'l', parentId: null})));
+    table.take(Array.from({length: 3000}, (_, i) => ({tesseraId: BigInt(i + 1), layer: 'l', parentIds: []})));
     const lut = buildLut({artifacts: {table, colours: new Map()}});
     expect(lut.rows).toBe(4);
   });
@@ -124,7 +140,7 @@ describe('a table that only gained ordinals patches the rows they fall in', () =
     lut.attach(device);
     const table = new SessionArtifactTable();
     // A table wide enough to span rows: the ordinals named next land at the top of the range.
-    table.take(Array.from({length: 2000}, (_, i) => ({tesseraId: BigInt(i + 1), layer: 'l', parentId: null, centroid: [2 ** 31 + i, 2 ** 31] as [number, number]})));
+    table.take(Array.from({length: 2000}, (_, i) => ({tesseraId: BigInt(i + 1), layer: 'l', parentIds: [], centroid: [2 ** 31 + i, 2 ** 31] as [number, number]})));
     const colours = artifactColours(
       table.liveEntries().map(({ordinal, entry}) => ({ordinal, centroid: entry.centroid})),
       'positional'
@@ -135,7 +151,7 @@ describe('a table that only gained ordinals patches the rows they fall in', () =
     const settled = texel(lut, 7);
 
     // One artifact named, its colour added to the map the store extends in place.
-    const [fresh] = table.take([{tesseraId: 9001n, layer: 'l', parentId: null, centroid: [2 ** 31 - 5e8, 2 ** 31 + 5e8]}]);
+    const [fresh] = table.take([{tesseraId: 9001n, layer: 'l', parentIds: [], centroid: [2 ** 31 - 5e8, 2 ** 31 + 5e8]}]);
     colours.set(fresh!, positionalEntry(table.entry(fresh!)!.centroid));
     expect(lut.update({artifacts: {table, colours}}, 'k')).toBe(true);
     expect(device.textureWrites).toBe(2);
@@ -155,9 +171,9 @@ describe('a table that only gained ordinals patches the rows they fall in', () =
     lut.attach(device);
     // Two rows of entries, so a whole rebuild and a patch are told apart by the region written.
     const table = new SessionArtifactTable();
-    table.take(Array.from({length: 2000}, (_, i) => ({tesseraId: BigInt(i + 1), layer: 'l', parentId: null, centroid: [2 ** 31 + i, 2 ** 31] as [number, number]})));
+    table.take(Array.from({length: 2000}, (_, i) => ({tesseraId: BigInt(i + 1), layer: 'l', parentIds: [], centroid: [2 ** 31 + i, 2 ** 31] as [number, number]})));
     const parent = table.ordinalOf('l', 1n);
-    const [child] = table.take([{tesseraId: 9001n, layer: 'l', parentId: 1n, rung: 1, centroid: [2 ** 31, 2 ** 31 + 1e9]}]);
+    const [child] = table.take([{tesseraId: 9001n, layer: 'l', parentIds: [1n], rung: 1, centroid: [2 ** 31, 2 ** 31 + 1e9]}]);
     const colours = artifactColours(
       table.liveEntries().map(({ordinal, entry}) => ({ordinal, centroid: entry.centroid})),
       'positional'
@@ -183,7 +199,7 @@ describe('a table that only gained ordinals patches the rows they fall in', () =
     const lut = new LookupTexture();
     lut.attach(device);
     const table = new SessionArtifactTable();
-    table.take(Array.from({length: 2000}, (_, i) => ({tesseraId: BigInt(i + 1), layer: 'l', parentId: null, centroid: [2 ** 31 + i, 2 ** 31] as [number, number]})));
+    table.take(Array.from({length: 2000}, (_, i) => ({tesseraId: BigInt(i + 1), layer: 'l', parentIds: [], centroid: [2 ** 31 + i, 2 ** 31] as [number, number]})));
     const parent = table.ordinalOf('l', 1n);
     const colours = artifactColours(
       table.liveEntries().map(({ordinal, entry}) => ({ordinal, centroid: entry.centroid})),
@@ -192,7 +208,7 @@ describe('a table that only gained ordinals patches the rows they fall in', () =
     lut.update({artifacts: {table, colours}}, 'k');
 
     // Named by the point frame alone — no colour of its own — under a parent already held.
-    const [late] = table.take([{tesseraId: 9001n, layer: 'l', parentId: 1n, rung: 1}]);
+    const [late] = table.take([{tesseraId: 9001n, layer: 'l', parentIds: [1n], rung: 1}]);
     expect(lut.update({artifacts: {table, colours}}, 'k')).toBe(true);
     // Patched — its row alone — and coloured by the ancestor the walk reaches, not neutral.
     expect(device.textureRegions[1]).toEqual({y: late! >> 10, height: 1});
@@ -206,11 +222,11 @@ describe('an ordinal named before its colour exists', () => {
     const lut = new LookupTexture();
     lut.attach(device);
     const table = new SessionArtifactTable();
-    table.take(Array.from({length: 50}, (_, i) => ({tesseraId: BigInt(i + 1), layer: 'l', parentId: null, centroid: [2 ** 31 + i, 2 ** 31] as [number, number]})));
+    table.take(Array.from({length: 50}, (_, i) => ({tesseraId: BigInt(i + 1), layer: 'l', parentIds: [], centroid: [2 ** 31 + i, 2 ** 31] as [number, number]})));
     const colours = artifactColours(table.liveEntries().map(({ordinal, entry}) => ({ordinal, centroid: entry.centroid})), 'positional');
     lut.update({artifacts: {table, colours}}, 'k');
     // A points frame names an ordinal and the layer draws before the store has coloured it.
-    const [fresh] = table.take([{tesseraId: 9001n, layer: 'l', parentId: null, centroid: [2 ** 31 - 5e8, 2 ** 31 + 5e8]}]);
+    const [fresh] = table.take([{tesseraId: 9001n, layer: 'l', parentIds: [], centroid: [2 ** 31 - 5e8, 2 ** 31 + 5e8]}]);
     lut.update({artifacts: {table, colours}}, 'k');
     expect([...lut.colourOf(fresh!)]).toEqual([...NEUTRAL]);
     const writes = device.textureWrites;

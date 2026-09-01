@@ -36,7 +36,7 @@ const FAR: Artifact = {
   box: [GRID32 * 0.75, GRID32 * 0.75, GRID32 - 1, GRID32 - 1],
   shape: null,
   content: [],
-  parentId: null,
+  parentIds: [],
   rung: 0
 };
 

@@ -33,6 +33,8 @@ const RINGS = new List(new Field('item', new List(new Field('item', new Uint32()
 const PARTS = new List(new Field('item', RINGS, true));
 const FLAT = new List(new Field('item', new Uint32(), false));
 const TEXTS = new List(new Field('item', new Utf8(), true));
+/** `parent_ids: list<uint64>` (contracts §3.2 r71): the served parents in this response, ascending. */
+const PARENTS = new List(new Field('item', new Uint64(), false));
 
 type Parts = number[][][] | null;
 
@@ -58,7 +60,7 @@ function body(rows: {x: Parts; y: Parts}[], type: {x: unknown; y: unknown} = {x:
       box_max_x: vectorFromArray(rows.map(() => 9), new Uint32()),
       box_max_y: vectorFromArray(rows.map(() => 9), new Uint32()),
       content: vectorFromArray(rows.map(() => [] as string[]), TEXTS),
-      parent_id: vectorFromArray(rows.map(() => null), new Uint64()),
+      parent_ids: vectorFromArray(rows.map(() => [] as bigint[]), PARENTS),
       // Required, and the decoder refuses a body without it (decision 0048 — there is no older
       // server to be lenient towards, and reading a missing rung as 0 would draw a whole
       // hierarchy at its coarsest and look like data).

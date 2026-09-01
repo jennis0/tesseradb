@@ -10,7 +10,7 @@ import './count.js';
 
 /**
  * `<tessera-artifact-list>` — what the layers served for this view (design §5.3 tier 2, §6): the
- * boards' *IN VIEW · N clusters* list, a tree built from `parentId` with a row's children beneath
+ * boards' *IN VIEW · N clusters* list, a tree built from `parentIds` with a row's children beneath
  * it, each with its name and its `Masked` count, the opened one highlighted. A click selects —
  * the card and the outline — and never moves the camera.
  *
@@ -114,10 +114,18 @@ export class TesseraArtifactList extends TesseraElement {
 /**
  * The served tree as a list: parents immediately above their own children, largest count first
  * at every level — a row's position says what contains it, which a flat sort by count loses.
+ *
+ * **An artifact appears once.** On a `dag` layer a child is served under several parents
+ * (decision 0117), and it is listed beneath the first one this walk reaches — a depth-first walk
+ * from the roots in count order, ties by lowest identifier, so the row it lands under is a
+ * function of the served set alone and never of the wire's row order. Whether it should instead
+ * appear under each served parent, and how a row would say *also under X*, is the components
+ * work's and is not decided here (`dag-hierarchies.md` §7).
  */
 export function flatten(lineage: ServedLineage): {artifact: Artifact; depth: number}[] {
   const out: {artifact: Artifact; depth: number}[] = [];
-  const bigger = (a: Artifact, b: Artifact) => (a.maskedCount < b.maskedCount ? 1 : a.maskedCount > b.maskedCount ? -1 : 0);
+  const bigger = (a: Artifact, b: Artifact) =>
+    a.maskedCount < b.maskedCount ? 1 : a.maskedCount > b.maskedCount ? -1 : a.tesseraId < b.tesseraId ? -1 : a.tesseraId > b.tesseraId ? 1 : 0;
   const seen = new Set<bigint>();
   const push = (into: {artifact: Artifact; depth: number}[], of: Artifact[], depth: number) => {
     for (const artifact of [...of].sort(bigger).reverse()) into.push({artifact, depth});

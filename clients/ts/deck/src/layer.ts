@@ -541,7 +541,7 @@ const TOPIC_SIZE = 12;
  *
  * A served artifact that has a served child in the same response is an ancestor of something on
  * the map. It names nothing its children do not name more precisely, so it draws no label (the
- * owner's review, 2026-08-26) — computed here from `parentId` over the served set, which is what
+ * owner's review, 2026-08-26) — computed here from `parentIds` over the served set, which is what
  * `lineage` already holds, so nothing new is asked of the wire.
  *
  * With no chosen level this is the cut's leaves. With one it is that level's artifacts **and**

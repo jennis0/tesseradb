@@ -113,7 +113,7 @@ describe('the membership column in the decoder', () => {
   });
 });
 
-const artifact = (id: bigint, parentId: bigint | null = null, layer = 'l', rung = 0): Artifact => ({
+const artifact = (id: bigint, parent: bigint | null = null, layer = 'l', rung = 0): Artifact => ({
   layer,
   tesseraId: id,
   key: `c-${id}`,
@@ -122,7 +122,7 @@ const artifact = (id: bigint, parentId: bigint | null = null, layer = 'l', rung 
   box: null,
   shape: null,
   content: [],
-  parentId,
+  parentIds: parent === null ? [] : [parent],
   rung
 });
 
@@ -159,7 +159,7 @@ describe('naming on the main thread', () => {
     expect([...bands[0]!.membership['l']!.distinct]).toEqual([o10]);
     expect([...bands[1]!.membership['l']!.distinct]).toEqual([o20]);
     // The parent link came from the same response's artifacts frame.
-    expect(table.entry(o20)?.parentOrdinal).toBe(o10);
+    expect(table.entry(o20)?.parentOrdinals).toEqual([o10]);
     // One reference per band that carries it; the response's own temporary ones are gone.
     table.release(bands[0]!.membership['l']!.distinct);
     expect(table.ordinalOf('l', 10n)).toBe(NO_ORDINAL);
@@ -249,8 +249,8 @@ describe('the membership golden (captured against the notebook layer, the layer 
 
 describe('a band is coloured by the response that carried it (§5.10)', () => {
   /** The same artifact, with a centroid — what a positional colour is a function of. */
-  const placed = (id: bigint, dx: number, parentId: bigint | null = null, rung = 0): Artifact => ({
-    ...artifact(id, parentId, 'l', rung),
+  const placed = (id: bigint, dx: number, parent: bigint | null = null, rung = 0): Artifact => ({
+    ...artifact(id, parent, 'l', rung),
     centroid: [GRID32_CENTRE + dx, GRID32_CENTRE]
   });
 
