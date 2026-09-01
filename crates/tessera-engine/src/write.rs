@@ -3734,29 +3734,43 @@ pub(crate) fn scoped_families_by_view(
     let mut out: FxHashMap<String, Vec<tessera_store::manifest::ScopedScalar>> =
         FxHashMap::default();
     for group in &manifest.groups {
-        if group.scoped_scalars.is_empty() {
-            continue;
-        }
-        // The owner's own views, then every sharing group's views of the same keys. A sharing
-        // group's roster carries the owner's keys by construction, so the key is matched rather
-        // than assumed: a key the sharing group does not carry has no row space to write into.
-        let sharing = manifest
-            .groups
-            .iter()
-            .filter(|g| g.members_of.as_deref() == Some(group.name.as_str()));
-        for g in std::iter::once(group).chain(sharing) {
-            for view in &g.views {
-                if !group.views.iter().any(|v| v.key == view.key) {
-                    continue;
-                }
-                out.insert(
-                    format!("{}{}{}", g.name, tessera_store::GROUP_SEPARATOR, view.key),
-                    group.scoped_scalars.clone(),
-                );
+        for view in &group.views {
+            let id = format!("{}{}{}", group.name, tessera_store::GROUP_SEPARATOR, view.key);
+            let families = scoped_families_of_view(manifest, &id);
+            if families.is_empty() {
+                continue;
             }
+            out.insert(id, families.to_vec());
         }
     }
     out
+}
+
+/// One view's **group-scoped** families — [`scoped_families_by_view`]'s rule, asked of one view.
+///
+/// **The rule itself lives here and the map is built from it**, so a caller that wants one view's
+/// answer does not walk every group to get it and cannot derive a second, differing list. The
+/// families are the **owning** group's, in that group's manifest order, which is the order a
+/// buffered row's `scoped` list is positional against; empty for a plain view, for a view whose key
+/// the owning group does not carry, and for a group that owns no family.
+pub(crate) fn scoped_families_of_view<'a>(
+    manifest: &'a tessera_store::manifest::Manifest,
+    view: &str,
+) -> &'a [tessera_store::manifest::ScopedScalar] {
+    const NONE: &[tessera_store::manifest::ScopedScalar] = &[];
+    let owner = scoped_owner_view_of(manifest, view);
+    let Some((owner_group, key)) = owner.split_once(tessera_store::GROUP_SEPARATOR) else {
+        return NONE;
+    };
+    let Some(group) = manifest.groups.iter().find(|g| g.name == owner_group) else {
+        return NONE;
+    };
+    // A sharing group's roster carries the owner's keys by construction, so the key is matched
+    // rather than assumed: a key the owning group does not carry addresses no cell.
+    if !group.views.iter().any(|v| v.key == key) {
+        return NONE;
+    }
+    &group.scoped_scalars
 }
 
 /// The view id a scoped value written through `view` is **addressed by** — the owning group's view
@@ -7637,6 +7651,7 @@ impl Executor {
                         ty: family.arrow_type,
                         category: family.vocabulary.is_some(),
                         filterable: crate::filter::scoped_is_filterable(family),
+                        has_value_column: crate::filter::scoped_has_value_column(family),
                         render: family.render,
                         has_base: family.views.contains(&scoped_view),
                         analyser,
@@ -7682,8 +7697,9 @@ impl Executor {
             };
 
             // Where each lane's value sits in a buffered row's `scoped` list, `None` where this
-            // view writes none of them — a sharing group's, and any family the batch could not
-            // have named.
+            // view writes none of them — since decision 0116 that is a view whose key is in no
+            // scope at all, a sharing group's writing the family through the key it shares, and
+            // any family the batch could not have named.
             let scoped_render_indices: Vec<Option<usize>> = scoped_render
                 .iter()
                 .map(|lane| families.iter().position(|f| f.name == lane.name))
@@ -8763,75 +8779,15 @@ impl Executor {
         // before `established_collisions` above decided which rows are joins — so a row whose
         // holder was established in between was admitted as a join having passed no arm at all.
         // One authoritative site, and the refusal text is the handler's own so the bodies are
-        // byte-identical to what the earlier site answered.
+        // byte-identical to what the earlier site answered. `settle_joins` also completes an
+        // accepted join — dropping its descriptors and terms, backfilling its omitted `render`
+        // values — because that is the same per-row pass over the same sources.
         if collisions == 0 {
-            if let Err(detail) = join_arms(&generation, &mut rows) {
+            if let Err(detail) = settle_joins(&generation, &mut rows) {
                 drop(generation);
                 self.ack_failed(&respond, ExecError::JoinRefused { detail });
                 self.health.note_work_refused();
                 return None;
-            }
-        }
-        // **A joining row carries no descriptors and no terms, and this is where they go**
-        // (`views.md` §4). The entity's label is the one it already has: its terms are already in
-        // the postings, put there by the flush that gave it its first row, and re-writing them from
-        // this row is how a second view would come to re-label an entity with no overlay entry.
-        //
-        // Here rather than in the handler for `established_collisions`'s reason: the handler's
-        // answer is a queue drain old. A row it called new and this pass calls a join would arrive
-        // with its descriptors intact and re-label the entity; a row it called a join and this pass
-        // calls new — its holder deleted in between — would arrive with them already dropped and
-        // allocate a fresh entity carrying no label at all, which is invisible to every principal.
-        for row in rows.iter_mut() {
-            if row.join.is_some() {
-                row.descriptors = Vec::new();
-                row.terms = Vec::new();
-            }
-        }
-        // **An accepted join's omitted `render` values are backfilled here** (`views.md` §4, owner
-        // ruling 2026-08-31), and here rather than in the handler because this is where join-ness
-        // is *settled*: `established_collisions` above is what finally decides which rows join and
-        // which allocate fresh, and a row that stops being a join must not carry a value it took
-        // from an entity it turned out not to be joining.
-        //
-        // A joining row is geometry-only in entity space — no descriptors, no postings, no
-        // attribute column, no record field — but its scalars still travel in its own row tail, so
-        // an omitted `render` value would put an **absence** in the joined view's hot column while
-        // every other view of the same entity rendered a value. An entity-scoped attribute is one
-        // value per entity (`views.md` §5); one that renders under one view and not another is not.
-        //
-        // Before the WAL append, so the log carries the value the flush will write and replay
-        // reproduces it rather than re-deriving it against whatever the bundle holds by then.
-        let declared = &generation.bundle.manifest.declared_scalars;
-        for row in rows.iter_mut() {
-            let Some(entity) = row.join else {
-                continue;
-            };
-            let buffered = generation.buffer.get(entity);
-            for (position, d) in declared.iter().enumerate() {
-                if !d.render {
-                    continue;
-                }
-                let Some(supplied) = row.scalars.get(position) else {
-                    continue;
-                };
-                if !crate::session::scalar_is_absent(supplied, d) {
-                    continue;
-                }
-                // The entity's own row where it is still buffered, the stored homes after it. A
-                // column the entity genuinely holds nothing for is `None` here and its absence
-                // stays an absence in every view.
-                let held = match &buffered {
-                    Some(item) => item.scalars.get(position).cloned(),
-                    None => crate::session::flushed_scalar_of(&generation, entity, position),
-                };
-                let Some(held) = held else {
-                    continue;
-                };
-                if crate::session::scalar_is_absent(&held, d) {
-                    continue;
-                }
-                row.scalars[position] = held;
             }
         }
         drop(generation);
@@ -8864,8 +8820,9 @@ impl Executor {
     }
 }
 
-/// The **join rule**'s three arms, over one batch whose join-ness `established_collisions` has just
-/// settled (`views.md` §4, §5; decision 0116).
+/// Settle every joining row of one batch, whose join-ness `established_collisions` has just decided
+/// (`views.md` §4, §5; decision 0116) — the **join rule**'s three arms, and then the completion an
+/// accepted join owes.
 ///
 /// `Err` is the refusal the caller is answered with — a `409`, whole batch without effect, taken
 /// before the WAL append so a refused batch leaves no record. The text is what
@@ -8883,7 +8840,13 @@ impl Executor {
 /// **A row index and a column name reach the caller; nothing else does.** No entity id, no external
 /// id and no value on either side (**I10**, and `error.rs`'s standing rule about caller data in
 /// bodies).
-fn join_arms(generation: &Generation, rows: &mut [UnallocatedRow]) -> Result<(), String> {
+///
+/// **One pass, because the arms and the completion read the same sources.** A joining row's
+/// buffered row is fetched once, its record-blob row is decompressed at most once
+/// ([`crate::session::BlobRow`]) however many blob-resident columns ask for it, and the descriptor
+/// drop and the render backfill happen in the same visit. Splitting them cost a second lookup per
+/// row and a decompression per blob column per site (review finding F4).
+fn settle_joins(generation: &Generation, rows: &mut [UnallocatedRow]) -> Result<(), String> {
     if rows.iter().all(|row| row.join.is_none()) {
         return Ok(());
     }
@@ -8891,15 +8854,9 @@ fn join_arms(generation: &Generation, rows: &mut [UnallocatedRow]) -> Result<(),
     let declared = &manifest.declared_scalars;
     // One derivation per batch, not per row: every row of a batch names one view, and this is the
     // list its `scoped` tail was parsed positionally against at the boundary.
-    let mut by_view = scoped_families_by_view(manifest);
-    let scoped_families = rows
-        .first()
-        .and_then(|row| by_view.remove(row.view.as_str()))
-        .unwrap_or_default();
-    let owner_view = rows
-        .first()
-        .map(|row| scoped_owner_view_of(manifest, &row.view))
-        .unwrap_or_default();
+    let view = rows.first().map(|row| row.view.as_str()).unwrap_or("");
+    let scoped_families = scoped_families_of_view(manifest, view);
+    let owner_view = scoped_owner_view_of(manifest, view);
     // The cell's key, for the refusal — the half of the owner view id a caller spelled, and never
     // the owning group, which a sharing group's caller has no business learning from a refusal.
     let key = owner_view
@@ -8913,6 +8870,8 @@ fn join_arms(generation: &Generation, rows: &mut [UnallocatedRow]) -> Result<(),
             continue;
         };
         let buffered = generation.buffer.get(entity);
+        // Read at most once for this row, and only if a blob-resident column asks.
+        let mut blob = crate::session::BlobRow::default();
         // **The label arm reads the buffer first and the transpose after it, and both are exact.**
         // The buffer holds the entity's own row until its flush; past that, `entities/terms/`
         // holds the same set in promoted ordinals (contracts §2.4).
@@ -8958,7 +8917,9 @@ fn join_arms(generation: &Generation, rows: &mut [UnallocatedRow]) -> Result<(),
                 Some(buffered) => buffered.scalars.get(position).cloned(),
                 // `None` here is *no value held* and *could not find out* alike; see
                 // `session::flushed_scalar_of` for why one answer serves both.
-                None => crate::session::flushed_scalar_of(generation, entity, position),
+                None => {
+                    crate::session::flushed_scalar_of(generation, entity, position, &mut blob)
+                }
             };
             let Some(held) = held else {
                 continue;
@@ -8997,6 +8958,20 @@ fn join_arms(generation: &Generation, rows: &mut [UnallocatedRow]) -> Result<(),
         // rows for one entity, so the second names an external id the open window already holds and
         // `admit_ingest` closes the window before reaching here — after which the first batch's row
         // is in the buffer and the buffered source below is the one that answers.
+        //
+        // **A `text` family past a flush is refused rather than compared, and that is the whole
+        // rule for it** (2026-09-01, review finding F1). Nothing here can compare prose across a
+        // flush boundary: a text column stores a dictionary, postings and a presence bitmap, and no
+        // per-entity value for `flushed_scoped_of` to read back. The blob-resident analogy the
+        // entity-scoped arm makes does not carry — *there* a lost comparison costs only the report,
+        // because a joining row writes no record field, but here the row's value **is** written, as
+        // a second text layer stamped with the same view. Text layers have no coverage check (their
+        // disjointness rests on I9, which no longer holds for a scoped column, two views of one key
+        // now reaching one cell) and `match` unions across them, so an admitted disagreement is two
+        // sets of words answering under one column with no symptom anywhere. So occupancy is asked
+        // instead of equality, and an occupied cell refuses a supplied string — equal or not, the
+        // equality being exactly what cannot be established. Omitting the column still passes, and
+        // the buffered source above still compares text exactly.
         for (position, family) in scoped_families.iter().enumerate() {
             let Some(supplied) = row.scoped.get(position) else {
                 continue;
@@ -9018,6 +8993,25 @@ fn join_arms(generation: &Generation, rows: &mut [UnallocatedRow]) -> Result<(),
                 .or_else(|| {
                     crate::session::flushed_scoped_of(generation, entity, family, &owner_view)
                 });
+            if held.is_none()
+                && family.arrow_type == ScalarType::Text
+                && crate::session::flushed_scoped_text_present(
+                    generation,
+                    entity,
+                    family,
+                    &owner_view,
+                )
+            {
+                return Err(format!(
+                    "row {index} names a value for group-scoped column '{}', and this deployment \
+                     already holds prose for key '{}'. A `text` family's stored value cannot be \
+                     compared once it has flushed — the column stores a dictionary and postings \
+                     and no value per entity — so a cell that holds prose takes no second one, \
+                     equal or not: changing it is a delete plus a re-ingest (decision 0047), and \
+                     omitting the column leaves the cell as it stands (views §5)",
+                    family.name, key
+                ));
+            }
             let Some(held) = held else {
                 continue;
             };
@@ -9038,6 +9032,63 @@ fn join_arms(generation: &Generation, rows: &mut [UnallocatedRow]) -> Result<(),
                  value or omits it (views §5)",
                 family.name, key
             ));
+        }
+
+        // ---- past this point the row is admitted, and what follows completes it ----
+
+        // **A joining row carries no descriptors and no terms, and this is where they go**
+        // (`views.md` §4). The entity's label is the one it already has: its terms are already in
+        // the postings, put there by the flush that gave it its first row, and re-writing them from
+        // this row is how a second view would come to re-label an entity with no overlay entry.
+        //
+        // Here rather than in the handler for `established_collisions`'s reason: the handler's
+        // answer is a queue drain old. A row it called new and this pass calls a join would arrive
+        // with its descriptors intact and re-label the entity; a row it called a join and this pass
+        // calls new — its holder deleted in between — would arrive with them already dropped and
+        // allocate a fresh entity carrying no label at all, which is invisible to every principal.
+        row.descriptors = Vec::new();
+        row.terms = Vec::new();
+
+        // **An accepted join's omitted `render` values are backfilled here** (`views.md` §4, owner
+        // ruling 2026-08-31), and here rather than in the handler because this is where join-ness
+        // is *settled*: `established_collisions` is what finally decides which rows join and which
+        // allocate fresh, and a row that stops being a join must not carry a value it took from an
+        // entity it turned out not to be joining.
+        //
+        // A joining row is geometry-only in entity space — no descriptors, no postings, no
+        // attribute column, no record field — but its scalars still travel in its own row tail, so
+        // an omitted `render` value would put an **absence** in the joined view's hot column while
+        // every other view of the same entity rendered a value. An entity-scoped attribute is one
+        // value per entity (`views.md` §5); one that renders under one view and not another is not.
+        //
+        // Before the WAL append, so the log carries the value the flush will write and replay
+        // reproduces it rather than re-deriving it against whatever the bundle holds by then.
+        for (position, d) in declared.iter().enumerate() {
+            if !d.render {
+                continue;
+            }
+            let Some(supplied) = row.scalars.get(position) else {
+                continue;
+            };
+            if !crate::session::scalar_is_absent(supplied, d) {
+                continue;
+            }
+            // The entity's own row where it is still buffered, the stored homes after it. A column
+            // the entity genuinely holds nothing for is `None` here and its absence stays an
+            // absence in every view.
+            let held = match &buffered {
+                Some(item) => item.scalars.get(position).cloned(),
+                None => {
+                    crate::session::flushed_scalar_of(generation, entity, position, &mut blob)
+                }
+            };
+            let Some(held) = held else {
+                continue;
+            };
+            if crate::session::scalar_is_absent(&held, d) {
+                continue;
+            }
+            row.scalars[position] = held;
         }
     }
     Ok(())

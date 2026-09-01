@@ -881,7 +881,13 @@ fn value_column_jobs(plan: &FoldPlan, ctx: &FoldContext) -> Vec<ColumnJob> {
     for family in &ctx.scoped_scalars {
         // Text owes no value column, per view exactly as bundle-wide: its whole index is a token
         // dictionary and the postings over it, which `fold_text_columns` merges.
-        if family.arrow_type == ScalarType::Text || !crate::filter::scoped_is_filterable(family) {
+        //
+        // **The condition is the value column and not the filter licence**, and it must be the
+        // same one `write_scoped_extents` writes on: a family carrying neither `index` nor
+        // `render` is stored and served at the drill-down (owner ruling), so its column has
+        // layers, and a fold that skipped it would leave those layers behind — the extents it
+        // folded away are gone from the manifest and the values with them.
+        if !crate::filter::scoped_has_value_column(family) {
             continue;
         }
         for view in &family.views {

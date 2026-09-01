@@ -740,6 +740,23 @@ pub fn extent_column_name(column: &str, view: Option<&str>) -> String {
 /// declaration, so the combination reaches no manifest a build wrote — and a manifest that
 /// carried it would name a token index no pass produced, which this predicate would otherwise
 /// demand at open.
+/// Does this family have an entity-space **value column** — the artefact a flush writes an extent
+/// into and the drill-down reads a value out of?
+///
+/// **Every family but `text`**, whose extent is a token dictionary and positional postings and
+/// holds nothing per entity. This is deliberately *wider* than [`scoped_is_filterable`]: a family
+/// declaring neither `index` nor `render` is stored and served at the drill-down without being
+/// searchable or drawn (owner ruling), so its column is opened and its extents composed while its
+/// leaf stays the unknown-column refusal — `EngineMeta::resolve_filter_column` requires
+/// [`scoped_is_filterable`] and answers `Unknown` before any column is looked up, so opening one
+/// here puts nothing on the filter surface.
+///
+/// ⊘ **Pending `ScopedScalar::has_value_column()`**, which lands with the drill-down's own branch;
+/// the two say the same thing and the store's helper is the one to keep.
+pub fn scoped_has_value_column(scoped: &tessera_store::manifest::ScopedScalar) -> bool {
+    scoped.arrow_type != tessera_spatial::tiler::ScalarType::Text
+}
+
 pub fn scoped_is_filterable(scoped: &tessera_store::manifest::ScopedScalar) -> bool {
     scoped.index || (scoped.render && Family::of_scoped(scoped) != Family::Text)
 }
@@ -876,7 +893,12 @@ fn open_scoped_column(
                 dict,
             }],
             covered,
-            filterable: true,
+            // **The licence, not the fact that it opened.** A family carrying neither flag is
+            // opened so the drill-down can read a value out of it, and `evaluate` gates on this
+            // flag — so a leaf that somehow reached it is refused exactly as an unfilterable
+            // entity-scoped column's is. `EngineMeta::resolve_filter_column` refuses such a leaf
+            // one layer earlier, before any column is looked up; this is the second of the two.
+            filterable: scoped_is_filterable(family),
             postings,
             analyser: None,
             text: Vec::new(),
@@ -1715,7 +1737,7 @@ impl FilterColumns {
         // ([`scoped_is_filterable`]): its columns are on disc and on no surface, and a leaf
         // naming it is refused as an undeclared column is.
         for family in scoped {
-            if !scoped_is_filterable(family) {
+            if !scoped_is_filterable(family) && !scoped_has_value_column(family) {
                 continue;
             }
             for view_id in &family.views {
@@ -1831,6 +1853,27 @@ impl FilterColumns {
     /// the column's own public surface: the count of present entities strictly below this one is
     /// its slot, for a universal column (where it degenerates to the entity id) and a partial one
     /// alike. O(containers below the entity) per read — drill-down cadence, never per mark.
+    /// Does any **flushed** `text` layer of `column` hold prose for `entity`?
+    ///
+    /// **The scoped cell arm's fail-closed source for a text family** (`views.md` §5, decision
+    /// 0116). A text column has no per-entity value to read back — its extent is a dictionary,
+    /// postings and this presence bitmap — so the cell arm cannot compare a supplied string with
+    /// a stored one across a flush boundary. What it can establish is *occupancy*, and that is
+    /// what this answers: a joining row supplying prose for a cell some layer already holds prose
+    /// for is refused rather than admitted unchecked, because admitting it would write a second
+    /// text layer stamped with the same view and `match` unions across layers silently.
+    ///
+    /// ⊘ **The base is not covered, and cannot be**: it writes no presence file at all
+    /// ([`TextLayer::present`]'s own marker, issue #123), so a cell whose only prose came from the
+    /// build reads as empty here. Closing that needs the base's presence bitmap, not a change to
+    /// this rule.
+    pub(crate) fn text_present(&self, column: &str, entity: u32) -> bool {
+        let Some(layers) = self.columns.get(column) else {
+            return false;
+        };
+        layers.text.iter().any(|layer| layer.present.contains(entity))
+    }
+
     pub(crate) fn stored_value(&self, column: &str, entity: u32) -> Option<RecordValue> {
         let layers = self.columns.get(column)?;
         let probe = Bitmap::of(&[entity]);
@@ -1980,7 +2023,7 @@ impl FilterColumns {
                     ),
                 ));
             };
-            if !scoped_is_filterable(family) {
+            if !scoped_is_filterable(family) && !scoped_has_value_column(family) {
                 continue;
             }
             if next.columns.contains_key(&scoped_column_name(column, view)) {

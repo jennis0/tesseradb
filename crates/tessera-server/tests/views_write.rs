@@ -2458,3 +2458,175 @@ async fn a_row_promoted_to_a_join_after_its_handler_pass_still_meets_the_arms() 
         );
     }
 }
+
+/// **The refusal body is the same whichever source answered it, to the byte** (decision 0116).
+///
+/// `the_buffered_and_flushed_attribute_arms_refuse_identically` asserts the two *sources* agree;
+/// this pins the whole body against a literal, so the text a caller reads cannot drift while the
+/// arms are moved between sites. It is the assertion decision 0116's "the bodies did not move with
+/// the site" claim rests on, and a `contains()` would not be one.
+#[tokio::test]
+async fn the_join_rules_refusal_body_is_pinned_whole() {
+    let served = serve().await;
+    assert_eq!(
+        create(&served, "quarter", "2026-Q5", q_record("Q5", 1))
+            .await
+            .status(),
+        201
+    );
+    let id = b"pinned-body".to_vec();
+    assert_eq!(
+        ingest(&served, "pin-first", "world", &[(id.clone(), 10.0, 10.0, "0", Some(7))])
+            .await
+            .status(),
+        200
+    );
+    let resp = ingest(
+        &served,
+        "pin-join",
+        "quarter:2026-Q5",
+        &[(id, 800.0, 300.0, "0", Some(9))],
+    )
+    .await;
+    assert_eq!(resp.status(), 409);
+    assert_eq!(
+        resp.text().await.unwrap(),
+        "{\"error\":\"conflict\",\"detail\":\"row 0 joins an entity this deployment already holds, \
+         with a different value for column 'score'. An entity-scoped attribute is one value per \
+         entity, so a joining row byte-matches the stored value or omits it (views §4, §5)\"}",
+        "the writer's body, whole — the text the handler answered with before the arms moved"
+    );
+}
+
+/// **A row that stops being a join keeps its label** (`views.md` §4, decision 0116).
+///
+/// The demotion direction of the same race. The handler resolves an external id to a live holder
+/// and stamps the row a join; between that pass and the apply the holder is deleted, so
+/// `established_collisions` clears the stamp and the row allocates a **fresh** entity. It must
+/// arrive still carrying its descriptors, or that fresh entity is written with no label at all —
+/// visible to no principal, and reachable by no deny either. Dropping them in the handler, as the
+/// code did until the arms moved, is what would have produced that.
+///
+/// **Two halves, and the first does not reach the writer's demotion.** Sequentially the handler
+/// sees the deleted holder itself and never stamps the row, so what the first half asserts is the
+/// *property* — a re-ingest past a delete is served under the label it carried — and not the
+/// ordering. The second half submits the delete and the re-ingest together, which is the only way
+/// this deployment reaches the ordering at all; the executor decides which lands first, so each
+/// round asserts what holds either way: the row is taken and labelled, or it is refused.
+#[tokio::test]
+async fn a_row_demoted_from_a_join_allocates_a_fresh_entity_that_keeps_its_label() {
+    let mut served = serve().await;
+    let id = b"demoted".to_vec();
+    let resp = ingest(&served, "demote-first", "world", &[(id.clone(), 10.0, 10.0, "0", Some(7))]).await;
+    assert_eq!(resp.status(), 200);
+    let first: u64 = resp.json::<Value>().await.unwrap()["tessera_ids"][0]
+        .as_u64()
+        .unwrap();
+    flush(&served).await;
+
+    // The holder is deleted, so the binding is dead bookkeeping: decision 0047 makes the
+    // re-ingest below allocate rather than 409, and it is no longer a join.
+    let body = json!([{ "tessera_id": first.to_string(), "idset": FIXTURE_IDSET, "op": "delete" }]);
+    let resp = served
+        .server
+        .client
+        .post(served.server.control_url("/control/changes"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "the holder is deleted");
+
+    // The same external id again, under a label this principal holds.
+    let resp = ingest(
+        &served,
+        "demote-second",
+        "quarter:2026-Q1",
+        &[(id, 800.0, 300.0, "1", Some(7))],
+    )
+    .await;
+    assert_eq!(resp.status(), 200, "a deleted holder does not collide");
+    let second: u64 = resp.json::<Value>().await.unwrap()["tessera_ids"][0]
+        .as_u64()
+        .unwrap();
+    assert_ne!(second, first, "a fresh entity, not the dead binding's");
+    flush(&served).await;
+    reauthorise(&mut served).await;
+
+    // The whole point: the fresh entity carries the label the batch named, so a principal that
+    // satisfies it is served the row. A row that had arrived with its descriptors already dropped
+    // would be here with an empty term set and visible to nobody.
+    assert!(
+        points(&served, "quarter:2026-Q1")
+            .await
+            .iter()
+            .any(|p| p.0 == second),
+        "the re-ingested row is served under the label it carried"
+    );
+
+    // The concurrent half. The deny lane has priority over the work queue, so a delete submitted
+    // beside an ingest can apply between that ingest's handler pass and its admit — which is the
+    // demotion the writer has to survive.
+    let mut taken = Vec::new();
+    for round in 0..8u32 {
+        let id = format!("demote-race-{round}").into_bytes();
+        let seed = ingest(
+            &served,
+            &format!("demote-race-seed-{round}"),
+            "world",
+            &[(id.clone(), 10.0, 10.0, "0", Some(7))],
+        )
+        .await;
+        assert_eq!(seed.status(), 200);
+        let holder: u64 = seed.json::<Value>().await.unwrap()["tessera_ids"][0]
+            .as_u64()
+            .unwrap();
+
+        let body = json!([{ "tessera_id": holder.to_string(), "idset": FIXTURE_IDSET, "op": "delete" }]);
+        let batch_id = format!("demote-race-again-{round}");
+        let rows = [(id, 800.0, 300.0, "1", Some(7))];
+        let (deleted, again) = tokio::join!(
+            served
+                .server
+                .client
+                .post(served.server.control_url("/control/changes"))
+                .bearer_auth(OPERATOR_CREDENTIAL)
+                .json(&body)
+                .send(),
+            ingest(&served, &batch_id, "quarter:2026-Q1", &rows),
+        );
+        assert_eq!(deleted.unwrap().status(), 200, "round {round}: the delete lands");
+        let status = again.status().as_u16();
+        let text = again.text().await.unwrap();
+        match status {
+            // Taken: whether it joined the still-live holder or allocated past the delete, it must
+            // carry a label — the fresh-entity case is the one the demotion produces.
+            200 => taken.push(
+                serde_json::from_str::<Value>(&text).unwrap()["tessera_ids"][0]
+                    .as_u64()
+                    .unwrap(),
+            ),
+            // Refused: the holder was still live at the admit and the labels differ, which is the
+            // label arm doing its job.
+            409 => assert!(
+                text.contains("under a different access label"),
+                "round {round}: the only lawful refusal here is the label arm's: {text}"
+            ),
+            other => panic!("round {round}: unexpected {other}: {text}"),
+        }
+    }
+    flush(&served).await;
+    let served_ids: Vec<u64> = points(&served, "quarter:2026-Q1")
+        .await
+        .iter()
+        .map(|p| p.0)
+        .collect();
+    for id in taken {
+        assert!(
+            served_ids.contains(&id),
+            "every row the executor took is served under the label it carried; {id} is not in \
+             {served_ids:?}"
+        );
+    }
+}

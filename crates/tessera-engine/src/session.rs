@@ -2610,16 +2610,6 @@ impl Engine {
             || generation.buffer.contains_in_view(entity, view)
     }
 
-    /// The entity's **own** buffered row — its terms and its scalars — where one is still awaiting
-    /// a flush, for the join rule's label and attribute arms (`views.md` §4).
-    ///
-    /// `None` means the buffer has nothing to compare against, which is the ordinary case for an
-    /// entity ingested before the last flush — and for the label half of that comparison the
-    /// caller falls through to [`Engine::flushed_terms`], which reads the entity→term transpose.
-    pub fn buffered_row(&self, entity: EntityId) -> Option<tessera_lifecycle::BufferedItem> {
-        self.generation().buffer.get(entity).cloned()
-    }
-
     /// An already-flushed entity's **full** term set, ascending, from the entity→term transpose
     /// (contracts §2.4) — the join rule's label arm, once the entity's own row has left the buffer
     /// (`views.md` §4).
@@ -2650,39 +2640,6 @@ impl Engine {
     /// needs, and naming the slot buys nothing an entity-independent message does not.
     pub fn flushed_terms(&self, entity: EntityId) -> Option<Vec<TermId>> {
         flushed_terms_of(&self.generation(), entity)
-    }
-
-    /// An already-flushed entity's stored value for one declared column, at the shape a batch
-    /// carries it in — the join rule's attribute arm, once the entity's own row has left the
-    /// buffer (`views.md` §4).
-    ///
-    /// **The label arm's shape, over three homes instead of one.** `entities/terms/` answers the
-    /// label question outright; an entity-scoped *value* has no single artefact, so this reads the
-    /// home the declaration puts it in and there are exactly three (records §3, decision 0068):
-    /// the entity-space value column where the column owes one (`index = true`, or a `derived`
-    /// category's floor), the record blob where it is blob-resident (text always; anything neither
-    /// rendered nor value-columned), and the hot column where `render = true` is the value's only
-    /// store. The three are exhaustive and, per column, the first that applies is the cheapest —
-    /// only a render-only column pays a row lookup.
-    ///
-    /// The answer is returned as a [`WalScalar`] so the comparison at the call site is the *same*
-    /// equality the buffered arm makes against a buffered row's scalars: one comparison, two
-    /// sources, and the two arms cannot come to disagree about what "the same value" means.
-    ///
-    /// `None` is *no value held*, and it is also *could not find out* — the two are one answer here
-    /// because the join it guards is inert in entity space either way (a joining row writes no
-    /// postings, no attribute column and no record field), so what an unreadable artefact costs is
-    /// the refusal, not the rule. Corruption is warned, never swallowed, and the warning names the
-    /// artefact rather than the entity (**I10**).
-    ///
-    /// **Server-side and control-plane.** Nothing derived from this reaches a client: the refusal
-    /// names the column, exactly as the buffered arm's does, and never the value on either side.
-    pub fn flushed_scalar(
-        &self,
-        entity: EntityId,
-        declared_index: usize,
-    ) -> Option<tessera_lifecycle::WalScalar> {
-        flushed_scalar_of(&self.generation(), entity, declared_index)
     }
 
     pub fn resolve_external_ids(
@@ -3750,17 +3707,91 @@ impl ExternalIdIndex {
     }
 }
 
-/// [`Engine::flushed_scalar`]'s body, over a generation the caller already holds.
+/// One entity's record-blob row, decompressed **at most once** whatever how many blob-resident
+/// columns ask for it (review finding F4).
 ///
-/// **The write executor needs this form, and that is why it is not a method.** The handler
-/// *compares* a joining batch against these values; the executor *backfills* an omitted render
-/// value from them (`views.md` §4), and it must read the same generation its apply will clone
-/// from rather than re-loading the pointer under itself. One body, so the comparison and the
-/// backfill cannot come to read a value differently.
+/// `fields_of` decompresses the block the entity's row sits in, and the join rule's attribute arm
+/// asks it once per blob-resident column: a schema with six such columns paid six decompressions of
+/// one block per joining row. The row is the same for all of them, so it is read here and shared.
+/// The outer `Option` is *not yet read*; the inner one is the blob's own answer, which is `None`
+/// for an entity with no row and for a blob that could not be read alike — the same collapse
+/// [`flushed_scalar_of`] documents, and for the same reason.
+#[derive(Default)]
+pub(crate) struct BlobRow(Option<Option<Vec<tessera_filter::RecordField>>>);
+
+impl BlobRow {
+    fn get(
+        &mut self,
+        generation: &Generation,
+        entity: u32,
+    ) -> &Option<Vec<tessera_filter::RecordField>> {
+        self.0.get_or_insert_with(|| {
+            match generation.filter_columns.records().fields_of(entity) {
+                Ok(fields) => fields,
+                // **The error's *kind*, never its `Display`** (**I10**). `RecordError::Malformed`
+                // carries a detail string, and the blob's detail strings name the entity in six
+                // spellings — its addressing checks are about *which* entity's row was found. The
+                // byte-scanner sweeps logs as well as payloads, so this warning carries the
+                // artefact and the class of defect, which is what an operator chasing a systematic
+                // build or flush fault needs; the row that tripped it buys nothing an
+                // entity-independent message does not. The drill-down propagates the same error as
+                // a refusal, and that path may carry the detail: it reaches an operator's error
+                // surface rather than the log the scanner reads.
+                Err(e) => {
+                    let kind = match &e {
+                        tessera_filter::RecordError::Io(io) => io.kind().to_string(),
+                        tessera_filter::RecordError::Malformed(_) => "malformed".to_string(),
+                    };
+                    tracing::warn!(
+                        artefact = "attrs/record",
+                        kind = %kind,
+                        "the record blob could not answer, so the join rule's attribute arm has \
+                         nothing to compare a blob-resident column against and this batch's joins \
+                         are accepted unchecked (views §4). The artefact is a build or flush \
+                         defect; a fold rewrites it."
+                    );
+                    None
+                }
+            }
+        })
+    }
+}
+
+/// An already-flushed entity's stored value for one declared column, at the shape a batch carries
+/// it in — the join rule's attribute arm and its render backfill, once the entity's own row has
+/// left the commit-window buffer (`views.md` §4).
+///
+/// **The label arm's shape, over three homes instead of one.** `entities/terms/` answers the label
+/// question outright; an entity-scoped *value* has no single artefact, so this reads the home the
+/// declaration puts it in and there are exactly three (records §3, decision 0068): the entity-space
+/// value column where the column owes one (`index = true`, or a `derived` category's floor), the
+/// record blob where it is blob-resident (text always; anything neither rendered nor
+/// value-columned), and the hot column where `render = true` is the value's only store. The three
+/// are exhaustive and, per column, the first that applies is the cheapest — only a render-only
+/// column pays a row lookup.
+///
+/// The answer is returned as a [`tessera_lifecycle::WalScalar`] so the comparison at the call site
+/// is the *same* equality the buffered arm makes against a buffered row's scalars: one comparison,
+/// two sources, and the two arms cannot come to disagree about what "the same value" means.
+///
+/// `None` is *no value held*, and it is also *could not find out* — the two are one answer here
+/// because the join it guards is inert in entity space either way (a joining row writes no
+/// postings, no attribute column and no record field), so what an unreadable artefact costs is the
+/// refusal, not the rule. Corruption is warned, never swallowed, and the warning names the artefact
+/// rather than the entity (**I10**).
+///
+/// **A free function rather than a method, because the write executor needs this form**: it must
+/// read the same generation its apply will clone from rather than re-loading the pointer under
+/// itself. `blob` is the caller's per-row [`BlobRow`], so a schema's blob-resident columns share one
+/// decompression.
+///
+/// **Server-side and control-plane.** Nothing derived from this reaches a client: the refusal names
+/// the column, exactly as the buffered arm's does, and never the value on either side.
 pub(crate) fn flushed_scalar_of(
     generation: &Generation,
     entity: EntityId,
     declared_index: usize,
+    blob: &mut BlobRow,
 ) -> Option<tessera_lifecycle::WalScalar> {
     let manifest = &generation.bundle.manifest;
     let declared = manifest.declared_scalars.get(declared_index)?;
@@ -3777,36 +3808,13 @@ pub(crate) fn flushed_scalar_of(
     } else if crate::filter::blob_resident(declared, vocabularies) {
         // The blob is keyed by entity and its rows are self-describing, so the field wanted is the
         // one tagged with this column's declared position (records §3). A malformed row refuses on
-        // the drill-down path, which propagates it; here it is a lost report.
-        match generation.filter_columns.records().fields_of(entity_raw) {
-            Ok(fields) => fields?
-                .into_iter()
-                .find_map(|f| (f.tag as usize == declared_index).then_some(f.value)),
-            // **The error's *kind*, never its `Display`** (**I10**). `RecordError::Malformed`
-            // carries a detail string, and the blob's detail strings name the entity in six
-            // spellings — its addressing checks are about *which* entity's row was found. The
-            // byte-scanner sweeps logs as well as payloads, so this warning carries the artefact
-            // and the class of defect, which is what an operator chasing a systematic build or
-            // flush fault needs; the row that tripped it buys nothing an entity-independent
-            // message does not. The drill-down propagates the same error as a refusal, and that
-            // path may carry the detail: it reaches an operator's error surface rather than the
-            // log the scanner reads.
-            Err(e) => {
-                let kind = match &e {
-                    tessera_filter::RecordError::Io(io) => io.kind().to_string(),
-                    tessera_filter::RecordError::Malformed(_) => "malformed".to_string(),
-                };
-                tracing::warn!(
-                    artefact = "attrs/record",
-                    kind = %kind,
-                    "the record blob could not answer, so the join rule's attribute arm has \
-                     nothing to compare a blob-resident column against and this batch's joins are \
-                     accepted unchecked (views §4). The artefact is a build or flush defect; a \
-                     fold rewrites it."
-                );
-                None
-            }
-        }
+        // the drill-down path, which propagates it; here it is a lost report — warned once per
+        // row by `BlobRow`, which is also what keeps this to one decompression however many
+        // blob-resident columns the schema declares.
+        blob.get(generation, entity_raw)
+            .as_ref()?
+            .iter()
+            .find_map(|f| (f.tag as usize == declared_index).then(|| f.value.clone()))
     } else {
         crate::viewport::flushed_row_scalar(generation, entity, declared_index)
     }?;
@@ -3860,6 +3868,34 @@ pub(crate) fn flushed_scoped_of(
     stored_as_wal(stored, &declared_of_scoped(family))
 }
 
+/// Does a **flushed** layer of this `(entity, attribute, key)` cell hold prose?
+///
+/// The `text` half of the scoped cell arm (`views.md` §5, decision 0116; review finding F1). A text
+/// family has no per-entity value for [`flushed_scoped_of`] to answer with, so the cell arm asks
+/// occupancy instead of equality and refuses a supplied string where the cell is occupied. `false`
+/// for every other family, which has a value to compare, and for a family on no filter surface,
+/// which has no column at all.
+///
+/// ⊘ **The build's base is not covered** — it writes no presence file
+/// ([`crate::filter::FilterColumns::text_present`], issue #123) — so a cell whose only prose came
+/// from the build reads as unoccupied. That is an under-refusal and it is stated rather than
+/// hidden: the fix is the base's presence bitmap, not a change here.
+pub(crate) fn flushed_scoped_text_present(
+    generation: &Generation,
+    entity: EntityId,
+    family: &tessera_store::manifest::ScopedScalar,
+    owner_view: &str,
+) -> bool {
+    if !crate::filter::scoped_is_filterable(family) {
+        return false;
+    }
+    let Ok(entity) = u32::try_from(entity.raw()) else {
+        return false;
+    };
+    let column = crate::filter::scoped_column_name(&family.name, owner_view);
+    generation.filter_columns.text_present(&column, entity)
+}
+
 /// A scoped family as the entity-scoped declaration the absence and comparison helpers take.
 ///
 /// **The same transcription the ingest boundary makes** (`control.rs`'s `scoped_as_declared`): a
@@ -3893,7 +3929,7 @@ pub(crate) fn declared_of_scoped(
 ///
 /// One definition, because three callers ask it: the handler's comparison, on both sides, and the
 /// executor's backfill.
-pub fn scalar_is_absent(
+pub(crate) fn scalar_is_absent(
     value: &tessera_lifecycle::WalScalar,
     declared: &tessera_store::manifest::DeclaredScalar,
 ) -> bool {

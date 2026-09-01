@@ -106,6 +106,11 @@ fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>, slot: Option
     ];
     if slot.is_some() {
         fields.push(Field::new("heat", DataType::Float32, true));
+        // The two families the two-door work added: a `text` one, whose stored value cannot be
+        // compared once flushed, and one carrying neither flag, which is stored and served at the
+        // drill-down without being searchable or drawn.
+        fields.push(Field::new("note", DataType::Utf8, true));
+        fields.push(Field::new("tag", DataType::Float32, true));
     }
     let schema = Arc::new(ArrowSchema::new(fields));
     let ids: Vec<u64> = ids.collect();
@@ -121,6 +126,16 @@ fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>, slot: Option
     if let Some(slot) = slot {
         columns.push(Arc::new(Float32Array::from(
             ids.iter().map(|&e| heat(slot, e)).collect::<Vec<_>>(),
+        )));
+        columns.push(Arc::new(arrow::array::StringArray::from(
+            ids.iter()
+                .map(|&e| Some(format!("built prose for {e} in {slot}")))
+                .collect::<Vec<_>>(),
+        )));
+        columns.push(Arc::new(Float32Array::from(
+            ids.iter()
+                .map(|&e| Some((e * 2 + slot as u64) as f32))
+                .collect::<Vec<_>>(),
         )));
     }
     let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
@@ -242,7 +257,46 @@ fn build_bundle(dir: &Path, declared: bool) -> std::path::PathBuf {
                     render: true,
                 },
                 group: "quarter".to_string(),
-                views: family_views,
+                views: family_views.clone(),
+                source: None,
+            },
+            // **A `text` family**, indexed so it has a column at all. Its extent is a token
+            // dictionary and positional postings and holds **no value per entity**, which is why
+            // the cell arm cannot compare its stored prose across a flush and refuses instead
+            // (decision 0116, review finding F1).
+            ScopedColumnFamily {
+                attribute: Attribute {
+                    name: "note".to_string(),
+                    title: None,
+                    field: None,
+                    ty: ScalarType::Text,
+                    analyser: Some("unicode/icu4x-2.2/p1".to_string()),
+                    vocabulary: None,
+                    value_set: None,
+                    index: true,
+                    render: false,
+                },
+                group: "quarter".to_string(),
+                views: family_views.clone(),
+                source: None,
+            },
+            // **Neither flag**: stored, served at the drill-down, not searchable and not drawn
+            // (owner ruling). It is here because a flush gated its extents on the *filter* licence,
+            // so such a family served the build's values and nothing ingested since.
+            ScopedColumnFamily {
+                attribute: Attribute {
+                    name: "tag".to_string(),
+                    title: None,
+                    field: None,
+                    ty: ScalarType::F32,
+                    analyser: None,
+                    vocabulary: None,
+                    value_set: None,
+                    index: false,
+                    render: false,
+                },
+                group: "quarter".to_string(),
+                views: family_views.clone(),
                 source: None,
             }],
             false => Vec::new(),
@@ -368,6 +422,74 @@ async fn try_ingest_with_heat(
         .header("x-tessera-view", view)
         .header("content-type", "application/octet-stream")
         .body(batch_with_heat(rows, heat))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.text().await.unwrap())
+}
+
+/// One ingest batch naming any subset of the group's three families, with its status and body —
+/// the general form of [`ingest_with_heat`], for the cases that write `note` or `tag`.
+///
+/// A `None` list is a batch that names no such column at all, which is a family every row is
+/// absent in rather than a malformed batch.
+async fn try_ingest_families(
+    served: &Served,
+    batch_id: &str,
+    view: &str,
+    rows: &[(Vec<u8>, f32, f32, &str)],
+    heat: Option<&[Option<f32>]>,
+    note: Option<&[Option<&str>]>,
+    tag: Option<&[Option<f32>]>,
+) -> (u16, String) {
+    use arrow::array::{BinaryArray, StringArray};
+    let mut fields = vec![
+        Field::new("external_id", DataType::Binary, true),
+        Field::new("x", DataType::Float32, false),
+        Field::new("y", DataType::Float32, false),
+        Field::new("access", DataType::Utf8, false),
+    ];
+    let mut columns: Vec<arrow::array::ArrayRef> = vec![
+        Arc::new(BinaryArray::from_iter(
+            rows.iter().map(|(id, _, _, _)| Some(id.as_slice())),
+        )),
+        Arc::new(Float32Array::from_iter_values(
+            rows.iter().map(|(_, x, _, _)| *x),
+        )),
+        Arc::new(Float32Array::from_iter_values(
+            rows.iter().map(|(_, _, y, _)| *y),
+        )),
+        Arc::new(StringArray::from_iter_values(
+            rows.iter().map(|(_, _, _, a)| *a),
+        )),
+    ];
+    if let Some(heat) = heat {
+        fields.push(Field::new("heat", DataType::Float32, true));
+        columns.push(Arc::new(Float32Array::from(heat.to_vec())));
+    }
+    if let Some(note) = note {
+        fields.push(Field::new("note", DataType::Utf8, true));
+        columns.push(Arc::new(StringArray::from(note.to_vec())));
+    }
+    if let Some(tag) = tag {
+        fields.push(Field::new("tag", DataType::Float32, true));
+        columns.push(Arc::new(Float32Array::from(tag.to_vec())));
+    }
+    let schema = Arc::new(ArrowSchema::new(fields));
+    let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
+    let mut w = arrow::ipc::writer::StreamWriter::try_new(Vec::new(), &schema).unwrap();
+    w.write(&batch).unwrap();
+    let body = w.into_inner().unwrap();
+    let resp = served
+        .server
+        .client
+        .post(served.server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", batch_id)
+        .header("x-tessera-view", view)
+        .header("content-type", "application/octet-stream")
+        .body(body)
         .send()
         .await
         .unwrap();
@@ -720,8 +842,18 @@ async fn meta_publishes_the_render_placement_and_the_views_that_have_a_column() 
         .await
         .unwrap();
     let families = body["scoped_scalars"].as_array().unwrap();
-    assert_eq!(families.len(), 1);
-    let heat = &families[0];
+    // The fixture's three: the rendered `heat` this test is about, an indexed `text` family, and
+    // one carrying neither flag — the last two exist for the two-door and drill-down cases below
+    // and are named here so a family appearing or vanishing is a failure rather than a surprise.
+    let named: Vec<&str> = families
+        .iter()
+        .map(|f| f["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(named, vec!["heat", "note", "tag"]);
+    let heat = families
+        .iter()
+        .find(|f| f["name"] == "heat")
+        .expect("the rendered family");
     assert_eq!(heat["name"], "heat");
     assert_eq!(heat["arrow_type"], "f32");
     assert_eq!(heat["scope"]["group"], "quarter");
@@ -942,10 +1074,11 @@ async fn a_flushed_segment_of_a_group_view_serves_the_scoped_value_the_batch_car
 /// **The same column on an entity-space batch is still refused, and with the same message**
 /// (`views.md` §5).
 ///
-/// That refusal is what makes a scoped column un-nameable outside its group's views: `heat` has no
-/// slot in `MANIFEST.declared_scalars` and names no registered layer, so on a plain view it is an
-/// undeclared column and nothing else. The admission above is scoped to the families of the group
-/// that owns the named view; a plain view has none, so this path is the one it always was.
+/// That refusal is what makes a scoped column un-nameable outside the views its key addresses:
+/// `heat` has no slot in `MANIFEST.declared_scalars` and names no registered layer, so on a plain
+/// view it is an undeclared column and nothing else. The admission above is scoped to the families
+/// whose owning group's key set holds the named view's key (decision 0116); a plain view holds no
+/// key at all, so this path is the one it always was.
 #[tokio::test]
 async fn a_scoped_column_on_an_entity_space_batch_is_still_refused() {
     let served = serve().await;
@@ -1472,4 +1605,234 @@ async fn a_second_door_naming_one_cell_dedupes_an_equal_value_and_refuses_a_diff
             "{view} answers the one value the cell holds: {answer:?}"
         );
     }
+}
+
+/// **A `text` cell that has flushed takes no second value through either door** (`views.md` §5,
+/// decision 0116; review finding F1).
+///
+/// The cell arm compares a supplied value with the stored one and deduplicates or refuses. It
+/// cannot do that for prose once the value has flushed: a text column stores a token dictionary,
+/// positional postings and a presence bitmap, and no value per entity to read back. Admitting the
+/// row anyway would write a **second text layer stamped with the same view** — text layers have no
+/// coverage check, their disjointness having rested on I9, which two doors onto one cell
+/// invalidated — and `match` unions across them, so both sets of words would answer under one
+/// column with no symptom anywhere.
+///
+/// So occupancy is asked instead of equality and the answer is the same either way: **a supplied
+/// string is refused whether it agrees with the stored prose or not**, because agreement is exactly
+/// what cannot be established. Omitting the column passes, and leaves the cell as it stands.
+#[tokio::test]
+async fn a_flushed_text_cell_refuses_a_second_value_equal_or_not() {
+    let served = serve().await;
+    const A: u64 = 9_601;
+    const B: u64 = 9_602;
+    const C: u64 = 9_603;
+    let prose = "the stored prose for this cell";
+
+    // Door one writes the cell, and it flushes.
+    let (status, body) = try_ingest_families(
+        &served,
+        "text-first",
+        "quarter:2026-Q1",
+        &[
+            (external_id_of(A), 250.0, 250.0, "0"),
+            (external_id_of(B), 251.0, 251.0, "0"),
+            (external_id_of(C), 252.0, 252.0, "0"),
+        ],
+        None,
+        Some(&[Some(prose), Some(prose), Some(prose)]),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "the first door writes the cell: {body}");
+    flush(&served).await;
+
+    // Door two, differing prose: refused.
+    let (status, body) = try_ingest_families(
+        &served,
+        "text-differs",
+        "quarter_map:2026-Q1",
+        &[(external_id_of(A), 300.0, 300.0, "0")],
+        None,
+        Some(&[Some("different prose entirely")]),
+        None,
+    )
+    .await;
+    assert_eq!(status, 409, "a differing string is refused: {body}");
+    assert!(
+        body.contains("group-scoped column 'note'") && body.contains("key '2026-Q1'"),
+        "the refusal names the column and the key: {body}"
+    );
+
+    // Door two, the *same* prose: refused too, and the message says why.
+    let (status, equal_body) = try_ingest_families(
+        &served,
+        "text-equal",
+        "quarter_map:2026-Q1",
+        &[(external_id_of(B), 301.0, 301.0, "0")],
+        None,
+        Some(&[Some(prose)]),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status, 409,
+        "an equal string is refused as well, equality being unverifiable: {equal_body}"
+    );
+    assert_eq!(
+        equal_body, body,
+        "one rule, one message: agreement is not something this arm can establish, so it cannot \
+         answer differently for it"
+    );
+
+    // Door two, omitting the column: accepted, and the cell stands as it was.
+    let (status, body) = try_ingest_families(
+        &served,
+        "text-absent",
+        "quarter_map:2026-Q1",
+        &[(external_id_of(C), 302.0, 302.0, "0")],
+        None,
+        Some(&[None]),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "a null names no value to disagree with: {body}");
+}
+
+/// **In one window the buffer answers, so text compares exactly** (`views.md` §5, decision 0116).
+///
+/// The refusal above is a property of the *flushed* cell and of nothing else. While the first
+/// door's row is still in the commit-window buffer its value is right there to compare, so the two
+/// ordinary answers hold: an equal string deduplicates and a differing one is the 409. Without this
+/// the fail-closed arm above would read as the rule for text rather than as the cost of a flush.
+#[tokio::test]
+async fn a_same_window_text_cell_still_dedupes_and_refuses_exactly() {
+    let served = serve().await;
+    const AGREES: u64 = 9_701;
+    const DISAGREES: u64 = 9_702;
+    let prose = "prose still sitting in the buffer";
+
+    let (status, body) = try_ingest_families(
+        &served,
+        "text-window-first",
+        "quarter:2026-Q2",
+        &[
+            (external_id_of(AGREES), 250.0, 250.0, "0"),
+            (external_id_of(DISAGREES), 251.0, 251.0, "0"),
+        ],
+        None,
+        Some(&[Some(prose), Some(prose)]),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+
+    // No flush between: the first door's rows are in the buffer.
+    let (status, body) = try_ingest_families(
+        &served,
+        "text-window-equal",
+        "quarter_map:2026-Q2",
+        &[(external_id_of(AGREES), 300.0, 300.0, "0")],
+        None,
+        Some(&[Some(prose)]),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "the buffer holds the value, so an equal string deduplicates: {body}"
+    );
+
+    let (status, body) = try_ingest_families(
+        &served,
+        "text-window-differs",
+        "quarter_map:2026-Q2",
+        &[(external_id_of(DISAGREES), 301.0, 301.0, "0")],
+        None,
+        Some(&[Some("other prose")]),
+        None,
+    )
+    .await;
+    assert_eq!(status, 409, "and a differing one is the 409: {body}");
+    assert!(
+        body.contains("group-scoped column 'note'") && body.contains("key '2026-Q2'"),
+        "naming the column and the key: {body}"
+    );
+}
+
+/// **A family carrying neither `index` nor `render` gets its extents from a flush** (`views.md` §5).
+///
+/// Such a family is stored and served at the drill-down without being searchable or drawn (owner
+/// ruling). The flush gated its per-view extents on the *filter* licence, so it wrote none: the
+/// family served the build's values and nothing ingested since, silently, because a column with no
+/// extent for a batch reads exactly as a batch that carried no value.
+///
+/// The gate is now the **value column**, and this drives the consequence end to end: an ingested
+/// value's extent is written, composed into the live generation, and folded like any other. A fold
+/// is the assertion that binds it — it rewrites every column the manifest names, so a base and an
+/// extent the fold did not know about is the failure this test would have caught before the fix
+/// (and did, while the two predicates disagreed).
+///
+/// ⊘ The drill-down's own assertion belongs with the branch that serves these families; what is
+/// proved here is that the values are on disc, in the manifest, and survive a rewrite.
+#[tokio::test]
+async fn a_neither_flag_family_gains_its_column_from_a_flush_and_keeps_it_through_a_fold() {
+    let served = serve().await;
+    const NEW: u64 = 9_801;
+    let (status, body) = try_ingest_families(
+        &served,
+        "tag-write",
+        "quarter:2026-Q1",
+        &[(external_id_of(NEW), 250.0, 250.0, "0")],
+        None,
+        None,
+        Some(&[Some(1234.5)]),
+    )
+    .await;
+    assert_eq!(status, 200, "a neither-flag column is nameable: {body}");
+    flush(&served).await;
+
+    // The view is on the family's list, which is what the opener and the drill-down walk.
+    let document: Value = served
+        .server
+        .client
+        .get(served.server.viewer_url("/v1/meta"))
+        .bearer_auth(&served.token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let views_of = |name: &str| -> Vec<String> {
+        document["scoped_scalars"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["name"] == name)
+            .expect("the family is published")["views"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect()
+    };
+    assert!(
+        views_of("tag").contains(&"quarter:2026-Q1".to_string()),
+        "the flush gave the view a column of the neither-flag family: {:?}",
+        views_of("tag")
+    );
+
+    // And the fold rewrites it rather than leaving the layers behind. A fold that did not know
+    // about this column would refuse, which is exactly how the missing half of this fix surfaced.
+    fold(&served).await;
+    assert!(
+        views_of("tag").contains(&"quarter:2026-Q1".to_string()),
+        "and the fold keeps it"
+    );
+    let (status, _) = viewport_bytes(&served, &served.token, "quarter:2026-Q1").await;
+    assert!(
+        status == 200 || status == 429,
+        "the view still answers after the rewrite, or sheds: {status}"
+    );
 }

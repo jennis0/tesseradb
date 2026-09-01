@@ -1268,6 +1268,21 @@ pub(crate) struct ScopedColumnSpec {
     /// family is on the filter surface, so its column is opened and this flush owes it an extent
     /// (`filter::scoped_is_filterable`).
     pub(crate) filterable: bool,
+    /// The family's values have an **entity-space value column**, which every family but `text`
+    /// does — a `text` family's extent is a token dictionary and positional postings and holds no
+    /// value per entity.
+    ///
+    /// **This, not [`Self::filterable`], is what decides whether this flush owes an extent** for a
+    /// family carrying neither flag. Such a family is stored and served at the drill-down without
+    /// being searchable or drawn (owner ruling), and gating the write on the *filter* licence left
+    /// it serving the build's values and nothing ingested since — the extent that would have
+    /// carried them was never written. The two predicates coincide for every family that has a
+    /// flag, so nothing else moves.
+    ///
+    /// ⊘ **A local predicate pending `ScopedScalar::has_value_column()`**, which lands with the
+    /// drill-down's own branch; the two say the same thing and the store's helper is the one to
+    /// keep.
+    pub(crate) has_value_column: bool,
     /// Declared `render = true` — the family occupies a lane in this view's row tail, which is a
     /// column for the purposes of `scoped_scalars[..].views` even where the family is on no filter
     /// surface at all.
@@ -1447,20 +1462,23 @@ fn write_scoped_extents(plan: &FlushPlan, ctx: &FlushContext) -> Result<ScopedWr
     let mut created = Vec::new();
     for spec in &ctx.scoped_schema {
         // **The view enters the family's list whatever the family's surface**, because this flush
-        // gives it a column of one kind or the other: an entity-space column below for a family on
-        // the filter surface, a lane in the row tail for a rendered one — and a rendered family
-        // takes both. `scoped_scalars[..].views` is what decides them — the opener walks it, and
-        // so does the request's render list — so a view left off it renders nothing and is opened
-        // for nothing.
-        if !spec.has_base && (spec.filterable || spec.render) {
+        // gives it a column of one kind or the other: an entity-space column below for a family
+        // that has one, a lane in the row tail for a rendered one — and a rendered family takes
+        // both. `scoped_scalars[..].views` is what decides them — the opener walks it, the
+        // request's render list walks it, and so does the drill-down — so a view left off it
+        // renders nothing, is opened for nothing and serves nothing.
+        let owes_extent = spec.filterable || spec.has_value_column;
+        if !spec.has_base && (owes_extent || spec.render) {
             created.push((spec.name.clone(), ctx.scoped_view.clone()));
         }
-        // A family on no surface has no column any reader opens, so an extent for it would be
-        // bytes nothing reads — the predicate is `filter::scoped_is_filterable`'s, the same one
-        // the opener and the fold apply, or the three would disagree about what exists. A
-        // **rendered** family is on that surface since 2026-08-31, so it takes the extent below
-        // as an indexed one does; what it does not take is a second route through the lane.
-        if !spec.filterable {
+        // **A family with a value column owes an extent whatever its flags.** A family declaring
+        // neither `index` nor `render` is stored and served at the drill-down without being
+        // searchable or drawn (owner ruling), so gating this on the *filter* licence left such a
+        // family serving the build's values and nothing ingested since: the flush wrote no extent
+        // for the values to be in. A **text** family has no value column and is the one that stays
+        // on the filter licence — its extent is a dictionary and postings, which nothing but the
+        // filter surface reads.
+        if !owes_extent {
             continue;
         }
         let column_rel = scoped_column_rel(ctx, &spec.name);
