@@ -73,6 +73,41 @@ describe('the session artifact table', () => {
     expect(table.version).toBeGreaterThan(settled);
   });
 
+  /**
+   * **The two batches a settle brings.** The point path's, built from the membership column, lands
+   * first and rarely holds every parent; the channel's follows with the whole served set. The
+   * second completing the list is not a colour moving: the walk reads the first entry alone, so
+   * the journal says `named` for the new parent and nothing for the child, and a texel resolving
+   * through the child wears the same colour before and after.
+   */
+  it('completes a partial parent list without journalling `linked`, and the first parent does not flip', () => {
+    const table = new SessionArtifactTable();
+    // A is held from the last cut; B is not yet.
+    const [a] = table.take([ref(1n)]);
+    // The point path's batch: the child names [A, B] on the wire, and only A resolves.
+    const [child] = table.take([{...ref(7n, null, 'clusters/x', 1), parentIds: [1n, 2n]}]);
+    expect(table.entry(child!)?.parentOrdinals).toEqual([a]);
+    const between = table.version;
+    expect(table.resolve(child!, new Set([a!]), 0)).toBe(a);
+    // The channel's batch: both parents served, the list completes.
+    const [, b] = table.take([ref(1n), ref(2n), {...ref(7n, null, 'clusters/x', 1), parentIds: [1n, 2n]}]);
+    expect(table.entry(child!)?.parentOrdinals).toEqual([a, b]);
+    expect(table.changesSince(between)).toEqual([{ordinal: b, kind: 'named'}]);
+    expect(table.resolve(child!, new Set([a!, b!]), 0)).toBe(a);
+  });
+
+  it('never shrinks a held list on a batch that resolves only some of the wire’s parents', () => {
+    const table = new SessionArtifactTable();
+    const [a, b, child] = table.take([ref(1n), ref(2n), {...ref(7n, null, 'clusters/x', 1), parentIds: [1n, 2n]}]);
+    expect(table.entry(child!)?.parentOrdinals).toEqual([a, b]);
+    // B's last reference goes: a later point-path batch naming [A, B] resolves A alone.
+    table.release([b!]);
+    const settled = table.version;
+    table.take([{...ref(7n, null, 'clusters/x', 1), parentIds: [1n, 2n]}]);
+    expect(table.entry(child!)?.parentOrdinals).toEqual([a, b]);
+    expect(table.version).toBe(settled);
+  });
+
   it('leaves a child a root when its parent is not in the batch — a link that does not resolve is no link', () => {
     const table = new SessionArtifactTable();
     const [child] = table.take([ref(2n, 7n)]);
