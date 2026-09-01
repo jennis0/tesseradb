@@ -131,13 +131,14 @@ class Labeller:
     gate, its own generating set and its own lifecycle.
     """
 
-    def __init__(self, titles: pa.Array, rows: np.ndarray):
-        """`rows` are the corpus rows `titles` came from, so a caller can map a cluster's members
-        into the vectoriser's row space."""
+    def __init__(self, titles: pa.Array, rows: np.ndarray, n: int):
+        """`rows` are the corpus rows `titles` came from, over a corpus of `n`, so a caller can map
+        a cluster's members into the vectoriser's row space with one array lookup."""
         from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS, CountVectorizer
 
         self.rows = rows
-        self.of_row = {int(r): i for i, r in enumerate(rows.tolist())}
+        self.of_row = np.full(n, -1, dtype=np.int64)
+        self.of_row[rows] = np.arange(len(rows))
         vec = CountVectorizer(
             stop_words=list(ENGLISH_STOP_WORDS | CORPUS_STOPLIST),
             token_pattern=r"(?u)\b[a-zA-Z][a-zA-Z-]{2,}\b",
@@ -150,8 +151,8 @@ class Labeller:
 
     def sampled(self, members: np.ndarray) -> np.ndarray:
         """A cluster's members, mapped into the vectoriser's rows and dropping those it never saw."""
-        got = [self.of_row.get(int(r)) for r in members]
-        return np.array([g for g in got if g is not None], dtype=np.int64)
+        got = self.of_row[members]
+        return got[got >= 0]
 
     def label(self, groups: dict, terms: int = LABEL_TERMS) -> dict:
         """`{key: [vectoriser rows]}` -> `{key: "term term term term"}`, omitting the keys with
@@ -538,7 +539,7 @@ def main() -> None:
             if n <= LABEL_MAX_DOCS
             else np.sort(np.random.default_rng(SEED + 1).choice(n, LABEL_MAX_DOCS, replace=False))
         )
-        labeller = Labeller(table.column("title").take(pa.array(label_rows)), label_rows)
+        labeller = Labeller(table.column("title").take(pa.array(label_rows)), label_rows, n)
     print(f"{len(labeller.vocab):,} candidate terms over {len(label_rows):,} titles")
 
     with steps.step("titles"):
