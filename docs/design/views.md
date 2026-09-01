@@ -879,10 +879,10 @@ an attribute. The two are kept apart so that neither grows the other's surface.
 > drill-down, which is the one thing its entity-scoped counterpart does that this one cannot. Every
 > **other** family is returned by the drill-down, keyed by the group's key *(r27, owner ruling
 > 2026-09-01; contracts §3.2 r68)*, and that is what a declaration with neither `index` nor
-> `render` means: stored, served there, on no filter surface and in no row tail. ⊘ Such a family
-> serves the build's values and nothing a flush has written since — the flush writes per-view
-> extents on the filter-surface licence alone — where every other family takes its extents and is
-> served live.
+> `render` means: stored, served there, on no filter surface and in no row tail. A flush writes
+> per-view extents for **every family with a value column** (r27's write half, widened at this
+> merge), so such a family is served live at the drill-down exactly as its searchable siblings
+> are — the build is its first writer, not its only one.
 >
 > **A category's value list is `/v1/categories`' own surface, and it is view-addressed**
 > (contracts §3.2). One column per view is one value set per view, so the route takes the view the
