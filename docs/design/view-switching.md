@@ -138,10 +138,13 @@ neighbour pinning and no velocity model: those buy latency hiding at the cost of
 is wrong whenever the user does something other than what it guessed, and the transition (§5)
 hides the same latency without guessing.
 
-**What a switch publishes, immediately.** The `view` projection with the new id and, where the
-new view's replica already holds the current camera's tiles, that composition; otherwise an empty
-composition with `status` at `loading`, so a component never draws view A's marks under view B's
-frame. The old marks stay on screen only by the transition (§5), which is not built; until it is,
+**What a switch publishes, immediately.** The `view` projection with the new id, empty marks and
+tiles, the incoming view's own artifact state (empty for a cold view, its held served set for a
+warm one — never the outgoing view's), and `status` at `loading`, so a component never draws view
+A's marks or artifacts under view B's frame. Where the incoming view's replica already holds the
+current camera's tiles, that composition follows **on the next scheduler tick** — a redraw from
+the held bands, no request — rather than synchronously, because the presenter coalesces per tick
+and a switch that landed a frame inside its caller would be the one place it did not. The old marks stay on screen only by the transition (§5), which is not built; until it is,
 a cold switch draws nothing for the length of one request, and the status strip says so.
 
 **The `replica` projection** reports the whole cache's bytes (the figure the budget bounds), the
@@ -156,8 +159,11 @@ today are two stores.
 
 **Within a group — the slider.** Every view of a group shares one frame (`views.md` §3.1), so the
 Morton addresses, the depth and the camera are the same in view *k* and view *k+1*. A step is:
-set the current view; re-schedule the last camera on the new view's presenter, which debounces
-on the settle exactly as a pan does; draw what the cache holds meanwhile. The basemap does not
+set the current view; re-schedule the last camera on the new view's presenter **behind a
+store-level settle of the driver's own debounce length**; draw what the cache holds meanwhile.
+The settle is the store's and not the driver's because the driver fires a leading-edge request
+for a camera arriving from stillness — which every stepped-to view is — so scheduling the incoming
+presenter directly would put one request on the wire per step (found at V1). The basemap does not
 change, the camera does not move, the selection stays — a shape in the shared frame means the
 same region — and its counts are re-asked under the new view. A slider moved rapidly issues one
 request per settle, not one per step: each passed-over view's presenter is scheduled and then
