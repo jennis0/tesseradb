@@ -1155,9 +1155,23 @@ export function createStore(options: StoreOptions): Store {
       switchTimer = null;
     }
 
-    viewId = id;
+    // **The incoming machinery is built before `viewId` moves, and bound in the same breath.**
+    // Everything below this line publishes, and every publish reaches the map synchronously — and
+    // the map decides its refit from `frame()`, which follows `viewId`. With `viewId` moved and
+    // `presenter` still the outgoing view's, that refit's `setView` schedules the view being
+    // *left*: the request goes out for a view nobody is looking at, the incoming view is never
+    // asked for at all, and the switch sits at `loading` for ever. Found by the V2 smoke against
+    // the multiview fixture, on the first switch across frames.
+    //
+    // Building first is safe because a view's machinery reports through `current()`, which is
+    // `id === viewId` read at the time of the event: while it is being built it is not current and
+    // publishes nothing.
     const incoming = machineryFor(id);
+    viewId = id;
     bind(incoming);
+    // Set here rather than below for the same reason: a `setView` arriving from a subscriber
+    // during this call clears it, and from then on the request on the wire answers for the status.
+    awaitingSwitchFrame = true;
     // Shared state reaches a view when it becomes current, rather than at every change: a change
     // pushed to a held view would have it *ask* (§3).
     incoming.channel.setLayers(layersOn);
@@ -1191,7 +1205,6 @@ export function createStore(options: StoreOptions): Store {
     // which on a cross-frame switch is not until the map has refitted: the list, the coverage
     // score and every `tesseraId` lookup would be against another view's row space (§8).
     onArtifacts(incoming.channel.current);
-    awaitingSwitchFrame = true;
     replaceProjection('status', {...projections.status, status: 'loading', refusal: null, stale: false});
     publishReplica(projections.replica.lastPlan);
 

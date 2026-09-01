@@ -347,6 +347,40 @@ describe('a switch across frames publishes no camera and drops the selection (§
     expect(asked('far').length).toBeGreaterThan(0);
     expect(store.get('view').composition).not.toBeNull();
   });
+
+  it('takes the refit from inside the switch, where the map actually makes it', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {store, asked} = open({view: 'v0', clock, scheduler});
+    await clock.advance(1);
+    // A layer is on, as the demo opens: building the incoming view's machinery then publishes its
+    // channel's state, and that publish is the first one a subscriber sees during the switch.
+    store.setLayers(['l']);
+    await shown(store, clock, scheduler);
+
+    // **The map refits from a subscription, not after `setCurrentView` returns.** It decides by
+    // `frame()`, which moves with the switch, so its `setView` lands *during* this call — and if
+    // the store's handles are not already pointed at the incoming view by then, that camera is
+    // scheduled on the view being left: the request goes out for a view nobody is looking at, the
+    // incoming one is never asked for, and the switch sits at `loading` for ever. Found by the V2
+    // smoke on the multiview fixture, where the first switch into a group never drew.
+    let refitted = false;
+    const stop = store.subscribe(() => {
+      if (refitted || store.frame() !== OTHER_FRAME) return;
+      refitted = true;
+      store.setView({bbox: [-1000, -500, 1000, 500], width: 800, height: 400});
+    });
+    store.setCurrentView('far');
+    await clock.advance(600);
+    scheduler.flush();
+    stop();
+
+    expect(refitted).toBe(true);
+    expect(asked('far').length).toBeGreaterThan(0);
+    // Nothing was asked for the view left behind after the switch began.
+    expect(asked('v0').filter((r) => r.bbox?.[0] === -1000)).toHaveLength(0);
+    expect(store.get('view').composition).not.toBeNull();
+  });
 });
 
 describe('a view that is not current asks for nothing (§8)', () => {
