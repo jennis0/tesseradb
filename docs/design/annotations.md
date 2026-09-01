@@ -576,6 +576,18 @@ shrink downward, so a parent at 5% of 10 000 declared members can fail a 10% rul
 `require_member_visibility = { fraction = … }` must expect gaps in its lineage. No disclosure follows either way, since each artifact passed its own
 test; what follows is a rendering consequence the caller chooses.
 
+**A withheld artifact is not in the viewer's tree** (owner ruling 2026-09-01, [decision 0117](../decisions/0117-a-child-may-name-several-parents.md)). The structure
+a frontier is selected over, and a budget cuts, is the artifacts this principal passes, with an edge
+wherever one passing artifact is the nearest passing ancestor of another; depth is counted in
+passing artifacts, and one with no passing ancestor is a root of that tree. So the served set at
+every depth is identical to the world in which the withheld artifact never existed, which is what
+C29's *indistinguishable from one that never existed* means for the cut, and substitution stays
+honest because containment is transitive. ⊘ **The implementation walks the whole level today** —
+a withheld artifact still occupies a rung and the climb passes through it, so a budget's settling
+depth is a function of artifacts the viewer may not see, one bit per budget sweep about a region's
+structure. Being corrected, not registered; [`dag-hierarchies.md`](dag-hierarchies.md) §6 carries the example and the fix. The rule holds
+for the `dag` kind identically, where the nearest passing ancestor is a set.
+
 **What remains is frontier *selection*, which is a display concern.** Where a parent and a child both
 pass, something must choose or the map draws both and counts the same points twice at two sizes.
 That is a computation over the edges — for each passing artifact, does a descendant also pass — and
@@ -1073,6 +1085,11 @@ followed through — the first finding that C4's structural closure does not sur
 population, which is the sharpest finding in the document and did not come from drafting it.
 
 ## Appendix R
+
+**r9 — 2026-09-01. A withheld artifact is not in the viewer's tree, and a child may name several
+parents.** §6 states the rule the cut is taken over — the passing artifacts and the edges they
+induce — and marks that the implementation does not yet meet it. The `dag` hierarchy kind is
+[`dag-hierarchies.md`](dag-hierarchies.md)'s; nothing here changes for it beyond the nearest passing ancestor being a set. [decision 0117](../decisions/0117-a-child-may-name-several-parents.md).
 
 **r8 — 2026-08-28. A hull is several rings.** §4.2 records that `hull` carries one ring per
 separated group of the visible members rather than one ring per artifact, and that the vertex budget

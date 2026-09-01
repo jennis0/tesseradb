@@ -65,7 +65,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | **C26** | Drill-down decompression time over the record blob | Low | Accepted — named at the record blob's design |
 | **C27** | An artifact layer's member-label declaration — artifact_visibility = { field, … } | Medium | Accepted — caller's control (⊘ not built) |
 | **C28** | A caller's membership requirement on supplied content — require_member_visibility | High if mis-declared | Accepted — caller's control (⊘ not built) |
-| **C29** | An artifact's parent identifier on the wire | Low | Accepted — bounded to the response's own membership |
+| **C29** | An artifact's parent identifiers on the wire (a list since r57) | Low | Accepted — bounded to the response's own membership, per entry |
 | **C30** | An item's satisfied labels, its reachable views and their positions, and its scoped values, on the drill-down | Low | Accepted — the intersection is the disclosure, and it is the principal's own; the views and values are the principal's own too |
 
 ## Documents

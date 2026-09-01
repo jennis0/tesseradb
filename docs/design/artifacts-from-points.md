@@ -122,9 +122,12 @@ Fixed-length entries are nullable: a point may be noise at a fine resolution and
 coarse one. A variable-length list against `tiered`, or a fixed-length one against `nested`, is a
 refusal rather than a guess.
 
-**A child naming two different parents is refused.** The map is built during the pass that already
-walks the column, and a conflict means the data is not the tree the layer declared — there is no
-correct output, and choosing a parent would publish a hierarchy the caller did not write. A `parent`
+**A child naming two different parents is refused — on a tree.** The map is built during the pass
+that already walks the column, and a conflict means the data is not the tree the layer declared —
+there is no correct output, and choosing a parent would publish a hierarchy the caller did not
+write. **Under `kind = "dag"` the second parent is recorded** (2026-09-01, [decision 0117](../decisions/0117-a-child-may-name-several-parents.md); [`dag-hierarchies.md`](dag-hierarchies.md) §4): the layer
+declared a graph, each lineage row is one path from a root, and the union of the paths is the
+graph. A self-edge and a cycle still refuse, at both entry points. A `parent`
 column on an artifact row and a lineage column disagreeing about one artifact is the same conflict
 and refuses with the same words: they are two spellings of one edge.
 
@@ -396,6 +399,11 @@ a predicate over a `derived` vocabulary is answered by a masked scan, which a vi
 clusters would pay 263 times.
 
 ## Appendix R — review trail
+
+**2026-09-01 — the two-parents refusal is scoped to the tree kinds.** §4 gains the `dag` case, in
+which a second parent is an edge rather than a contradiction. Nothing else in this document moves:
+membership was already one row per `(artifact, entity)`, and a point in ten artifacts was already
+ten rows ([`dag-hierarchies.md`](dag-hierarchies.md) §2).
 
 **2026-08-20 — r7. A key that names nothing creates it, at both entry points, and the fail-open is
 closed three times.** §6.3 is built:

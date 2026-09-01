@@ -11,7 +11,7 @@ this document records what was actually done and why.
 both of which are named there by owner direction. Whether the campaign is tracked here or on issues
 is the owner's to settle.
 
-**Last updated:** 2026-08-30.
+**Last updated:** 2026-09-01.
 
 ---
 
@@ -23,7 +23,7 @@ is the owner's to settle.
 | 0 | Re-run the 5×10⁷ artifact tier | — | **Deferred, deliberately.** It confirms W1 and W2, which bite at rung 2 and not at rung 1, and it costs a ~45 GB build. Take it before rung 2, not before rung 1 |
 | **1** | **GeoNames** | **13,463,857** | **Built, verified and served**, and rebuilt 2026-08-30 on a declared `web_mercator` projection. Not done against §7.1's bar — see §2 |
 | **2** | **Overture places + divisions** | **7.4×10⁷** | **Built and verified**, and rebuilt 2026-08-30 on a declared projection with its boundary polygons in longitude and latitude — see §3 |
-| 3 | MedCPT / PubMed | 3.6×10⁷ | Not started. Staged; MeSH is **not** staged and is a prerequisite |
+| **3** | **MedCPT / PubMed** | **35,920,666** | **Surveyed, not built** — see §4. Staged, and MeSH now staged too (2.7 MB, not the 51.8 GB the plan expected). Blocked on two surface changes the survey found: multi-membership under a levelled kind, and a DAG hierarchy |
 | 4 | PaperSeek + OpenAlex | 1.02×10⁸ | Not started. Staged |
 | 5 | TreeOfLife | 2.33×10⁸ | Not started. Staged |
 | 6 | GBIF | 3.50×10⁹ | Not started. Staged; needs a second local volume |
@@ -41,7 +41,8 @@ path that does not exist. Those two files and `scales.json` were kept back and r
 the citations are about the schema's shape rather than the 31 GB beside it.
 
 **All eight datasets are staged** at `/mnt/nas/joe/tessera/datasets/<name>/<vintage>/`, 2.5 TB, each
-with a README stating what was verified at acquisition and what is the publisher's claim.
+with a README stating what was verified at acquisition and what is the publisher's claim. **A ninth
+was added 2026-09-01** — `mesh/2025/`, rung 3's label side, on the same convention (§4.1).
 
 **`data/` is already mirrored** to `arxiv-tessera/2026-07-27/`, so the plan's §5 cleanup is a
 verification rather than a copy. It has **not** been verified and nothing has been deleted; there is
@@ -345,7 +346,127 @@ registry's count and says the shape is not observed.
 - The **spatial** boundary layer has been built but never served. 386 s of the build goes into
   resolving 73.6M rows against 625,754 polygons, and what that costs a request is unmeasured.
 
-## 4. The machinery this campaign built
+## 4. Rung 3 — MedCPT / PubMed, surveyed and not built
+
+Surveyed 2026-09-01 over the staged bytes, before anything was written. **Nothing is built**: there
+is no `test_corpora/medcpt/`, no `prepare.py` and no declaration. What is settled is what the rung
+is made of, which of the plan's prerequisites are real, and the shape of its artifact layer.
+
+**35,920,666 rows**, counted from the 38 `.npy` headers rather than inferred from the chunk list —
+768-dimensional `float32`, 105 GB. The plan's 3.6×10⁷ is right.
+
+### 4.1 Three things the survey corrected in the plan
+
+**The 51.8 GB PubMed baseline is not a prerequisite.** The plan (§9.3) says acquiring it and
+extracting `(pmid, descriptor, tree_numbers)` is "a prerequisite, not a step". It is neither: the
+staged `pubmed_chunk_N.json` files already carry, per PMID, the date, the title, **the abstract**
+and **the MeSH descriptors** with their qualifiers and major-topic flags. The baseline is now worth
+its 51.8 GB only for `journal` and `publication_type`, two of the three rendered columns the plan
+named, and that is a scope choice rather than a gate.
+
+**What was actually missing is the MeSH tree, and it is 2.7 MB.** The chunks name descriptors; they
+do not say where a descriptor sits. `mtrees2025.bin` is the NLM's flat `Descriptor Name;TreeNumber`
+file and it is the whole of the structure. Acquired 2026-09-01 to
+`/mnt/nas/joe/tessera/datasets/mesh/2025/`, with its own README carrying the counts below and the
+join's cost. The 2026 vintage is not published at that path; 2025 already post-dates the corpus.
+
+**Abstracts are staged and free to read.** The plan defers them to rung 4 as the forcing case for
+the streaming text column, on the reasoning that they would have to be joined from the baseline.
+They are in the chunks — roughly 30 GB of strings at 36M rows — so whether rung 3 forces that work a
+rung early is now a decision rather than an acquisition.
+
+### 4.2 The polyhierarchy is not what blocks the layer
+
+The plan expects rung 3 to force a ruling on MeSH's polyhierarchy, marks it **blocking** in §7.1,
+and lists it in §8 as one of the things the campaign will break. Measured, that is not where the
+rung stops. Two mismatches were found and they are independent.
+
+| | Measured | |
+|---|---|---|
+| **An article is in many concepts** | mean **10.6** descriptors, median 10, max 48 · 3.6 of them major topics | the blocker |
+| **A concept is at many positions** | **52.9%** of 30,954 descriptors carry more than one tree number, up to 24 · 2,633 span more than one top-level branch | not the blocker |
+
+**Keyed by tree number, MeSH is a strict tree.** 64,883 nodes, 115 roots across 16 branches, depth
+13, every node's parent its own dotted prefix and **zero** nodes whose prefix is absent. So the
+two-parents refusal (`artifacts-from-points.md` §4) need never fire, and the case the plan expected
+to argue about dissolves without a surface change.
+
+**What stops the rung is multi-membership.** A member source is one row per point, and the only
+hierarchy kind that reads a list as plain multi-membership is `flat`, which carries no edges.
+`tiered` wants a fixed list of one entry per level; `nested` wants a single lineage. Neither can say
+*this article is in ten concepts*, and that is true of the flat spelling of the layer as well — it is
+not a property of the hierarchy at all. **A levelled kind admitting several member rows for one
+point is the change this rung requires**, and it is required under every option below.
+
+### 4.3 The layer's shape — an owner ruling, 2026-09-01
+
+Four routes were put up; the ruling is **key the artifacts by descriptor and let a child name
+several parents**, which makes the layer a **DAG** rather than a tree. So two surface changes are
+needed rather than one: multi-membership under a levelled kind, and a hierarchy that is declared as
+a DAG. ⊘ **Neither is designed and neither is built.** Both are named here at the rung that forces
+them; the rung cannot be built correctly until they exist.
+
+**Why not key by tree number**, which would have cost nothing. Because the duplication cascades. A
+polyhierarchical concept's *descendants* are duplicated with it — `Respiratory Tract Neoplasms` is
+itself at two positions, so everything under it appears twice — and 30,954 concepts become 64,883
+artifacts. A client browsing that sees one concept, with one count, in several places, with nothing
+on the wire to say it is one thing. It remains the cheap fallback if the DAG is not taken.
+
+**A DAG corrupts no count, and that was checked rather than assumed.** The number beside a served
+artifact is always the masked count of the artifact's **own declared membership** (`annotations.md`
+§3), never a sum over children; roll-up within a level is *substitution* of a parent for its
+children rather than aggregation ([decision 0087](decisions/0087-cross-level-edges-are-information-not-rollup.md));
+and containment is verified one intersection per edge, so a concept need only be a subset of each of
+its parents, which it is. The two-parents refusal is there because ambiguous data is not the tree the
+layer *declared* — a layer declaring a DAG is not ambiguous, and this one would be declaring the
+shape the NLM publishes.
+
+### 4.4 Two coverage figures that must travel with every number from this rung
+
+Both are properties of the source and neither is repairable by preparation.
+
+**MeSH coverage runs with time, and the chunks are in PMID order.** Indexing lags publication:
+
+| chunk | articles | with MeSH | with abstract |
+|---|---|---|---|
+| 0 (1975–1979) | 977,492 | **100.0%** | 43.5% |
+| 18 (to 2009) | 940,707 | 86.8% | 69.3% |
+| 37 (to 2023) | 380,761 | **37.5%** | 87.0% |
+
+A whole-corpus MeSH figure is a weighted average over a strong trend, and abstract coverage runs the
+opposite way. ⊘ Neither was measured over all 38 chunks; three were read.
+
+⊘ **5.87% of descriptor mentions do not resolve against the 2025 vintage, and the miss is not
+random.** 89 descriptors carry all of it — headings the NLM has since retired or renamed, weighted
+towards the ancestry and ethnicity terms revised in 2022–23 (`african americans`,
+`asian continental ancestry group`). The articles were indexed against the MeSH of their year,
+running back to 1975; the file is one vintage. Measured over chunk 18: 25,907 distinct descriptors
+seen, 89 unresolved (0.3% of distinct, 5.87% of mentions). Dropping them drops a slice with a
+subject. The repair, if one is wanted, is the NLM's replacement-terms file and not a fuzzy match.
+**Ruled 2026-09-01: dropped, and said so** — the rung is a demonstrator and the slice is stated
+rather than repaired.
+
+### 4.5 The projection experiment becomes two views
+
+Plan §6.2 proposes building the arXiv geometry both ways — full-dimension cosine kNN into UMAP
+against the shipped PCA-64 route — and judging on the tile-occupancy table. **Owner direction,
+2026-09-01: run the two routes as two views of one entity space**, and develop it on arXiv's
+2.4×10⁶ (or a subset of it) so iteration is fast, rather than on rung 3.
+
+The multi-view machinery takes this unmodified — several row spaces over one entity space, each with
+its own frame, `projection = "none"` for an abstract embedding, and a layer named on several views
+drawn in each ([`../test_corpora/multiview/`](../test_corpora/multiview/README.md), which builds and
+verifies as of 2026-08-31). What it adds over the plan's form is that **computed content is per
+view**, so every artifact gets a centroid and a box in each projection over the *same* membership.
+Whether PCA-64 scatters a concept that full dimension holds together becomes a number per artifact
+rather than an aggregate autocorrelation figure and a judgement about how the pictures look. It also
+ships as a corpus rather than as a probe, so the two routes stay side by side instead of one being
+chosen and the other discarded.
+
+⊘ **Not run.** The GPU was held by a Windows-side process when the plan was written; on 2026-09-01
+it holds 3.7 of 10 GB and is usable.
+
+## 5. The machinery this campaign built
 
 - **[`../test_corpora/`](../test_corpora/README.md)** — one directory per rung, in git: `prepare.py`,
   `corpus.toml`, `README.md`. Derived files go to `$TESSERA_LADDER/<rung>` (default
@@ -362,7 +483,7 @@ registry's count and says the shape is not observed.
   join (§3). ⊘ Its Python is 3.10, so it has no `tomllib`; `~/venvs/projection` does.
 - **`run_demo.sh --terms / --ranks / --label`**, and `custom` on ports of its own — see §6.
 
-## 5. Cross-cutting findings
+## 6. Cross-cutting findings
 
 Ordered by how much they matter beyond this rung.
 
@@ -406,7 +527,7 @@ is not in doubt. GeoNames is the first corpus where the two come apart, and the 
 spelling for both. Routed around here by materialising the hole as an explicit artifact (1,373 of
 them, against 464,000 real); **not raised as an issue and not designed**.
 
-## 6. Problems found in tooling, and what was done
+## 7. Problems found in tooling, and what was done
 
 **`run_demo.sh` reported a scale ready when another process held the port.** The readiness poll asks
 the *port*, not the process it started, so a stale server answered, the script declared success, and
@@ -424,25 +545,46 @@ into `dd195c9`, a commit about the rings track. Content intact, provenance misle
 
 **`test_corpora/` is untracked** and needs its own commit.
 
-## 7. Open, and what is next
+## 8. Open, and what is next
 
 **Owner calls outstanding**
 
-- The design pass on artifact response volume (§5, and the memo it points at).
+- The design pass on artifact response volume (§6, and the memo it points at).
 - Whether `parent_edges`' two nulls need separating, and whether that is worth an issue.
 - Whether this tracker is the campaign's status record or the campaign moves to issues.
+- **Whether rung 3 takes its abstracts** (§4.1). They are staged, so including them forces the
+  streaming text column a rung earlier than the plan schedules it.
+- ~~Whether rung 3 is worth the 51.8 GB baseline~~ — **ruled 2026-09-01: not needed.** `journal`
+  and `publication_type` are not taken; the rung renders what the chunks carry.
+- ~~What to do with the 5.87% of unresolved descriptor mentions~~ — **ruled 2026-09-01: dropped**,
+  and the drop is stated beside every coverage figure (§4.4). This is a technology demonstrator, not
+  a production system, and the replacement-terms repair is not worth its step.
+
+**Designed 2026-09-01, provisional** — [`design/dag-hierarchies.md`](design/dag-hierarchies.md),
+reviewed once (r2), all five rulings made, awaiting promotion
+
+- ~~Several member rows for one point under a levelled kind.~~ **Not a change.** A member source is
+  one row per `(artifact, entity)`, not one per point, and the reader has no per-entity uniqueness
+  under any kind; `prepare.py` explodes the `m` field and today's reader takes it (design §2). What
+  the survey described was the point-source *list* column, which nobody needs here.
+- **A hierarchy declared as a DAG** — `kind = "dag"`, a child naming several parents recorded rather
+  than refused, depth the longest path, the cut reading every depth's count. Measured on the MeSH
+  file: 30,954 descriptors, 42,287 edges, 30.0% with more than one parent, acyclic, longest path 17
+  (`probes/2026-09-01-mesh-dag/`). The one question the data forces is the membership's closure:
+  ≈3.1×10⁸ rows explicit against ≈1.7×10⁹ closed upward, extrapolated from chunk 18.
 
 **Rung 1 work not done**
 
 - `places/containment` — the third layer, from `hierarchy.txt`, as a `nested` lineage. Needs a DAG
-  walk and will meet genuine multiple parents, which is the polyhierarchy refusal for real rather
-  than as the keying artefact rung 1 already dissolved.
+  walk and will meet genuine multiple parents — **the same surface change §4.3 rules for**, arriving
+  at rung 1 rather than at rung 3.
 - Everything in §2's ❌ rows: the 0091 test, the oracle census, the write cycle, p99 and a screenshot.
 
-**Before rung 2**
+**Before rung 3**
 
-- Rung 0, to confirm W1 and W2 reproduce and whether the pre-flight now refuses rather than being
-  killed.
-- The `spatial` extension, for the `division_area` point-in-polygon join.
-- A decision on whether the artifact volume finding blocks a rung whose boundary layer is larger
-  still.
+- **The projection experiment as two views** (§4.5), developed on arXiv's 2.4×10⁶ or a subset of it.
+  This is what is being worked on.
+- The DAG design above, reviewed and ruled.
+- Rung 0, still not taken. It confirms W1 and W2 reproduce and whether the pre-flight refuses rather
+  than being killed. ⊘ Rung 2 passed without either wall firing (§3), which is a reason to want the
+  controlled run rather than a reason to drop it.

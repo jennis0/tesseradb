@@ -1,9 +1,9 @@
-# Client-components campaign file ownership — the allowlist behind `scripts/check-track-allowlist.sh`.
+# DAG-hierarchies campaign file ownership — the allowlist behind `scripts/check-track-allowlist.sh`.
 #
-# Rewritten 2026-08-25 for the client-components campaign (controller), replacing the artifact
-# scale campaign's map, whose tracks have all merged. Tracks branch from `main` at 26ffaee (the
-# decision files 0095–0101) and merge back into it; the plan is docs/client-handover.md §2 and the
-# status record is docs/client-delivery.md.
+# Rewritten 2026-09-01 (controller) for the delivery of decision 0117 / `docs/design/dag-hierarchies.md`,
+# replacing the client-components campaign's map, whose tracks have all merged. Three tracks branch
+# from `main` at the promotion commit and merge back into it; the briefs are in
+# `.superpowers/sdd/2026-09-01-dag-hierarchies/` and the status record is `docs/ingest-campaign.md` §8.
 #
 # The rule this file gives teeth to: ownership is an allowlist, not an intention. A track that
 # needs a file outside its list **stops and reports** — the controller reassigns or sequences.
@@ -11,432 +11,63 @@
 #
 # Path syntax: shell glob, matched with bash `[[ path == pattern ]]`, so `*` spans `/`. Paths
 # are repo-relative, exactly as `git diff --name-only` prints them.
-#
-# Wave 1 tracks (merged 2026-08-25): step01, docs6, s3. Wave 2: step2 (merged). Wave 3: step3 (merged). Wave 4 merged. Wave 5 merged. Wave 6 (owner rulings 2026-08-26): s1 (the CORS surface), designs6 (the selection operand's design), smoke (the headed path), toponymy (the tiered layer's levels).
 
-# FROZEN (controller, 2026-08-25). Decisions and the two normative designs change only through
-# the owner; scripts are the checks themselves; authz and plugin crates are outside this campaign.
-# `crates/tessera-wire/*` came OFF the previous campaign's freeze for this one: the D12 column is
-# a points-frame schema change and `payload.rs` is the only place that schema is built — a freeze
-# that made the ruled column unbuildable would be the stale freeze the manifest.rs precedent
-# (2026-08-22) says is worse than none. It is owned by [track.s3] alone.
+# FROZEN (controller, 2026-09-01). Decisions and the normative designs change only through the
+# owner — the design for this campaign is already promoted; a track that finds it wrong reports.
 [frozen]
 paths = [
   "crates/tessera-authz/*",
   "crates/tessera-plugin/*",
   "docs/decisions/*",
-  "docs/design/architecture.md",
-  "docs/design/write-path.md",
+  "docs/design/*",
   "scripts/*",
 ]
 
-# Files more than one track legitimately touches; expected to conflict textually at merge and
-# reviewed at integration. `clients/ts/package.json`: step01 renames workspaces, docs6 adds the
-# wire-example workspace. `docs/design/client-components.md` is the controller's, edited at
-# integration only — a track that finds the design wrong reports it.
+# Shared: `artifacts.rs` holds the record → engine interface (the store track changes what a record
+# carries; the engine track changes what is read from it) and is expected to conflict textually at
+# merge, resolved by the controller. The tracker is appended by every track.
 [shared]
 paths = [
   "Cargo.lock",
-  "clients/ts/package.json",
-  "clients/ts/package-lock.json",
-  "docs/client-delivery.md",
+  "crates/tessera-engine/src/artifacts.rs",
+  "docs/ingest-campaign.md",
 ]
 
-# Wave 1 — steps 0 and 1: the presented frame into the client, then the store; the @tesseradb
-# rename. Everything under clients/ts except the wire-example workspace docs6 creates.
-[track.step01]
+# Track store — the declaration, the build, the durable record, the ingest refusals and cycle check.
+[track.store]
 paths = [
-  "clients/ts/core/*",
-  "clients/ts/viewer/*",
-  "clients/ts/spike/*",
-  "clients/ts/scripts/*",
-  "clients/ts/README.md",
-  "clients/ts/tsconfig.base.json",
-  "run_demo.sh",
-  "docs/design/client-architecture.md",
-]
-
-# Wave 1 — step 6, C3's documents: contracts §3.2 amended (documenting the wire as it is — no
-# behaviour changes), the OpenAPI description and the test that keeps it true, the worked decodes
-# sharing no code with ours, the obligations list.
-[track.docs6]
-paths = [
-  "docs/design/contracts.md",
-  "docs/design/client-obligations.md",
-  "docs/openapi/*",
-  "docs/design/README.md",
-  "clients/ts/wire-example/*",
-  "crates/tessera-server/tests/openapi.rs",
-  "crates/tessera-server/Cargo.toml",
-  "reference/*",
-]
-
-# Wave 1 — S3, the per-point membership column (D12): the wire's points frame gains per named
-# layer one nullable u64; the engine resolves deepest-served per point; the server plumbs it. Owns
-# the memo that carries the proposed leak-register row (C30) for the owner.
-[track.s3]
-paths = [
-  "crates/tessera-wire/*",
-  "crates/tessera-engine/src/*",
-  "crates/tessera-engine/tests/*",
-  "crates/tessera-server/src/*",
-  "crates/tessera-server/tests/viewport_membership.rs",
-  "crates/tessera-server/tests/http.rs",
-  "crates/tessera-types/src/*",
-  "docs/evidence/memos/2026-08-25-d12-membership-column.md",
-]
-
-# Wave 2 — step 2 (controller, 2026-08-25): `@tesseradb/deck` and `@tesseradb/components`, the
-# viewer as the explorer plus instruments, box selection in the store (region counting is store
-# work, so core is on the list), the harness beside the gate. Branches from main at the step 0–1
-# merge (53eb4a7).
-[track.step2]
-paths = [
-  "clients/ts/core/*",
-  "clients/ts/deck/*",
-  "clients/ts/components/*",
-  "clients/ts/harness/*",
-  "clients/ts/viewer/*",
-  "clients/ts/scripts/*",
-  "clients/ts/README.md",
-  "clients/ts/tsconfig.base.json",
-  "run_demo.sh",
-]
-
-# Wave 3 — step 3 (controller, 2026-08-25): artifacts and encoding — the membership column
-# consumed, the lookup texture, the four artifact elements, lasso, the sidecar retired. Same files
-# as step 2; branches from main at the step-2 merge.
-[track.step3]
-paths = [
-  "clients/ts/core/*",
-  "clients/ts/deck/*",
-  "clients/ts/components/*",
-  "clients/ts/harness/*",
-  "clients/ts/viewer/*",
-  "clients/ts/scripts/*",
-  "clients/ts/README.md",
-  "clients/ts/tsconfig.base.json",
-  "run_demo.sh",
-]
-
-# Wave 4 — steps 4 and 5 in parallel (controller, 2026-08-25). Disjoint by construction: step 4 is
-# the examples, `@tesseradb/react` and the harness's C1-page assertions; step 5 is the Python
-# package, the notebook example and the components' bundle entry. Both branch from main at the
-# step-3 merge. `clients/ts/package.json` is shared (both add workspaces).
-[track.step4]
-paths = [
-  "clients/ts/react/*",
-  "clients/ts/examples/*",
-  "clients/ts/harness/*",
-  "clients/ts/README.md",
-]
-
-[track.step5]
-paths = [
-  "clients/py/*",
-  "clients/ts/components/*",
-  "notebooks/*",
-  "CLAUDE.md",
-]
-
-# Wave 5 — the owner's review (controller, 2026-08-25). `corpus`: data/notebook's declarations
-# migrated to the current configuration surface, built, and served as the demo's dataset with its
-# HDBSCAN tree, topic labels and taxonomy. `ui`: the four bugs and the visual pass against the
-# design boards. Disjoint: corpus owns the data pipeline and the two demo scripts; ui owns the
-# client packages. Both branch from main at 28d82ec.
-[track.corpus]
-paths = [
-  "notebooks/*",
-  "data/notebook/*",
-  "run_demo.sh",
-  "clients/ts/scripts/*",
-  "docs/evidence/memos/2026-08-25-notebook-corpus-as-demo.md",
-]
-
-[track.ui]
-paths = [
-  "clients/ts/core/*",
-  "clients/ts/deck/*",
-  "clients/ts/components/*",
-  "clients/ts/harness/*",
-  "clients/ts/viewer/*",
-  "clients/ts/examples/*",
-  "clients/ts/react/*",
-  "clients/ts/README.md",
-  "docs/evidence/mockups/client-components/*",
-]
-
-# Wave 6 — the owner's rulings of 2026-08-26 (controller). `s1` builds decision 0102's surface;
-# `designs6` writes the selection operand's design and takes it through review (no code); `smoke`
-# gives the smoke scripts the headed browser the harness already has; `toponymy` finds why a
-# tiered layer's level 0 serves 186 artifacts where the pipeline declares 16. All four branch from
-# main at the wave-5 merge.
-[track.s1]
-paths = [
-  "crates/tessera-server/src/*",
-  "crates/tessera-server/tests/*",
-  "docs/design/configuration.md",
-  "clients/ts/README.md",
-]
-
-[track.designs6]
-paths = [
-  "docs/design/selection-operand.md",
-  "docs/design/README.md",
-]
-
-[track.smoke]
-paths = [
-  "clients/ts/viewer/*",
-  "clients/ts/harness/*",
-]
-
-[track.toponymy]
-paths = [
-  "notebooks/*",
-  "docs/evidence/memos/2026-08-26-tiered-levels.md",
-]
-
-# Wave 7 — the owner's look review (controller, 2026-08-26). `look`: hulls only on hover and
-# selection on every layer, labels on the frontier sized by level, the mark glow down, the density
-# wash off by default. `hull`: the served hull becomes a concave (alpha) shape rather than a convex
-# wrap. Disjoint — the first is the client packages, the second is the engine's derived content.
-[track.look]
-paths = [
-  "clients/ts/core/*",
-  "clients/ts/deck/*",
-  "clients/ts/components/*",
-  "clients/ts/harness/*",
-  "clients/ts/viewer/*",
-]
-
-[track.hull]
-paths = [
-  "crates/tessera-engine/src/derived.rs",
-  "crates/tessera-engine/tests/*",
-  "docs/design/annotations.md",
-  "docs/evidence/memos/2026-08-26-concave-hulls.md",
-]
-
-# Wave 8 — the shape question (controller, 2026-08-27). An investigation, not a build: what shape
-# family a served hull should be for a density clustering, what else is worth carrying, and how a
-# layer author chooses. Owns its design document and its probe directory.
-[track.shape]
-paths = [
-  "docs/design/artifact-shapes.md",
-  "docs/evidence/memos/2026-08-27-artifact-shapes.md",
-  "probes/2026-08-27-artifact-shapes/*",
-  "docs/design/README.md",
-]
-
-# Wave 9 — several rings (controller, 2026-08-27, on the owner's ruling of D). Settles the family
-# under the multi-ring ruling, takes the triangulation measurement C was blocked on, and builds it:
-# the engine's derived shape, the wire's artifacts frame, the contracts amendment, the design.
-[track.rings]
-paths = [
-  "crates/tessera-engine/src/derived.rs",
-  "crates/tessera-engine/tests/*",
-  "crates/tessera-wire/*",
-  "crates/tessera-types/src/layer.rs",
-  "crates/tessera-server/src/viewer.rs",
-  "crates/tessera-server/tests/*",
-  "docs/design/artifact-shapes.md",
-  "docs/design/contracts.md",
-  "docs/design/annotations.md",
-  "probes/2026-08-27-artifact-shapes/*",
-  "Cargo.toml",
-  "crates/tessera-engine/Cargo.toml",
-]
-
-# Wave 9b — the client reads several rings (controller, 2026-08-27). The wire's hull became
-# `list<list<uint32>>`; the decoder reads a flat list and the pick path assumes one polygon per
-# artifact. Specified in `artifact-shapes.md` §9.
-[track.ringsclient]
-paths = [
-  "clients/ts/core/*",
-  "clients/ts/deck/*",
-  "clients/ts/components/*",
-  "clients/ts/harness/*",
-  "clients/ts/viewer/*",
-]
-
-# Wave 10 — the contour and the hover (controller, 2026-08-28, on the owner's third look review).
-[track.contours]
-paths = [
-  "clients/ts/core/*",
-  "clients/ts/deck/*",
-  "clients/ts/components/*",
-  "clients/ts/harness/*",
-  "clients/ts/viewer/*",
-]
-
-# Wave 11 — the dig's vertex budget (controller, 2026-08-28). Settles artifact-shapes.md §8 B on
-# fresh measurement: the cap is acting as a fidelity control, which B says it must not.
-[track.budget]
-paths = [
-  "crates/tessera-engine/src/derived.rs",
-  "crates/tessera-engine/tests/*",
-  "docs/design/artifact-shapes.md",
-  "probes/2026-08-27-artifact-shapes/*",
-]
-
-# Wave 12 — the contour and its cost (controller, 2026-08-28). Acts on the owner's containment
-# ruling and on the measurement that the hull is 94% of an artifacts request while the client draws
-# one: serve the shape where it is drawn, reconsider the family at that scale, smooth as
-# DataMapPlot does.
-[track.contour2]
-paths = [
-  "crates/tessera-engine/src/*",
-  "crates/tessera-engine/tests/*",
-  "crates/tessera-server/src/*",
-  "crates/tessera-server/tests/*",
-  "crates/tessera-types/src/layer.rs",
-  "crates/tessera-wire/*",
-  "clients/ts/core/*",
-  "clients/ts/deck/*",
-  "clients/ts/components/*",
-  "docs/design/artifact-shapes.md",
-  "docs/design/contracts.md",
-  "docs/openapi/tessera.yaml",
-  "probes/2026-08-27-artifact-shapes/*",
-]
-
-# Wave 13 — the shape's own cost (controller, 2026-08-28, owner direction: fix the computation, do
-# not parallelise it — request-level parallelism is the boundary). Quantise the input, cache the
-# result, then re-measure the family.
-[track.shapeperf]
-paths = [
-  "crates/tessera-engine/src/*",
-  "crates/tessera-engine/tests/*",
-  "crates/tessera-store/src/derived.rs",
-  "docs/design/artifact-shapes.md",
-  "probes/2026-08-27-artifact-shapes/*",
-]
-
-# Wave 14 — occupied cells without a scan (controller, 2026-08-28, owner direction: make serving
-# every hull cheap enough that the client's narrowing is an optimisation, not a requirement).
-[track.cells]
-paths = [
-  "crates/tessera-engine/src/*",
-  "crates/tessera-engine/tests/*",
-  "crates/tessera-store/src/derived.rs",
-  "crates/tessera-spatial/src/*",
-  "docs/design/artifact-shapes.md",
-  "probes/2026-08-27-artifact-shapes/*",
-]
-
-# Wave 15 — the gather (controller, 2026-08-28). Contained and general: bin on the Morton code's
-# high bits so positions are un-interleaved only for the representatives that survive. The dig is
-# worked separately and is not this track's.
-[track.gather]
-paths = [
-  "crates/tessera-engine/src/derived.rs",
-  "crates/tessera-engine/tests/hull_geometry.rs",
-  "crates/tessera-spatial/src/*",
-  "docs/design/artifact-shapes.md",
-]
-
-# Wave 16 — the dig (controller, 2026-08-28). The three changes explored together because they
-# interact: index the ring's edges, stop digging at the input's own resolution, then re-derive the
-# family comparison. Shares `derived.rs` with [track.gather]; conflicts are expected and reviewed
-# at integration.
-[track.dig]
-paths = [
-  "crates/tessera-engine/src/derived.rs",
-  "crates/tessera-engine/tests/hull_geometry.rs",
-  "crates/tessera-engine/tests/hull_triangulation.rs",
-  "crates/tessera-engine/tests/common/*",
-  "docs/design/artifact-shapes.md",
-]
-
-# The shape-membership work (docs/design/polygon-membership.md §12), stage 1: the geometry core.
-# Branches from main at 8ad499e2.
-[track.shape-core]
-paths = [
-  "crates/tessera-spatial/*",
-  "docs/design/polygon-membership.md",
-  "docs/artifact-delivery.md",
-]
-
-# Stage 2 of the shape work (polygon-membership.md §12): the artifact type. Branches from
-# artifacts/shape-core; carries the core uncommitted until stage 1 is committed.
-[track.shape-type]
-paths = [
-  "crates/tessera-spatial/*",
-  "crates/tessera-types/src/layer.rs",
+  "crates/tessera-types/*",
   "crates/tessera-build/*",
-  "crates/tessera-lifecycle/src/membership.rs",
-  "crates/tessera-lifecycle/src/wal.rs",
-  "crates/tessera-lifecycle/src/registry.rs",
-  "crates/tessera-engine/*",
+  "crates/tessera-lifecycle/*",
   "crates/tessera-store/*",
-  "crates/tessera-server/*",
+  "crates/tessera-engine/src/write.rs",
+  "crates/tessera-engine/tests/artifact_hierarchy.rs",
   "crates/tessera-cli/*",
-  "clients/py/*",
-  "conformance/*",
-  "test_corpora/overture/*",
-  "docs/design/polygon-membership.md",
-  "docs/design/configuration.md",
-  "docs/design/annotations.md",
-  "docs/design/annotation-representation.md",
-  "docs/artifact-delivery.md",
-  "docs/openapi/*",
+  "crates/tessera-corpus/*",
+  "test_corpora/*",
 ]
 
-# Stage 3 of the shape work (polygon-membership.md §12): the wire and the client. Branches from
-# campaign/rung-2-overture at 16c9db4e.
-[track.shape-wire]
+# Track engine — the cut over the viewer's tree, the lineage over parent lists, the membership
+# column's tie, `rung`, and the wire column.
+[track.engine]
 paths = [
+  "crates/tessera-engine/src/cut.rs",
+  "crates/tessera-engine/src/membership_column.rs",
+  "crates/tessera-engine/src/viewport.rs",
+  "crates/tessera-engine/src/derived.rs",
+  "crates/tessera-engine/src/lib.rs",
+  "crates/tessera-engine/tests/artifact_row_major.rs",
+  "crates/tessera-engine/tests/artifact_projection.rs",
+  "crates/tessera-engine/tests/membership_column.rs",
+  "crates/tessera-engine/tests/cut*.rs",
   "crates/tessera-wire/*",
   "crates/tessera-server/*",
-  "crates/tessera-engine/*",
-  "crates/tessera-types/src/layer.rs",
-  "crates/tessera-build/*",
-  "crates/tessera-lifecycle/src/membership.rs",
-  "crates/tessera-lifecycle/src/registry.rs",
-  "crates/tessera-store/*",
-  "crates/tessera-spatial/*",
-  "clients/ts/*",
-  "clients/py/*",
-  "conformance/*",
-  "docs/design/contracts.md",
-  "docs/design/artifact-shapes.md",
-  "docs/design/client-components.md",
-  "docs/design/client-interaction.md",
-  "docs/design/polygon-membership.md",
-  "docs/design/annotations.md",
-  "docs/openapi/*",
-  "docs/artifact-delivery.md",
-  "docs/client-delivery.md",
-  "docs/evidence/*",
   "reference/oracle/*",
 ]
 
-# Stage 4 of the shape work (polygon-membership.md §12): the region leaf.
-[track.shape-region]
+# Track client — the TypeScript client and its harness.
+[track.client]
 paths = [
-  "crates/tessera-engine/*",
-  "crates/tessera-filter/*",
-  "crates/tessera-server/*",
-  "crates/tessera-wire/*",
-  "crates/tessera-types/*",
-  "crates/tessera-build/*",
-  "crates/tessera-spatial/*",
-  "crates/tessera-store/*",
-  "clients/ts/*",
-  "clients/py/*",
-  "conformance/*",
-  "reference/*",
-  "docs/design/selection-operand.md",
-  "docs/design/polygon-membership.md",
-  "docs/design/contracts.md",
-  "docs/design/filter-surface.md",
-  "docs/design/filter-result-cache.md",
-  "docs/design/client-components.md",
-  "docs/design/client-interaction.md",
-  "docs/design/configuration.md",
-  "docs/openapi/*",
-  "docs/artifact-delivery.md",
+  "clients/*",
   "docs/client-delivery.md",
-  "docs/evidence/*",
 ]

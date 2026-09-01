@@ -134,4 +134,5 @@ prevent.
 | [0114](0114-the-drill-down-serves-the-satisfied-labels-only.md) | 2026-08-31 | The item drill-down serves the labels the asking session satisfies, and no others |
 | [0115](0115-a-dropped-view-key-is-reusable.md) | 2026-09-01 | A dropped view key is reusable, and an internal incarnation keeps its predecessor's artifacts out |
 | [0116](0116-a-scoped-values-address-is-the-attribute-and-the-key.md) | 2026-09-01 | A scoped value's address is (attribute → its group, key), and the join rule is decided on the serial writer |
+| [0117](0117-a-child-may-name-several-parents.md) | 2026-09-01 | A `dag` hierarchy kind: a child may name several parents; the artifacts frame names every served parent; a withheld artifact is not in the viewer's tree |
 

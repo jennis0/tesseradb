@@ -477,7 +477,7 @@ the mis-split word does not find the document. `lindera` is the design's named e
 | `artifacts` | O | inline array, instead of `source`, for an authored layer — the keys below |
 | `membership` | R | `enumerated` \| `spatial` \| `{ attribute = <field> }`. `{ attribute = f }` is a **predicate**: its artifacts are derived from the indexed column `f`, whose distinct values they are, so such a layer declares no `content`, no `depends_on`, no `levels`, no `artifact_visibility.field`, no `layout` and no hierarchy but `flat` — each of those would register a layer that is reachable and serves nothing. `spatial` reads `[layer.shape]`, and its artifacts are **published rows** each carrying a shape ([`polygon-membership.md`](polygon-membership.md) §6.2): a spatial layer may declare content, `depends_on`, `levels`, any hierarchy and a `layout` pin; what it may not declare is a proportional criterion or `artifact_visibility.field` |
 | `value_set` | D `closed` | whether a member key the layer's artifacts do not declare is refused, or creates an artifact carrying nothing but its name ([`artifacts-from-points.md`](artifacts-from-points.md) §3). `closed` makes `artifacts` the roster; `open` makes it enrichment, so a cluster the points name and the table omits exists without a title, a cluster the table carries and no point names is an artifact with no members, and neither is an error. **It governs both entry points**: a build mints from a member source, and an ingest batch mints from a column named for the layer, at the close of the commit window that allocates the points. What `open` costs is that a mistyped key becomes a permanent object rather than a refusal — reported, at both entry points, and not bounded |
-| `hierarchy` | R | `{ kind = flat \| nested \| stacked \| tiered, prune_children = bool }` — see below |
+| `hierarchy` | R | `{ kind = flat \| nested \| dag \| stacked \| tiered, prune_children = bool }` — see below |
 | `layout` | O | the **serving-layout pin**: `rows` (one row-space bitmap per artifact), `column` (one artifact label per row, for a level whose memberships partition the corpus) or `list` (a list of labels per row, where they overlap). Absent — the pick is automatic, taken **at the build** from the bundle's own row space and re-evaluated at every compaction fold ([decision 0094](../decisions/0094-the-serving-layout-is-chosen-at-build-and-re-evaluated-at-the-fold.md)). What it reads is the level's **`everywhere` fraction** — how much of the level is too wide for any node of the tile index — and its artifact count; ⊘ the threshold on the first is provisional (`tessera_store::derived::ROW_MAJOR_EVERYWHERE_FRACTION`). Blocks per artifact is **reported and no longer read** (decision 0092's (c), now emitted by the build itself): the 2026-08-22 bracket moved it 6 → 12 with the cost *falling*, and the one quantity tracking the cost was the `everywhere` fraction. Present, it pins **every level of the layer**, at the build and at every fold after it, and a fold never overturns it. **Nothing on the wire names a layout** — both forms answer identically, so this is a latency choice and not a contract. A word outside the three is refused, and a pin on an attribute membership is refused: a single-valued attribute's membership *is* the column, so it has no second form for a pin to select between. A spatial layer takes a pin: its membership is resolved into a per-row source when a segment is published, and the pin selects between the same forms it selects between for an enumerated layer. ⊘ `column` on a level whose memberships turn out to **overlap** cannot be refused at parse — single-valuedness is a property of the data — so it is checked at the first fold, which composes the level artifact-major and says so in its trace rather than writing a column whose labels would each be whichever artifact wrote last |
 | `shape` | O | `{ kind = "bbox" \| "circle" \| "ellipse" \| "polygon" }` — **only** on `membership = "spatial"`, and refused elsewhere as a rule nothing evaluates. The kind and nothing else: every kind is **exact** — the members are the rows whose stored position is inside the shape, closed on every side for a box, even-odd with an edge inside for a polygon ([`polygon-membership.md`](polygon-membership.md) §4.1) — so there is no depth, and a `depth` written is refused naming §6.1 of that design. Each artifact carries its geometry in the kind's own fields: `min_x`, `min_y`, `max_x`, `max_y` (inline `bbox = [min_x, min_y, max_x, max_y]`); `cx`, `cy`, `r` (`circle = [cx, cy, r]`); `cx`, `cy`, `a`, `b`, `angle` (`ellipse = [cx, cy, a, b, angle]`, the angle in degrees anticlockwise from the x axis); a WKB `geometry` column — GeoParquet's own name — for a polygon (`wkt = "POLYGON ((…))"` inline). A polygon is an OGC `MultiPolygon`: parts, each a ring and its holes. The shape is canonicalised at the build to the view's grid and what that did is **reported, never refused** — clipped to the extent, wholly outside, rings dropped, a table that looks written in degrees for a view that is not; what refuses is a coordinate that is not one, an inverted box, a non-positive radius or axis, and a polygon over the deployment's `max_shape_vertices` (default 10⁶). A row with no geometry is published with an empty shape and reported. A layer may span several views: the geometry is declared once and resolved per view; ⊘ views declare no `projection` yet, so a layer in more than one is warned rather than refused. ⊘ A `spatial` layer with **no** `shape` is the state this surface has always had: declared, registered, and holding nothing, because it has no shape to publish artifacts against |
 | `visibility` | R | an access label, or `public` |
@@ -558,17 +558,19 @@ publish a hierarchy the caller did not write. **Under `flat` a list is plain mul
 positions are read, and the point is a member of every artifact its list names, which is what the
 same membership written as several member rows has always meant. So is **a child named under
 two different parents**, whether the two come from two rows of the column or from the column and an
-artifact row's `parent`. A null or `-1` entry places the point at no artifact *at that level* and
+artifact row's `parent` — **except under `dag`**, where the second parent is one more edge, and the
+artifact row's `parent` may itself be a list ([`dag-hierarchies.md`](dag-hierarchies.md) §4). A null or `-1` entry places the point at no artifact *at that level* and
 links nothing across itself; a row of nothing but those is one unclustered row. A `level` column
 beside a list key is ignored and said so, the positions being what carry the levels.
 
-**The four hierarchy kinds, and which of them carry levels.** The kind is declared and never
+**The five hierarchy kinds, and which of them carry levels.** The kind is declared and never
 inferred from the edges, and the levels rule follows from it:
 
 | `kind` | Lineage | `[[layer.levels]]` |
 |---|---|---|
 | `flat` | none | optional |
 | `nested` | a tree in the edges, every artifact at level 0 | **refused** — a tree's structure is its edges, not a ladder |
+| `dag` | a directed acyclic graph in the edges, every artifact at level 0 — `nested` in every respect but that **a child may name several parents** (2026-09-01, [`dag-hierarchies.md`](dag-hierarchies.md); [decision 0117](../decisions/0117-a-child-may-name-several-parents.md)) | **refused**, as for `nested` |
 | `stacked` | none; independent analyses, one per level | **required** |
 | `tiered` | containment edges running coarser → finer between levels | **required** |
 
@@ -1348,6 +1350,13 @@ disclosing nothing.
 
 
 ## Appendix R — review trail
+
+**2026-09-01 — a fifth hierarchy kind, `dag`.** `nested` with several parents per child, for a
+polyhierarchy keyed by the concept rather than by its positions: MeSH at rung 3 of the ingest
+campaign, and GeoNames' feature containment. The `parent` cell on an artifact row may be a list
+under it, and a lineage naming a second parent is recorded rather than refused. Everything else the
+kind means — no levels, edges within the level, roll-up — is `nested`'s. Ruled in [decision 0117](../decisions/0117-a-child-may-name-several-parents.md);
+[`dag-hierarchies.md`](dag-hierarchies.md) is the design.
 
 **2026-08-31 — a `[[view_group]]` may declare no roster at all.** The third arrangement this
 surface already described — the group's own `source` behind `fields.view`, with neither roster form
