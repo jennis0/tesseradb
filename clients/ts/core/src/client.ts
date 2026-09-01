@@ -580,17 +580,22 @@ export class TesseraClient {
   async categories(
     token: string,
     column: string,
-    opts: {codes?: readonly number[]; limit?: number} = {}
+    opts: {codes?: readonly number[]; limit?: number; view?: string} = {}
   ): Promise<CategoryValue[]> {
     // Encoded, because a column name reaches this from `/v1/meta` rather than from a literal.
     const base = `${this.opts.viewerUrl}/v1/categories/${encodeURIComponent(column)}`;
     const out: CategoryValue[] = [];
+    // The view the caller is asking under (contracts §3.2): what a **group-scoped** category's
+    // codes stand for is that view's own column, and the route resolves the view before the
+    // column whatever the column's scope — so naming it costs an entity-scoped column nothing and
+    // is the only thing that answers a scoped one.
+    const view = opts.view ? `view=${encodeURIComponent(opts.view)}` : '';
 
     if (opts.codes) {
       // Nothing to ask about. Returning early rather than sending `codes=` keeps an empty request
       // from being read as the *enumeration* form, which would fetch the whole vocabulary.
       if (opts.codes.length === 0) return out;
-      const url = `${base}?codes=${[...opts.codes].join(',')}`;
+      const url = `${base}?codes=${[...opts.codes].join(',')}${view ? `&${view}` : ''}`;
       const page = await this.categoryPage(token, url);
       return page.values;
     }
@@ -600,6 +605,7 @@ export class TesseraClient {
       const params = new URLSearchParams();
       if (opts.limit !== undefined) params.set('limit', String(opts.limit));
       if (cursor !== null) params.set('after', cursor);
+      if (opts.view !== undefined) params.set('view', opts.view);
       const query = params.toString();
       const page = await this.categoryPage(token, query ? `${base}?${query}` : base);
       out.push(...page.values);

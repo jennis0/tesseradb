@@ -9,12 +9,14 @@ import {
   TesseraFilter as FilterElement,
   TesseraFilterPanel as FilterPanelElement,
   TesseraItemCard as ItemCardElement,
+  TesseraKeyPicker as KeyPickerElement,
   TesseraLayerPicker as LayerPickerElement,
   TesseraLegend as LegendElement,
   TesseraMap as MapElement,
   TesseraSelection as SelectionElement,
   TesseraStatus as StatusElement,
-  TesseraStore as StoreElement
+  TesseraStore as StoreElement,
+  TesseraViewPicker as ViewPickerElement
 } from '@tesseradb/components';
 
 /**
@@ -51,6 +53,8 @@ export type TesseraEvents = {
   'tessera-colourchange': Detail<{colourBy: string | null}>;
   'tessera-filterchange': Detail<{column: string | null; expr: FilterExpr | null}>;
   'tessera-open': Detail<{id: string; fields: Record<string, unknown>; externalId: string | null}>;
+  'tessera-viewswitch': Detail<{from: string; to: string; sameFrame: boolean}>;
+  'tessera-viewfollow': Detail<{view: string; x: number; y: number}>;
 };
 
 const ev = <K extends keyof TesseraEvents>(name: K) => name as EventName<TesseraEvents[K]>;
@@ -71,7 +75,9 @@ export const TesseraExplorer = wrap('tessera-explorer', ExplorerElement, {
   onFilterChange: ev('tessera-filterchange'),
   onStateChange: ev('tessera-statechange'),
   onExpired: ev('tessera-expired'),
-  onOpen: ev('tessera-open')
+  onOpen: ev('tessera-open'),
+  onViewSwitch: ev('tessera-viewswitch'),
+  onViewFollow: ev('tessera-viewfollow')
 });
 export const TesseraMap = wrap('tessera-map', MapElement, {
   onPick: ev('tessera-pick'),
@@ -88,6 +94,8 @@ export const TesseraFilter = wrap('tessera-filter', FilterElement, {onFilterChan
 export const TesseraFilterPanel = wrap('tessera-filter-panel', FilterPanelElement, {onFilterChange: ev('tessera-filterchange')});
 export const TesseraSelection = wrap('tessera-selection', SelectionElement, {onSelectChange: ev('tessera-selectchange')});
 export const TesseraLayerPicker = wrap('tessera-layer-picker', LayerPickerElement, {onLayerChange: ev('tessera-layerchange')});
+export const TesseraViewPicker = wrap('tessera-view-picker', ViewPickerElement, {onViewSwitch: ev('tessera-viewswitch')});
+export const TesseraKeyPicker = wrap('tessera-key-picker', KeyPickerElement, {onViewSwitch: ev('tessera-viewswitch')});
 export const TesseraArtifactList = wrap('tessera-artifact-list', ArtifactListElement, {onArtifactSelect: ev('tessera-artifactselect')});
 export const TesseraArtifactCard = wrap('tessera-artifact-card', ArtifactCardElement, {onArtifactFit: ev('tessera-artifactfit')});
 export const TesseraLegend = wrap('tessera-legend', LegendElement, {onColourChange: ev('tessera-colourchange')});
@@ -100,10 +108,12 @@ export type {
   FilterElement,
   FilterPanelElement,
   ItemCardElement,
+  KeyPickerElement,
   LayerPickerElement,
   LegendElement,
   MapElement,
   SelectionElement,
   StatusElement,
-  StoreElement
+  StoreElement,
+  ViewPickerElement
 };

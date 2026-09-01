@@ -17,6 +17,7 @@ afterEach(() => {
 });
 
 const view = {
+  id: 'v',
   composition: null,
   depth: 5,
   visible: {value: 12_040, exact: true},

@@ -353,6 +353,25 @@ export class Driver {
     );
   }
 
+  /**
+   * Draw this view from what is held, asking for nothing.
+   *
+   * The view switch's immediate publish (`view-switching.md` §3): a view returned to already holds
+   * the bands its last visit fetched, and a switch that waited for the settle's request before
+   * publishing them would blank the map for a request it does not need. It derives on the settle's
+   * terms — unconditionally, at full fidelity — because a switch is a settled moment by
+   * construction: the camera did not move, the view did.
+   *
+   * Nothing here touches the request discipline. A view stepped through and left before the
+   * caller's own settle fires has been drawn and has asked for nothing (§4).
+   */
+  redraw(view: ViewState, width: number, height: number): void {
+    this.lastView = view;
+    this.width = width;
+    this.height = height;
+    this.reconcile('settle', view);
+  }
+
   /** An absorb landed mid-fetch: pieces paint as they arrive. The consumer coalesces to frames. */
   absorbed(): void {
     if (this.lastView) this.reconcile('absorb', this.lastView);

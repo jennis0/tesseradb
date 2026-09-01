@@ -1,4 +1,4 @@
-import {NO_COUNT, NO_MASKED, servedLineage, SessionArtifactTable, type Projections, type ProjectionName, type Store, type StatusProjection} from '@tesseradb/client';
+import {NO_COUNT, NO_MASKED, servedLineage, SessionArtifactTable, type Projections, type ProjectionName, type Quantisation, type Store, type StatusProjection} from '@tesseradb/client';
 
 /**
  * A store with no network and no driver: projections a test sets directly, and the subscription
@@ -6,6 +6,11 @@ import {NO_COUNT, NO_MASKED, servedLineage, SessionArtifactTable, type Projectio
  */
 export type FakeStore = Store & {
   set<K extends ProjectionName>(name: K, value: Projections[K]): void;
+  /**
+   * Move the frame `frame()` answers with — how a test drives a switch across frames
+   * (`view-switching.md` §4), which the store makes by pointing at another view's quantisation.
+   */
+  setFrame(q: Quantisation): void;
   calls: {name: string; args: unknown[]}[];
 };
 
@@ -13,7 +18,7 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
   const projections: Projections = {
     meta: null,
     status: {status: 'idle', sessionWarm: false, refusal: null, stale: false, expired: false, retrying: false},
-    view: {composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, served: NO_COUNT, provisional: 0},
+    view: {id: '', composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, served: NO_COUNT, provisional: 0},
     marks: {bands: [], standIn: [], count: NO_COUNT},
     tiles: {tiles: []},
     artifacts: {layer: null, layers: [], served: [], lineage: servedLineage([]), status: 'idle', refusal: null, version: 0, held: 0, table: new SessionArtifactTable(), servedOrdinals: new Set(), shapes: new Map(), colours: new Map(), palette: 'positional', coverage: {current: 0, stale: 0}},
@@ -21,9 +26,10 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
     region: null,
     filters: {draft: {}, expr: null, values: {}, valueErrors: {}},
     legend: {ranks: {}, domains: {}, categories: {}, categoryErrors: {}, colourBy: null},
-    replica: {bytes: 0, points: 0, bands: 0, lastPlan: null},
+    replica: {bytes: 0, points: 0, bands: 0, views: 0, lastPlan: null},
     ...overrides
   };
+  let held: Quantisation = {xMin: 0, xMax: 1, yMin: 0, yMax: 1};
   const all = new Set<() => void>();
   const perName = new Map<ProjectionName, Set<() => void>>();
   const calls: {name: string; args: unknown[]}[] = [];
@@ -62,9 +68,13 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
     setColourBy: spy('setColourBy'),
     setPalette: spy('setPalette'),
     setBudget: spy('setBudget'),
+    setCurrentView: spy('setCurrentView'),
     // The unit square, so a component's data↔world conversion is the identity here and a test
     // asserting on world coordinates is asserting on what it wrote.
-    frame: () => ({xMin: 0, xMax: 1, yMin: 0, yMax: 1}),
+    frame: () => held,
+    setFrame(q: Quantisation) {
+      held = q;
+    },
     pick: async (...args: unknown[]) => {
       calls.push({name: 'pick', args});
     },

@@ -99,12 +99,20 @@ const BASEMAP_SETTLE_MS = 180;
  * no network, a refused request — leaves the map exactly as it was, a basemap being an underlay
  * and not the picture.
  */
+let basemapGeneration = 0;
+
 async function installBasemap(view: ViewInfo, camera?: Camera): Promise<void> {
+  // **A basemap is only ever installed for the switch that asked for it.** Both awaits below run
+  // for as long as a tile fetch takes, and a viewer stepping geographic → embedding →
+  // geographic-2 faster than that would otherwise have view A's tiles land under view C's points.
+  // The generation is the same guard `activate` uses for its meta.
+  const mine = ++basemapGeneration;
   await explorer.updateComplete;
   const map = explorer.map;
-  if (!map) return;
+  if (!map || mine !== basemapGeneration) return;
   try {
     const basemap = await basemapLayer(view, camera);
+    if (mine !== basemapGeneration) return;
     map.basemap = basemap;
     // **The ground under the labels is the basemap's, not the page's.** OpenStreetMap's standard
     // style is a pale one, and the demo's chrome is dark — so with the ground left to
@@ -129,19 +137,38 @@ async function installBasemap(view: ViewInfo, camera?: Camera): Promise<void> {
  * Debounced on the view *settling* rather than driven per frame: the wheel emits a view change per
  * notch, and composing a texture per notch would fetch every level between the two ends of the
  * gesture to draw none of them.
+ *
+ * **Bound to the current view, and rebound at a switch** (`view-switching.md` §6.5): one listener
+ * for the page's life, reading the view it follows from a variable a switch replaces, so a
+ * settle after a switch composes against the new view's frame and never the one it left.
  */
+let followedView: ViewInfo | null = null;
+let composed: BasemapCover | null = null;
+let lastCamera: Camera | null = null;
+let followTimer: ReturnType<typeof setTimeout> | null = null;
+let followListening = false;
+
 function followCameraWithBasemap(view: ViewInfo): void {
-  let composed: BasemapCover | null = null;
-  let timer: ReturnType<typeof setTimeout> | null = null;
+  followedView = view;
+  composed = null;
+  if (followTimer !== null) {
+    clearTimeout(followTimer);
+    followTimer = null;
+  }
+  if (followListening) return;
+  followListening = true;
   explorer.addEventListener('tessera-viewchange', (event) => {
+    const followed = followedView;
+    if (!followed) return;
     const {bbox, zoom} = (event as CustomEvent<{bbox: [number, number, number, number]; zoom: number}>).detail;
-    const [x0, y0] = dataToWorldXY(bbox[0], bbox[1], view.quantisation);
-    const [x1, y1] = dataToWorldXY(bbox[2], bbox[3], view.quantisation);
+    const [x0, y0] = dataToWorldXY(bbox[0], bbox[1], followed.quantisation);
+    const [x1, y1] = dataToWorldXY(bbox[2], bbox[3], followed.quantisation);
     const camera: Camera = {
       worldBox: [Math.min(x0, x1), Math.min(y0, y1), Math.max(x0, x1), Math.max(y0, y1)],
       zoom
     };
-    const wanted = coverFor(view, camera);
+    lastCamera = camera;
+    const wanted = coverFor(followed, camera);
     if (
       composed &&
       composed.level === wanted.level &&
@@ -152,13 +179,76 @@ function followCameraWithBasemap(view: ViewInfo): void {
     ) {
       return;
     }
-    if (timer !== null) clearTimeout(timer);
-    timer = setTimeout(() => {
-      timer = null;
+    if (followTimer !== null) clearTimeout(followTimer);
+    followTimer = setTimeout(() => {
+      followTimer = null;
       composed = wanted;
-      void installBasemap(view, camera);
+      void installBasemap(followed, camera);
     }, BASEMAP_SETTLE_MS);
   });
+}
+
+/**
+ * Take the basemap down, now, and stand every fetch in flight down with it.
+ *
+ * Called at the switch rather than when the next one arrives: a view with a `tile_scheme` of
+ * `null` has no basemap to replace the old one with, so leaving the tiles up until an answer
+ * comes would draw a map of the world under an embedding — and for as long as the fetch takes,
+ * which is the whole of what a viewer sees of the switch.
+ */
+function dropBasemap(): void {
+  basemapGeneration += 1;
+  composed = null;
+  if (followTimer !== null) {
+    clearTimeout(followTimer);
+    followTimer = null;
+  }
+  const map = explorer.map;
+  if (map) {
+    map.basemap = null;
+    map.ground = '';
+  }
+}
+
+/**
+ * The current view is URL state (`view-switching.md` §6.5): `?view=<id>` beside `?dataset=`, so a
+ * link means what it showed. Written with `replaceState` — a switch is not a page in the history,
+ * and a slider run through a group's roster would otherwise leave one entry per step behind it.
+ */
+function writeViewToUrl(id: string): void {
+  const url = new URL(location.href);
+  if (url.searchParams.get('view') === id) return;
+  url.searchParams.set('view', id);
+  history.replaceState(null, '', url);
+}
+
+/**
+ * Follow a switch: the basemap is decided **per switch** from the new view's `tile_scheme`, and
+ * the URL says which view it is. A scheme of `null` means the basemap goes, which is what
+ * `basemapLayer` answers with, so a switch from a geographic view to an embedding removes it
+ * rather than leaving tiles under points that cannot line up with them.
+ *
+ * Within a group the camera does not move, so no settle will recompose the ground: the last
+ * camera is composed for straight away. Across frames the map refits, and the settle that
+ * follows composes for wherever it lands.
+ */
+function onViewChanged(id: string): void {
+  const meta = store.state.meta;
+  const view = meta?.views.find((v) => v.id === id);
+  if (!meta || !view) return;
+  const previous = meta.views.find((v) => v.id === store.state.view);
+  const p = previous?.quantisation;
+  const q = view.quantisation;
+  const keepsFrame = p !== undefined && p.xMin === q.xMin && p.xMax === q.xMax && p.yMin === q.yMin && p.yMax === q.yMax;
+  store.update((s) => {
+    s.view = id;
+  });
+  writeViewToUrl(id);
+  dropBasemap();
+  followCameraWithBasemap(view);
+  const camera = keepsFrame ? lastCamera : null;
+  if (camera) composed = coverFor(view, camera);
+  void installBasemap(view, camera ?? undefined);
 }
 
 /** The first map's probe, published for the smoke scripts and the harness (§5.9). */
@@ -301,6 +391,11 @@ function mirror(): void {
   const view = ds.get('view');
   const replica = ds.get('replica');
 
+  // The store is the one place a switch is decided (§6.3): the pickers, the notebook and a host
+  // calling `setCurrentView` all land here, so the basemap and the URL follow the projection
+  // rather than any one control's event.
+  if (view.id && view.id !== store.state.view) onViewChanged(view.id);
+
   store.update((s) => {
     s.meta = meta;
     s.status = status.status === 'idle' && s.switching ? 'idle' : status.status;
@@ -349,6 +444,7 @@ function openSession(preset: Dataset['presets'][number]): void {
       return {token: session.token, expiresAt: session.expiresAt};
     },
     budget: store.state.budget,
+    view: store.state.view,
     prefetch,
     driver: {prefetchLayers: config.prefetchLayers},
     replica: {
@@ -415,7 +511,7 @@ function openSession(preset: Dataset['presets'][number]): void {
 /** Which `activate` is current: an earlier one that is still awaiting its meta stands down. */
 let activation = 0;
 
-async function activate(dataset: Dataset): Promise<void> {
+async function activate(dataset: Dataset, requestedView: string | null = null): Promise<void> {
   const mine = ++activation;
   unsubscribe?.();
   unsubscribe = null;
@@ -450,6 +546,8 @@ async function activate(dataset: Dataset): Promise<void> {
     s.datasetId = dataset.id;
     s.switching = true;
     s.meta = null;
+    // A view id belongs to a bundle; the next one's is not known until its meta arrives.
+    s.view = '';
     s.session = null;
     s.terms = first?.terms ?? [];
     s.termsLabel = first?.label ?? '';
@@ -488,10 +586,18 @@ async function activate(dataset: Dataset): Promise<void> {
     }
     if (mine !== activation) return;
     const rendered = meta.declaredScalars.filter((c) => c.render);
+    // **An id the bundle does not declare falls back to the first view and is reported** (§6.5).
+    // A wrong view discloses nothing and costs a rerun, so it is a line in the failures panel and
+    // never a refusal to open the dataset.
+    const asked = requestedView === null ? null : (meta.views.find((v) => v.id === requestedView) ?? null);
+    const opening = asked ?? meta.views[0]!;
     store.update((s) => {
       s.session = session;
       s.meta = meta;
-      s.view = meta.views[0]!.id;
+      s.view = opening.id;
+      if (requestedView !== null && asked === null) {
+        s.failures = [...s.failures.slice(-19), {code: 'unknown-view', detail: `this bundle declares no view '${requestedView}'`, at: Date.now()}];
+      }
       s.mTarget = meta.selection.thetaTargetMarks;
       s.artifactLayer = meta.layers[0]?.name ?? null;
       // The demo opens coloured by cluster where a layer exists (the boards), else by a column.
@@ -502,8 +608,9 @@ async function activate(dataset: Dataset): Promise<void> {
           : (rendered.find((c) => c.category)?.name ?? rendered[0]?.name ?? null);
       s.switching = false;
     });
-    void installBasemap(meta.views[0]!);
-    followCameraWithBasemap(meta.views[0]!);
+    writeViewToUrl(opening.id);
+    followCameraWithBasemap(opening);
+    void installBasemap(opening);
     trace.event('session', {
       dataset: dataset.id,
       kMaxMarks: meta.selection.kMaxMarks,
@@ -520,9 +627,12 @@ async function activate(dataset: Dataset): Promise<void> {
 
 async function start() {
   datasets = await loadDatasets();
-  const requested = new URLSearchParams(location.search).get('dataset');
+  const params = new URLSearchParams(location.search);
+  const requested = params.get('dataset');
   const chosen = datasets.find((d) => d.id === requested) ?? datasets[0]!;
-  await activate(chosen);
+  // `?view=` is read once, at the first activation: a view id belongs to a bundle, so carrying one
+  // across a dataset change from the picker would ask the next bundle for a view of the last.
+  await activate(chosen, params.get('view'));
 }
 
 start().catch((error) => {

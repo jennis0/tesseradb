@@ -1,4 +1,4 @@
-"""Builds the ten artboards and canvas.json for the client-components canvas."""
+"""Builds the eleven artboards and canvas.json for the client-components canvas."""
 import json
 import os
 from gen import *  # noqa
@@ -165,6 +165,86 @@ def board_status():
     <div class="float" style="width:336px">{status_expanded(stale=True)}</div></div>
 </div>'''
     write('StatusStates.dc.html', dc_file(FONTS_LINK + css_block(), body))
+
+
+
+# ============================================================================== Views — the two pickers
+def views_toolbar(layout='Quarterly embedding', key=None, label=None, at_end=False, colour_by='clusters', layer='2 of 3 on',
+                  single=False):
+    """The explorer's toolbar with `<tessera-view-picker>` and `<tessera-key-picker>` above *Colour by*
+    (`view-switching.md` §6.3). `single` is the one-view corpus: both pickers render nothing and the
+    toolbar is exactly today's."""
+    def step(direction, off=False):
+        rot = ' style="transform:rotate(180deg);display:inline-flex"' if direction == 'prev' else ' style="display:inline-flex"'
+        cls = 'btn off' if off else 'btn'
+        return (f'<button class="{cls}" aria-label="{"Previous" if direction == "prev" else "Next"}" '
+                f'style="width:30px;padding:0;display:inline-flex;align-items:center;justify-content:center;flex:none">'
+                f'<span{rot}>{icon("chevr", 14)}</span></button>')
+    rows = ''
+    if not single:
+        rows += (f'<div class="col" style="gap:4px;margin-bottom:10px"><span class="xs muted">View</span>'
+                 f'<div class="select">{layout}{icon("chev", 14)}</div></div>')
+    if key is not None:
+        text = f'{label}<span class="mono xs muted" style="margin-left:8px">{key}</span>' if label else key
+        rows += (f'<div class="col" style="gap:4px;margin-bottom:10px"><span class="xs muted">quarter</span>'
+                 f'<div class="row" style="gap:6px">{step("prev")}'
+                 f'<div class="select grow" style="flex-grow:1">{text}{icon("chev", 14)}</div>{step("next", off=at_end)}</div></div>')
+    rows += (f'<div class="row" style="gap:10px">'
+             f'<div class="col grow" style="gap:4px"><span class="xs muted">Colour by</span>'
+             f'<div class="select">{colour_by}{icon("chev", 14)}</div></div>'
+             f'<div class="col grow" style="gap:4px"><span class="xs muted">Layers</span>'
+             f'<div class="select">{layer}{icon("chev", 14)}</div></div></div>')
+    return f'<div class="panel">{rows}</div>'
+
+
+def view_menu(entries, current):
+    """The view picker's open list: plain views, then the groups, in `/v1/meta`'s serving order."""
+    items = ''.join(
+        f'<div class="row" style="height:28px;padding:0 10px;gap:8px;border-radius:3px;'
+        f'{"background:var(--tessera-surface-2);font-weight:500" if e == current else ""}">'
+        f'<span style="width:14px;display:inline-flex">{icon("check", 12, sw=2) if e == current else ""}</span>{e}</div>'
+        for e in entries)
+    return (f'<div class="float" style="width:300px;padding:6px;border:1px solid var(--tessera-line);'
+            f'border-radius:var(--tessera-radius);background:var(--tessera-surface)">{items}</div>')
+
+
+def item_views_chips(views, current):
+    chips = ''.join(
+        f'<span class="chip" style="{"background:var(--tessera-accent);color:var(--tessera-accent-ink)" if v == current else ""}">{v}</span>'
+        for v in views)
+    return (f'<div class="panel"><div class="hd">Item</div>'
+            f'<div style="font-weight:500;margin-bottom:8px">Decoding surface codes with sparse attention transformers</div>'
+            f'<span class="xs muted">In views</span>'
+            f'<div class="row" style="flex-wrap:wrap;gap:6px;margin:4px 0 10px">{chips}</div>'
+            f'<div class="row" style="gap:8px"><span class="chip">quant-ph</span><span class="chip">2024</span></div></div>')
+
+
+def board_views():
+    col = 'display:flex;flex-direction:column;gap:10px;width:336px'
+    case = lambda title, note, body: (f'<div class="col" style="gap:8px;{col}"><div class="hd">{title}</div>'
+                                      f'<span class="xs faint" style="min-height:32px">{note}</span>{body}</div>')
+    body = f'''
+<div class="tx" style="width:1160px; height:660px; padding:28px 32px; display:flex; flex-direction:column; gap:22px;">
+  <div class="col" style="gap:4px"><div class="hd">tessera-view-picker · tessera-key-picker</div>
+    <span class="sm muted">Two selects at the top of the toolbar slot. The first chooses the layout — a plain view or a group; the second walks the group's roster in creation order, previous and next beside it. Neither draws for a one-view corpus.</span></div>
+  <div class="row" style="gap:28px; align-items:flex-start">
+    {case('A group, mid-roster', 'Label from roster metadata (a text <span class="mono">label</span>, else <span class="mono">starts</span> as a date), the key muted after it.',
+          views_toolbar(layout='Quarterly embedding', key='2026-Q3', label='Jul–Sep 2026'))}
+    {case('A group, at the end', 'Next is disabled; the roster never wraps.',
+          views_toolbar(layout='Quarterly map', key='2026-Q4', label='Oct–Dec 2026', at_end=True))}
+    {case('Two plain views', 'The arXiv rung. No group, so no key picker.',
+          views_toolbar(layout='knn'))}
+  </div>
+  <div class="row" style="gap:28px; align-items:flex-start">
+    {case('One view', 'Every demo corpus today. Nothing is drawn; the toolbar is unchanged.',
+          views_toolbar(single=True))}
+    {case('The view picker, open', 'Plain views first, then the groups — an owner group and the map laid over its keys are two entries. Choosing the other keeps the key.',
+          view_menu(['World', 'World (flat)', 'Quarterly embedding', 'Quarterly map'], 'Quarterly embedding'))}
+    {case('The item card follows', 'Every view the session may reach holds this item; the current one is marked, another is one click.',
+          item_views_chips(['knn', 'pca64'], 'knn'))}
+  </div>
+</div>'''
+    write('Views.dc.html', dc_file(FONTS_LINK + css_block(), body))
 
 
 # ============================================================================== Selection flow
@@ -559,6 +639,7 @@ def canvas():
         dict(file='ResearchDesk.dc.html', title='Host 3 — document research desk', x=0, y=1040, w=1440, h=900, page='page-2'),
         dict(file='Article.dc.html', title='Host 4 — editorial drop-in', x=1540, y=1040, w=900, h=1500, page='page-2'),
         dict(file='Notebook.dc.html', title='Host 5 — notebook', x=2540, y=1040, w=1200, h=1000, page='page-2'),
+        dict(file='Views.dc.html', title='View switching — the two pickers', x=0, y=2400, w=1160, h=660, page='page-1'),
     ]
     notes = [
         dict(id='n-default', x=0, y=-150, w=560, page='page-1',
@@ -583,7 +664,7 @@ def canvas():
 
 if __name__ == '__main__':
     board_main(); board_overlay(); board_narrow(); board_status(); board_selection()
-    board_ops(); board_images(); board_research(); board_article(); board_notebook()
+    board_ops(); board_images(); board_research(); board_article(); board_notebook(); board_views()
     canvas()
     for n in sorted(os.listdir(OUT)):
         if n.endswith('.dc.html') or n == 'canvas.json':
