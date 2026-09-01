@@ -108,7 +108,7 @@ construction. The camera is per view only across *frames*: within a group it is 
 
 **What is shared and why.** The mask is the principal's, not the view's; a filter is an
 expression over entity-space attributes and means the same thing in every view (a group-scoped
-attribute is the exception, §6.7); colour, palette, layer choice and the point budget are the
+attribute is the exception, §6.8); colour, palette, layer choice and the point budget are the
 user's; an item's detail already carries every reachable view's position, so one fetch serves
 every view; the described-record cache is per id. **The session artifact table is one**, not
 one per view: it is the ordinal registry behind the map's single lookup texture, keyed
@@ -271,6 +271,12 @@ labels are the owning group's, found through `membersOf`.
 
 Hidden when the current view is plain — a plain view is in no group and has no neighbours.
 
+**The rules live in the client, not the element** (§6.7): the label rule, the entry list and its
+order, which view a group is entered on, and whether the view set is trivial are pure functions
+in `@tesseradb/client` beside `viewsOfGroup` and `stepView`, and the elements render their
+answers. A host building its own picker, and the React wrapper, get the same behaviour without
+re-deriving it.
+
 ### 6.3 Where they sit
 
 Both go at the top of the explorer's **`toolbar`** slot, above *Colour by* and *Layers*, in
@@ -310,7 +316,33 @@ recomposition are rebound to the current view, and the three `meta.views[0]` sit
 rebuilding them, and the current view id is up-synced with the other traitlets at the settle, so
 `m.view` reads what the map shows. `Map(url, view=…)` keeps its meaning as the initial view.
 
-### 6.7 Group-scoped attributes — ⊘ not needed by any corpus in the tree
+### 6.7 Reuse and restyling
+
+Owner direction 2026-09-01: a consuming system must be able to take these up easily and restyle
+them. The design meets that on the client-components ladder (§5.6 there) and nowhere else:
+
+- **Headless first.** The switch is `setCurrentView` on the store and the current view is
+  `view.id`, so a host with its own controls, a React application or the notebook switches
+  without our elements. The four rules the pickers embody — `viewLabel`, `viewPickerEntries`,
+  `enterGroup`, `isTrivialViewSet` — are exported from `@tesseradb/client` as pure functions with
+  their own tests; the elements are thin renderers over them.
+- **Placement.** Both pickers are Tier 2 panels: they read the store by context, sit in the
+  explorer's `toolbar` slot as default content, and are replaced by putting anything else in that
+  slot. Both are wrapped in `@tesseradb/react` as every other element is.
+- **Restyling.** Every element exposes parts in the existing convention — `title`, `select`,
+  `step` (with `data-direction`), `label`, `key`, `entry` — and uses only the existing
+  `--tessera-*` tokens, no new ones, so a host that has restyled the legend's `::part(select)`
+  gets these for free.
+- **The select is the platform's.** A native `<select>` is keyboard-native, accessible, and its
+  held arrow key is the slider for free; the price is that the open list is the browser's and
+  only the closed trigger restyles. A host that needs a styled list replaces the element through
+  the slot and calls the same four functions. A custom listbox was considered and not taken —
+  it is a component to own and keep accessible, for a gain in styling alone. Owner leaning, not
+  ruled.
+- **Routing stays the host's.** `?view=` is the viewer's, not the components'; a host that owns
+  its URL listens for `tessera-viewswitch` and writes what it likes.
+
+### 6.8 Group-scoped attributes — ⊘ not needed by any corpus in the tree
 
 A filter over a scoped family means *this view's column*: under a view of the family's group the
 leaf goes bare and the request's view decides; under any other view it must pin a key
@@ -387,4 +419,7 @@ the store against its tests — and integrate on the multi-view fixture.
   Found while reading the code: `viewsOfGroup` and `stepView` already exist, tested and uncalled;
   `scopedScalars` is named in a comment and declared nowhere; the pinned leaf already composes.
   The steps are laid out (§9) and one ruling is put (§10). The board `Views.dc.html` is added to
-  the canvas generator in the same change. Unreviewed beyond the author.
+  the canvas generator in the same change. Unreviewed beyond the author. **Same day, owner
+  question on reuse and restyling:** §6.7 added — the rules move into `@tesseradb/client` as pure
+  functions, the parts and the token rule are named, React wrappers owed, the native select kept
+  as a leaning.
