@@ -186,7 +186,7 @@ def views_toolbar(layout='Quarterly embedding', key=None, label=None, at_end=Fal
                  f'<div class="select">{layout}{icon("chev", 14)}</div></div>')
     if key is not None:
         text = f'{label}<span class="mono xs muted" style="margin-left:8px">{key}</span>' if label else key
-        rows += (f'<div class="col" style="gap:4px;margin-bottom:10px"><span class="xs muted">Quarter</span>'
+        rows += (f'<div class="col" style="gap:4px;margin-bottom:10px"><span class="xs muted">quarter</span>'
                  f'<div class="row" style="gap:6px">{step("prev")}'
                  f'<div class="select grow" style="flex-grow:1">{text}{icon("chev", 14)}</div>{step("next", off=at_end)}</div></div>')
     rows += (f'<div class="row" style="gap:10px">'

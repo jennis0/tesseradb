@@ -285,6 +285,9 @@ off the screen. A `members` group's views carry no metadata of their own (`views
 labels are the owning group's, found through `membersOf`.
 
 Hidden when the current view is plain — a plain view is in no group and has no neighbours.
+Its caption is the group's **`name`** — the key's namespace, `quarter` in `quarter:2026-Q3` —
+not its title: the layout picker above already shows the title, and the same words twice read
+as a fault on the first screenshots (ruled 2026-09-01).
 
 **The rules live in the client, not the element** (§6.7): the label rule, the entry list and its
 order, which view a group is entered on, and whether the view set is trivial are pure functions
