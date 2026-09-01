@@ -78,6 +78,30 @@ fn rare_entity(slot: usize) -> u64 {
     QUARTERS[slot].1.start + 1
 }
 
+/// `tone`'s value set: closed, `derived`, and its family is on the surface by **`render` alone**
+/// — no `index` at all (`views.md` §5 r26).
+///
+/// It is here because that combination is the one where the two admissions could have parted: a
+/// `derived` list is answered from the per-view keyed postings, and the postings are owed on the
+/// family's *filter* admission, so a build that owed them to `index` alone would leave this family
+/// with a value list nothing could derive. `sector` beside it is `index = true`, and would not
+/// catch it. `solitary` is carried by one entity per quarter, on `rare`'s argument.
+const TONES: [&str; 4] = ["dawn", "noon", "dusk", "solitary"];
+
+/// The one entity carrying `solitary` in a quarter: the first of its members the narrow principal
+/// below cannot see.
+///
+/// **Derived from the mask rather than from the range**, where [`rare_entity`] takes the range's
+/// second member and is outside the narrow mask for `2026-Q1` alone. The property this file needs
+/// holds per quarter, and picking the entity by arithmetic on the range gets it in one quarter out
+/// of three by luck — which showed up here as a narrow list equal to the wide one rather than a
+/// proper subset of it.
+fn solitary_entity(slot: usize) -> u64 {
+    members(slot)
+        .find(|&e| !narrow_mask(e))
+        .expect("every quarter holds an entity the narrow principal cannot see")
+}
+
 /// The word every quarter's prose carries, one per quarter, so a `match` that read the wrong
 /// view's postings answers the empty set rather than a plausible one.
 const WORDS: [&str; 4] = ["alpha", "beta", "gamma", "delta"];
@@ -104,6 +128,20 @@ fn sector(slot: usize, entity: u64) -> Option<&'static str> {
     }
     let pair = [slot % 3, (slot + 1) % 3];
     Some(SECTORS[pair[(entity % 2) as usize]])
+}
+
+/// **`tone`, per view** — `sector`'s shape over its own value set and its own absence stride, so
+/// the two `derived` families cannot pass on one another's arithmetic. `solitary` sits on the same
+/// entity `rare` does, which is the entity the narrow principal below cannot see.
+fn tone(slot: usize, entity: u64) -> Option<&'static str> {
+    if entity == solitary_entity(slot) {
+        return Some("solitary");
+    }
+    if entity.is_multiple_of(7) {
+        return None;
+    }
+    let pair = [(slot + 1) % 3, (slot + 2) % 3];
+    Some(TONES[pair[(entity % 2) as usize]])
 }
 
 /// **`note`, per view** — prose carrying this quarter's own word, for half the entities.
@@ -169,6 +207,15 @@ fn sectors_visible_to(slot: usize, visible: &dyn Fn(u64) -> bool) -> BTreeSet<&'
         .collect()
 }
 
+/// The `tone` values a quarter's entities carry **that this principal can see** —
+/// [`sectors_visible_to`]'s question of the render-only family.
+fn tones_visible_to(slot: usize, visible: &dyn Fn(u64) -> bool) -> BTreeSet<&'static str> {
+    members(slot)
+        .filter(|&e| visible(e))
+        .filter_map(|e| tone(slot, e))
+        .collect()
+}
+
 /// The entities a principal holding term `1` alone can see — `common::terms_of` grants it on
 /// `e % 3 == 0` and term `0` on everything, so this is a proper, non-trivial slice of the corpus.
 fn narrow_mask(entity: u64) -> bool {
@@ -210,6 +257,7 @@ fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>, slot: Option
         fields.push(Field::new("mood", DataType::Utf8, true));
         fields.push(Field::new("sector", DataType::Utf8, true));
         fields.push(Field::new("note", DataType::Utf8, true));
+        fields.push(Field::new("tone", DataType::Utf8, true));
     }
     let schema = Arc::new(ArrowSchema::new(fields));
     let ids: Vec<u64> = ids.collect();
@@ -231,6 +279,9 @@ fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>, slot: Option
         )));
         columns.push(Arc::new(StringArray::from(
             ids.iter().map(|&e| note(slot, e)).collect::<Vec<_>>(),
+        )));
+        columns.push(Arc::new(StringArray::from(
+            ids.iter().map(|&e| tone(slot, e)).collect::<Vec<_>>(),
         )));
     }
     let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
@@ -379,6 +430,25 @@ fn build_families(dir: &Path) -> std::path::PathBuf {
             scoped(category("mood"), family_views.clone(), None),
             scoped(category("sector"), family_views.clone(), None),
             scoped(
+                // **A `derived` category on the surface by `render` alone.** Its keyed per-view
+                // postings are owed on the family's filter admission, which `render` now carries,
+                // and `/v1/categories` derives its list from exactly those — so a build that owed
+                // them to `index` would leave this family listable by nothing.
+                Attribute {
+                    name: "tone".to_string(),
+                    title: None,
+                    field: None,
+                    ty: ScalarType::U8,
+                    analyser: None,
+                    vocabulary: Some("tone".to_string()),
+                    value_set: Some(ValueSet::Closed),
+                    index: false,
+                    render: true,
+                },
+                family_views.clone(),
+                None,
+            ),
+            scoped(
                 Attribute {
                     name: "note".to_string(),
                     title: None,
@@ -442,10 +512,14 @@ fn build_families(dir: &Path) -> std::path::PathBuf {
                     "sector".to_string(),
                     vocabulary("sector", &SECTORS, Visibility::Derived),
                 ),
+                (
+                    "tone".to_string(),
+                    vocabulary("tone", &TONES, Visibility::Derived),
+                ),
             ]),
         },
     })
-    .expect("a five-view build with four scoped families succeeds");
+    .expect("a five-view build with five scoped families succeeds");
     out
 }
 
@@ -818,6 +892,65 @@ async fn a_derived_value_list_narrows_per_principal_under_each_view() {
         "the narrow list is a proper subset: {narrow_q1:?} vs {wide:?}"
     );
     assert!(!narrow_mask(rare_entity(0)), "the fixture's premise");
+}
+
+/// **A `derived` list narrows per principal for a family on the surface by `render` alone**
+/// (`views.md` §5 r26, per-point-attributes §3.3 — the **C11** channel).
+///
+/// `sector` beside it is `index = true`, so it could not tell a build that owed the per-view keyed
+/// postings to `index` from one that owed them to the family's filter admission. `tone` is
+/// `index = false, render = true`: nothing but that admission puts its postings on disc, and
+/// nothing but those postings can derive its value list. Until this test the narrowing was traced
+/// through the code for such a family and driven for no such family.
+///
+/// The assertion is the exact set under each view, and then the named value in both directions:
+/// `solitary` is carried by one entity per quarter, and that entity is not one the narrow
+/// principal holds a term for. Serving the authored set to the narrow principal is the disclosure;
+/// serving it empty to a principal who does have members is the availability failure on the other
+/// side, and only an exact expectation tells the two apart.
+#[tokio::test]
+async fn a_render_only_derived_value_list_narrows_per_principal_under_each_view() {
+    let served = serve().await;
+    let narrow = token(&served, &["1"]).await;
+
+    for (slot, (key, _)) in QUARTERS.iter().enumerate() {
+        let path = format!("tone?view=quarter:{key}");
+        let wide: BTreeSet<String> = keys(&served, &path).await.into_iter().collect();
+        assert_eq!(
+            wide,
+            tones_visible_to(slot, &|_| true)
+                .into_iter()
+                .map(str::to_string)
+                .collect::<BTreeSet<String>>(),
+            "quarter:{key}, every term held"
+        );
+        let listed: BTreeSet<String> = keys_as(&served, &narrow, &path).await.into_iter().collect();
+        assert_eq!(
+            listed,
+            tones_visible_to(slot, &narrow_mask)
+                .into_iter()
+                .map(str::to_string)
+                .collect::<BTreeSet<String>>(),
+            "quarter:{key}, narrow principal"
+        );
+        assert!(
+            !listed.is_empty(),
+            "quarter:{key}: the narrow principal has members here, so an empty list is a failure \
+             rather than a narrowing"
+        );
+        assert!(
+            listed.is_subset(&wide) && listed != wide,
+            "quarter:{key}: the narrow list is a proper subset: {listed:?} vs {wide:?}"
+        );
+        assert!(wide.contains("solitary"), "quarter:{key}: {wide:?}");
+        assert!(!listed.contains("solitary"), "quarter:{key}: {listed:?}");
+    }
+    for slot in 0..QUARTERS.len() {
+        assert!(
+            !narrow_mask(solitary_entity(slot)),
+            "the fixture's premise, in every quarter"
+        );
+    }
 }
 
 /// **A suppression retires a value and a term from the scoped routes, with no third rule.**
