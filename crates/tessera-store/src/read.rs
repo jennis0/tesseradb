@@ -55,6 +55,13 @@ use crate::render_presence::{render_presence_path, RenderPresence, RENDER_PRESEN
 pub struct ViewData {
     pub row_space: RowSpace,
     pub segments: Vec<Arc<SegmentData>>,
+    /// **Which incarnation of the key these files belong to** (decision 0115). Read off the
+    /// segments this data was built from, or off the manifest for a view that has none yet.
+    ///
+    /// [`Bundle::with_views`] is what it is for: a dropped key may be created again, and the
+    /// recreated view is declared under the same id, so "is this view still declared" no longer
+    /// tells the predecessor's row space from the successor's. This does.
+    pub incarnation: tessera_types::view::ViewIncarnation,
 }
 
 /// One loaded segment: its row count, its Morton codes (row order, ascending), and a zero-copy
@@ -171,6 +178,10 @@ impl Bundle {
             Ok(ViewData {
                 row_space,
                 segments,
+                // **The view's own, unchanged**: a flush and a merge write into the incarnation
+                // that is live, and neither crosses a drop — a dropped view has no row space to
+                // extend and no segments to collapse.
+                incarnation: view_data.incarnation,
             })
         })
     }
@@ -211,6 +222,10 @@ impl Bundle {
             Ok(ViewData {
                 row_space,
                 segments,
+                // **The view's own, unchanged**: a flush and a merge write into the incarnation
+                // that is live, and neither crosses a drop — a dropped view has no row space to
+                // extend and no segments to collapse.
+                incarnation: view_data.incarnation,
             })
         })
     }
@@ -238,6 +253,7 @@ impl Bundle {
             Ok(ViewData {
                 row_space: view_data.row_space.clone(),
                 segments: view_data.segments.clone(),
+                incarnation: view_data.incarnation,
             })
         })
     }
@@ -256,10 +272,17 @@ impl Bundle {
     /// Side-manifests are untouched — the roster's durable half is published by the ordinary
     /// deny-state path at the next tick, on the mechanism `layer_tombstones` already uses.
     pub fn with_views(&self, manifest: Manifest) -> Arc<Bundle> {
-        let declared: Vec<&str> = manifest.views.iter().map(|v| v.id.as_str()).collect();
         let mut partitions = self.partitions.clone();
         for partition in partitions.values_mut() {
-            partition.views.retain(|id, _| declared.contains(&id.as_str()));
+            // **Declared *and* at the live incarnation** (decision 0115). A dropped key may be
+            // created again, and the recreated view carries the same id — so declaration alone
+            // stopped being the question the moment the burn was withdrawn. A view whose data was
+            // built over a dead incarnation is dropped here exactly as an undeclared one is, and
+            // the seeding below puts an **empty** view back in its place: the predecessor's files
+            // stay on disc, reachable by nothing, until the fold reclaims them.
+            partition
+                .views
+                .retain(|id, data| manifest.is_live_incarnation(id, data.incarnation));
             for view in &manifest.views {
                 partition
                     .views
@@ -273,6 +296,7 @@ impl Bundle {
                             0,
                         ),
                         segments: Vec::new(),
+                        incarnation: view.incarnation,
                     });
             }
         }
@@ -475,8 +499,24 @@ fn open_prefix(
         let selected = load_verifying_segments_manifest(&prefix_dir, &partition_dir, verification)?;
         let segments_manifest = selected.manifest;
 
+        // **One incarnation per view, and it is the newest** (decision 0115). A drop leaves its
+        // segments in the live side-manifest until a fold reclaims them, so after a key has been
+        // created again this list can name two incarnations of one view id. Their row spaces are
+        // unrelated — each is dense from its own base — so composing them would be nonsense
+        // before it was a disclosure. Incarnations are minted monotonically, so the newest is the
+        // live one; the rest are the fold's to reclaim and are not opened. `with_views` then
+        // checks even that one against the roster and blanks the view if it disagrees, which is
+        // where the *fail-closed* half lives: this pass has the manifest and not yet the log.
+        let mut newest: HashMap<&str, tessera_types::view::ViewIncarnation> = HashMap::new();
+        for seg_desc in &segments_manifest.segments {
+            let seen = newest.entry(seg_desc.view.as_str()).or_default();
+            *seen = (*seen).max(seg_desc.incarnation);
+        }
         let mut views: HashMap<String, ViewData> = HashMap::new();
         for seg_desc in &segments_manifest.segments {
+            if newest.get(seg_desc.view.as_str()) != Some(&seg_desc.incarnation) {
+                continue;
+            }
             // **Per component the path derivation will lay down**, not on the joined id: a
             // group's view is `group:key` and `:` is exactly the character the two-component path
             // exists for (`views.md` §3.2).
@@ -566,6 +606,7 @@ fn open_prefix(
                         ViewData {
                             row_space,
                             segments: Vec::new(),
+                            incarnation: seg_desc.incarnation,
                         },
                     );
                     views.get_mut(&seg_desc.view).expect("just inserted")
@@ -720,6 +761,7 @@ fn open_prefix(
                     0,
                 ),
                 segments: Vec::new(),
+                incarnation: view.incarnation,
             });
         }
 

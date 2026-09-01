@@ -186,6 +186,10 @@ pub(crate) struct FlushContext {
     pub(crate) prefix_dir: PathBuf,
     pub(crate) partition: String,
     pub(crate) view: String,
+    /// The incarnation of `view` this flush writes into (decision 0115), resolved from the
+    /// generation's manifest when the flush was planned and stamped into every artifact it
+    /// writes. A view whose incarnation the manifest cannot resolve is not flushed at all.
+    pub(crate) incarnation: tessera_types::view::ViewIncarnation,
     pub(crate) seg_id: String,
     pub(crate) row_base: u32,
     pub(crate) identity_key: IdentityKey,
@@ -224,6 +228,10 @@ pub(crate) struct FlushContext {
     /// A flush that used `view` for both would put a sharing door's values in a directory no leaf
     /// resolves to and no reader opens — served as absence, with no error anywhere.
     pub(crate) scoped_view: String,
+    /// The incarnation of [`FlushContext::scoped_view`] (decisions 0115, 0116): the cell's
+    /// directory carries the **owner** view's incarnation, which under a sharing door is not
+    /// [`FlushContext::incarnation`]'s view.
+    pub(crate) scoped_incarnation: tessera_types::view::ViewIncarnation,
     /// One entry per lane in [`FlushContext::scalar_schema`]'s **scoped suffix**, giving where
     /// that lane's value sits in a buffered row's `scoped` list — `None` for a lane this view
     /// renders and does not write, which since decision 0116 is only a family this view's batches
@@ -324,6 +332,9 @@ pub(crate) struct CompletedFlush {
     /// render list is decided by it, so a view left off renders nothing and is opened for
     /// nothing.
     pub(crate) scoped_columns: Vec<(String, String)>,
+    /// The incarnation of [`FlushContext::view`] this flush wrote under (decision 0115), carried
+    /// out so the publication can stamp the side-manifest entries that outlive a drop.
+    pub(crate) incarnation: tessera_types::view::ViewIncarnation,
     /// This flush's text layers, one per indexed `text` column. Composed onto the live generation
     /// at publication, exactly as a filter extent is: a `match` over a batch flushed since the
     /// build must see it without waiting for a fold.
@@ -438,6 +449,7 @@ pub(crate) fn execute_flush(
         &ctx.view,
         FlushInput {
             seg_id: &ctx.seg_id,
+            incarnation: ctx.incarnation,
             rows,
             quantisation: ctx.quantisation,
             identity_key: &ctx.identity_key,
@@ -547,11 +559,10 @@ pub(crate) fn execute_flush(
     // enters the bundle's file set, and a base outside it is a file `ensure_verified` finds
     // unaccounted for.
     for (column, view) in &scoped_columns {
-        let mut rel = format!("partitions/{}/attrs/{column}", ctx.partition);
-        for component in tessera_store::view_path_components(view) {
-            rel.push('/');
-            rel.push_str(component);
-        }
+        // The writer's own derivation, not a second copy of it: the base is digested at the path
+        // it was written to, incarnation suffix included (decision 0115).
+        let rel =
+            tessera_store::scoped_column_rel(&ctx.partition, column, view, ctx.scoped_incarnation);
         for name in [
             tessera_filter::VALUES_FILE,
             tessera_filter::PRESENCE_FILE,
@@ -660,6 +671,7 @@ pub(crate) fn execute_flush(
         entity_terms_extent,
         text_extents,
         scoped_columns,
+        incarnation: ctx.incarnation,
         files,
         tier,
         tier_path: tier_rel,
@@ -1411,6 +1423,9 @@ fn write_text_layer(
 
     Ok(Some(tessera_store::manifest::TextExtent {
         column: column.to_string(),
+        // The incarnation travels with the view, and is `None` for the same rows `view` is:
+        // an entity-scoped column belongs to no view (decision 0115).
+        incarnation: view.as_ref().map(|_| ctx.incarnation),
         view,
         dict: dict_rel,
         postings: postings_rel,
@@ -1420,16 +1435,16 @@ fn write_text_layer(
 
 /// Where one view's column of a group-scoped family lives, prefix-relative —
 /// `partitions/<p>/attrs/<column>/<group>/<key>/` (`views.md` §5), through the one place a view id
-/// becomes a path so the writer cannot drift from `FilterColumns::open`'s reader.
+/// and its incarnation become a path so the writer cannot drift from `FilterColumns::open`'s
+/// reader. Above the declared incarnation the last component is `<key>@<n>` (decision 0115), so a
+/// recreated key's base never lands on the path its predecessor's occupies.
 fn scoped_column_rel(ctx: &FlushContext, column: &str) -> String {
-    let mut rel = format!("partitions/{}/attrs/{column}", ctx.partition);
-    // **`scoped_view`, not `view`** (decision 0116): the directory is the cell's address and the
-    // cell is `(attribute → its group, key)`, so a sharing group's door writes the owner's path.
-    for component in tessera_store::view_path_components(&ctx.scoped_view) {
-        rel.push('/');
-        rel.push_str(component);
-    }
-    rel
+    // **`scoped_view` and its own incarnation, not `view`'s** (decisions 0115, 0116): the
+    // directory is the cell's address, the cell is `(attribute → its group, key)`, and the
+    // incarnation suffix is the owner view's — a sharing group's door writes the owner's path,
+    // and a recreated key's base never lands on its predecessor's.
+    tessera_store::scoped_column_rel(&ctx.partition, column, &ctx.scoped_view, ctx.scoped_incarnation)
+
 }
 
 /// Write this flush's extent for every **group-scoped** family of its view's group, and the empty

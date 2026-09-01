@@ -66,7 +66,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | **C27** | An artifact layer's member-label declaration — artifact_visibility = { field, … } | Medium | Accepted — caller's control (⊘ not built) |
 | **C28** | A caller's membership requirement on supplied content — require_member_visibility | High if mis-declared | Accepted — caller's control (⊘ not built) |
 | **C29** | An artifact's parent identifier on the wire | Low | Accepted — bounded to the response's own membership |
-| **C30** | An item's satisfied labels, on the drill-down | Low | Accepted — the intersection is the disclosure, and it is the principal's own |
+| **C30** | An item's satisfied labels, its reachable views and their positions, and its scoped values, on the drill-down | Low | Accepted — the intersection is the disclosure, and it is the principal's own; the views and values are the principal's own too |
 
 ## Documents
 
@@ -77,7 +77,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `annotation-representation.md` | Normative for the annotation representat | 40 |
 | `annotation-write-cycle.md` | Normative for the annotation write cycle | 18 |
 | `annotations.md` | Normative — r43 | 18 |
-| `architecture.md` | Normative — r55 | 41 |
+| `architecture.md` | Normative — r56 | 41 |
 | `artifact-fetch-protocol.md` | Normative — r3 | 7 |
 | `artifact-serving-at-scale.md` | Ruled, reviewed, amended, and re-measure | 21 |
 | `artifact-shapes.md` | Normative — r7 |  |
@@ -92,7 +92,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `concurrency-lifecycle.md` | Normative — r11 | 13 |
 | `configuration.md` | Normative for the build-time configurati | 28 |
 | `conformance.md` | Normative — r19 | 19 |
-| `contracts.md` | Normative — r67 | 33 |
+| `contracts.md` | Normative — r70 | 34 |
 | `core-access-expressions.md` | Provisional — under review | 1 |
 | `correctness-suite.md` | Provisional — under review | 13 |
 | `deferred-index-ordinal-split.md` | Deferred |  |
@@ -113,5 +113,5 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `streamed-serving.md` | Normative — r2 |  |
 | `system-architecture.md` | Normative — r17 | 28 |
 | `tile-addressed-integration.md` | Provisional — under review |  |
-| `views.md` | Normative — r26 | 18 |
+| `views.md` | Normative — r29 | 21 |
 | `write-path.md` | Normative for the write path. Owner sign | 20 |

@@ -706,6 +706,9 @@ pub fn encode_expression(mut clauses: Vec<&[u32]>) -> Vec<u32> {
 /// One derived file waiting to be filed: its coordinates and its bytes.
 pub struct Filed {
     pub view: String,
+    /// The incarnation of `view` this structure was derived over (decision 0115). Stamped into
+    /// the manifest entry so that a key created again does not adopt it.
+    pub incarnation: tessera_types::view::ViewIncarnation,
     pub layer: String,
     pub level: u32,
     pub level_version: u64,
@@ -797,6 +800,7 @@ pub fn file_tile_indexes(
         &|item, path| TileIndexExtent {
             path,
             view: item.view.clone(),
+            incarnation: item.incarnation,
             layer: item.layer.clone(),
             level: item.level,
             level_version: item.level_version,
@@ -828,6 +832,7 @@ pub fn file_row_columns(
         &|item, path| RowColumnExtent {
             path,
             view: item.view.clone(),
+            incarnation: item.incarnation,
             layer: item.layer.clone(),
             level: item.level,
             level_version: item.level_version,
@@ -865,6 +870,8 @@ pub fn file_containment(
 /// One segment's resolved shape rows waiting to be filed: its coordinates, its key and its bytes.
 pub struct FiledShapeRows {
     pub view: String,
+    /// The incarnation of `view` these rows were resolved over (decision 0115).
+    pub incarnation: tessera_types::view::ViewIncarnation,
     pub layer: String,
     pub level: u32,
     pub level_version: u64,
@@ -905,6 +912,7 @@ pub fn file_shape_rows(
         entries.push(ShapeRowsExtent {
             path: format!("partitions/{partition}/{kind}/{name}"),
             view: item.view.clone(),
+            incarnation: item.incarnation,
             layer: item.layer.clone(),
             level: item.level,
             level_version: item.level_version,
@@ -936,6 +944,7 @@ pub fn file_shape_held(
         &|item, path| ShapeHeldExtent {
             path,
             view: item.view.clone(),
+            incarnation: item.incarnation,
             layer: item.layer.clone(),
             level: item.level,
             level_version: item.level_version,

@@ -562,7 +562,12 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
 
     // Reopen: fresh replay from disk, not the in-memory `Overlay`/`IngestBuffer` above.
     let (_wal, records) = Wal::open(&wal_path).unwrap();
-    let (overlay, buffer, _established, _resolver) = replay(&records, &dict, Overlay::new());
+    let (overlay, buffer, _established, _resolver) = replay(
+        &records,
+        &dict,
+        Overlay::new(),
+        &tessera_lifecycle::owner_id_only,
+    );
 
     assert!(
         overlay.is_deleted(e(ENTITY_X)),

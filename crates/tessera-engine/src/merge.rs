@@ -50,6 +50,9 @@ use crate::Generation;
 pub(crate) struct MergePlan {
     pub(crate) partition: String,
     pub(crate) view: String,
+    /// The incarnation of `view` the inputs carry and the output takes (decision 0115). A merge
+    /// never crosses a drop: its inputs are the live row space's own extents.
+    pub(crate) incarnation: tessera_types::view::ViewIncarnation,
     pub(crate) inputs: Vec<MergeInput>,
     /// Where the merged extent begins in view row space — the first consumed extent's `row_base`.
     pub(crate) row_base: u32,
@@ -67,6 +70,18 @@ pub(crate) fn plan_merge(generation: &Generation, policy: MergePolicy) -> Option
         return None;
     }
     for (view, view_data) in &partition_data.views {
+        // **The view's live incarnation, or this view is not merged** (decision 0115). The bundle
+        // and its manifest are brought into step by `Bundle::with_views`, so a mismatch here is a
+        // state the composition already refuses to serve; failing closed costs a merge and never
+        // publishes one over a dead row space.
+        let incarnation = view_data.incarnation;
+        if !generation
+            .bundle
+            .manifest
+            .is_live_incarnation(view, incarnation)
+        {
+            continue;
+        }
         // **Only extents may be merged, never the base segment.** The base is the one segment with
         // no extent — `permutation.bin` addresses it — so restricting selection to the extent list
         // excludes it structurally rather than by the size bound alone.
@@ -78,6 +93,7 @@ pub(crate) fn plan_merge(generation: &Generation, policy: MergePolicy) -> Option
             .iter()
             .map(|extent| SegmentDescriptor {
                 view: view.clone(),
+                incarnation,
                 seg_id: extent.seg_id.clone(),
                 row_count: extent.row_count(),
                 entity_lo: extent.entity_lo,
@@ -98,6 +114,7 @@ pub(crate) fn plan_merge(generation: &Generation, policy: MergePolicy) -> Option
         return Some(MergePlan {
             partition: partition.clone(),
             view: view.clone(),
+            incarnation,
             inputs: descriptors
                 .iter()
                 .filter(|d| chosen.contains(&d.seg_id))
@@ -204,6 +221,7 @@ pub(crate) fn execute(plan: MergePlan, ctx: MergeContext) -> Result<CompletedMer
         &plan.partition,
         &plan.view,
         MergeSpec {
+            incarnation: plan.incarnation,
             seg_id: &ctx.seg_id,
             inputs: &plan.inputs,
             identity_key: &ctx.identity_key,

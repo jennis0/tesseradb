@@ -187,6 +187,7 @@ fn flushed_bundle(root: &Path) {
         "default",
         "s0",
         FlushInput {
+            incarnation: 0,
             seg_id: "flush-1",
             rows,
             quantisation: manifest
@@ -230,7 +231,7 @@ fn flushed_bundle(root: &Path) {
         layer_tombstones: seg0.layer_tombstones.clone(),
         views: Vec::new(),
         scoped_columns: Vec::new(),
-        view_tombstones: Vec::new(),
+        dead_view_incarnations: Vec::new(),
         membership_extents: Vec::new(),
         level_versions: Vec::new(),
         containment_extents: Vec::new(),

@@ -441,6 +441,10 @@ pub(crate) struct PlannedSegment {
 /// One view's half of a fold plan.
 pub(crate) struct FoldViewPlan {
     pub(crate) view: String,
+    /// The incarnation of `view` this plan folds (decision 0115) — the bundle's own, which
+    /// `Bundle::with_views` has already held to the live roster. Stamped into the new base
+    /// segment so that the fold's output is the successor's and not a predecessor's.
+    pub(crate) incarnation: tessera_types::view::ViewIncarnation,
     /// Every live segment of this view at the snapshot — the base plus every extent. Pass 1 merges
     /// them all; order does not matter to it, since the merge is driven by a heap over each
     /// cursor's `(morton, tessera_id)` key.
@@ -693,6 +697,7 @@ pub(crate) fn plan_fold(
             .map_or(row_space.base().bound(), |extent| extent.entity_hi + 1);
         views.push(FoldViewPlan {
             view: view.clone(),
+            incarnation: view_data.incarnation,
             segments: view_data
                 .segments
                 .iter()
@@ -837,7 +842,30 @@ pub(crate) struct FoldContext {
     /// entity-scoped column one bundle-wide — and without them a fold writes a prefix in which the
     /// families' directories simply are not there, which is a bundle that does not open.
     pub(crate) scoped_scalars: Vec<tessera_store::manifest::ScopedScalar>,
+    /// Which incarnation each view of the roster is, taken from the same manifest
+    /// `scoped_scalars` came from (decision 0115). A scoped column's directory carries it above
+    /// the build's, so the fold that rewrites those columns has to place them where the opener
+    /// will look — the one derivation being `tessera_store::scoped_column_rel`.
+    pub(crate) view_incarnations:
+        std::collections::HashMap<String, tessera_types::view::ViewIncarnation>,
     pub(crate) vocabularies: Vec<ManifestVocabulary>,
+}
+
+/// The path one view's column of a scoped family folds into, or `None` where this manifest cannot
+/// say which incarnation the view is (decision 0115).
+///
+/// **`None` skips the column rather than guessing one.** A family naming a view the roster cannot
+/// place is a manifest whose two halves disagree; `FilterColumns::open` skips it for the same
+/// reason, so the fold writing nothing there produces exactly the state the opener already
+/// tolerates instead of a folded column at a path nothing reads.
+fn scoped_job_rel(plan: &FoldPlan, ctx: &FoldContext, family: &str, view: &str) -> Option<String> {
+    let incarnation = ctx.view_incarnations.get(view)?;
+    Some(tessera_store::scoped_column_rel(
+        &plan.partition,
+        family,
+        view,
+        *incarnation,
+    ))
 }
 
 /// One column the attribute pass folds: where its files live, and what its declaration says about
@@ -891,13 +919,11 @@ fn value_column_jobs(plan: &FoldPlan, ctx: &FoldContext) -> Vec<ColumnJob> {
             continue;
         }
         for view in &family.views {
+            let Some(rel) = scoped_job_rel(plan, ctx, &family.name, view) else {
+                continue;
+            };
             jobs.push(ColumnJob {
-                rel: format!(
-                    "partitions/{}/attrs/{}/{}",
-                    plan.partition,
-                    family.name,
-                    tessera_store::view_path_components(view).join("/")
-                ),
+                rel,
                 name: family.name.clone(),
                 view: Some(view.clone()),
                 arrow_type: family.arrow_type,
@@ -1117,6 +1143,7 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
 
         segments.push(SegmentDescriptor {
             view: view.view.clone(),
+            incarnation: view.incarnation,
             seg_id: ctx.seg_id.clone(),
             row_count: out.row_count,
             entity_lo: 0,
@@ -1719,13 +1746,11 @@ fn fold_text_columns(
         .filter(|f| f.arrow_type == ScalarType::Text && f.index)
     {
         for view in &family.views {
+            let Some(rel) = scoped_job_rel(plan, ctx, &family.name, view) else {
+                continue;
+            };
             jobs.push(ColumnJob {
-                rel: format!(
-                    "partitions/{}/attrs/{}/{}",
-                    plan.partition,
-                    family.name,
-                    tessera_store::view_path_components(view).join("/")
-                ),
+                rel,
                 name: family.name.clone(),
                 view: Some(view.clone()),
                 arrow_type: family.arrow_type,
@@ -1868,6 +1893,7 @@ mod tests {
 
     fn segment(seg_id: &str, entity_lo: u64, entity_hi: u64) -> SegmentDescriptor {
         SegmentDescriptor {
+            incarnation: 0,
             view: "s0".to_string(),
             seg_id: seg_id.to_string(),
             row_count: (entity_hi - entity_lo + 1) as u32,

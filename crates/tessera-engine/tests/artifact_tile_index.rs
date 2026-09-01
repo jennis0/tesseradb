@@ -673,6 +673,7 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
     store.seed_level_version(LAYER, 0, 11);
     let projected_at = store.level_version(LAYER, 0);
     let entry = |view: &str, version: u64| tessera_store::manifest::TileIndexExtent {
+        incarnation: 0,
         path: rel.to_string(),
         view: view.to_string(),
         layer: LAYER.to_string(),

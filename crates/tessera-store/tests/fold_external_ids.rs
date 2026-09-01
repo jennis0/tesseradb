@@ -64,6 +64,7 @@ fn run_of(root: &Path, seg_id: &str, bindings: &[(u64, &str)]) -> PathBuf {
         PARTITION,
         VIEW,
         FlushInput {
+            incarnation: 0,
             seg_id,
             rows,
             quantisation: quantisation(),
@@ -299,6 +300,7 @@ fn a_post_snapshot_entity_resolves_through_its_carried_forward_extent() {
         PARTITION,
         VIEW,
         FlushInput {
+            incarnation: 0,
             seg_id: "post-fold-flush",
             rows: vec![
                 flush_row(n, Some(b"omega"), 0.1, 0.1),

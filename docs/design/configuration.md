@@ -754,7 +754,7 @@ arbitrary.**
 |---|---|
 | Artifacts, layers | **Yes, today.** That is the control plane's whole job; the build plane exists only so a 10⁷-artifact level need not ride the trickle path (`annotation-write-cycle.md` §6.1) |
 | Vocabulary values | **By design, no endpoint.** Appending a value and retiring one are both safe — a new code is assigned, a retired one moves to `reserved` and is never reassigned (`per-point-attributes.md` §2.2) — but ⊘ `/control/categories` is still owed, so today the route exists on paper only |
-| Views | **A group's view: yes, since 2026-08-31.** `PUT /control/views/{group}/{key}` creates it — WAL'd, the roster's durable home the segments manifest, serving empty until its first flush (views §3.2) — and `DELETE` drops it, the key burnt for ever. A plain view or a new group is a rebuild, deliberately (decision 0108) |
+| Views | **A group's view: yes, since 2026-08-31.** `PUT /control/views/{group}/{key}` creates it — WAL'd, the roster's durable home the segments manifest, serving empty until its first flush (views §3.2) — and `DELETE` drops it, freeing the key for a later create (decision 0115). A plain view or a new group is a rebuild, deliberately (decision 0108) |
 | Attributes | **Deliberately not online.** Adding `index` is a build pass with no row rewrite; adding `render` rewrites every segment; changing a width or a type is refused outright. The convention is Elasticsearch's, and stolen on purpose: *mappings are immutable; you reindex* |
 
 ⊘ **Declaring a wholly new attribute after a build is not specified**, as distinct from altering an

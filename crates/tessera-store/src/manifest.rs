@@ -427,6 +427,23 @@ impl IdentityDescriptor {
 pub struct ViewDescriptor {
     pub id: String,
     pub display_name: String,
+    /// **Which incarnation of this key the view currently is** (decision 0115) — the one place a
+    /// reader with a view id gets the number every artifact of the view is stamped with.
+    ///
+    /// **Internal, and on no wire.** `/v1/meta` publishes the id and the roster record; this
+    /// number is not part of either, and no response carries it, so a principal cannot tell a
+    /// recreated key from one created for the first time.
+    ///
+    /// [`DECLARED_INCARNATION`] for a view the build declared. A create while the service runs
+    /// mints the next value and [`Manifest::with_roster`] stamps it here; a drop takes the
+    /// descriptor out, and a create of the same key puts back a descriptor at a higher one — which
+    /// is what makes every segment, column and derived structure of the predecessor unreachable.
+    ///
+    /// **Required, not `default`**, on `quantisation`'s rule and with a sharper consequence: an
+    /// absent incarnation reads as the build's, which is the one value a leftover artifact of a
+    /// dropped-and-recreated key could carry, so a default here would adopt exactly the artifacts
+    /// the field exists to keep out.
+    pub incarnation: ViewIncarnation,
     /// The frame every position in this view is quantised against (contracts §2.5), immutable
     /// for the view's life — which is what makes a Morton prefix a permanent address in this view
     /// (decision 0040).
@@ -671,6 +688,12 @@ impl ScopedScalar {
 pub struct ScopedColumn {
     pub column: String,
     pub view: String,
+    /// The view's incarnation when the column was written (decision 0115).
+    ///
+    /// **Carried, not resolved.** This list is complete current state carried forward for ever,
+    /// so an entry outlives the drop that made it garbage; without the stamp a key created again
+    /// would find its predecessor's pair in the list and publish the old column as its own.
+    pub incarnation: ViewIncarnation,
 }
 
 /// One view of a group, as the roster records it.
@@ -696,7 +719,8 @@ pub struct GroupViewDescriptor {
 /// durable travels through `tessera-lifecycle`, which does not depend on this crate
 /// (`tessera_types::view`). Re-exported here so a manifest reader still names one module.
 pub use tessera_types::view::{
-    CreatedView, GroupMetadataField, TombstonedView, ViewMetadataType, ViewMetadataValue,
+    CreatedView, DeadIncarnation, GroupMetadataField, ViewIncarnation, ViewMetadataType,
+    ViewMetadataValue, DECLARED_INCARNATION,
 };
 
 /// `views[..].projection` as the name a declaration writes (`projections.md` §5), refusing one
@@ -891,6 +915,38 @@ impl Manifest {
             .collect()
     }
 
+    /// The group that **owns** `group`'s keys — itself, unless it declares `members`
+    /// (`views.md` §3.3). A group this manifest does not declare owns its own keys, which is the
+    /// answer a caller can act on: it names no sharing groups either.
+    pub fn owner_of_group(&self, group: &str) -> String {
+        self.groups
+            .iter()
+            .find(|g| g.name == group)
+            .and_then(|g| g.members_of.clone())
+            .unwrap_or_else(|| group.to_string())
+    }
+
+    /// Every view id one key of `owner` resolves to: the owning group's, and one for **every group
+    /// whose views are the owner's** (`members`, `views.md` §3.3).
+    ///
+    /// **One definition, because a key is not one view.** A create lands on every sharing group at
+    /// the same moment and a drop takes it off every one of them, so anything that acts on "the
+    /// views of this key" — [`Self::with_roster`]'s death loop, the drop's buffer prune, its
+    /// `delete_dangling` probe, and the WAL replay's own prune — must expand the same way. Three
+    /// copies of the expansion is how one of them comes to prune a single spelling and leave the
+    /// other's rows to be adopted by whatever takes the key next
+    /// ([decision 0115](../../../docs/decisions/0115-a-dropped-view-key-is-reusable.md)).
+    ///
+    /// The caller passes the **owner**: `owner_of_group` is what turns the group a request named
+    /// into it.
+    pub fn view_ids_for_key(&self, owner: &str, key: &str) -> Vec<String> {
+        self.groups
+            .iter()
+            .filter(|g| g.name == owner || g.members_of.as_deref() == Some(owner))
+            .map(|g| format!("{}{}{}", g.name, crate::GROUP_SEPARATOR, key))
+            .collect()
+    }
+
     /// This manifest as the **live roster** makes it: the views a build declared, plus every view
     /// created while the service runs, minus every key that has been dropped (`views.md` §3.2,
     /// §3.4).
@@ -909,12 +965,38 @@ impl Manifest {
     /// A create naming a group this manifest does not declare is **dropped rather than expanded**:
     /// it cannot arise from the create operation, which refuses an unknown group, and a rebuild is
     /// free to remove a group — in which case its views are not views of this bundle either.
-    pub fn with_roster(
-        &self,
-        created: &[CreatedView],
-        tombstones: &[TombstonedView],
-    ) -> Manifest {
+    pub fn with_roster(&self, created: &[CreatedView], dead: &[DeadIncarnation]) -> Manifest {
         let mut manifest = self.clone();
+        // **The deaths first, then the creations** (decision 0115). A key may be dropped and
+        // created again, and both lists are complete current state rather than a diff — so this
+        // order is what decides whether the recreate survives. Taking the dead incarnation's
+        // descriptors out first lets the creation put back a descriptor at the live incarnation;
+        // the other order would delete the view the caller was just told it had. A death whose key
+        // nothing recreated simply leaves the group without it.
+        for stone in dead {
+            // **The owner's groups and every group sharing its views** — the one expansion
+            // `Self::view_ids_for_key` defines, which the drop's own prunes take too.
+            let ids = manifest.view_ids_for_key(&stone.group, &stone.key);
+            for group in &mut manifest.groups {
+                if group.name == stone.group
+                    || group.members_of.as_deref() == Some(stone.group.as_str())
+                {
+                    group.views.retain(|v| v.key != stone.key);
+                    // **And the families' own lists** (`views.md` §5). A family names the views
+                    // that have a column, and [`Self::validate_groups`] holds every one of them to
+                    // being a view of the group — so a list that kept a dropped key would make the
+                    // manifest refuse to load at the next restart. The column's files are left
+                    // behind with the prefix, exactly as the view's segments are: §3.4's
+                    // reclamation is by omission, and the incarnation is what keeps a key created
+                    // again from adopting them.
+                    let dropped = format!("{}{}{}", group.name, crate::GROUP_SEPARATOR, stone.key);
+                    for family in &mut group.scoped_scalars {
+                        family.views.retain(|v| *v != dropped);
+                    }
+                }
+            }
+            manifest.views.retain(|v| !ids.contains(&v.id));
+        }
         for view in created {
             // The owner, then every group whose views are the owner's.
             let sharing: Vec<String> = manifest
@@ -955,6 +1037,11 @@ impl Manifest {
                         // entry above and this descriptor carry one label, which
                         // `Manifest::validate_groups` holds them to.
                         visibility: view.visibility.clone(),
+                        // **The record's incarnation** (decision 0115), which is what every
+                        // consumer with a view id resolves an artifact's stamp against. A key
+                        // created again lands here at a higher number than the segments and
+                        // columns its predecessor left behind, so none of them is composed.
+                        incarnation: view.incarnation,
                         // **The group's frame and the group's projection**: a view of a group
                         // shares every setting with its siblings, which is what makes a key set
                         // one coordinate system observed at several keys.
@@ -964,35 +1051,28 @@ impl Manifest {
                 }
             }
         }
-        for stone in tombstones {
-            let ids: Vec<String> = manifest
-                .groups
-                .iter()
-                .filter(|g| {
-                    g.name == stone.group || g.members_of.as_deref() == Some(stone.group.as_str())
-                })
-                .map(|g| format!("{}{}{}", g.name, crate::GROUP_SEPARATOR, stone.key))
-                .collect();
-            for group in &mut manifest.groups {
-                if group.name == stone.group
-                    || group.members_of.as_deref() == Some(stone.group.as_str())
-                {
-                    group.views.retain(|v| v.key != stone.key);
-                    // **And the families' own lists** (`views.md` §5). A family names the views
-                    // that have a column, and [`Self::validate_groups`] holds every one of them to
-                    // being a view of the group — so a list that kept a dropped key would make the
-                    // manifest refuse to load at the next restart. The column's files are left
-                    // behind with the prefix, exactly as the view's segments are: §3.4's
-                    // reclamation is by omission.
-                    let dropped = format!("{}{}{}", group.name, crate::GROUP_SEPARATOR, stone.key);
-                    for family in &mut group.scoped_scalars {
-                        family.views.retain(|v| *v != dropped);
-                    }
-                }
-            }
-            manifest.views.retain(|v| !ids.contains(&v.id));
-        }
         manifest
+    }
+
+    /// Which incarnation the view with this id currently is, or `None` if this manifest declares
+    /// no such view (decision 0115).
+    ///
+    /// **The one resolution site for an artifact's stamp, and it fails closed**: a caller that
+    /// gets `None` must treat the artifact as unreachable, never as live.
+    pub fn incarnation_of(&self, view: &str) -> Option<ViewIncarnation> {
+        self.views
+            .iter()
+            .find(|v| v.id == view)
+            .map(|v| v.incarnation)
+    }
+
+    /// Is this artifact's `(view, incarnation)` stamp the live one?
+    ///
+    /// The predicate every carry-forward and every open filters on. A stamp naming a view this
+    /// manifest does not declare, or naming an incarnation that is not the live one, is an
+    /// artifact of a dropped view: unreachable, and the fold's to reclaim.
+    pub fn is_live_incarnation(&self, view: &str, incarnation: ViewIncarnation) -> bool {
+        self.incarnation_of(view) == Some(incarnation)
     }
 
     /// This manifest with each `(family, view)` pair added to the family's own `views` list —
@@ -1007,9 +1087,16 @@ impl Manifest {
     /// or a view this manifest does not declare is **dropped rather than expanded**, on
     /// [`Self::with_roster`]'s rule: a rebuild is free to remove either, in which case the column
     /// is not this bundle's either.
-    pub fn with_scoped_columns(&self, columns: &[(String, String)]) -> Manifest {
+    /// **A pair of a dead incarnation is dropped, not published** (decision 0115): the column is
+    /// on disc under the same path a key created again would use, and adding it to the family's
+    /// list would serve the predecessor's values as the new view's. The pair is checked against
+    /// this manifest's own incarnation, which is the live one by construction.
+    pub fn with_scoped_columns(&self, columns: &[(String, String, ViewIncarnation)]) -> Manifest {
         let mut manifest = self.clone();
-        for (column, view) in columns {
+        for (column, view, incarnation) in columns {
+            if !manifest.is_live_incarnation(view, *incarnation) {
+                continue;
+            }
             let Some((group_name, key)) = view.split_once(crate::GROUP_SEPARATOR) else {
                 continue;
             };
@@ -1071,6 +1158,15 @@ impl Manifest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SegmentDescriptor {
     pub view: String,
+    /// The view's incarnation when this segment was written (decision 0115).
+    ///
+    /// **Carried rather than resolved, and this is the class the stamp exists for.** A dropped
+    /// view's segments stay in the live side-manifest until a fold reclaims them; a key created
+    /// again is declared once more, so the "is this view still declared" test that omits them
+    /// today would start answering yes and the new view would serve the predecessor's points —
+    /// the silent wrong answer. The restart path can check this with no ordering argument: it has
+    /// the manifest and the roster, and needs nothing about when either was written.
+    pub incarnation: ViewIncarnation,
     pub seg_id: String,
     pub row_count: u32,
     pub entity_lo: u64,
@@ -1165,6 +1261,12 @@ pub struct AttrExtent {
     /// and not tolerance of an older manifest ([`AttrExtent::dict`]'s note).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view: Option<String>,
+    /// The incarnation of [`Self::view`] when this extent was written — `Some` exactly when
+    /// `view` is, an entity-scoped column belonging to no view (decision 0115). Carried for
+    /// [`SegmentDescriptor::incarnation`]'s reason: the list is carried forward for ever, so an
+    /// extent outlives the drop that orphaned it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incarnation: Option<ViewIncarnation>,
     /// Prefix-relative path of the values file.
     pub values: String,
     /// Prefix-relative path of the presence bitmap.
@@ -1226,6 +1328,10 @@ pub struct TextExtent {
     /// `Option`'s absence is the field's own, not tolerance of an older manifest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view: Option<String>,
+    /// The incarnation of [`Self::view`] when this extent was written — `Some` exactly when
+    /// `view` is. [`AttrExtent::incarnation`]'s field, for its reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incarnation: Option<ViewIncarnation>,
     /// Prefix-relative path of the extent's **own** front-coded token dictionary. An extent's
     /// postings are positions in this dictionary and name nothing against another's.
     pub dict: String,
@@ -1401,6 +1507,11 @@ pub struct TileIndexExtent {
     pub path: String,
     /// The view whose row space these extents are in.
     pub view: String,
+    /// The view's incarnation when this structure was written (decision 0115). Carried for
+    /// [`SegmentDescriptor::incarnation`]'s reason: a derived structure is addressed by *row*, so
+    /// one written over a dropped incarnation's row space would label the rows of a key created
+    /// again with the predecessor's artifacts.
+    pub incarnation: ViewIncarnation,
     pub layer: String,
     pub level: u32,
     /// The level's version when this column was projected. **Also the adoption test.**
@@ -1430,6 +1541,11 @@ pub struct RowColumnExtent {
     pub path: String,
     /// The view whose row space this column is addressed in.
     pub view: String,
+    /// The view's incarnation when this structure was written (decision 0115). Carried for
+    /// [`SegmentDescriptor::incarnation`]'s reason: a derived structure is addressed by *row*, so
+    /// one written over a dropped incarnation's row space would label the rows of a key created
+    /// again with the predecessor's artifacts.
+    pub incarnation: ViewIncarnation,
     pub layer: String,
     pub level: u32,
     /// The level's version when this column was written. **Also the adoption test.**
@@ -1462,6 +1578,11 @@ pub struct ShapeRowsExtent {
     pub path: String,
     /// The view whose segment the rows are of.
     pub view: String,
+    /// The view's incarnation when this structure was written (decision 0115). Carried for
+    /// [`SegmentDescriptor::incarnation`]'s reason: a derived structure is addressed by *row*, so
+    /// one written over a dropped incarnation's row space would label the rows of a key created
+    /// again with the predecessor's artifacts.
+    pub incarnation: ViewIncarnation,
     pub layer: String,
     pub level: u32,
     /// The level's version when the segment was resolved. **Also the adoption test.**
@@ -1491,6 +1612,11 @@ pub struct ShapeHeldExtent {
     pub path: String,
     /// The view the shapes were canonicalised for.
     pub view: String,
+    /// The view's incarnation when this structure was written (decision 0115). Carried for
+    /// [`SegmentDescriptor::incarnation`]'s reason: a derived structure is addressed by *row*, so
+    /// one written over a dropped incarnation's row space would label the rows of a key created
+    /// again with the predecessor's artifacts.
+    pub incarnation: ViewIncarnation,
     pub layer: String,
     pub level: u32,
     /// The level's version when the decompositions were written. **Also the adoption test.**
@@ -1603,12 +1729,19 @@ pub struct SegmentsManifest {
     /// column-free, and the two are indistinguishable under a default while only one is safe to
     /// serve.
     pub scoped_columns: Vec<ScopedColumn>,
-    /// Every view key that has ever been dropped (`views.md` §3.4).
+    /// Every **incarnation of a key that has died** and whose artifacts a fold has not yet
+    /// reclaimed (`views.md` §3.4, decision 0115).
     ///
-    /// **Carried for ever and never pruned**, on `layer_tombstones`' argument: a key that once
-    /// meant something must not come to mean something else, and a recreated `2026-Q3` with
-    /// different contents would silently repoint every bookmark and every cached θ.
-    pub view_tombstones: Vec<TombstonedView>,
+    /// **This is bookkeeping, not a refusal.** It was a tombstone list, and a create measured
+    /// itself against it; a dropped key is now reusable, and what remains is what the reuse needs
+    /// — the record that an incarnation's row spaces, columns and derived structures are on disc
+    /// and unreachable. Renamed rather than repurposed under the old name, so that nothing reads
+    /// it as the burn it no longer is.
+    ///
+    /// Carried forward at every publication, on `layer_tombstones`' argument: a mark that lives
+    /// only in the log is lost at the first rotation, and a reclaim that forgot an incarnation
+    /// would leave its files on disc for ever.
+    pub dead_view_incarnations: Vec<DeadIncarnation>,
     /// Every packed membership extent this partition holds — see [`MembershipExtent`]. Empty in a
     /// bundle straight out of `tessera build`, which registers no layers and publishes no artifacts.
     ///
@@ -1794,7 +1927,7 @@ pub const HONOURED_STATE: &[&str] = &[
     // one a 404 — and, worse, would admit a create on a key a live or tombstoned view already
     // holds, when a key is a view's only address and is never reused (`views.md` §3.2, §3.4).
     "views",
-    "view_tombstones",
+    "dead_view_incarnations",
 ];
 
 /// The subset of state fields a manifest carries **because a deny was accepted** (contracts
@@ -1885,7 +2018,10 @@ impl SegmentsManifest {
             ("layers", !self.layers.is_empty()),
             ("layer_tombstones", !self.layer_tombstones.is_empty()),
             ("views", !self.views.is_empty()),
-            ("view_tombstones", !self.view_tombstones.is_empty()),
+            (
+                "dead_view_incarnations",
+                !self.dead_view_incarnations.is_empty(),
+            ),
         ]
         .into_iter()
         .filter(|(name, carried)| *carried && !HONOURED_STATE.contains(name))
@@ -2028,7 +2164,7 @@ mod tests {
             layer_tombstones: Vec::new(),
             views: Vec::new(),
             scoped_columns: Vec::new(),
-            view_tombstones: Vec::new(),
+            dead_view_incarnations: Vec::new(),
             membership_extents: Vec::new(),
             level_versions: Vec::new(),
             containment_extents: Vec::new(),
@@ -2152,7 +2288,7 @@ mod tests {
                 "layers",
                 "layer_tombstones",
                 "views",
-                "view_tombstones",
+                "dead_view_incarnations",
             ],
             "deltas: `build_fragment_with_deltas` unions every live tier into a fragment. \
              deny/tombstones: the loader seeds the initial overlay from them and WAL replay \
@@ -2163,7 +2299,7 @@ mod tests {
              before replaying the WAL over the top, which is what makes a registration survive the \
              rotation that reclaims its `LayerCreate` record — a reader carrying them and ignoring \
              them would open a bundle as though no layer had ever been registered, every gate \
-             absent and every reserved run free for reissue. views/view_tombstones: \
+             absent and every reserved run free for reissue. views/dead_view_incarnations: \
              `Engine::open` seeds the `ViewRoster` from them and amends the bundle's own manifest \
              with what it holds, before replaying the WAL over the top — which is what makes a \
              view created while the service ran survive the rotation that reclaims its \

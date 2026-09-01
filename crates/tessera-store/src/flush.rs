@@ -70,6 +70,9 @@ pub struct FlushRow {
 /// Everything one flush needs to write one segment.
 pub struct FlushInput<'a> {
     pub seg_id: &'a str,
+    /// The incarnation of the view this segment is written into (decision 0115), stamped into the
+    /// descriptor so that a key created again cannot adopt it.
+    pub incarnation: tessera_types::view::ViewIncarnation,
     /// **Ascending by `entity_id`, with deleted entities already removed** (§3.5: a deletion's ID
     /// stays burned and no row is created for it). Contiguity is I9's doing — ids are issued
     /// monotonically from the high-water — and it is what makes the extent dense.
@@ -271,6 +274,7 @@ pub fn write_flush_segment(
     Ok(FlushOutput {
         segment: SegmentDescriptor {
             view: view.to_string(),
+            incarnation: input.incarnation,
             seg_id: input.seg_id.to_string(),
             row_count: input.rows.len() as u32,
             entity_lo,
@@ -466,6 +470,7 @@ mod tests {
             "p",
             "s",
             FlushInput {
+                incarnation: 0,
                 seg_id: "seg-1",
                 rows,
                 quantisation: quantisation(),

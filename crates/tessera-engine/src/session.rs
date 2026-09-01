@@ -1145,10 +1145,10 @@ impl Engine {
             .values()
             .flat_map(|partition| partition.manifest.views.iter().cloned())
             .collect();
-        let manifest_view_tombstones: Vec<tessera_types::view::TombstonedView> = bundle
+        let manifest_dead_incarnations: Vec<tessera_types::view::DeadIncarnation> = bundle
             .partitions
             .values()
-            .flat_map(|partition| partition.manifest.view_tombstones.iter().cloned())
+            .flat_map(|partition| partition.manifest.dead_view_incarnations.iter().cloned())
             .collect();
         // The views the *build* declared, whose keys a create must not reissue.
         let declared_views: Vec<(String, String)> = bundle
@@ -1217,8 +1217,15 @@ impl Engine {
                 layers: &manifest_layers,
                 tombstones: &manifest_layer_tombstones,
                 created_views: &manifest_created_views,
-                view_tombstones: &manifest_view_tombstones,
+                dead_view_incarnations: &manifest_dead_incarnations,
                 declared_views,
+                // **The `members` expansion, so replay's `ViewDrop` arm prunes every id the key
+                // names** (`views.md` §3.3, decision 0115). The owner's spelling alone would
+                // leave a sharing group's buffered rows in the log to be flushed into whatever
+                // takes the key next.
+                view_ids_of_key: &|group: &str, key: &str| {
+                    bundle.manifest.view_ids_for_key(group, key)
+                },
                 membership_extents: &manifest_membership_extents,
                 level_versions: &manifest_level_versions,
                 prefix_dir: prefix_dir.clone(),
@@ -1272,26 +1279,29 @@ impl Engine {
         // dropped. Applied here, before the first generation is built, because everything below
         // reads the manifest — the deny mask over every view, `/v1/meta`, view resolution on both
         // planes — and a created view absent from it comes back from a restart as a 404.
-        let (created_views, view_tombstones) = write_state.roster.snapshot();
+        let (created_views, dead_incarnations) = write_state.roster.snapshot();
         // **And the group-scoped columns a flush wrote** (`views.md` §5).
         // `scoped_scalars[..].views` names the views that have a column; a flush of a view created
         // since the build wrote one, and `SegmentsManifest::scoped_columns` is where that survives
         // a restart — `MANIFEST.json` being rewritten only by a fold.
-        let scoped_columns: Vec<(String, String)> = bundle
+        // The incarnation travels with the pair: a column of a dead incarnation is on disc under
+        // the same path a key created again would use, and `with_scoped_columns` drops it rather
+        // than publishing the predecessor's values as the new view's (decision 0115).
+        let scoped_columns: Vec<(String, String, tessera_types::view::ViewIncarnation)> = bundle
             .partitions
             .values()
             .flat_map(|p| p.manifest.scoped_columns.iter())
-            .map(|c| (c.column.clone(), c.view.clone()))
+            .map(|c| (c.column.clone(), c.view.clone(), c.incarnation))
             .collect();
         let bundle = if created_views.is_empty()
-            && view_tombstones.is_empty()
+            && dead_incarnations.is_empty()
             && scoped_columns.is_empty()
         {
             Arc::new(bundle)
         } else {
             let manifest = bundle
                 .manifest
-                .with_roster(&created_views, &view_tombstones)
+                .with_roster(&created_views, &dead_incarnations)
                 .with_scoped_columns(&scoped_columns);
             Arc::new(bundle).with_views(manifest)
         };
@@ -1344,6 +1354,9 @@ impl Engine {
                     // the first component of each family's view ids, so what the opener needs is
                     // the families and not the rosters (`views.md` §5).
                     &bundle.manifest.scoped_scalars(),
+                    // The roster this bundle is serving, which is what places a scoped column on
+                    // disc (decision 0115).
+                    &|view: &str| bundle.manifest.incarnation_of(view),
                     &bundle.manifest.vocabularies,
                     &extents,
                     &record_extents,
@@ -2597,17 +2610,12 @@ impl Engine {
     /// One permutation read and one hash lookup; nothing walks.
     pub fn view_holds(&self, entity: EntityId, view: &str) -> bool {
         let generation = self.generation();
-        generation
-            .bundle
-            .partitions
-            .values()
-            .any(|partition| {
-                partition
-                    .views
-                    .get(view)
-                    .is_some_and(|data| data.row_space.row_of(entity).is_some())
-            })
-            || generation.buffer.contains_in_view(entity, view)
+        generation.bundle.partitions.values().any(|partition| {
+            partition
+                .views
+                .get(view)
+                .is_some_and(|data| data.row_space.row_of(entity).is_some())
+        }) || generation.buffer.contains_in_view(entity, view)
     }
 
     /// An already-flushed entity's **full** term set, ascending, from the entity→term transpose
@@ -3596,6 +3604,7 @@ pub(crate) fn open_rotation(
             &phash,
             &bundle.manifest.declared_scalars,
             &bundle.manifest.scoped_scalars(),
+            &|view: &str| bundle.manifest.incarnation_of(view),
             &bundle.manifest.vocabularies,
             &partition.manifest.attr_extents,
             // The record blob rotates with the prefix for the reason the value columns do: the

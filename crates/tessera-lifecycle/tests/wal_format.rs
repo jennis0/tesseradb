@@ -135,11 +135,14 @@ fn a_wal_row_round_trips_a_coordinate_no_f32_holds() {
 /// bytes a coordinate now takes come out of whatever field follows it — the row would land
 /// somewhere on the grid instead of failing. **16** is the version before `WalRow` gained
 /// `scoped` (`views.md` §5, r24): postcard is positional, so a 16 record read at 17 takes the
-/// *next* record's leading bytes for the list it does not carry.
+/// *next* record's leading bytes for the list it does not carry. **17** is the version before the
+/// roster records carried an incarnation (decision 0115): a 17 `ViewCreate` read at 18 takes the
+/// gate's bytes for the incarnation and everything after it shifts, so the record decodes into a
+/// roster entry nobody wrote.
 #[test]
 fn a_log_at_a_version_whose_records_would_be_misread_is_refused() {
     let dir = tempfile::TempDir::new().unwrap();
-    for (index, version) in [15u16, 16].into_iter().enumerate() {
+    for (index, version) in [15u16, 16, 17].into_iter().enumerate() {
         let at = dir.path().join(format!("v{index}"));
         std::fs::create_dir(&at).unwrap();
         std::fs::write(at.join("wal-000001.log"), header_at_version(version, 1, 0)).unwrap();
@@ -153,7 +156,7 @@ fn a_log_at_a_version_whose_records_would_be_misread_is_refused() {
     // a statement about the version rather than about the rest of the header.
     let other = dir.path().join("current");
     std::fs::create_dir(&other).unwrap();
-    std::fs::write(other.join("wal-000001.log"), header_at_version(17, 1, 0)).unwrap();
+    std::fs::write(other.join("wal-000001.log"), header_at_version(18, 1, 0)).unwrap();
     assert!(Wal::open(other.join("wal.log")).is_ok());
 }
 
@@ -162,12 +165,15 @@ fn a_log_at_a_version_whose_records_would_be_misread_is_refused() {
 /// publication and a restart.
 #[test]
 fn view_create_and_drop_round_trip() {
-    use tessera_types::view::{CreatedView, TombstonedView, ViewMetadataValue};
+    use tessera_types::view::{CreatedView, DeadIncarnation, ViewMetadataValue};
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path().join("wal.log");
     let created = CreatedView {
         group: "quarter".to_string(),
         key: "2026-Q5".to_string(),
+        // The incarnation is recorded, never re-derived (decision 0115), so it has to survive the
+        // round trip like every other field of the record.
+        incarnation: 3,
         visibility: None,
         metadata: [(
             "label".to_string(),
@@ -176,9 +182,10 @@ fn view_create_and_drop_round_trip() {
         .into_iter()
         .collect(),
     };
-    let dropped = TombstonedView {
+    let dropped = DeadIncarnation {
         group: "quarter".to_string(),
         key: "2026-Q4".to_string(),
+        incarnation: 2,
     };
     {
         let (mut wal, _) = Wal::open(&path).unwrap();

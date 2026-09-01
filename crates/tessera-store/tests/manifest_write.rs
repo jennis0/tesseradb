@@ -115,7 +115,7 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
         layer_tombstones: Vec::new(),
         views: Vec::new(),
         scoped_columns: Vec::new(),
-        view_tombstones: Vec::new(),
+        dead_view_incarnations: Vec::new(),
         membership_extents: Vec::new(),
         level_versions: Vec::new(),
         containment_extents: Vec::new(),
@@ -125,6 +125,7 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
         shape_held_extents: Vec::new(),
         artifact_record_extents: Vec::new(),
         segments: vec![SegmentDescriptor {
+            incarnation: 0,
             view: "main".to_string(),
             seg_id: "seg0".to_string(),
             row_count: items.len() as u32,
@@ -168,6 +169,7 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
         },
         groups: Vec::new(),
         views: vec![ViewDescriptor {
+            incarnation: 0,
             visibility: None,
             id: "main".to_string(),
             display_name: "Main".to_string(),
@@ -324,7 +326,7 @@ fn manifest_fixture() -> SegmentsManifest {
         layer_tombstones: Vec::new(),
         views: Vec::new(),
         scoped_columns: Vec::new(),
-        view_tombstones: Vec::new(),
+        dead_view_incarnations: Vec::new(),
         membership_extents: Vec::new(),
         level_versions: Vec::new(),
         containment_extents: Vec::new(),

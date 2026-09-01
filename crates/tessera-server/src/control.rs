@@ -2619,15 +2619,21 @@ fn metadata_value(name: &str, value: &serde_json::Value) -> Result<ViewMetadataV
 /// `PUT /control/views/{group}/{key}` — create a view of a group while the service runs
 /// (`views.md` §3.2, decision 0108).
 ///
-/// **Nothing is checked here.** Whether the group exists and whether the key is free or burnt are
-/// both state only the write executor may read — a handler that checked first could be overtaken
-/// between its check and the enqueue, and would then have acked two views onto one key. The one thing this function does is turn JSON into the typed record the roster
-/// stores, and refuse a shape that is not a scalar.
+/// **Nothing is checked here.** Whether the group exists and whether the key is free are both
+/// state only the write executor may read — a handler that checked first could be overtaken
+/// between its check and the enqueue, and would then have acked two views onto one key. The one
+/// thing this function does is turn JSON into the typed record the roster stores, and refuse a
+/// shape that is not a scalar.
 ///
-/// The three answers are the executor's: **404** for a group or key this deployment does not
-/// carry, **409** for a key already taken or already dropped — a roster record is immutable, so
-/// there is no resubmission that would make it land — and **422** for a record refused on its own
-/// terms.
+/// The three answers are the executor's: **404** for a group this deployment does not carry,
+/// **409** for a key that is **live** — a roster record is immutable, so a caller who wants to
+/// change one drops the view first — and **422** for a record refused on its own terms.
+///
+/// **A previously dropped key is a 201, not a 409** ([decision 0115](../../../docs/decisions/0115-a-dropped-view-key-is-reusable.md)):
+/// a key is a name the caller chose, and the immutable-record workflow above is only useful if
+/// the name can come back. The recreated view is empty, and a principal cannot tell it from a key
+/// created for the first time — the incarnation that keeps the predecessor's artifacts out is
+/// internal and reaches no wire surface.
 async fn create_view(
     State(state): State<Arc<AppState>>,
     axum::extract::Path((group, key)): axum::extract::Path<(String, String)>,
@@ -2661,12 +2667,12 @@ async fn create_view(
     ))
 }
 
-/// `DELETE /control/views/{group}/{key}` — drop a view and tombstone its key for ever
-/// (`views.md` §3.4).
+/// `DELETE /control/views/{group}/{key}` — drop a view, freeing its key (`views.md` §3.4).
 ///
-/// **The key never comes back**, and that is the operation rather than a side effect of it: a
-/// recreated `2026-Q3` with different contents would silently repoint every bookmark, every cached
-/// θ and every client cache keyed on the view (decision 0029).
+/// **The key comes back free** (decision 0115). What does not come back is the view: its row
+/// spaces, columns and derived structures stay on disc until the fold reclaims them, stamped with
+/// an incarnation the recreated key does not carry, so a `PUT` under the same name is an *empty*
+/// view rather than the old one under a new record.
 ///
 /// **Dropping a view deletes no entity.** `?delete_dangling=true` is for the caller who did mean
 /// "and the items that were only here": the entities of this view that hold a row in no other one

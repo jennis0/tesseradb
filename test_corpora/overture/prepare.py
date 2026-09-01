@@ -660,7 +660,11 @@ token_max_lifetime  = 3600
 viewer  = "127.0.0.1:8081"
 session = "127.0.0.1:8082"
 control = "127.0.0.1:8083"
-max_k   = 200
+# 5,000, as the arXiv rung serves and against the 200 the geographic rungs' template carried: at
+# 7.4x10^7 points a 200-mark response is a viewport a person cannot read anything from, and the
+# marks per request are what a viewer's budget spends. The ceiling is the service's, not the
+# client's — the effective cap is min(k, max_k, k_max_marks) (contracts §3.2).
+max_k   = 5000
 session_credential_env  = "TESSERA_OVERTURE_SESSION_CRED"
 operator_credential_env = "TESSERA_OVERTURE_OPERATOR_CRED"
 # Development only — the origins the demo viewer is served from, so a browser on this machine can

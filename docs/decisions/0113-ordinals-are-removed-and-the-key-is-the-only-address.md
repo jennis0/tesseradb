@@ -34,6 +34,13 @@ and by nothing else. A caller who wants a numeric ordering mints numeric keys.
 **Key tombstones are unchanged.** A dropped key is refused for ever, and it always was the key
 rather than the number that would repoint a bookmark or a client cache ([0029](0029-view-key.md)).
 
+> **Superseded in part by [0115](0115-a-dropped-view-key-is-reusable.md)** (2026-09-01, owner
+> ruling). The burn is withdrawn: a dropped key may be created again, at a fresh internal
+> incarnation that keeps its predecessor's artifacts out. The 0029 citation above was an
+> over-generalisation — 0029 names a cache coordinate that contains no view id — and the clause
+> was never separately ruled. The rest of this decision stands: the key is still a view's only
+> address, and the incarnation is not a second one.
+
 **Appendix C's C27 (roster ordinal gaps) is deleted**, and this decision supersedes 0110. The
 register enumerates channels that exist; with no position served, a gate-filtered roster is a
 shorter list and nothing else, and a principal reading it cannot count what was withheld. This is

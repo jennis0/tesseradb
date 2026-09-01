@@ -38,6 +38,7 @@ fn flush(prefix_dir: &Path, seg_id: &str, rows: Vec<FlushRow>, row_base: u32) ->
         PARTITION,
         VIEW,
         FlushInput {
+            incarnation: 0,
             seg_id,
             rows,
             quantisation: unit_quantisation(),
@@ -226,6 +227,7 @@ fn unordered_rows_are_refused() {
         PARTITION,
         VIEW,
         FlushInput {
+            incarnation: 0,
             seg_id: "seg-bad",
             rows: vec![row(52, None, 0.1, 0.1), row(50, None, 0.2, 0.2)],
             quantisation: unit_quantisation(),

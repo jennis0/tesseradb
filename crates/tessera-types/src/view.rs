@@ -14,6 +14,25 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+/// What joins a group's name to one of its keys in a view id — `<group>:<key>` (`views.md` §3.2).
+///
+/// Here rather than beside the manifest's copy because the WAL's roster records travel through
+/// `tessera-lifecycle`, which does not depend on `tessera-store`, and a second spelling of the
+/// separator is how the two halves come to disagree about what a view id is.
+pub const GROUP_SEPARATOR: char = ':';
+
+/// Which incarnation of a key an artifact belongs to (decision 0115).
+///
+/// A counter rather than a random nonce: replay applies what was decided — the minted value
+/// travels in the `ViewCreate` record — and a counter is the form a restart can also *check*, the
+/// seed being one above every incarnation the manifests and the log carry, live or dead.
+pub type ViewIncarnation = u64;
+
+/// The incarnation of every view a **build** declared. A build coins each key once, so there is
+/// nothing for it to distinguish; a key it declared that is later dropped and created again comes
+/// back at 1 or above.
+pub const DECLARED_INCARNATION: ViewIncarnation = 0;
+
 /// One roster metadata value, typed against its group's declaration (`views.md` §3.1).
 ///
 /// **View metadata is not an attribute** (`views.md` §5): one value per view rather than one per
@@ -127,6 +146,19 @@ pub struct GroupMetadataField {
 pub struct CreatedView {
     pub group: String,
     pub key: String,
+    /// Which **incarnation** of the key this record is
+    /// ([decision 0115](../../../docs/decisions/0115-a-dropped-view-key-is-reusable.md)).
+    ///
+    /// **Internal, and on no wire.** A client addresses a view by `<group>:<key>` and by nothing
+    /// else; this number never appears in `/v1/meta`, in a response, or in a view id. It exists
+    /// because a dropped view's row spaces, columns and side-manifest entries outlive the drop
+    /// until the fold reclaims them, and a key created again must not adopt them: every artifact
+    /// of a view carries the incarnation it was written under, and only the live one is composed.
+    ///
+    /// **Minted monotonically and recorded, never re-derived** — the rule `VocabularyMint` and
+    /// `LayerCreate` already follow. A build-declared view is incarnation 0, so a key first used
+    /// at a build and dropped comes back at 1 or above.
+    pub incarnation: ViewIncarnation,
     /// This view's own gate; `None` takes the group's.
     ///
     /// ⊘ **Recorded and never evaluated** (`views.md` §6): no gate is evaluated anywhere and no
@@ -135,17 +167,25 @@ pub struct CreatedView {
     pub metadata: BTreeMap<String, ViewMetadataValue>,
 }
 
-/// One dropped key (`views.md` §3.4).
+/// One **dead incarnation** of a key — what a drop leaves behind (`views.md` §3.4,
+/// [decision 0115](../../../docs/decisions/0115-a-dropped-view-key-is-reusable.md)).
 ///
-/// **Carried for ever and never pruned**, exactly as a layer's tombstone is: a recreated key with
-/// different contents would silently repoint every bookmark, every cached θ and every client cache
-/// keyed on the view (decision 0029). The key is the only address a view has
-/// ([decision 0113](../../../docs/decisions/0113-ordinals-are-removed-and-the-key-is-the-only-address.md)),
-/// so burning it burns the whole of what a drop must burn.
+/// **Not a refusal.** This list used to be a tombstone list and a create measured itself against
+/// it; a dropped key is now reusable, and what survives is the bookkeeping the reuse needs. An
+/// entry says *this incarnation of this key is dead, and its artifacts are unreachable until the
+/// fold reclaims them* — which is what keeps a recreated key from adopting its predecessor's row
+/// spaces, columns and derived structures, and what a reclaim reads to know what it may delete.
+///
+/// **Carried until the reclaim, not for ever in principle** — though nothing prunes it today: the
+/// fold reclaims a dead incarnation's files by omission (`views.md` §3.4), and the entry is what
+/// records that there was something to omit. The field is named for what it holds rather than
+/// kept under the tombstone name it no longer earns.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TombstonedView {
+pub struct DeadIncarnation {
     pub group: String,
     pub key: String,
+    /// The incarnation that died. Every artifact stamped with it is unreachable from this moment.
+    pub incarnation: ViewIncarnation,
 }
 
 /// A name a view id is built out of — a plain view's name, or a group's name or one of its keys

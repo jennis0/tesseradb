@@ -490,7 +490,10 @@ fn a_view_without_a_quantisation_extent_is_a_typed_error() {
             "shard_id": 0,
             "idset": 1
         },
-        "views": [{"id": "s0", "display_name": "s0", "projection": "none"}],
+        // `incarnation` is present and `quantisation` is not, so the refusal below is about the
+        // frame rather than about whichever required field serde happens to reach first
+        // (decision 0115 added the other one).
+        "views": [{"id": "s0", "display_name": "s0", "projection": "none", "incarnation": 0}],
         "partitions": [],
         "files": {}
     });

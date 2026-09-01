@@ -12,7 +12,10 @@
 #   ./run_demo.sh --scale notebook # the notebook corpus: the HDBSCAN tree, its topics, the taxonomy
 #   ./run_demo.sh --scale notebook-2m4  # the same pipeline over the whole corpus, plus toponymy
 #   ./run_demo.sh --bundle PATH   # serve a bundle you already have, on its own
-#   ./run_demo.sh --bundle PATH --terms GB,FR,DE [--ranks R.json] [--label 'Name']
+#   ./run_demo.sh --deployment D/tessera.toml --terms "$(cat D/country-terms.txt)" --ranks D/country-ranks.json
+#                                 # …a rung of the dataset ladder, served on its own deployment:
+#                                 # its ports, its credentials, its disclosure floor, unrewritten
+#   ./run_demo.sh --bundle PATH --terms GB,FR,DE [--ranks R.json] [--label 'Name'] [--prose name]
 #                                 # …whose dictionary is its own, not the fixtures' 0..200
 #   ./run_demo.sh --no-viewer     # servers only (for curl, the golden capture, the smoke script)
 #   ./run_demo.sh --rebuild       # discard and rebuild the demo bundles
@@ -159,6 +162,12 @@ export TESSERA_SESSION_CRED="${TESSERA_SESSION_CRED:-dev-session-credential}"
 export TESSERA_OPERATOR_CRED="${TESSERA_OPERATOR_CRED:-dev-operator-credential}"
 
 bundle_override=""
+# A `tessera.toml` an operator already has — a dataset-ladder rung's, which `prepare.py` writes
+# beside its parquets. Unlike `--bundle`, nothing here is generated: the bundle path, the three
+# ports, the plugin, the disclosure floor and the credential variable names are that file's, and it
+# is read rather than rewritten. It is the only route that serves a bundle whose credentials are
+# not the demo's, and the only one that leaves the deployment under the operator's control.
+deployment_override=""
 run_viewer=1
 rebuild=0
 build_only=0
@@ -178,13 +187,20 @@ ranks_override=''
 # What the picker calls this bundle. Without it the entry is the bundle's absolute path, which is
 # what the operator typed rather than what the corpus is.
 label_override=''
+# The prose columns the picker's source panel names for a `--bundle` or `--deployment` entry. It is
+# a caption, not a control — the filter surface itself is `/v1/meta`'s `filter_operands` — but a
+# panel saying "prose indexed: none" over a corpus with an indexed text column is a caption that is
+# wrong, so the corpus's own columns can be named.
+prose_override=''
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --scale)      scales+=("$2"); shift 2 ;;
     --bundle)     bundle_override="$2"; shift 2 ;;
+    --deployment) deployment_override="$2"; shift 2 ;;
     --terms)      terms_override="$2"; shift 2 ;;
     --ranks)      ranks_override="$2"; shift 2 ;;
     --label)      label_override="$2"; shift 2 ;;
+    --prose)      prose_override="$2"; shift 2 ;;
     --no-viewer)  run_viewer=0; shift ;;
     --build-only) build_only=1; shift ;;
     --rebuild)    rebuild=1; shift ;;
@@ -260,7 +276,7 @@ b = pathlib.Path('$bundle_override')
 m = sorted(b.glob('v*/MANIFEST.json'))
 print(json.load(open(m[-1]))['entity_id_high_water'] if m else 0)
 " 2>/dev/null || echo 0; }
-  prose_of()   { echo ''; }
+  prose_of()   { if [[ -n "$prose_override" ]]; then printf '"%s"' "${prose_override//,/\",\"}"; fi; }
   schema_of()  { echo ''; }
   # **Its own ports, not 2m4's.** Sharing them meant a `--bundle` run beside an already-running
   # 2m4 bound nothing, found that port ready anyway, and measured its principals against the other
@@ -270,8 +286,100 @@ print(json.load(open(m[-1]))['entity_id_high_water'] if m else 0)
   control_of() { echo 45799; }
 fi
 
+# `--deployment` is the other escape hatch, and it differs from `--bundle` in what it *does not*
+# do: it writes no deployment file. A ladder rung's `tessera.toml` — the one its `prepare.py`
+# generated beside the parquets — carries the bundle, the three ports, the disclosure floor and the
+# names of the variables holding its credentials, and none of that is the demo's to overwrite.
+#
+# The secrets are read from a `.env` beside that file when the environment does not already carry
+# them. `tessera serve` reads credentials from the process environment alone (the `.env` route in
+# the binary is the *identity key*'s, and that key is the build's rather than the server's), so a
+# rung whose credentials live only in its `.env` would otherwise refuse to start with nothing said
+# about where its secret was.
+if [[ -n "$deployment_override" ]]; then
+  [[ -n "$bundle_override" ]] && { echo "--deployment and --bundle name the same thing twice" >&2; exit 2; }
+  [[ -f "$deployment_override" ]] || { echo "no such deployment: $deployment_override" >&2; exit 1; }
+  deployment_override="$(cd "$(dirname "$deployment_override")" && pwd)/$(basename "$deployment_override")"
+  DEPLOY_DIR="$(dirname "$deployment_override")"
+
+  # A scalar out of one `[section]`, quotes stripped. The keys read here are addresses, paths and
+  # variable names — one line each — so this is the whole of the TOML this script needs, and the
+  # system python3 here has no `tomllib`.
+  toml_scalar() {
+    awk -v want_section="$1" -v want_key="$2" '
+      /^[[:space:]]*\[/ { section = $0; gsub(/[][[:space:]]/, "", section); next }
+      { line = $0; sub(/#.*/, "", line)
+        if (section == want_section && match(line, /^[[:space:]]*[A-Za-z_]+[[:space:]]*=/)) {
+          key = substr(line, 1, index(line, "=") - 1); gsub(/[[:space:]]/, "", key)
+          if (key == want_key) {
+            value = substr(line, index(line, "=") + 1)
+            gsub(/^[[:space:]]*["'"'"']?|["'"'"']?[[:space:]]*$/, "", value)
+            print value; exit
+          }
+        }
+      }' "$deployment_override"
+  }
+  port_of_addr() { echo "${1##*:}"; }
+
+  bundle_override="$(toml_scalar bundle path)"
+  [[ -n "$bundle_override" ]] || { echo "$deployment_override: no [bundle].path" >&2; exit 1; }
+  # `[bundle].path` is resolved against the deployment file, as the binary resolves it
+  # (configuration.md §3) — a rung's own file says `path = "bundle"`.
+  [[ "$bundle_override" = /* ]] || bundle_override="$DEPLOY_DIR/$bundle_override"
+  [[ -d "$bundle_override" ]] || { echo "$deployment_override names a bundle that is not there: $bundle_override" >&2; exit 1; }
+
+  # The credentials this deployment declares, taken from the environment first and from the `.env`
+  # beside the file second — the same precedence the binary gives the identity key, and for the
+  # same reason: an exported variable is more specific than a file.
+  for role in session operator; do
+    var="$(toml_scalar serve "${role}_credential_env")"
+    [[ -n "$var" ]] || continue
+    if [[ -z "${!var:-}" && -f "$DEPLOY_DIR/.env" ]]; then
+      value="$(sed -n "s/^[[:space:]]*\(export[[:space:]]\+\)\?$var=//p" "$DEPLOY_DIR/.env" | head -1 | sed "s/^[\"']//;s/[\"']$//")"
+      [[ -n "$value" ]] && export "$var=$value"
+    fi
+    [[ -n "${!var:-}" ]] || { echo "$deployment_override declares $var for the $role plane and nothing sets it (not the environment, not $DEPLOY_DIR/.env)" >&2; exit 1; }
+    # The presets script and the viewer read the demo's variable names, not this deployment's.
+    if [[ "$role" == session ]]; then
+      export TESSERA_SESSION_CRED="${!var}"
+    else
+      export TESSERA_OPERATOR_CRED="${!var}"
+    fi
+  done
+
+  # The browser talks to this server directly, so an origin the deployment does not enumerate is a
+  # CORS failure that reads like a broken server (client-interaction §7). Reported, not refused:
+  # `--no-viewer` wants no origin at all.
+  if [[ $run_viewer -eq 1 ]] && ! grep -q "localhost:$VITE_PORT" "$deployment_override"; then
+    echo "warning: $deployment_override does not list http://localhost:$VITE_PORT in [serve].dev_cors_origins;" >&2
+    echo "         the viewer will load and every request from it will fail CORS." >&2
+  fi
+
+  scales=(custom)
+  items_of()   { python3 -c "
+import json,sys,pathlib
+b = pathlib.Path('$bundle_override')
+m = sorted(b.glob('v*/MANIFEST.json'))
+print(json.load(open(m[-1]))['entity_id_high_water'] if m else 0)
+" 2>/dev/null || echo 0; }
+  prose_of()   { if [[ -n "$prose_override" ]]; then printf '"%s"' "${prose_override//,/\",\"}"; fi; }
+  schema_of()  { echo ''; }
+  # This deployment's own ports, whatever they are: two rungs served at once are two files, and
+  # the picker offers both.
+  viewer_of()  { port_of_addr "$(toml_scalar serve viewer)"; }
+  session_of() { port_of_addr "$(toml_scalar serve session)"; }
+  control_of() { port_of_addr "$(toml_scalar serve control)"; }
+  label_override="${label_override:-$(basename "$DEPLOY_DIR")}"
+fi
+
 bundle_of() {
   if [[ -n "$bundle_override" ]]; then echo "$bundle_override"; else echo "$DEV/bundle-$1"; fi
+}
+
+# Which `tessera.toml` a scale is built and served against: the operator's under `--deployment`,
+# and otherwise the one `write_deployment` generates below.
+deployment_of() {
+  if [[ -n "$deployment_override" ]]; then echo "$deployment_override"; else echo "$DEV/tessera-$1.toml"; fi
 }
 
 # ------------------------------------------------------------------------------------ the builds
@@ -282,6 +390,9 @@ bundle_of() {
 # paths are absolute because this file is generated per machine and never committed — a `source` in
 # the *declaration* is the one that has to travel.
 write_deployment() {
+  # `--deployment` names a file this script did not write and must not: it is the rung's own, and
+  # rewriting it would replace its ports, its credentials and its disclosure floor with the demo's.
+  [[ -n "$deployment_override" ]] && return 0
   local scale="$1" bundle
   bundle="$(bundle_of "$scale")"
   mkdir -p "$DEV/$scale"
@@ -431,7 +542,7 @@ build_scale() {
   "${scope[@]}" \
   /usr/bin/time -v -o "$DEV/build-$scale.time" \
   "$BIN" build \
-    --deployment "$DEV/tessera-$scale.toml" \
+    --deployment "$(deployment_of "$scale")" \
     "${limit[@]}" \
     ${TESSERA_BUILD_MEMORY_BUDGET:+--memory-budget "$TESSERA_BUILD_MEMORY_BUDGET"} \
     $mint_external --mint-id-key --no-oracle-pairs
@@ -481,7 +592,7 @@ start_scale() {
   done
 
   say "starting tessera serve for $scale on :$viewer_port"
-  "$BIN" serve --deployment "$DEV/tessera-$scale.toml" &
+  "$BIN" serve --deployment "$(deployment_of "$scale")" &
   SERVE_PIDS+=($!)
   local pid=${SERVE_PIDS[-1]}
 

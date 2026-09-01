@@ -363,6 +363,9 @@ pub fn run(
         let ordinals = store.level(layer, *level).count() as u32;
         tile_indexes.push(Filed {
             view: view.to_string(),
+            // **A build coins each key once, so every structure it writes is the declared
+            // incarnation** (decision 0115). There is no drop at a build to leave a predecessor.
+            incarnation: tessera_store::manifest::DECLARED_INCARNATION,
             layer: layer.clone(),
             level: *level,
             level_version: store.level_version(layer, *level),
@@ -427,6 +430,7 @@ pub fn run(
         match bytes {
             Some(bytes) => columns.push(Filed {
                 view: view.to_string(),
+                incarnation: tessera_store::manifest::DECLARED_INCARNATION,
                 layer: layer.clone(),
                 level: *level,
                 level_version: store.level_version(layer, *level),
@@ -465,6 +469,7 @@ pub fn run(
             let level_version = store.level_version(layer, *level);
             shape_rows.push(derived::FiledShapeRows {
                 view: view.to_string(),
+                incarnation: tessera_store::manifest::DECLARED_INCARNATION,
                 layer: layer.clone(),
                 level: *level,
                 level_version,
@@ -499,6 +504,7 @@ pub fn run(
                 .collect();
             Filed {
                 view: view.to_string(),
+                incarnation: tessera_store::manifest::DECLARED_INCARNATION,
                 layer: layer.clone(),
                 level: *level,
                 level_version,
@@ -643,6 +649,7 @@ fn containment(
         };
         composed.push(Filed {
             view: String::new(),
+            incarnation: tessera_store::manifest::DECLARED_INCARNATION,
             layer: layer.clone(),
             level: *level,
             level_version: store.level_version(layer, *level),

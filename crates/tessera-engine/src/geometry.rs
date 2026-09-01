@@ -477,7 +477,7 @@ mod tests {
             layer_tombstones: Vec::new(),
             views: Vec::new(),
             scoped_columns: Vec::new(),
-            view_tombstones: Vec::new(),
+            dead_view_incarnations: Vec::new(),
             membership_extents: Vec::new(),
             level_versions: Vec::new(),
             containment_extents: Vec::new(),

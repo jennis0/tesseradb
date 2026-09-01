@@ -48,4 +48,7 @@ pub use read::{
 pub use reclaim::{hard_link_forward, reclaim_prefix};
 pub use row_entity::{write_row_entity, RowToEntity, ROW_ENTITY_FILE};
 pub use sidecar::ExternalIdSidecar;
-pub use view_path::{view_path, view_path_components, view_rel, GROUP_SEPARATOR};
+pub use view_path::{
+    scoped_column_components, scoped_column_rel, view_path, view_path_components, view_rel,
+    GROUP_SEPARATOR,
+};

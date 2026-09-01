@@ -1848,6 +1848,8 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         view_files.extend(presence_paths);
         segments.push(tessera_store::manifest::SegmentDescriptor {
             view: view.view_id.clone(),
+            // **The declared incarnation** (decision 0115): a build coins each key once.
+            incarnation: tessera_store::manifest::DECLARED_INCARNATION,
             seg_id: SEG_ID.to_string(),
             row_count: rows_in_view,
             entity_lo: 0,
