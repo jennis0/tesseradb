@@ -242,7 +242,10 @@ pub struct IncomingArtifact {
     /// carries a `tessera_id` and never a position in a dense level (C8), so the caller holds no
     /// address for the target beyond the key they published it under.
     pub attached_to: Option<IncomingAttachment>,
-    /// The parent artifact in a hierarchical layer, named by the parent's own key.
+    /// The parent artifacts in a hierarchical layer, each named by the parent's own key. Empty at
+    /// a root; at most one on a `nested` or `tiered` layer, which refuse a second; as many as the
+    /// child sits beneath on a `dag` layer (`dag-hierarchies.md` §4, decision 0117). A key named
+    /// twice is one edge.
     ///
     /// **The lineage is declared upward only, and the downward list is deliberately absent.** A
     /// `children_keys` beside this was read, validated for cross-row agreement, and never walked:
@@ -250,7 +253,7 @@ pub struct IncomingArtifact {
     /// inverting the parent edges, because that is the direction an artifact can state without
     /// knowing what will later point at it. Two spellings of one edge is one more place for them
     /// to disagree.
-    pub parent_key: Option<String>,
+    pub parent_keys: Vec<String>,
     /// The artifact's canonical shapes, one per view — required on a layer whose `shape` declares
     /// one, refused on every other kind. It **is** the membership: `members` stays empty on such a
     /// layer, because the rows inside the shape are resolved from it at every segment's
@@ -331,7 +334,7 @@ impl IncomingArtifact {
             members: bitmap_of_entities(members),
             contents: Vec::new(),
             attached_to: None,
-            parent_key: None,
+            parent_keys: Vec::new(),
             shape: None,
         }
     }
@@ -445,7 +448,8 @@ pub struct ArtifactRecord {
     /// target's disposition and reachability as well as on its own conjuncts, on **every** route —
     /// see [`Attachment`].
     pub attached_to: Option<Attachment>,
-    /// This artifact's parent in its layer's hierarchy.
+    /// This artifact's parents in its layer's hierarchy — ascending by `(level, ordinal)`,
+    /// deduplicated; empty at a root, one on a tree, several on a `dag` layer (decision 0117).
     ///
     /// **The opposite of an attachment in the one way that matters**: it is *not* a visibility term.
     /// A node's verdict is its own masked count against its own criterion, with no input from its
@@ -454,14 +458,15 @@ pub struct ArtifactRecord {
     /// a parent that is suppressed, deleted or below its bar withholds itself and nothing else. What
     /// the edge decides is only which of two artifacts that *both* passed is the one drawn.
     ///
-    /// A parent whose ordinal is now a hole leaves this node a root, which serves it: correct, since
-    /// it passed its own test, and the reason the fold does not have to rewrite these.
+    /// A parent whose ordinal is now a hole is a parent this node does not have, and a node whose
+    /// every parent is one is a root, which serves it: correct, since it passed its own test, and
+    /// the reason the fold does not have to rewrite these.
     ///
     /// **The level is carried because a layer's edges are one of two shapes.** A nested layer's run
     /// within one level, and the cut climbs them; a tiered layer's run between levels, and
     /// the cut does not — those are information about what contains what, not a ladder to coarsen
     /// along (owner ruling, 2026-08-18).
-    pub parent: Option<crate::wal::ParentRef>,
+    pub parents: Vec<crate::wal::ParentRef>,
 }
 
 /// The resolved target of an attachment: the edge `annotation-representation.md` §2.4 names, with
@@ -847,7 +852,7 @@ impl ArtifactStore {
                         ordinal: a.ordinal,
                         entity: a.entity,
                     }),
-                    parent: published.parent,
+                    parents: published.parents.clone(),
                 },
                 shape,
             );
@@ -1595,14 +1600,14 @@ impl ArtifactStore {
 ///             | u32 LE members_len | membership bytes (portable Roaring)
 ///             | content*
 ///             | attachment
-///             | parent
+///             | parents
 ///             | shape
 /// content    := u32 LE set_len | generating-set bytes (portable Roaring)
 /// attachment := u8 0                                     -- unattached
 ///             | u8 1 | u16 LE layer_len | layer bytes (UTF-8)
 ///                    | u32 LE level | u32 LE ordinal | u64 LE target entity
-/// parent     := u8 0                                     -- a root
-///             | u8 1 | u32 LE level | u32 LE ordinal
+/// parents    := u16 LE parent_count                      -- 0 at a root
+///             | per parent, ascending by (level, ordinal): u32 LE level | u32 LE ordinal
 /// shape      := u8 0                                     -- no declared shape
 ///             | u8 3 | u16 LE views
 ///                    | per view: u16 LE view_len | view bytes (UTF-8)
@@ -1683,14 +1688,16 @@ pub fn encode_record(record: &ArtifactRecord, shape: Option<&ArtifactShapes>) ->
             out.extend_from_slice(&attachment.entity.raw().to_le_bytes());
         }
     }
-    // The parent, on the attachment's discriminant rule: absent is one byte and never zero, so
-    // *this node is a root* and *this reader does not know whether it had a parent* cannot encode
-    // the same. Here the second answer would serve a child beside the ancestor that should have
-    // replaced it — a duplicate on the map rather than a disclosure, but wrong either way.
-    match record.parent {
-        None => out.push(0),
-        Some(parent) => {
-            out.push(1);
+    // The parents, counted: a root is an explicit zero and never an absent field, so *this node
+    // is a root* and *this reader does not know whether it had a parent* cannot encode the same.
+    // Here the second answer would serve a child beside the ancestor that should have replaced it
+    // — a duplicate on the map rather than a disclosure, but wrong either way. More parents than a
+    // `u16` counts is a record this encoding cannot read back, refused at encode on the key's and
+    // the contents' rule rather than written as a prefix of the lineage.
+    let parent_count = u16::try_from(record.parents.len()).unwrap_or(u16::MAX);
+    out.extend_from_slice(&parent_count.to_le_bytes());
+    if parent_count != u16::MAX {
+        for parent in &record.parents {
             out.extend_from_slice(&parent.level.to_le_bytes());
             out.extend_from_slice(&parent.ordinal.to_le_bytes());
         }
@@ -1773,14 +1780,25 @@ pub fn decode_record(
         }
         _ => return None,
     };
-    let parent = match take(1)?[0] {
-        0 => None,
-        1 => Some(crate::wal::ParentRef {
+    let parent_count = u16::from_le_bytes(take(2)?.try_into().ok()?) as usize;
+    if parent_count == u16::MAX as usize {
+        return None;
+    }
+    // **Strictly ascending, or a decode failure.** The writer keeps the list sorted and
+    // deduplicated, so a list that is not is one this reader did not write — and reading it
+    // would hand the engine a lineage whose duplicate edges count twice and whose order is
+    // whatever the bytes happened to say.
+    let mut parents = Vec::with_capacity(parent_count);
+    for _ in 0..parent_count {
+        let parent = crate::wal::ParentRef {
             level: u32::from_le_bytes(take(4)?.try_into().ok()?),
             ordinal: u32::from_le_bytes(take(4)?.try_into().ok()?),
-        }),
-        _ => return None,
-    };
+        };
+        if parents.last().is_some_and(|last| *last >= parent) {
+            return None;
+        }
+        parents.push(parent);
+    }
     // **The shapes go through [`ArtifactShapes::new`] rather than being assembled from the
     // bytes**, so a blob carrying no view or an empty shape is a decode failure and not an artifact
     // whose membership is a region nobody wrote. One constructor, at both ends. Whether the bytes
@@ -1814,7 +1832,7 @@ pub fn decode_record(
             members,
             contents,
             attached_to,
-            parent,
+            parents,
         },
         shape,
     ))
@@ -1878,7 +1896,7 @@ mod tests {
             members: Bitmap::of(members),
             contents: Vec::new(),
             attached_to: None,
-            parent: None,
+            parents: Vec::new(),
         }
     }
 
@@ -2204,6 +2222,66 @@ mod tests {
     /// **An attachment survives the packed extent, and a lost one is a decode failure.** A label
     /// restored as unattached is a label that serves when its cluster is suppressed — the fail-open
     /// the term exists to close, reappearing at a restart, with nothing anywhere reporting a fault.
+    /// **Several parents round-trip, and a list the writer could not have produced is refused**
+    /// (`dag-hierarchies.md` §7, decision 0117). The list is what `BUNDLE_FORMAT` 5 guards: the
+    /// previous encoding was one byte and at most one parent.
+    #[test]
+    fn several_parents_round_trip_and_an_unsorted_list_is_refused() {
+        use crate::wal::ParentRef;
+        let mut r = record(100, &[1, 2, 3]);
+        r.parents = vec![
+            ParentRef {
+                level: 0,
+                ordinal: 3,
+            },
+            ParentRef {
+                level: 0,
+                ordinal: 7,
+            },
+            ParentRef {
+                level: 1,
+                ordinal: 0,
+            },
+        ];
+        let blob = encode_record(&r, None);
+        let (back, _) = decode_record(r.entity, &blob).expect("a whole blob decodes");
+        assert_eq!(back.parents, r.parents, "every parent, in order");
+
+        let mut root = r.clone();
+        root.parents.clear();
+        let (back, _) = decode_record(root.entity, &encode_record(&root, None)).unwrap();
+        assert!(back.parents.is_empty(), "a root is an explicit zero");
+
+        // A duplicate edge or an out-of-order list is not one this writer produced: the record is
+        // kept ascending and deduplicated, so the reader treats anything else as another format.
+        let mut twice = r.clone();
+        twice.parents.push(ParentRef {
+            level: 1,
+            ordinal: 0,
+        });
+        assert!(
+            decode_record(twice.entity, &encode_record(&twice, None)).is_none(),
+            "a duplicate edge refuses"
+        );
+        let mut backwards = r.clone();
+        backwards.parents.reverse();
+        assert!(
+            decode_record(backwards.entity, &encode_record(&backwards, None)).is_none(),
+            "an unsorted list refuses"
+        );
+
+        // Every truncation inside the list refuses rather than decoding as fewer parents.
+        let whole = decode_record(root.entity, &encode_record(&root, None)).is_some();
+        assert!(whole);
+        for len in 0..blob.len() {
+            assert!(
+                decode_record(r.entity, &blob[..len]).is_none(),
+                "a blob truncated to {len} of {} bytes must refuse",
+                blob.len()
+            );
+        }
+    }
+
     #[test]
     fn an_attachment_round_trips_and_a_truncated_one_is_refused() {
         let mut r = record(100, &[1, 2, 3]);
@@ -2306,7 +2384,7 @@ mod tests {
                 members: serialise_members(&Bitmap::of(members)),
                 contents: Vec::new(),
                 attached_to: None,
-                parent: None,
+                parents: Vec::new(),
                 shape: None,
             }],
         }

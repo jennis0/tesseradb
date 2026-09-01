@@ -3742,7 +3742,12 @@ pub(crate) fn scoped_families_by_view(
         FxHashMap::default();
     for group in &manifest.groups {
         for view in &group.views {
-            let id = format!("{}{}{}", group.name, tessera_store::GROUP_SEPARATOR, view.key);
+            let id = format!(
+                "{}{}{}",
+                group.name,
+                tessera_store::GROUP_SEPARATOR,
+                view.key
+            );
             let families = scoped_families_of_view(manifest, &id);
             if families.is_empty() {
                 continue;
@@ -7409,56 +7414,55 @@ impl Executor {
         // process serves from layers its own manifest no longer names until a restart. Affordable
         // for the same reason: the layers are memory-mapped, and a coalesce fires once per
         // `width` ticks. `None` where the axis did not run, and the live stack rides through.
-        let records = if completed.record.is_none() {
-            None
-        } else {
-            let partition_dir = prefix_dir
-                .join("partitions")
-                .join(&completed.plan.partition);
-            // The schema decides whether there is a base, exactly as it does at open: a build
-            // writes `attrs/record` only where a column has no other home. Derived rather than
-            // probed for, so a missing base refuses instead of reading as "those entities have no
-            // record".
-            let blob_resident = live
-                .bundle
-                .manifest
-                .declared_scalars
-                .iter()
-                .any(|d| crate::filter::blob_resident(d, &live.bundle.manifest.vocabularies));
-            let record_dir = partition_dir.join("attrs").join("record");
-            // **Both lists, one stack**, as the open composes them: an artifact's content extents
-            // hold the same format and the same reader, and the two never share an entity.
-            let extents: Vec<tessera_filter::RecordExtentPaths> = manifest
-                .record_extents
-                .iter()
-                .chain(manifest.artifact_record_extents.iter())
-                .map(|e| tessera_filter::RecordExtentPaths {
-                    blocks: prefix_dir.join(&e.blocks),
-                    hasrow: prefix_dir.join(&e.hasrow),
-                    directory: prefix_dir.join(&e.directory),
-                })
-                .collect();
-            match tessera_filter::RecordStack::open(
-                blob_resident.then_some(record_dir.as_path()),
-                &extents,
-                live.filter_columns.access(),
-            ) {
-                Ok(stack) => Some(Arc::new(stack)),
-                Err(e) => {
-                    self.health
-                        .coalesce_failures
-                        .fetch_add(1, Ordering::Relaxed);
-                    tracing::error!(
-                        error = %e,
-                        "ALARM: a completed coalesce's record extent would not compose into a \
-                         stack; discarding it rather than publishing a manifest naming a \
-                         layer this process cannot serve. Its files are orphans and every \
-                         consumed entry still stands"
-                    );
-                    return;
+        let records =
+            if completed.record.is_none() {
+                None
+            } else {
+                let partition_dir = prefix_dir
+                    .join("partitions")
+                    .join(&completed.plan.partition);
+                // The schema decides whether there is a base, exactly as it does at open: a build
+                // writes `attrs/record` only where a column has no other home. Derived rather than
+                // probed for, so a missing base refuses instead of reading as "those entities have no
+                // record".
+                let blob_resident =
+                    live.bundle.manifest.declared_scalars.iter().any(|d| {
+                        crate::filter::blob_resident(d, &live.bundle.manifest.vocabularies)
+                    });
+                let record_dir = partition_dir.join("attrs").join("record");
+                // **Both lists, one stack**, as the open composes them: an artifact's content extents
+                // hold the same format and the same reader, and the two never share an entity.
+                let extents: Vec<tessera_filter::RecordExtentPaths> = manifest
+                    .record_extents
+                    .iter()
+                    .chain(manifest.artifact_record_extents.iter())
+                    .map(|e| tessera_filter::RecordExtentPaths {
+                        blocks: prefix_dir.join(&e.blocks),
+                        hasrow: prefix_dir.join(&e.hasrow),
+                        directory: prefix_dir.join(&e.directory),
+                    })
+                    .collect();
+                match tessera_filter::RecordStack::open(
+                    blob_resident.then_some(record_dir.as_path()),
+                    &extents,
+                    live.filter_columns.access(),
+                ) {
+                    Ok(stack) => Some(Arc::new(stack)),
+                    Err(e) => {
+                        self.health
+                            .coalesce_failures
+                            .fetch_add(1, Ordering::Relaxed);
+                        tracing::error!(
+                            error = %e,
+                            "ALARM: a completed coalesce's record extent would not compose into a \
+                             stack; discarding it rather than publishing a manifest naming a \
+                             layer this process cannot serve. Its files are orphans and every \
+                             consumed entry still stands"
+                        );
+                        return;
+                    }
                 }
-            }
-        };
+            };
         let filter_columns = match live.filter_columns.with_coalesced(
             &windows,
             &text_windows,
@@ -9093,9 +9097,7 @@ fn settle_joins(generation: &Generation, rows: &mut [UnallocatedRow]) -> Result<
                 Some(buffered) => buffered.scalars.get(position).cloned(),
                 // `None` here is *no value held* and *could not find out* alike; see
                 // `session::flushed_scalar_of` for why one answer serves both.
-                None => {
-                    crate::session::flushed_scalar_of(generation, entity, position, &mut blob)
-                }
+                None => crate::session::flushed_scalar_of(generation, entity, position, &mut blob),
             };
             let Some(held) = held else {
                 continue;
@@ -9254,9 +9256,7 @@ fn settle_joins(generation: &Generation, rows: &mut [UnallocatedRow]) -> Result<
             // absence in every view.
             let held = match &buffered {
                 Some(item) => item.scalars.get(position).cloned(),
-                None => {
-                    crate::session::flushed_scalar_of(generation, entity, position, &mut blob)
-                }
+                None => crate::session::flushed_scalar_of(generation, entity, position, &mut blob),
             };
             let Some(held) = held else {
                 continue;
@@ -9341,13 +9341,20 @@ impl Executor {
             // published would be the batch's row order rather than anything the caller wrote. It is
             // made here, over the batch's own column, because that is where the two rows are — and
             // it is the whole check for a minted child, whose parent nothing else has an opinion
-            // about yet.
+            // about yet. **On a `dag` layer a second parent is an edge, not a contradiction**
+            // (`dag-hierarchies.md` §4, decision 0117), and the check passes it through to the
+            // close, where `mint_records` collects a child's parents.
+            let several = |layer: &str| {
+                registry.get(layer).is_some_and(|l| {
+                    l.declaration.hierarchy.kind == tessera_types::layer::HierarchyKind::Dag
+                })
+            };
             let mut claimed: std::collections::BTreeMap<(&str, u32, &str), &str> =
                 Default::default();
             for edge in &artifacts.edges {
                 let at = (edge.layer.as_str(), edge.level, edge.child.as_str());
                 if let Some(first) = claimed.insert(at, edge.parent.as_str()) {
-                    if first != edge.parent {
+                    if first != edge.parent && !several(&edge.layer) {
                         return Err(format!(
                             "{} in level {} of {} is named as a child of both {first} and {}. A \
                              list column declares the edges, so two rows naming different parents \
@@ -9525,29 +9532,6 @@ impl Executor {
             return Ok((Vec::new(), minted_per_entry));
         };
 
-        // **A child named under two parents refuses**, across the window as it does within a batch:
-        // two entries naming different parents for one artifact are two hierarchies, and there is no
-        // correct output. Checked before anything is prepared, so a refusal spends nothing.
-        let mut parents: BTreeMap<(String, u32, String), String> = BTreeMap::new();
-        for edge in &edges {
-            let at = (edge.layer.clone(), edge.level, edge.child.clone());
-            match parents.get(&at) {
-                Some(first) if *first != edge.parent => {
-                    return Err(format!(
-                        "{} in level {} of {} is named as a child of both {first} and {}. A list \
-                         column declares the edges, so two rows naming different parents for one \
-                         artifact are two hierarchies — and which of them was published would be \
-                         the order the batches arrived in rather than anything the caller wrote",
-                        edge.child, edge.level, edge.layer, edge.parent
-                    ))
-                }
-                Some(_) => {}
-                None => {
-                    parents.insert(at, edge.parent.clone());
-                }
-            }
-        }
-
         type Prepared = Result<
             (
                 Vec<WalRecord>,
@@ -9557,6 +9541,36 @@ impl Executor {
             String,
         >;
         let prepared: Prepared = self.live.with_publication_state(|registry, store, alloc| {
+            // **A child named under two parents refuses**, across the window as it does within a
+            // batch: two entries naming different parents for one artifact are two hierarchies,
+            // and there is no correct output. Checked before anything is prepared, so a refusal
+            // spends nothing. **On a `dag` layer the second parent is recorded** — a child's
+            // parents are the union of what every batch in the window named for it, each key
+            // once (`dag-hierarchies.md` §4, decision 0117). The cycle those edges could close is
+            // refused where the artifacts are created, in `prepare_publish`, which walks the
+            // batch's own edges — a growth never adds lineage, so the window's minted edges are
+            // every edge a cycle could run through.
+            let mut parents: BTreeMap<(String, u32, String), Vec<String>> = BTreeMap::new();
+            for edge in &edges {
+                let several = registry.get(&edge.layer).is_some_and(|l| {
+                    l.declaration.hierarchy.kind == tessera_types::layer::HierarchyKind::Dag
+                });
+                let at = (edge.layer.clone(), edge.level, edge.child.clone());
+                let named = parents.entry(at).or_default();
+                if named.contains(&edge.parent) {
+                    continue;
+                }
+                if !named.is_empty() && !several {
+                    return Err(format!(
+                        "{} in level {} of {} is named as a child of both {} and {}. A list \
+                         column declares the edges, so two rows naming different parents for one \
+                         artifact are two hierarchies — and which of them was published would be \
+                         the order the batches arrived in rather than anything the caller wrote",
+                        edge.child, edge.level, edge.layer, named[0], edge.parent
+                    ));
+                }
+                named.push(edge.parent.clone());
+            }
             // Re-resolved here and not trusted from admission: a publication executes between an
             // admission and this close (it takes the work lane, and the window is open across it),
             // so a key that named nothing then may name an artifact now — and §5's second ruling is
@@ -9594,9 +9608,10 @@ impl Executor {
                         // refusals, in the words `prepare_publish` would have made them in.
                         contents: Vec::new(),
                         attached_to: None,
-                        parent_key: parents
+                        parent_keys: parents
                             .get(&((*layer).to_string(), *level, (*key).to_string()))
-                            .cloned(),
+                            .cloned()
+                            .unwrap_or_default(),
                         // A layer declaring a `shape` publishes boxes an author wrote, so a point
                         // naming a key on such a layer has nothing to mint one from — the layer is
                         // a predicate and `resolve_or_mint` refuses the key at admission.
@@ -12247,8 +12262,9 @@ impl Executor {
                         crate::cut::Lineage::new(store.level(layer, *level).map(
                             |(ordinal, record)| {
                                 let within = record
-                                    .parent
-                                    .filter(|parent| parent.level == *level)
+                                    .parents
+                                    .iter()
+                                    .find(|parent| parent.level == *level)
                                     .map(|parent| parent.ordinal);
                                 (ordinal, within)
                             },

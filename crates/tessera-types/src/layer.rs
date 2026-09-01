@@ -291,6 +291,17 @@ pub enum HierarchyKind {
     Flat,
     /// A tree, held in the layer's **edges**. A coarser view is an ancestor.
     Nested,
+    /// A directed acyclic graph, held in the layer's edges — [`Nested`](HierarchyKind::Nested) in
+    /// every respect but one: **a child may name several parents**, and a second parent arriving
+    /// for a child is recorded rather than refused (`dag-hierarchies.md` §3, decision 0117). Every
+    /// artifact sits at level 0, `[[layer.levels]]` is refused, the edges are roll-up, a list key
+    /// column is read as a lineage, and a budget climbs the edges. A self-edge and a cycle refuse
+    /// at both entry points.
+    ///
+    /// A kind value rather than a key on `nested`, because the kind is what every reader switches
+    /// on and a tree and a graph are different shapes; and `nested`'s cousin rather than
+    /// `tiered`'s, because a concept at several depths cannot be placed at one level.
+    Dag,
     /// Independent analyses, one per level, with no lineage between them. A coarser view is a
     /// different analysis rather than an ancestor, so switching to it replaces one claim with
     /// another rather than coarsening the first.
@@ -983,9 +994,9 @@ impl RegisteredLayer {
 #[derive(Debug, Clone, PartialEq)]
 pub enum DeclarationError {
     EmptyName,
-    /// A treed layer declaring levels, which is the one combination decision 0082 forbids: its
-    /// lineage is in its edges, so a level number would be an address component pretending to carry
-    /// position.
+    /// A treed layer — `nested` or `dag` — declaring levels, which is the one combination decision
+    /// 0082 forbids: its lineage is in its edges, so a level number would be an address component
+    /// pretending to carry position.
     TreeWithLevels,
     /// A stacked layer with no levels — its levels *are* its analyses, so it has declared nothing.
     StackedWithoutLevels,
@@ -1006,7 +1017,11 @@ pub enum DeclarationError {
     /// grid's own depth of 16. Refused rather than warned because it has no reading at all: since
     /// the range became the default bound on a response (decision 0103) such a level is served at
     /// no depth, and the operator's only symptom would be a layer that is silently absent.
-    ZoomRangeEmpty { level: u32, lo: u32, hi: u32 },
+    ZoomRangeEmpty {
+        level: u32,
+        lo: u32,
+        hi: u32,
+    },
     /// A layer declares a `shape` and its membership is not `spatial`, so nothing would read it.
     ShapeWithoutSpatialMembership,
     /// A layer declares two drawn geometries — a derived hull, a membership shape and an authored
@@ -1047,8 +1062,8 @@ impl std::fmt::Display for DeclarationError {
             ),
             DeclarationError::TreeWithLevels => write!(
                 f,
-                "a nested layer's hierarchy is its edges, so it declares no levels: remove the \
-                 levels, or declare the layer stacked if its levels are independent analyses"
+                "a nested or dag layer's hierarchy is its edges, so it declares no levels: remove \
+                 the levels, or declare the layer stacked if its levels are independent analyses"
             ),
             DeclarationError::StackedWithoutLevels => write!(
                 f,
@@ -1150,7 +1165,11 @@ impl LayerDeclaration {
         if self.name.trim().is_empty() {
             return Err(DeclarationError::EmptyName);
         }
-        if self.name.trim().eq_ignore_ascii_case(RESERVED_LAYER_SELECTION) {
+        if self
+            .name
+            .trim()
+            .eq_ignore_ascii_case(RESERVED_LAYER_SELECTION)
+        {
             return Err(DeclarationError::ReservedName(self.name.clone()));
         }
         if self.depends_on.iter().any(|d| d == &self.name) {
@@ -1163,7 +1182,7 @@ impl LayerDeclaration {
         // The publish path and the build both enforce the direction; this is where the shape that
         // makes the question answerable at all is checked.
         match self.hierarchy.kind {
-            HierarchyKind::Nested if !self.levels.is_empty() => {
+            HierarchyKind::Nested | HierarchyKind::Dag if !self.levels.is_empty() => {
                 return Err(DeclarationError::TreeWithLevels)
             }
             HierarchyKind::Stacked if self.levels.is_empty() => {
@@ -1381,8 +1400,10 @@ pub enum ListMeaning {
     /// level. `edges` is `tiered`'s containment between consecutive entries; `stacked`'s levels are
     /// independent analyses and carry none.
     Levelled { levels: usize, edges: bool },
-    /// `nested`: a lineage, entry *k* the parent of entry *k+1*, **every artifact at level 0** — a
-    /// nested layer's hierarchy is its edges and it declares no levels (decision 0082).
+    /// `nested` and `dag`: a lineage, entry *k* the parent of entry *k+1*, **every artifact at
+    /// level 0** — a treed layer's hierarchy is its edges and it declares no levels (decision
+    /// 0082). Under `dag` a second lineage naming another parent for a child adds the edge; under
+    /// `nested` it is refused (`dag-hierarchies.md` §4).
     Lineage,
     /// `flat`: a membership each, at level 0, in no order. A flat layer has no positions for a list
     /// to index, so the entries are a set and nothing is read from their adjacency.
@@ -1393,7 +1414,7 @@ impl ListMeaning {
     pub fn of(kind: HierarchyKind, levels: usize) -> Self {
         match kind {
             HierarchyKind::Flat => ListMeaning::Unordered,
-            HierarchyKind::Nested => ListMeaning::Lineage,
+            HierarchyKind::Nested | HierarchyKind::Dag => ListMeaning::Lineage,
             HierarchyKind::Stacked => ListMeaning::Levelled {
                 levels,
                 edges: false,
@@ -1571,12 +1592,24 @@ mod tests {
     /// derived layer declared, and `hull` is not an ask word.
     #[test]
     fn the_ask_vocabulary_says_shape_where_the_declaration_says_hull() {
-        assert_eq!(ComputedProperty::parse_ask("shape"), Some(ComputedProperty::Hull));
+        assert_eq!(
+            ComputedProperty::parse_ask("shape"),
+            Some(ComputedProperty::Hull)
+        );
         assert_eq!(ComputedProperty::parse_ask("hull"), None);
-        assert_eq!(ComputedProperty::parse_ask("centroid"), Some(ComputedProperty::Centroid));
-        assert_eq!(ComputedProperty::parse_ask("box"), Some(ComputedProperty::Box));
+        assert_eq!(
+            ComputedProperty::parse_ask("centroid"),
+            Some(ComputedProperty::Centroid)
+        );
+        assert_eq!(
+            ComputedProperty::parse_ask("box"),
+            Some(ComputedProperty::Box)
+        );
         assert_eq!(ComputedProperty::parse("shape"), None);
-        assert_eq!(ComputedProperty::ASK_VOCABULARY, ["centroid", "box", "shape"]);
+        assert_eq!(
+            ComputedProperty::ASK_VOCABULARY,
+            ["centroid", "box", "shape"]
+        );
     }
 
     #[test]
@@ -1836,6 +1869,12 @@ mod tests {
             Err(DeclarationError::TreeWithLevels)
         );
         assert!(decl(HierarchyKind::Nested, vec![]).validate().is_ok());
+        // A DAG is `nested` in this respect (`dag-hierarchies.md` §3): its lineage is its edges.
+        assert_eq!(
+            decl(HierarchyKind::Dag, vec![0, 1]).validate(),
+            Err(DeclarationError::TreeWithLevels)
+        );
+        assert!(decl(HierarchyKind::Dag, vec![]).validate().is_ok());
         assert_eq!(
             decl(HierarchyKind::Stacked, vec![]).validate(),
             Err(DeclarationError::StackedWithoutLevels)
@@ -2084,6 +2123,12 @@ mod tests {
             "a nested layer holds every artifact at level 0"
         );
         assert!(lineage.declares_edges());
+        assert_eq!(
+            ListMeaning::of(HierarchyKind::Dag, 0),
+            lineage,
+            "a dag layer reads a list exactly as a nested one does; what differs is only that a \
+             second parent is recorded rather than refused"
+        );
 
         let flat = ListMeaning::of(HierarchyKind::Flat, 0);
         assert_eq!(flat.arity(), None);

@@ -176,7 +176,7 @@ fn node(
     sources: impl Iterator<Item = u64>,
 ) -> IncomingArtifact {
     let mut artifact = IncomingArtifact::from_entities(Some(key.into()), fx.members(sources));
-    artifact.parent_key = parent.map(str::to_string);
+    artifact.parent_keys = parent.into_iter().map(str::to_string).collect();
     artifact
 }
 

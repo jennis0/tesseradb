@@ -573,6 +573,16 @@ reviewed once (r2), all five rulings made, awaiting promotion
   (`probes/2026-09-01-mesh-dag/`). The one question the data forces is the membership's closure:
   ≈3.1×10⁸ rows explicit against ≈1.7×10⁹ closed upward, extrapolated from chunk 18.
 
+**Delivery, track `store` (2026-09-01, branch `dag/store`)** — the declaration, the durable record,
+the build and the ingest side of the design above are built: `kind = "dag"`; a record's parents as
+a list in the WAL row and the record blob, `BUNDLE_FORMAT` 4 → 5 and a bundle at any other number
+refused at open; the artifact row's `parent` as a list; a second parent recorded under `dag` and
+refused as before under `nested` and `tiered` at both entry points; and the cycle check the ingest
+side lacked, in the registry's publication so one body serves the build, `publish_artifacts` and
+the commit window's mint. What is *not* in this track: the cut over parent lists, longest-path
+depth, `parent_ids` on the wire and the client — the engine and client tracks'. Ledger:
+`.superpowers/sdd/2026-09-01-dag-hierarchies/progress-store.md`.
+
 **Rung 1 work not done**
 
 - `places/containment` — the third layer, from `hierarchy.txt`, as a `nested` lineage. Needs a DAG

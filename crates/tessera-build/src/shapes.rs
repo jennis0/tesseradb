@@ -160,7 +160,11 @@ impl ShapeLayerReport {
         eprintln!(
             "    clipped to the extent {}, wholly outside {}, rings dropped {}, degrees-looking \
              {}, children escaping their parent's bounds {}",
-            self.clipped, self.outside, self.rings_dropped, self.degrees_looking, self.children_escaping
+            self.clipped,
+            self.outside,
+            self.rings_dropped,
+            self.degrees_looking,
+            self.children_escaping
         );
         eprintln!(
             "    decomposition: {} interior tile(s) (max {} per artifact), {} boundary cell(s) \
@@ -257,7 +261,9 @@ impl<'a> ShapeColumns<'a> {
             match optional(path, batch, fields, "geometry")? {
                 None => None,
                 Some(array) => Some(match array.data_type() {
-                    arrow::datatypes::DataType::Binary => Wkb::Binary(typed(path, array, "geometry")?),
+                    arrow::datatypes::DataType::Binary => {
+                        Wkb::Binary(typed(path, array, "geometry")?)
+                    }
                     arrow::datatypes::DataType::LargeBinary => {
                         Wkb::Large(typed(path, array, "geometry")?)
                     }
@@ -404,12 +410,7 @@ pub struct ShapeReader {
 }
 
 impl ShapeReader {
-    pub fn new(
-        layer: &str,
-        kind: ShapeKind,
-        ctx: ShapeContext,
-        default_space: ShapeSpace,
-    ) -> Self {
+    pub fn new(layer: &str, kind: ShapeKind, ctx: ShapeContext, default_space: ShapeSpace) -> Self {
         // **No warning for a layer over several views.** Spanning is opt-in and the caller
         // declared it, so the two-unprojected-views warning is removed (decision 0111); what is
         // warned is a shape outside a view's own extent, which is a fact about the geometry and
@@ -473,8 +474,8 @@ impl ShapeReader {
                 ))
             })?,
         };
-        let canonical =
-            canonical_shapes(&shape, &self.ctx.views, space, self.ctx.max_vertices).map_err(|e| {
+        let canonical = canonical_shapes(&shape, &self.ctx.views, space, self.ctx.max_vertices)
+            .map_err(|e| {
                 BuildError::Invalid(format!(
                     "layer '{}': artifact {key}: {e}",
                     self.report.layer
@@ -505,7 +506,8 @@ impl ShapeReader {
             .iter()
             .map(|(v, b)| (v.len() + b.len()) as u64)
             .sum::<u64>();
-        self.bounds.insert(key.to_string(), canonical.bounds.clone());
+        self.bounds
+            .insert(key.to_string(), canonical.bounds.clone());
         Ok(ArtifactShapes::new(canonical.by_view))
     }
 
@@ -542,19 +544,28 @@ impl ShapeReader {
     /// geometry** — Overture's polygons are generalised for cartography and do not nest reliably,
     /// and a service that derived the tree from containment would build a different tree from the
     /// publisher's (`polygon-membership.md` §6.2).
-    pub fn finish(mut self, parents: impl IntoIterator<Item = (String, String)>) -> ShapeLayerReport {
+    pub fn finish(
+        mut self,
+        parents: impl IntoIterator<Item = (String, String)>,
+    ) -> ShapeLayerReport {
         for (child, parent) in parents {
             let (Some(child), Some(parent)) = (self.bounds.get(&child), self.bounds.get(&parent))
             else {
                 continue;
             };
-            let escapes = child.iter().zip(parent).any(|((_, c), (_, p))| match (c, p) {
-                (Some(c), Some(p)) => {
-                    c.min_x < p.min_x || c.min_y < p.min_y || c.max_x > p.max_x || c.max_y > p.max_y
-                }
-                (Some(_), None) => true,
-                _ => false,
-            });
+            let escapes = child
+                .iter()
+                .zip(parent)
+                .any(|((_, c), (_, p))| match (c, p) {
+                    (Some(c), Some(p)) => {
+                        c.min_x < p.min_x
+                            || c.min_y < p.min_y
+                            || c.max_x > p.max_x
+                            || c.max_y > p.max_y
+                    }
+                    (Some(_), None) => true,
+                    _ => false,
+                });
             if escapes {
                 self.report.children_escaping += 1;
             }
@@ -648,14 +659,16 @@ pub fn check_reports(config: &Config) -> Vec<std::result::Result<ShapeLayerRepor
         let result = (|| -> Result<ShapeLayerReport> {
             let mut parents: Vec<(String, String)> = Vec::new();
             match &sources.artifacts {
-                None => Ok(ShapeReader::new(&declaration.name, kind, ctx, ShapeSpace::View)
-                    .finish(parents)),
+                None => Ok(
+                    ShapeReader::new(&declaration.name, kind, ctx, ShapeSpace::View)
+                        .finish(parents),
+                ),
                 Some(ArtifactSource::Inline(rows)) => {
                     let mut reader =
                         ShapeReader::new(&declaration.name, kind, ctx, ShapeSpace::View);
                     for row in rows {
                         reader.row(&row.key, inline_shape(row, kind)?, row.space.as_deref())?;
-                        if let Some(parent) = &row.parent {
+                        for parent in &row.parent {
                             parents.push((row.key.clone(), parent.clone()));
                         }
                     }
@@ -666,21 +679,22 @@ pub fn check_reports(config: &Config) -> Vec<std::result::Result<ShapeLayerRepor
                     fields,
                     default_space,
                 }) => {
-                    let mut reader =
-                        ShapeReader::new(&declaration.name, kind, ctx, *default_space);
+                    let mut reader = ShapeReader::new(&declaration.name, kind, ctx, *default_space);
                     for batch in crate::layers::batches(path)? {
                         let batch = batch?;
                         let keys = crate::layers::key_column(path, &batch, fields, "key")?;
-                        let parent = optional_utf8(path, &batch, fields, "parent")?;
+                        let parent = crate::layers::parent_column(path, &batch, fields)?;
                         let columns = ShapeColumns::open(path, &batch, fields, kind)?;
                         let spaces = space_column(path, &batch, fields)?;
                         for row in 0..batch.num_rows() {
                             let key = crate::layers::key_at(&keys, row);
-                            reader.row(&key, columns.at(path, row, &key)?, space_at(spaces, row))?;
-                            if let Some(parent) = parent.and_then(|c| {
-                                (!c.is_null(row)).then(|| c.value(row).to_string())
-                            }) {
-                                parents.push((key, parent));
+                            reader.row(
+                                &key,
+                                columns.at(path, row, &key)?,
+                                space_at(spaces, row),
+                            )?;
+                            for parent in crate::layers::parents_at(path, parent.as_ref(), row)? {
+                                parents.push((key.clone(), parent));
                             }
                         }
                     }

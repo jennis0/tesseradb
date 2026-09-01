@@ -370,7 +370,7 @@ fn treed(fx: &Fixture) -> Vec<IncomingArtifact> {
                 Some(format!("t{parent}.{child}")),
                 fx.members(clo..(clo + 500).min(N_ITEMS)),
             );
-            node.parent_key = Some(format!("t{parent}"));
+            node.parent_keys = vec![format!("t{parent}")];
             out.push(node);
         }
     }

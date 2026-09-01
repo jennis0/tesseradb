@@ -373,7 +373,9 @@ pub enum WalRecord {
     ///
     /// **It names the owner group only.** Groups sharing these views (`members`, `views.md` §3.3)
     /// take their copies from this one record, because the key and the ordinal are the owner's.
-    ViewCreate { view: tessera_types::view::CreatedView },
+    ViewCreate {
+        view: tessera_types::view::CreatedView,
+    },
     /// An accepted view drop. **The key is freed and the incarnation dies** (decision 0115): a
     /// key is a name the caller chose, so it may be created again, and what must not come back is
     /// the predecessor's artifacts. `LayerDrop` still tombstones, and the difference is deliberate
@@ -498,8 +500,11 @@ pub struct PublishedArtifact {
     /// that may since have moved. The bytes are the engine's (`polygon-membership.md` §6.6) and
     /// this crate holds them opaquely, as it holds the membership's.
     pub shape: Option<crate::membership::ArtifactShapes>,
-    /// This artifact's parent in its layer's hierarchy — resolved from the key the caller named,
-    /// on `attached_to`'s argument.
+    /// This artifact's parents in its layer's hierarchy — resolved from the keys the caller named,
+    /// on `attached_to`'s argument. **Ascending by `(level, ordinal)` and deduplicated**: empty at
+    /// a root, one entry on a `nested` or `tiered` layer, and on a `dag` layer as many as the
+    /// child sits beneath (`dag-hierarchies.md` §4, decision 0117). A duplicate edge is one edge,
+    /// whichever spelling stated it and however many rows did.
     ///
     /// **Only the parent direction is durable.** The child direction is the same relation read the
     /// other way, and a level's child index is built from these at open exactly as its row-space
@@ -515,13 +520,14 @@ pub struct PublishedArtifact {
     /// **No layer qualifier and no entity.** An edge relates two artifacts of one *layer*, so the
     /// layer is the reader's own; and unlike an attachment this is not a visibility term — a
     /// node's verdict is its own (decision 0080) — so there is no target entity to test.
-    pub parent: Option<ParentRef>,
+    pub parents: Vec<ParentRef>,
 }
 
-/// The resolved parent of an artifact, inside its own layer.
+/// One resolved parent of an artifact, inside its own layer.
 ///
-/// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// On-disk format: field order is positional under postcard — see [`WalRow`]'s note. The derived
+/// order is `(level, ordinal)`, which is the order a record's list is kept in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ParentRef {
     pub level: u32,
     pub ordinal: u32,
@@ -2015,7 +2021,7 @@ mod tests {
                     members: serialise_members(&first),
                     contents: Vec::new(),
                     attached_to: None,
-                    parent: None,
+                    parents: Vec::new(),
                     shape: None,
                 },
                 // An artifact whose members have all been deleted is a real state, and an
@@ -2039,16 +2045,24 @@ mod tests {
                         ordinal: 17,
                         entity: EntityId::new(4_294_901_759),
                     }),
-                    // The fourth optional field, and the one that decodes *after* the attachment
+                    // The fourth field, a list, and the one that decodes *after* the attachment
                     // — so a shape that lost a byte in the attachment would land here and read a
                     // parent out of the wrong offset. Set on the artifact that also carries the
                     // attachment, which is where the two can be told apart, and with a **level
                     // that is not this artifact's own**: a cross-level parent is the shape whose
-                    // two words could be read in either order without either looking wrong.
-                    parent: Some(ParentRef {
-                        level: 2,
-                        ordinal: 65_535,
-                    }),
+                    // two words could be read in either order without either looking wrong. Two
+                    // of them, because a `dag` layer's child names several (decision 0117) and a
+                    // list of one would round-trip through a reader that still held one.
+                    parents: vec![
+                        ParentRef {
+                            level: 2,
+                            ordinal: 65_535,
+                        },
+                        ParentRef {
+                            level: 2,
+                            ordinal: 65_536,
+                        },
+                    ],
                     // The fifth optional field, and the last one — set here so the round-trip
                     // covers a record carrying every optional at once, which is the arrangement a
                     // positional decoder misreads first.

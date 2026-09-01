@@ -51,7 +51,7 @@
 //! artifacts and members, the publication order, and the hierarchy checks that need every artifact
 //! in hand.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
@@ -93,8 +93,9 @@ struct PlannedArtifact {
     /// Indexed by rank, dense — a gap would silently renumber the caller's ranking.
     contents: Vec<PlannedContent>,
     attached_to: Option<IncomingAttachment>,
-    /// Parent artifact in a hierarchy, named by the parent's own key.
-    parent_key: Option<String>,
+    /// Parent artifacts in a hierarchy, each named by the parent's own key — one on a tree, and on
+    /// a `dag` layer as many as the artifact sits beneath (`dag-hierarchies.md` §4). Each key once.
+    parent_keys: Vec<String>,
     /// The artifact's canonical shapes, one per view, on a layer whose `shape` declares one —
     /// which *is* its membership there, so `membership` stays empty beside it.
     shape: Option<ArtifactShapes>,
@@ -141,7 +142,7 @@ struct ResolvedArtifact {
     members: ResolvedMembers,
     contents: Vec<IncomingContent>,
     attached_to: Option<IncomingAttachment>,
-    parent_key: Option<String>,
+    parent_keys: Vec<String>,
     shape: Option<ArtifactShapes>,
 }
 
@@ -422,6 +423,29 @@ pub struct SplitCoverage {
     pub stray_members: u64,
 }
 
+/// One treed level's shape as a graph — decision 0092's report, for the edges: what the cut will
+/// climb, and on a `dag` layer how far it is from a tree (`dag-hierarchies.md` §3). Rung 3's MeSH
+/// layer has 30% of its descriptors under more than one parent, and an operator reading a budget's
+/// behaviour there needs that number beside the layer, not in a probe.
+///
+/// It decides nothing. Reported for every layer whose kind carries edges — a tree's line reads
+/// `0 under more than one parent`, which is the cheap way of saying it is one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HierarchyShape {
+    pub layer: String,
+    pub level: u32,
+    pub kind: String,
+    pub artifacts: u64,
+    /// Parent edges, each once.
+    pub edges: u64,
+    /// Artifacts naming no parent.
+    pub roots: u64,
+    /// Artifacts naming more than one parent — nonzero only on a `dag` layer.
+    pub multi_parent: u64,
+    /// The most parents any artifact names.
+    pub max_parents: u64,
+}
+
 /// What a build's layer pass produced, for the manifest and for the digest map.
 pub struct PublishedLayers {
     /// For a layer scoped to a group, which view's artifact set each published artifact belongs
@@ -433,6 +457,8 @@ pub struct PublishedLayers {
     pub containment_violations: Vec<ContainmentViolation>,
     /// Per-parent coverage: how much of each split its children hold between them.
     pub split_coverage: Vec<SplitCoverage>,
+    /// Per treed level, its edges as a graph — reported beside the layer and in `containment.json`.
+    pub hierarchy_shapes: Vec<HierarchyShape>,
     /// One past the lowest entity the layers and their artifacts claimed. **The mark that must
     /// reach the manifest**: the WAL carries the same one in its records and rotation reclaims
     /// those, so a mark that lived only there is lost at the first rotation and the next
@@ -491,6 +517,7 @@ impl Default for PublishedLayers {
             artifact_views: BTreeMap::new(),
             containment_violations: Vec::new(),
             split_coverage: Vec::new(),
+            hierarchy_shapes: Vec::new(),
             low_water: tessera_types::layer::ROWLESS_CEILING,
             membership_extents: Vec::new(),
             level_versions: Vec::new(),
@@ -649,11 +676,11 @@ pub fn read(
                 .artifacts
                 .iter()
                 .filter(|((layer, _, _), _)| layer == &input.name)
-                .filter_map(|((_, _, key), index)| {
+                .flat_map(|((_, _, key), index)| {
                     plan.bodies[*index]
-                        .parent_key
-                        .clone()
-                        .map(|parent| (key.clone(), parent))
+                        .parent_keys
+                        .iter()
+                        .map(|parent| (key.clone(), parent.clone()))
                 })
                 .collect();
             plan.shape_reports.push(reader.finish(parents));
@@ -817,7 +844,7 @@ fn read_artifacts(
         let target_layer = optional_utf8(path, &batch, fields, "attached_layer")?;
         let target_level = optional_u32(path, &batch, ATTACHED_LEVEL)?;
         let target_key = optional_utf8(path, &batch, fields, "attached_key")?;
-        let parent = optional_utf8(path, &batch, fields, "parent")?;
+        let parent = parent_column(path, &batch, fields)?;
 
         // **A stored membership on a layer whose members are computed is a refusal**, not a
         // column read anyway: `membership` decides what a write invalidates, and a spatial or
@@ -931,7 +958,7 @@ fn read_artifacts(
                     Some(column) => ranked_at(path, column, row, &address.2)?,
                 },
                 attached_to: attachment,
-                parent_key: parent.as_ref().and_then(|c| value_at(c, row)),
+                parent_keys: parents_at(path, parent.as_ref(), row)?,
                 shape: match (shapes.as_deref_mut(), shape_columns.as_ref()) {
                     (Some(reader), Some(columns)) => reader.row(
                         &address.2,
@@ -1003,7 +1030,11 @@ fn plan_inline(
                 })
                 .collect(),
             attached_to,
-            parent_key: row.parent.clone(),
+            parent_keys: {
+                let mut keys = row.parent.clone();
+                dedup_keys(&mut keys);
+                keys
+            },
             shape: match shapes.as_deref_mut() {
                 Some(reader) => {
                     let input = inline_shape(row, reader.kind())
@@ -1067,11 +1098,13 @@ fn read_members(
     // Built on the first integer batch and not before: a text-keyed layer never pays for it, and a
     // layer of 10⁷ artifacts pays once rather than per point.
     let mut roster: Option<KeyRoster> = None;
-    // The edges a list column declared, child address → parent key. **One entry per child, not one
+    // The edges a list column declared, child address → parents. **One entry per child, not one
     // per row**: a cluster of a hundred thousand points states its parent a hundred thousand times,
     // and the second statement onward is a comparison rather than an insertion. Applied once the
-    // whole source has been read, so a conflict is found wherever in the file it sits.
-    let mut lineage: BTreeMap<usize, usize> = BTreeMap::new();
+    // whole source has been read, so a conflict is found wherever in the file it sits — and on a
+    // `dag` layer a second parent is an insertion rather than a conflict (`dag-hierarchies.md` §4).
+    let several = declaration.hierarchy.kind == tessera_types::layer::HierarchyKind::Dag;
+    let mut lineage: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     // Reused across rows rather than allocated per point: one slot per position in the row's list,
     // `None` where the entry named no artifact.
     let mut entries: Vec<Option<usize>> = Vec::new();
@@ -1166,13 +1199,13 @@ fn read_members(
                         attach_member(plan, *member, path, source, rank)?;
                     }
                     if listed.meaning.declares_edges() {
-                        record_lineage(&entries, plan, &mut lineage, path)?;
+                        record_lineage(&entries, plan, &mut lineage, path, several)?;
                     }
                 }
             }
         }
     }
-    apply_lineage(plan, lineage, path)?;
+    apply_lineage(plan, lineage, path, several)?;
     Ok((unclustered, read))
 }
 
@@ -1301,72 +1334,91 @@ fn null_entity(path: &Path, what: &str) -> BuildError {
     ))
 }
 
-/// The edges one row's list declares, folded into the map of what each child's parent is.
+/// The edges one row's list declares, folded into the map of what each child's parents are.
 ///
 /// The adjacency itself is [`parent_edges`]'s — the wire reads the same rule off the same function
 /// — and what is added here is the conflict: **one entry per child, not one per row**, so a cluster
 /// of a hundred thousand points states its parent a hundred thousand times and the second statement
-/// onward is a comparison rather than an insertion.
+/// onward is a comparison rather than an insertion. Under `several` — a `dag` layer — a second
+/// parent is inserted instead, once (`dag-hierarchies.md` §4, decision 0117).
 fn record_lineage(
     entries: &[Option<usize>],
     plan: &LayerPlan,
-    lineage: &mut BTreeMap<usize, usize>,
+    lineage: &mut BTreeMap<usize, Vec<usize>>,
     path: &Path,
+    several: bool,
 ) -> Result<()> {
     for (parent, child) in parent_edges(entries) {
-        match lineage.get(child) {
-            Some(first) if first != parent => {
-                return Err(two_parents(
-                    path,
-                    plan.address_of(*child),
-                    &plan.address_of(*first).2,
-                    &plan.address_of(*parent).2,
-                ))
-            }
-            Some(_) => {}
-            None => {
-                lineage.insert(*child, *parent);
-            }
+        let named = lineage.entry(*child).or_default();
+        if named.contains(parent) {
+            continue;
         }
+        if !named.is_empty() && !several {
+            return Err(two_parents(
+                path,
+                plan.address_of(*child),
+                &plan.address_of(named[0]).2,
+                &plan.address_of(*parent).2,
+            ));
+        }
+        named.push(*parent);
     }
     Ok(())
 }
 
-/// Hang every child the column named under the parent it named.
+/// Hang every child the column named under the parents it named.
 ///
 /// **A parent already on the artifact row must be the same one**: a `parent` column and a lineage
 /// column are two spellings of one edge, and an artifact holding a different parent in each is the
-/// same conflict as two points disagreeing.
-fn apply_lineage(plan: &mut LayerPlan, lineage: BTreeMap<usize, usize>, path: &Path) -> Result<()> {
+/// same conflict as two points disagreeing. Under `several` the two spellings are unioned, each
+/// edge once — a duplicate edge is one edge whichever spelling stated it (`dag-hierarchies.md` §4).
+fn apply_lineage(
+    plan: &mut LayerPlan,
+    lineage: BTreeMap<usize, Vec<usize>>,
+    path: &Path,
+    several: bool,
+) -> Result<()> {
     // **Applied in address order, not arena order.** The conflict below is a refusal, and which of
     // several a corpus carries is reported must not depend on the order keys happened to be met —
     // it is the order they sort in, which is what it has always been. One sort of at most one entry
     // per child, against one probe per member row.
-    let mut in_order: Vec<(usize, usize)> = lineage.into_iter().collect();
+    let mut in_order: Vec<(usize, Vec<usize>)> = lineage.into_iter().collect();
     in_order.sort_by(|a, b| plan.address_of(a.0).cmp(plan.address_of(b.0)));
-    for (child, parent) in in_order {
-        let parent_key = plan.address_of(parent).2.clone();
+    for (child, parents) in in_order {
         let address = plan.address_of(child).clone();
-        let artifact = &mut plan.bodies[child];
-        match &artifact.parent_key {
-            Some(declared) if *declared != parent_key => {
-                return Err(two_parents(path, &address, declared, &parent_key))
+        for parent in parents {
+            let parent_key = plan.address_of(parent).2.clone();
+            let artifact = &mut plan.bodies[child];
+            if artifact.parent_keys.contains(&parent_key) {
+                continue;
             }
-            _ => artifact.parent_key = Some(parent_key),
+            if let Some(declared) = artifact.parent_keys.first().filter(|_| !several) {
+                return Err(two_parents(path, &address, declared, &parent_key));
+            }
+            artifact.parent_keys.push(parent_key);
         }
     }
     Ok(())
 }
 
+/// Each key once, in order of first appearance: a duplicate edge is one edge
+/// (`dag-hierarchies.md` §4).
+fn dedup_keys(keys: &mut Vec<String>) {
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    keys.retain(|key| seen.insert(key.clone()));
+}
+
 /// **A child naming two different parents is refused** (`artifacts-from-points.md` §4). The data is
 /// not the tree the layer declared: there is no correct output, and choosing a parent would publish
-/// a hierarchy the caller did not write.
+/// a hierarchy the caller did not write. A `dag` layer declares a graph and never reaches this
+/// (`dag-hierarchies.md` §4).
 fn two_parents(path: &Path, child: &Address, first: &str, second: &str) -> BuildError {
     BuildError::Invalid(format!(
         "{}: {} in level {} of {} is named as a child of both {first} and {second}. A list key \
          column declares the edges, so two rows naming different parents for one artifact are two \
          hierarchies — and which of them was published would be the file's row order rather than \
-         anything the caller wrote",
+         anything the caller wrote. Declare `kind = \"dag\"` if a child may sit under several \
+         parents",
         path.display(),
         child.2,
         child.1,
@@ -1510,7 +1562,7 @@ pub fn publish(
     // publication that assigns permanent ids rather than after it. It is also the last reader of a
     // membership before the publication takes it — the memberships are the largest thing this stage
     // holds, and nothing after this point needs them whole.
-    let (violations, coverage) =
+    let (violations, coverage, hierarchy_shapes) =
         verify_hierarchies(&plan.declarations, &plan.artifacts, &resolved, &table)?;
 
     // Grouped by `(layer, level)`, each level's artifacts in key order — so a level's
@@ -1621,6 +1673,7 @@ pub fn publish(
         artifact_views,
         containment_violations: violations,
         split_coverage: coverage,
+        hierarchy_shapes,
         low_water: alloc.low_water(),
         unclustered: plan.unclustered.clone(),
         minted: plan.minted.clone(),
@@ -1980,10 +2033,16 @@ fn verify_hierarchies(
     index_of: &BTreeMap<Address, usize>,
     resolved: &[ResolvedArtifact],
     table: &spill::MemberTable,
-) -> Result<(Vec<ContainmentViolation>, Vec<SplitCoverage>)> {
+) -> Result<(
+    Vec<ContainmentViolation>,
+    Vec<SplitCoverage>,
+    Vec<HierarchyShape>,
+)> {
     // Which parent has claimed each child, so a second claim is a refusal rather than a silent
     // reparenting: a child with two parents has two lineages, and which one a cut walks would
-    // depend on iteration order.
+    // depend on iteration order. **A `dag` layer's child holds several, and never enters this
+    // map** (`dag-hierarchies.md` §4); its containment and coverage are per edge below, exactly as
+    // a tree's are.
     let mut claimed: BTreeMap<(&str, u32, &str), &str> = BTreeMap::new();
     // Children grouped under their parent, so containment and coverage are one pass over each
     // parent's membership rather than one per edge. **Each child by its full address**, because an
@@ -2001,85 +2060,124 @@ fn verify_hierarchies(
         .map(|d| (d.name.as_str(), d.hierarchy.kind))
         .collect();
 
+    // The graph per treed level, counted as the edges are walked: every artifact of such a level
+    // counts once, its parents each once.
+    let mut shapes: BTreeMap<(&str, u32), HierarchyShape> = BTreeMap::new();
     for (address, index) in index_of {
         let (layer, level, key) = address;
-        let Some(parent_key) = resolved[*index].parent_key.as_deref() else {
-            continue;
-        };
-        let kind = kind_of
-            .get(layer.as_str())
-            .copied()
-            .unwrap_or(tessera_types::layer::HierarchyKind::Flat);
-        let cross_level = matches!(kind, tessera_types::layer::HierarchyKind::Tiered);
-        if !cross_level && !matches!(kind, tessera_types::layer::HierarchyKind::Nested) {
-            return Err(BuildError::Invalid(format!(
+        if let Some(kind) = kind_of.get(layer.as_str()).filter(|k| {
+            !matches!(
+                k,
+                tessera_types::layer::HierarchyKind::Flat
+                    | tessera_types::layer::HierarchyKind::Stacked
+            )
+        }) {
+            let named = resolved[*index].parent_keys.len() as u64;
+            let shape = shapes
+                .entry((layer.as_str(), *level))
+                .or_insert_with(|| HierarchyShape {
+                    layer: layer.clone(),
+                    level: *level,
+                    kind: format!("{kind:?}").to_lowercase(),
+                    artifacts: 0,
+                    edges: 0,
+                    roots: 0,
+                    multi_parent: 0,
+                    max_parents: 0,
+                });
+            shape.artifacts += 1;
+            shape.edges += named;
+            shape.roots += u64::from(named == 0);
+            shape.multi_parent += u64::from(named > 1);
+            shape.max_parents = shape.max_parents.max(named);
+        }
+        // Each parent an artifact names is one edge, checked on its own; the keys are already each
+        // once, so a repeated edge cannot reach here.
+        for parent_key in resolved[*index].parent_keys.iter().map(String::as_str) {
+            let kind = kind_of
+                .get(layer.as_str())
+                .copied()
+                .unwrap_or(tessera_types::layer::HierarchyKind::Flat);
+            let cross_level = matches!(kind, tessera_types::layer::HierarchyKind::Tiered);
+            let several = matches!(kind, tessera_types::layer::HierarchyKind::Dag);
+            if !cross_level
+                && !several
+                && !matches!(kind, tessera_types::layer::HierarchyKind::Nested)
+            {
+                return Err(BuildError::Invalid(format!(
                 "{layer} is declared {kind:?} and so has no lineage, but {key} names a parent — \
                  declare it nested if its edges run within a level, or tiered if they run between \
                  levels"
             )));
-        }
+            }
 
-        // **Where to look for the parent is the declared shape's to say.** A layer may not mix the
-        // two directions, which is what makes an edge's meaning independent of the data: an
-        // tiered layer's parent is in a strictly coarser level, and a key that resolves
-        // only at this level or a finer one is an edge running against the resolution — refused
-        // rather than reinterpreted.
-        let parent_address = if cross_level {
-            let mut found = None;
-            for coarser in 0..*level {
-                let candidate = (layer.clone(), coarser, parent_key.to_string());
-                if let Some((stored, _)) = index_of.get_key_value(&candidate) {
-                    if found.is_some() {
-                        return Err(BuildError::Invalid(format!(
+            // **Where to look for the parent is the declared shape's to say.** A layer may not mix the
+            // two directions, which is what makes an edge's meaning independent of the data: an
+            // tiered layer's parent is in a strictly coarser level, and a key that resolves
+            // only at this level or a finer one is an edge running against the resolution — refused
+            // rather than reinterpreted.
+            let parent_address = if cross_level {
+                let mut found = None;
+                for coarser in 0..*level {
+                    let candidate = (layer.clone(), coarser, parent_key.to_string());
+                    if let Some((stored, _)) = index_of.get_key_value(&candidate) {
+                        if found.is_some() {
+                            return Err(BuildError::Invalid(format!(
                             "{layer} artifact {key} names parent {parent_key}, which exists in \
                              more than one coarser level; which level the edge meant would depend \
                              on the search order, so it is refused rather than resolved"
                         )));
+                        }
+                        found = Some(stored);
                     }
-                    found = Some(stored);
                 }
-            }
-            match found {
-                Some(address) => address,
-                None => {
-                    return Err(BuildError::Invalid(format!(
+                match found {
+                    Some(address) => address,
+                    None => {
+                        return Err(BuildError::Invalid(format!(
                         "{layer} level {level} artifact {key} names parent {parent_key}, which no \
                          coarser level declares — a tiered layer's edges run from a coarser \
                          level to a finer one, so a parent at this level or below is an \
                          edge running against the resolution"
                     )))
+                    }
                 }
-            }
-        } else {
-            let candidate = (layer.clone(), *level, parent_key.to_string());
-            match index_of.get_key_value(&candidate) {
-                Some((stored, _)) => stored,
-                None => {
-                    return Err(BuildError::Invalid(format!(
+            } else {
+                let candidate = (layer.clone(), *level, parent_key.to_string());
+                match index_of.get_key_value(&candidate) {
+                    Some((stored, _)) => stored,
+                    None => {
+                        return Err(BuildError::Invalid(format!(
                         "{layer} level {level} artifact {key} names parent {parent_key}, which \
                          this level does not declare — a nested layer's edges relate two artifacts \
                          of one level, and a parent that does not exist would leave the child a \
                          root of a tree nobody wrote"
                     )))
+                    }
+                }
+            };
+            // **Only a within-level edge can name itself.** A key is unique per `(layer,
+            // level)`, so a levelled taxonomy legitimately carries the same key at two levels — an
+            // arXiv archive with no subclass is `hep-ph` at both, and the level-1 artifact's parent is
+            // the level-0 one of the same name.
+            if !cross_level && parent_key == key {
+                return Err(BuildError::Invalid(format!(
+                "{layer} level {level} artifact {key} names itself as its parent — the edges hold \
+                 a cycle of length one"
+            )));
+            }
+            if !several {
+                if let Some(first) = claimed.insert((layer, *level, key), parent_key) {
+                    return Err(BuildError::Invalid(format!(
+                        "{layer} level {level} artifact {key} is claimed by both {first} and \
+                     {parent_key}; a child has one lineage or the cut that walks it depends on \
+                     iteration order. Declare `kind = \"dag\"` if a child may sit under several \
+                     parents"
+                    )));
                 }
             }
-        };
-        // **Only a within-level edge can name itself.** A key is unique per `(layer,
-        // level)`, so a levelled taxonomy legitimately carries the same key at two levels — an
-        // arXiv archive with no subclass is `hep-ph` at both, and the level-1 artifact's parent is
-        // the level-0 one of the same name.
-        if !cross_level && parent_key == key {
-            return Err(BuildError::Invalid(format!(
-                "{layer} level {level} artifact {key} names itself as its parent"
-            )));
+            children_of.entry(parent_address).or_default().push(address);
         }
-        if let Some(first) = claimed.insert((layer, *level, key), parent_key) {
-            return Err(BuildError::Invalid(format!(
-                "{layer} level {level} artifact {key} is claimed by both {first} and {parent_key}; \
-                 a child has one lineage or the cut that walks it depends on iteration order"
-            )));
-        }
-        children_of.entry(parent_address).or_default().push(address);
     }
 
     let mut violations = Vec::new();
@@ -2179,15 +2277,17 @@ fn verify_hierarchies(
     }
 
     detect_cycles(index_of, resolved, &kind_of)?;
-    Ok((violations, coverage))
+    Ok((violations, coverage, shapes.into_values().collect()))
 }
 
-/// Refuse a hierarchy holding a cycle, which is not a tree and has no root to descend from.
+/// Refuse a hierarchy holding a cycle, which is neither a tree nor a DAG and has no root to descend
+/// from.
 ///
-/// Walks each artifact's ancestry to the root, bounded by the level's own artifact count — a chain
-/// longer than that has revisited a node, whatever the shape of the loop.
+/// A depth-first search over each artifact's parent lists, in key order, colouring each node once
+/// it is known to reach a root; a node met while still on the chain being walked is the cycle
+/// (`dag-hierarchies.md` §4). A self-edge is refused before this by `verify_hierarchies`.
 ///
-/// **Only a nested layer can hold one, and only its edges are walked.** A tiered layer's
+/// **Only a nested or dag layer can hold one, and only their edges are walked.** A tiered layer's
 /// edges each step to a strictly coarser level, and the levels are finite and bounded below by
 /// zero, so a cycle is not expressible there.
 ///
@@ -2207,62 +2307,85 @@ fn detect_cycles(
     //
     // A `BTreeMap` at both levels, because the order artifacts are visited in is the order this
     // reports a cycle in, and that order must stay `artifacts.keys()`'s.
-    let mut levels: BTreeMap<(&str, u32), BTreeMap<&str, Option<&str>>> = BTreeMap::new();
+    let mut levels: BTreeMap<(&str, u32), BTreeMap<&str, &[String]>> = BTreeMap::new();
     for ((layer, level, key), index) in index_of {
         if !matches!(
             kind_of.get(layer.as_str()),
-            Some(tessera_types::layer::HierarchyKind::Nested)
+            Some(
+                tessera_types::layer::HierarchyKind::Nested
+                    | tessera_types::layer::HierarchyKind::Dag
+            )
         ) {
             continue;
         }
         levels
             .entry((layer.as_str(), *level))
             .or_default()
-            .insert(key.as_str(), resolved[*index].parent_key.as_deref());
+            .insert(key.as_str(), resolved[*index].parent_keys.as_slice());
     }
 
     // **One visit per artifact, not one walk per artifact.** Each node is coloured once it is known
     // to reach a root, so a chain already proved good is left the moment it is re-entered — and a
     // node met while still on the current chain *is* the cycle, which is what the count bound was
     // standing in for. The bound it replaces was derived by scanning the whole map per artifact,
-    // O(A²), and a `nested` layer puts every artifact at level 0 (`configuration.md`, the four
+    // O(A²), and a `nested` layer puts every artifact at level 0 (`configuration.md`, the
     // hierarchy kinds): 600,000 artifacts at the Overture rung, 3.6×10¹¹ key visits, and the whole
     // of that build's layers stage. It also removes a latent hang — a corpus that genuinely held a
     // cycle ran the bound's full length for every artifact whose lineage reached it.
     //
     // **The artifact reported is the same one**: the walks start in key order and the first start
     // whose lineage reaches a cycle is the first artifact the counted walk would have failed on.
+    // Over parent lists the walk is a depth-first search with an explicit stack of
+    // `(node, next parent to try)`; on a tree every list has one entry and it is the chain walk
+    // it replaces.
     for ((layer, level), parents) in &levels {
         // 0 unvisited · 1 on the chain being walked · 2 known to reach a root
         let mut state: std::collections::HashMap<&str, u8> =
             std::collections::HashMap::with_capacity(parents.len());
         for start in parents.keys() {
-            let mut chain: Vec<&str> = Vec::new();
-            let mut node = *start;
-            loop {
-                match state.get(node).copied().unwrap_or(0) {
-                    2 => break,
+            if state.get(*start).copied().unwrap_or(0) == 2 {
+                continue;
+            }
+            let mut chain: Vec<(&str, usize)> = vec![(*start, 0)];
+            state.insert(*start, 1);
+            while let Some((node, next)) = chain.last_mut() {
+                let node = *node;
+                let Some(parent) = parents[node].get(*next) else {
+                    state.insert(node, 2);
+                    chain.pop();
+                    continue;
+                };
+                *next += 1;
+                let parent = parent.as_str();
+                // A parent this level does not hold ends that path: what sits above a key this
+                // level never declared is not this level's to call a cycle.
+                if !parents.contains_key(parent) {
+                    continue;
+                }
+                match state.get(parent).copied().unwrap_or(0) {
+                    2 => {}
                     1 => {
+                        let from = chain
+                            .iter()
+                            .position(|(n, _)| *n == parent)
+                            .expect("a node on the chain is in it");
+                        let path: Vec<&str> = chain[from..]
+                            .iter()
+                            .map(|(n, _)| *n)
+                            .chain(std::iter::once(parent))
+                            .collect();
                         return Err(BuildError::Invalid(format!(
                             "{layer} level {level}: the lineage above {start} does not reach a \
-                             root within the level's own artifact count, so the edges hold a \
-                             cycle — a tree has a root to descend a cut from and a cycle has none"
-                        )))
+                             root, so the edges hold a cycle — {} — and a hierarchy has a root \
+                             to descend a cut from where a cycle has none",
+                            path.join(" → ")
+                        )));
                     }
-                    _ => {}
+                    _ => {
+                        state.insert(parent, 1);
+                        chain.push((parent, 0));
+                    }
                 }
-                state.insert(node, 1);
-                chain.push(node);
-                match parents.get(node).copied().flatten() {
-                    // A root, or a parent this level does not hold — the chain ends, and what sits
-                    // above a key this level never declared is not this level's to call a cycle.
-                    None => break,
-                    Some(parent) if !parents.contains_key(parent) => break,
-                    Some(parent) => node = parent,
-                }
-            }
-            for node in chain {
-                state.insert(node, 2);
             }
         }
     }
@@ -2362,7 +2485,7 @@ fn resolve_artifact(
         members,
         contents,
         attached_to: artifact.attached_to.take(),
-        parent_key: artifact.parent_key.take(),
+        parent_keys: std::mem::take(&mut artifact.parent_keys),
         shape: artifact.shape.take(),
     })
 }
@@ -2391,7 +2514,7 @@ fn incoming_artifact(
             IncomingArtifact::attached(Some(key.to_string()), members, contents, attached_to)
         }
     };
-    result.parent_key = artifact.parent_key.take();
+    result.parent_keys = std::mem::take(&mut artifact.parent_keys);
     result.shape = artifact.shape.take();
     Ok(result)
 }
@@ -3005,6 +3128,93 @@ fn scalar_key_column<'a>(
 }
 
 // ---------------------------------------------------------------------------------------------
+// The artifact row's `parent`: one key, or a list of them
+// ---------------------------------------------------------------------------------------------
+
+/// An artifact row's `parent` column: a scalar key, or a list of keys — `list<utf8>` or
+/// `list<int>` on the rule an integer key already takes — which a `dag` layer's child needs and
+/// every kind accepts, a scalar being a list of one (`dag-hierarchies.md` §4). The row's grain
+/// stays one row per artifact: several parents are several entries in one cell, and the one-row
+/// refusal in [`read_artifacts`] stands.
+pub(crate) enum ParentColumn<'a> {
+    Scalar(KeyColumn<'a>),
+    Listed(ListShape<'a>, KeyColumn<'a>),
+}
+
+pub(crate) fn parent_column<'a>(
+    path: &Path,
+    batch: &'a arrow::record_batch::RecordBatch,
+    fields: &Fields,
+) -> Result<Option<ParentColumn<'a>>> {
+    let Some(array) = optional(path, batch, fields, "parent")? else {
+        return Ok(None);
+    };
+    let name = fields.of("parent");
+    Ok(Some(match array.data_type() {
+        arrow::datatypes::DataType::List(_) => {
+            let list: &ListArray = typed(path, array, name)?;
+            ParentColumn::Listed(
+                ListShape::Variable(list),
+                scalar_key_column(path, list.values(), name, "the elements of")?,
+            )
+        }
+        arrow::datatypes::DataType::FixedSizeList(..) => {
+            let list: &FixedSizeListArray = typed(path, array, name)?;
+            ParentColumn::Listed(
+                ListShape::Fixed(list),
+                scalar_key_column(path, list.values(), name, "the elements of")?,
+            )
+        }
+        _ => ParentColumn::Scalar(scalar_key_column(path, array, name, "column")?),
+    }))
+}
+
+/// One row's parents, each key once in the order written; empty where the cell is null, which is
+/// a root. An integer is its decimal spelling, as a key is everywhere.
+pub(crate) fn parents_at(
+    path: &Path,
+    column: Option<&ParentColumn<'_>>,
+    row: usize,
+) -> Result<Vec<String>> {
+    let mut keys = match column {
+        None => Vec::new(),
+        Some(ParentColumn::Scalar(key)) => key.key_at(row).into_iter().collect(),
+        Some(ParentColumn::Listed(shape, values)) => {
+            let range = match shape {
+                ListShape::Variable(list) => {
+                    if list.is_null(row) {
+                        return Ok(Vec::new());
+                    }
+                    let offsets = list.value_offsets();
+                    offsets[row] as usize..offsets[row + 1] as usize
+                }
+                ListShape::Fixed(list) => {
+                    if list.is_null(row) {
+                        return Ok(Vec::new());
+                    }
+                    let width = list.value_length() as usize;
+                    row * width..(row + 1) * width
+                }
+            };
+            range
+                .map(|index| {
+                    values.key_at(index).ok_or_else(|| {
+                        BuildError::Invalid(format!(
+                            "{}: row {row}'s parent list holds a null entry; a parent is named \
+                             or the entry is left out, and a null here would be an edge to \
+                             nothing",
+                            path.display()
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<String>>>()?
+        }
+    };
+    dedup_keys(&mut keys);
+    Ok(keys)
+}
+
+// ---------------------------------------------------------------------------------------------
 // A list key column: the artifacts a point belongs to, and the edges between them
 // ---------------------------------------------------------------------------------------------
 
@@ -3028,7 +3238,7 @@ struct ListedKeys<'a> {
     meaning: ListMeaning,
 }
 
-enum ListShape<'a> {
+pub(crate) enum ListShape<'a> {
     /// A `List`: its rows may differ in length, which is what a lineage is.
     Variable(&'a ListArray),
     /// A `FixedSizeList`: every row has the arity the type states.

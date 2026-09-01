@@ -114,7 +114,7 @@ fn node(
     sources: impl Iterator<Item = u64>,
 ) -> IncomingArtifact {
     let mut artifact = IncomingArtifact::from_entities(Some(key.into()), fx.members(sources));
-    artifact.parent_key = parent.map(str::to_string);
+    artifact.parent_keys = parent.into_iter().map(str::to_string).collect();
     artifact
 }
 
@@ -1161,11 +1161,13 @@ fn tiered_zoomed(name: &str, ranges: &[(u32, u32)]) -> LayerDeclaration {
     d.levels = ranges
         .iter()
         .enumerate()
-        .map(|(level, &(lo, hi))| tessera_types::layer::LevelDeclaration {
-            level: level as u32,
-            title: Some(format!("level {level}")),
-            zoom: Some((lo, hi)),
-        })
+        .map(
+            |(level, &(lo, hi))| tessera_types::layer::LevelDeclaration {
+                level: level as u32,
+                title: Some(format!("level {level}")),
+                zoom: Some((lo, hi)),
+            },
+        )
         .collect();
     d
 }
@@ -1238,20 +1240,49 @@ fn a_request_naming_no_levels_follows_the_declared_map() {
     let fx = fixture();
     let engine = fx.open();
     engine
-        .register_layer(tiered_zoomed("admin/boundaries", &[(0, 4), (3, 7), (6, 10)]))
+        .register_layer(tiered_zoomed(
+            "admin/boundaries",
+            &[(0, 4), (3, 7), (6, 10)],
+        ))
         .unwrap();
     plant_three_levels(&engine, &fx, "admin/boundaries");
 
     // Depth 0: only the coarsest range contains it.
-    let overview = at_zoom(&engine, &full_coverage_credential(), 0, "admin/boundaries", LevelSelection::Declared);
-    assert_eq!(levels_of(&overview), vec![0], "depth 0 is inside [0,4] alone");
+    let overview = at_zoom(
+        &engine,
+        &full_coverage_credential(),
+        0,
+        "admin/boundaries",
+        LevelSelection::Declared,
+    );
+    assert_eq!(
+        levels_of(&overview),
+        vec![0],
+        "depth 0 is inside [0,4] alone"
+    );
 
     // Depth 3: the seam of the first two ranges, so both answer.
-    let seam = at_zoom(&engine, &full_coverage_credential(), 3, "admin/boundaries", LevelSelection::Declared);
-    assert_eq!(levels_of(&seam), vec![0, 1], "depth 3 is inside [0,4] and [3,7]");
+    let seam = at_zoom(
+        &engine,
+        &full_coverage_credential(),
+        3,
+        "admin/boundaries",
+        LevelSelection::Declared,
+    );
+    assert_eq!(
+        levels_of(&seam),
+        vec![0, 1],
+        "depth 3 is inside [0,4] and [3,7]"
+    );
 
     // Depth 8: past the first two entirely.
-    let deep = at_zoom(&engine, &full_coverage_credential(), 8, "admin/boundaries", LevelSelection::Declared);
+    let deep = at_zoom(
+        &engine,
+        &full_coverage_credential(),
+        8,
+        "admin/boundaries",
+        LevelSelection::Declared,
+    );
     assert_eq!(levels_of(&deep), vec![2], "depth 8 is inside [6,10] alone");
 }
 
@@ -1263,7 +1294,10 @@ fn naming_levels_overrides_the_declared_map() {
     let fx = fixture();
     let engine = fx.open();
     engine
-        .register_layer(tiered_zoomed("admin/boundaries", &[(0, 4), (3, 7), (6, 10)]))
+        .register_layer(tiered_zoomed(
+            "admin/boundaries",
+            &[(0, 4), (3, 7), (6, 10)],
+        ))
         .unwrap();
     plant_three_levels(&engine, &fx, "admin/boundaries");
 
@@ -1286,8 +1320,18 @@ fn naming_levels_overrides_the_declared_map() {
     );
     assert_eq!(levels_of(&both), vec![0, 2]);
 
-    let all = at_zoom(&engine, &full_coverage_credential(), 0, "admin/boundaries", LevelSelection::All);
-    assert_eq!(levels_of(&all), vec![0, 1, 2], "`All` ignores the map entirely");
+    let all = at_zoom(
+        &engine,
+        &full_coverage_credential(),
+        0,
+        "admin/boundaries",
+        LevelSelection::All,
+    );
+    assert_eq!(
+        levels_of(&all),
+        vec![0, 1, 2],
+        "`All` ignores the map entirely"
+    );
 
     // A level the layer does not hold is absent rather than a refusal — the route an unreachable
     // layer name takes, and for the same reason: asking is not a way to learn what exists.
@@ -1308,7 +1352,9 @@ fn naming_levels_overrides_the_declared_map() {
 fn a_layer_declaring_no_zoom_range_serves_every_level() {
     let fx = fixture();
     let engine = fx.open();
-    engine.register_layer(tiered("admin/boundaries", 3)).unwrap();
+    engine
+        .register_layer(tiered("admin/boundaries", 3))
+        .unwrap();
     plant_three_levels(&engine, &fx, "admin/boundaries");
 
     // Depth 8 rather than deeper: a whole-map request at depth 9 or below is already refused on
@@ -1362,7 +1408,11 @@ fn a_treed_layers_rungs_are_chain_depths_and_the_levels_selection_is_inert() {
         "clusters/hdbscan",
         LevelSelection::Declared,
     );
-    assert_eq!(levels_of(&served), vec![0, 1], "root at rung 0, its child at 1");
+    assert_eq!(
+        levels_of(&served),
+        vec![0, 1],
+        "root at rung 0, its child at 1"
+    );
     assert!(served.len() >= 2, "the whole visible tree, unpruned");
 
     // Naming levels for the tiered layer beside it must not blank a clustering: the layer
@@ -1389,7 +1439,10 @@ fn the_level_is_declared_not_counted_from_parent_links() {
     let fx = fixture();
     let engine = fx.open();
     engine
-        .register_layer(tiered_zoomed("admin/boundaries", &[(0, 4), (3, 7), (6, 10)]))
+        .register_layer(tiered_zoomed(
+            "admin/boundaries",
+            &[(0, 4), (3, 7), (6, 10)],
+        ))
         .unwrap();
     engine
         .publish_artifacts(
@@ -1414,7 +1467,13 @@ fn the_level_is_declared_not_counted_from_parent_links() {
         )
         .unwrap();
 
-    let served = at_zoom(&engine, &full_coverage_credential(), 0, "admin/boundaries", LevelSelection::All);
+    let served = at_zoom(
+        &engine,
+        &full_coverage_credential(),
+        0,
+        "admin/boundaries",
+        LevelSelection::All,
+    );
     let county = served
         .iter()
         .find(|a| a.key.as_deref() == Some("county"))
@@ -1424,7 +1483,10 @@ fn the_level_is_declared_not_counted_from_parent_links() {
         .find(|a| a.key.as_deref() == Some("country"))
         .expect("the country is served");
 
-    assert_eq!(county.rung, 2, "the declared level — a levelled layer's rung");
+    assert_eq!(
+        county.rung, 2,
+        "the declared level — a levelled layer's rung"
+    );
     assert_eq!(
         county.parent_id,
         Some(country.tessera_id),
@@ -1507,7 +1569,10 @@ fn naming_a_level_does_not_blank_a_treed_layer_beside_it() {
         .viewport(
             &session,
             ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize)
-                .layers(LayerSelection::Named(&["admin/boundaries", "clusters/hdbscan"]))
+                .layers(LayerSelection::Named(&[
+                    "admin/boundaries",
+                    "clusters/hdbscan",
+                ]))
                 .levels(LevelSelection::Named(&[1])),
         )
         .expect("a viewport over the whole map")
@@ -1599,7 +1664,10 @@ fn a_dependent_goes_when_its_targets_level_is_not_asked_for() {
 
     // Both levels asked for: the country is served and so is the name at level 1 above it.
     let served = both(0, LevelSelection::Named(&[0, 1]));
-    assert_eq!(keys_in(&served, "admin/boundaries"), vec!["country", "state"]);
+    assert_eq!(
+        keys_in(&served, "admin/boundaries"),
+        vec!["country", "state"]
+    );
     assert_eq!(keys_in(&served, "admin/names"), vec!["country-name"]);
 
     // **Level 1 alone.** The label's own level *is* selected — so nothing about the selection
@@ -1610,5 +1678,387 @@ fn a_dependent_goes_when_its_targets_level_is_not_asked_for() {
     assert!(
         keys_in(&served, "admin/names").is_empty(),
         "a label whose subject was not served is absent, whatever withheld the subject"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The dag shape: a child under several parents (`dag-hierarchies.md`, decision 0117)
+// ---------------------------------------------------------------------------------------------
+
+/// A `dag` layer: `treed_whole` at the kind that records a second parent rather than refusing it.
+/// Open, so an ingest batch's keys mint.
+fn dag(name: &str) -> LayerDeclaration {
+    let mut d = declaration(name, None, false);
+    d.hierarchy.kind = HierarchyKind::Dag;
+    d.value_set = tessera_types::layer::ValueSet::Open;
+    d
+}
+
+/// The same at `nested`, for the refusals that must not move.
+fn tree_open(name: &str) -> LayerDeclaration {
+    let mut d = declaration(name, None, false);
+    d.value_set = tessera_types::layer::ValueSet::Open;
+    d
+}
+
+/// One node of a planted graph: a key, its parents' keys, and the source ids it holds.
+fn node_under(
+    fx: &Fixture,
+    key: &str,
+    parents: &[&str],
+    sources: impl Iterator<Item = u64>,
+) -> IncomingArtifact {
+    let mut artifact = IncomingArtifact::from_entities(Some(key.into()), fx.members(sources));
+    artifact.parent_keys = parents.iter().map(|p| p.to_string()).collect();
+    artifact
+}
+
+/// Request a flush and block until it has published.
+fn flush(engine: &Engine) {
+    let before = engine.write_executor_stats().flushes;
+    engine.request_flush();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while engine.write_executor_stats().flushes == before {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the flush never published"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// Request a fold and block until it has published, asserting it was not discarded.
+fn fold(engine: &Engine) {
+    let before = engine.write_executor_stats();
+    engine.request_fold();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let now = engine.write_executor_stats();
+        assert_eq!(
+            now.fold_failures, before.fold_failures,
+            "the fold was discarded rather than published"
+        );
+        if now.folds > before.folds {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the fold never published"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// Every log member, deleted — so whatever a reopen finds came from the bundle.
+fn remove_the_whole_log(fx: &Fixture) {
+    let dir = fx.wal.parent().expect("the log has a directory");
+    let stem = fx.wal.file_stem().expect("the log has a stem").to_owned();
+    let mut removed = 0usize;
+    for entry in std::fs::read_dir(dir)
+        .expect("the log's directory exists")
+        .flatten()
+    {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(&format!("{}-", stem.to_string_lossy())) {
+            std::fs::remove_file(entry.path()).expect("a log member is removable");
+            removed += 1;
+        }
+    }
+    assert!(removed > 0, "the log had at least one member to remove");
+}
+
+/// The parents the **bundle** holds for the artifact under `key`, read out of the live prefix's
+/// record packs by the same decoder the engine opens them with — the durable form
+/// (`dag-hierarchies.md` §7), not the served one.
+fn parents_in_bundle(
+    fx: &Fixture,
+    engine: &Engine,
+    key: &str,
+) -> Vec<tessera_lifecycle::wal::ParentRef> {
+    let dir = fx
+        .root
+        .join(&engine.generation().prefix)
+        .join("partitions")
+        .join("default")
+        .join("members");
+    let mut found = None;
+    for entry in std::fs::read_dir(&dir)
+        .expect("the fold wrote record packs")
+        .flatten()
+    {
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != "tsmb") {
+            continue;
+        }
+        let pack = tessera_store::membership::MembershipPack::open(&path).expect("a pack opens");
+        for (_, blob) in pack.iter() {
+            if blob.is_empty() {
+                continue;
+            }
+            let (record, _) = tessera_lifecycle::membership::decode_record(EntityId::new(1), blob)
+                .expect("a record the fold wrote decodes");
+            if record.key.as_deref() == Some(key) {
+                assert!(found.is_none(), "one artifact under {key}");
+                found = Some(record.parents);
+            }
+        }
+    }
+    found.unwrap_or_else(|| panic!("no record under {key} in the bundle"))
+}
+
+/// **A child under two parents publishes, is served, and comes back from the bundle with both**
+/// (`dag-hierarchies.md` §4, §7). The record is the guard `BUNDLE_FORMAT` 5 exists for: the fold
+/// writes the parent list, and a reopen with the log deleted reads it back from the bundle alone.
+///
+/// ⊘ The served link is one parent here — `parent_id` on the wire is the engine track's to widen
+/// to `parent_ids` — so what is asserted of the response is that it names one of the two.
+#[test]
+fn a_dag_child_under_two_parents_is_published_served_and_folded_whole() {
+    let fx = fixture();
+    let served_ids = {
+        let engine = fx.open();
+        engine.register_layer(dag("mesh/d")).unwrap();
+        engine
+            .publish_artifacts(
+                "mesh/d".into(),
+                0,
+                vec![
+                    node_under(&fx, "p0", &[], 0..150),
+                    node_under(&fx, "p1", &[], 50..200),
+                    // Named out of order and one of them twice: the record is ascending and
+                    // holds each parent once.
+                    node_under(&fx, "c", &["p1", "p0", "p1"], 50..150),
+                ],
+            )
+            .expect("a child under two parents is what a dag layer declares");
+
+        let served = artifacts_of(&engine, &full_coverage_credential(), None);
+        assert_eq!(keys(&served), vec!["c", "p0", "p1"]);
+        let id_of = |key: &str| {
+            served
+                .iter()
+                .find(|a| a.key.as_deref() == Some(key))
+                .unwrap()
+                .tessera_id
+        };
+        let child = served
+            .iter()
+            .find(|a| a.key.as_deref() == Some("c"))
+            .unwrap();
+        let link = child.parent_id.expect("the child names a served parent");
+        assert!(
+            link == id_of("p0") || link == id_of("p1"),
+            "the link is one of the child's two parents"
+        );
+
+        // No point was ingested, so there is nothing to flush; the fold rewrites the level whole.
+        fold(&engine);
+        let parents = parents_in_bundle(&fx, &engine, "c");
+        assert_eq!(
+            parents,
+            vec![
+                tessera_lifecycle::wal::ParentRef {
+                    level: 0,
+                    ordinal: 0
+                },
+                tessera_lifecycle::wal::ParentRef {
+                    level: 0,
+                    ordinal: 1
+                }
+            ],
+            "the bundle holds both parents, ascending, each once"
+        );
+        let mut ids: Vec<_> = served.iter().map(|a| a.tessera_id).collect();
+        ids.sort();
+        ids
+    };
+    remove_the_whole_log(&fx);
+
+    let engine = fx.open();
+    let served = artifacts_of(&engine, &full_coverage_credential(), None);
+    assert_eq!(keys(&served), vec!["c", "p0", "p1"]);
+    let mut ids: Vec<_> = served.iter().map(|a| a.tessera_id).collect();
+    ids.sort();
+    assert_eq!(
+        ids, served_ids,
+        "the same three artifacts, from the bundle alone"
+    );
+    let child = served
+        .iter()
+        .find(|a| a.key.as_deref() == Some("c"))
+        .unwrap();
+    assert!(child.parent_id.is_some(), "the child still names a parent");
+}
+
+/// One ingest batch of one point naming `keys` on `layer`, with the edges its list column would
+/// have declared — what `/control/ingest` decodes to, taken at the engine boundary.
+fn ingest_edges(
+    engine: &Engine,
+    batch: &str,
+    layer: &str,
+    keys: &[&str],
+    edges: &[(&str, &str)],
+) -> Result<u64, String> {
+    let descriptors = vec![b"0".to_vec()];
+    let mut hash = [0u8; 32];
+    for (slot, byte) in hash.iter_mut().zip(batch.as_bytes()) {
+        *slot = *byte;
+    }
+    let row = tessera_lifecycle::command::UnallocatedRow {
+        external_id: Some(batch.as_bytes().to_vec()),
+        view: "s0".to_string(),
+        join: None,
+        descriptors: descriptors.clone(),
+        x: 5.0,
+        y: 5.0,
+        scalars: Vec::new(),
+        terms: engine.resolve_terms(&descriptors),
+        scoped: Vec::new(),
+    };
+    engine
+        .accept_ingest_joining(
+            vec![row],
+            batch.to_string(),
+            hash,
+            tessera_lifecycle::BatchArtifacts {
+                memberships: keys
+                    .iter()
+                    .map(|key| tessera_lifecycle::BatchMembership {
+                        layer: layer.to_string(),
+                        level: 0,
+                        key: key.to_string(),
+                        rows: vec![0],
+                    })
+                    .collect(),
+                edges: edges
+                    .iter()
+                    .map(|(child, parent)| tessera_lifecycle::BatchEdge {
+                        layer: layer.to_string(),
+                        level: 0,
+                        child: child.to_string(),
+                        parent: parent.to_string(),
+                    })
+                    .collect(),
+            },
+        )
+        .map(|(_, minted)| minted)
+        .map_err(|e| e.to_string())
+}
+
+/// **An ingest batch minting a child under two new parents mints all three, the child holding
+/// both** (`dag-hierarchies.md` §4): every parent exists before the edge into it, resolved among
+/// the batch's own siblings, and the record the fold writes carries the pair.
+#[test]
+fn an_ingest_batch_minting_a_child_under_two_new_parents_mints_all_three() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(dag("mesh/d")).unwrap();
+    assert_eq!(
+        ingest_edges(
+            &engine,
+            "b1",
+            "mesh/d",
+            &["c", "p0", "p1"],
+            &[("c", "p0"), ("c", "p1")]
+        )
+        .expect("a child under two new parents is one batch on a dag layer"),
+        3,
+        "the child and both parents are minted"
+    );
+    flush(&engine);
+    fold(&engine);
+    let parents = parents_in_bundle(&fx, &engine, "c");
+    assert_eq!(parents.len(), 2, "both edges, each resolved: {parents:?}");
+    for key in ["p0", "p1"] {
+        assert!(
+            parents_in_bundle(&fx, &engine, key).is_empty(),
+            "{key} is a root"
+        );
+    }
+}
+
+/// **A cycle refuses an ingest batch, at every kind, naming the cycle** (`dag-hierarchies.md`
+/// §4): the check is over the window's minted edges, where the artifacts are created. A self-edge
+/// is the cycle of length one. Nothing is published.
+#[test]
+fn a_cycle_refuses_an_ingest_batch_at_every_kind() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(dag("mesh/d")).unwrap();
+    engine.register_layer(tree_open("clusters/t")).unwrap();
+    for layer in ["mesh/d", "clusters/t"] {
+        let refused = ingest_edges(
+            &engine,
+            &format!("three-{layer}"),
+            layer,
+            &["a", "b", "c"],
+            &[("a", "b"), ("b", "c"), ("c", "a")],
+        )
+        .expect_err("a 3-cycle has no root");
+        assert!(
+            refused.contains("cycle — a → b → c → a"),
+            "the cycle is named, child → parent: {refused}"
+        );
+        let refused = ingest_edges(
+            &engine,
+            &format!("self-{layer}"),
+            layer,
+            &["s"],
+            &[("s", "s")],
+        )
+        .expect_err("a self-edge is a cycle of length one");
+        assert!(refused.contains("s → s"), "{refused}");
+    }
+    assert_eq!(
+        engine.published_artifacts(),
+        0,
+        "a refusal publishes nothing"
+    );
+
+    // A diamond minted in one batch is not a cycle.
+    assert_eq!(
+        ingest_edges(
+            &engine,
+            "diamond",
+            "mesh/d",
+            &["r", "l", "m", "c"],
+            &[("l", "r"), ("m", "r"), ("c", "l"), ("c", "m")]
+        )
+        .expect("two paths to one root, every edge descending"),
+        4
+    );
+}
+
+/// **A `nested` layer still refuses a child named under two parents, in the words it always
+/// used**, where the same batch on a `dag` layer mints the three.
+#[test]
+fn a_nested_ingest_batch_naming_two_parents_still_refuses() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(dag("mesh/d")).unwrap();
+    engine.register_layer(tree_open("clusters/t")).unwrap();
+    let refused = ingest_edges(
+        &engine,
+        "tree",
+        "clusters/t",
+        &["c", "p0", "p1"],
+        &[("c", "p0"), ("c", "p1")],
+    )
+    .expect_err("a tree's child has one parent");
+    assert!(
+        refused.contains("c in level 0 of clusters/t is named as a child of both p0 and p1"),
+        "{refused}"
+    );
+    assert_eq!(
+        ingest_edges(
+            &engine,
+            "graph",
+            "mesh/d",
+            &["c", "p0", "p1"],
+            &[("c", "p0"), ("c", "p1")]
+        )
+        .unwrap(),
+        3
     );
 }

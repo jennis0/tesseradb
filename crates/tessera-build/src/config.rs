@@ -626,15 +626,35 @@ pub struct InlineArtifact {
     /// space as the same producer's membership polygon (§6.1).
     #[serde(default)]
     pub space: Option<String>,
-    /// The parent artifact in a hierarchy, by its key.
-    #[serde(default)]
-    pub parent: Option<String>,
+    /// The parent artifacts in a hierarchy, by key — one under `nested` or `tiered`, and under
+    /// `dag` as many as the artifact sits beneath (`dag-hierarchies.md` §4). Written as one string
+    /// or as a list; a scalar is a list of one, exactly as the artifact table's `parent` column is
+    /// read.
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub parent: Vec<String>,
     #[serde(default)]
     pub attached_layer: Option<String>,
     #[serde(default)]
     pub attached_level: u32,
     #[serde(default)]
     pub attached_key: Option<String>,
+}
+
+/// A key written as one string or as a list of them — the two spellings of an artifact row's
+/// `parent` cell, which under `dag` may name several (`dag-hierarchies.md` §4).
+fn one_or_many<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Vec<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match OneOrMany::deserialize(deserializer)? {
+        OneOrMany::One(one) => vec![one],
+        OneOrMany::Many(many) => many,
+    })
 }
 
 /// `[layer.labels]` — a label layer, written where it is used.
@@ -5377,7 +5397,7 @@ fn compile_layers(
                     "parent",
                     matches!(
                         hierarchy.kind,
-                        HierarchyKind::Nested | HierarchyKind::Tiered
+                        HierarchyKind::Nested | HierarchyKind::Dag | HierarchyKind::Tiered
                     ),
                     "`hierarchy.kind` is `flat` or `stacked`, neither of which has lineage in its \
                      edges",
@@ -5727,21 +5747,23 @@ fn compile_hierarchy(block: &LayerBlock) -> Result<Hierarchy> {
         declaration_error(format!(
             "layer '{}': `hierarchy` is required — the kind is declared and never inferred from \
              the edges. Write `hierarchy = {{ kind = \"flat\" }}` for one population of artifacts, \
-             \"nested\" for a tree held in the edges, \"stacked\" for independent analyses one per \
-             level, or \"tiered\" for containment edges running coarser → finer between levels. \
-             `prune_children = true` serves only the deepest passing artifact per branch",
+             \"nested\" for a tree held in the edges, \"dag\" for the same with a child under \
+             several parents, \"stacked\" for independent analyses one per level, or \"tiered\" \
+             for containment edges running coarser → finer between levels. `prune_children = \
+             true` serves only the deepest passing artifact per branch",
             block.name
         ))
     })?;
     let kind = match declared.kind.as_deref() {
         Some("flat") => HierarchyKind::Flat,
         Some("nested") => HierarchyKind::Nested,
+        Some("dag") => HierarchyKind::Dag,
         Some("stacked") => HierarchyKind::Stacked,
         Some("tiered") => HierarchyKind::Tiered,
         Some(other) => {
             return Err(declaration_error(format!(
                 "layer '{}': `hierarchy.kind = \"{other}\"` is none of \"flat\", \"nested\", \
-                 \"stacked\" or \"tiered\"",
+                 \"dag\", \"stacked\" or \"tiered\"",
                 block.name
             )));
         }
@@ -5749,8 +5771,9 @@ fn compile_hierarchy(block: &LayerBlock) -> Result<Hierarchy> {
             return Err(declaration_error(format!(
                 "layer '{}': `hierarchy.kind` is required. \"flat\" is one population with no \
                  lineage; \"nested\" is a tree held in the edges, every artifact at level 0; \
-                 \"stacked\" is independent analyses, one per level; \"tiered\" is containment \
-                 edges running coarser → finer between levels",
+                 \"dag\" is the same with a child under several parents; \"stacked\" is \
+                 independent analyses, one per level; \"tiered\" is containment edges running \
+                 coarser → finer between levels",
                 block.name
             )));
         }
