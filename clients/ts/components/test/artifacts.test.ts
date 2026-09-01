@@ -1,7 +1,7 @@
 import {afterEach, describe, expect, it} from 'vitest';
 import {SessionArtifactTable, servedLineage, type Artifact, type ArtifactsProjection, type Layer, type Meta} from '@tesseradb/client';
 import '../src/layer-picker.js';
-import '../src/artifact-list.js';
+import {flatten} from '../src/artifact-list.js';
 import '../src/artifact-card.js';
 import '../src/legend.js';
 import '../src/explorer.js';
@@ -37,7 +37,7 @@ const META: Meta = {
   filterOperands: []
 };
 
-const artifact = (id: bigint, count: bigint, parentId: bigint | null = null, content: string[] = []): Artifact => ({
+const artifact = (id: bigint, count: bigint, parent: bigint | null = null, content: string[] = []): Artifact => ({
   layer: 'clusters',
   tesseraId: id,
   key: `c-${id}`,
@@ -46,14 +46,14 @@ const artifact = (id: bigint, count: bigint, parentId: bigint | null = null, con
   box: null,
   shape: null,
   content,
-  parentId,
+  parentIds: parent === null ? [] : [parent],
   rung: 0,
   matched: null
 });
 
 function artifactsProjection(served: Artifact[], layers = ['clusters', 'labels']): ArtifactsProjection {
   const table = new SessionArtifactTable();
-  const ordinals = table.take(served.map((a) => ({tesseraId: a.tesseraId, layer: a.layer, parentId: a.parentId})));
+  const ordinals = table.take(served.map((a) => ({tesseraId: a.tesseraId, layer: a.layer, parentIds: a.parentIds})));
   return {
     layer: layers[0] ?? null,
     layers,
@@ -92,7 +92,7 @@ describe('<tessera-layer-picker>', () => {
 });
 
 describe('<tessera-artifact-list>', () => {
-  it('builds the tree from parentId, a row beneath what contains it, with Masked counts, and opens on click', async () => {
+  it('builds the tree from parentIds, a row beneath what contains it, with Masked counts, and opens on click', async () => {
     const host = await mount('<tessera-artifact-list></tessera-artifact-list>');
     const served = [artifact(1n, 100n, null, ['Alpha']), artifact(2n, 40n, 1n), artifact(3n, 60n, 1n), artifact(4n, 5n)];
     const store = fakeStore({meta: META, status: status({}), artifacts: artifactsProjection(served)});
@@ -105,6 +105,30 @@ describe('<tessera-artifact-list>', () => {
     expect(deepText(deep(host, '[part="item"][data-id="3"] [part="count"]')).trim()).toBe('60');
     (rows[1] as HTMLElement).click();
     expect(store.calls.find((c) => c.name === 'openArtifact')?.args[0]).toBe(3n);
+  });
+
+  /**
+   * A `dag` layer's child served under two parents (decision 0117): it is beneath both in the
+   * lineage, and the list shows it **once**, under the first parent the count-ordered walk
+   * reaches — the larger parent here — with nothing under the other. What a second position
+   * would look like is the components work's, not this test's.
+   */
+  it('lists a child of two served parents once, beneath the first reached, and the walk is by count then id', async () => {
+    const host = await mount('<tessera-artifact-list></tessera-artifact-list>');
+    const served = [artifact(2n, 90n, null, ['Beta']), artifact(1n, 100n, null, ['Alpha']), {...artifact(3n, 10n, null, ['Gamma']), parentIds: [1n, 2n]}];
+    const lineage = servedLineage(served);
+    expect(lineage.roots.map((a) => a.tesseraId)).toEqual([2n, 1n]);
+    expect(lineage.childrenOf.get(1n)?.map((a) => a.tesseraId)).toEqual([3n]);
+    expect(lineage.childrenOf.get(2n)?.map((a) => a.tesseraId)).toEqual([3n]);
+    const store = fakeStore({meta: META, status: status({}), artifacts: artifactsProjection(served)});
+    (host.querySelector('tessera-artifact-list') as unknown as {store: unknown}).store = store;
+    await settle(host);
+    const rows = deepAll(host, '[part="item"]');
+    expect(rows.map((r) => r.getAttribute('data-id'))).toEqual(['1', '3', '2']);
+    expect(rows.map((r) => (r as HTMLElement).style.getPropertyValue('--depth'))).toEqual(['0', '1', '0']);
+    // Two roots of equal count list by lowest id, so the order is the served set's and not the wire's row order.
+    const tied = flatten(servedLineage([artifact(5n, 7n), artifact(4n, 7n)]));
+    expect(tied.map(({artifact}) => artifact.tesseraId)).toEqual([4n, 5n]);
   });
 
   it('shows a count and a neutral placeholder where a row has no name — never the key', async () => {
@@ -235,6 +259,18 @@ describe('<tessera-artifact-card> follows the served set', () => {
     const text = deepText(host);
     expect(text).not.toMatch(/nothing you were served/);
     expect(text).not.toMatch(/inside/);
+  });
+
+  it('lists a child on the card of each served parent it names (decision 0117)', async () => {
+    const host = await mount('<tessera-artifact-card></tessera-artifact-card>');
+    const served = [artifact(1n, 100n, null, ['Alpha']), artifact(2n, 90n, null, ['Beta']), {...artifact(3n, 10n, null, ['Gamma']), parentIds: [1n, 2n]}];
+    const store = fakeStore({meta: META, status: status({}), artifacts: artifactsProjection(served)});
+    (host.querySelector('tessera-artifact-card') as unknown as {store: unknown}).store = store;
+    for (const id of [1n, 2n]) {
+      store.set('selection', {item: null, itemRefusal: null, artifact: {id, detail: {layer: 'clusters', key: `c-${id}`, maskedCount: 100n, centroid: null, box: null, shape: null}}, artifactRefusal: null});
+      await settle(host);
+      expect(deepAll(host, '[part="child"] [part="name"]').map((n) => n.textContent)).toEqual(['Gamma']);
+    }
   });
 });
 

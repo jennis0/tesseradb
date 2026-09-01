@@ -71,9 +71,9 @@ const roster = async () =>
 const drawn = async () =>
   page.evaluate(() => {
     const p = window.__tesseraProbe;
-    const explorer = /** @type {{store: {get(name: 'artifacts'): {served: {tesseraId: bigint; layer: string; box: number[] | null; rung: number; parentId: bigint | null; maskedCount: bigint}[]; shapes: Map<bigint, number[][][]>}} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')));
+    const explorer = /** @type {{store: {get(name: 'artifacts'): {served: {tesseraId: bigint; layer: string; box: number[] | null; rung: number; parentIds: bigint[]; maskedCount: bigint}[]; shapes: Map<bigint, number[][][]>}} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')));
     const a = explorer?.store?.get('artifacts');
-    const served = (a?.served ?? []).map((x) => ({id: String(x.tesseraId), layer: x.layer, box: x.box, rung: x.rung, parent: x.parentId === null ? null : String(x.parentId), count: Number(x.maskedCount)}));
+    const served = (a?.served ?? []).map((x) => ({id: String(x.tesseraId), layer: x.layer, box: x.box, rung: x.rung, parents: x.parentIds.map((p) => String(p)), count: Number(x.maskedCount)}));
     const shapes = Object.fromEntries([...(a?.shapes ?? new Map())].map(([id, parts]) => [String(id), parts]));
     // The camera's zoom, which is what `needShape` asks the vertex rule at; the probe's `depth`
     // is the request depth, which the driver picks per principal from what they can see.
@@ -179,7 +179,7 @@ const shapeBytes = {};
 const chosen = {overview: null, city: null, hull: null};
 /** A served artifact on the frontier — one no served artifact names as its parent — of a layer. */
 const frontierOf = (served, layer) => {
-  const parents = new Set(served.map((a) => a.parent).filter((x) => x !== null));
+  const parents = new Set(served.flatMap((a) => a.parents));
   return served.filter((a) => a.layer === layer && !parents.has(a.id));
 };
 const area = (a) => (a.box[2] - a.box[0]) * (a.box[3] - a.box[1]);

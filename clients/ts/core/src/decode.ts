@@ -477,11 +477,12 @@ export function decodeArtifactsFrame(payload: Uint8Array): {
   // declares no supplied content — never that content was withheld, because an artifact whose
   // content this principal may not read does not appear at all.
   const content = t.getChild('content')!;
-  // **Present only where the parent is also in this response.** A null is a root *or* a parent
-  // this principal was not served, and the two are deliberately one value: naming the second
-  // would disclose that a coarser artifact exists which they may not see. Read it as "no parent
-  // here", never as "no parent".
-  const parentId = t.getChild('parent_id');
+  // **An entry only where that parent is also in this response** (contracts §3.2 r71; decision
+  // 0117), ascending by `tessera_id`. An empty list is a root, a flat artifact *or* a parent this
+  // principal was not served, and the three are deliberately one value: naming the last would
+  // disclose that a coarser artifact exists which they may not see. Read it as "no parent
+  // here", never as "no parent". A tree serves at most one entry; a `dag` layer several.
+  const parentIds = t.getChild('parent_ids');
   // **The rung a client draws this artifact at**, non-nullable, computed the right way for the
   // layer's kind (contracts §3.2 r44): the declared level on a levelled layer, the
   // response-local parent-chain depth on a treed one, 0 on a flat one. Read by name like every
@@ -502,6 +503,15 @@ export function decodeArtifactsFrame(payload: Uint8Array): {
   if (rung == null) {
     throw new Error(
       'viewport artifacts frame carries no `rung` column: this client requires a server that serves it (contracts §3.2 r44 renamed and re-meant `level`)'
+    );
+  }
+  // The same refusal for the parent list: a body carrying `parent_id` — the scalar this column
+  // replaced (contracts §3.2 r71) — would otherwise read as a response in which nothing is
+  // linked, and a hierarchy drawn as a flat set looks like data. No shim keeps the old name
+  // (decision 0048).
+  if (parentIds == null) {
+    throw new Error(
+      'viewport artifacts frame carries no `parent_ids` column: this client requires a server that serves it (contracts §3.2 r71 replaced `parent_id`)'
     );
   }
   for (let i = 0; i < tesseraId.length; i++) {
@@ -561,9 +571,9 @@ export function decodeArtifactsFrame(payload: Uint8Array): {
           : [Number(bx), Number(boxMinY.get(i)), Number(boxMaxX.get(i)), Number(boxMaxY.get(i))],
       shape,
       content: Array.from(content.get(i) ?? [], (v) => String(v)),
-      // Absent on a server older than the field, which reads the same as a root — the
-      // fail-closed direction, and the only one available without inventing a parent.
-      parentId: parentId == null || parentId.get(i) === null ? null : BigInt(parentId.get(i)),
+      // A null cell has no reading the contract gives it and is taken as the empty list, which is
+      // the fail-closed direction — no parent is invented.
+      parentIds: Array.from(parentIds.get(i) ?? [], (v) => BigInt(v as bigint)),
       rung: Number(rung.get(i)),
       matched: matched == null || matched.get(i) === null ? null : Boolean(matched.get(i))
     });

@@ -591,20 +591,24 @@ export type Artifact = {
    */
   content: string[];
   /**
-   * This artifact's parent, **and only ever one that is in the same response**.
+   * This artifact's parents, **and only ever those in the same response**, ascending by
+   * `tesseraId` (contracts §3.2 r71; decision 0117).
    *
    * The structure to nest what you draw, or to filter to one subtree while still drawing the rest
    * of the map — which is what a levelled layer's edges are for, since its resolution comes from
-   * choosing a level rather than from coarsening along them.
+   * choosing a level rather than from coarsening along them. A tree serves at most one entry; a
+   * `dag` layer may serve several, and a client that wants one parent takes the first, which the
+   * server's ordering makes the same one every time (`dag-hierarchies.md` §7).
    *
-   * **`null` means "no parent in this response", not "no parent".** It covers a root and a parent
-   * this principal was not served — below its own criterion for them, suppressed, or dropped by
-   * the layer's frontier — and the two are one value deliberately: distinguishing them would
-   * disclose that a coarser artifact exists which they may not see. Build the tree from what you
-   * were given and treat unlinked artifacts as roots of it; do not model a "hidden parent" state,
-   * because there is nothing to fill it from.
+   * **Empty means "no parent in this response", not "no parent".** It covers a root, a flat
+   * artifact, and a parent this principal was not served — below its own criterion for them,
+   * suppressed, or dropped by the layer's frontier — and the three are one value deliberately:
+   * distinguishing them would disclose that a coarser artifact exists which they may not see.
+   * The control is per entry (C29): a withheld parent is simply absent from the list. Build the
+   * tree from what you were given and treat unlinked artifacts as roots of it; do not model a
+   * "hidden parent" state, because there is nothing to fill it from.
    */
-  parentId: bigint | null;
+  parentIds: bigint[];
   /**
    * **The resolution a client draws this artifact at**, computed the right way for its layer's
    * kind (contracts §3.2 r44): the declared level on a **levelled** layer — a fact about the
@@ -614,7 +618,7 @@ export type Artifact = {
    *
    * **A client draws by this column and never derives it.** Which derivation a layer kind wants
    * — declared level or chain count — was a documented per-client trap, fallen into once; the
-   * server now serves the right number for every kind, so counting `parentId` links here answers
+   * server now serves the right number for every kind, so counting `parentIds` links here answers
    * no question this field does not.
    */
   rung: number;

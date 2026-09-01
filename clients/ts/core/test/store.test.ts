@@ -379,8 +379,8 @@ describe('the colours are rebuilt when the table moves and not per response', ()
     // Two artifacts, served identically on every request — the shape of a layer whose artifacts
     // are scattered through row space and so are served in full whatever the viewport.
     const served = [
-      {layer: 'clusters/a', tesseraId: 1n, key: 'c1', maskedCount: 5n, centroid: [1, 2] as [number, number], box: null, shape: null, content: [], parentId: null, rung: 0, matched: null},
-      {layer: 'clusters/a', tesseraId: 2n, key: 'c2', maskedCount: 7n, centroid: [3, 4] as [number, number], box: null, shape: null, content: [], parentId: null, rung: 0, matched: null}
+      {layer: 'clusters/a', tesseraId: 1n, key: 'c1', maskedCount: 5n, centroid: [1, 2] as [number, number], box: null, shape: null, content: [], parentIds: [], rung: 0, matched: null},
+      {layer: 'clusters/a', tesseraId: 2n, key: 'c2', maskedCount: 7n, centroid: [3, 4] as [number, number], box: null, shape: null, content: [], parentIds: [], rung: 0, matched: null}
     ];
     const {client} = fakeClient(() => {
       const r = response('ck');
@@ -426,7 +426,7 @@ describe('the colours are rebuilt when the table moves and not per response', ()
       box: null,
       shape: null,
       content: [],
-      parentId: null,
+      parentIds: [],
       rung: 0,
       matched: null
     });

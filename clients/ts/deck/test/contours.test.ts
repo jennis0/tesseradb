@@ -5,7 +5,7 @@ import {ringWithin, shapeContains} from '../src/contours.js';
 
 /** The served shape as it is drawn, and which of the served shapes the map actually draws. */
 
-const artifact = (id: bigint, parentId: bigint | null, count = 10n): Artifact => ({
+const artifact = (id: bigint, parent: bigint | null, count = 10n): Artifact => ({
   layer: 'clusters',
   tesseraId: id,
   key: `c-${id}`,
@@ -14,7 +14,7 @@ const artifact = (id: bigint, parentId: bigint | null, count = 10n): Artifact =>
   box: [0, 0, 2 ** 32 - 1, 2 ** 32 - 1],
   shape: [[[[0, 0], [2 ** 32 - 1, 0], [2 ** 32 - 1, 2 ** 32 - 1], [0, 2 ** 32 - 1]]]],
   content: [],
-  parentId,
+  parentIds: parent === null ? [] : [parent],
   rung: 0,
   matched: null
 });
@@ -36,7 +36,7 @@ const meta = (layers: {name: string; computedContent?: string[]; shape?: 'derive
 function withRungs(served: Artifact[]): Artifact[] {
   const byId = new Map(served.map((a) => [a.tesseraId, a]));
   const depthOf = (a: Artifact, guard = 0): number => {
-    const parent = a.parentId === null ? undefined : byId.get(a.parentId);
+    const parent = a.parentIds.length === 0 ? undefined : byId.get(a.parentIds[0]!);
     return parent && guard < 1024 ? depthOf(parent, guard + 1) + 1 : 0;
   };
   return served.map((a) => ({...a, rung: depthOf(a)}));
@@ -45,7 +45,7 @@ function withRungs(served: Artifact[]): Artifact[] {
 function projection(input: Artifact[]): ArtifactsProjection {
   const served = withRungs(input);
   const table = new SessionArtifactTable();
-  const ordinals = table.take(served.map((a) => ({tesseraId: a.tesseraId, layer: a.layer, parentId: a.parentId, rung: a.rung})));
+  const ordinals = table.take(served.map((a) => ({tesseraId: a.tesseraId, layer: a.layer, parentIds: a.parentIds, rung: a.rung})));
   return {layer: 'clusters', layers: ['clusters'], served, lineage: servedLineage(served), status: 'shown', refusal: null, version: 1, held: 0, table, servedOrdinals: new Set(ordinals), shapes: new Map(), colours: new Map(), palette: 'positional', coverage: {current: 0, stale: 0}};
 }
 

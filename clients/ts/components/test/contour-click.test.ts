@@ -20,7 +20,7 @@ afterEach(() => {
 const boxOf = (x0: number, y0: number, x1: number, y1: number): [number, number, number, number] =>
   [x0, y0, x1, y1].map((v) => Math.round(v * GRID32_PER_WORLD_UNIT)) as [number, number, number, number];
 
-const artifact = (id: bigint, parentId: bigint | null, rung: number, box: [number, number, number, number]): Artifact => ({
+const artifact = (id: bigint, parent: bigint | null, rung: number, box: [number, number, number, number]): Artifact => ({
   layer: 'clusters',
   tesseraId: id,
   key: `c-${id}`,
@@ -29,14 +29,14 @@ const artifact = (id: bigint, parentId: bigint | null, rung: number, box: [numbe
   box,
   shape: null,
   content: [],
-  parentId,
+  parentIds: parent === null ? [] : [parent],
   rung,
   matched: null
 });
 
 function artifactsProjection(served: Artifact[]): ArtifactsProjection {
   const table = new SessionArtifactTable();
-  const ordinals = table.take(served.map((a) => ({tesseraId: a.tesseraId, layer: a.layer, parentId: a.parentId, rung: a.rung})));
+  const ordinals = table.take(served.map((a) => ({tesseraId: a.tesseraId, layer: a.layer, parentIds: a.parentIds, rung: a.rung})));
   return {
     layer: 'clusters',
     layers: ['clusters'],

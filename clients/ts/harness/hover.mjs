@@ -64,7 +64,10 @@ const servedArtifacts = () =>
     const G = 2 ** 32 / 512;
     return a.served.map((x) => ({
       id: String(x.tesseraId),
-      parent: x.parentId === null ? null : String(x.parentId),
+      // The first served parent: the wire orders them ascending by id (contracts §3.2 r71), so a
+      // tree's one entry and a `dag` layer's lowest read the same way.
+      parent: x.parentIds.length === 0 ? null : String(x.parentIds[0]),
+      parents: x.parentIds.map((p) => String(p)),
       layer: x.layer,
       count: Number(x.maskedCount),
       rings: (x.shape ?? []).flat().filter((r) => r.length >= 3).map((r) => r.map(([px, py]) => [px / G, py / G])),
@@ -137,7 +140,7 @@ if (!served) {
   process.exit(1);
 }
 /** The frontier oracle: a served artifact with no served child. Computed here, not read off the map. */
-const parents = new Set(served.map((x) => x.parent).filter(Boolean));
+const parents = new Set(served.flatMap((x) => x.parents));
 const frontier = new Set(served.filter((x) => !parents.has(x.id)).map((x) => x.id));
 const shaped = served.filter((x) => x.rings.length > 0);
 console.log(`--- [${elapsed()}] ${served.length} served, ${frontier.size} on the frontier, ${shaped.length} carrying a hull ---`);
@@ -304,7 +307,7 @@ const unprovoked = (samples, drawn, near = 6) => {
  */
 const live = async () => {
   const now = await servedArtifacts();
-  const ancestors = new Set(now.map((x) => x.parent).filter(Boolean));
+  const ancestors = new Set(now.flatMap((x) => x.parents));
   const front = new Set(now.filter((x) => !ancestors.has(x.id)).map((x) => x.id));
   const shapes = now.filter((x) => x.rings.length > 0 && front.has(x.id));
   return {now, front, shapes};

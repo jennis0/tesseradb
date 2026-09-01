@@ -504,7 +504,7 @@ export class ArtifactChannel {
           novel.map((a) => ({
             tesseraId: a.tesseraId,
             layer: a.layer,
-            parentId: a.parentId,
+            parentIds: a.parentIds,
             centroid: a.centroid,
             rung: a.rung
           }))
@@ -518,7 +518,7 @@ export class ArtifactChannel {
     return artifacts.map((a) => {
       const {artifact} = this.held.get(keyOf(a))!;
       // The response's own `rung` beside its bit: on a treed layer the rung is response-local —
-      // the depth in the forest this cut's `parent_id` links form (contracts §3.2 r44) — so a
+      // the depth in the forest this cut's `parent_ids` links form (contracts §3.2 r44) — so a
       // re-served artifact wears this response's number, not the one it was first held under.
       // Levelled and flat rungs never move, so the held object comes back unchanged there.
       return a.matched === artifact.matched && a.rung === artifact.rung ? artifact : {...artifact, rung: a.rung, matched: a.matched};
@@ -850,13 +850,18 @@ export class ArtifactChannel {
 }
 
 /**
- * The tree the response carried, assembled from `parentId`.
+ * The forest the response carried, assembled from `parentIds`.
  *
  * **Built from what was served and nothing else.** A parent is named only where it is in the same
- * response (decision 0087), and an artifact whose parent was withheld arrives with `parentId` null
- * — identically to one that has no parent at all. So a link that does not resolve is treated as no
- * link, and the artifact is a root of what this viewer was given. There is no "hidden parent"
- * state here because there is nothing on the wire to fill one from.
+ * response (decision 0087; C29 per entry), and an artifact whose parent was withheld arrives with
+ * that entry absent — identically to one that has no parent at all. So a link that does not
+ * resolve is treated as no link, and an artifact with none is a root of what this viewer was
+ * given. There is no "hidden parent" state here because there is nothing on the wire to fill one
+ * from.
+ *
+ * **On a `dag` layer a child is listed under every served parent** (decision 0117): the card's
+ * children are the served artifacts naming it among their parents, and a walk that must show
+ * each artifact once — the list — deduplicates as it goes.
  *
  * **It is this response's tree, not the layer's.** The set changes as the map moves and as the
  * cut's budget bites: two viewers, and the same viewer at two depths, correctly see different
@@ -864,9 +869,12 @@ export class ArtifactChannel {
  */
 export type ServedLineage = {
   byId: Map<bigint, Artifact>;
-  /** A parent's served children, by the parent's identifier. Absent means none were served. */
+  /**
+   * A parent's served children, by the parent's identifier — under a `dag` layer one child may
+   * sit under several. Absent means none were served.
+   */
   childrenOf: Map<bigint, Artifact[]>;
-  /** Those with no served parent — where a walk of the tree starts. */
+  /** Those with no served parent — where a walk of the forest starts. */
   roots: Artifact[];
   /** Whether any link resolved at all: a flat layer, and a tree cut to one level, look the same. */
   linked: boolean;
@@ -877,14 +885,16 @@ export function servedLineage(artifacts: readonly Artifact[]): ServedLineage {
   const childrenOf = new Map<bigint, Artifact[]>();
   const roots: Artifact[] = [];
   for (const artifact of artifacts) {
-    const parent = artifact.parentId === null ? undefined : byId.get(artifact.parentId);
-    if (!parent) {
-      roots.push(artifact);
-      continue;
+    let linked = false;
+    for (const parentId of artifact.parentIds) {
+      const parent = byId.get(parentId);
+      if (!parent) continue;
+      linked = true;
+      const siblings = childrenOf.get(parent.tesseraId);
+      if (siblings) siblings.push(artifact);
+      else childrenOf.set(parent.tesseraId, [artifact]);
     }
-    const siblings = childrenOf.get(parent.tesseraId);
-    if (siblings) siblings.push(artifact);
-    else childrenOf.set(parent.tesseraId, [artifact]);
+    if (!linked) roots.push(artifact);
   }
   return {byId, childrenOf, roots, linked: childrenOf.size > 0};
 }

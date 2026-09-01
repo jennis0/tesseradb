@@ -206,7 +206,7 @@ export type BandSplitter = {
  * session ordinals through the table — a few thousand lookups, once per response — and each
  * band's points are remapped from local index to ordinal with a tight loop as the band is
  * built. Parent links come from the same response's artifacts frame, which is the only place a
- * `parentId` is ever named (decision 0087).
+ * `parentIds` is ever named (decision 0087).
  *
  * The response holds one temporary reference per distinct ordinal while its bands are being
  * built, so an ordinal named by the distinct list cannot be recycled between two slices; each
@@ -222,12 +222,12 @@ type ResponseNaming = {
 };
 
 function nameResponse(result: ViewportResult, table: SessionArtifactTable): {naming: ResponseNaming[]; release: () => void} {
-  // The response's own artifacts frame is the only source of a `parentId` (decision 0087) and,
+  // The response's own artifacts frame is the only source of a `parentIds` (decision 0087) and,
   // for the artifacts this response's points belong to, of a centroid — which is what colours
   // them. Feeding both here is what lets a band be coloured by the response that carried it,
   // rather than waiting on the `k = 0` channel two hundred milliseconds behind the gesture.
-  const frameOf = new Map<string, {parentId: bigint | null; centroid: readonly [number, number] | null; rung: number}>();
-  for (const a of result.artifacts) frameOf.set(`${a.layer} ${a.tesseraId}`, {parentId: a.parentId, centroid: a.centroid, rung: a.rung});
+  const frameOf = new Map<string, {parentIds: readonly bigint[]; centroid: readonly [number, number] | null; rung: number}>();
+  for (const a of result.artifacts) frameOf.set(`${a.layer} ${a.tesseraId}`, {parentIds: a.parentIds, centroid: a.centroid, rung: a.rung});
   const naming: ResponseNaming[] = [];
   const held: Uint32Array[] = [];
   for (const [layer, column] of Object.entries(result.membership)) {
@@ -239,7 +239,7 @@ function nameResponse(result: ViewportResult, table: SessionArtifactTable): {nam
       // artifact this response's artifacts frame also carries, and then the rung is the wire's; a
       // reference built from the column alone has no rung to give and takes 0, which is what a
       // flat layer's — and a treed root's — is. It is never counted from the links.
-      refs.push({tesseraId: id, layer, parentId: known?.parentId ?? null, centroid: known?.centroid ?? null, rung: known?.rung});
+      refs.push({tesseraId: id, layer, parentIds: known?.parentIds ?? [], centroid: known?.centroid ?? null, rung: known?.rung});
     }
     const ordinals = table.take(refs);
     held.push(ordinals);

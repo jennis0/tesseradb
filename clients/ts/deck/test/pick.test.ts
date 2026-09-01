@@ -4,11 +4,11 @@ import {artifactOfMark} from '../src/pick.js';
 
 /** A hovered mark names the artifact it is a member of, through its ordinal and the table. */
 
-const artifact = (id: bigint, parentId: bigint | null, rung = 0): Artifact => ({layer: 'clusters', tesseraId: id, key: `c-${id}`, maskedCount: 1n, centroid: null, box: null, shape: null, content: [], parentId, rung, matched: null});
+const artifact = (id: bigint, parent: bigint | null, rung = 0): Artifact => ({layer: 'clusters', tesseraId: id, key: `c-${id}`, maskedCount: 1n, centroid: null, box: null, shape: null, content: [], parentIds: parent === null ? [] : [parent], rung, matched: null});
 
 function projection(served: Artifact[]): ArtifactsProjection {
   const table = new SessionArtifactTable();
-  const ordinals = table.take(served.map((a) => ({tesseraId: a.tesseraId, layer: a.layer, parentId: a.parentId, rung: a.rung})));
+  const ordinals = table.take(served.map((a) => ({tesseraId: a.tesseraId, layer: a.layer, parentIds: a.parentIds, rung: a.rung})));
   return {layer: 'clusters', layers: ['clusters'], served, lineage: servedLineage(served), status: 'shown', refusal: null, version: 1, held: 0, table, servedOrdinals: new Set(ordinals), shapes: new Map(), colours: new Map(), palette: 'positional', coverage: {current: 0, stale: 0}};
 }
 

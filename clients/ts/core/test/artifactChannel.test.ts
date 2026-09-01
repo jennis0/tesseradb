@@ -14,7 +14,7 @@ import type {Artifact, ArtifactIdentity, FilterExpr, Layer, Quantisation, Viewpo
 
 const Q: Quantisation = {xMin: 0, xMax: 100, yMin: 0, yMax: 100};
 
-const artifact = (id: bigint, parentId: bigint | null = null, matched: boolean | null = null): Artifact => ({
+const artifact = (id: bigint, parent: bigint | null = null, matched: boolean | null = null): Artifact => ({
   layer: 'clusters/x',
   tesseraId: id,
   key: `c-${id}`,
@@ -23,7 +23,7 @@ const artifact = (id: bigint, parentId: bigint | null = null, matched: boolean |
   box: null,
   shape: null,
   content: [],
-  parentId,
+  parentIds: parent === null ? [] : [parent],
   rung: 0,
   matched
 });
@@ -317,7 +317,7 @@ const geo = (
   box: g.box ?? null,
   shape: null,
   content: [],
-  parentId: null,
+  parentIds: [],
   rung: g.rung ?? 0,
   matched: g.matched ?? null
 });
