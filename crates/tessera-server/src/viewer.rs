@@ -1913,8 +1913,9 @@ struct ItemResp {
     ///
     /// Gate-filtered: a view the session's gate refuses is absent exactly as a view nobody
     /// declared is, so this array is never the place a gate-failed view is named. Always present,
-    /// empty included — a point held only in views this principal cannot reach serves `[]`, which
-    /// is the same shape and the same bytes as one in no view at all.
+    /// empty included — `[]` says *none of this item's views is one you may reach*, and it says
+    /// nothing else: an item in no view at all is a `404` before this field is built, so it is not
+    /// the other reading of an empty array but a different response entirely.
     views: Vec<ItemViewDto>,
     /// **The group-scoped attribute values, by family name and then by the group's key**
     /// (`views.md` §5) — `{"mood": {"2026-Q1": "calm"}}`. The key is a view's only address

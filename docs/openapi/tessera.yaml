@@ -1373,9 +1373,10 @@ components:
             **The views this item is in that this principal may reach**, sorted by id, each with
             the position that view places it at. **Gate-filtered**: a view the session's gate
             refuses is absent exactly as a view nobody declared is, so this is never the place a
-            gate-failed view is named. Always present; `[]` where the item is held only in views
-            this principal cannot reach, which is the same shape and the same bytes as an item in
-            no view at all.
+            gate-failed view is named. Always present; `[]` says *none of this item's views is one
+            you may reach* and says nothing else — an item in no view at all is a `404` before this
+            field is built, so it is a different response rather than the other reading of an empty
+            array.
           items:
             type: object
             additionalProperties: false

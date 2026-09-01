@@ -7309,7 +7309,10 @@ impl Executor {
                         .fetch_add(1, Ordering::Relaxed);
                     tracing::error!(
                         error = %e,
-                        "ALARM: a completed coalesce's record extent would not compose into a                          stack; discarding it rather than publishing a manifest naming a layer                          this process cannot serve. Its files are orphans and every consumed                          entry still stands"
+                        "ALARM: a completed coalesce's record extent would not compose into a \
+                         stack; discarding it rather than publishing a manifest naming a \
+                         layer this process cannot serve. Its files are orphans and every \
+                         consumed entry still stands"
                     );
                     return;
                 }
