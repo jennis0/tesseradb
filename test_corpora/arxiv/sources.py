@@ -6,6 +6,11 @@ bytes off the share; arXiv reads `data/` in this checkout, which `probes/build_c
 share holds a mirror of that directory at `arxiv-tessera/2026-07-27/`, which is a backup and not
 the source — see `../README.md`.
 
+`surnames` is a `list<string>` and rides along here rather than being read separately: it is a few
+hundred megabytes of Arrow buffers against the abstracts' several gigabytes of Python strings, and
+`prepare.py` joins it into the `authors` column with `binary_join` without ever materialising a
+list per row.
+
 The expensive read is the embedding matrix: 2,422,486 x 1024 float32 is 9.9 GB, and both stages
 need it — `prepare` for PCA and UMAP, `toponymy` for the exemplars and the keyphrase ranking. It is
 streamed and filtered to the sample so that memory is the sample's rows rather than the corpus's,
@@ -44,7 +49,8 @@ def load_metadata(data: Path = DATA, prose_columns: tuple[str, ...] = ("title", 
     here and reads each prose column afterwards with [`load_prose_column`].
     """
     corpus = pq.read_table(
-        data / "corpus.parquet", columns=["entity_id", "id", "categories", "v1_created"]
+        data / "corpus.parquet",
+        columns=["entity_id", "id", "categories", "surnames", "v1_created"],
     )
     prose = pq.read_table(
         data / "demo" / "prose.parquet", columns=["entity_id", *prose_columns]

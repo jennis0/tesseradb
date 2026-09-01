@@ -23,8 +23,6 @@ kmeans                = "clusters-kmeans.parquet"
 kmeans_members        = "clusters-kmeans-members.parquet"
 hdbscan               = "clusters-hdbscan.parquet"
 hdbscan_members       = "clusters-hdbscan-members.parquet"
-taxonomy              = "taxonomy-arxiv.parquet"
-taxonomy_members      = "taxonomy-arxiv-members.parquet"
 # <toponymy-sources>
 
 [defaults]
@@ -56,7 +54,7 @@ allocation_view = "knn"
 
 [[view]]
 name             = "knn"
-title            = "Full-dimension cosine kNN"
+title            = "Topic map"
 projection       = "none"
 extent           = "auto"
 source           = "points"
@@ -65,7 +63,7 @@ point_visibility = { field = "categories", default = "public" }
 
 [[view]]
 name             = "pca64"
-title            = "PCA to 64 components"
+title            = "Topic map (PCA-64)"
 projection       = "none"
 extent           = "auto"
 source           = "points_pca64"
@@ -112,12 +110,14 @@ render     = true
 index      = true
 
 # `timestamp_us` rather than `i64`, so the unit is a fact the client reads off `/v1/meta` rather
-# than a convention it has to be told.
+# than a convention it has to be told. Indexed as well as rendered: a map of papers is asked for a
+# date range before it is asked for anything else, and a `render` column answers no filter.
 [[attribute]]
 name   = "submitted_at"
 title  = "Submitted"
 type   = "timestamp_us"
 render = true
+index  = true
 
 # Prose lives in the record blob and reaches a client at drill-down: `render` on a text column is
 # refused, the hot column being a fixed-width slot per row. `index` builds the token index behind
@@ -132,6 +132,14 @@ name  = "abstract"
 type  = "text"
 index = true
 
+# The surnames `corpus.parquet` carries, joined. Text and therefore drill-down and `match`, never
+# `render`; one paper carries 2,832 of them, which is why this is not a category.
+[[attribute]]
+name  = "authors"
+title = "Authors"
+type  = "text"
+index = true
+
 [[attribute]]
 name  = "arxiv_id"
 title = "arXiv ID"
@@ -139,14 +147,14 @@ type  = "keyword"
 index = true
 
 # ---------------------------------------------------------------------------------------------
-# Three layers, and **every one of them is named on both views**. That is the experiment: one
-# membership, two projections. A `computed` content is recomputed per viewer from
-# `membership ∩ M_auth` — and, a view being a row space of its own, per view — so each cluster and
-# each subject class carries a centroid, a box and a hull **in each layout over one membership**,
-# and "does this route scatter a concept" becomes a property of the artifacts the server serves
-# rather than a statistic about the point cloud.
+# Two layers, **both named on both views**, and that is what the second view is for: a `computed`
+# content is recomputed per viewer from `membership ∩ M_auth` — and, a view being a row space of
+# its own, per view — so every cluster carries a centroid, a box and a hull in each layout over one
+# membership. Both are drawn over the same 2D positions the `knn` view holds, which is why they
+# draw something: a k-means cell and an HDBSCAN cluster are compact in the layout they were fitted
+# in, where a published category is not (see the withdrawal note at the end of this file).
 #
-# **A cluster carries its own title.** The TF-IDF description is supplied `text` content on the
+# **A cluster carries its own title.** The c-TF-IDF description is supplied `text` content on the
 # cluster artifact itself, ranked — the description first, a generic fallback second — rather than
 # an artifact of its own on a `topics/*` layer that a client had to join by attachment. A client
 # names an artifact from its own first content, so a cluster shows its title with no join.
@@ -214,39 +222,15 @@ require_member_visibility = { fraction = 0.05 }
     type                      = "text"
     require_member_visibility = "all"
 
-# The taxonomy: arXiv's own classification, as levels with containment edges between them.
+# ⊘ **`taxonomy/arxiv` was a third layer here and is withdrawn** (owner ruling, 2026-09-01), on
+# the same rule Overture's taxonomy was withdrawn on: a layer earns its place by *drawing*
+# something in the view it is declared over. An archive's papers are scattered across the whole
+# embedding, so its box is a tenth of the map and its hull is the map; 97-98% of its artifacts came
+# back `everywhere` in the build's report, so all 209 of them were served on every viewport request
+# to draw outlines that say nothing. `README.md` carries the measured spread against the two
+# clusterings.
 #
-# **Its edges are information, not roll-up.** A budget does not climb them — substituting an
-# archive for its subject classes would draw one shape across a region whose neighbours are still
-# drawn as classes. The resolution is the client choosing a level, and the edges are what let it
-# nest what it draws or filter to one archive's subtree while still drawing the rest.
-#
-# It is also the covering counterpart to HDBSCAN: every paper's primary category sits in exactly
-# one archive, so an archive *is* the union of its classes, and the two layers put a covering and a
-# non-covering hierarchy side by side over the same points. Its artifacts carry no supplied
-# content: an archive's key *is* its published name, and inventing a TF-IDF description for it
-# would replace a fact with a statistic.
-
-[[layer]]
-name       = "taxonomy/arxiv"
-title      = "arXiv classification"
-source     = "taxonomy"
-views      = ["knn", "pca64"]
-membership = "enumerated"
-hierarchy  = { kind = "tiered", prune_children = false }
-
-visibility          = "public"
-artifact_visibility = { default = "inherited" }
-require_member_visibility = { count = 1 }
-content = { computed = ["centroid", "box", "hull"] }
-
-  [[layer.levels]]
-  level = 0
-  title = "archive"
-
-  [[layer.levels]]
-  level = 1
-  title = "subject class"
-
-  [layer.members]
-  source = "taxonomy_members"
+# **The classification itself is not gone.** It is the `archive` and `primary_category` attributes
+# above — rendered, so a client colours by them, and indexed, so a client filters on them. That is
+# what a published taxonomy over scattered points is good for here; a hierarchy of artifacts over
+# it was not.

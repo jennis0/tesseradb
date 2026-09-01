@@ -9,12 +9,15 @@ speed wins over fidelity to the CPU `umap-learn` pipeline this rung used to run)
 200,000-point graph cuML lays out in 6.4 s where `umap-learn` took 82.7 s, and at 2.4x10^6 that is
 the difference between minutes and an hour. What it costs is that neither view is bit-for-bit the
 geometry `docs/evidence/` was measured against — `data/geometry.parquet`, which was itself cuML on
-a GPU under no seed. The local measures (neighbourhood recall, category purity) agree between the
-two implementations to within a point and the global ones (tile occupancy, frame use) do not, UMAP's
-objective constraining only which points sit near which. **Compare the two views against each
-other; do not compare either against `data/geometry.parquet`.**
+a GPU under no seed. **A figure taken against one of these layouts is not comparable with a figure
+taken against another**, and that includes `geometry.parquet`.
 
-`random_state` is fixed, so a rerun of one route over one sample reproduces its own layout.
+Which of the two better preserves the embedding is not a question this rung asks: it is a question
+about UMAP, and the rung is a demonstrator (owner ruling, 2026-09-01). What decided which is the
+anchor is that `knn` is 3x cheaper and keeps a cluster contiguous in row space — see `README.md`.
+
+`random_state` is fixed, and ⊘ that is enough for `pca64` and not for `knn`: CAGRA's index build
+is approximate and takes no seed, so the graph UMAP is handed moves between runs.
 """
 
 from __future__ import annotations

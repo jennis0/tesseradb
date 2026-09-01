@@ -16,11 +16,11 @@ toponymy_topic_members = "topics-toponymy-members.parquet"
 
 # ---- split ----
 
-# **Toponymy's rungs are levels, and its tree runs between them.** This is the *tiered* shape over
-# a density clustering rather than a published taxonomy, which puts the two cases side by side:
-# `taxonomy/arxiv` is covering — an archive is exactly the union of its classes — and these rungs
-# are not, since a paper that is noise on one rung belongs to nothing there. The build's
-# containment report names every such edge; they are the algorithm's, not a fault.
+# **Toponymy's rungs are levels, and its tree runs between them.** This is the *tiered* shape, and
+# it is the rung's only one — the third shape beside `clusters/kmeans`'s flat one and
+# `clusters/hdbscan`'s nested tree. Like the second and unlike a published taxonomy, it is not
+# covering: a paper that is noise on one rung belongs to nothing there. The build's containment
+# report names every such edge; they are the algorithm's, not a fault.
 
 [[layer]]
 name       = "clusters/toponymy"

@@ -1,10 +1,10 @@
 """arXiv — 2,422,486 preprints, the ladder's bottom rung and the only one with an embedding.
 
 One pass from the arXiv sources to a corpus `tessera build` consumes: the BGE embedding laid out
-**twice**, two clusterings over the first layout, arXiv's own taxonomy beside them, and a TF-IDF
-title on every cluster. A third clustering — Toponymy's layered one, named by a language model —
-is the rung's optional second stage, [`toponymy.py`][], because it needs a chat endpoint and costs
-an hour and a half over the whole corpus where this stage costs minutes.
+**twice**, two clusterings over the first layout, and a c-TF-IDF title on every cluster. A third
+clustering — Toponymy's layered one, named by a language model — is the rung's optional second
+stage, [`toponymy.py`][], because it needs a chat endpoint and costs an hour and a half over the
+whole corpus where this stage costs minutes.
 
 **This rung's source is derived, not staged.** `data/` in this checkout is what
 `probes/build_corpus.py` and `probes/build_embeddings.py` produced; the share holds a mirror of it
@@ -17,11 +17,11 @@ positioned two ways rather than two corpora:
   `precomputed_knn` so UMAP does the layout and nothing else.
 - `pca64` — PCA to 64 components first, which is the route `data/geometry.parquet` was built on.
 
-Both run cuML's UMAP with a fixed `random_state` (`routes.py`). What that buys over comparing two
-separate builds offline is that a layer's `computed` content is resolved **per view**, so every
-cluster carries a centroid, a box and a hull in *each* projection over one membership: whether a
-route scatters a concept stops being an aggregate statistic about the point cloud and becomes a
-property of the artifacts the server serves. `compare.py` measures the two against each other.
+Both run cuML's UMAP with a fixed `random_state` (`routes.py`). **They are here to exercise the
+multi-view machinery on a real corpus**, and because `knn` is the route that scales to the ladder's
+later embedding rungs — not to settle which projection is more faithful. It is also the faster of
+the two end to end, and the one whose clusters stay contiguous in row space; the README has both
+figures.
 
 **This rung is the ladder's one irreproducible corpus, and it is worth being exact about which
 part.** A geographic rung's positions are a pure function of its input, so a frame change costs a
@@ -67,6 +67,7 @@ from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from ..common.paths import ladder
@@ -79,7 +80,14 @@ SEED = 0
 
 KMEANS_LAYER = "clusters/kmeans"
 HDBSCAN_LAYER = "clusters/hdbscan"
-TAXONOMY_LAYER = "taxonomy/arxiv"
+
+# **`taxonomy/arxiv` is withdrawn** (owner ruling, 2026-09-01), on the rule Overture's taxonomy was
+# withdrawn on: a layer earns its place by *drawing* something in the view it is declared over. An
+# archive's members are scattered across the whole map, so its box covers a tenth of it and its
+# hull is the map — 97-98% of its artifacts were `everywhere` in the build's report, all 209 served
+# on every viewport request for outlines that show nothing. The classification is still here and
+# still useful: it is the `archive` and `primary_category` attributes, which colour and filter.
+# The figures are in `README.md`.
 
 #: The two views, in declaration order. The view name is the route name: a figure quoted against a
 #: view says which projection produced it without a lookup. The first is the **anchor**
@@ -91,10 +99,19 @@ KMEANS_K = 64
 #: A node whose largest child holds more than this share of its members is not a level.
 CHAIN = 0.9
 
-LABEL_TERMS = 3  #: how many TF-IDF terms make up one title
+LABEL_TERMS = 4  #: how many c-TF-IDF terms make up one title
 LABEL_SAMPLE = 200  #: documents a title is generated from — its generating set
 MAX_CORPUS_SHARE = 0.02  #: above this a term is corpus vocabulary, not cluster vocabulary
 MIN_CLUSTER_SHARE = 0.02  #: below this it is a coincidence rather than a description
+
+#: Tokens that describe a physics or maths paper rather than a topic. They survive every
+#: frequency rule this file has — each is under the 2% corpus cap and each is disproportionately
+#: common in some clusters — so they are named. **Kept short on purpose**: a stoplist that grows
+#: is a labeller being hand-tuned, and the c-TF-IDF denominator is what is meant to do this work.
+CORPUS_STOPLIST = frozenset("""
+production sqrt measurement results based using model models method methods approach study
+analysis data paper show new two one problem problems case time
+""".split())
 
 #: The lowest-ranked content, served to a viewer who holds its narrower generating set but not the
 #: whole of the specific one's. It names the kind of thing without describing this one.
@@ -245,8 +262,8 @@ class Tree:
 
 
 class Labeller:
-    """TF-IDF titles over the paper titles, by term frequency *within* a cluster against document
-    frequency *across* the corpus.
+    """Cluster titles by **c-TF-IDF against the layer's own sibling clusters** — how much more a
+    term occurs in this cluster than across the clusters it is drawn beside.
 
     **Plain TF-IDF over each cluster treated as one long document gives unusable labels**, and it
     is worth recording because it is the first thing anyone writes. Concatenating a cluster's
@@ -257,10 +274,17 @@ class Labeller:
 
     What works is the same two ingredients the other way round —
 
-        score(t, C) = f(t, C) · log( f(t, C) / f(t, corpus) )
+        score(t, C) = f(t, C) · log( f(t, C) / mean_C' f(t, C') )
 
-    where *f* is the share of documents containing the term. A term scores well by being both
-    common in the cluster and disproportionately so.
+    where *f* is the share of a cluster's documents containing the term, and the denominator runs
+    over **every cluster of the same layer**, each weighted equally. A term scores well by being
+    both common in this cluster and disproportionately so among its siblings.
+
+    **The denominator was the whole corpus and that is what made the titles thin.** Against a
+    corpus average, a term common to a whole discipline still clears the bar in every cluster of
+    that discipline, so the first run over the full corpus produced `production measurement sqrt`,
+    `tev sqrt search` and `brauer production modular` — the physics-paper register, not the
+    cluster. Against the siblings, a term every neighbouring cluster also carries cancels.
 
     **Label quality tracks the clustering, not this function.** These clusters are drawn in a 2D
     UMAP projection, so they are spatially coherent and only roughly topical, and the labels say
@@ -270,12 +294,12 @@ class Labeller:
     """
 
     def __init__(self, titles: list[str]):
-        from sklearn.feature_extraction.text import CountVectorizer
+        from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS, CountVectorizer
 
         # Binary occurrence rather than counts: the score is over the *share of documents*
         # carrying a term, so a title repeating a word does not make it more characteristic.
         vec = CountVectorizer(
-            stop_words="english",
+            stop_words=list(ENGLISH_STOP_WORDS | CORPUS_STOPLIST),
             # Alphabetic, three characters or more: without this the ranking fills with fragments
             # of identifiers and bare numbers (`b_s0`, `892`), distinctive and meaningless.
             token_pattern=r"(?u)\b[a-zA-Z][a-zA-Z-]{2,}\b",
@@ -285,18 +309,30 @@ class Labeller:
         )
         self.occurs = vec.fit_transform(titles)
         self.vocab = np.array(vec.get_feature_names_out())
-        self.corpus_share = np.asarray(self.occurs.sum(axis=0)).ravel() / self.occurs.shape[0]
 
     def label(self, groups: dict, terms: int = LABEL_TERMS) -> dict:
-        """`{key: [row indices]}` -> `{key: "term term term"}`, omitting the keys with nothing
-        distinctive to say."""
+        """`{key: [row indices]}` -> `{key: "term term term term"}`, omitting the keys with nothing
+        distinctive to say.
+
+        **The whole layer at once, because the denominator is the layer.** A cluster cannot be
+        titled on its own here: what makes a term worth printing is that its siblings do not carry
+        it, so every group's share is computed first and the background is their mean.
+        """
+        keys = list(groups)
+        shares = np.empty((len(keys), len(self.vocab)), dtype=np.float64)
+        for i, key in enumerate(keys):
+            rows = np.asarray(groups[key])
+            shares[i] = np.asarray(self.occurs[rows].sum(axis=0)).ravel() / max(1, len(rows))
+        # Each cluster counts once, whatever its size: pooling the documents instead would let one
+        # cluster holding half the layer set the background it is then scored against.
+        background = shares.mean(axis=0)
+
         out = {}
-        for key, rows in groups.items():
-            rows = np.asarray(rows)
-            share = np.asarray(self.occurs[rows].sum(axis=0)).ravel() / max(1, len(rows))
+        for i, key in enumerate(keys):
+            share = shares[i]
             score = np.where(
                 share >= MIN_CLUSTER_SHARE,
-                share * np.log(share / (self.corpus_share + 1e-9) + 1e-9),
+                share * np.log(share / (background + 1e-9) + 1e-9),
                 -np.inf,
             )
             top = np.argsort(score)[::-1][:terms]
@@ -504,6 +540,11 @@ def main() -> None:
         primary = np.array([c.split()[0] if c else "unknown" for c in categories])
         archive = np.array([p.split(".")[0] for p in primary])
         access = [c.split() if c else [] for c in categories]
+        # **The authors, joined in Arrow rather than in Python.** `corpus.parquet` carries them as
+        # a `list<string>` of surnames — 2,832 of them on one paper — and `binary_join` turns the
+        # whole column into one string column without materialising a list per row. Nothing
+        # surfaced them before; a paper map is asked "who wrote this" as often as "when".
+        authors = pc.binary_join(corpus.column("surnames").take(take), ", ")
         title = sources.load_prose_column("title", take)
         abstract = sources.load_prose_column("abstract", take)
 
@@ -571,6 +612,7 @@ def main() -> None:
             "archive": pa.array(archive, pa.string()),
             "primary_category": pa.array(primary, pa.string()),
             "submitted_at": pa.array(created.astype("datetime64[us]"), pa.timestamp("us")),
+            "authors": authors,
             "title": pa.array(title, pa.string()),
             "abstract": pa.array(abstract, pa.string()),
         })
@@ -585,17 +627,7 @@ def main() -> None:
         return f"{prefix}-{k:06d}"
 
     with steps.step("write artifacts"):
-        # **The taxonomy: two levels, and edges that run between them.** arXiv's own classification
-        # is the *tiered* shape — an archive contains its subject classes, a subject class is a
-        # subject class everywhere on the map, and the resolution is *semantic* rather than
-        # something a budget trades for. An archive with no subclass carries the same key at both
-        # levels, which is legitimate: a key is unique per `(layer, level)`.
-        for name in sorted(set(archive)):
-            artifacts.artifact(TAXONOMY_LAYER, name, level=0)
-        for name in sorted(set(primary)):
-            artifacts.artifact(TAXONOMY_LAYER, name, level=1, parent=name.split(".")[0])
-
-        # **A cluster carries its own title**, as ranked supplied content: the TF-IDF description
+        # **A cluster carries its own title**, as ranked supplied content: the c-TF-IDF description
         # first, the generic fallback second. A viewer is served the first whose generating set
         # they hold entirely, or nothing — never the cluster's identity with its description
         # missing. The title used to be an artifact of its own on a `topics/*` layer that the
@@ -621,19 +653,10 @@ def main() -> None:
             )
 
     with steps.step("write members"):
-        by_archive, by_primary = collections.defaultdict(list), collections.defaultdict(list)
-        for row, (a, p) in enumerate(zip(archive, primary)):
-            by_archive[a].append(row)
-            by_primary[p].append(row)
-        for name, rows in by_archive.items():
-            artifacts.members(TAXONOMY_LAYER, name, rows, level=0)
-        for name, rows in by_primary.items():
-            artifacts.members(TAXONOMY_LAYER, name, rows, level=1)
-
         # A cluster's own membership is the cluster; each content's generating set is a sample
         # drawn from it, and so a subset of that membership by construction. The sample is what is
         # recorded as the provenance a viewer must hold, and it is the same draw the label layers
-        # made — the TF-IDF ranking itself was computed over the whole cluster.
+        # made — the c-TF-IDF ranking itself was computed over the whole cluster.
         rng = np.random.default_rng(SEED)
         for k in range(KMEANS_K):
             artifacts.members(KMEANS_LAYER, cluster_key("km", k), kmeans_groups[k])
@@ -672,10 +695,6 @@ def main() -> None:
     # the original.
     shutil.copy(Path(__file__).parent / "corpus.toml", out / "corpus.toml")
     write_deployment(out)
-
-    # `compare.py` reads this rather than the parquets: it wants the two layouts side by side in
-    # one array, in view order, over the sample the run drew.
-    np.save(out / "positions.npy", np.stack([positions[v] for v in VIEWS]))
 
     manifest = {
         "rung": RUNG,
@@ -717,7 +736,6 @@ def main() -> None:
         if f.is_file():
             print(f"  {f.name:34} {f.stat().st_size / 1e6:8.2f} MB")
     print(f"\nnext:\n  cd {out} && tessera check --payloads && tessera build\n"
-          f"  python -m test_corpora.arxiv.compare\n"
           f"  ./run_demo.sh --deployment {out}/tessera.toml \\\n"
           f"      --terms \"$(cat {out}/category-terms.txt)\" --ranks {out}/category-ranks.json \\\n"
           f"      --label 'arXiv: two projections' --prose title,abstract")
