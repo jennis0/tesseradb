@@ -860,6 +860,38 @@ impl Manifest {
             .collect()
     }
 
+    /// The group that **owns** `group`'s keys — itself, unless it declares `members`
+    /// (`views.md` §3.3). A group this manifest does not declare owns its own keys, which is the
+    /// answer a caller can act on: it names no sharing groups either.
+    pub fn owner_of_group(&self, group: &str) -> String {
+        self.groups
+            .iter()
+            .find(|g| g.name == group)
+            .and_then(|g| g.members_of.clone())
+            .unwrap_or_else(|| group.to_string())
+    }
+
+    /// Every view id one key of `owner` resolves to: the owning group's, and one for **every group
+    /// whose views are the owner's** (`members`, `views.md` §3.3).
+    ///
+    /// **One definition, because a key is not one view.** A create lands on every sharing group at
+    /// the same moment and a drop takes it off every one of them, so anything that acts on "the
+    /// views of this key" — [`Self::with_roster`]'s death loop, the drop's buffer prune, its
+    /// `delete_dangling` probe, and the WAL replay's own prune — must expand the same way. Three
+    /// copies of the expansion is how one of them comes to prune a single spelling and leave the
+    /// other's rows to be adopted by whatever takes the key next
+    /// ([decision 0115](../../../docs/decisions/0115-a-dropped-view-key-is-reusable.md)).
+    ///
+    /// The caller passes the **owner**: `owner_of_group` is what turns the group a request named
+    /// into it.
+    pub fn view_ids_for_key(&self, owner: &str, key: &str) -> Vec<String> {
+        self.groups
+            .iter()
+            .filter(|g| g.name == owner || g.members_of.as_deref() == Some(owner))
+            .map(|g| format!("{}{}{}", g.name, crate::GROUP_SEPARATOR, key))
+            .collect()
+    }
+
     /// This manifest as the **live roster** makes it: the views a build declared, plus every view
     /// created while the service runs, minus every key that has been dropped (`views.md` §3.2,
     /// §3.4).
@@ -887,14 +919,9 @@ impl Manifest {
         // the other order would delete the view the caller was just told it had. A death whose key
         // nothing recreated simply leaves the group without it.
         for stone in dead {
-            let ids: Vec<String> = manifest
-                .groups
-                .iter()
-                .filter(|g| {
-                    g.name == stone.group || g.members_of.as_deref() == Some(stone.group.as_str())
-                })
-                .map(|g| format!("{}{}{}", g.name, crate::GROUP_SEPARATOR, stone.key))
-                .collect();
+            // **The owner's groups and every group sharing its views** — the one expansion
+            // `Self::view_ids_for_key` defines, which the drop's own prunes take too.
+            let ids = manifest.view_ids_for_key(&stone.group, &stone.key);
             for group in &mut manifest.groups {
                 if group.name == stone.group
                     || group.members_of.as_deref() == Some(stone.group.as_str())

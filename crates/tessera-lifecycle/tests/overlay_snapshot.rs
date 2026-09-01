@@ -135,7 +135,12 @@ fn a_snapshot_replays_in_position_and_never_displaces_what_precedes_it() {
     }
 
     let (_wal, records) = Wal::open(&path).unwrap();
-    let (overlay, _buffer, _established, _resolver) = replay(&records, &dict, Overlay::new());
+    let (overlay, _buffer, _established, _resolver) = replay(
+        &records,
+        &dict,
+        Overlay::new(),
+        &tessera_lifecycle::owner_id_only,
+    );
 
     assert!(
         overlay.is_suppressed(EntityId::new(7)),

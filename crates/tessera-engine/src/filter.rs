@@ -782,6 +782,7 @@ fn open_scoped_column(
     partition_dir: &Path,
     family: &tessera_store::manifest::ScopedScalar,
     view_id: &str,
+    incarnation: tessera_types::view::ViewIncarnation,
     vocabularies: &[tessera_store::manifest::ManifestVocabulary],
     mmap: bool,
 ) -> std::io::Result<(String, Placement, Layers)> {
@@ -793,9 +794,11 @@ fn open_scoped_column(
         .then(|| resolve_analyser(&family.name, family.analyser.as_deref()))
         .transpose()?;
     // `attrs/<column>/<group>/<key>/` — the view id's own path components, through the one place a
-    // view id becomes a path, so the opener cannot drift from the writer.
+    // view id becomes a path, so the opener cannot drift from the writer. Above the declared
+    // incarnation the key carries its own suffix (decision 0115): a recreated key opens its own
+    // base, and its predecessor's is left where the fold's reclaim expects to find it.
     let mut dir = partition_dir.join("attrs").join(&family.name);
-    for component in tessera_store::view_path_components(view_id) {
+    for component in tessera_store::scoped_column_components(view_id, incarnation) {
         dir.push(component);
     }
     let name = scoped_column_name(&family.name, view_id);
@@ -1558,6 +1561,10 @@ impl FilterColumns {
         declared: &[tessera_store::manifest::DeclaredScalar],
         // Every group's scoped column families, in manifest order (`views.md` §5).
         scoped: &[tessera_store::manifest::ScopedScalar],
+        // Which incarnation each view is, from the roster (`Manifest::incarnation_of`,
+        // decision 0115). A family names the views that have a column; this is what places one on
+        // disc, a recreated key's base living beside its predecessor's rather than over it.
+        view_incarnation: &dyn Fn(&str) -> Option<tessera_types::view::ViewIncarnation>,
         vocabularies: &[tessera_store::manifest::ManifestVocabulary],
         extents: &[tessera_store::manifest::AttrExtent],
         record_extents: &[tessera_store::manifest::RecordExtent],
@@ -1719,8 +1726,20 @@ impl FilterColumns {
                 continue;
             }
             for view_id in &family.views {
-                let (name, placement, layers) =
-                    open_scoped_column(&partition_dir, family, view_id, vocabularies, mmap)?;
+                // **No incarnation, no column** (decision 0115): a family naming a view the
+                // roster cannot place is a bundle whose two halves disagree, and opening it under
+                // a guessed incarnation is how a dropped view's values reach a live one.
+                let Some(incarnation) = view_incarnation(view_id) else {
+                    continue;
+                };
+                let (name, placement, layers) = open_scoped_column(
+                    &partition_dir,
+                    family,
+                    view_id,
+                    incarnation,
+                    vocabularies,
+                    mmap,
+                )?;
                 placements.insert(name.clone(), placement);
                 columns.insert(name, layers);
             }
@@ -1958,7 +1977,7 @@ impl FilterColumns {
     pub fn with_scoped_columns(
         &self,
         partition_dir: &Path,
-        columns: &[(String, String)],
+        columns: &[(String, String, tessera_types::view::ViewIncarnation)],
         scoped: &[tessera_store::manifest::ScopedScalar],
         vocabularies: &[tessera_store::manifest::ManifestVocabulary],
         mmap: bool,
@@ -1970,7 +1989,7 @@ impl FilterColumns {
             records: Arc::clone(&self.records),
             entity_terms: Arc::clone(&self.entity_terms),
         };
-        for (column, view) in columns {
+        for (column, view, incarnation) in columns {
             let Some(family) = scoped.iter().find(|f| f.name == *column) else {
                 return std::io::Result::Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -1986,8 +2005,14 @@ impl FilterColumns {
             if next.columns.contains_key(&scoped_column_name(column, view)) {
                 continue;
             }
-            let (name, placement, layers) =
-                open_scoped_column(partition_dir, family, view, vocabularies, mmap)?;
+            let (name, placement, layers) = open_scoped_column(
+                partition_dir,
+                family,
+                view,
+                *incarnation,
+                vocabularies,
+                mmap,
+            )?;
             next.placements.insert(name.clone(), placement);
             next.columns.insert(name, layers);
         }
@@ -2029,17 +2054,14 @@ impl FilterColumns {
         // The transpose's extent composes here for the record blob's reason, plus one of its own:
         // a flush's labels that no live stack holds leave the join rule's label arm unable to
         // compare against the batch that just landed, which is the arm's whole point.
-        let entity_terms = if entity_terms.is_empty() {
-            Arc::clone(&self.entity_terms)
-        } else {
-            Arc::new(
-                self.entity_terms
-                    .with_extents(entity_terms)
-                    .map_err(|e| {
-                        std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-                    })?,
-            )
-        };
+        let entity_terms =
+            if entity_terms.is_empty() {
+                Arc::clone(&self.entity_terms)
+            } else {
+                Arc::new(self.entity_terms.with_extents(entity_terms).map_err(|e| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
+                })?)
+            };
         let mut next = FilterColumns {
             columns: self.columns.clone(),
             placements: self.placements.clone(),
@@ -2537,12 +2559,9 @@ impl FilterColumns {
         if self.space_of(expr, prefer_row)? == Space::Entity {
             return Ok(RoutedFilter::Entity(self.eval(expr, candidate)?));
         }
-        Ok(RoutedFilter::Row(self.route(
-            expr,
-            candidate,
-            prefer_row,
-            regions,
-        )?))
+        Ok(RoutedFilter::Row(
+            self.route(expr, candidate, prefer_row, regions)?,
+        ))
     }
 
     /// Which space `expr` evaluates in, given each leaf's placement and the request's preference.

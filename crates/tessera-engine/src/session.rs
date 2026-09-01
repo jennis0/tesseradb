@@ -1219,6 +1219,13 @@ impl Engine {
                 created_views: &manifest_created_views,
                 dead_view_incarnations: &manifest_dead_incarnations,
                 declared_views,
+                // **The `members` expansion, so replay's `ViewDrop` arm prunes every id the key
+                // names** (`views.md` §3.3, decision 0115). The owner's spelling alone would
+                // leave a sharing group's buffered rows in the log to be flushed into whatever
+                // takes the key next.
+                view_ids_of_key: &|group: &str, key: &str| {
+                    bundle.manifest.view_ids_for_key(group, key)
+                },
                 membership_extents: &manifest_membership_extents,
                 level_versions: &manifest_level_versions,
                 prefix_dir: prefix_dir.clone(),
@@ -1347,6 +1354,9 @@ impl Engine {
                     // the first component of each family's view ids, so what the opener needs is
                     // the families and not the rosters (`views.md` §5).
                     &bundle.manifest.scoped_scalars(),
+                    // The roster this bundle is serving, which is what places a scoped column on
+                    // disc (decision 0115).
+                    &|view: &str| bundle.manifest.incarnation_of(view),
                     &bundle.manifest.vocabularies,
                     &extents,
                     &record_extents,
@@ -2600,17 +2610,12 @@ impl Engine {
     /// One permutation read and one hash lookup; nothing walks.
     pub fn view_holds(&self, entity: EntityId, view: &str) -> bool {
         let generation = self.generation();
-        generation
-            .bundle
-            .partitions
-            .values()
-            .any(|partition| {
-                partition
-                    .views
-                    .get(view)
-                    .is_some_and(|data| data.row_space.row_of(entity).is_some())
-            })
-            || generation.buffer.contains_in_view(entity, view)
+        generation.bundle.partitions.values().any(|partition| {
+            partition
+                .views
+                .get(view)
+                .is_some_and(|data| data.row_space.row_of(entity).is_some())
+        }) || generation.buffer.contains_in_view(entity, view)
     }
 
     /// The entity's **own** buffered row — its terms and its scalars — where one is still awaiting
@@ -3661,6 +3666,7 @@ pub(crate) fn open_rotation(
             &phash,
             &bundle.manifest.declared_scalars,
             &bundle.manifest.scoped_scalars(),
+            &|view: &str| bundle.manifest.incarnation_of(view),
             &bundle.manifest.vocabularies,
             &partition.manifest.attr_extents,
             // The record blob rotates with the prefix for the reason the value columns do: the

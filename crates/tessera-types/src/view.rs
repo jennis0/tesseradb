@@ -14,6 +14,13 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+/// What joins a group's name to one of its keys in a view id — `<group>:<key>` (`views.md` §3.2).
+///
+/// Here rather than beside the manifest's copy because the WAL's roster records travel through
+/// `tessera-lifecycle`, which does not depend on `tessera-store`, and a second spelling of the
+/// separator is how the two halves come to disagree about what a view id is.
+pub const GROUP_SEPARATOR: char = ':';
+
 /// Which incarnation of a key an artifact belongs to (decision 0115).
 ///
 /// A counter rather than a random nonce: replay applies what was decided — the minted value

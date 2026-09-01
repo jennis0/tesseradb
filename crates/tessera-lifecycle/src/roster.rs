@@ -60,10 +60,9 @@ impl std::fmt::Display for RosterError {
                  NEW key, never an update, because an updatable gate is a narrowing that does not \
                  bite live sessions"
             ),
-            RosterError::Unknown { group, key } => write!(
-                f,
-                "no view '{group}:{key}' — nothing to drop"
-            ),
+            RosterError::Unknown { group, key } => {
+                write!(f, "no view '{group}:{key}' — nothing to drop")
+            }
             RosterError::Refused(detail) => write!(f, "{detail}"),
         }
     }
@@ -114,6 +113,10 @@ impl ViewRoster {
     /// off `MANIFEST.json`, which is the roster's other half and the half that never changes.
     pub fn seed_declared(&mut self, views: impl IntoIterator<Item = (String, String)>) {
         for (group, key) in views {
+            // **The mint's floor moves for these too**, so the seed genuinely covers every
+            // incarnation the manifests carry: a declared key that is dropped and created again
+            // must not be handed the number its build segments are stamped with (decision 0115).
+            self.next_incarnation = self.next_incarnation.max(DECLARED_INCARNATION + 1);
             self.live.insert((group, key), DECLARED_INCARNATION);
         }
     }
@@ -139,10 +142,8 @@ impl ViewRoster {
 
     fn admit(&mut self, view: CreatedView) {
         self.next_incarnation = self.next_incarnation.max(view.incarnation + 1);
-        self.live.insert(
-            (view.group.clone(), view.key.clone()),
-            view.incarnation,
-        );
+        self.live
+            .insert((view.group.clone(), view.key.clone()), view.incarnation);
         if let Some(existing) = self
             .created
             .iter_mut()
@@ -167,11 +168,9 @@ impl ViewRoster {
             self.created
                 .retain(|v| !(v.group == stone.group && v.key == stone.key));
         }
-        if !self
-            .dead
-            .iter()
-            .any(|s| s.group == stone.group && s.key == stone.key && s.incarnation == stone.incarnation)
-        {
+        if !self.dead.iter().any(|s| {
+            s.group == stone.group && s.key == stone.key && s.incarnation == stone.incarnation
+        }) {
             self.dead.push(stone);
         }
     }

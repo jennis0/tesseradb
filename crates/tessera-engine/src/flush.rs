@@ -543,11 +543,9 @@ pub(crate) fn execute_flush(
     // enters the bundle's file set, and a base outside it is a file `ensure_verified` finds
     // unaccounted for.
     for (column, view) in &scoped_columns {
-        let mut rel = format!("partitions/{}/attrs/{column}", ctx.partition);
-        for component in tessera_store::view_path_components(view) {
-            rel.push('/');
-            rel.push_str(component);
-        }
+        // The writer's own derivation, not a second copy of it: the base is digested at the path
+        // it was written to, incarnation suffix included (decision 0115).
+        let rel = tessera_store::scoped_column_rel(&ctx.partition, column, view, ctx.incarnation);
         for name in [
             tessera_filter::VALUES_FILE,
             tessera_filter::PRESENCE_FILE,
@@ -1405,14 +1403,11 @@ fn write_text_layer(
 
 /// Where one view's column of a group-scoped family lives, prefix-relative —
 /// `partitions/<p>/attrs/<column>/<group>/<key>/` (`views.md` §5), through the one place a view id
-/// becomes a path so the writer cannot drift from `FilterColumns::open`'s reader.
+/// and its incarnation become a path so the writer cannot drift from `FilterColumns::open`'s
+/// reader. Above the declared incarnation the last component is `<key>@<n>` (decision 0115), so a
+/// recreated key's base never lands on the path its predecessor's occupies.
 fn scoped_column_rel(ctx: &FlushContext, column: &str) -> String {
-    let mut rel = format!("partitions/{}/attrs/{column}", ctx.partition);
-    for component in tessera_store::view_path_components(&ctx.view) {
-        rel.push('/');
-        rel.push_str(component);
-    }
-    rel
+    tessera_store::scoped_column_rel(&ctx.partition, column, &ctx.view, ctx.incarnation)
 }
 
 /// Write this flush's extent for every **group-scoped** family of its view's group, and the empty

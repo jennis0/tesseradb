@@ -359,7 +359,12 @@ async fn points(served: &Served, view: &str) -> Vec<PointRow> {
             continue;
         }
         assert_eq!(resp.status().as_u16(), 200, "a served view answers: {view}");
-        if resp.headers().get("x-tessera-stale").is_some_and(|v| v == "1") && unsettled {
+        if resp
+            .headers()
+            .get("x-tessera-stale")
+            .is_some_and(|v| v == "1")
+            && unsettled
+        {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             continue;
         }
@@ -759,9 +764,14 @@ async fn a_known_external_id_joins_a_second_view_and_is_placed_in_each() {
 
     let id = b"joiner".to_vec();
     assert_eq!(
-        ingest(&served, "first", "world", &[(id.clone(), 10.0, 10.0, "0", Some(7))])
-            .await
-            .status(),
+        ingest(
+            &served,
+            "first",
+            "world",
+            &[(id.clone(), 10.0, 10.0, "0", Some(7))]
+        )
+        .await
+        .status(),
         200,
         "an unknown external id allocates, as it always did"
     );
@@ -796,11 +806,7 @@ async fn a_known_external_id_joins_a_second_view_and_is_placed_in_each() {
         "one identity, in two views: world {world_ids:?}, q5 {q5_ids:?}"
     );
     let joined = shared[0];
-    let world_code = in_world
-        .iter()
-        .find(|p| p.0 == joined)
-        .unwrap()
-        .1;
+    let world_code = in_world.iter().find(|p| p.0 == joined).unwrap().1;
     let q5_code = in_q5.iter().find(|p| p.0 == joined).unwrap().1;
     assert_ne!(
         world_code, q5_code,
@@ -836,9 +842,14 @@ async fn a_join_refuses_a_second_row_a_relabel_and_a_changed_attribute() {
     );
     let id = b"arms".to_vec();
     assert_eq!(
-        ingest(&served, "first", "world", &[(id.clone(), 10.0, 10.0, "0", Some(7))])
-            .await
-            .status(),
+        ingest(
+            &served,
+            "first",
+            "world",
+            &[(id.clone(), 10.0, 10.0, "0", Some(7))]
+        )
+        .await
+        .status(),
         200
     );
 
@@ -920,7 +931,13 @@ async fn a_suppressed_holder_joins_a_view_and_stays_hidden_until_it_is_unsuppres
     // newly created view takes a new session, exactly as a client would.
     reauthorise(&mut served).await;
     let id = b"hidden".to_vec();
-    let resp = ingest(&served, "first", "world", &[(id.clone(), 10.0, 10.0, "0", Some(7))]).await;
+    let resp = ingest(
+        &served,
+        "first",
+        "world",
+        &[(id.clone(), 10.0, 10.0, "0", Some(7))],
+    )
+    .await;
     assert_eq!(resp.status(), 200);
     let tessera_id: u64 = resp.json::<Value>().await.unwrap()["tessera_ids"][0]
         .as_u64()
@@ -935,7 +952,8 @@ async fn a_suppressed_holder_joins_a_view_and_stays_hidden_until_it_is_unsuppres
     );
 
     let change = |op: &str| {
-        let body = json!([{ "tessera_id": tessera_id.to_string(), "idset": FIXTURE_IDSET, "op": op }]);
+        let body =
+            json!([{ "tessera_id": tessera_id.to_string(), "idset": FIXTURE_IDSET, "op": op }]);
         served
             .server
             .client
@@ -1270,7 +1288,9 @@ render = true
     let config = tessera_build::config::Config::parse(&config_path, &Default::default())
         .expect("the declaration parses");
     let registry = config.build_views().expect("the roster is minted");
-    let anchor = config.anchor_view(&registry).expect("the anchor is declared");
+    let anchor = config
+        .anchor_view(&registry)
+        .expect("the anchor is declared");
     let views: Vec<ViewArgs> = registry
         .iter()
         .map(|view| ViewArgs {
@@ -1330,8 +1350,7 @@ async fn a_minted_group_takes_a_create_a_drop_and_a_join() {
     // The minted key is served like a declared one, carrying no record of its own.
     let document = meta(&served).await;
     assert_eq!(
-        roster_of(&document, "quarter:2026-Q1")
-            .expect("the minted view is served")["metadata"],
+        roster_of(&document, "quarter:2026-Q1").expect("the minted view is served")["metadata"],
         json!({})
     );
 
@@ -1351,7 +1370,9 @@ async fn a_minted_group_takes_a_create_a_drop_and_a_join() {
     // **Create.** The group declares no metadata, so the record is empty — and the view is a view
     // from the acknowledgement.
     assert_eq!(
-        create(&served, "quarter", "2026-Q2", json!({})).await.status(),
+        create(&served, "quarter", "2026-Q2", json!({}))
+            .await
+            .status(),
         201
     );
     reauthorise(&mut served).await;
@@ -1380,7 +1401,10 @@ async fn a_minted_group_takes_a_create_a_drop_and_a_join() {
     reauthorise(&mut served).await;
     let in_q2 = points(&served, "quarter:2026-Q2").await;
     assert_eq!(in_q2.len(), 1, "the joined row, and only it");
-    assert_eq!(in_q2[0].0, joined, "the row is the one the acknowledgement named");
+    assert_eq!(
+        in_q2[0].0, joined,
+        "the row is the one the acknowledgement named"
+    );
     let in_world: Vec<u64> = points(&served, "world").await.iter().map(|p| p.0).collect();
     assert!(
         in_world.contains(&joined),
@@ -1403,7 +1427,9 @@ async fn a_minted_group_takes_a_create_a_drop_and_a_join() {
     assert!(!view_ids(&meta(&served).await).contains(&"quarter:2026-Q1".to_string()));
     assert_eq!(viewport(&served, "quarter:2026-Q1").await.status(), 404);
     assert_eq!(
-        create(&served, "quarter", "2026-Q1", json!({})).await.status(),
+        create(&served, "quarter", "2026-Q1", json!({}))
+            .await
+            .status(),
         201,
         "a dropped key is reusable (decision 0115)"
     );
@@ -1660,7 +1686,10 @@ async fn a_fold_after_a_drop_reclaims_the_dropped_view_and_a_recreate_adopts_not
     // drop's probe finds all four dangling.
     let before = served.server.state.engine.retirable_deletions();
     let body = drop_view(&served, "quarter", "2026-Q2", true).await;
-    assert_eq!(body["deleted"], 4, "every entity of the view was in no other: {body}");
+    assert_eq!(
+        body["deleted"], 4,
+        "every entity of the view was in no other: {body}"
+    );
     assert_eq!(
         served.server.state.engine.retirable_deletions(),
         before + 4,
@@ -1701,9 +1730,14 @@ async fn a_join_naming_a_different_label_is_refused_after_the_entity_has_flushed
     );
     let id = b"flushed-label".to_vec();
     assert_eq!(
-        ingest(&served, "first", "world", &[(id.clone(), 10.0, 10.0, "0", Some(7))])
-            .await
-            .status(),
+        ingest(
+            &served,
+            "first",
+            "world",
+            &[(id.clone(), 10.0, 10.0, "0", Some(7))]
+        )
+        .await
+        .status(),
         200
     );
     flush(&served).await;
@@ -1837,7 +1871,8 @@ fn write_families_points(path: &Path, view: &str, ids: std::ops::Range<u64>) {
                 ids.iter().map(|e| format!("n{e}")),
             )),
             Arc::new(arrow::array::StringArray::from_iter_values(
-                ids.iter().map(|e| ["astro", "cond", "hep"][(e % 3) as usize]),
+                ids.iter()
+                    .map(|e| ["astro", "cond", "hep"][(e % 3) as usize]),
             )),
         ],
     )
@@ -2260,7 +2295,12 @@ async fn filtered_points(served: &Served, view: &str, filter: Value) -> Vec<Poin
             200,
             "a filtered view answers: {view}"
         );
-        if resp.headers().get("x-tessera-stale").is_some_and(|v| v == "1") && unsettled {
+        if resp
+            .headers()
+            .get("x-tessera-stale")
+            .is_some_and(|v| v == "1")
+            && unsettled
+        {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             continue;
         }
@@ -2468,10 +2508,20 @@ async fn a_recreated_key_holds_only_its_own_rows_across_a_replay_and_a_fold() {
 
     // The first incarnation's rows, flushed, so the view owns a segment and a row space.
     let first: Vec<Row<'_>> = (0..6)
-        .map(|i| (format!("first-{i}").into_bytes(), 300.0 + i as f32, 300.0, "0", Some(i)))
+        .map(|i| {
+            (
+                format!("first-{i}").into_bytes(),
+                300.0 + i as f32,
+                300.0,
+                "0",
+                Some(i),
+            )
+        })
         .collect();
     assert_eq!(
-        ingest(&served, "first-batch", "quarter:2026-Q5", &first).await.status(),
+        ingest(&served, "first-batch", "quarter:2026-Q5", &first)
+            .await
+            .status(),
         200
     );
     flush(&served).await;
@@ -2482,15 +2532,28 @@ async fn a_recreated_key_holds_only_its_own_rows_across_a_replay_and_a_fold() {
     // flushed rows above are dropped from the replayed buffer by the ordinary "this row already
     // has geometry" filter, whatever the drop does.
     let stale: Vec<Row<'_>> = (0..3)
-        .map(|i| (format!("stale-{i}").into_bytes(), 320.0 + i as f32, 320.0, "0", Some(i)))
+        .map(|i| {
+            (
+                format!("stale-{i}").into_bytes(),
+                320.0 + i as f32,
+                320.0,
+                "0",
+                Some(i),
+            )
+        })
         .collect();
     assert_eq!(
-        ingest(&served, "stale-batch", "quarter:2026-Q5", &stale).await.status(),
+        ingest(&served, "stale-batch", "quarter:2026-Q5", &stale)
+            .await
+            .status(),
         200
     );
 
     // **Drop and recreate in one window** — no flush, no fold, no publication between them.
-    assert_eq!(drop_view(&served, "quarter", "2026-Q5", false).await["deleted"], 0);
+    assert_eq!(
+        drop_view(&served, "quarter", "2026-Q5", false).await["deleted"],
+        0
+    );
     assert_eq!(
         create(&served, "quarter", "2026-Q5", q_record("Q5 second", 2))
             .await
@@ -2507,10 +2570,20 @@ async fn a_recreated_key_holds_only_its_own_rows_across_a_replay_and_a_fold() {
 
     // The second incarnation's rows, left **unflushed**, so the restart below has to replay them.
     let second: Vec<Row<'_>> = (0..4)
-        .map(|i| (format!("second-{i}").into_bytes(), 500.0 + i as f32, 500.0, "0", Some(i)))
+        .map(|i| {
+            (
+                format!("second-{i}").into_bytes(),
+                500.0 + i as f32,
+                500.0,
+                "0",
+                Some(i),
+            )
+        })
         .collect();
     assert_eq!(
-        ingest(&served, "second-batch", "quarter:2026-Q5", &second).await.status(),
+        ingest(&served, "second-batch", "quarter:2026-Q5", &second)
+            .await
+            .status(),
         200
     );
 
@@ -2546,5 +2619,162 @@ async fn a_recreated_key_holds_only_its_own_rows_across_a_replay_and_a_fold() {
         points(&served, "quarter:2026-Q5").await.len(),
         4,
         "and the fold reclaimed the dead incarnation's files without touching the live one's"
+    );
+}
+
+/// **A drop expands to every id the key names, on both prune paths**
+/// ([decision 0115](../../../docs/decisions/0115-a-dropped-view-key-is-reusable.md), `views.md`
+/// §3.3).
+///
+/// A key is one view of the group that owns it *and* one of every group sharing its views, and
+/// `Manifest::with_roster` has always taken all of them off the roster together. The two buffer
+/// prunes did not: each built a single `<group>:<key>` — the live path from the group the *request*
+/// named, the replay arm from the record's owner — so rows buffered under the other spelling
+/// survived the drop and flushed into the view created next under that key. Points of a view the
+/// operator dropped, served under a name they had just recreated, with nothing to see.
+///
+/// Both directions are here because the two sites fail the opposite way round:
+///
+/// - **the live path**, whose id came from the group the *request* named, so a drop addressed to
+///   the owner left the sharing group's buffered rows in the generation;
+/// - **the replay arm**, whose id came from the record — and a `ViewDrop` record always carries
+///   the **owner**, so the sharing group's rows were the ones it never named, whichever spelling
+///   the operator used.
+///
+/// The two halves therefore differ in *where the rows have to be kept out of*, not in which
+/// spelling the drop uses: the second ingests through the sharing group and never flushes before
+/// the restart, so the rows exist only in the log and the replay arm is the one thing standing
+/// between them and the recreated key.
+#[tokio::test]
+async fn a_drop_prunes_every_spelling_of_the_key_on_the_live_path_and_at_replay() {
+    let mut served = serve().await;
+
+    // ---- (A) the live path: drop on the owner, rows buffered under the sharing group ---------
+    assert_eq!(
+        create(&served, "quarter", "2026-Q5", q_record("Q5 first", 1))
+            .await
+            .status(),
+        201
+    );
+    reauthorise(&mut served).await;
+    let shared: Vec<Row<'_>> = (0..5)
+        .map(|i| {
+            (
+                format!("shared-{i}").into_bytes(),
+                600.0 + i as f32,
+                600.0,
+                "0",
+                Some(i),
+            )
+        })
+        .collect();
+    assert_eq!(
+        ingest(&served, "shared-batch", "quarter_map:2026-Q5", &shared)
+            .await
+            .status(),
+        200,
+        "the fixture accepts a batch through the sharing group's spelling"
+    );
+
+    // Dropped by the **owner's** name, which is the spelling the live prune used to build from.
+    assert_eq!(
+        drop_view(&served, "quarter", "2026-Q5", false).await["deleted"],
+        0
+    );
+    assert_eq!(
+        create(&served, "quarter", "2026-Q5", q_record("Q5 second", 2))
+            .await
+            .status(),
+        201
+    );
+    reauthorise(&mut served).await;
+    // **One row of the new incarnation's own**, so the flush below has work and the count is a
+    // statement rather than an empty buffer's silence: five stale rows would make it six.
+    assert_eq!(
+        ingest(
+            &served,
+            "fresh-q5",
+            "quarter:2026-Q5",
+            &[(b"fresh-q5".to_vec(), 610.0, 610.0, "0", Some(0))],
+        )
+        .await
+        .status(),
+        200
+    );
+    flush(&served).await;
+    for id in ["quarter:2026-Q5", "quarter_map:2026-Q5"] {
+        assert_eq!(
+            points(&served, id).await.len(),
+            if id == "quarter:2026-Q5" { 1 } else { 0 },
+            "{id}: the recreated key adopted rows buffered under the other spelling"
+        );
+    }
+
+    // ---- (B) the replay arm: rows buffered under the sharing group, and no flush ------------
+    drop_view(&served, "quarter", "2026-Q5", false).await;
+    assert_eq!(
+        create(&served, "quarter", "2026-Q6", q_record("Q6 first", 3))
+            .await
+            .status(),
+        201
+    );
+    reauthorise(&mut served).await;
+    let owned: Vec<Row<'_>> = (0..5)
+        .map(|i| {
+            (
+                format!("owned-{i}").into_bytes(),
+                700.0 + i as f32,
+                700.0,
+                "0",
+                Some(i),
+            )
+        })
+        .collect();
+    assert_eq!(
+        ingest(&served, "owned-batch", "quarter_map:2026-Q6", &owned)
+            .await
+            .status(),
+        200
+    );
+    // Dropped by the **sharing group's** name, which changes nothing about the record: a
+    // `ViewDrop` always carries the owner, so a replay prune built from the record alone looks
+    // under `quarter:2026-Q6` and never under the id these rows are actually in.
+    assert_eq!(
+        drop_view(&served, "quarter_map", "2026-Q6", false).await["deleted"],
+        0
+    );
+    assert_eq!(
+        create(&served, "quarter", "2026-Q6", q_record("Q6 second", 4))
+            .await
+            .status(),
+        201
+    );
+    // **No flush before the restart**: the rows are in the log and nowhere else, so what keeps
+    // them out of the recreated view is replay's own `ViewDrop` arm.
+    let mut served = restart(served).await;
+    reauthorise(&mut served).await;
+    assert_eq!(
+        ingest(
+            &served,
+            "fresh-q6",
+            "quarter:2026-Q6",
+            &[(b"fresh-q6".to_vec(), 710.0, 710.0, "0", Some(0))],
+        )
+        .await
+        .status(),
+        200
+    );
+    flush(&served).await;
+    for id in ["quarter:2026-Q6", "quarter_map:2026-Q6"] {
+        assert_eq!(
+            points(&served, id).await.len(),
+            if id == "quarter:2026-Q6" { 1 } else { 0 },
+            "{id}: the replayed drop left rows under a spelling the record did not name"
+        );
+    }
+    assert_eq!(
+        roster_of(&meta(&served).await, "quarter:2026-Q6").unwrap()["metadata"]["label"]["value"],
+        "Q6 second",
+        "and the surviving record is the recreate's"
     );
 }

@@ -16,8 +16,12 @@ performs. The incarnation is **internal** — on no wire surface, not part of a 
 invisible to a principal, who cannot tell a recreated key from a fresh one. `view_tombstones`
 becomes `dead_view_incarnations` and stops being a refusal; `WAL_VERSION` moves to 18 and
 `bundle_format` stays at 4. Buffered rows resolve through replay order rather than carrying a
-stamp: `ViewDrop` is met between the rows it kills and the rows the recreate takes. `delete_dangling`
-and the two removal rules are untouched. *(Written on a branch beside other view work; if another
+stamp: `ViewDrop` is met between the rows it kills and the rows the recreate takes — and the prune
+expands to **every id the key names**, the owner's and every sharing group's, as §3.3 has always
+required and as `with_roster` already did. One artefact needed a path rather than a stamp: a scoped
+column's *base* is the only thing a view owns at a fixed one, so it moves to `<key>@<incarnation>`
+above the build's, a flush of a recreated key otherwise writing over a path the live manifest still
+digests. `delete_dangling` and the two removal rules are untouched. *(Written on a branch beside other view work; if another
 revision lands first this one renumbers, and the `r27` references in the body renumber with it.)*
 **Status:** Normative (r26) — **`render` alone makes a group-scoped family a filter operand**
 (r26, 2026-08-31, owner ruling; `contracts.md` §3.2 r67). §5's last standing restriction goes: the
@@ -919,7 +923,10 @@ an attribute. The two are kept apart so that neither grows the other's surface.
 > declaration. A scoped category's novel key is minted where an entity-scoped one is, at the
 > commit-window close.
 >
-> The flush writes the family's extent for its view under `attrs/<column>/<group>/<key>/extents/`,
+> The flush writes the family's extent for its view under `attrs/<column>/<group>/<key>/extents/`
+> — `<key>@<incarnation>` above the build's (r27, decision 0115: the *base* is the one artefact a
+> view owns at a fixed path, and a recreated key must not write over the path the live manifest
+> still digests, nor over files the previous generation may still hold mapped) —
 > beside the build's base and composed at publication exactly as an entity-scoped extent is — the
 > only thing the scope changes is the directory. A view the family has no column for acquires an
 > **empty base** at the same flush, so what is on disc is what a build would have written for an

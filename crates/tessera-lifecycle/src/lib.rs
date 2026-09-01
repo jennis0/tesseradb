@@ -45,7 +45,7 @@ pub use command::{
     UnallocatedRow,
 };
 pub use faults::WalMeter;
-pub use overlay::{replay, Overlay};
+pub use overlay::{owner_id_only, replay, Overlay};
 pub use wal::{
     ChangeOp, ExecutorWal, MembershipGrowth, OverlaySnapshotEntry, PublishedArtifact, Wal, WalError,
     WalRecord, WalRow, WalScalar,

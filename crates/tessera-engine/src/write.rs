@@ -2067,6 +2067,10 @@ pub(crate) struct ManifestSeed<'a> {
     pub dead_view_incarnations: &'a [tessera_types::view::DeadIncarnation],
     /// The views a build declared, as `(group, key)` — the keys a create must not reissue.
     pub declared_views: Vec<(String, String)>,
+    /// `Manifest::view_ids_for_key` — every view id a dropped key resolves to, the owner's and
+    /// every sharing group's (`views.md` §3.3). Replay's `ViewDrop` arm prunes the buffer with it,
+    /// and it is passed rather than derived because `tessera-lifecycle` holds no manifest.
+    pub view_ids_of_key: &'a dyn Fn(&str, &str) -> Vec<String>,
     /// Every published membership extent, across every partition's manifest, with the prefix
     /// directory their paths are relative to.
     pub membership_extents: &'a [tessera_store::manifest::MembershipExtent],
@@ -2389,6 +2393,8 @@ impl WritePath {
             );
         }
 
+        // Taken off the manifest seed before it is shadowed by the overlay seed below.
+        let view_ids_of_key = seed.view_ids_of_key;
         // **The manifests' deny state is the starting point, and replay runs over it.** Ordering,
         // not aesthetics — see `replay`'s own doc: every WAL record postdates any state an
         // honourable manifest carries, and the one op that needs the later record to win is
@@ -2399,7 +2405,8 @@ impl WritePath {
             seed.apply(*entity, *op);
         }
 
-        let (overlay, mut buffer, established, resolver) = replay(&records, dict, seed);
+        let (overlay, mut buffer, established, resolver) =
+            replay(&records, dict, seed, view_ids_of_key);
         // **Re-hashed at the boundary, once, at startup.** `replay` builds this with `FxHashMap`;
         // the live index deliberately does not — see `WritePath::established`'s doc. Converting
         // here costs one pass over the replayed set at open and keeps the hasher choice in one
@@ -4524,8 +4531,14 @@ fn roster_error(e: tessera_lifecycle::RosterError) -> ExecError {
     }
 }
 
-/// The entities of `view` that hold a row in **no other view** — the commit-window buffer
+/// The entities of `views` that hold a row in **no other view** — the commit-window buffer
 /// included (`views.md` §3.4's `delete_dangling`).
+///
+/// **`views` is every id the dropped key resolves to** (`Manifest::view_ids_for_key`), not the one
+/// the request happened to name: a key is a view of the group that owns it *and* one of every
+/// group sharing its views (`views.md` §3.3), so a probe over a single spelling reads the wrong
+/// row space when the drop was addressed to the other, and counts an entity dangling that holds a
+/// row under the key's own second name.
 ///
 /// **The buffer counts as a view's rows.** A row accepted but not yet flushed is in no
 /// permutation, so a probe that read the permutations alone would call an entity dangling that a
@@ -4536,41 +4549,44 @@ fn roster_error(e: tessera_lifecycle::RosterError) -> ExecError {
 /// and every built view that published a `row-entity.u32`; where it cannot, the fallback asks
 /// each entity below the high-water whether this view holds it, which is `O(entity space)` and is
 /// reported rather than hidden, because a silent one would look like an idle service.
-fn dangling_entities(generation: &Generation, view: &str) -> Vec<EntityId> {
+fn dangling_entities(generation: &Generation, views: &[String]) -> Vec<EntityId> {
     let mut candidates: Vec<EntityId> = Vec::new();
-    for partition in generation.bundle.partitions.values() {
-        let Some(view_data) = partition.views.get(view) else {
-            continue;
-        };
-        let rows = view_data.row_space.total_rows();
-        if view_data.row_space.can_invert() {
-            for row in 0..rows {
-                if let Some(entity) =
-                    view_data.row_space.entity_of(tessera_types::RowId::new(row as u32))
-                {
-                    candidates.push(entity);
+    for view in views {
+        for partition in generation.bundle.partitions.values() {
+            let Some(view_data) = partition.views.get(view) else {
+                continue;
+            };
+            let rows = view_data.row_space.total_rows();
+            if view_data.row_space.can_invert() {
+                for row in 0..rows {
+                    if let Some(entity) = view_data
+                        .row_space
+                        .entity_of(tessera_types::RowId::new(row as u32))
+                    {
+                        candidates.push(entity);
+                    }
                 }
-            }
-        } else {
-            let bound = view_data.row_space.base().bound();
-            tracing::warn!(
-                view = %view,
-                entities = bound,
-                "this view publishes no row→entity table, so delete_dangling walks entity space \
-                 to enumerate its rows"
-            );
-            for raw in 0..bound {
-                let entity = EntityId::new(raw);
-                if view_data.row_space.row_of(entity).is_some() {
-                    candidates.push(entity);
+            } else {
+                let bound = view_data.row_space.base().bound();
+                tracing::warn!(
+                    view = %view,
+                    entities = bound,
+                    "this view publishes no row→entity table, so delete_dangling walks entity \
+                     space to enumerate its rows"
+                );
+                for raw in 0..bound {
+                    let entity = EntityId::new(raw);
+                    if view_data.row_space.row_of(entity).is_some() {
+                        candidates.push(entity);
+                    }
                 }
             }
         }
     }
     // **Every buffered row, joins included** (`rows()`, not `iter()`): the question here is which
-    // entities have a row *in this view*, which is geometry, and a join is a row.
+    // entities have a row *in one of these views*, which is geometry, and a join is a row.
     for (entity, item) in generation.buffer.rows() {
-        if item.view == view {
+        if views.iter().any(|view| view == &item.view) {
             candidates.push(*entity);
         }
     }
@@ -4586,12 +4602,11 @@ fn dangling_entities(generation: &Generation, view: &str) -> Vec<EntityId> {
             partition
                 .views
                 .iter()
-                .any(|(id, data)| id != view && data.row_space.row_of(*entity).is_some())
+                .any(|(id, data)| !views.contains(id) && data.row_space.row_of(*entity).is_some())
         });
-        let buffered_elsewhere = generation
-            .buffer
-            .rows()
-            .any(|(buffered, item)| buffered == entity && item.view != view);
+        let buffered_elsewhere = generation.buffer.rows().any(|(buffered, item)| {
+            buffered == entity && !views.iter().any(|view| view == &item.view)
+        });
         !in_another_view && !buffered_elsewhere
     });
     candidates
@@ -5346,6 +5361,15 @@ impl Executor {
             &partition_data.manifest,
             &generation.bundle.manifest.files,
             self.coalesce_policy,
+            // The roster as this generation has it (decision 0115): a scoped column of an
+            // incarnation that is no longer live is the fold's to reclaim, not this pass's to
+            // merge.
+            &|view, incarnation| {
+                generation
+                    .bundle
+                    .manifest
+                    .is_live_incarnation(view, incarnation)
+            },
         ) else {
             return;
         };
@@ -5858,6 +5882,14 @@ impl Executor {
             // each, and a fold that omitted them wrote a prefix their directories are absent
             // from (`views.md` §5).
             scoped_scalars: manifest.scoped_scalars(),
+            // The roster those families' view ids are placed by (decision 0115): a scoped column's
+            // directory carries the incarnation above the build's, so the fold has to write it
+            // where the opener will look.
+            view_incarnations: manifest
+                .views
+                .iter()
+                .map(|v| (v.id.clone(), v.incarnation))
+                .collect(),
             vocabularies: manifest.vocabularies.clone(),
         };
 
@@ -6194,7 +6226,13 @@ impl Executor {
             // **And nothing of a dead incarnation** (decision 0115), on the segment filter's
             // argument: a group-scoped column's extents outlive the drop that orphaned them, and
             // a key created again writes its own column under the same family name.
-            .filter(|extent| carries_live_view(&live_incarnations, extent.view.as_deref(), extent.incarnation))
+            .filter(|extent| {
+                carries_live_view(
+                    &live_incarnations,
+                    extent.view.as_deref(),
+                    extent.incarnation,
+                )
+            })
             .cloned()
             .collect();
         // The record-blob extents take the attribute extents' shape exactly: the fold consumed
@@ -6242,7 +6280,13 @@ impl Executor {
             .text_extents
             .iter()
             .filter(|extent| !consumed_texts.contains(extent.dict.as_str()))
-            .filter(|extent| carries_live_view(&live_incarnations, extent.view.as_deref(), extent.incarnation))
+            .filter(|extent| {
+                carries_live_view(
+                    &live_incarnations,
+                    extent.view.as_deref(),
+                    extent.incarnation,
+                )
+            })
             .cloned()
             .collect();
 
@@ -6265,7 +6309,8 @@ impl Executor {
                 // now omits (`views.md` §3.4), and that one did not self-heal: it discarded every
                 // fold of the bundle for ever.
                 discard(
-                    "a carried-forward segment names a view created since the plan was taken, so                      the fold has no base for it; the next fold plans over a bundle that has it",
+                    "a carried-forward segment names a view created since the plan was taken, so \
+                     the fold has no base for it; the next fold plans over a bundle that has it",
                 );
                 return;
             };
@@ -7589,7 +7634,9 @@ impl Executor {
             let Some(incarnation) = manifest.incarnation_of(&view) else {
                 tracing::error!(
                     view = %view,
-                    "a flush plan names a view this bundle's manifest does not declare, so its                      incarnation cannot be resolved; the plan is dropped and the buffer is                      retained"
+                    "a flush plan names a view this bundle's manifest does not declare, so its \
+                     incarnation cannot be resolved; the plan is dropped and the buffer is \
+                     retained"
                 );
                 return;
             };
@@ -10191,18 +10238,18 @@ impl Executor {
     ) {
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
-        let id = format!("{group}{}{key}", tessera_store::GROUP_SEPARATOR);
         // The owner's key, whatever group the request named: a key belongs to the group that owns
         // the views, and dropping the key takes the view out of every group sharing them
         // (`views.md` §3.3).
-        let owner = generation
-            .bundle
-            .manifest
-            .groups
-            .iter()
-            .find(|g| g.name == group)
-            .and_then(|g| g.members_of.clone())
-            .unwrap_or_else(|| group.clone());
+        let owner = generation.bundle.manifest.owner_of_group(&group);
+        // **Every id the key resolves to**, which is what a drop takes away — the owner's view and
+        // every sharing group's. Built from the *owner* rather than from the group the request
+        // named, and used by all three things below that act on "the views of this key": the log
+        // line, the `delete_dangling` probe and the buffer prune. A prune over the requested
+        // spelling alone leaves the other's buffered rows to be flushed into whatever takes the
+        // key next ([decision 0115](../../../docs/decisions/0115-a-dropped-view-key-is-reusable.md)).
+        let ids = generation.bundle.manifest.view_ids_for_key(&owner, &key);
+        let id = format!("{owner}{}{key}", tessera_store::GROUP_SEPARATOR);
         let prepared = self
             .live
             .with_roster(|roster| roster.prepare_drop(&owner, &key));
@@ -10217,7 +10264,7 @@ impl Executor {
         // **Computed before the drop applies**, because the probe reads the row space the drop is
         // about to take away — and on this thread, with no yield between it and the submission.
         let dangling = if delete_dangling {
-            dangling_entities(&generation, &id)
+            dangling_entities(&generation, &ids)
         } else {
             Vec::new()
         };
@@ -10231,7 +10278,7 @@ impl Executor {
             return;
         }
         self.live.with_roster(|roster| roster.apply(&record));
-        let published = self.publish_roster(&generation, started, std::slice::from_ref(&id));
+        let published = self.publish_roster(&generation, started, &ids);
         self.deny_dirty = true;
         // **Ordinary deletions, through the ordinary lane.** They are appended, fsynced and
         // applied by the same path a `/control/changes` delete takes, so they retire at the fold
@@ -12030,9 +12077,16 @@ impl Executor {
             Arc::clone(&live.filter_columns)
         } else {
             let partition_dir = record_dir.join("partitions").join(&completed.partition);
+            // Stamped with the flush's own incarnation, which is what places the base it just
+            // wrote (decision 0115).
+            let opening: Vec<(String, String, tessera_types::view::ViewIncarnation)> = completed
+                .scoped_columns
+                .iter()
+                .map(|(column, view)| (column.clone(), view.clone(), completed.incarnation))
+                .collect();
             match live.filter_columns.with_scoped_columns(
                 &partition_dir,
-                &completed.scoped_columns,
+                &opening,
                 &live.bundle.manifest.scoped_scalars(),
                 &live.bundle.manifest.vocabularies,
                 true,

@@ -842,7 +842,30 @@ pub(crate) struct FoldContext {
     /// entity-scoped column one bundle-wide — and without them a fold writes a prefix in which the
     /// families' directories simply are not there, which is a bundle that does not open.
     pub(crate) scoped_scalars: Vec<tessera_store::manifest::ScopedScalar>,
+    /// Which incarnation each view of the roster is, taken from the same manifest
+    /// `scoped_scalars` came from (decision 0115). A scoped column's directory carries it above
+    /// the build's, so the fold that rewrites those columns has to place them where the opener
+    /// will look — the one derivation being `tessera_store::scoped_column_rel`.
+    pub(crate) view_incarnations:
+        std::collections::HashMap<String, tessera_types::view::ViewIncarnation>,
     pub(crate) vocabularies: Vec<ManifestVocabulary>,
+}
+
+/// The path one view's column of a scoped family folds into, or `None` where this manifest cannot
+/// say which incarnation the view is (decision 0115).
+///
+/// **`None` skips the column rather than guessing one.** A family naming a view the roster cannot
+/// place is a manifest whose two halves disagree; `FilterColumns::open` skips it for the same
+/// reason, so the fold writing nothing there produces exactly the state the opener already
+/// tolerates instead of a folded column at a path nothing reads.
+fn scoped_job_rel(plan: &FoldPlan, ctx: &FoldContext, family: &str, view: &str) -> Option<String> {
+    let incarnation = ctx.view_incarnations.get(view)?;
+    Some(tessera_store::scoped_column_rel(
+        &plan.partition,
+        family,
+        view,
+        *incarnation,
+    ))
 }
 
 /// One column the attribute pass folds: where its files live, and what its declaration says about
@@ -890,13 +913,11 @@ fn value_column_jobs(plan: &FoldPlan, ctx: &FoldContext) -> Vec<ColumnJob> {
             continue;
         }
         for view in &family.views {
+            let Some(rel) = scoped_job_rel(plan, ctx, &family.name, view) else {
+                continue;
+            };
             jobs.push(ColumnJob {
-                rel: format!(
-                    "partitions/{}/attrs/{}/{}",
-                    plan.partition,
-                    family.name,
-                    tessera_store::view_path_components(view).join("/")
-                ),
+                rel,
                 name: family.name.clone(),
                 view: Some(view.clone()),
                 arrow_type: family.arrow_type,
@@ -1719,13 +1740,11 @@ fn fold_text_columns(
         .filter(|f| f.arrow_type == ScalarType::Text && f.index)
     {
         for view in &family.views {
+            let Some(rel) = scoped_job_rel(plan, ctx, &family.name, view) else {
+                continue;
+            };
             jobs.push(ColumnJob {
-                rel: format!(
-                    "partitions/{}/attrs/{}/{}",
-                    plan.partition,
-                    family.name,
-                    tessera_store::view_path_components(view).join("/")
-                ),
+                rel,
                 name: family.name.clone(),
                 view: Some(view.clone()),
                 arrow_type: family.arrow_type,

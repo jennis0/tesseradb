@@ -1184,6 +1184,33 @@ async fn flush(served: &Served) {
 }
 
 /// Request a compaction fold and block until it has published (`POST /control/compact`).
+/// Where one view's column of a group-scoped family lives under a partition directory.
+///
+/// **The key's directory carries its incarnation above the build's** (`views.md` §5,
+/// [decision 0115](../../../docs/decisions/0115-a-dropped-view-key-is-reusable.md)): a view a
+/// build declared is at `<key>/`, and one created while the service runs is at `<key>@<n>/`, so a
+/// recreated key's base never lands on the path its predecessor's occupies. The number is
+/// internal — no wire surface carries it — so a test matches the prefix rather than naming it.
+fn scoped_dir(partition: &std::path::Path, family: &str, key: &str) -> std::path::PathBuf {
+    let group = partition.join("attrs").join(family).join("quarter");
+    let exact = group.join(key);
+    if exact.is_dir() {
+        return exact;
+    }
+    let suffixed = format!("{key}@");
+    std::fs::read_dir(&group)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(&suffixed))
+        })
+        .unwrap_or(exact)
+}
+
 async fn fold(served: &Served) {
     let before = served.server.state.engine.write_executor_stats().folds;
     let resp = served
@@ -1522,11 +1549,7 @@ async fn every_scoped_family_survives_ingest_flush_layering_fold_and_restart() {
     // and the families would be served as absent from the first read.
     for family in ["mood", "sector", "score"] {
         for key in ["2026-Q1", "2026-Q3", MINTED_KEY] {
-            let dir = partition
-                .join("attrs")
-                .join(family)
-                .join("quarter")
-                .join(key);
+            let dir = scoped_dir(&partition, family, key);
             assert!(
                 dir.join("values.arrow").is_file(),
                 "the fold wrote {family}'s column for {key}: {}",
@@ -1536,11 +1559,7 @@ async fn every_scoped_family_survives_ingest_flush_layering_fold_and_restart() {
     }
     for key in ["2026-Q1", "2026-Q3", MINTED_KEY] {
         // Text owes no value column, per view exactly as bundle-wide: a dictionary and postings.
-        let dir = partition
-            .join("attrs")
-            .join("note")
-            .join("quarter")
-            .join(key);
+        let dir = scoped_dir(&partition, "note", key);
         assert!(
             dir.join("postings.arrow").is_file(),
             "the fold wrote `note`'s index for {key}: {}",

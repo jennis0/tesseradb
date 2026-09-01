@@ -88,6 +88,28 @@ with no ordering argument*:
 | WAL rows and buffer entries | **resolves**, through replay order | Replay is strictly ordered and `ViewDrop` occurs between the rows it kills and the rows the recreate takes. It discards the buffer's rows for that view exactly as the live path does. A stamp on `WalRow` would widen every row buffer in the commit window to record what the sequence already states. |
 | `MembershipExtent`, `RecordExtent`, `EntityTermsExtent`, `LocatorExtent`, the overlay, the deny list | **neither** | Entity space, and incarnation-independent — the same reason `delete_dangling`'s deletions are ordinary deletions. |
 
+**One artefact needed a path and not just a stamp.** A scoped column's *base* —
+`attrs/<column>/<group>/<key>/values.arrow` and the three files beside it — is the only thing a
+view owns at a fixed path: everything else it writes is named by a `seg_id` that is never reused.
+A flush of a recreated key would therefore have written straight over its predecessor's base, and
+that is not merely untidy. The live manifest still digests that file, so a crash between the write
+and the next publication leaves a bundle whose digests refuse to open; and the dropped view's
+column may still be memory-mapped, `filter_columns` being carried across a drop unchanged, so the
+truncation is the same hazard the flush `seg_id` attempt counter exists to prevent. The directory
+therefore carries the incarnation above the build's — `<key>@<n>` — through one derivation
+(`tessera_store::scoped_column_rel`) that the writer, the digest pass and the opener all take.
+`@` is reserved out of a view key, so the suffix cannot collide with one, and at
+`DECLARED_INCARNATION` the path is exactly what every existing bundle already lays down.
+
+**A drop expands to every id the key names.** A key is a view of the group that owns it *and* one
+of every group sharing its views (`views.md` §3.3), so anything acting on "the views of this key"
+takes `Manifest::view_ids_for_key`: `with_roster`'s death loop, the drop's buffer prune, its
+`delete_dangling` probe, and replay's own prune (which is passed the expansion, `tessera-lifecycle`
+holding no manifest). Three separate spellings of it is how one site comes to prune a single id and
+leave the other's rows for the next incarnation to adopt — reachable from either end, since the
+live path built its id from the group the *request* named while the record always carries the
+owner.
+
 **Fail-closed everywhere it is asked.** An artifact whose incarnation cannot be resolved — an
 unknown view, a half-stamped entry — is omitted, never treated as live. Omitting a derived
 structure costs a recomposition; adopting one serves another key's rows.
@@ -123,6 +145,13 @@ the recreate survives; the other order deletes the view the caller was just told
   The incarnation is not a second address and cannot be spelled on any request.
 - **`LayerDrop` still tombstones a layer name**, and the difference from a view key is the point:
   a layer name travels in bookmarks, edges and suppressions.
+- **`dead_view_incarnations` is the mint's only durable floor, and nothing prunes it today.** The
+  seed is one above every incarnation the roster and the log carry; the live records alone do not
+  bound it, because the highest incarnation a key ever had is exactly the one a drop moves into the
+  dead list. So a reclaim that ever prunes an entry must leave a high-water behind it — on
+  `entity_id_high_water`'s pattern — or the mint regresses at the next restart and a fresh
+  incarnation is stamped with a number its predecessor's leftovers already carry. Pruning is not
+  built, and this is the condition on building it.
 
 ## Evidence
 
@@ -132,4 +161,7 @@ the recreate survives; the other order deletes the view the caller was just told
 `crates/tessera-store/src/read.rs` (`with_views`), `crates/tessera-engine/src/write.rs`
 (the fold's carry-forward). Tested at
 `crates/tessera-server/tests/views_write.rs::a_recreated_key_holds_only_its_own_rows_across_a_replay_and_a_fold`
-and `::a_fold_after_a_drop_reclaims_the_dropped_view_and_a_recreate_adopts_nothing`.
+`::a_fold_after_a_drop_reclaims_the_dropped_view_and_a_recreate_adopts_nothing` and
+`::a_drop_prunes_every_spelling_of_the_key_on_the_live_path_and_at_replay`, with
+`tessera_store::view_path::tests::a_scoped_columns_path_moves_with_the_incarnation_and_not_at_the_build`
+and `tessera_engine::coalesce::tests::a_dead_incarnations_window_is_not_planned` beside them.
