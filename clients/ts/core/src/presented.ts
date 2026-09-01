@@ -155,6 +155,18 @@ export class Presenter {
     this.driver.schedule(view, width, height);
   }
 
+  /**
+   * Present this view from the replica's held bands, asking for nothing — see
+   * {@link Driver.redraw}. The switch's immediate publish (`view-switching.md` §3); a view holding
+   * nothing for the camera presents nothing, and the caller's empty frame stands.
+   */
+  redraw(view: ViewState, width: number, height: number): void {
+    this.lastView = view;
+    this.width = width;
+    this.height = height;
+    this.driver.redraw(view, width, height);
+  }
+
   /** Re-ask for the last view — what a budget change or a dropped replica needs. */
   reschedule(): void {
     if (this.lastView) this.driver.schedule(this.lastView, this.width, this.height);

@@ -16,8 +16,8 @@ import {requestLevels} from './artifactChannel.js';
 import {artifactBudgetFor} from './artifactBudget.js';
 import {artifactColours, positionalEntry, type PaletteKind, type PaletteScheme, type Rgba} from './palette.js';
 import type {Band, BandKey} from './bands.js';
-import {bandKey} from './bands.js';
-import {Replica, type ReplicaOptions} from './replica.js';
+import {BandBudget, bandKey} from './bands.js';
+import {DEFAULT_CACHE_BYTES, Replica, type ReplicaOptions} from './replica.js';
 import {TesseraClient, TesseraError, type TesseraClientOptions} from './client.js';
 import type {DepthChoice} from './budget.js';
 import type {Presented} from './presented.js';
@@ -347,6 +347,17 @@ export const CLUSTER_PREFIX = 'cluster:';
 /** How many held marks a region lists — the panel's list, not the count, which is always whole. */
 export const REGION_HELD_LIMIT = 500;
 
+/**
+ * How long a view waits, after becoming current, before it asks for the camera it inherited.
+ *
+ * The driver's own debounce, applied a level up: a slider held down steps through a group's views
+ * faster than this, and each step's request is cancelled by the next, so a passed-over view costs
+ * nothing and the one the hand stops on issues the single request (`view-switching.md` §4). It is
+ * here rather than in the driver because the driver's leading edge fires for a view arriving from
+ * stillness, which every stepped-to view is.
+ */
+const VIEW_SETTLE_MS = 140;
+
 const NO_STATUS: StatusProjection = {
   status: 'idle',
   sessionWarm: false,
@@ -392,8 +403,24 @@ export function createStore(options: StoreOptions): Store {
   let contentKeyAtFrame = '';
   let selection: SelectionShape | null = null;
 
-  // Replica and the machinery on top of it are built after `meta`, which carries the views and
-  // their frames.
+  /**
+   * One view's geometry machinery (`view-switching.md` §3). A replica's bands are quantised under
+   * one frame, a presenter's composition is one view's drawn frame and its counts, and a channel's
+   * served set is per row space, so all three are per view by construction. Everything else in the
+   * store — the token, the mask, `meta`, the filters, the colour, the layer choice, the budget,
+   * the item details and the session artifact table — is shared and untouched by a switch.
+   */
+  type ViewMachinery = {id: string; replica: Replica; presenter: Presenter; channel: ArtifactChannel};
+
+  /** Built on first visit, kept on leaving: a switch is a pointer change, never a rebuild (§3). */
+  const perView = new Map<string, ViewMachinery>();
+
+  /** One byte budget across every view's bands, evicted least-recently-drawn across them (§3). */
+  const bandBudget = new BandBudget(options.replica?.cacheBytes ?? DEFAULT_CACHE_BYTES);
+
+  // The current view's machinery, rebound at a switch so every reader below — and every consumer
+  // reading through an accessor — follows the current view without knowing a switch happened.
+  // Built after `meta`, which carries the views and their frames.
   let replica: Replica | null = null;
   let presenter: Presenter | null = null;
   let channel: ArtifactChannel | null = null;
@@ -401,6 +428,17 @@ export function createStore(options: StoreOptions): Store {
   let layersOn: string[] = [];
   let lastView: {input: ViewInput} | null = null;
   let queuedView: ViewInput | null = null; // a setView before meta arrives
+  /** A `setCurrentView` before meta arrives — applied at warm-up in place of `options.view` (§3). */
+  let queuedCurrentView: string | null = null;
+  /** The pending {@link VIEW_SETTLE_MS} wait, cancelled by the next switch. */
+  let switchTimer: unknown = null;
+  /**
+   * A switch published an empty frame and `loading`, and the incoming view's own bands are what
+   * answer it: the driver transitions on requests, and a frame derived from the cache is not one.
+   * Cleared by {@link setView}, so only a frame presented before anything was asked for may end
+   * the wait — a cold switch stays at `loading` until the request it triggered says otherwise.
+   */
+  let awaitingSwitchFrame = false;
 
   const projections: Projections = {
     meta: null,
@@ -470,7 +508,26 @@ export function createStore(options: StoreOptions): Store {
    * bundle may declare another.
    */
   function frameOrNull(): Quantisation | null {
-    return meta?.views.find((v) => v.id === viewId)?.quantisation ?? null;
+    return quantisationOf(viewId);
+  }
+
+  /** One named view's frame, or `null` where the bundle declares no such view. */
+  function quantisationOf(id: string): Quantisation | null {
+    return meta?.views.find((v) => v.id === id)?.quantisation ?? null;
+  }
+
+  /**
+   * Whether two views share a frame — the question §4 turns on. Every view of a group quantises
+   * against one extent (`views.md` §3.1), so the Morton addresses, the depth and the camera mean
+   * the same thing in both and a switch keeps them; two frames that differ share nothing, and a
+   * camera carried across would put the marks somewhere the user did not point at.
+   *
+   * By value, not by identity: `meta` hands out a fresh object per view.
+   */
+  function sameFrame(a: Quantisation | null, b: Quantisation | null): boolean {
+    return (
+      a !== null && b !== null && a.xMin === b.xMin && a.xMax === b.xMax && a.yMin === b.yMin && a.yMax === b.yMax
+    );
   }
 
   /**
@@ -487,10 +544,152 @@ export function createStore(options: StoreOptions): Store {
 
   // ---- session bring-up ---------------------------------------------------------------------
 
+  /**
+   * Build one view's machinery (`view-switching.md` §3), on its first visit and never again.
+   *
+   * Each part is bound to **this** view's id and frame, not to whichever view is current: the
+   * replica names it on every request, the channel asks under it, and the events they emit are
+   * dropped where the view is no longer the one being drawn — a held view emits nothing anybody
+   * reads, and cannot write the current view's projections. The session artifact table is the one
+   * thing handed in from outside: an ordinal indexes a colour rather than a position, so an
+   * artifact identity served in two views takes one ordinal and one colour (§3).
+   */
+  function buildView(id: string): ViewMachinery {
+    const m = meta;
+    if (!m) throw new Error('a view is built after meta');
+    const q = quantisationOf(id);
+    if (!q) throw new Error(`the bundle declares no view '${id}'`);
+    /** This view's own presenter, read by the fetch closure below; assigned a few lines on. */
+    let ownPresenter: Presenter | null = null;
+    const current = () => id === viewId;
+
+    const built = new Replica(
+      async (req, signal, background, onPart) => {
+        const tok = await ensureToken();
+        tokenEverUsed = true;
+        // The point path names the layers that are on, with their closure, and pays their pass
+        // (§5.10): that is what puts the membership column on each band. `[]` until a layer is on
+        // — and `[]` on the replica's counts-only revalidation, which absorbs no points and would
+        // pay the artifact pass for a frame nobody reads.
+        // The point path carries the same budget as the channel, so a point's membership column
+        // names the deepest artifact of the *same* cut the panels show.
+        const zoom = ownPresenter?.view?.view.zoom ?? 0;
+        return client.viewport(
+          tok,
+          {
+            ...req,
+            view: id,
+            filters: requestFilters(),
+            layers: req.k === 0 ? [] : layersOn,
+            ...(req.k === 0 || layersOn.length === 0 ? {} : {artifactBudget: artifactBudgetFor(zoom)}),
+            // The levels from the camera zoom, so the membership column names the same cut the
+            // channel asks for — and not the deepest level alone, which is what the server's
+            // depth-keyed default answers a budget-deepened request with (`requestLevels`).
+            ...(req.k === 0 || layersOn.length === 0 || requestLevels(m.layers, layersOn, zoom) === undefined ? {} : {levels: requestLevels(m.layers, layersOn, zoom)})
+          },
+          signal,
+          background,
+          onPart
+        );
+      },
+      q,
+      {
+        view: id,
+        table,
+        budget: bandBudget,
+        cache: options.replica?.cache,
+        revalidateAfterMs: options.replica?.revalidateAfterMs,
+        onPhase: (kind, ms, n) => {
+          options.replica?.onPhase?.(kind, ms, n);
+          // A stored slice is drawable now: the driver derives at most once per its gap while
+          // the response streams in, so the first marks arrive with the first slice.
+          if (kind === 'piece' || kind === 'store') ownPresenter?.absorbed();
+        },
+        now: () => clock.now()
+      }
+    );
+
+    ownPresenter = new Presenter(
+      built,
+      {
+        kMaxMarks: m.selection.kMaxMarks,
+        maxTilesPerRequest: m.maxTilesPerRequest,
+        thetaTargetMarks: m.selection.thetaTargetMarks
+      },
+      clock,
+      scheduler,
+      {
+        onPresented: (p) => {
+          if (current()) onPresented(p);
+        },
+        onStatus: (status, refusal) => {
+          if (current()) onStatus(status, refusal);
+        },
+        onTrace: (kind, fields) => {
+          if (current()) onTrace(kind, fields);
+        }
+      },
+      {budget, ...options.driver},
+      options.prefetch ?? true
+    );
+
+    const viewChannel = new ArtifactChannel(client, {
+      clock,
+      view: id,
+      quantisation: q,
+      token: () => token,
+      // The drawn depth, from the projection the frame handler has just replaced — the presenter's
+      // own handle is assigned after it hands the frame over, so it is one frame behind here. A
+      // view that is not current has no drawn depth in the projection and reads its own.
+      depth: () => (current() ? projections.view.depth : undefined) ?? ownPresenter?.frame?.depth,
+      maxTiles: m.maxTilesPerRequest,
+      table,
+      // The same composition the point path sends — the region leaf included, so an artifact's
+      // `matched` bit is *has a member inside the selection the filters admit*: a filtered view
+      // asks the server (the bit is per request, decision 0104), an unfiltered one over scopes
+      // held whole is served locally.
+      filters: () => requestFilters(),
+      // What classifies each layer for the fetch model — levelled and flat scopes may be held
+      // whole; treed ones ask per view always.
+      declarations: m.layers,
+      onChange: (state) => {
+        if (current()) onArtifacts(state);
+      }
+    });
+    // A `setLayers` that arrived before meta is honoured now: the channel is what asks, and it
+    // did not exist to be told. (Found by the artifacts smoke: the demo chooses its layer before
+    // opening the session's store, and the choice was lost on every principal switch.)
+    viewChannel.setLayers(layersOn);
+
+    const machinery: ViewMachinery = {id, replica: built, presenter: ownPresenter, channel: viewChannel};
+    perView.set(id, machinery);
+    return machinery;
+  }
+
+  /** This view's machinery, built on first visit (§3). */
+  function machineryFor(id: string): ViewMachinery {
+    return perView.get(id) ?? buildView(id);
+  }
+
+  /** Point the store's own handles at one view's machinery — the whole of what a switch changes. */
+  function bind(machinery: ViewMachinery): void {
+    replica = machinery.replica;
+    presenter = machinery.presenter;
+    channel = machinery.channel;
+  }
+
   async function warm(): Promise<void> {
     const t = await ensureToken();
     tokenEverUsed = true;
     meta = await client.meta(t);
+    // A `setCurrentView` before meta names the view to open with, in place of `options.view` (§3);
+    // an id the bundle does not declare is refused here exactly as it is afterwards.
+    if (queuedCurrentView !== null) {
+      const wanted = queuedCurrentView;
+      queuedCurrentView = null;
+      if (meta.views.some((v) => v.id === wanted)) viewId = wanted;
+      else onTrace('view-switch', {refused: 1, id: wanted});
+    }
     if (!viewId) viewId = meta.views[0]?.id ?? '';
     replaceProjection('meta', meta);
     replaceProjection('view', {...projections.view, id: viewId});
@@ -502,90 +701,7 @@ export function createStore(options: StoreOptions): Store {
     }
 
     layersOn = layerClosure(meta.layers, layersOn);
-    replica = new Replica(
-      async (req, signal, background, onPart) => {
-        const tok = await ensureToken();
-        tokenEverUsed = true;
-        // The point path names the layers that are on, with their closure, and pays their pass
-        // (§5.10): that is what puts the membership column on each band. `[]` until a layer is on
-        // — and `[]` on the replica's counts-only revalidation, which absorbs no points and would
-        // pay the artifact pass for a frame nobody reads.
-        // The point path carries the same budget as the channel, so a point's membership column
-        // names the deepest artifact of the *same* cut the panels show.
-        const zoom = presenter?.view?.view.zoom ?? 0;
-        return client.viewport(
-          tok,
-          {
-            ...req,
-            view: viewId,
-            filters: requestFilters(),
-            layers: req.k === 0 ? [] : layersOn,
-            ...(req.k === 0 || layersOn.length === 0 ? {} : {artifactBudget: artifactBudgetFor(zoom)}),
-            // The levels from the camera zoom, so the membership column names the same cut the
-            // channel asks for — and not the deepest level alone, which is what the server's
-            // depth-keyed default answers a budget-deepened request with (`requestLevels`).
-            ...(req.k === 0 || layersOn.length === 0 || !meta || requestLevels(meta.layers, layersOn, zoom) === undefined ? {} : {levels: requestLevels(meta.layers, layersOn, zoom)})
-          },
-          signal,
-          background,
-          onPart
-        );
-      },
-      frame(),
-      {
-        view: viewId,
-        table,
-        cacheBytes: options.replica?.cacheBytes,
-        cache: options.replica?.cache,
-        revalidateAfterMs: options.replica?.revalidateAfterMs,
-        onPhase: (kind, ms, n) => {
-          options.replica?.onPhase?.(kind, ms, n);
-          // A stored slice is drawable now: the driver derives at most once per its gap while
-          // the response streams in, so the first marks arrive with the first slice.
-          if (kind === 'piece' || kind === 'store') presenter?.absorbed();
-        },
-        now: () => clock.now()
-      }
-    );
-
-    presenter = new Presenter(
-      replica,
-      {
-        kMaxMarks: meta.selection.kMaxMarks,
-        maxTilesPerRequest: meta.maxTilesPerRequest,
-        thetaTargetMarks: meta.selection.thetaTargetMarks
-      },
-      clock,
-      scheduler,
-      {onPresented: (p) => onPresented(p), onStatus, onTrace},
-      {budget, ...options.driver},
-      options.prefetch ?? true
-    );
-
-    channel = new ArtifactChannel(client, {
-      clock,
-      view: viewId,
-      quantisation: frame(),
-      token: () => token,
-      // The drawn depth, from the projection the frame handler has just replaced — the presenter's
-      // own handle is assigned after it hands the frame over, so it is one frame behind here.
-      depth: () => projections.view.depth ?? presenter?.frame?.depth,
-      maxTiles: meta.maxTilesPerRequest,
-      table,
-      // The same composition the point path sends — the region leaf included, so an artifact's
-      // `matched` bit is *has a member inside the selection the filters admit*: a filtered view
-      // asks the server (the bit is per request, decision 0104), an unfiltered one over scopes
-      // held whole is served locally.
-      filters: () => requestFilters(),
-      // What classifies each layer for the fetch model — levelled and flat scopes may be held
-      // whole; treed ones ask per view always.
-      declarations: meta.layers,
-      onChange: onArtifacts
-    });
-    // A `setLayers` that arrived before meta is honoured now: the channel is what asks, and it
-    // did not exist to be told. (Found by the artifacts smoke: the demo chooses its layer before
-    // opening the session's store, and the choice was lost on every principal switch.)
-    channel.setLayers(layersOn);
+    bind(machineryFor(viewId));
 
     if (queuedView) {
       const q = queuedView;
@@ -677,6 +793,12 @@ export function createStore(options: StoreOptions): Store {
     // A frame on screen ends *Starting session…*: the session answered, whatever the driver's
     // status says about the request still streaming.
     if (!projections.status.sessionWarm && frame.exactDrawn + frame.provisional > 0) replaceProjection('status', {...projections.status, sessionWarm: true});
+    // A switch published `loading` over an empty frame; this one came from the view's own bands
+    // and no request will arrive to transition the status (`view-switching.md` §3).
+    if (awaitingSwitchFrame) {
+      awaitingSwitchFrame = false;
+      if (projections.status.status === 'loading') replaceProjection('status', {...projections.status, status: 'shown'});
+    }
     replaceProjection('view', {
       id: viewId,
       composition: frame,
@@ -706,15 +828,11 @@ export function createStore(options: StoreOptions): Store {
 
     if (replica) {
       const fetched = p.fetched;
-      replaceProjection('replica', {
-        bytes: replica.bytes,
-        points: replica.points,
-        bands: replica.bandCount,
-        views: replica.bandCount > 0 ? 1 : 0,
-        lastPlan: fetched
+      publishReplica(
+        fetched
           ? {held: fetched.plan.wanted - fetched.plan.novel, fetched: fetched.plan.novel}
           : projections.replica.lastPlan
-      });
+      );
     }
     if (stale !== projections.status.stale) {
       replaceProjection('status', {...projections.status, stale, sessionWarm: true});
@@ -733,6 +851,22 @@ export function createStore(options: StoreOptions): Store {
         replica: {bytes: replica.bytes, points: replica.points, bands: replica.bandCount}
       });
     }
+  }
+
+  /**
+   * The `replica` projection (`view-switching.md` §3): **`bytes` is the whole cache** — every
+   * view's bands, the figure the one budget bounds — and `views` how many views hold any band,
+   * which is what a default budget is measured against. `points` and `bands` are the current
+   * view's: they describe what is drawable now.
+   */
+  function publishReplica(lastPlan: ReplicaProjection['lastPlan']): void {
+    replaceProjection('replica', {
+      bytes: replica?.bytes ?? 0,
+      points: replica?.points ?? 0,
+      bands: replica?.bandCount ?? 0,
+      views: replica?.heldViews ?? 0,
+      lastPlan
+    });
   }
 
   function onArtifacts(state: ArtifactChannelState): void {
@@ -876,7 +1010,13 @@ export function createStore(options: StoreOptions): Store {
       if (ok) current++;
       else stale.push(band);
     }
-    const toAsk = stale.filter((b) => colourAsked.get(bandKey(b.depth, b.prefix)) !== a.version);
+    // **Nothing is asked for while a switch is settling.** `reschedule` re-enters the driver,
+    // which fires its leading edge for a view arriving from stillness — so a view the slider is
+    // passing through would ask here, outside the settle that exists to stop exactly that
+    // (`view-switching.md` §4). Not merely deferred but *not decided*: recording these bands as
+    // asked and then not asking would leave them stale until the served set moved. The frame the
+    // settled request draws runs this check again, with nothing pending.
+    const toAsk = switchTimer === null ? stale.filter((b) => colourAsked.get(bandKey(b.depth, b.prefix)) !== a.version) : [];
     for (const b of toAsk) colourAsked.set(bandKey(b.depth, b.prefix), a.version);
     if (toAsk.length > 0) {
       replica.retract(toAsk);
@@ -933,7 +1073,7 @@ export function createStore(options: StoreOptions): Store {
     const wanted = [...counts.keys()].filter((code) => !held.has(code));
     if (wanted.length === 0) return;
     try {
-      const resolved = await client.categories(token, column, {codes: wanted});
+      const resolved = await client.categories(token, column, {codes: wanted, view: viewId});
       const byCode = new Map((projections.legend.categories[column] ?? []).map((v) => [v.code, v]));
       for (const v of resolved) byCode.set(v.code, v);
       replaceProjection('legend', {
@@ -972,16 +1112,114 @@ export function createStore(options: StoreOptions): Store {
   // ---- verbs --------------------------------------------------------------------------------
 
   /**
-   * ⊘ The seam stub: the design's `setCurrentView` (`view-switching.md` §3) is built on the store
-   * track; until it lands a call is traced and nothing changes, so a component built against the
-   * interface neither throws nor switches.
+   * Make `id` the view the store answers from (`view-switching.md` §3–§4).
+   *
+   * **A pointer change, never a rebuild.** The machinery of the view being left is cancelled — a
+   * view that is not current has nothing in flight and no timer that could put something there
+   * (§8) — the machinery of the view being entered is built on its first visit, brought up to date
+   * from the shared fields, and bound; nothing re-subscribes and no component is told to.
+   *
+   * **The camera follows the frame, not the view.** Within a group every view quantises against
+   * one extent, so the camera, the depth rule and the selection carry over and the same tiles are
+   * asked for in the view arrived at. Across frames there is no camera to carry: the incoming view
+   * is published with none and the selection goes, because a selection is a shape in one frame's
+   * data coordinates. The map owns the camera, sees the frame change under `view.id`, refits and
+   * issues the `setView` that asks for what the refitted camera covers.
+   *
+   * An id `meta.views` does not list is **ignored and reported**, never a throw and never a guess
+   * at a neighbour: the pickers are built from `meta.views` and cannot produce one, a host's URL
+   * state can, and a wrong view id discloses nothing.
    */
   function setCurrentView(id: string): void {
-    options.instruments?.onTrace?.('view-switch', {refused: 1, id, reason: 'not built'});
+    if (!meta) {
+      // Queued as `setView` is, and applied at warm-up in place of `options.view`.
+      queuedCurrentView = id;
+      return;
+    }
+    if (id === viewId) return;
+    if (!meta.views.some((v) => v.id === id)) {
+      onTrace('view-switch', {refused: 1, id});
+      return;
+    }
+
+    const from = viewId;
+    const kept = sameFrame(quantisationOf(from), quantisationOf(id));
+
+    // Nothing of a view that is not current may be in flight, and nothing of it may be scheduled:
+    // a debounce left armed would put a request on the wire for a view nobody is looking at.
+    const outgoing = perView.get(from);
+    outgoing?.presenter.cancel();
+    outgoing?.channel.cancel();
+    if (switchTimer !== null) {
+      clock.cancel(switchTimer);
+      switchTimer = null;
+    }
+
+    viewId = id;
+    const incoming = machineryFor(id);
+    bind(incoming);
+    // Shared state reaches a view when it becomes current, rather than at every change: a change
+    // pushed to a held view would have it *ask* (§3).
+    incoming.channel.setLayers(layersOn);
+    incoming.presenter.setBudget(budget);
+    // The content key was the frame of another view's replica, and the colour refetch's record is
+    // per band key with no view axis — both are about what was drawn, and what was drawn is gone.
+    contentKeyAtFrame = '';
+    colourAsked.clear();
+    // A shape is generalised against the frame it was fetched under and names an artifact of one
+    // view's row space (§8: the client does not match artifact identity across views).
+    forgetShapes('all');
+
+    if (!kept) {
+      // No camera to carry, so no question to re-ask: `lastView` is the outgoing frame's bbox and
+      // means nothing here. The map's refit is what supplies the next one.
+      lastView = null;
+      selection = null;
+      regionVerdict = null;
+      replaceProjection('region', null);
+    }
+
+    // The `view` projection, immediately, with the new id and no marks: view A's marks must never
+    // be drawn under view B's frame, and the presenter of the view being entered was cancelled
+    // when it was left, so it holds nothing to publish yet.
+    replaceProjection('view', {id, composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, served: NO_COUNT, provisional: 0});
+    replaceProjection('marks', {...projections.marks, bands: [], standIn: [], count: NO_COUNT});
+    replaceProjection('tiles', {tiles: []});
+    // The artifacts of the view being entered — its own channel's state, which is empty for a
+    // cold view and its held served set for a warm one. Left alone, the projection would show the
+    // outgoing view's artifacts under the incoming view's id until that channel next answered,
+    // which on a cross-frame switch is not until the map has refitted: the list, the coverage
+    // score and every `tesseraId` lookup would be against another view's row space (§8).
+    onArtifacts(incoming.channel.current);
+    awaitingSwitchFrame = true;
+    replaceProjection('status', {...projections.status, status: 'loading', refusal: null, stale: false});
+    publishReplica(projections.replica.lastPlan);
+
+    if (kept && lastView) {
+      const v = toDriverView(lastView.input);
+      // What this view already holds for the camera, drawn without asking for anything — the
+      // return to a warm view is the cache's whole point. It reaches the projections on the next
+      // scheduler tick rather than inside this call, because deriving a frame is the presenter's
+      // work and the presenter coalesces to one paint per tick; nothing waits on the network. A
+      // cold view draws nothing, and the empty frame published above stands until the request
+      // below answers.
+      incoming.presenter.redraw({target: v.target, zoom: v.zoom}, v.width, v.height);
+      // And the request, after the settle: a slider stepping through five views issues one
+      // request, for the fifth (§4).
+      switchTimer = clock.after(VIEW_SETTLE_MS, () => {
+        switchTimer = null;
+        if (lastView) setView(lastView.input);
+      });
+    }
+
+    onTrace('view-switch', {from, to: id, sameFrame: kept ? 1 : 0});
   }
 
   function setView(input: ViewInput): void {
     lastView = {input};
+    // A request answers for the status from here on: the driver transitions on its own, and the
+    // partial frames it presents on the way are not the switch's cache-derived frame.
+    awaitingSwitchFrame = false;
     if (!meta || !presenter) {
       // A setView before meta has arrived is queued (§4).
       queuedView = input;
@@ -1010,6 +1248,15 @@ export function createStore(options: StoreOptions): Store {
   function requery(): void {
     presenter?.cancel();
     replica?.reset();
+    // A filter and a selection are shared, so a held view's bands answer the question that has
+    // just changed as surely as this view's do (`view-switching.md` §3). They are dropped now
+    // rather than at the switch, so no view is ever drawn under a filter it was not fetched
+    // under; a held view asks for nothing here, and refills when it is next current.
+    for (const held of perView.values()) {
+      if (held.id === viewId) continue;
+      held.presenter.cancel();
+      held.replica.reset();
+    }
     contentKeyAtFrame = '';
     if (lastView) setView(lastView.input);
   }
@@ -1038,7 +1285,7 @@ export function createStore(options: StoreOptions): Store {
     if (enumerating.has(column)) return;
     enumerating.add(column);
     try {
-      const values = await client.categories(token, column);
+      const values = await client.categories(token, column, {view: viewId});
       if (disposed) return;
       values.sort((a, b) => a.key.localeCompare(b.key));
       replaceProjection('filters', {...projections.filters, values: {...projections.filters.values, [column]: values}});
@@ -1402,9 +1649,18 @@ export function createStore(options: StoreOptions): Store {
   }
 
   function clear(): void {
-    presenter?.cancel();
-    channel?.reset();
-    replica?.reset();
+    // **Every held view, not the current one alone**: a mask change invalidates all of them
+    // (`view-switching.md` §4), and a view left warm across it would draw the previous
+    // principal's marks the moment it was returned to.
+    for (const held of perView.values()) {
+      held.presenter.cancel();
+      held.channel.reset();
+      held.replica.reset();
+    }
+    if (switchTimer !== null) {
+      clock.cancel(switchTimer);
+      switchTimer = null;
+    }
     table.clear();
     forgetShapes('all');
     contentKeyAtFrame = '';
@@ -1415,6 +1671,7 @@ export function createStore(options: StoreOptions): Store {
     selection = null;
     regionVerdict = null;
     replaceProjection('region', null);
+    publishReplica(null);
   }
 
   function refresh(): void {
@@ -1429,8 +1686,12 @@ export function createStore(options: StoreOptions): Store {
 
   function dispose(): void {
     disposed = true;
-    presenter?.cancel();
-    channel?.cancel();
+    for (const held of perView.values()) {
+      held.presenter.cancel();
+      held.channel.cancel();
+    }
+    if (switchTimer !== null) clock.cancel(switchTimer);
+    switchTimer = null;
     if (renewTimer) clock.cancel(renewTimer);
     client.close();
   }
