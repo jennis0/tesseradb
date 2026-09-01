@@ -69,12 +69,9 @@
 /// multiple of it, which a per-node map insert would have been.
 #[derive(Debug)]
 pub struct Lineage {
-    /// The parent direction as a CSR: `parents[parent_at[u]..parent_at[u + 1]]`, ascending and
-    /// without duplicates — a duplicate edge is one edge, whichever spelling stated it
-    /// (`dag-hierarchies.md` §4). A tree's lists are at most one long. `parent_at` spans every
-    /// ordinal that names a parent or is named as one; an ordinal past its end has no parents.
-    parent_at: Vec<u32>,
-    parents: Vec<u32>,
+    /// The parent direction — see [`Parents`]. Spans every ordinal that names a parent or is
+    /// named as one; an ordinal past its end has no parents.
+    parents: Parents,
     /// `depth[ordinal]`: **the longest path from a root**, the root being 0 (`dag-hierarchies.md`
     /// §5) — resolved once for the whole level when the lineage is built, rather than per request.
     ///
@@ -113,6 +110,25 @@ pub struct Lineage {
     dag: bool,
 }
 
+/// The parent direction, in the shape the kind needs.
+///
+/// **A tree keeps one `u32` per ordinal**, because that is what the cut's cost rests on: every
+/// sweep in [`Plan::new`] reads a node's parents, and at a level of ten million a CSR read — two
+/// offsets and a bounds check — in place of one word measured as +55% on the whole cut and 2.5×
+/// on the lineage build. A DAG pays the CSR, which is the shape its lists need; a tree does not
+/// pay for a shape it never uses.
+#[derive(Debug)]
+enum Parents {
+    /// `parent[ordinal]`, [`NO_PARENT`] at a root.
+    Tree(Vec<u32>),
+    /// `list[at[u]..at[u + 1]]`, ascending and without duplicates — a duplicate edge is one
+    /// edge, whichever spelling stated it (`dag-hierarchies.md` §4).
+    Dag { at: Vec<u32>, list: Vec<u32> },
+}
+
+/// A tree's slot at a root.
+const NO_PARENT: u32 = u32::MAX;
+
 impl Lineage {
     /// Build a **tree's** lineage from `(ordinal, parents)` pairs — every artifact of the level,
     /// not only the passing ones, since the level's edges are a property of the level. A parent
@@ -140,6 +156,9 @@ impl Lineage {
     where
         P: IntoIterator<Item = u32>,
     {
+        if !dag {
+            return Self::build_tree(pairs);
+        }
         // The edge list, `(child, parent)`, then a counting sort into the CSR. A self-edge is
         // refused at both entry points (`dag-hierarchies.md` §4); one arriving anyway is dropped
         // here rather than read as a cycle of length one.
@@ -192,13 +211,15 @@ impl Lineage {
         parents.truncate(write);
         let parent_at = read_at;
 
-        let depth = Self::depths(&parent_at, &parents);
+        let depth = Self::dag_depths(&parent_at, &parents);
         let roots = (0..span as u32)
             .filter(|&n| parent_at[n as usize] == parent_at[n as usize + 1])
             .collect();
         Lineage {
-            parent_at,
-            parents,
+            parents: Parents::Dag {
+                at: parent_at,
+                list: parents,
+            },
             depth,
             edges,
             child_index: std::sync::OnceLock::new(),
@@ -207,37 +228,89 @@ impl Lineage {
         }
     }
 
+    /// A tree's build: one linear fill of a word per ordinal. A list longer than one on a tree
+    /// is refused at both entry points; one arriving anyway keeps its last entry, so the table
+    /// stays a tree and the walks stay bounded.
+    fn build_tree<P>(pairs: impl IntoIterator<Item = (u32, P)>) -> Self
+    where
+        P: IntoIterator<Item = u32>,
+    {
+        let mut parent: Vec<u32> = Vec::new();
+        let mut edges = 0usize;
+        for (ordinal, of) in pairs {
+            for up in of {
+                if up == ordinal {
+                    continue;
+                }
+                let need = (ordinal as usize).max(up as usize) + 1;
+                if parent.len() < need {
+                    parent.resize(need, NO_PARENT);
+                }
+                if parent[ordinal as usize] == NO_PARENT {
+                    edges += 1;
+                }
+                parent[ordinal as usize] = up;
+            }
+        }
+        let depth = Self::tree_depths(&parent, edges);
+        let roots = (0..parent.len() as u32)
+            .filter(|&n| parent[n as usize] == NO_PARENT)
+            .collect();
+        Lineage {
+            parents: Parents::Tree(parent),
+            depth,
+            edges,
+            child_index: std::sync::OnceLock::new(),
+            roots,
+            dag: false,
+        }
+    }
+
     /// How many ordinals the parent table spans — every ordinal that names or is named as a
     /// parent. An ordinal at or past this has no parents and no children.
     fn span(&self) -> usize {
-        self.parent_at.len() - 1
+        match &self.parents {
+            Parents::Tree(parent) => parent.len(),
+            Parents::Dag { at, .. } => at.len() - 1,
+        }
     }
 
     /// The parents of `ordinal`, ascending; empty at a root and at an ordinal this level does
-    /// not hold.
+    /// not hold. On a tree this is the one word's slot, borrowed, and never a list built.
+    #[inline]
     pub fn parents_of(&self, ordinal: u32) -> &[u32] {
         let at = ordinal as usize;
-        if at >= self.span() {
-            return &[];
+        match &self.parents {
+            Parents::Tree(parent) => match parent.get(at) {
+                Some(up) if *up != NO_PARENT => std::slice::from_ref(up),
+                _ => &[],
+            },
+            Parents::Dag { at: offsets, list } => {
+                if at + 1 >= offsets.len() {
+                    return &[];
+                }
+                &list[offsets[at] as usize..offsets[at + 1] as usize]
+            }
         }
-        &self.parents[self.parent_at[at] as usize..self.parent_at[at + 1] as usize]
     }
 
-    /// The child direction as a CSR — one counting pass and one fill over the parent CSR.
-    fn children_of(parent_at: &[u32], parents: &[u32]) -> (Vec<u32>, Vec<u32>) {
-        let span = parent_at.len() - 1;
+    /// The child direction as a CSR — one counting pass and one fill over the parent direction.
+    fn children_of(&self) -> (Vec<u32>, Vec<u32>) {
+        let span = self.span();
         let mut child_at = vec![0u32; span + 1];
-        for &up in parents {
-            child_at[up as usize + 1] += 1;
+        for node in 0..span as u32 {
+            for &up in self.parents_of(node) {
+                child_at[up as usize + 1] += 1;
+            }
         }
         for slot in 1..=span {
             child_at[slot] += child_at[slot - 1];
         }
         let mut cursor = child_at.clone();
-        let mut children = vec![0u32; parents.len()];
-        for node in 0..span {
-            for &up in &parents[parent_at[node] as usize..parent_at[node + 1] as usize] {
-                children[cursor[up as usize] as usize] = node as u32;
+        let mut children = vec![0u32; self.edges];
+        for node in 0..span as u32 {
+            for &up in self.parents_of(node) {
+                children[cursor[up as usize] as usize] = node;
                 cursor[up as usize] += 1;
             }
         }
@@ -246,9 +319,7 @@ impl Lineage {
 
     /// The children of `ordinal`, ascending — building the index on the first call.
     fn children_of_node(&self, ordinal: u32) -> &[u32] {
-        let (child_at, children) = self
-            .child_index
-            .get_or_init(|| Self::children_of(&self.parent_at, &self.parents));
+        let (child_at, children) = self.child_index.get_or_init(|| self.children_of());
         let at = ordinal as usize;
         if at + 1 >= child_at.len() {
             return &[];
@@ -256,19 +327,56 @@ impl Lineage {
         &children[child_at[at] as usize..child_at[at + 1] as usize]
     }
 
-    /// Every ordinal's depth — the longest path from a root — resolved in one pass with the
-    /// ancestors memoised.
+    /// A tree's depths, resolved in one pass with the ancestors memoised.
     ///
     /// **Ancestors are shared, so depth is the quantity most worth memoising.** A balanced tree's
     /// lineages all pass through the same handful of nodes near the root, and computing each node's
     /// depth by walking to the root would re-walk that spine once per descendant — the depth of the
-    /// tree multiplied by the number of nodes, for an answer that never changes.
-    ///
-    /// A depth-first pass over the parent lists, iterative so a ten-million-node chain does not
-    /// recurse ten million deep. The cycle guard is the in-progress mark: the build and the mint
-    /// refuse a cycle, and a hand-written WAL is not a build, so a parent still in progress when
-    /// its child is resolved contributes nothing rather than looping.
-    fn depths(parent_at: &[u32], parents: &[u32]) -> Vec<u32> {
+    /// tree multiplied by the number of nodes, for an answer that never changes. The cycle guard
+    /// is the edge count: the build and the mint refuse a cycle, and a hand-written WAL is not a
+    /// build.
+    fn tree_depths(parent: &[u32], edges: usize) -> Vec<u32> {
+        const UNKNOWN: u32 = u32::MAX;
+        let mut known = vec![UNKNOWN; parent.len()];
+        let mut stack: Vec<u32> = Vec::new();
+        for node in 0..parent.len() as u32 {
+            if known[node as usize] != UNKNOWN {
+                continue;
+            }
+            stack.clear();
+            let mut at = node;
+            // Climb to the first node whose depth is already known, or to a root.
+            let base = loop {
+                let up = parent[at as usize];
+                if up == NO_PARENT {
+                    known[at as usize] = 0;
+                    break 0;
+                }
+                if stack.len() > edges {
+                    known[at as usize] = 0;
+                    break 0;
+                }
+                stack.push(at);
+                if known[up as usize] != UNKNOWN {
+                    break known[up as usize];
+                }
+                at = up;
+            };
+            // Unwind, deepest last: each node is one below the one above it.
+            let mut d = base;
+            for &n in stack.iter().rev() {
+                d += 1;
+                known[n as usize] = d;
+            }
+        }
+        known
+    }
+
+    /// A DAG's depths — the longest path from a root — in one depth-first pass over the parent
+    /// lists, iterative so a ten-million-node chain does not recurse ten million deep. The cycle
+    /// guard is the in-progress mark: a parent still in progress when its child is resolved
+    /// contributes nothing rather than looping.
+    fn dag_depths(parent_at: &[u32], parents: &[u32]) -> Vec<u32> {
         const UNKNOWN: u32 = u32::MAX;
         const PENDING: u32 = u32::MAX - 1;
         let span = parent_at.len() - 1;
@@ -499,14 +607,25 @@ impl Lineages {
 /// frontier walk of 12 ms and side tables of 2 ms, so the storage was the whole cost and not the
 /// arithmetic.
 struct Plan {
-    /// The passing nodes of each **rung** — passing-depth — ascending within a rung, so a cut at
-    /// depth *d* reads `by_rung[0..=d]` and never touches the rest of the level.
+    /// The passing nodes bucketed by **rung** — passing-depth — as a CSR, ascending within a
+    /// rung: `by_rung[rung_at[r]..rung_at[r + 1]]`. A cut at depth *d* reads the first *d + 1*
+    /// buckets and never touches the rest of the level.
     ///
     /// **This is what keeps the answer proportional to itself.** A budget forces a shallow cut, so
     /// the served set is the top of the tree: 729 artifacts out of ten million in the measured case.
     /// An earlier revision built one interval per *servable* node — three arrays of ten million,
     /// 120 MB — and then scanned all of them to pick those 729, which was 83 ms of the cut's 262.
-    by_rung: Vec<Vec<u32>>,
+    ///
+    /// A counting sort rather than a vector per rung — the counts fall out of the rung sweep and
+    /// the placement out of the `until` sweep, where growing seven million entries through
+    /// per-bucket reallocation in a pass of their own measured 62 ms of the plan's 209. Placed in
+    /// sweep order, not ordinal order, which is why [`Plan::serve_at`] sorts what it serves.
+    rung_at: Vec<u32>,
+    by_rung: Vec<u32>,
+    /// The heads, ascending — the answer at the deepest rung and at every depth past it, which
+    /// is the unbudgeted cut. Held so that answer is a copy rather than a read of every bucket
+    /// and a sort of the level's frontier.
+    heads: Vec<u32>,
     /// Per ordinal, the first depth at which it is **no longer** served, because a passing node
     /// beneath it has become reachable in some lineage that was picking it. `u32::MAX` for a
     /// frontier node, which is picked at every depth from its own downward.
@@ -515,8 +634,12 @@ struct Plan {
     counts: Vec<u32>,
 }
 
-/// The value of a node's passing-depth slot while no passing ancestor has been found on any path.
-const NO_PASSING_ABOVE: u32 = u32::MAX;
+/// A node's rung slot while no passing ancestor has been found on any path. **Zero, so the table
+/// is zero-initialised**: a `vec![0; span]` of forty megabytes is a lazily-mapped allocation,
+/// where any other fill value is a write of every page before the first sweep — most of the
+/// difference at a level where a few thousand pass and every array is the level's size. Rungs
+/// are therefore stored one above their value in this table.
+const NO_PASSING_ABOVE: u32 = 0;
 
 impl Plan {
     /// `prune` is the layer's `prune_children`: with it, only the frontier contributes — where a
@@ -563,18 +686,43 @@ impl Plan {
         // since a node is expanded at most once.
         let mut covered = vec![false; span];
         let mut climbed = vec![false; span];
-        let mut stack: Vec<u32> = Vec::new();
-        for &node in sorted {
-            stack.push(node);
-            while let Some(at) = stack.pop() {
-                for &up in lineage.parents_of(at) {
-                    let u = up as usize;
-                    if is_passing[u] {
-                        covered[u] = true;
-                    }
-                    if !climbed[u] {
+        match &lineage.parents {
+            // A tree's climb is the chain, one word per step.
+            Parents::Tree(parent) => {
+                for &node in sorted {
+                    let mut at = node;
+                    loop {
+                        let up = parent.get(at as usize).copied().unwrap_or(NO_PARENT);
+                        if up == NO_PARENT {
+                            break;
+                        }
+                        let u = up as usize;
+                        if is_passing[u] {
+                            covered[u] = true;
+                        }
+                        if climbed[u] {
+                            break;
+                        }
                         climbed[u] = true;
-                        stack.push(up);
+                        at = up;
+                    }
+                }
+            }
+            Parents::Dag { .. } => {
+                let mut stack: Vec<u32> = Vec::new();
+                for &node in sorted {
+                    stack.push(node);
+                    while let Some(at) = stack.pop() {
+                        for &up in lineage.parents_of(at) {
+                            let u = up as usize;
+                            if is_passing[u] {
+                                covered[u] = true;
+                            }
+                            if !climbed[u] {
+                                climbed[u] = true;
+                                stack.push(up);
+                            }
+                        }
                     }
                 }
             }
@@ -586,10 +734,14 @@ impl Plan {
         // **Marked, not collected.** Materialising them cost 34 ms of the pass at a level of ten
         // million: six and a half million ordinals into a 27 MB vector, to answer a question that
         // is one array read wherever it is asked.
+        //
+        // The heads are also collected here, ascending — see [`Plan::heads`].
         let mut is_head = vec![false; span];
+        let mut heads: Vec<u32> = Vec::new();
         for &n in sorted {
             if !prune || !covered[n as usize] {
                 is_head[n as usize] = true;
+                heads.push(n);
             }
         }
 
@@ -641,70 +793,110 @@ impl Plan {
         // withheld node occupy no rung. A node with no passing ancestor on any path is a root of
         // the viewer's tree and served from depth zero: that is the fallback rule of
         // `annotations.md` §6, and under this counting it is not a special case.
+        // `rung[n]` holds the rung **plus one** (see [`NO_PASSING_ABOVE`]). The passing nodes per
+        // rung are counted here, where the rung is in hand, so the bucketing below is one fill.
+        //
+        // **The two sweeps read the parent direction in its own shape.** On a tree that is one
+        // word per node; going through the slice `parents_of` returns costs a discriminant test
+        // and a bounds check per node in the two hottest loops here, which measured as the
+        // difference between the old plan and this one at a level of ten million.
+        let tree: Option<&[u32]> = match &lineage.parents {
+            Parents::Tree(parent) => Some(parent),
+            Parents::Dag { .. } => None,
+        };
         let mut rung = vec![NO_PASSING_ABOVE; span];
-        let mut deepest_rung = 0u32;
+        let mut per_rung: Vec<u32> = Vec::new();
         for level in &by_depth {
             for &node in level {
                 let n = node as usize;
                 let mut above = NO_PASSING_ABOVE;
-                for &up in lineage.parents_of(node) {
-                    let r = rung[up as usize];
-                    if r != NO_PASSING_ABOVE && (above == NO_PASSING_ABOVE || r > above) {
-                        above = r;
+                match tree {
+                    Some(parent) => {
+                        let up = parent.get(n).copied().unwrap_or(NO_PARENT);
+                        if up != NO_PARENT {
+                            above = rung[up as usize];
+                        }
+                    }
+                    None => {
+                        for &up in lineage.parents_of(node) {
+                            above = above.max(rung[up as usize]);
+                        }
                     }
                 }
                 rung[n] = if is_passing[n] {
-                    let r = if above == NO_PASSING_ABOVE {
-                        0
-                    } else {
-                        above + 1
-                    };
-                    deepest_rung = deepest_rung.max(r);
-                    r
+                    // A root of the viewer's tree is rung 0, stored as 1; a child is one deeper
+                    // than the deepest rung above it.
+                    if per_rung.len() <= above as usize {
+                        per_rung.resize(above as usize + 1, 0);
+                    }
+                    per_rung[above as usize] += 1;
+                    above + 1
                 } else {
                     above
                 };
             }
         }
+        let deepest_rung = per_rung.len().saturating_sub(1) as u32;
 
         // **Deepest first: when does a node stop being anybody's pick?** When a passing node
         // beneath it becomes reachable — so the answer is the *latest* such rung over the lineages
         // running through it, which is a max accumulated into every parent. A withheld node hands
         // its own maximum upward, so the next passing node below is found through it.
+        //
+        // **A node's `until` is final when this sweep reaches it** — every child is deeper and
+        // was visited first — so its interval is closed in the same visit: the node is placed in
+        // its rung's bucket and the per-depth counts take its `[from, until)` into a difference
+        // array, so the budget search is answered without materialising a single cut and there
+        // is no third sweep. A head is picked at every depth from its own downward, so its
+        // interval is open at the top; written into `until` rather than carried beside it,
+        // because the parents read a passing node's rung and never its `until`.
+        let mut rung_at = vec![0u32; deepest_rung as usize + 2];
+        for (r, &n) in per_rung.iter().enumerate() {
+            rung_at[r + 1] = rung_at[r] + n;
+        }
+        let mut cursor = rung_at.clone();
+        let mut by_rung = vec![0u32; rung_at[deepest_rung as usize + 1] as usize];
+        let mut delta = vec![0i64; deepest_rung as usize + 2];
         let mut until = vec![0u32; span];
         for level in by_depth.iter().rev() {
             for &node in level {
                 let n = node as usize;
-                let contribution = if is_passing[n] { rung[n] } else { until[n] };
-                for &up in lineage.parents_of(node) {
-                    let at = &mut until[up as usize];
-                    *at = (*at).max(contribution);
+                let contribution = if is_passing[n] {
+                    let lo = rung[n] - 1;
+                    if is_head[n] {
+                        until[n] = u32::MAX;
+                    }
+                    let hi = until[n];
+                    by_rung[cursor[lo as usize] as usize] = node;
+                    cursor[lo as usize] += 1;
+                    // A passing node beneath another sits at a deeper rung, so `lo < hi` holds
+                    // by construction; the guard is for a malformed level's cycle, whose node
+                    // is placed and never served.
+                    if lo < hi {
+                        delta[lo as usize] += 1;
+                        if (hi as usize) < delta.len() {
+                            delta[hi as usize] -= 1;
+                        }
+                    }
+                    lo
+                } else {
+                    until[n]
+                };
+                match tree {
+                    Some(parent) => {
+                        let up = parent.get(n).copied().unwrap_or(NO_PARENT);
+                        if up != NO_PARENT {
+                            let at = &mut until[up as usize];
+                            *at = (*at).max(contribution);
+                        }
+                    }
+                    None => {
+                        for &up in lineage.parents_of(node) {
+                            let at = &mut until[up as usize];
+                            *at = (*at).max(contribution);
+                        }
+                    }
                 }
-            }
-        }
-
-        // The intervals, and the per-depth counts accumulated from them into a difference array —
-        // so the budget search is answered without materialising a single cut, and without an
-        // array over the ordinal space to scan for it afterwards. A head is picked at every depth
-        // from its own downward, so its interval is open at the top; written into `until` rather
-        // than carried beside it, because the sweep that filled `until` has already run and
-        // nothing below reads the old value.
-        let mut by_rung: Vec<Vec<u32>> = vec![Vec::new(); deepest_rung as usize + 1];
-        let mut delta = vec![0i64; deepest_rung as usize + 2];
-        for &node in sorted {
-            let n = node as usize;
-            let lo = rung[n];
-            if is_head[n] {
-                until[n] = u32::MAX;
-            }
-            let hi = until[n];
-            if lo >= hi {
-                continue;
-            }
-            by_rung[lo as usize].push(node);
-            delta[lo as usize] += 1;
-            if (hi as usize) < delta.len() {
-                delta[hi as usize] -= 1;
             }
         }
         let mut counts = Vec::with_capacity(deepest_rung as usize + 1);
@@ -715,7 +907,9 @@ impl Plan {
         }
 
         Plan {
+            rung_at,
             by_rung,
+            heads,
             until,
             counts,
         }
@@ -747,17 +941,20 @@ impl Plan {
         // and a head's interval is open at the top. Comparing against `u32::MAX` itself would
         // exclude exactly the nodes an unbounded depth is meant to serve.
         let depth = depth.min(self.deepest());
+        if depth == self.deepest() {
+            // Every head is served at the deepest rung and nothing else is, so the unbudgeted
+            // cut is the frontier itself — already ascending, and no bucket is read for it.
+            return self.heads.clone();
+        }
         // **Only the rungs a cut here can reach.** Every node served at `depth` sits at or above
         // it, so the deeper buckets are never read: at a budget that settles on depth six over a
         // ten-million-artifact level, that is a thousand nodes examined rather than ten million.
-        let mut served: Vec<u32> = Vec::new();
-        for level in self.by_rung.iter().take(depth as usize + 1) {
-            for &node in level {
-                if depth < self.until[node as usize] {
-                    served.push(node);
-                }
-            }
-        }
+        let end = self.rung_at[depth as usize + 1] as usize;
+        let mut served: Vec<u32> = self.by_rung[..end]
+            .iter()
+            .copied()
+            .filter(|&node| depth < self.until[node as usize])
+            .collect();
         served.sort_unstable();
         served
     }

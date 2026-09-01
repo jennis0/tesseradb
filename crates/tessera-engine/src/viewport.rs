@@ -1617,29 +1617,29 @@ impl Engine {
         // function of the view's projection and the view's own frame together — both declared per
         // view — and it is derived here rather than at the wire so that the ingest plane, which
         // reads this same structure, cannot come to a different answer about the same bundle.
-        let meta_view =
-            |s: &tessera_store::manifest::ViewDescriptor, roster: Option<MetaRoster>| MetaView {
-                id: s.id.clone(),
-                display_name: s.display_name.clone(),
-                quantisation: s.quantisation,
-                projection: s.projection,
-                tile: tessera_spatial::frame::tile_scheme(
-                    s.projection,
-                    &Bounds {
-                        x_min: s.quantisation.x_min,
-                        x_max: s.quantisation.x_max,
-                        y_min: s.quantisation.y_min,
-                        y_max: s.quantisation.y_max,
-                    },
-                )
-                .map(|(scheme, square)| TileAddress {
-                    scheme,
-                    z: square.z,
-                    x: square.x,
-                    y: square.y,
-                }),
-                roster,
-            };
+        let meta_view = |s: &tessera_store::manifest::ViewDescriptor,
+                         roster: Option<MetaRoster>| MetaView {
+            id: s.id.clone(),
+            display_name: s.display_name.clone(),
+            quantisation: s.quantisation,
+            projection: s.projection,
+            tile: tessera_spatial::frame::tile_scheme(
+                s.projection,
+                &Bounds {
+                    x_min: s.quantisation.x_min,
+                    x_max: s.quantisation.x_max,
+                    y_min: s.quantisation.y_min,
+                    y_max: s.quantisation.y_max,
+                },
+            )
+            .map(|(scheme, square)| TileAddress {
+                scheme,
+                z: square.z,
+                x: square.x,
+                y: square.y,
+            }),
+            roster,
+        };
         // **Serving order is the roster's order** (`views.md` §3.2): the plain views in manifest
         // order, then each group's views in creation order — which is the order the roster
         // records themselves are in, a build's declarations first and each create appended after
@@ -6022,31 +6022,37 @@ impl Engine {
         // cut, the content withholds and the dependent drop, because those are what make the
         // forest response-local: a row whose ancestors were pruned, withheld or cut away is a root
         // of its subtree and reads 0, whatever its depth in the stored tree.
-        if !treed.is_empty() {
-            let parents_of: std::collections::HashMap<u64, Vec<u64>> = served
-                .iter()
-                .filter(|a| treed.contains(&a.layer))
-                .map(|a| {
-                    (
-                        a.tessera_id.raw(),
-                        a.parent_ids.iter().map(|p| p.raw()).collect(),
-                    )
-                })
-                .collect();
-            let rungs = response_rungs(&parents_of);
-            for artifact in served.iter_mut().filter(|a| treed.contains(&a.layer)) {
-                artifact.rung = rungs.get(&artifact.tessera_id.raw()).copied().unwrap_or(0);
-            }
+        //
+        // **Settled before the membership column's served set is handed over**, because the
+        // column ranks by this rung and never by the stored depth: the stored depth counts
+        // withheld nodes, so two served artifacts holding one point would be ordered by an
+        // artifact the viewer cannot see (`dag-hierarchies.md` §6, decision 0117 E).
+        let parents_of: std::collections::HashMap<u64, Vec<u64>> = served
+            .iter()
+            .filter(|a| treed.contains(&a.layer))
+            .map(|a| {
+                (
+                    a.tessera_id.raw(),
+                    a.parent_ids.iter().map(|p| p.raw()).collect(),
+                )
+            })
+            .collect();
+        let rungs = response_rungs(&parents_of);
+        for artifact in served.iter_mut().filter(|a| treed.contains(&a.layer)) {
+            artifact.rung = rungs.get(&artifact.tessera_id.raw()).copied().unwrap_or(0);
         }
         // **The membership column's served set is `served_at` after the drop** — exactly the
-        // artifacts in `served`, and the only identifiers the column can name.
+        // artifacts in `served`, and the only identifiers the column can name — each with its
+        // response-local rung (0 on a layer whose rung is its declared level, which the level
+        // index already ranks).
         for ((name, level, ordinal), tessera_id) in &served_at {
             if let Some(slot) = served_layers
                 .iter_mut()
                 .find(|l| &l.name == name)
                 .and_then(|l| l.levels.iter_mut().find(|l| l.level == *level))
             {
-                slot.served.insert(*ordinal, *tessera_id);
+                let rung = rungs.get(&tessera_id.raw()).copied().unwrap_or(0);
+                slot.served.insert(*ordinal, (*tessera_id, rung));
             }
         }
         Ok((served, served_layers))

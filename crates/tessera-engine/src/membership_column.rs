@@ -42,6 +42,13 @@
 //! levels names the one at the higher index, and within a level the one deeper in the lineage.
 //! A treed layer sits entirely at level 0 and has only the second half.
 //!
+//! **"Deeper" is the response-local rung, never the stored depth.** The stored depth counts every
+//! node of the level, withheld ones included, so ranking by it would order two served artifacts
+//! by an artifact the viewer cannot see — `R → X → A` and `R → B`, `X` withheld, a point in all
+//! three: by stored depth `A` outranks `B`; with `X` never having existed they tie and the lower
+//! identifier wins. The rung is counted over the response's own links (decision 0117 E), so the
+//! answer is the same in both worlds.
+//!
 //! **A tie is broken by the lowest `tessera_id`** (`dag-hierarchies.md` §6). On a tree the deepest
 //! served artifact holding a point is unique; on a DAG, and on a flat layer with multi-membership,
 //! two served artifacts may hold the point at one depth, and a rule that took whichever the
@@ -78,9 +85,10 @@ pub(crate) struct ServedLevel {
     pub level: u32,
     pub rows: Arc<ArtifactRows>,
     pub lineage: Arc<Lineage>,
-    /// Ordinal → identifier, for **exactly** the artifacts of this level in the response's
-    /// artifacts frame. Filled after the dependent drop, so a label whose target went is not here.
-    pub served: HashMap<u32, TesseraId>,
+    /// Ordinal → identifier and response-local rung, for **exactly** the artifacts of this level
+    /// in the response's artifacts frame. Filled after the dependent drop and after the rungs are
+    /// settled, so a label whose target went is not here and the rank reads nothing stored.
+    pub served: HashMap<u32, (TesseraId, u32)>,
 }
 
 /// One layer this response served artifacts from, with its served levels.
@@ -150,9 +158,9 @@ impl Resolved {
     }
 }
 
-/// The rank a candidate wins by: the finest level first, then the deepest in its lineage, then
-/// the **lowest** identifier — a total order, so the answer is the same whichever route found
-/// the candidates and in whatever order it met them.
+/// The rank a candidate wins by: the finest level first, then the deepest **rung** in the
+/// response's own forest, then the **lowest** identifier — a total order, so the answer is the
+/// same whichever route found the candidates and in whatever order it met them.
 type Rank = (u32, u32, Reverse<u64>);
 
 fn resolve_layer(rows: &[u32], bitmap: &Bitmap, layer: &ServedLayer) -> Vec<Option<u64>> {
@@ -171,11 +179,12 @@ fn resolve_layer(rows: &[u32], bitmap: &Bitmap, layer: &ServedLayer) -> Vec<Opti
             level
                 .served
                 .get(&ordinal)
-                .map(|id| (level.level, level.lineage.depth(ordinal), Reverse(id.raw())))
+                .map(|&(id, rung)| (level.level, rung, Reverse(id.raw())))
         };
         match level.rows.column() {
             // Row-major: the point's leaf, then the best-ranked served ancestor-or-self of it
-            // over every path.
+            // over every path. The stored lineage is climbed only to *find* the served
+            // ancestors; what ranks them is the response's own rung.
             Some(column) => {
                 for (i, &row) in rows.iter().enumerate() {
                     column.for_each_label(row, |leaf| {
@@ -190,11 +199,11 @@ fn resolve_layer(rows: &[u32], bitmap: &Bitmap, layer: &ServedLayer) -> Vec<Opti
             // Artifact-major: each served artifact's rows against the response's, one
             // intersection per served artifact.
             None => {
-                for (&ordinal, &id) in &level.served {
+                for (&ordinal, &(id, rung)) in &level.served {
                     let Some(members) = level.rows.get(ordinal) else {
                         continue;
                     };
-                    let rank = (level.level, level.lineage.depth(ordinal), Reverse(id.raw()));
+                    let rank = (level.level, rung, Reverse(id.raw()));
                     for row in members.and(bitmap).iter() {
                         if let Ok(i) = rows.binary_search(&row) {
                             consider(i, rank);
@@ -215,6 +224,36 @@ mod tests {
     use crate::row_column::RowColumn;
     use tessera_types::layer::ServingLayout;
 
+    /// Served artifacts with their response-local rung: the longest chain to each through the
+    /// served set alone, which is what the serving path computes over the response's links.
+    fn with_rungs(lineage: &Lineage, served: &[(u32, u64)]) -> Vec<(u32, u64, u32)> {
+        fn rung(o: u32, lineage: &Lineage, served: &[(u32, u64)]) -> u32 {
+            let mut scratch = Vec::new();
+            let mut best = 0;
+            // The served parents in the response's forest are the nearest served ancestors on
+            // every path — what `parent_ids` carries after the cut.
+            for &up in lineage.parents_of(o) {
+                let mut stack = vec![up];
+                while let Some(at) = stack.pop() {
+                    if scratch.contains(&at) {
+                        continue;
+                    }
+                    scratch.push(at);
+                    if served.iter().any(|&(s, _)| s == at) {
+                        best = best.max(rung(at, lineage, served) + 1);
+                    } else {
+                        stack.extend_from_slice(lineage.parents_of(at));
+                    }
+                }
+            }
+            best
+        }
+        served
+            .iter()
+            .map(|&(o, id)| (o, id, rung(o, lineage, served)))
+            .collect()
+    }
+
     /// Both routes over one level: the artifact-major form of `sets`, and the row-major form
     /// composed from the same memberships — a label column where every row is in one artifact,
     /// a list column otherwise.
@@ -224,10 +263,10 @@ mod tests {
         lineage: &Arc<Lineage>,
         served: &[(u32, u64)],
     ) -> (ServedLayer, ServedLayer) {
-        let served_map = |_: ()| -> HashMap<u32, TesseraId> {
-            served
-                .iter()
-                .map(|&(o, id)| (o, TesseraId::new(id)))
+        let served_map = |_: ()| -> HashMap<u32, (TesseraId, u32)> {
+            with_rungs(lineage, served)
+                .into_iter()
+                .map(|(o, id, rung)| (o, (TesseraId::new(id), rung)))
                 .collect()
         };
         let artifact_major = Arc::new(ArtifactRows::synthetic(sets, None));
@@ -259,19 +298,71 @@ mod tests {
     }
 
     /// The rule, written the obvious way: over the served artifacts holding the row, the deepest
-    /// by stored depth, then the lowest identifier.
+    /// by response-local rung, then the lowest identifier.
     fn expected(
         sets: &[Option<&[u32]>],
         lineage: &Lineage,
         served: &[(u32, u64)],
         row: u32,
     ) -> Option<u64> {
-        served
-            .iter()
-            .filter(|&&(o, _)| sets[o as usize].is_some_and(|m| m.contains(&row)))
-            .map(|&(o, id)| (lineage.depth(o), Reverse(id), id))
+        with_rungs(lineage, served)
+            .into_iter()
+            .filter(|&(o, _, _)| sets[o as usize].is_some_and(|m| m.contains(&row)))
+            .map(|(_, id, rung)| (rung, Reverse(id), id))
             .max()
             .map(|(_, _, id)| id)
+    }
+
+    /// **The column does not depend on a withheld artifact.** `R → X → A` and `R → B`, a point
+    /// held by all three, `X` withheld, `R`, `A` and `B` served with `id(B) < id(A)`: by stored
+    /// depth `A` would win (2 over 1); in the world where `X` never existed `A` and `B` tie at
+    /// rung 1 and `B` wins. The same answer in both worlds, on both routes.
+    #[test]
+    fn a_withheld_node_does_not_rank_a_served_artifact_deeper() {
+        const R: u32 = 0;
+        const X: u32 = 1;
+        const A: u32 = 2;
+        const B: u32 = 3;
+        let with_x = Arc::new(Lineage::new([
+            (R, None::<u32>),
+            (X, Some(R)),
+            (A, Some(X)),
+            (B, Some(R)),
+        ]));
+        let without_x = Arc::new(Lineage::new([(R, None::<u32>), (A, Some(R)), (B, Some(R))]));
+        let sets: [Option<&[u32]>; 4] = [
+            Some(&[0, 1, 2]),
+            Some(&[0, 1]),
+            Some(&[0, 1]),
+            Some(&[0, 2]),
+        ];
+        let sets_without: [Option<&[u32]>; 4] =
+            [Some(&[0, 1, 2]), None, Some(&[0, 1]), Some(&[0, 2])];
+        let served = [(R, 10), (A, 30), (B, 20)];
+        assert_both_routes_agree(&sets, 3, &with_x, &served);
+        assert_both_routes_agree(&sets_without, 3, &without_x, &served);
+        let rows: Vec<u32> = (0..3).collect();
+        let column = |sets: &[Option<&[u32]>], lineage: &Arc<Lineage>| {
+            let (artifact_major, row_major) = both_routes(sets, 3, lineage, &served);
+            (
+                Resolved::new(rows.clone(), &[artifact_major]).columns_for(&rows)[0]
+                    .ids
+                    .clone(),
+                Resolved::new(rows.clone(), &[row_major]).columns_for(&rows)[0]
+                    .ids
+                    .clone(),
+            )
+        };
+        let (a1, r1) = column(&sets, &with_x);
+        let (a2, r2) = column(&sets_without, &without_x);
+        assert_eq!(
+            a1,
+            vec![Some(20), Some(30), Some(20)],
+            "row 0 is in A and B at one rung and names the lower id; row 1 is in A alone"
+        );
+        assert_eq!(a1, a2, "the same answer with and without X, artifact-major");
+        assert_eq!(r1, r2, "and row-major");
+        assert_eq!(a1, r1);
     }
 
     fn assert_both_routes_agree(
