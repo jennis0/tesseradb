@@ -68,6 +68,15 @@ python3 -m test_corpora.common.projection                        # the transform
 ~/venvs/projection/bin/python -m test_corpora.arxiv.prepare       # the embedding rung
 ```
 
+## Two directories here are not rungs
+
+They measure nothing about a dataset and are outside the ingest campaign's sizing.
+
+| | |
+|---|---|
+| [`multiview/`](multiview/README.md) | the fixture [`docs/design/views.md`](../docs/design/views.md) is pointed at — ten row spaces over one entity space, both view-group forms, a shape layer spanning two frames. Synthetic but real-derived: it reads the GeoNames rung's built output and un-projects it |
+| `common/` | the transform, the paths and the timer the rungs share |
+
 ## Rungs
 
 | Rung | Points | Bundle | State |
