@@ -127,6 +127,13 @@ stops being current its presenter and channel are cancelled**: whatever was in f
 and nothing is issued until it is current again. A slider stepping through five views therefore
 issues requests for the fifth alone (§4).
 
+**A warm return pays off within a group and not across frames** (measured at V2's smoke). On a
+shared camera the held bands are at the depth the camera wants and draw at once; after a
+cross-frame switch the refit recalibrates the depth, the held bands are at the old one, and the
+return drew nothing for some 350 ms while the request went out and answered. §4's declined depth
+pinning is why; the cache still spares the bytes, not the wait. Accepted — the cross-frame
+case is a refit either way, and the transition (§5) is what would hide it.
+
 **The cache.** Every view's replica holds its own bands; what changes is that the byte budget
 is one figure for the store and the victim is chosen least-recently-drawn across every view, with
 the protected rectangle applying to the evicting view alone. A view the user left an hour ago
@@ -336,6 +343,22 @@ recomposition are rebound to the current view, and the three `meta.views[0]` sit
 rebuilding them, and the current view id is up-synced with the other traitlets at the settle, so
 `m.view` reads what the map shows. `Map(url, view=…)` keeps its meaning as the initial view.
 
+> **Built 2026-09-01** (V2, `client/view-switching-components`, refereed; smoked live on
+> `test_corpora/multiview` — ten views, two groups, a `members` layout — with 17 of 17 checks
+> holding): §6.1–§6.7 in full, the four rules in `@tesseradb/client` (`viewLabel`,
+> `viewPickerEntries`, `enterGroup`, `hasOneLayout`), the map's refit decided by comparing
+> `frame()` against the frame the camera was last pushed under, every tick and with no id gate.
+> Measured at the smoke: a within-group switch keeps the camera and the box selection and issues
+> one ask for the new view (five requests — three point sub-bands, a count and the ring's own —
+> and none for any other); stepping Q1→Q4 at key-repeat issues one ask for Q4 and none for Q2 or
+> Q3; a warm return within a group draws its 64 held bands on the first animation frame with no
+> request. **§6.8's ⊘ has a corpus now:** the fixture's `mood` family is scoped to `quarter`, and
+> under `world` the filter panel asks `/v1/categories/mood` bare and is refused (`422`), which the
+> panel shows as *values not listable* — honest, and the panel rule §6.8 defers is what would
+> pin the key instead. Two things on the board a native select cannot draw: an `<option>` holds
+> text alone, so the key follows the label after a middle dot rather than muted, and the open
+> list is the browser's (§6.7).
+
 ### 6.7 Reuse and restyling
 
 Owner direction 2026-09-01: a consuming system must be able to take these up easily and restyle
@@ -442,4 +465,11 @@ the store against its tests — and integrate on the multi-view fixture.
   the canvas generator in the same change. Unreviewed beyond the author. **Same day, owner
   question on reuse and restyling:** §6.7 added — the rules move into `@tesseradb/client` as pure
   functions, the parts and the token rule are named, React wrappers owed, the native select kept
-  as a leaning.
+  as a leaning. **V1 and V2 built the same day**, each refereed separately and fixed once (the
+  store: a colour-stale refetch outside the settle, the artifacts projection not rebound, the
+  switch flag armed on a cold switch; the components: a follow subscription surviving
+  disconnection, the basemap install without a generation guard), then smoked live, which found
+  one more (the incoming machinery built after `viewId` moved, so the map's refit landed on the
+  outgoing presenter). The document was corrected at the claim in three places: the switch settle
+  is the store's, the warm publish is a tick late, and a warm return across frames waits for the
+  refit's depth.
