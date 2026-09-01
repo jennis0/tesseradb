@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {enterGroup, isTrivialViewSet, stepView, viewLabel, viewPickerEntries, viewsOfGroup} from '../src/views.js';
+import {enterGroup, hasOneLayout, stepView, viewLabel, viewPickerEntries, viewsOfGroup} from '../src/views.js';
 import type {Meta, ViewInfo, ViewMetadataValue} from '../src/types.js';
 
 const view = (id: string, group?: string, key?: string): ViewInfo => ({
@@ -136,9 +136,9 @@ describe('the layout entries', () => {
     ]);
   });
 
-  it('are trivial — and a picker draws nothing — for one plain view and no groups', () => {
-    expect(isTrivialViewSet({views: [view('s0')], groups: []} as unknown as Meta)).toBe(true);
-    expect(isTrivialViewSet(rich)).toBe(false);
+  it('are one layout — and the layout picker draws nothing — for one plain view and no groups', () => {
+    expect(hasOneLayout({views: [view('s0')], groups: []} as unknown as Meta)).toBe(true);
+    expect(hasOneLayout(rich)).toBe(false);
   });
 });
 

@@ -387,6 +387,9 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
   // roster costs one `setCurrentView` per step rather than a store torn down and reopened — which
   // is correct and unusable under a slider. A `url` change is still a rebuild: a `tessera_id`
   // minted by one bundle means nothing to another.
+  // As with `layers` and `colour_by`, the echo guard means a switch made **in one cell** reaches
+  // that cell's store alone: the up-sync writes the trait with the guard set, so the other mounted
+  // views are not steered by it. A switch written from the kernel still reaches every view.
   model.on('change:view', () => {
     if (state.syncingUp) return;
     const view = model.get('view');

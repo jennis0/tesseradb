@@ -324,7 +324,7 @@ export class TesseraMap extends TesseraElement {
    * switch is compared against to decide whether the camera moves.
    */
   private cameraFrame: Quantisation | null = null;
-  /** The view the camera last answered for; a change in it is a switch, not a pan. */
+  /** The view last drawn for; a change in it is a switch, and a switch drops the hover. */
   private cameraView = '';
   private frameGaps: number[] = [];
   private frameLoop: number | null = null;
@@ -407,21 +407,26 @@ export class TesseraMap extends TesseraElement {
       this.pushView();
     }
     const view = s.get('view');
-    // **A switch across frames refits; a switch within a group does not** (`view-switching.md`
-    // §4). Every view of a group shares one frame, so the same tiles at the same depth are the
-    // request in the next view and the store re-schedules the camera itself — moving it would
-    // throw away the position the user is reading. A frame the camera has never been fitted under
-    // is a different picture: fit it, which issues the `setView` the store is waiting for, and
-    // drop the hover, which was resolved against marks that are no longer on screen.
+    // **Every switch drops the hover** (owner ruling, 2026-09-01), a switch within a group
+    // included: the marks under the cursor are different rows in the next view, and a tooltip
+    // held across the step would name a record that is no longer beneath the pointer.
     if (view.id !== this.cameraView) {
       this.cameraView = view.id;
-      const frame = s.frame();
-      if (frame && !sameFrame(frame, this.cameraFrame)) {
-        this.hover = null;
-        this.hoveredArtifact = null;
-        this.fit();
-      }
+      this.hover = null;
+      this.hoveredArtifact = null;
     }
+    // **A switch across frames refits; a switch within a group does not** (`view-switching.md`
+    // §4). Every view of a group shares one frame, so the same tiles at the same depth are the
+    // request in the next view and the store re-schedules the camera itself — moving the camera
+    // would throw away the position the user is reading.
+    //
+    // The question is asked of the **frame**, on every tick and not under a `view.id` gate: a pan
+    // has already written `cameraFrame` through `pushView`, so the two agree, and the refit does
+    // not depend on the store publishing the new id and the new extent in one tick. A null
+    // `cameraFrame` is the interval before the first camera went out, where there is nothing to
+    // refit from and the initial view is drawn as it is.
+    const frame = s.frame();
+    if (frame && this.cameraFrame && !sameFrame(frame, this.cameraFrame)) this.fit();
     const status = s.get('status');
     const p = this.probe;
     p.view = {

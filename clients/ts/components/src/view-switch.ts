@@ -5,7 +5,7 @@ import {emit} from './base.js';
  * What the two pickers share beyond the rules themselves (`view-switching.md` §6.3).
  *
  * **The rules live in `@tesseradb/client`** — `viewLabel`, `viewPickerEntries`, `enterGroup`,
- * `isTrivialViewSet`, `viewsOfGroup` and `stepView` — so a host that draws its own picker gets the
+ * `hasOneLayout`, `viewsOfGroup` and `stepView` — so a host that draws its own picker gets the
  * same answers as these elements without importing an element. What is left here is the frame
  * comparison the camera decides by and the one site a switch is announced from.
  */

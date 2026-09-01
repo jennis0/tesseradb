@@ -129,6 +129,25 @@ describe('<tessera-view-picker>', () => {
     expect(switched(store)).toEqual(['quarter:2026-Q2']);
   });
 
+  it('puts the select back where a choice issues no switch', async () => {
+    const {host, store} = await picker('tessera-view-picker', 'quarter:2026-Q3');
+    const select = deep(host, 'select') as HTMLSelectElement;
+    // The group the user is already in: `enterGroup` answers the current view, which is not a
+    // switch — and the control must not be left naming a layout the store is not in.
+    chooseOption(select, 'g:quarter');
+    expect(switched(store)).toEqual([]);
+    expect(select.value).toBe('g:quarter');
+
+    // A group with no reachable view: no switch, and the select goes back to the current entry.
+    const empty = meta();
+    empty.groups = [...empty.groups, {name: 'ghost', title: 'Ghost', membersOf: null, views: []}];
+    const gone = await picker('tessera-view-picker', 'knn', empty);
+    const other = deep(gone.host, 'select') as HTMLSelectElement;
+    chooseOption(other, 'g:ghost');
+    expect(switched(gone.store)).toEqual([]);
+    expect(other.value).toBe('v:knn');
+  });
+
   it('announces the switch with sameFrame from the two views’ quantisation', async () => {
     const seen: {from: string; to: string; sameFrame: boolean}[] = [];
     document.body.addEventListener('tessera-viewswitch', (e) => seen.push((e as CustomEvent).detail));
@@ -156,12 +175,15 @@ describe('<tessera-key-picker>', () => {
   it('draws a members group under its own heading, labelled through the owning group', async () => {
     const {host} = await picker('tessera-key-picker', 'world:2026-Q10');
     expect(deepAll(host, 'option').map((o) => o.textContent?.trim())[1]).toBe('Long quarter · 2026-Q10');
-    expect(deep(host, '[part="label"]')?.textContent).toBe('Quarterly map');
+    expect(deep(host, '[part="label"]')?.textContent).toBe('world');
   });
 
-  it('heads the select with the group’s title', async () => {
+  it('captions the select with the group’s name — the key’s namespace, not the title above it', async () => {
     const {host} = await picker('tessera-key-picker', 'quarter:2026-Q2');
-    expect(deep(host, '[part="label"]')?.textContent).toBe('Quarter');
+    expect(deep(host, '[part="label"]')?.textContent).toBe('quarter');
+    // The layout picker keeps the title: the two captions say different things.
+    const layout = await picker('tessera-view-picker', 'quarter:2026-Q2');
+    expect(deepAll(layout.host, 'option').map((o) => o.textContent?.trim())).toContain('Quarter');
   });
 
   it('disables previous at the first view and next at the last, and never wraps', async () => {
@@ -227,6 +249,18 @@ describe('<tessera-map> at a switch', () => {
     const before = pushes(store);
     store.set('view', {...store.get('view'), id: 'quarter:2026-Q3'});
     await settle(host);
+    expect(pushes(store)).toBe(before);
+  });
+
+  it('drops the hover on a switch within a group, where the camera does not move', async () => {
+    const {host, store} = await map('quarter:2026-Q2');
+    const el = host.querySelector('tessera-map') as unknown as {hover: unknown};
+    el.hover = {x: 1, y: 1, title: 't', lines: []};
+    const before = pushes(store);
+    store.set('view', {...store.get('view'), id: 'quarter:2026-Q3'});
+    await settle(host);
+    // The marks under the cursor are different rows in the next view (owner ruling).
+    expect(el.hover).toBeNull();
     expect(pushes(store)).toBe(before);
   });
 
@@ -306,6 +340,25 @@ describe('<tessera-item-card> and the views it reaches', () => {
 });
 
 describe('<tessera-explorer>', () => {
+  /** An explorer on the fixture, showing `id`, with its map's `lookAt` recorded. */
+  async function following(id: string) {
+    const host = await mount('<tessera-explorer></tessera-explorer>');
+    const el = host.querySelector('tessera-explorer') as unknown as {store: unknown; map: {lookAt(x: number, y: number): boolean} | null};
+    const store = fakeStore({meta: meta(), status: status({})});
+    store.set('view', {...store.get('view'), id});
+    store.setFrame(FLAT);
+    el.store = store;
+    await settle(host);
+    const looks: [number, number][] = [];
+    el.map!.lookAt = (x, y) => {
+      looks.push([x, y]);
+      return true;
+    };
+    const follow = (view: string, x = 10, y = 20) =>
+      deep(host, 'tessera-map')!.dispatchEvent(new CustomEvent('tessera-viewfollow', {detail: {view, x, y}, bubbles: true, composed: true}));
+    return {host, el, store, looks, follow};
+  }
+
   it('puts both pickers at the top of the toolbar slot', async () => {
     const host = await mount('<tessera-explorer></tessera-explorer>');
     const el = host.querySelector('tessera-explorer') as unknown as {store: unknown};
@@ -321,20 +374,8 @@ describe('<tessera-explorer>', () => {
   });
 
   it('follows an item into another view: the switch, then the camera once the frame is drawn', async () => {
-    const host = await mount('<tessera-explorer></tessera-explorer>');
-    const el = host.querySelector('tessera-explorer') as unknown as {store: unknown; map: {lookAt(x: number, y: number): boolean} | null};
-    const store = fakeStore({meta: meta(), status: status({})});
-    store.set('view', {...store.get('view'), id: 'quarter:2026-Q2'});
-    store.setFrame(FLAT);
-    el.store = store;
-    await settle(host);
-    const looks: [number, number][] = [];
-    const map = el.map!;
-    map.lookAt = (x, y) => {
-      looks.push([x, y]);
-      return true;
-    };
-    deep(host, 'tessera-map')!.dispatchEvent(new CustomEvent('tessera-viewfollow', {detail: {view: 'world:2026-Q2', x: 10, y: 20}, bubbles: true, composed: true}));
+    const {host, store, looks, follow} = await following('quarter:2026-Q2');
+    follow('world:2026-Q2');
     expect(store.calls.filter((c) => c.name === 'setCurrentView').map((c) => c.args[0])).toEqual(['world:2026-Q2']);
     // Across frames the camera waits for the new view's own composition.
     expect(looks).toEqual([]);
@@ -345,5 +386,30 @@ describe('<tessera-explorer>', () => {
     store.set('view', {...store.get('view'), id: 'world:2026-Q2', composition: DRAWN});
     await settle(host);
     expect(looks).toEqual([[10, 20]]);
+  });
+
+  it('drops a follow in flight when the explorer leaves the document', async () => {
+    const {host, store, looks, follow} = await following('quarter:2026-Q2');
+    follow('world:2026-Q2');
+    (host.querySelector('tessera-explorer') as HTMLElement).remove();
+    store.setFrame(GEO);
+    store.set('view', {...store.get('view'), id: 'world:2026-Q2', composition: DRAWN});
+    await settle(host);
+    // A callback still running on a detached explorer would centre a map that is not on screen.
+    expect(looks).toEqual([]);
+  });
+
+  it('ends the wait where the view answers with no frame to centre on', async () => {
+    const {host, store, looks, follow} = await following('quarter:2026-Q2');
+    follow('world:2026-Q2');
+    store.setFrame(GEO);
+    store.set('view', {...store.get('view'), id: 'world:2026-Q2'});
+    store.set('status', status({status: 'refused', refusal: {code: 'no-such-view', detail: 'gone'}}));
+    await settle(host);
+    expect(looks).toEqual([]);
+    // The wait is over: a composition arriving later is not this follow's answer.
+    store.set('view', {...store.get('view'), id: 'world:2026-Q2', composition: DRAWN});
+    await settle(host);
+    expect(looks).toEqual([]);
   });
 });

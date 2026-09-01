@@ -1,5 +1,5 @@
 import {css, html, nothing, type PropertyValues} from 'lit';
-import {enterGroup, isTrivialViewSet, viewPickerEntries, type Meta} from '@tesseradb/client';
+import {enterGroup, hasOneLayout, viewPickerEntries, type Meta} from '@tesseradb/client';
 import {TesseraElement} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {switchView} from './view-switch.js';
@@ -10,7 +10,7 @@ import {chrome, tokens} from './tokens.js';
  * and one per group, in `/v1/meta`'s serving order, at the top of the explorer's toolbar.
  *
  * The rules are `@tesseradb/client`'s: `viewPickerEntries` for the entries and their order,
- * `enterGroup` for which view of a chosen group is entered, `isTrivialViewSet` for the hiding
+ * `enterGroup` for which view of a chosen group is entered, `hasOneLayout` for the hiding
  * rule. What this element adds is the control the boards draw, the memory of the key it last left
  * each group on, and the switch.
  *
@@ -60,19 +60,29 @@ export class TesseraViewPicker extends TesseraElement {
     // Leaving a group records the key it was left on, for the day it is chosen again.
     const roster = meta.views.find((v) => v.id === currentId)?.roster ?? null;
     if (roster) this.lastKey.set(roster.group, roster.key);
-    if (value.startsWith('v:')) {
-      switchView(this, s, meta, value.slice(2));
+    const group = value.startsWith('g:') ? value.slice(2) : null;
+    const target = group === null ? value.slice(2) : enterGroup(meta, group, currentId, this.lastKey.get(group));
+    // **A choice that issues no switch is put back.** A group this session reaches no view of
+    // answers `null`, and a group whose entry view is the one already current is not a switch;
+    // in both the store stays where it is, and a select left showing the choice would name a
+    // layout the map is not drawing.
+    if (target === null || target === currentId) {
+      this.restoreSelect();
       return;
     }
-    const group = value.slice(2);
-    const target = enterGroup(meta, group, currentId, this.lastKey.get(group));
-    if (target) switchView(this, s, meta, target);
+    switchView(this, s, meta, target);
+  }
+
+  /** Put the select back to the entry the store is in — see {@link choose}. */
+  private restoreSelect(): void {
+    const select = this.renderRoot.querySelector('select');
+    if (select && select.value !== this.chosen) select.value = this.chosen;
   }
 
   override render() {
     const s = this.resolvedStore;
     const meta = s?.get('meta') ?? null;
-    if (!s || !meta || isTrivialViewSet(meta)) return nothing;
+    if (!s || !meta || hasOneLayout(meta)) return nothing;
     const entries = viewPickerEntries(meta, s.get('view').id);
     const value = (entry: {kind: 'view' | 'group'; id: string}) => `${entry.kind === 'group' ? 'g' : 'v'}:${entry.id}`;
     const current = entries.find((e) => e.current);

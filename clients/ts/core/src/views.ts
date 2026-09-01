@@ -157,11 +157,15 @@ export function viewPickerEntries(meta: Meta, currentId: string): ViewPickerEntr
 }
 
 /**
- * Whether a bundle offers one layout, and a picker should therefore draw **nothing** — not an
- * empty select (`view-switching.md` §6.1). One plain view and no groups is every demo corpus
- * today, and the toolbar looks exactly as it did before views existed.
+ * Whether a bundle offers **one layout**, and the layout picker should therefore draw nothing —
+ * not an empty select (`view-switching.md` §6.1). One plain view and no groups is every demo
+ * corpus today, and the toolbar looks exactly as it did before views existed.
+ *
+ * It is a question about layouts and not about views: a bundle whose one layout is a *group* of
+ * forty quarters answers `true` here, and the key picker still draws its roster. Nothing about
+ * this says a viewer has one view to look at.
  */
-export function isTrivialViewSet(meta: Meta): boolean {
+export function hasOneLayout(meta: Meta): boolean {
   return viewPickerEntries(meta, '').length <= 1;
 }
 

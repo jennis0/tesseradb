@@ -309,6 +309,14 @@ export class TesseraExplorer extends TesseraElement {
     super.onStoreChange();
   }
 
+  override disconnectedCallback(): void {
+    // **A follow in flight is released here, not only at dispose.** The base class drops this
+    // element's own subscription; the follow's is a second one, and a callback left running on a
+    // detached explorer would eventually centre a map that is no longer in the document.
+    this.following?.();
+    super.disconnectedCallback();
+  }
+
   override dispose(): void {
     this.following?.();
     this.map?.dispose();
@@ -483,12 +491,17 @@ export class TesseraExplorer extends TesseraElement {
       // Another switch took over — the user chose elsewhere while this one was waiting.
       if (view.id !== detail.view) {
         this.following?.();
-        this.following = null;
         return;
       }
-      if (!view.composition) return;
+      if (!view.composition) {
+        // **A view that answers without a frame ends the wait.** A refusal, an expiry, or a mask
+        // that leaves this principal nothing to draw are all settled answers: there will be no
+        // composition to centre on, and a subscription left waiting for one never ends.
+        const status = s.get('status');
+        if (status.status === 'refused' || status.status === 'empty' || status.expired) this.following?.();
+        return;
+      }
       this.following?.();
-      this.following = null;
       centre();
     });
     this.following = () => {

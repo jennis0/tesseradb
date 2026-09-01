@@ -101,9 +101,12 @@ export class TesseraKeyPicker extends TesseraElement {
     const current = meta.views.find((v) => v.id === s.get('view').id) ?? null;
     const roster = current?.roster ?? null;
     if (!current || !roster) return nothing;
-    const group = meta.groups.find((g) => g.name === roster.group) ?? null;
     const views = viewsOfGroup(meta, roster.group);
-    const heading = group?.title ?? roster.group;
+    // **The caption is the group's `name`, not its title** (owner ruling, 2026-09-01): the layout
+    // picker directly above already shows the title, and a caption repeating it reads as the same
+    // words twice. The name is the key's namespace — `quarter` over `2026-Q3` — which is what a
+    // reader needs to know the key beneath it belongs to.
+    const heading = roster.group;
     const previous = stepView(meta, current.id, -1);
     const next = stepView(meta, current.id, 1);
     this.chosen = current.id;

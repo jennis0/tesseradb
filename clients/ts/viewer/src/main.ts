@@ -93,17 +93,40 @@ declare global {
  * no network, a refused request — leaves the map exactly as it was, a basemap being an underlay
  * and not the picture.
  */
+let basemapGeneration = 0;
+
 async function installBasemap(view: ViewInfo): Promise<void> {
+  // **A basemap is only ever installed for the switch that asked for it.** Both awaits below run
+  // for as long as a tile fetch takes, and a viewer stepping geographic → embedding →
+  // geographic-2 faster than that would otherwise have view A's tiles land under view C's points.
+  // The generation is the same guard `activate` uses for its meta.
+  const mine = ++basemapGeneration;
   await explorer.updateComplete;
   const map = explorer.map;
-  if (!map) return;
+  if (!map || mine !== basemapGeneration) return;
   try {
-    map.basemap = await basemapLayer(view);
+    const layer = await basemapLayer(view);
+    if (mine !== basemapGeneration) return;
+    map.basemap = layer;
   } catch (error) {
     store.update((s) => {
       s.failures = [...s.failures.slice(-19), {code: 'basemap', detail: String(error), at: Date.now()}];
     });
   }
+}
+
+/**
+ * Take the basemap down, now, and stand every fetch in flight down with it.
+ *
+ * Called at the switch rather than when the next one arrives: a view with a `tile_scheme` of
+ * `null` has no basemap to replace the old one with, so leaving the tiles up until an answer
+ * comes would draw a map of the world under an embedding — and for as long as the fetch takes,
+ * which is the whole of what a viewer sees of the switch.
+ */
+function dropBasemap(): void {
+  basemapGeneration += 1;
+  const map = explorer.map;
+  if (map) map.basemap = null;
 }
 
 /**
@@ -131,6 +154,7 @@ function onViewChanged(id: string): void {
     s.view = id;
   });
   writeViewToUrl(id);
+  dropBasemap();
   void installBasemap(view);
 }
 
