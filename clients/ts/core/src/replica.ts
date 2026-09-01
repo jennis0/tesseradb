@@ -276,6 +276,9 @@ export class Replica {
    * Bytes held across every view sharing this replica's budget — the figure the budget bounds, and
    * therefore the one a look-ahead sizes its ring against (`view-switching.md` §3). Identical to
    * this view's own held bytes where the budget has one member.
+   *
+   * **The ring's fullness is measured across every view**, not this one alone (`ringMargin`): the
+   * budget a second view's bands are spending is not room this view's anticipation may buy with.
    */
   get bytes(): number {
     return this.cache.sharedBytes;

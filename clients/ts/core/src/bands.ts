@@ -452,7 +452,9 @@ export class BandBudget {
    * **Every other view's bands are offered before the evicting view's**, which is the cross-view
    * half of least-recently-drawn: a view that is not current was, by construction, drawn less
    * recently than the one being fetched for. Within each group the single-cache order stands, so a
-   * store with one view evicts byte for byte as it did before this existed.
+   * store with one view evicts byte for byte as it did before this existed. **View-first rather
+   * than one merged ordering across views**: a held view's recent band yields before the current
+   * view's older one, which is the intent — the current view is the one being drawn.
    */
   evict(focus: EvictionFocus, from: BandCache, lowWaterFraction = 0.9): void {
     if (this.bytes <= this.budgetBytes) return;
@@ -465,7 +467,11 @@ export class BandBudget {
     }
     held.sort((a, b) => evictionOrder(a.band, b.band, focus));
 
-    const order = held.concat(from.heldBands().map((band) => ({cache: from, band})).sort((a, b) => evictionOrder(a.band, b.band, focus)));
+    const evicting = from
+      .heldBands()
+      .map((band) => ({cache: from, band}))
+      .sort((a, b) => evictionOrder(a.band, b.band, focus));
+    const order = held.concat(evicting);
 
     const protect = focus.protect;
     for (const {cache, band} of order) {

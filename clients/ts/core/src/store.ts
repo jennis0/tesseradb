@@ -433,9 +433,10 @@ export function createStore(options: StoreOptions): Store {
   /** The pending {@link VIEW_SETTLE_MS} wait, cancelled by the next switch. */
   let switchTimer: unknown = null;
   /**
-   * A switch published an empty frame and `loading`, and no request will answer it where the
-   * incoming view's own bands do. The driver transitions on requests, so the frame that arrives
-   * without one is what ends the wait.
+   * A switch published an empty frame and `loading`, and the incoming view's own bands are what
+   * answer it: the driver transitions on requests, and a frame derived from the cache is not one.
+   * Cleared by {@link setView}, so only a frame presented before anything was asked for may end
+   * the wait — a cold switch stays at `loading` until the request it triggered says otherwise.
    */
   let awaitingSwitchFrame = false;
 
@@ -1009,7 +1010,13 @@ export function createStore(options: StoreOptions): Store {
       if (ok) current++;
       else stale.push(band);
     }
-    const toAsk = stale.filter((b) => colourAsked.get(bandKey(b.depth, b.prefix)) !== a.version);
+    // **Nothing is asked for while a switch is settling.** `reschedule` re-enters the driver,
+    // which fires its leading edge for a view arriving from stillness — so a view the slider is
+    // passing through would ask here, outside the settle that exists to stop exactly that
+    // (`view-switching.md` §4). Not merely deferred but *not decided*: recording these bands as
+    // asked and then not asking would leave them stale until the served set moved. The frame the
+    // settled request draws runs this check again, with nothing pending.
+    const toAsk = switchTimer === null ? stale.filter((b) => colourAsked.get(bandKey(b.depth, b.prefix)) !== a.version) : [];
     for (const b of toAsk) colourAsked.set(bandKey(b.depth, b.prefix), a.version);
     if (toAsk.length > 0) {
       replica.retract(toAsk);
@@ -1178,6 +1185,12 @@ export function createStore(options: StoreOptions): Store {
     replaceProjection('view', {id, composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, served: NO_COUNT, provisional: 0});
     replaceProjection('marks', {...projections.marks, bands: [], standIn: [], count: NO_COUNT});
     replaceProjection('tiles', {tiles: []});
+    // The artifacts of the view being entered — its own channel's state, which is empty for a
+    // cold view and its held served set for a warm one. Left alone, the projection would show the
+    // outgoing view's artifacts under the incoming view's id until that channel next answered,
+    // which on a cross-frame switch is not until the map has refitted: the list, the coverage
+    // score and every `tesseraId` lookup would be against another view's row space (§8).
+    onArtifacts(incoming.channel.current);
     awaitingSwitchFrame = true;
     replaceProjection('status', {...projections.status, status: 'loading', refusal: null, stale: false});
     publishReplica(projections.replica.lastPlan);
@@ -1204,6 +1217,9 @@ export function createStore(options: StoreOptions): Store {
 
   function setView(input: ViewInput): void {
     lastView = {input};
+    // A request answers for the status from here on: the driver transitions on its own, and the
+    // partial frames it presents on the way are not the switch's cache-derived frame.
+    awaitingSwitchFrame = false;
     if (!meta || !presenter) {
       // A setView before meta has arrived is queued (§4).
       queuedView = input;
