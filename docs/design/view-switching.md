@@ -74,7 +74,9 @@ card; a `scopedScalars` field on the client's `Meta` (a doc comment names it, th
 declare it) — though the filter draft already composes a pinned leaf `family@key` verbatim, so a
 scoped family under another view is a naming question and not a machinery one; and a view on the
 client's `/v1/categories` request, which the server has been view-addressed for since
-2026-08-31 (contracts §3.2).
+2026-08-31 (contracts §3.2) — **built at V1**: the optional `view` query parameter, passed at
+both store call sites. The value cache behind it is per column with no view axis, which is
+harmless until a group-scoped family is served (§6.8).
 
 ## 3. The store holds several views
 
@@ -151,9 +153,16 @@ a cold switch draws nothing for the length of one request, and the status strip 
 current view's points and bands, and `views`, the number of views holding any band — which is
 what a default budget will be measured against (§7).
 
-**⊘ Specified, not implemented.** The store binds `options.view ?? meta.views[0]` once, builds
-one replica, one presenter and one channel, and has no `setCurrentView`. Two views of one bundle
-today are two stores.
+> **Built 2026-09-01** (V1, `client/view-switching-store`, refereed): everything in this section,
+> with two things the building settled — the re-schedule at a within-group switch sits behind a
+> store-level settle (§4), and a warm view's held composition is published one scheduler tick
+> after the switch, from its own bands and with no request. The budget is one `BandBudget`
+> shared by one `BandCache` per replica; eviction offers every non-current view's bands before
+> the current view's, then the existing order within each — view-first rather than one merged
+> cross-view ordering, which is a choice recorded at the code. The prefetch ring now measures its
+> fullness against the whole store's held bytes, a consequence of one budget that §7 did not
+> state. A filter or selection change resets every held view's replica as well as the current
+> one's, since their bands answer the previous question.
 
 ## 4. A switch, in the two cases that differ
 
@@ -305,8 +314,10 @@ the item's position there — `x`, `y` are that view's own grid units, dequantis
 view's frame — so *follow this item into the other view* is one click and needs no request: the
 detail already holds every position. It emits `tessera-viewfollow` `{view, x, y}` (data
 coordinates) and the explorer handles it by switching, waiting for the frame, and centring. The
-card also draws `labels` as chips where the array is non-empty, and `scoped` values as a second
-group of rows headed by the key, in key order as served.
+card also draws `labels` as chips where the array is non-empty — captioned as the labels the
+viewer *holds*, never as the item's label set (decision 0114) — and `scoped` values as a second
+group of rows headed by the key, in key order as served. Across frames a follow costs two viewport
+requests, the map's refit and then the centring; within a group it costs one.
 
 ### 6.5 The viewer: URL state and the basemap
 
