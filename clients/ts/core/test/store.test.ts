@@ -694,3 +694,26 @@ describe('needShape fetches the drawn shape by identifier', () => {
     expect(artifact).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('the subscriber fan-out', () => {
+  it('tells every subscriber even when an earlier one throws', () => {
+    // The fault that motivated this: a viewer's basemap follower threw from inside the fan-out on
+    // a view with no tile, and every element subscribed after the map kept drawing the previous
+    // publish — a status strip at zero beside a million marks.
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const traced: string[] = [];
+    const store = createStore({viewerUrl: 'http://x', token: 't', instruments: {onTrace: (kind) => traced.push(kind)}});
+    const seen: string[] = [];
+    store.subscribe('filters', () => {
+      throw new Error('boom');
+    });
+    store.subscribe('filters', () => seen.push('named-after'));
+    store.subscribe(() => seen.push('all'));
+    store.setFilters({});
+    expect(seen).toEqual(['named-after', 'all']);
+    expect(traced).toContain('subscriber-fault');
+    expect(quiet).toHaveBeenCalledTimes(1);
+    quiet.mockRestore();
+    store.dispose();
+  });
+});

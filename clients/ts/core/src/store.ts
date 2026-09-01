@@ -474,10 +474,27 @@ export function createStore(options: StoreOptions): Store {
   const all: Set<Listener> = new Set();
   const perName = new Map<ProjectionName, Set<() => void>>();
 
+  /**
+   * Publish one projection to every subscriber — **each one, whatever the others do.** A
+   * subscriber that throws is reported — to the console with its stack, and to `onTrace` — and
+   * the fan-out continues past it: a `forEach` that let the throw escape stopped at the first bad
+   * listener, and every element subscribed after it drew the previous publish for as long as the
+   * fault lasted — a status strip at zero beside a million marks, or a blank map beside a live
+   * one, depending on nothing but connection order.
+   */
   function replaceProjection<K extends ProjectionName>(name: K, value: Projections[K]): void {
     projections[name] = value;
-    perName.get(name)?.forEach((fn) => fn());
-    all.forEach((fn) => fn());
+    perName.get(name)?.forEach(deliver);
+    all.forEach(deliver);
+  }
+
+  function deliver(fn: () => void): void {
+    try {
+      fn();
+    } catch (error) {
+      console.error('a store subscriber threw; the other subscribers were still told', error);
+      options.instruments?.onTrace?.('subscriber-fault', {message: error instanceof Error ? error.message : String(error)});
+    }
   }
 
   // ---- the token supplier -------------------------------------------------------------------

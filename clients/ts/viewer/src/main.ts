@@ -159,7 +159,10 @@ function followCameraWithBasemap(view: ViewInfo): void {
   followListening = true;
   explorer.addEventListener('tessera-viewchange', (event) => {
     const followed = followedView;
-    if (!followed) return;
+    // A view whose frame is aligned to no tiling has no ground to follow (`tile` is null exactly
+    // when `tileScheme` is): every embedding view is this case, and composing for it threw from
+    // inside the store's own fan-out, which starved every subscriber behind the map.
+    if (!followed || followed.tileScheme === null || followed.tile === null) return;
     const {bbox, zoom} = (event as CustomEvent<{bbox: [number, number, number, number]; zoom: number}>).detail;
     const [x0, y0] = dataToWorldXY(bbox[0], bbox[1], followed.quantisation);
     const [x1, y1] = dataToWorldXY(bbox[2], bbox[3], followed.quantisation);
@@ -246,7 +249,7 @@ function onViewChanged(id: string): void {
   writeViewToUrl(id);
   dropBasemap();
   followCameraWithBasemap(view);
-  const camera = keepsFrame ? lastCamera : null;
+  const camera = keepsFrame && view.tileScheme !== null && view.tile !== null ? lastCamera : null;
   if (camera) composed = coverFor(view, camera);
   void installBasemap(view, camera ?? undefined);
 }
