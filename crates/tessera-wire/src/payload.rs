@@ -43,7 +43,7 @@ use std::sync::Arc;
 use arrow::array::{
     ArrayRef, BooleanArray, DictionaryArray, Float32Array, Float64Array, Int16Array, Int32Array,
     Int64Array, Int8Array, ListBuilder, StringArray, StringBuilder, TimestampMicrosecondArray,
-    UInt16Array, UInt32Array, UInt32Builder, UInt64Array, UInt8Array,
+    UInt16Array, UInt32Array, UInt32Builder, UInt64Array, UInt64Builder, UInt8Array,
 };
 use arrow::datatypes::{DataType, Field, Schema, UInt16Type};
 use arrow::ipc::writer::StreamWriter;
@@ -279,29 +279,31 @@ pub struct ArtifactRow<'a> {
     /// who contains none receives no artifact at all rather than this list empty. So there is no
     /// *content withheld* state on this wire and no shape to express one.
     pub content: &'a [String],
-    /// The identifier of this artifact's parent, **and only ever one that is in this same
-    /// response**.
+    /// The identifiers of this artifact's parents, **and only ever those in this same response**,
+    /// ascending (`dag-hierarchies.md` §7). A tree's list is at most one long; a `dag` layer's
+    /// may name several, and a client that wants one parent takes the first and gets the same
+    /// one every time.
     ///
     /// This is the structure a client needs to nest what it draws, or to filter to one subtree
     /// while still drawing the rest of the map. It is what a hierarchy is *for* on a levelled
     /// layer, whose edges carry containment rather than a ladder to coarsen along.
     ///
-    /// **Null is the fail-closed answer and covers two different situations deliberately.** The
-    /// artifact may be a root; or its parent may exist and not have been served — below its own
-    /// criterion for this viewer, suppressed, or dropped by the frontier. Naming a parent in the
-    /// second case would disclose that a coarser grouping exists which this principal is not
-    /// cleared to see, so the two are one value here and a client must read null as *no parent in
-    /// this response* rather than as *no parent*.
-    pub parent_id: Option<u64>,
+    /// **An absent entry is the fail-closed answer and covers two different situations
+    /// deliberately** (C29, per entry). The artifact may be a root; or a parent may exist and not
+    /// have been served — below its own criterion for this viewer, suppressed, or dropped by the
+    /// frontier. Naming a parent in the second case would disclose that a coarser grouping exists
+    /// which this principal is not cleared to see, so the two are one shape here and a client must
+    /// read an empty list as *no parent in this response* rather than as *no parent*.
+    pub parent_ids: Vec<u64>,
     /// **The resolution a client draws this artifact at**, computed the right way for its layer's
     /// kind so no client has to know which way that is (`artifact-fetch-protocol.md` §5.3, the
     /// rung ruling; it renamed and re-meant the `level` column this field carried until then).
     ///
     /// On a **levelled** layer it is the declared level — a fact about the artifact, the same
     /// number for every principal served it, indexing the level set `/v1/meta` publishes. On a
-    /// **treed** layer it is the response-local parent-chain depth: the depth of this row in the
-    /// forest the response's own `parent_id` links form, after the budget cut, so a re-rooted
-    /// subtree's root reads 0. On a **flat** layer it is 0. The two derivations disagree on real
+    /// **treed** layer it is the response-local depth: the longest parent chain to this row in
+    /// the forest the response's own `parent_ids` links form, after the budget cut, so a
+    /// re-rooted subtree's root reads 0. On a **flat** layer it is 0. The two derivations disagree on real
     /// data — a tiered layer's edges skip levels and its roots arrive parentless — which is why
     /// the server computes the right one per layer rather than leaving every client to pick
     /// (and one shipped client to pick wrongly, which is what happened).
@@ -436,7 +438,14 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
             DataType::List(Arc::new(Field::new("item", DataType::Utf8, false))),
             false,
         ),
-        Field::new("parent_id", DataType::UInt64, true),
+        // Non-nullable, and empty is a value: a root, a flat artifact, and an artifact whose
+        // every parent this response withheld all carry an empty list (see
+        // [`ArtifactRow::parent_ids`]).
+        Field::new(
+            "parent_ids",
+            DataType::List(Arc::new(Field::new("item", DataType::UInt64, false))),
+            false,
+        ),
         // Non-nullable: every artifact has a rung — a levelled layer's declared level, a treed
         // layer's response-local chain depth, a flat layer's 0 (see [`ArtifactRow::rung`]). There
         // is no *withheld* state to express — an artifact whose content could not be served is
@@ -465,6 +474,15 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
         // Never null: an artifact with no supplied content has an *empty* list, because its layer
         // declares none. A null would have to mean something else, and there is nothing else.
         content.append(true);
+    }
+    let mut parent_ids = ListBuilder::new(UInt64Builder::new()).with_field(Arc::new(Field::new(
+        "item",
+        DataType::UInt64,
+        false,
+    )));
+    for row in rows {
+        parent_ids.values().append_slice(&row.parent_ids);
+        parent_ids.append(true);
     }
 
     let mut columns: Vec<ArrayRef> = vec![
@@ -495,7 +513,7 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
             rows.iter().map(|r| r.bbox.map(|b| b[3])),
         )),
         Arc::new(content.finish()),
-        Arc::new(UInt64Array::from_iter(rows.iter().map(|r| r.parent_id))),
+        Arc::new(parent_ids.finish()),
         Arc::new(UInt32Array::from_iter_values(rows.iter().map(|r| r.rung))),
         Arc::new(BooleanArray::from_iter(rows.iter().map(|r| r.matched))),
     ];
@@ -633,7 +651,11 @@ pub fn points_frame(
         assert_eq!(points, len, "scalar column {name:?} length mismatch");
     }
     for (layer, col) in membership {
-        assert_eq!(points, col.len(), "membership column {layer:?} length mismatch");
+        assert_eq!(
+            points,
+            col.len(),
+            "membership column {layer:?} length mismatch"
+        );
     }
 
     let mut fields = vec![
@@ -660,7 +682,9 @@ pub fn points_frame(
     columns.push(Arc::new(UInt64Array::from_iter_values(
         tessera_ids.iter().copied(),
     )));
-    columns.push(Arc::new(UInt64Array::from_iter_values(codes.iter().copied())));
+    columns.push(Arc::new(UInt64Array::from_iter_values(
+        codes.iter().copied(),
+    )));
     for (_, col) in scalars {
         columns.push(wire_column_array(col));
     }
@@ -741,7 +765,10 @@ impl std::fmt::Display for FrameError {
                 write!(f, "truncated frame header at byte {at}")
             }
             FrameError::TruncatedPayload { at } => {
-                write!(f, "frame at byte {at} claims a payload past the end of the body")
+                write!(
+                    f,
+                    "frame at byte {at} claims a payload past the end of the body"
+                )
             }
             FrameError::UnknownKind { kind, at } => {
                 write!(f, "unknown frame kind {kind} at byte {at}")
@@ -798,17 +825,46 @@ fn wire_column_width(col: &ScalarColumn) -> usize {
 
 /// The element type behind each `ScalarColumn` variant, for `size_of`.
 macro_rules! wire_elem {
-    (U8) => { u8 }; (U16) => { u16 }; (U32) => { u32 }; (U64) => { u64 };
-    (I8) => { i8 }; (I16) => { i16 }; (I32) => { i32 }; (I64) => { i64 };
-    (F32) => { f32 }; (F64) => { f64 }; (TimestampUs) => { i64 };
+    (U8) => {
+        u8
+    };
+    (U16) => {
+        u16
+    };
+    (U32) => {
+        u32
+    };
+    (U64) => {
+        u64
+    };
+    (I8) => {
+        i8
+    };
+    (I16) => {
+        i16
+    };
+    (I32) => {
+        i32
+    };
+    (I64) => {
+        i64
+    };
+    (F32) => {
+        f32
+    };
+    (F64) => {
+        f64
+    };
+    (TimestampUs) => {
+        i64
+    };
 }
 use wire_elem;
 
 /// Serialise `batch` by **appending** to `out` — straight into the frame buffer, no intermediate
 /// allocation and no copy of the finished stream.
 fn write_stream_into(schema: &Schema, batch: &RecordBatch, out: &mut Vec<u8>) {
-    let mut writer =
-        StreamWriter::try_new(out, schema).expect("frame stream writer construction");
+    let mut writer = StreamWriter::try_new(out, schema).expect("frame stream writer construction");
     writer.write(batch).expect("frame stream write");
     writer.finish().expect("frame stream finish");
 }
@@ -826,7 +882,10 @@ mod tests {
         let points = points_frame(
             &[1, 2, 3],
             &[10, 20, 30],
-            &[("w", ScalarColumn::U16(&[7, 8, 9])), ("n", ScalarColumn::Utf8(&names3))],
+            &[
+                ("w", ScalarColumn::U16(&[7, 8, 9])),
+                ("n", ScalarColumn::Utf8(&names3)),
+            ],
             &[],
         );
         let trailer = trailer_frame(br#"{"stream_us":1}"#);
@@ -839,7 +898,10 @@ mod tests {
 
         let frames = split_frames(&body).expect("well-formed body splits");
         let kinds: Vec<u8> = frames.iter().map(|(k, _)| *k).collect();
-        assert_eq!(kinds, vec![FRAME_TILES, FRAME_SUB_CELLS, FRAME_POINTS, FRAME_TRAILER]);
+        assert_eq!(
+            kinds,
+            vec![FRAME_TILES, FRAME_SUB_CELLS, FRAME_POINTS, FRAME_TRAILER]
+        );
         assert_eq!(frames[3].1, br#"{"stream_us":1}"#);
         // Each payload is a complete Arrow stream: decodable alone.
         for (kind, payload) in &frames[..3] {

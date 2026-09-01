@@ -796,13 +796,11 @@ fn a_served_artifact_names_its_parent_when_the_parent_is_also_served() {
             .expect("served")
     };
     let country = by_key("country");
-    assert_eq!(country.parent_id, None, "a root names no parent");
-    assert_eq!(
-        by_key("state-a").parent_id,
-        Some(country.tessera_id),
+    assert!(country.parent_ids.is_empty(), "a root names no parent");
+    assert_eq!(by_key("state-a").parent_ids, vec![country.tessera_id],
         "a state names the country it is in, by the identifier that country was served under"
     );
-    assert_eq!(by_key("state-b").parent_id, Some(country.tessera_id));
+    assert_eq!(by_key("state-b").parent_ids, vec![country.tessera_id]);
 }
 
 /// **A parent that exists and was withheld is null, identically to a root.** That is the whole
@@ -855,8 +853,7 @@ fn a_withheld_parent_is_named_no_differently_from_a_root() {
         vec!["state"],
         "the country is below the bar for this principal and the state is not"
     );
-    assert_eq!(
-        narrow[0].parent_id, None,
+    assert!(narrow[0].parent_ids.is_empty(),
         "the state's parent exists and was withheld, so it reads exactly as a root does — the \
          alternative discloses that a coarser artifact is there"
     );
@@ -873,7 +870,7 @@ fn a_withheld_parent_is_named_no_differently_from_a_root() {
         .find(|a| a.key.as_deref() == Some("state"))
         .expect("served");
     assert!(
-        state.parent_id.is_some(),
+        !state.parent_ids.is_empty(),
         "the same edge is named for a principal served both endpoints"
     );
 }
@@ -898,8 +895,7 @@ fn a_pruned_response_carries_no_parent_links() {
 
     let served = artifacts_of(&engine, &full_coverage_credential(), None);
     assert_eq!(keys(&served), vec!["leaf"]);
-    assert_eq!(
-        served[0].parent_id, None,
+    assert!(served[0].parent_ids.is_empty(),
         "the root was dropped by the frontier, so there is nothing in this response to name"
     );
 }
@@ -935,11 +931,11 @@ fn a_levelled_layer_may_carry_one_key_at_two_levels() {
     assert_eq!(served.len(), 2, "both levels are served");
     let child = served
         .iter()
-        .find(|a| a.parent_id.is_some())
+        .find(|a| !a.parent_ids.is_empty())
         .expect("the level-1 artifact names its parent");
     let parent = served
         .iter()
-        .find(|a| a.tessera_id == child.parent_id.unwrap())
+        .find(|a| a.tessera_id == child.parent_ids[0])
         .expect("and the parent is in the response");
     assert_ne!(
         child.tessera_id, parent.tessera_id,
@@ -1487,9 +1483,7 @@ fn the_level_is_declared_not_counted_from_parent_links() {
         county.rung, 2,
         "the declared level — a levelled layer's rung"
     );
-    assert_eq!(
-        county.parent_id,
-        Some(country.tessera_id),
+    assert_eq!(county.parent_ids, vec![country.tessera_id],
         "and its parent is the country, one link up — which is the count that would say 1"
     );
 }
@@ -1811,8 +1805,8 @@ fn parents_in_bundle(
 /// (`dag-hierarchies.md` §4, §7). The record is the guard `BUNDLE_FORMAT` 5 exists for: the fold
 /// writes the parent list, and a reopen with the log deleted reads it back from the bundle alone.
 ///
-/// ⊘ The served link is one parent here — `parent_id` on the wire is the engine track's to widen
-/// to `parent_ids` — so what is asserted of the response is that it names one of the two.
+/// The response names both parents in `parent_ids`, ascending by identifier (contracts §3.2 r71),
+/// since both are served.
 #[test]
 fn a_dag_child_under_two_parents_is_published_served_and_folded_whole() {
     let fx = fixture();
@@ -1846,10 +1840,11 @@ fn a_dag_child_under_two_parents_is_published_served_and_folded_whole() {
             .iter()
             .find(|a| a.key.as_deref() == Some("c"))
             .unwrap();
-        let link = child.parent_id.expect("the child names a served parent");
-        assert!(
-            link == id_of("p0") || link == id_of("p1"),
-            "the link is one of the child's two parents"
+        let mut both = vec![id_of("p0"), id_of("p1")];
+        both.sort_unstable();
+        assert_eq!(
+            child.parent_ids, both,
+            "the child names both served parents, ascending by identifier"
         );
 
         // No point was ingested, so there is nothing to flush; the fold rewrites the level whole.
@@ -1888,7 +1883,7 @@ fn a_dag_child_under_two_parents_is_published_served_and_folded_whole() {
         .iter()
         .find(|a| a.key.as_deref() == Some("c"))
         .unwrap();
-    assert!(child.parent_id.is_some(), "the child still names a parent");
+    assert!(!child.parent_ids.is_empty(), "the child still names a parent");
 }
 
 /// One ingest batch of one point naming `keys` on `layer`, with the edges its list column would

@@ -622,7 +622,7 @@ fn the_artifacts_frame_fixes_its_column_order_and_dictionary_encodes_the_layer()
             "box_max_x",
             "box_max_y",
             "content",
-            "parent_id",
+            "parent_ids",
             "rung",
             "matched",
         ],
@@ -723,7 +723,11 @@ fn artifact_frame_bytes_per_row_hold_the_measured_bounds() {
             bbox: Some([i as u32, i as u32, i as u32 + 5, i as u32 + 5]),
             shape: None,
             content: &content[i],
-            parent_id: (i % 7 != 0).then_some((i / 7) as u64),
+            parent_ids: if i % 7 != 0 {
+                vec![(i / 7) as u64]
+            } else {
+                Vec::new()
+            },
             rung: (i % 3) as u32,
             matched: Some(i % 2 == 0),
         })

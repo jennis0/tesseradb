@@ -798,13 +798,15 @@ pub struct ArtifactOut {
     /// it safe beside a gate that may have admitted the artifact on its own terms: such an artifact
     /// is authorised to *exist*, not to describe members the viewer cannot see.
     pub derived: crate::derived::DerivedContent,
-    /// This artifact's parent, **and only ever one that is also in this response**.
+    /// This artifact's parents, **and only ever those that are also in this response**, ascending
+    /// by identifier (`dag-hierarchies.md` §7). A tree's list is at most one long; a `dag`
+    /// layer's may name several.
     ///
     /// The structure a client needs to nest what it draws, or to filter to one subtree while still
-    /// drawing the rest of the map. **Null covers two situations on purpose**: a root, and a parent
-    /// that exists but was withheld from this viewer. Distinguishing them would disclose that a
-    /// coarser grouping exists which they are not cleared to see.
-    pub parent_id: Option<TesseraId>,
+    /// drawing the rest of the map. **An absent entry covers two situations on purpose**: a root,
+    /// and a parent that exists but was withheld from this viewer (C29, per entry). Distinguishing
+    /// them would disclose that a coarser grouping exists which they are not cleared to see.
+    pub parent_ids: Vec<TesseraId>,
     /// **This is one content, entire.** Where an artifact carries several ranked descriptions,
     /// this is the first whose generating set the viewer contains completely; a viewer containing
     /// none receives no artifact at all rather than this list empty. Empty means the layer declares
@@ -817,16 +819,16 @@ pub struct ArtifactOut {
     /// On a **levelled** layer it is the declared level — a fact about the artifact, the same for
     /// every principal served it, indexing the level set `/v1/meta` publishes. A client needs
     /// that number because the alternative it was reduced to is wrong: a tiered layer's edges
-    /// skip levels and leave roots parentless, so counting `parent_id` links disagrees with the
+    /// skip levels and leave roots parentless, so counting `parent_ids` links disagrees with the
     /// declaration on every layer whose data is not a perfect ladder.
     ///
     /// On a **treed** layer — which declares no levels and sits entirely at level 0, its
     /// structure in its edges ([decision 0082](../../../docs/decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md))
-    /// — it is the **response-local parent-chain depth**: the depth of this row in the forest the
-    /// response's own `parent_id` links form, *after* the budget cut and every other narrowing,
-    /// so the root of a re-rooted subtree reads 0. That is the number walking the served parents
-    /// yields, computed server-side so no client has to know which layer kind wants which
-    /// derivation (the shipped client picked wrongly once).
+    /// — it is the **response-local depth**: the longest parent chain to this row in the forest
+    /// the response's own `parent_ids` links form (`dag-hierarchies.md` §5), *after* the budget
+    /// cut and every other narrowing, so the root of a re-rooted subtree reads 0. That is the
+    /// number walking the served parents yields, computed server-side so no client has to know
+    /// which layer kind wants which derivation (the shipped client picked wrongly once).
     ///
     /// On a **flat** layer it is 0.
     pub rung: u32,
@@ -1436,7 +1438,8 @@ impl EngineMeta {
         };
         match pin {
             Some(pin) => {
-                let requested = format!("{}{}{}", family.group, tessera_store::GROUP_SEPARATOR, pin);
+                let requested =
+                    format!("{}{}{}", family.group, tessera_store::GROUP_SEPARATOR, pin);
                 match self.resolve_visible_view(&requested, visible) {
                     // A view of the group that has no column — one created since the build — is
                     // the same answer as a key nobody declared, and the same answer a gate-failed
@@ -1614,29 +1617,28 @@ impl Engine {
         // function of the view's projection and the view's own frame together — both declared per
         // view — and it is derived here rather than at the wire so that the ingest plane, which
         // reads this same structure, cannot come to a different answer about the same bundle.
-        let meta_view = |s: &tessera_store::manifest::ViewDescriptor, roster: Option<MetaRoster>| {
-            MetaView {
-                id: s.id.clone(),
-                display_name: s.display_name.clone(),
-                quantisation: s.quantisation,
-                projection: s.projection,
-                tile: tessera_spatial::frame::tile_scheme(
-                    s.projection,
-                    &Bounds {
-                        x_min: s.quantisation.x_min,
-                        x_max: s.quantisation.x_max,
-                        y_min: s.quantisation.y_min,
-                        y_max: s.quantisation.y_max,
-                    },
-                )
-                .map(|(scheme, square)| TileAddress {
-                    scheme,
-                    z: square.z,
-                    x: square.x,
-                    y: square.y,
-                }),
-                roster,
-            }
+        let meta_view = |s: &tessera_store::manifest::ViewDescriptor,
+                         roster: Option<MetaRoster>| MetaView {
+            id: s.id.clone(),
+            display_name: s.display_name.clone(),
+            quantisation: s.quantisation,
+            projection: s.projection,
+            tile: tessera_spatial::frame::tile_scheme(
+                s.projection,
+                &Bounds {
+                    x_min: s.quantisation.x_min,
+                    x_max: s.quantisation.x_max,
+                    y_min: s.quantisation.y_min,
+                    y_max: s.quantisation.y_max,
+                },
+            )
+            .map(|(scheme, square)| TileAddress {
+                scheme,
+                z: square.z,
+                x: square.x,
+                y: square.y,
+            }),
+            roster,
         };
         // **Serving order is the roster's order** (`views.md` §3.2): the plain views in manifest
         // order, then each group's views in creation order — which is the order the roster
@@ -1990,8 +1992,7 @@ impl Engine {
 
         // One value slot per declared column, filled home by home; a column no home
         // holds a value in stays `None` and is omitted — absence is absence.
-        let mut values: Vec<Option<ScalarOut>> =
-            vec![None; manifest.declared_scalars.len()];
+        let mut values: Vec<Option<ScalarOut>> = vec![None; manifest.declared_scalars.len()];
 
         // Home 1: the row. The same `resolve_scalars` the viewport gather uses, so the
         // two read paths cannot disagree about what a stored type decodes to.
@@ -2001,8 +2002,7 @@ impl Engine {
                 continue;
             };
             let d = &manifest.declared_scalars[declared_index];
-            values[declared_index] =
-                row_field_out(view, local, d, &generation.vocabularies);
+            values[declared_index] = row_field_out(view, local, d, &generation.vocabularies);
         }
 
         // Home 2: entity space — every non-rendered column with a value column (indexed
@@ -2011,9 +2011,7 @@ impl Engine {
             if d.render || values[declared_index].is_some() {
                 continue;
             }
-            if let Some(stored) =
-                generation.filter_columns.stored_value(&d.name, entity_raw)
-            {
+            if let Some(stored) = generation.filter_columns.stored_value(&d.name, entity_raw) {
                 values[declared_index] = stored_field_out(
                     stored,
                     d.arrow_type,
@@ -2343,7 +2341,11 @@ fn scoped_values_of(
     let reachable: Vec<(&str, &str)> = manifest
         .groups
         .iter()
-        .flat_map(|g| g.views.iter().map(move |v| (g.name.as_str(), v.key.as_str())))
+        .flat_map(|g| {
+            g.views
+                .iter()
+                .map(move |v| (g.name.as_str(), v.key.as_str()))
+        })
         .filter(|(group, key)| {
             visible.contains_view(&format!("{group}{}{key}", tessera_store::GROUP_SEPARATOR))
         })
@@ -2369,11 +2371,7 @@ fn scoped_values_of(
             let Some(owned) = owning_key_of((group, key), members_of, &family.group) else {
                 continue;
             };
-            let id = format!(
-                "{}{}{owned}",
-                family.group,
-                tessera_store::GROUP_SEPARATOR
-            );
+            let id = format!("{}{}{owned}", family.group, tessera_store::GROUP_SEPARATOR);
             // The family's own list, not the roster: a view created since the build has no column
             // until one is written for it, and asking for one would be asking for a file no pass
             // wrote.
@@ -3633,7 +3631,9 @@ fn eval_row_expr(
             // here than skipped, and a region leaf's kids are already resolved.
             let mut out = scope.all_rows();
             for kid in kids {
-                out.andnot_inplace(&eval_row_expr(kid, images, next_image, segments, domain, scope)?);
+                out.andnot_inplace(&eval_row_expr(
+                    kid, images, next_image, segments, domain, scope,
+                )?);
             }
             Ok(out)
         }
@@ -3671,7 +3671,9 @@ fn eval_row_expr(
             // entity path argues it).
             let mut out = scan_rows(segments, domain, column, RowPredicate::present_in(*family))?;
             for (i, kid) in kids.iter().enumerate() {
-                out.andnot_inplace(&eval_row_expr(kid, images, next_image, segments, domain, scope)?);
+                out.andnot_inplace(&eval_row_expr(
+                    kid, images, next_image, segments, domain, scope,
+                )?);
                 if out.is_empty() {
                     // Nothing below can widen an empty difference, so the remaining kids are not
                     // evaluated — **but `images` is positional and their verdicts are still in
@@ -5023,11 +5025,11 @@ impl Engine {
             // treed layer's stored level is 0, and its response-local chain depth is also 0 here,
             // this response being one artifact with no parent links to be deep in.
             rung: level,
-            // **Always null on this route, and not by omission.** A parent is named only where it
-            // is also in the response, and this response is one artifact — so there is nothing for
-            // it to name. Resolving the parent here anyway would hand a caller who holds one
+            // **Always empty on this route, and not by omission.** A parent is named only where
+            // it is also in the response, and this response is one artifact — so there is nothing
+            // for it to name. Resolving the parents here anyway would hand a caller who holds one
             // identifier the existence of a coarser artifact they were never served.
-            parent_id: None,
+            parent_ids: Vec::new(),
             // The identifier route carries no filter to answer about (decision 0104), and there is
             // no viewport for the answer to be scoped to either.
             matched: None,
@@ -5085,8 +5087,7 @@ impl Engine {
                         )
                     }),
                 };
-                let Some(shape) = held.shapes.get(ordinal as usize).and_then(|s| s.as_ref())
-                else {
+                let Some(shape) = held.shapes.get(ordinal as usize).and_then(|s| s.as_ref()) else {
                     return false;
                 };
                 let (parts, guarded) = crate::shapes::served_rings(&shape.shape, zoom);
@@ -5227,14 +5228,19 @@ impl Engine {
                 })
             }
             None => {
-                let fields = generation.filter_columns.records().fields_of(entity).ok()??;
+                let fields = generation
+                    .filter_columns
+                    .records()
+                    .fields_of(entity)
+                    .ok()??;
                 values_for(base, kinds, materialise, |tag| {
-                    fields.iter().find(|f| f.tag == tag).and_then(|f| {
-                        match &f.value {
+                    fields
+                        .iter()
+                        .find(|f| f.tag == tag)
+                        .and_then(|f| match &f.value {
                             tessera_filter::RecordValue::Utf8(text) => Some(text.as_str()),
                             _ => None,
-                        }
-                    })
+                        })
                 })
             }
         }
@@ -5540,7 +5546,7 @@ impl Engine {
             {
                 continue;
             }
-            if layer.declaration.hierarchy.kind == tessera_types::layer::HierarchyKind::Nested {
+            if lineage_kind(layer.declaration.hierarchy.kind).is_some() {
                 treed.insert(name.clone());
             }
 
@@ -5687,9 +5693,11 @@ impl Engine {
                     passing.push((ordinal, entity, masked_count, rank));
                 }
 
-                // The level's lineage, read from the parent pointers of **every** artifact and not
-                // only the passing ones: an ancestor that failed its own criterion is still an
-                // ancestor, and a cut blind to it would keep a node its descendant covers.
+                // The level's lineage, read from the parent lists of **every** artifact and not
+                // only the passing ones, because the edges are a property of the level and one
+                // lineage serves every viewer. **What the cut is taken over is the passing nodes
+                // alone** (decision 0117 E): the plan counts depth in them and climbs through the
+                // rest, so a withheld ancestor is not in this viewer's tree.
                 //
                 // **Within-level edges only, and that is the whole of the tiered shape's
                 // treatment here** (owner ruling, 2026-08-18). A tiered layer's edges run
@@ -5705,29 +5713,25 @@ impl Engine {
                 // work: ~96 ms at a level of ten million, against the ~3 ms the cut over them now
                 // costs.
                 //
-                // **The version and the build are taken inside one hold of the artifacts lock**,
-                // which is what makes the cached lineage the lineage *of* the version it is filed
-                // under: read separately, a write landing between the two would file the new
-                // level's edges under the old level's version, and the next request would serve a
-                // cut through a tree that has moved.
-                let lineage = self.write.with_artifacts(|store| {
-                    self.lineages.get_or_build(
-                        &name,
-                        level,
-                        store.level_version(&name, level),
-                        || {
-                            crate::cut::Lineage::new(store.level(&name, level).map(
-                                |(ordinal, record)| {
-                                    let within = record
-                                        .parents
-                                        .iter()
-                                        .find(|parent| parent.level == level)
-                                        .map(|parent| parent.ordinal);
-                                    (ordinal, within)
-                                },
-                            ))
-                        },
-                    )
+                // **Read from the row form, whose records and version were taken inside one hold
+                // of the artifacts lock** (above), which is what makes the cached lineage the
+                // lineage *of* the version it is filed under: read separately, a write landing
+                // between the two would file the new level's edges under the old level's version,
+                // and the next request would serve a cut through a tree that has moved.
+                let lineage = self.lineages.get_or_build(&name, level, level_version, || {
+                    let records = rows.records();
+                    let edges = (0..records.len() as u32).map(|ordinal| {
+                        let within = records
+                            .parents(ordinal)
+                            .iter()
+                            .filter(move |parent| parent.level == level)
+                            .map(|parent| parent.ordinal);
+                        (ordinal, within)
+                    });
+                    match lineage_kind(layer.declaration.hierarchy.kind) {
+                        Some(true) => crate::cut::Lineage::dag(edges),
+                        _ => crate::cut::Lineage::new(edges),
+                    }
                 });
                 let ordinals: Vec<u32> = passing.iter().map(|&(o, ..)| o).collect();
                 // Ascending and deduplicated, which the cut guarantees — so the membership test in
@@ -5874,13 +5878,17 @@ impl Engine {
                     } else {
                         false
                     };
-                    // **The parent comes from the level's own records and the key from the store.**
-                    // Both are per-ordinal facts of one generation, but only one of them is held
-                    // in the row form: a key is a caller's string, one per artifact, and copying
-                    // ten million of them into a cached structure buys nothing the store's own
-                    // lookup does not already answer. The key is payload, so the identity
-                    // projection skips the lookup.
-                    let parent = rows.parents(ordinal).first().copied();
+                    // **The parents come from the level's own records and the key from the
+                    // store.** Both are per-ordinal facts of one generation, but only one of them
+                    // is held in the row form: a key is a caller's string, one per artifact, and
+                    // copying ten million of them into a cached structure buys nothing the
+                    // store's own lookup does not already answer. The key is payload, so the
+                    // identity projection skips the lookup.
+                    let parents: Vec<(String, u32, u32)> = rows
+                        .parents(ordinal)
+                        .iter()
+                        .map(|p| (name.clone(), p.level, p.ordinal))
+                        .collect();
                     let key = match artifact_rows {
                         ArtifactRows::Identity => None,
                         ArtifactRows::Full => self
@@ -5893,7 +5901,7 @@ impl Engine {
                     served_at.insert((name.clone(), level, ordinal), tessera_id);
                     placed.push(Placement {
                         at: (name.clone(), level, ordinal),
-                        parent: parent.map(|p| (name.clone(), p.level, p.ordinal)),
+                        parents,
                         attached_to: rows
                             .attachment(ordinal)
                             .map(|a| (a.layer.clone(), a.level, a.ordinal)),
@@ -5910,7 +5918,7 @@ impl Engine {
                         // recomputed below, once the response's row set is final.
                         rung: level,
                         // Filled in below, once the response's own membership is settled.
-                        parent_id: None,
+                        parent_ids: Vec::new(),
                         // Asked only of the artifacts that survived the cut: the bit describes what
                         // is served, and an artifact the response drops has no row to carry one.
                         matched: matched.as_ref().map(|m| rows.matches(m, ordinal)),
@@ -5974,11 +5982,13 @@ impl Engine {
             .collect();
 
         // **A parent is named only where it is also in this response**, which is the whole of the
-        // disclosure rule for this field. An artifact whose parent exists but was withheld — below
-        // its own criterion for this viewer, suppressed, or dropped by the frontier — carries a
-        // null here, indistinguishable from a root. Naming it would tell the viewer that a coarser
-        // grouping exists which they are not cleared to see, which is a disclosure the rest of this
-        // pass takes care to avoid making.
+        // disclosure rule for this field, and it applies per entry (C29). An artifact whose parent
+        // exists but was withheld — below its own criterion for this viewer, suppressed, or dropped
+        // by the frontier — carries no entry for it, indistinguishable from a root having none.
+        // Naming it would tell the viewer that a coarser grouping exists which they are not
+        // cleared to see, which is a disclosure the rest of this pass takes care to avoid making.
+        // Ascending by identifier, so a client that wants one parent takes the first and gets the
+        // same one every time.
         let mut served = Vec::with_capacity(out.len());
         for ((((mut artifact, place), dropped), target_count), target_bit) in out
             .into_iter()
@@ -5996,93 +6006,128 @@ impl Engine {
             if let Some(bit) = target_bit {
                 artifact.matched = bit;
             }
-            artifact.parent_id = place
-                .parent
-                .as_ref()
-                .and_then(|key| served_at.get(key))
-                .copied();
+            artifact.parent_ids = place
+                .parents
+                .iter()
+                .filter_map(|key| served_at.get(key))
+                .copied()
+                .collect();
+            artifact.parent_ids.sort_unstable_by_key(|id| id.raw());
+            artifact.parent_ids.dedup();
             served.push(artifact);
         }
-        // **A treed layer's rung is the response-local parent-chain depth** — the depth of each
-        // row in the forest this response's own `parent_id` links form
-        // (`artifact-fetch-protocol.md` §5.3). Computed here, after the cut, the content
-        // withholds and the dependent drop, because those are what make the forest
-        // response-local: a row whose ancestors were pruned, withheld or cut away is a root of
-        // its subtree and reads 0, whatever its depth in the stored tree.
-        if !treed.is_empty() {
-            let parent_of: std::collections::HashMap<u64, Option<u64>> = served
-                .iter()
-                .filter(|a| treed.contains(&a.layer))
-                .map(|a| (a.tessera_id.raw(), a.parent_id.map(|p| p.raw())))
-                .collect();
-            let edges = parent_of.values().filter(|p| p.is_some()).count();
-            let mut depths: std::collections::HashMap<u64, u32> =
-                std::collections::HashMap::with_capacity(parent_of.len());
-            for artifact in served.iter_mut().filter(|a| treed.contains(&a.layer)) {
-                artifact.rung =
-                    response_depth(artifact.tessera_id.raw(), &parent_of, &mut depths, edges);
-            }
+        // **A treed layer's rung is the response-local depth** — the longest parent chain to each
+        // row in the forest this response's own `parent_ids` links form
+        // (`artifact-fetch-protocol.md` §5.3, `dag-hierarchies.md` §5). Computed here, after the
+        // cut, the content withholds and the dependent drop, because those are what make the
+        // forest response-local: a row whose ancestors were pruned, withheld or cut away is a root
+        // of its subtree and reads 0, whatever its depth in the stored tree.
+        //
+        // **Settled before the membership column's served set is handed over**, because the
+        // column ranks by this rung and never by the stored depth: the stored depth counts
+        // withheld nodes, so two served artifacts holding one point would be ordered by an
+        // artifact the viewer cannot see (`dag-hierarchies.md` §6, decision 0117 E).
+        let parents_of: std::collections::HashMap<u64, Vec<u64>> = served
+            .iter()
+            .filter(|a| treed.contains(&a.layer))
+            .map(|a| {
+                (
+                    a.tessera_id.raw(),
+                    a.parent_ids.iter().map(|p| p.raw()).collect(),
+                )
+            })
+            .collect();
+        let rungs = response_rungs(&parents_of);
+        for artifact in served.iter_mut().filter(|a| treed.contains(&a.layer)) {
+            artifact.rung = rungs.get(&artifact.tessera_id.raw()).copied().unwrap_or(0);
         }
         // **The membership column's served set is `served_at` after the drop** — exactly the
-        // artifacts in `served`, and the only identifiers the column can name.
+        // artifacts in `served`, and the only identifiers the column can name — each with its
+        // response-local rung (0 on a layer whose rung is its declared level, which the level
+        // index already ranks).
         for ((name, level, ordinal), tessera_id) in &served_at {
             if let Some(slot) = served_layers
                 .iter_mut()
                 .find(|l| &l.name == name)
                 .and_then(|l| l.levels.iter_mut().find(|l| l.level == *level))
             {
-                slot.served.insert(*ordinal, *tessera_id);
+                let rung = rungs.get(&tessera_id.raw()).copied().unwrap_or(0);
+                slot.served.insert(*ordinal, (*tessera_id, rung));
             }
         }
         Ok((served, served_layers))
     }
 }
 
-/// The response-local parent-chain depth of one served treed artifact — its `rung`
-/// (`artifact-fetch-protocol.md` §5.3).
-///
-/// `parent_of` holds every served row of the treed layers, keyed by `tessera_id`, valued with the
-/// response's own `parent_id` — which, by that field's contract, only ever names an identifier in
-/// the same response, and within the artifact's own layer. `None`, and an identifier `parent_of`
-/// does not hold, are both roots: *no parent in this response* is rung 0, whatever the stored
-/// tree says.
-///
-/// Memoised through `depths` because ancestors are shared, exactly as [`crate::cut::Lineage`]'s
-/// depth table is; the cycle guard is the edge count, as there — the publish refuses a cycle, so
-/// exceeding it means a malformed store, and the fail-safe answer is a root.
-fn response_depth(
-    id: u64,
-    parent_of: &std::collections::HashMap<u64, Option<u64>>,
-    depths: &mut std::collections::HashMap<u64, u32>,
-    edges: usize,
-) -> u32 {
-    let mut chain: Vec<u64> = Vec::new();
-    let mut at = id;
-    let base = loop {
-        if let Some(&known) = depths.get(&at) {
-            break known;
-        }
-        match parent_of.get(&at).copied().flatten() {
-            None => {
-                depths.insert(at, 0);
-                break 0;
-            }
-            Some(up) => {
-                if chain.len() > edges {
-                    depths.insert(at, 0);
-                    break 0;
-                }
-                chain.push(at);
-                at = up;
-            }
-        }
-    };
-    let mut depth = base;
-    for &node in chain.iter().rev() {
-        depth += 1;
-        depths.insert(node, depth);
+/// Whether a layer's kind holds a lineage the cut climbs and the rung is counted over —
+/// `Some(dag)` for the kinds whose edges are roll-up, `None` for the flat and levelled kinds,
+/// whose edges are information rather than a ladder to coarsen along
+/// ([decision 0087](../../../docs/decisions/0087-cross-level-edges-are-information-not-rollup.md)).
+fn lineage_kind(kind: tessera_types::layer::HierarchyKind) -> Option<bool> {
+    match kind {
+        tessera_types::layer::HierarchyKind::Nested => Some(false),
+        // A `dag` layer is `nested` with several parents (decision 0117): a lineage, and one the
+        // cut reads every depth's count over rather than bisecting (`dag-hierarchies.md` §6).
+        tessera_types::layer::HierarchyKind::Dag => Some(true),
+        _ => None,
     }
-    depths[&id]
+}
+
+/// The response-local depth of every served treed artifact — its `rung`
+/// (`artifact-fetch-protocol.md` §5.3): **the longest parent chain** to it over the response's
+/// own links (`dag-hierarchies.md` §5), the same definition the stored lineage's depth has.
+///
+/// `parents_of` holds every served row of the treed layers, keyed by `tessera_id`, valued with the
+/// response's own `parent_ids` — which, by that field's contract, only ever name identifiers in
+/// the same response, and within the artifact's own layer. An empty list, and an identifier
+/// `parents_of` does not hold, are both roots: *no parent in this response* is rung 0, whatever
+/// the stored tree says.
+///
+/// One depth-first pass with the ancestors memoised, iterative for the same reason
+/// [`crate::cut::Lineage`]'s is; the cycle guard is the in-progress mark — the publish and the
+/// mint refuse a cycle, so a parent still in progress when its child is resolved is a malformed
+/// store, and it contributes nothing rather than looping.
+fn response_rungs(
+    parents_of: &std::collections::HashMap<u64, Vec<u64>>,
+) -> std::collections::HashMap<u64, u32> {
+    const PENDING: u32 = u32::MAX;
+    let mut known: std::collections::HashMap<u64, u32> =
+        std::collections::HashMap::with_capacity(parents_of.len());
+    let mut stack: Vec<u64> = Vec::new();
+    for &id in parents_of.keys() {
+        if known.contains_key(&id) {
+            continue;
+        }
+        stack.push(id);
+        while let Some(&at) = stack.last() {
+            let ups = parents_of.get(&at).map_or(&[][..], Vec::as_slice);
+            match known.get(&at).copied() {
+                None => {
+                    known.insert(at, PENDING);
+                    for &up in ups {
+                        if !known.contains_key(&up) {
+                            stack.push(up);
+                        }
+                    }
+                }
+                Some(PENDING) => {
+                    let rung = ups
+                        .iter()
+                        .filter_map(|up| known.get(up).copied())
+                        .filter(|&k| k != PENDING)
+                        .map(|k| k + 1)
+                        .max()
+                        .unwrap_or(0);
+                    known.insert(at, rung);
+                    stack.pop();
+                }
+                Some(_) => {
+                    stack.pop();
+                }
+            }
+        }
+    }
+    known
 }
 
 /// Where one served artifact sits, and what it points at.
@@ -6092,8 +6137,8 @@ fn response_depth(
 struct Placement {
     /// Its own address — `(layer, level, ordinal)`, the triple an [`Attachment`] carries.
     at: (String, u32, u32),
-    /// The address of its parent, where it names one. Within its own layer by construction.
-    parent: Option<(String, u32, u32)>,
+    /// The addresses of its parents, where it names any. Within its own layer by construction.
+    parents: Vec<(String, u32, u32)>,
     /// The address of the artifact it depends on, where its layer declares a dependency.
     attached_to: Option<(String, u32, u32)>,
 }
@@ -6108,8 +6153,8 @@ struct Placement {
 /// clusters that same response does not hold. One response never contradicts itself.
 ///
 /// **Server-side, and the attachment identifier never reaches the wire.** Publishing it so a client
-/// could filter for itself was declined for the reason `parent_id` carries a null rather than a
-/// withheld parent's name: handing over the identifier names an artifact the response does not
+/// could filter for itself was declined for the reason `parent_ids` omits a withheld parent rather
+/// than naming it: handing over the identifier names an artifact the response does not
 /// contain. A client never told the relationship cannot notice what is missing from it.
 ///
 /// **The target's layer must be in this request.** A request naming the dependent layer *alone* —
@@ -6868,8 +6913,11 @@ pub(crate) fn scoped_render_families<'a>(
             // §3.3's rule, stated once in `owning_key_of`, and then the family's own list: a view
             // of the group that has no column — one created since the build — renders nothing.
             owning_key_of(roster, members_of, &f.group).is_some_and(|key| {
-                f.views
-                    .contains(&format!("{}{}{key}", f.group, tessera_store::GROUP_SEPARATOR))
+                f.views.contains(&format!(
+                    "{}{}{key}",
+                    f.group,
+                    tessera_store::GROUP_SEPARATOR
+                ))
             })
         })
         .collect()

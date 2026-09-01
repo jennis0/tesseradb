@@ -22,8 +22,7 @@ use tokio::sync::{mpsc, oneshot};
 use tessera_types::{GenerationStamp, TesseraId};
 use tessera_wire::{
     artifacts_frame, artifacts_identity_frame, points_frame, sub_cells_frame, tiles_frame,
-    trailer_frame, ArtifactRow,
-    ScalarColumn,
+    trailer_frame, ArtifactRow, ScalarColumn,
 };
 
 use tessera_engine::viewport::ViewportRequest;
@@ -864,7 +863,7 @@ struct ViewportReq {
     /// **`"identity"` answers with the SAME rows in a fixed four-column schema** — `layer`
     /// (dictionary-encoded), `tessera_id`, `rung`, `matched`: the row set, the `matched` bits and
     /// the `rung` values are identical under either value, and only the columns change, which is
-    /// what keeps every cross-reference (`parent_id`, the points frames' membership columns) true
+    /// what keeps every cross-reference (`parent_ids`, the points frames' membership columns) true
     /// and is why the projection discloses nothing — a column subset of what the same caller's
     /// identical request would have been served. For the caller that already holds the payload
     /// columns and wants this filter's bits over the same rows.
@@ -1143,7 +1142,7 @@ impl ViewportSink for WireSink {
                 bbox: a.derived.bbox,
                 shape: a.derived.shape.as_deref(),
                 content: &a.content,
-                parent_id: a.parent_id.map(|id| id.raw()),
+                parent_ids: a.parent_ids.iter().map(|id| id.raw()).collect(),
                 rung: a.rung,
                 matched: a.matched,
             })
@@ -1218,7 +1217,10 @@ fn run_viewport_stream(
     // on all of them, so the three cost the same work as well as reading the same.
     let Some(view) = meta.resolve_visible_view(&req.view, &session.visible_views) else {
         if let Some(tx) = sink.first_tx.take() {
-            let _ = tx.send(Err(ApiError::Unknown(format!("unknown view '{}'", req.view))));
+            let _ = tx.send(Err(ApiError::Unknown(format!(
+                "unknown view '{}'",
+                req.view
+            ))));
         }
         return;
     };

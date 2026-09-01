@@ -580,7 +580,11 @@ struct ClientArtifact {
     masked_count: u64,
     centroid: Option<[f64; 2]>,
     bbox: Option<[u32; 4]>,
-    parent_key: Option<String>,
+    /// The keys of the parents the response named — every one of them in the same response, so
+    /// the identifiers resolve here. Empty is *no parent named*, which covers a root and a
+    /// parent withheld from this viewer alike; the ambiguity is deliberate on the wire and is
+    /// kept here.
+    parent_keys: Vec<String>,
 }
 
 /// The whole map, as one principal sees it: the tile counts, and every artifact served.
@@ -618,8 +622,8 @@ async fn client_view(server: &TestServer, terms: &[&str]) -> ClientView {
     }
 }
 
-/// Decode the artifacts frame in full — the shared decoder drops `parent_id`, and the edge is half
-/// of what a lineage column is for.
+/// Decode the artifacts frame in full — the shared decoder drops `parent_ids`, and the edges are
+/// half of what a lineage column is for.
 fn artifacts_by_key(body: &[u8]) -> Vec<ClientArtifact> {
     use arrow::array::Float64Array as F64;
     let frames = tessera_wire::split_frames(body).expect("well-formed frames");
@@ -660,9 +664,22 @@ fn artifacts_by_key(body: &[u8]) -> Vec<ClientArtifact> {
         let keys = keys.as_any().downcast_ref::<StringArray>().unwrap();
         let counts = column(3);
         let counts = counts.as_any().downcast_ref::<UInt64Array>().unwrap();
-        // Column 11 of the r43 order — after `content` at 10, before `rung` at 12.
+        // Column 11 of the r43 order — after `content` at 10, before `rung` at 12 — a
+        // `list<uint64>`, non-nullable, ascending (`dag-hierarchies.md` §7).
         let parents = column(11);
-        let parents = parents.as_any().downcast_ref::<UInt64Array>().unwrap();
+        let parents = parents
+            .as_any()
+            .downcast_ref::<arrow::array::ListArray>()
+            .unwrap();
+        let parents_at = |i: usize| -> Vec<u64> {
+            let entry = parents.value(i);
+            entry
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap()
+                .values()
+                .to_vec()
+        };
         let f64_at = |col: usize, i: usize| {
             let a = batch.column(col).clone();
             let a = a.as_any().downcast_ref::<F64>().unwrap().clone();
@@ -690,7 +707,7 @@ fn artifacts_by_key(body: &[u8]) -> Vec<ClientArtifact> {
                     masked_count: counts.value(i),
                     centroid,
                     bbox,
-                    parent_key: parents.is_valid(i).then(|| parents.value(i).to_string()),
+                    parent_keys: parents_at(i).iter().map(u64::to_string).collect(),
                 },
             ));
         }
@@ -705,9 +722,11 @@ fn artifacts_by_key(body: &[u8]) -> Vec<ClientArtifact> {
     let mut artifacts: Vec<ClientArtifact> = rows
         .into_iter()
         .map(|(_, mut a)| {
-            a.parent_key = a
-                .parent_key
-                .map(|id| key_of.get(&id).cloned().flatten().unwrap_or(id));
+            a.parent_keys = a
+                .parent_keys
+                .into_iter()
+                .map(|id| key_of.get(&id).cloned().flatten().unwrap_or(id))
+                .collect();
             a
         })
         .collect();
@@ -848,7 +867,7 @@ async fn a_lineage_column_ingests_the_database_a_member_table_builds() {
     // The fixture is a tree, and the comparison is only worth running if the response says so.
     let view = client_view(&built, &["0", "1"]).await;
     assert!(
-        view.artifacts.iter().any(|a| a.parent_key.is_some()),
+        view.artifacts.iter().any(|a| !a.parent_keys.is_empty()),
         "the built side served no edge, so the lineage comparison would prove nothing"
     );
 
@@ -964,7 +983,7 @@ async fn a_lineage_column_mints_the_chain_and_the_edges_it_declares() {
     assert!(
         view.artifacts
             .iter()
-            .filter(|a| a.parent_key.is_some())
+            .filter(|a| !a.parent_keys.is_empty())
             .count()
             >= 3,
         "the ingested side served no lineage, so the edges were not created: {:?}",
@@ -1001,7 +1020,7 @@ async fn a_tiered_column_mints_the_coarse_level_before_the_fine_one() {
     assert!(
         view.artifacts
             .iter()
-            .filter(|a| a.parent_key.is_some())
+            .filter(|a| !a.parent_keys.is_empty())
             .count()
             >= 3,
         "a tiered containment was not created: {:?}",
@@ -1451,8 +1470,8 @@ async fn a_lineage_naming_an_edge_the_layer_does_not_hold_still_joins() {
         .iter()
         .find(|a| a.key.as_deref() == Some("leaf"))
         .expect("the published artifact serves");
-    assert_eq!(
-        leaf.parent_key, None,
+    assert!(
+        leaf.parent_keys.is_empty(),
         "the edge was reported, not invented — a growth adds members and never lineage"
     );
 }
