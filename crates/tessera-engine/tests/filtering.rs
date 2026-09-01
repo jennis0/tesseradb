@@ -3696,7 +3696,7 @@ fn a_coalesced_layer_that_does_not_cover_its_window_is_refused() {
             values,
         };
     let err = columns
-        .with_coalesced(&[window(extent(&[100, 101, 200]))], &[], None)
+        .with_coalesced(&[window(extent(&[100, 101, 200]))], &[], None, None)
         .expect_err("a coalesced layer short of its window is refused");
     assert!(format!("{err}").contains("coverage"), "{err}");
 
@@ -3706,11 +3706,11 @@ fn a_coalesced_layer_that_does_not_cover_its_window_is_refused() {
     stray
         .consumed
         .push("attrs/bonus/extents/never.arrow".to_string());
-    assert!(columns.with_coalesced(&[stray], &[], None).is_err());
+    assert!(columns.with_coalesced(&[stray], &[], None, None).is_err());
 
     // The well-formed replace, which is what the pass actually publishes.
     let next = columns
-        .with_coalesced(&[window(extent(&[100, 101, 200, 201]))], &[], None)
+        .with_coalesced(&[window(extent(&[100, 101, 200, 201]))], &[], None, None)
         .expect("the coalesced layer covers exactly its window");
     let mut cand = Bitmap::new();
     cand.add_range(0..300);

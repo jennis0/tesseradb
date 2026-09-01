@@ -1834,6 +1834,21 @@ impl FilterColumns {
         &self.entity_terms
     }
 
+    /// The access mode every layer of this generation was opened with — what a re-derived stack
+    /// must be opened with too, or a publication would swap a mapped reader for a read one under
+    /// a live request.
+    pub(crate) fn access(&self) -> tessera_filter::Access {
+        self.access
+    }
+
+    /// How many layers the record blob's stack holds — the base, if the schema has a
+    /// blob-resident column, plus one per published extent. Operator- and test-facing: nothing on
+    /// the wire carries it, and it is how a coalesce's publication can be asserted to have
+    /// *shrunk* the live stack rather than merely the manifest.
+    pub fn record_layers(&self) -> usize {
+        self.records.layer_count()
+    }
+
     /// The route affordances of one filterable column, or `None` where the column is not
     /// filterable at all — the same distinction [`FilterColumns::resolve`] refuses on.
     pub fn placement(&self, column: &str) -> Option<Placement> {
@@ -2142,6 +2157,7 @@ impl FilterColumns {
         windows: &[CoalescedWindow],
         texts: &[CoalescedTextWindow],
         entity_terms: Option<Arc<tessera_store::EntityTermsStack>>,
+        records: Option<Arc<RecordStack>>,
     ) -> std::io::Result<FilterColumns> {
         let entity_terms = match entity_terms {
             None => Arc::clone(&self.entity_terms),
@@ -2164,11 +2180,25 @@ impl FilterColumns {
                 next
             }
         };
+        // **The record axis's stack is replaced, not carried through** — the same rule the
+        // transpose above takes, and it had the same defect the transpose was fixed for: a
+        // coalesce that folded a window of record extents into one edited the manifest and left
+        // the live stack holding the layers it had consumed, so the running process kept probing
+        // them until a restart while a reopen of the same bundle held one. Nothing served a wrong
+        // answer — the layers are disjoint in entity space (I9), so an extra layer answers for
+        // the entities it always answered for — but the cost the coalesce exists to remove stayed
+        // until a restart removed it, and the process and its own manifest disagreed about what
+        // it was serving from. `None` where the axis did not run, in which case the live stack
+        // rides through untouched, which is the ordinary case.
+        let records = match records {
+            None => Arc::clone(&self.records),
+            Some(next) => next,
+        };
         let mut next = FilterColumns {
             columns: self.columns.clone(),
             placements: self.placements.clone(),
             access: self.access,
-            records: Arc::clone(&self.records),
+            records,
             entity_terms,
         };
         for window in windows {

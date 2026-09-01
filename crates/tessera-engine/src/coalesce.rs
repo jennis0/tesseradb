@@ -558,10 +558,18 @@ pub(crate) struct CompletedCoalesce {
     /// `crate::flush::FlushedExtent`'s precedent.
     pub(crate) attrs: Vec<CoalescedAttr>,
     /// The record window collapsed into one extent, or `None` if the axis did not run. The entry
-    /// only, not a reader: no live state composes record extents — drill-down opens the stack
-    /// from the manifest — so publication is purely the manifest edit `rebase_into` performs.
-    /// The extent was reopened on the pool before completion, so the entry names files the
-    /// fail-closed reader has already accepted.
+    /// only: the live stack is re-derived from the rebased manifest at publication, which is the
+    /// form that cannot drift from what a restart would open — see
+    /// `WriteExecutor::publish_coalesce`, and [`Self::terms`] beside it, whose axis takes the same
+    /// treatment for the same reason. The extent was reopened on the pool before completion, so
+    /// the entry names files the fail-closed reader has already accepted.
+    ///
+    /// **The comment this replaces said no live state composes record extents, and that was
+    /// wrong**: a flush composes one onto the live `RecordStack` (`RecordStack::with_extents`), so
+    /// a coalesce that edited only the manifest left the running process probing the layers it had
+    /// consumed until a restart. Disjointness in entity space (I9) meant no answer was wrong; what
+    /// was wrong was that the process and its own manifest disagreed about what it was serving
+    /// from, and the cost the coalesce exists to remove survived it.
     pub(crate) record: Option<RecordExtent>,
     /// One coalesced extent per window the text axis took. The entry only, not a reader: a text
     /// layer is composed from its three paths (`FilterColumns::with_extents` does the same for a

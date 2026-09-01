@@ -1676,6 +1676,12 @@ fn a_coalesce_collapses_record_extents_and_every_row_still_answers() {
         8,
         "one record extent per flush before the coalesce"
     );
+    // The base plus one layer per extent, in the stack the *running* process reads from.
+    assert_eq!(
+        engine.generation().filter_columns.record_layers(),
+        9,
+        "the live stack composes each flush's extent as it publishes"
+    );
 
     engine.request_flush();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
@@ -1685,6 +1691,35 @@ fn a_coalesce_collapses_record_extents_and_every_row_still_answers() {
             "the coalesce never published"
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    // **The live stack shrank with the manifest, before any restart.** The blob's layers ride on
+    // `Arc`s from one generation to the next, so a publication that edited only the manifest left
+    // this reader probing the eight extents the coalesce had just consumed — until the process
+    // restarted, and with no wrong answer to find it by, the layers being disjoint in entity space
+    // (I9). The count is the assertion because the count is the cost: a miss walks every layer,
+    // and the whole point of the pass is that there are fewer of them.
+    assert_eq!(
+        engine.generation().filter_columns.record_layers(),
+        2,
+        "the base plus the one coalesced extent, re-derived from the rebased manifest"
+    );
+    // And it answers — a re-derived stack that opened the wrong files would be caught here rather
+    // than at the restart below.
+    for (entity, note, _) in &ingested {
+        let entity = u32::try_from(entity.raw()).unwrap();
+        let fields = engine
+            .generation()
+            .filter_columns
+            .records()
+            .fields_of(entity)
+            .expect("the live stack reads")
+            .expect("every ingested entity has a blob row");
+        assert!(
+            fields.iter().any(|f| f.value
+                == tessera_filter::RecordValue::Utf8(note.clone())),
+            "entity {entity} lost its note to the coalesce's live publication"
+        );
     }
     drop(engine);
 

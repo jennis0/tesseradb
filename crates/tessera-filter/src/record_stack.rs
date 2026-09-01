@@ -90,6 +90,13 @@ impl RecordStack {
         Ok(Self { layers })
     }
 
+    /// How many layers this stack holds — the base, where the schema had a blob-resident column,
+    /// plus one per extent opened onto it. Diagnostic: a caller that wants a *row* asks
+    /// [`Self::fields_of`], and this says only how many probes a miss costs.
+    pub fn layer_count(&self) -> usize {
+        self.layers.len()
+    }
+
     /// The blob-resident fields of `entity`, from whichever layer holds its row; `Ok(None)` when
     /// no layer does — the ordinary case for an entity all of whose fields live in the other two
     /// homes.

@@ -7262,10 +7262,64 @@ impl Executor {
                 }
             }
         };
+        // **The record axis's stack is re-derived from the rebased manifest too**, on exactly the
+        // transpose's rule above: a coalesce that folds a window of record extents into one must
+        // leave the live reader probing the extent it wrote and not the ones it consumed, or the
+        // process serves from layers its own manifest no longer names until a restart. Affordable
+        // for the same reason: the layers are memory-mapped, and a coalesce fires once per
+        // `width` ticks. `None` where the axis did not run, and the live stack rides through.
+        let records = if completed.record.is_none() {
+            None
+        } else {
+            let partition_dir = prefix_dir
+                .join("partitions")
+                .join(&completed.plan.partition);
+            // The schema decides whether there is a base, exactly as it does at open: a build
+            // writes `attrs/record` only where a column has no other home. Derived rather than
+            // probed for, so a missing base refuses instead of reading as "those entities have no
+            // record".
+            let blob_resident = live
+                .bundle
+                .manifest
+                .declared_scalars
+                .iter()
+                .any(|d| crate::filter::blob_resident(d, &live.bundle.manifest.vocabularies));
+            let record_dir = partition_dir.join("attrs").join("record");
+            // **Both lists, one stack**, as the open composes them: an artifact's content extents
+            // hold the same format and the same reader, and the two never share an entity.
+            let extents: Vec<tessera_filter::RecordExtentPaths> = manifest
+                .record_extents
+                .iter()
+                .chain(manifest.artifact_record_extents.iter())
+                .map(|e| tessera_filter::RecordExtentPaths {
+                    blocks: prefix_dir.join(&e.blocks),
+                    hasrow: prefix_dir.join(&e.hasrow),
+                    directory: prefix_dir.join(&e.directory),
+                })
+                .collect();
+            match tessera_filter::RecordStack::open(
+                blob_resident.then_some(record_dir.as_path()),
+                &extents,
+                live.filter_columns.access(),
+            ) {
+                Ok(stack) => Some(Arc::new(stack)),
+                Err(e) => {
+                    self.health
+                        .coalesce_failures
+                        .fetch_add(1, Ordering::Relaxed);
+                    tracing::error!(
+                        error = %e,
+                        "ALARM: a completed coalesce's record extent would not compose into a                          stack; discarding it rather than publishing a manifest naming a layer                          this process cannot serve. Its files are orphans and every consumed                          entry still stands"
+                    );
+                    return;
+                }
+            }
+        };
         let filter_columns = match live.filter_columns.with_coalesced(
             &windows,
             &text_windows,
             entity_terms,
+            records,
         ) {
             Ok(columns) => Arc::new(columns),
             Err(e) => {
