@@ -107,6 +107,7 @@ fn write_inputs(root: &Path, rows: u64, segments: u64) -> Vec<MergeInput> {
                 PARTITION,
                 VIEW,
                 FlushInput {
+                    incarnation: 0,
                     seg_id: &format!("in-{s}"),
                     rows: flush_rows,
                     quantisation: quantisation(),
@@ -153,6 +154,7 @@ fn main() {
                 PARTITION,
                 VIEW,
                 MergeSpec {
+                    incarnation: 0,
                     seg_id: "merged",
                     inputs: &inputs,
                     identity_key: &key(),

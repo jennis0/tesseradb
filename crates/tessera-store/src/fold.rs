@@ -382,6 +382,7 @@ mod tests {
             "p",
             "s",
             FlushInput {
+                incarnation: 0,
                 seg_id,
                 rows: flush_rows,
                 quantisation: Quantisation {

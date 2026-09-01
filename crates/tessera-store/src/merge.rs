@@ -153,6 +153,9 @@ pub struct MergeInput {
 /// Everything [`execute_merge`] needs beyond its inputs — the same shape [`crate::flush::FlushInput`]
 /// has, because publication does not care which produced the segment.
 pub struct MergeSpec<'a> {
+    /// The incarnation of the view this merge writes into (decision 0115) — the inputs' own, a
+    /// merge never crossing a drop.
+    pub incarnation: tessera_types::view::ViewIncarnation,
     /// The **new** segment's id. Never one of the inputs': `seg_id`s are never reused (contracts
     /// §2.1), which is what makes the publication rebase ABA-safe.
     pub seg_id: &'a str,
@@ -422,6 +425,7 @@ pub fn execute_merge(
     Ok(FlushOutput {
         segment: SegmentDescriptor {
             view: view.to_string(),
+            incarnation: spec.incarnation,
             seg_id: spec.seg_id.to_string(),
             row_count: row_count as u32,
             entity_lo,
@@ -485,6 +489,7 @@ mod tests {
             "p",
             "s",
             FlushInput {
+                incarnation: 0,
                 seg_id,
                 rows: flush_rows,
                 quantisation: Quantisation {
@@ -548,6 +553,7 @@ mod tests {
             "p",
             "s",
             MergeSpec {
+                incarnation: 0,
                 seg_id: "seg-m",
                 inputs: &[a, b],
                 identity_key: &key,
@@ -603,6 +609,7 @@ mod tests {
             "p",
             "s",
             MergeSpec {
+                incarnation: 0,
                 seg_id: "seg-m",
                 inputs: &[a, b],
                 identity_key: &key,

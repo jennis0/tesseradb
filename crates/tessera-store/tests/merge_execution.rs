@@ -43,6 +43,7 @@ fn segment(root: &Path, seg_id: &str, entity_lo: u64, count: u64, stride: u64) -
         PARTITION,
         VIEW,
         FlushInput {
+            incarnation: 0,
             seg_id,
             rows,
             quantisation: quantisation(),
@@ -67,6 +68,7 @@ fn merge(root: &Path, inputs: &[MergeInput]) -> tessera_store::flush::FlushOutpu
         PARTITION,
         VIEW,
         MergeSpec {
+            incarnation: 0,
             seg_id: "merged-1",
             inputs,
             identity_key: &key(),
@@ -257,6 +259,7 @@ fn out_of_order_inputs_are_refused() {
         PARTITION,
         VIEW,
         MergeSpec {
+            incarnation: 0,
             seg_id: "merged-1",
             inputs: &[a, b],
             identity_key: &key(),
@@ -292,6 +295,7 @@ fn a_missing_scalar_column_fails_the_merge_rather_than_shifting_the_rest() {
         PARTITION,
         VIEW,
         MergeSpec {
+            incarnation: 0,
             seg_id: "merged-1",
             inputs: &[a, b],
             identity_key: &key(),

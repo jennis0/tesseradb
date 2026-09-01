@@ -363,29 +363,33 @@ pub enum WalRecord {
     ///
     /// **This record is for replay, and the segments manifest is the durable home.** Rotation
     /// reclaims WAL records, so a roster that lived only here is lost at the first rotation — and
-    /// a reused ordinal or key silently repoints every client cache keyed on the view
-    /// (decision 0029). `SegmentsManifest::views` is where it survives; this is what puts it back
-    /// between a publication and a restart, in the order it happened.
+    /// the roster then serves a group as though nothing had ever been added to it.
+    /// `SegmentsManifest::views` is where it survives; this is what puts it back between a
+    /// publication and a restart, in the order it happened.
     ///
-    /// **The ordinal is recorded, never re-derived.** Replay applies what was decided: a
-    /// re-derivation would renumber every view above a drop the log no longer carries.
+    /// **The incarnation is recorded, never re-derived** (decision 0115). Replay applies what was
+    /// decided: a re-derivation would hand a key created again the incarnation its predecessor's
+    /// segments, columns and derived structures already carry, and the new view would serve them.
     ///
     /// **It names the owner group only.** Groups sharing these views (`members`, `views.md` §3.3)
     /// take their copies from this one record, because the key and the ordinal are the owner's.
     ViewCreate { view: tessera_types::view::CreatedView },
-    /// An accepted view drop. **The key is tombstoned, not freed** — for `LayerDrop`'s reason,
-    /// stated for a view in `views.md` §3.4: a recreated `2026-Q3` with different contents would
-    /// silently repoint every bookmark, every cached θ and every client cache keyed on the view.
+    /// An accepted view drop. **The key is freed and the incarnation dies** (decision 0115): a
+    /// key is a name the caller chose, so it may be created again, and what must not come back is
+    /// the predecessor's artifacts. `LayerDrop` still tombstones, and the difference is deliberate
+    /// — a layer name travels in bookmarks, edges and suppressions, where a view key addresses a
+    /// row space and nothing else.
     ///
-    /// **The ordinal travels with it** because it is burnt too: a high-water recovered from the
-    /// live views alone would reissue the newest ordinal the moment it was the one dropped.
+    /// **The incarnation travels with it**, which is what makes the record self-sufficient under
+    /// rotation: a death that did not say which incarnation died could not be told apart from a
+    /// death of the one created after it.
     ///
     /// **This record removes no entity.** An entity whose only view was dropped still exists, with
     /// its label, its attributes and its memberships, in no view; `delete_dangling` submits
     /// ordinary deletions through the deny lane and is not a second retirement route
     /// (`views.md` §3.4, write-path §5.4).
     ViewDrop {
-        view: tessera_types::view::TombstonedView,
+        view: tessera_types::view::DeadIncarnation,
     },
     /// An accepted layer drop. **The name is tombstoned, not freed**: it is refused on recreation
     /// for ever, because bookmarks, edges and suppressions all travel by it and a name that once
@@ -658,7 +662,7 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 // **17**: `WalRow` gained `scoped` — a row's values for the group-scoped attribute families of
 // its view's group (`views.md` §5). Postcard is positional, so the field is on-disk format and a
 // log at 16 is refused rather than read one list short.
-const WAL_VERSION: u16 = 17;
+const WAL_VERSION: u16 = 18;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts

@@ -186,6 +186,10 @@ pub(crate) struct FlushContext {
     pub(crate) prefix_dir: PathBuf,
     pub(crate) partition: String,
     pub(crate) view: String,
+    /// The incarnation of `view` this flush writes into (decision 0115), resolved from the
+    /// generation's manifest when the flush was planned and stamped into every artifact it
+    /// writes. A view whose incarnation the manifest cannot resolve is not flushed at all.
+    pub(crate) incarnation: tessera_types::view::ViewIncarnation,
     pub(crate) seg_id: String,
     pub(crate) row_base: u32,
     pub(crate) identity_key: IdentityKey,
@@ -312,6 +316,9 @@ pub(crate) struct CompletedFlush {
     /// render list is decided by it, so a view left off renders nothing and is opened for
     /// nothing.
     pub(crate) scoped_columns: Vec<(String, String)>,
+    /// The incarnation of [`FlushContext::view`] this flush wrote under (decision 0115), carried
+    /// out so the publication can stamp the side-manifest entries that outlive a drop.
+    pub(crate) incarnation: tessera_types::view::ViewIncarnation,
     /// This flush's text layers, one per indexed `text` column. Composed onto the live generation
     /// at publication, exactly as a filter extent is: a `match` over a batch flushed since the
     /// build must see it without waiting for a fold.
@@ -426,6 +433,7 @@ pub(crate) fn execute_flush(
         &ctx.view,
         FlushInput {
             seg_id: &ctx.seg_id,
+            incarnation: ctx.incarnation,
             rows,
             quantisation: ctx.quantisation,
             identity_key: &ctx.identity_key,
@@ -648,6 +656,7 @@ pub(crate) fn execute_flush(
         entity_terms_extent,
         text_extents,
         scoped_columns,
+        incarnation: ctx.incarnation,
         files,
         tier,
         tier_path: tier_rel,
@@ -1384,6 +1393,9 @@ fn write_text_layer(
 
     Ok(Some(tessera_store::manifest::TextExtent {
         column: column.to_string(),
+        // The incarnation travels with the view, and is `None` for the same rows `view` is:
+        // an entity-scoped column belongs to no view (decision 0115).
+        incarnation: view.as_ref().map(|_| ctx.incarnation),
         view,
         dict: dict_rel,
         postings: postings_rel,

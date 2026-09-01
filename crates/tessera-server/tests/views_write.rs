@@ -11,9 +11,12 @@
 //!   a 404 with an acknowledgement in front of it.
 //! - **The roster survives a restart.** The WAL carries the create for replay and rotation
 //!   reclaims it, so the *segments manifest* is the durable home — a roster that lived only in
-//!   the log comes back missing, and a burnt key then comes back to life.
-//! - **A key is burnt by a drop.** A recreated key with different contents would silently repoint
-//!   every bookmark and every client cache keyed on the view (decision 0029).
+//!   the log comes back missing, and the drop it recorded is then undone.
+//! - **A dropped key is reusable, and a recreate adopts nothing**
+//!   ([decision 0115](../../../docs/decisions/0115-a-dropped-view-key-is-reusable.md)). The key is
+//!   a name the caller chose; the predecessor's row spaces, columns and derived structures linger
+//!   until the fold reclaims them, and the internal incarnation is what keeps them out of the view
+//!   created under the reused name.
 //!
 //! The fixture is built here rather than taken from `test_corpora/` because these tests assert the
 //! shapes the declaration states, and a synthetic corpus states them with no data dependency —
@@ -662,11 +665,12 @@ async fn a_create_refuses_a_taken_key_a_bad_key_a_wrong_record_and_an_unknown_gr
     assert_eq!(resp.status(), 201, "a refused create takes no key");
 }
 
-/// **A drop takes the key out of the roster and burns it** (`views.md` §3.4): the view is a 404
-/// from then on, on every group sharing it, and the key is refused on recreation for ever.
+/// **A drop takes the key out of the roster and frees it** (`views.md` §3.4, decision 0115): the
+/// view is a 404 from then on, on every group sharing it, and the key may be created again — at a
+/// fresh incarnation, so the recreated view is empty rather than the old one under a new record.
 #[tokio::test]
-async fn a_drop_burns_the_key_and_survives_a_restart() {
-    let served = serve().await;
+async fn a_drop_frees_the_key_and_the_drop_survives_a_restart() {
+    let mut served = serve().await;
     let created = create(&served, "quarter", "2026-Q5", q_record("Q5", 1)).await;
     assert_eq!(created.status(), 201);
 
@@ -687,15 +691,28 @@ async fn a_drop_burns_the_key_and_survives_a_restart() {
         404,
         "a request naming a dropped view is the same 404 as one that never existed"
     );
+    // **The key is free, and the record is the new one** (decision 0115): a recreate under a
+    // dropped key is a 201, and what the name means from here is what the new record says.
     assert_eq!(
-        create(&served, "quarter", "2026-Q5", q_record("Q5 again", 1))
+        create(&served, "quarter", "2026-Q5", q_record("Q5 again", 9))
             .await
             .status(),
-        409,
-        "a dropped key is never reused"
+        201,
+        "a dropped key is reusable"
     );
+    // A view created since this session authorised is a 404 to it until it re-authorises
+    // (`views.md` §6), and that is as true of a recreate as of a first create.
+    reauthorise(&mut served).await;
+    let document = meta(&served).await;
+    assert_eq!(
+        roster_of(&document, "quarter:2026-Q5").unwrap()["metadata"]["label"]["value"],
+        "Q5 again",
+        "the recreated key carries its own record, not its predecessor's"
+    );
+    // And drop it again, so the restart below is over a key with two dead incarnations behind it.
+    drop_view(&served, "quarter", "2026-Q5", false).await;
 
-    // A different key still creates: what a drop burns is the key it named and nothing else.
+    // A different key still creates: a drop touches the key it named and nothing else.
     let resp = create(&served, "quarter", "2026-Q6", q_record("Q6", 2)).await;
     assert_eq!(resp.status(), 201);
 
@@ -711,9 +728,10 @@ async fn a_drop_burns_the_key_and_survives_a_restart() {
         create(&served, "quarter", "2026-Q5", q_record("Q5", 1))
             .await
             .status(),
-        409,
-        "the tombstone survives the restart, or the key comes back to life"
+        201,
+        "the drop survives the restart as an absence, and the key is still free"
     );
+    drop_view(&served, "quarter", "2026-Q5", false).await;
     // A declared view can be dropped too, and the same rules hold for it.
     assert!(view_ids(&document).contains(&"quarter:2026-Q1".to_string()));
     drop_view(&served, "quarter", "2026-Q1", false).await;
@@ -1378,7 +1396,7 @@ async fn a_minted_group_takes_a_create_a_drop_and_a_join() {
     .await;
     assert_eq!(resp.status(), 409, "the entity is alive in `world` already");
 
-    // **Drop**, and the key is burnt — on a minted view exactly as on a declared one.
+    // **Drop**, and the key is freed — on a minted view exactly as on a declared one.
     let body = drop_view(&served, "quarter", "2026-Q1", false).await;
     assert_eq!(body["deleted"], 0);
     reauthorise(&mut served).await;
@@ -1386,8 +1404,8 @@ async fn a_minted_group_takes_a_create_a_drop_and_a_join() {
     assert_eq!(viewport(&served, "quarter:2026-Q1").await.status(), 404);
     assert_eq!(
         create(&served, "quarter", "2026-Q1", json!({})).await.status(),
-        409,
-        "a dropped key is never reused"
+        201,
+        "a dropped key is reusable (decision 0115)"
     );
 }
 
@@ -1503,14 +1521,13 @@ fn view_dirs(root: &Path, group: &str, key: &str) -> Vec<std::path::PathBuf> {
 ///   — is reclaimed whole. A restart's orphan sweep is the deterministic end of that: after it, no
 ///   prefix under the bundle root names the view.
 /// - **A restart serves the survivors**, so the omission took the dropped view and nothing else.
-/// - **The tombstone outlives the fold.** The fold rewrites the manifest; a key burnt before it
-///   that came back free after it would be decision 0029's silent repointing, reached the long way
-///   round.
+/// - **The drop outlives the fold.** The fold rewrites the manifest; a key the manifest no longer
+///   carries must not come back as a view of it, record and rows and all.
 /// - **And the two removal rules compose.** A second drop, this one with `delete_dangling`, puts
 ///   ordinary deletions on the deny lane; the fold that omits the view's segments is also the fold
 ///   that executes them, and their overlay entries retire there (Rule F) rather than at the drop.
 #[tokio::test]
-async fn a_fold_after_a_drop_reclaims_the_dropped_view_and_keeps_its_tombstone() {
+async fn a_fold_after_a_drop_reclaims_the_dropped_view_and_a_recreate_adopts_nothing() {
     let mut served = serve().await;
 
     // A second key, so the group still has a view after the drop and the survivors are a set
@@ -1611,14 +1628,25 @@ async fn a_fold_after_a_drop_reclaims_the_dropped_view_and_keeps_its_tombstone()
         "the dropped view is the 404 a name nobody declared gets"
     );
 
-    // (d) The tombstone survived the fold's manifest rewrite.
+    // (d) **The key created again after the fold is an empty view** (decision 0115). The old
+    // incarnation's files are gone by now, so this arm is about the roster: the recreate lands,
+    // and the view it makes carries the new record and no rows.
     assert_eq!(
         create(&served, "quarter", "2026-Q1", q_record("Q1 again", 1))
             .await
             .status(),
-        409,
-        "a key burnt before the fold is still burnt after it"
+        201,
+        "a key dropped before the fold is free after it"
     );
+    let mut served = served;
+    reauthorise(&mut served).await;
+    assert_eq!(
+        points(&served, "quarter:2026-Q1").await.len(),
+        0,
+        "the recreated key is an empty view, not the build's own rows under a new record"
+    );
+    drop_view(&served, "quarter", "2026-Q1", false).await;
+    reauthorise(&mut served).await;
 
     // (e) **`delete_dangling`'s deletions retire at the fold that omits their view's segments**
     // (`views.md` §3.4, Rule F, write-path §5.4). The two removal rules meet here and only here:
@@ -2398,4 +2426,125 @@ async fn the_value_oracle_does_not_let_one_views_absence_answer_for_anothers_val
             );
         }
     }
+}
+
+/// **A key dropped and created again adopts nothing of its predecessor's, across a restart that
+/// replays the log and across the fold that reclaims the files**
+/// ([decision 0115](../../../docs/decisions/0115-a-dropped-view-key-is-reusable.md)).
+///
+/// This is the whole reason the burn existed, and the reason the incarnation replaces it. A
+/// dropped view's segments, columns and buffered rows outlive the drop — the segments until a fold
+/// reclaims them, the buffered rows until the log is replayed — so a recreate that resolved
+/// artifacts by *view id* would serve the old view's points under the new name. Nothing about that
+/// is visible from the outside: the answer would simply be wrong.
+///
+/// Three mechanisms, and each needs its own arm because each keeps the predecessor out at a
+/// different layer:
+///
+/// - **The segments.** The first batch is flushed, so `2026-Q5` has a segment on disc when it is
+///   dropped. The recreated key's row space must not adopt it — `Bundle::with_views` blanks a view
+///   whose data carries a dead incarnation, and the fold's carry-forward omits its descriptors.
+/// - **The buffered rows.** The second batch is *not* flushed before the restart, so it is in the
+///   WAL and nowhere else — and so is the first batch's, whose member the flush has not yet let
+///   go. Replay meets `ViewDrop` between them and discards the rows of the incarnation it kills,
+///   which is what makes the ordered replay the resolution site rather than a stamp on every row.
+/// - **The manifest's roster.** The drop and the recreate happen in one window with no publication
+///   between them, so both reach the side manifest as one `(views, dead_view_incarnations)` pair —
+///   which is the case that decides whether `with_roster` applies the deaths before the creations
+///   or after. The wrong order deletes the view the caller was just told it had.
+///
+/// **Nothing here is visible on a wire.** The incarnation is on no response, so the assertions are
+/// about *contents*: the recreated view holds the second batch's four rows and none of the first's.
+#[tokio::test]
+async fn a_recreated_key_holds_only_its_own_rows_across_a_replay_and_a_fold() {
+    let mut served = serve().await;
+    assert_eq!(
+        create(&served, "quarter", "2026-Q5", q_record("Q5 first", 1))
+            .await
+            .status(),
+        201
+    );
+    reauthorise(&mut served).await;
+
+    // The first incarnation's rows, flushed, so the view owns a segment and a row space.
+    let first: Vec<Row<'_>> = (0..6)
+        .map(|i| (format!("first-{i}").into_bytes(), 300.0 + i as f32, 300.0, "0", Some(i)))
+        .collect();
+    assert_eq!(
+        ingest(&served, "first-batch", "quarter:2026-Q5", &first).await.status(),
+        200
+    );
+    flush(&served).await;
+    assert_eq!(points(&served, "quarter:2026-Q5").await.len(), 6);
+
+    // **And rows that never flushed**, so the drop below meets them in the buffer and the restart
+    // meets them in the log. Without this arm the buffered half of the hazard is invisible: the
+    // flushed rows above are dropped from the replayed buffer by the ordinary "this row already
+    // has geometry" filter, whatever the drop does.
+    let stale: Vec<Row<'_>> = (0..3)
+        .map(|i| (format!("stale-{i}").into_bytes(), 320.0 + i as f32, 320.0, "0", Some(i)))
+        .collect();
+    assert_eq!(
+        ingest(&served, "stale-batch", "quarter:2026-Q5", &stale).await.status(),
+        200
+    );
+
+    // **Drop and recreate in one window** — no flush, no fold, no publication between them.
+    assert_eq!(drop_view(&served, "quarter", "2026-Q5", false).await["deleted"], 0);
+    assert_eq!(
+        create(&served, "quarter", "2026-Q5", q_record("Q5 second", 2))
+            .await
+            .status(),
+        201,
+        "a dropped key is reusable, and in the same window"
+    );
+    reauthorise(&mut served).await;
+    assert_eq!(
+        points(&served, "quarter:2026-Q5").await.len(),
+        0,
+        "the recreated key is an empty view: the predecessor's segment is on disc and unreachable"
+    );
+
+    // The second incarnation's rows, left **unflushed**, so the restart below has to replay them.
+    let second: Vec<Row<'_>> = (0..4)
+        .map(|i| (format!("second-{i}").into_bytes(), 500.0 + i as f32, 500.0, "0", Some(i)))
+        .collect();
+    assert_eq!(
+        ingest(&served, "second-batch", "quarter:2026-Q5", &second).await.status(),
+        200
+    );
+
+    // ---- the replay ------------------------------------------------------------------------
+    let mut served = restart(served).await;
+    reauthorise(&mut served).await;
+    let document = meta(&served).await;
+    assert_eq!(
+        roster_of(&document, "quarter:2026-Q5").unwrap()["metadata"]["label"]["value"],
+        "Q5 second",
+        "the surviving record is the recreate's, so the deaths were applied before the creations"
+    );
+    // The rows are in the buffer and nowhere else, so the flush is what gives them geometry —
+    // and what makes the count below a statement about *which* rows replay kept.
+    flush(&served).await;
+    let after_replay = points(&served, "quarter:2026-Q5").await;
+    assert_eq!(
+        after_replay.len(),
+        4,
+        "the replayed view holds the second batch and none of the first: {}",
+        after_replay.len()
+    );
+
+    // ---- the fold --------------------------------------------------------------------------
+    fold(&served).await;
+    let (_, folded_dir) = live_prefix(&served);
+    assert!(
+        segment_views(&folded_dir).contains(&"quarter:2026-Q5".to_string()),
+        "the recreated view is folded like any other"
+    );
+    let served = restart(served).await;
+    assert_eq!(
+        points(&served, "quarter:2026-Q5").await.len(),
+        4,
+        "and the fold reclaimed the dead incarnation's files without touching the live one's"
+    );
 }

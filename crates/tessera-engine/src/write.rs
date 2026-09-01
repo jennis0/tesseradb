@@ -1658,13 +1658,13 @@ impl LiveState {
         f(&mut roster)
     }
 
-    /// What a publication carries forward: the creations and the tombstones, complete current
-    /// state — [`Self::registry_for_publication`]'s contract, for the roster.
+    /// What a publication carries forward: the creations and the dead incarnations, complete
+    /// current state — [`Self::registry_for_publication`]'s contract, for the roster.
     fn roster_for_publication(
         &self,
     ) -> (
         Vec<tessera_types::view::CreatedView>,
-        Vec<tessera_types::view::TombstonedView>,
+        Vec<tessera_types::view::DeadIncarnation>,
     ) {
         lock_recover(&self.roster).snapshot()
     }
@@ -2061,10 +2061,10 @@ pub(crate) struct ManifestSeed<'a> {
     pub layers: &'a [tessera_types::layer::RegisteredLayer],
     pub tombstones: &'a [String],
     /// Every view created since the build, across every partition's manifest (`views.md` §3.2),
-    /// and every key ever dropped. The build's own roster is not here: it is in `MANIFEST.json`
-    /// and is seeded separately.
+    /// and every incarnation that has died. The build's own roster is not here: it is in
+    /// `MANIFEST.json` and is seeded separately.
     pub created_views: &'a [tessera_types::view::CreatedView],
-    pub view_tombstones: &'a [tessera_types::view::TombstonedView],
+    pub dead_view_incarnations: &'a [tessera_types::view::DeadIncarnation],
     /// The views a build declared, as `(group, key)` — the keys a create must not reissue.
     pub declared_views: Vec<(String, String)>,
     /// Every published membership extent, across every partition's manifest, with the prefix
@@ -2298,7 +2298,7 @@ impl WritePath {
         // create reissue a key a declared view already holds.
         let mut roster = tessera_lifecycle::ViewRoster::new();
         roster.seed_declared(seed.declared_views.iter().cloned());
-        roster.seed(seed.created_views, seed.view_tombstones);
+        roster.seed(seed.created_views, seed.dead_view_incarnations);
         for record in &records {
             roster.apply(record);
         }
@@ -2933,8 +2933,8 @@ impl WritePath {
         }
     }
 
-    /// Drop a view, tombstoning its key for ever, and answer how many entities `delete_dangling`
-    /// submitted for deletion (`views.md` §3.4).
+    /// Drop a view — freeing its key and killing its incarnation (decision 0115) — and answer how
+    /// many entities `delete_dangling` submitted for deletion (`views.md` §3.4).
     pub(crate) fn drop_view(
         &self,
         group: String,
@@ -4099,7 +4099,7 @@ mod vocabulary_extensions_tests {
             layer_tombstones: Vec::new(),
             views: Vec::new(),
             scoped_columns: Vec::new(),
-            view_tombstones: Vec::new(),
+            dead_view_incarnations: Vec::new(),
             membership_extents: Vec::new(),
             level_versions: Vec::new(),
             containment_extents: Vec::new(),
@@ -4488,15 +4488,37 @@ fn live_segments_of(generation: &Generation) -> usize {
         .unwrap_or(0)
 }
 
+/// Is this extent's `(view, incarnation)` pair one the live manifest still declares?
+///
+/// **An entity-scoped extent belongs to no view and is always carried** — its `view` is `None`,
+/// and so is its incarnation. A group-scoped one is carried only where the pair is live: a dropped
+/// key's columns sit in the list until a fold reclaims them, and a key created again writes its
+/// own column under the same family name (decision 0115).
+///
+/// **Fail-closed by construction**: a half-stamped entry — a view with no incarnation, or the
+/// reverse — matches nothing and is omitted, which loses a derived artefact and never serves one.
+fn carries_live_view(
+    live: &FxHashMap<&str, tessera_types::view::ViewIncarnation>,
+    view: Option<&str>,
+    incarnation: Option<tessera_types::view::ViewIncarnation>,
+) -> bool {
+    match (view, incarnation) {
+        (None, None) => true,
+        (Some(view), Some(incarnation)) => live.get(view) == Some(&incarnation),
+        _ => false,
+    }
+}
+
 /// The refusal a roster error is answered with — the three the wire tells apart
 /// (`views.md` §3.2, and this module's `ExecError` doc for why the caller's remedy decides).
 fn roster_error(e: tessera_lifecycle::RosterError) -> ExecError {
     use tessera_lifecycle::RosterError;
     let detail = e.to_string();
     match e {
-        RosterError::Exists { .. } | RosterError::Tombstoned { .. } => {
-            ExecError::ViewConflict { detail }
-        }
+        // **A conflict is a *live* key and nothing else now** (decision 0115): a dropped key is
+        // created again at a fresh incarnation, so the tombstone arm this match once had has no
+        // refusal left to carry.
+        RosterError::Exists { .. } => ExecError::ViewConflict { detail },
         RosterError::Unknown { .. } => ExecError::ViewUnknown { detail },
         RosterError::Refused(_) => ExecError::ViewRefused { detail },
     }
@@ -6088,26 +6110,33 @@ impl Executor {
         // `RowSpace::with_extent` requires; for runs it is recency, which decision 0047's
         // newest-first resolution reads.
         //
-        // **A dropped view's segments are carried by nothing** (`views.md` §3.4): the drop retains
-        // the view out of the bundle, so the plan has no base for it and never consumed its
-        // segments — and carrying them would name a view the new manifest does not declare. This
-        // filter is the whole of "reclamation by omission": the descriptors are left behind with
-        // the superseded prefix's files, which the reclaim then deletes. Without it every fold
-        // after a drop of a view that held rows is *discarded* by the base check below, so
-        // compaction stops for the life of the bundle and nothing ever retires.
+        // **A dead incarnation's segments are carried by nothing** (`views.md` §3.4, decision
+        // 0115): the drop retains the view out of the bundle, so the plan has no base for it and
+        // never consumed its segments — and carrying them would name an incarnation the new
+        // manifest does not declare. This filter is the whole of "reclamation by omission": the
+        // descriptors are left behind with the superseded prefix's files, which the reclaim then
+        // deletes. Without it every fold after a drop of a view that held rows is *discarded* by
+        // the base check below, so compaction stops for the life of the bundle and nothing ever
+        // retires.
         //
-        // **The `MANIFEST.json` roster decides, not the partition's view map.** Both answer *is
-        // this view still declared* — the map is retained against the same roster at
-        // `Bundle::with_views` — but only one of them is that question: the map is a cache of open
-        // row spaces, and a later change to how it is built would move this predicate without
-        // anyone reading this line. The roster read here is the same snapshot the new manifest is
-        // written from, so what is carried and what is declared cannot disagree.
-        let declared_views: FxHashSet<&str> = live
+        // **`(view, incarnation)`, not the view alone.** A dropped key may be created again
+        // (decision 0115), and the recreated view is declared under the same id — so "is this
+        // view still declared" stopped being the question the moment the burn was withdrawn. A
+        // segment stamped with the dead incarnation would otherwise be carried into the fold's
+        // output and the new view would serve the predecessor's points.
+        //
+        // **The `MANIFEST.json` roster decides, not the partition's view map.** Both answer the
+        // same question — the map is retained against the same roster at `Bundle::with_views` —
+        // but only one of them is that question: the map is a cache of open row spaces, and a
+        // later change to how it is built would move this predicate without anyone reading this
+        // line. The roster read here is the same snapshot the new manifest is written from, so
+        // what is carried and what is declared cannot disagree.
+        let live_incarnations: FxHashMap<&str, tessera_types::view::ViewIncarnation> = live
             .bundle
             .manifest
             .views
             .iter()
-            .map(|v| v.id.as_str())
+            .map(|v| (v.id.as_str(), v.incarnation))
             .collect();
         // **Owned, because the log that reports them outlives this borrow**: the generation is
         // moved into `pending_reclaim` at step 8, a few lines before the publication is logged.
@@ -6118,14 +6147,14 @@ impl Executor {
             .iter()
             .filter(|d| !consumed_segments.contains(&(d.view.as_str(), d.seg_id.as_str())))
             .filter(|d| {
-                let declared = declared_views.contains(d.view.as_str());
-                if !declared {
+                let live = live_incarnations.get(d.view.as_str()) == Some(&d.incarnation);
+                if !live {
                     omitted_segments += 1;
                     if !omitted_views.iter().any(|v| v == &d.view) {
                         omitted_views.push(d.view.clone());
                     }
                 }
-                declared
+                live
             })
             .collect();
         let carried_tiers: Vec<String> = live_manifest
@@ -6162,6 +6191,10 @@ impl Executor {
             .attr_extents
             .iter()
             .filter(|extent| !consumed_attrs.contains(extent.values.as_str()))
+            // **And nothing of a dead incarnation** (decision 0115), on the segment filter's
+            // argument: a group-scoped column's extents outlive the drop that orphaned them, and
+            // a key created again writes its own column under the same family name.
+            .filter(|extent| carries_live_view(&live_incarnations, extent.view.as_deref(), extent.incarnation))
             .cloned()
             .collect();
         // The record-blob extents take the attribute extents' shape exactly: the fold consumed
@@ -6209,6 +6242,7 @@ impl Executor {
             .text_extents
             .iter()
             .filter(|extent| !consumed_texts.contains(extent.dict.as_str()))
+            .filter(|extent| carries_live_view(&live_incarnations, extent.view.as_deref(), extent.incarnation))
             .cloned()
             .collect();
 
@@ -6376,6 +6410,15 @@ impl Executor {
         // tile index and column would not, because a level that flipped is never asked for its old
         // form again and nothing would ever claim the entry.
         let fold_segments = fold_segments(&to_prefix_dir, &plan.partition, &completed.segments);
+        // **Which incarnation each planned view is** (decision 0115), so every derived structure
+        // this pass writes is stamped with the one whose row space it was written over. Taken
+        // from the plan rather than from the live manifest: the plan is what the row spaces above
+        // came from, and a view created since it was taken has no space here to describe.
+        let fold_incarnations: FxHashMap<String, tessera_types::view::ViewIncarnation> = plan
+            .views
+            .iter()
+            .map(|view| (view.view.clone(), view.incarnation))
+            .collect();
         let layouts = self.choose_layouts(&spaces, &pending_retirement, &fold_segments);
         for (layer, level, chosen) in &layouts {
             if self.live.record_layout(layer, *level, *chosen) {
@@ -6389,6 +6432,7 @@ impl Executor {
             &to_prefix_dir,
             &plan.partition,
             manifest_n,
+            &fold_incarnations,
             &spaces,
             &layouts,
             &pending_retirement,
@@ -6400,6 +6444,7 @@ impl Executor {
             &to_prefix_dir,
             &plan.partition,
             manifest_n,
+            &fold_incarnations,
             &spaces,
             &layouts,
             &pending_retirement,
@@ -6412,6 +6457,7 @@ impl Executor {
             &to_prefix_dir,
             &plan.partition,
             manifest_n,
+            &fold_incarnations,
             &row_columns,
             &pending_retirement,
             &fold_segments,
@@ -6420,6 +6466,7 @@ impl Executor {
             &to_prefix_dir,
             &plan.partition,
             manifest_n,
+            &fold_incarnations,
             &pending_retirement,
             &fold_segments,
         );
@@ -6478,7 +6525,7 @@ impl Executor {
         // The roster, from the live roster rather than from the fold's own inputs, on exactly the
         // argument above it: the manifest a fold planned against may be several publications
         // behind, and a view created since must not be dropped by the publication that lands.
-        let (created_views, view_tombstones) = self.live.roster_for_publication();
+        let (created_views, dead_view_incarnations) = self.live.roster_for_publication();
 
         let mut segments_manifest = SegmentsManifest {
             // The flight's text extents, and the pass merged every other one into the new base
@@ -6510,7 +6557,7 @@ impl Executor {
             // here would be a second copy of a fact the prefix's own manifest now states
             // (`views.md` §5).
             scoped_columns: Vec::new(),
-            view_tombstones,
+            dead_view_incarnations,
             // **The pass's own output, not the live list.** The paths are prefix-relative and the
             // fold publishes a *new* prefix, so what step 3a wrote is the only list that names
             // files this prefix contains. The content extents beside it are carried by link, their
@@ -7534,6 +7581,18 @@ impl Executor {
             // view's rows on the first's grid. The manifest is the authority for both — a plan
             // naming a view the manifest does not declare is dropped here rather than flushed
             // against a guessed frame, which is the same refusal `accept_ingest` makes upstream.
+            // **And this view's incarnation** (decision 0115), resolved from the same manifest
+            // and on the same rule: a plan naming a view the manifest does not declare is
+            // dropped, never flushed under a guess. The stamp goes on the segment, on every
+            // scoped column this flush writes, and on every extent — which is what stops a key
+            // created again from adopting them.
+            let Some(incarnation) = manifest.incarnation_of(&view) else {
+                tracing::error!(
+                    view = %view,
+                    "a flush plan names a view this bundle's manifest does not declare, so its                      incarnation cannot be resolved; the plan is dropped and the buffer is                      retained"
+                );
+                return;
+            };
             let Some(quantisation) = manifest.quantisation_of(&view) else {
                 tracing::error!(
                     view = %view,
@@ -7654,6 +7713,7 @@ impl Executor {
                     prefix_dir: self.prefix_dir(generation),
                     partition: partition.clone(),
                     view: view.clone(),
+                    incarnation,
                     // **`seg_id`s are never reused** (contracts §2.1), which is what makes the
                     // merge rebase ABA-safe — and the attempt counter is not decoration. `next_n`
                     // alone repeats whenever a flush is planned twice before it publishes, and the
@@ -10107,8 +10167,8 @@ impl Executor {
         respond.ack(Ack::ViewCreated, &published);
     }
 
-    /// `DELETE /control/views/{group}/{key}` — drop a view, tombstoning its key for ever
-    /// (`views.md` §3.4).
+    /// `DELETE /control/views/{group}/{key}` — drop a view, freeing its key and killing its
+    /// incarnation (`views.md` §3.4, decision 0115).
     ///
     /// **Dropping a view deletes no entity.** An entity whose only view was dropped still exists,
     /// with its label, its attributes and its artifact memberships, in no view — and a later batch
@@ -10576,9 +10636,9 @@ impl Executor {
             // clone** (`views.md` §3.2): the manifest this was cloned from may be several
             // publications behind, and a create that landed since would be dropped by carrying it
             // forward — which a rotation then makes permanent.
-            let (created_views, view_tombstones) = self.live.roster_for_publication();
+            let (created_views, dead_view_incarnations) = self.live.roster_for_publication();
             manifest.views = created_views;
-            manifest.view_tombstones = view_tombstones;
+            manifest.dead_view_incarnations = dead_view_incarnations;
             // **Membership extents are written before the manifest that names them**, which is the
             // whole of their durability contract: a manifest naming a missing extent refuses at
             // open, so the file has to be durable first. A failure here abandons the publication
@@ -10990,8 +11050,10 @@ impl Executor {
                 .map(
                     |(layer, level, level_version, bytes)| tessera_store::derived::Filed {
                         // A partition is a function of the level's records and the prefix's
-                        // postings, so it is not per view and the entry carries none.
+                        // postings, so it is not per view and the entry carries none — and no
+                        // incarnation either, there being no view to carry one for.
                         view: String::new(),
+                        incarnation: tessera_store::manifest::DECLARED_INCARNATION,
                         layer,
                         level,
                         level_version,
@@ -11259,6 +11321,7 @@ impl Executor {
         prefix_dir: &std::path::Path,
         partition: &str,
         n: u64,
+        incarnations: &FxHashMap<String, tessera_types::view::ViewIncarnation>,
         spaces: &[(String, tessera_store::RowSpace)],
         layouts: &[(String, u32, tessera_types::layer::ServingLayout)],
         pending_retirement: &[(String, u32)],
@@ -11369,15 +11432,19 @@ impl Executor {
             n,
             written
                 .into_iter()
-                .map(|(view, layer, level, level_version, layout, bytes)| {
-                    tessera_store::derived::Filed {
+                .filter_map(|(view, layer, level, level_version, layout, bytes)| {
+                    // **No incarnation, no file** (decision 0115): a structure addressed by row
+                    // and stamped with a guess would label another key's rows.
+                    let incarnation = *incarnations.get(&view)?;
+                    Some(tessera_store::derived::Filed {
                         view,
+                        incarnation,
                         layer,
                         level,
                         level_version,
                         layout,
                         bytes,
-                    }
+                    })
                 })
                 .collect(),
         )
@@ -11389,11 +11456,13 @@ impl Executor {
     ///
     /// **Every failure is a dropped entry, not a discarded fold** — the form is derived, and an
     /// open that finds no entry resolves the segment again, loudly.
+    #[allow(clippy::too_many_arguments)]
     fn write_shape_rows(
         &self,
         prefix_dir: &std::path::Path,
         partition: &str,
         n: u64,
+        incarnations: &FxHashMap<String, tessera_types::view::ViewIncarnation>,
         columns: &[tessera_store::manifest::RowColumnExtent],
         pending_retirement: &[(String, u32)],
         fold_segments: &[(String, tessera_store::read::SegmentData)],
@@ -11443,8 +11512,13 @@ impl Executor {
                     );
                     continue;
                 };
+                // **No incarnation, no file** — `write_row_columns`' rule.
+                let Some(incarnation) = incarnations.get(view).copied() else {
+                    continue;
+                };
                 filed.push(tessera_store::derived::FiledShapeRows {
                     view: view.clone(),
+                    incarnation,
                     layer: layer.clone(),
                     level: *level,
                     level_version: version,
@@ -11469,6 +11543,7 @@ impl Executor {
         prefix_dir: &std::path::Path,
         partition: &str,
         n: u64,
+        incarnations: &FxHashMap<String, tessera_types::view::ViewIncarnation>,
         pending_retirement: &[(String, u32)],
         fold_segments: &[(String, tessera_store::read::SegmentData)],
     ) -> Vec<tessera_store::manifest::ShapeHeldExtent> {
@@ -11510,8 +11585,12 @@ impl Executor {
                                 )
                             })
                             .collect();
+                    let Some(incarnation) = incarnations.get(view).copied() else {
+                        continue;
+                    };
                     out.push(tessera_store::derived::Filed {
                         view: view.clone(),
+                        incarnation,
                         layer: layer.clone(),
                         level: *level,
                         level_version: version,
@@ -11531,6 +11610,7 @@ impl Executor {
         prefix_dir: &std::path::Path,
         partition: &str,
         n: u64,
+        incarnations: &FxHashMap<String, tessera_types::view::ViewIncarnation>,
         spaces: &[(String, tessera_store::RowSpace)],
         layouts: &[(String, u32, tessera_types::layer::ServingLayout)],
         pending_retirement: &[(String, u32)],
@@ -11606,16 +11686,19 @@ impl Executor {
             n,
             projected
                 .into_iter()
-                .map(
-                    |(view, layer, level, level_version, bytes)| tessera_store::derived::Filed {
+                .filter_map(|(view, layer, level, level_version, bytes)| {
+                    // **No incarnation, no file** — `write_row_columns`' rule.
+                    let incarnation = *incarnations.get(&view)?;
+                    Some(tessera_store::derived::Filed {
                         view,
+                        incarnation,
                         layer,
                         level,
                         level_version,
                         layout: tessera_types::layer::ServingLayout::ArtifactMajor,
                         bytes,
-                    },
-                )
+                    })
+                })
                 .collect(),
         )
     }
@@ -12022,9 +12105,9 @@ impl Executor {
         manifest.layers = layers;
         manifest.layer_tombstones = layer_tombstones;
         // The roster beside them, on the same rule and for the same reason (`views.md` §3.2).
-        let (created_views, view_tombstones) = self.live.roster_for_publication();
+        let (created_views, dead_view_incarnations) = self.live.roster_for_publication();
         manifest.views = created_views;
-        manifest.view_tombstones = view_tombstones;
+        manifest.dead_view_incarnations = dead_view_incarnations;
         // **And the group-scoped columns this flush gave a view its first of** (`views.md` §5).
         // Carried forward and appended to, never restated: the list is what a *restart* recovers
         // `scoped_scalars[..].views` from, and a render-only family writes no extent for the
@@ -12034,6 +12117,10 @@ impl Executor {
             let entry = tessera_store::manifest::ScopedColumn {
                 column: column.clone(),
                 view: view.clone(),
+                // **The incarnation this flush wrote under** (decision 0115). The list is carried
+                // forward for ever, so an entry outlives the drop that orphaned its column; the
+                // stamp is what keeps a key created again from publishing it as its own.
+                incarnation: completed.incarnation,
             };
             if !manifest.scoped_columns.contains(&entry) {
                 manifest.scoped_columns.push(entry);
@@ -12058,6 +12145,9 @@ impl Executor {
                     .iter()
                     .map(|e| tessera_store::manifest::AttrExtent {
                         column: e.column.clone(),
+                        // `None` for an entity-scoped column, which belongs to no view — the
+                        // incarnation follows the view exactly (decision 0115).
+                        incarnation: e.view.as_ref().map(|_| completed.incarnation),
                         view: e.view.clone(),
                         values: e.values_rel.clone(),
                         presence: e.presence_rel.clone(),
@@ -12128,7 +12218,13 @@ impl Executor {
         }
 
         let seg_id = completed.segment.seg_id.clone();
-        let scoped_columns = completed.scoped_columns.clone();
+        // Stamped with the flush's own incarnation for `Manifest::with_scoped_columns`, which
+        // publishes a pair only where it is the live one (decision 0115).
+        let scoped_columns: Vec<(String, String, tessera_types::view::ViewIncarnation)> = completed
+            .scoped_columns
+            .iter()
+            .map(|(column, view)| (column.clone(), view.clone(), completed.incarnation))
+            .collect();
         let next_bundle = match live.bundle.with_segment(
             &completed.partition,
             &completed.view,

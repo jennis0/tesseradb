@@ -1,10 +1,11 @@
-//! The view roster: which views of which groups exist, and which keys are burnt
-//! (`views.md` §3.2, §3.4; [decision 0108](../../../docs/decisions/0108-a-view-group-grows-by-its-roster.md)).
+//! The view roster: which views of which groups exist, at which incarnation, and which
+//! incarnations are dead (`views.md` §3.2, §3.4;
+//! [decision 0108](../../../docs/decisions/0108-a-view-group-grows-by-its-roster.md),
+//! [decision 0115](../../../docs/decisions/0115-a-dropped-view-key-is-reusable.md)).
 //!
 //! Beside [`crate::registry`] and shaped like it, because the two problems are the same one: a
-//! named object created while the service runs, made durable by a WAL record, carried forward for
-//! ever by the segments manifest, and refused on recreation once dropped. What differs is what a
-//! name costs — a layer's name carries entities and a view's carries a coordinate system — and
+//! named object created while the service runs, made durable by a WAL record and carried forward
+//! by the segments manifest. What differs is what a name costs — a layer's name carries entities and a view's carries a coordinate system — and
 //! what each is measured against: a layer against its own declaration, a view against the group's.
 //!
 //! **What lives here is the runtime half.** The views a build declared are in `MANIFEST.json` and
@@ -17,19 +18,22 @@
 //! - **A roster record is immutable.** There is no update: an existing key is refused, and a wrong
 //!   record is a drop and a recreate under a new key. The alternative is a narrowed gate that does
 //!   not bite live sessions, a staleness the deny lane is not allowed and the roster is not either.
-//! - **A key is never reused.** It is burnt by a drop and the tombstone carries it for ever,
-//!   because a recreated key with different contents silently repoints every client cache keyed
-//!   on the view (decision 0029). The key is a view's only address (decision 0113), so this is
-//!   the whole of what a drop burns.
+//! - **A dropped key is reusable, and a recreate mints a new incarnation** (decision 0115). A key
+//!   is a human-chosen name, not a system identity, and the correction workflow the immutability
+//!   rule above forces — a wrong record is a drop and a recreate — is only useful if the name can
+//!   come back. What must never come back is the *predecessor's artifacts*: they linger until the
+//!   fold reclaims them, so the create mints an incarnation, every artifact carries the one it was
+//!   written under, and composition takes only the live one. The incarnation is internal: no wire
+//!   surface carries it and no client can tell a recreated key from a fresh one.
 //! - **A key belongs to the group that owns it.** A group declaring `members` takes
 //!   another group's (`views.md` §3.3), so a create names the owner and the sharing groups' copies
 //!   are derived from that one record. Two records would be two places for them to disagree.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use tessera_types::view::{
-    check_view_key, CreatedView, GroupMetadataField, TombstonedView, ViewMetadataType,
-    ViewMetadataValue,
+    check_view_key, CreatedView, DeadIncarnation, GroupMetadataField, ViewIncarnation,
+    ViewMetadataType, ViewMetadataValue, DECLARED_INCARNATION,
 };
 
 use crate::wal::WalRecord;
@@ -40,8 +44,6 @@ use crate::wal::WalRecord;
 pub enum RosterError {
     /// The key is already a view of this group.
     Exists { group: String, key: String },
-    /// The key was dropped, and a dropped key never comes back.
-    Tombstoned { group: String, key: String },
     /// No view of this group holds the key, so there is nothing to drop.
     Unknown { group: String, key: String },
     /// The request's own shape: the key's charset, the metadata, or the gate.
@@ -57,13 +59,6 @@ impl std::fmt::Display for RosterError {
                  decision 0108): a wrong gate or wrong metadata is a drop and a recreate under a \
                  NEW key, never an update, because an updatable gate is a narrowing that does not \
                  bite live sessions"
-            ),
-            RosterError::Tombstoned { group, key } => write!(
-                f,
-                "view key '{group}:{key}' was dropped, and a dropped key is never reused \
-                 (views §3.4). A recreated key with different contents would silently repoint \
-                 every bookmark, every cached θ and every client cache keyed on the view \
-                 (decision 0029) — a caller who wants the key again wants a different key"
             ),
             RosterError::Unknown { group, key } => write!(
                 f,
@@ -96,11 +91,16 @@ pub struct GroupFacts<'a> {
 pub struct ViewRoster {
     /// The creations, in creation order — what a publication writes and a replay reads back.
     created: Vec<CreatedView>,
-    /// Every key ever dropped.
-    tombstones: Vec<TombstonedView>,
-    /// `(group, key)` of every view that exists right now, the build's included, so an existing
-    /// key is one lookup rather than a walk of two lists and a subtraction.
-    live: BTreeSet<(String, String)>,
+    /// Every incarnation that has died and whose artifacts the fold has not yet reclaimed.
+    dead: Vec<DeadIncarnation>,
+    /// `(group, key) -> incarnation` for every view that exists right now, the build's included
+    /// (at [`DECLARED_INCARNATION`]), so an existing key is one lookup rather than a walk of two
+    /// lists and a subtraction.
+    live: BTreeMap<(String, String), ViewIncarnation>,
+    /// The next incarnation to mint — one above every incarnation this roster has ever seen, live
+    /// or dead. Seeded from durable state and moved by every record applied, so a replay never
+    /// mints a value a record already spent.
+    next_incarnation: ViewIncarnation,
 }
 
 impl ViewRoster {
@@ -114,7 +114,7 @@ impl ViewRoster {
     /// off `MANIFEST.json`, which is the roster's other half and the half that never changes.
     pub fn seed_declared(&mut self, views: impl IntoIterator<Item = (String, String)>) {
         for (group, key) in views {
-            self.live.insert((group, key));
+            self.live.insert((group, key), DECLARED_INCARNATION);
         }
     }
 
@@ -124,36 +124,55 @@ impl ViewRoster {
     /// **A tombstone is applied after the creation it retires**, whether or not that creation is
     /// still in the log: the two lists are complete current state, not a diff, so a key in both is
     /// a key that was created and then dropped.
-    pub fn seed(&mut self, created: &[CreatedView], tombstones: &[TombstonedView]) {
+    /// **The dead list is applied after the creations it retires, and a creation of a *later*
+    /// incarnation survives it**: the two lists are complete current state, not a diff, so a key
+    /// in both is a key that was created, dropped, and — if the creation names the higher
+    /// incarnation — created again.
+    pub fn seed(&mut self, created: &[CreatedView], dead: &[DeadIncarnation]) {
         for view in created {
             self.admit(view.clone());
         }
-        for stone in tombstones {
+        for stone in dead {
             self.retire(stone.clone());
         }
     }
 
     fn admit(&mut self, view: CreatedView) {
-        self.live.insert((view.group.clone(), view.key.clone()));
-        if !self
+        self.next_incarnation = self.next_incarnation.max(view.incarnation + 1);
+        self.live.insert(
+            (view.group.clone(), view.key.clone()),
+            view.incarnation,
+        );
+        if let Some(existing) = self
             .created
-            .iter()
-            .any(|v| v.group == view.group && v.key == view.key)
+            .iter_mut()
+            .find(|v| v.group == view.group && v.key == view.key)
         {
+            // A recreate under the same key replaces the record in place — it is one row of the
+            // roster, at whichever incarnation is current, and creation order is the order the key
+            // was *first* served in.
+            *existing = view;
+        } else {
             self.created.push(view);
         }
     }
 
-    fn retire(&mut self, stone: TombstonedView) {
-        self.live.remove(&(stone.group.clone(), stone.key.clone()));
-        self.created
-            .retain(|v| !(v.group == stone.group && v.key == stone.key));
+    fn retire(&mut self, stone: DeadIncarnation) {
+        self.next_incarnation = self.next_incarnation.max(stone.incarnation + 1);
+        // **Only the incarnation named**, so a seed that meets a drop and a later recreate in
+        // either order lands on the same state: a live record of a *higher* incarnation is not
+        // touched by a death below it.
+        if self.live.get(&(stone.group.clone(), stone.key.clone())) == Some(&stone.incarnation) {
+            self.live.remove(&(stone.group.clone(), stone.key.clone()));
+            self.created
+                .retain(|v| !(v.group == stone.group && v.key == stone.key));
+        }
         if !self
-            .tombstones
+            .dead
             .iter()
-            .any(|s| s.group == stone.group && s.key == stone.key)
+            .any(|s| s.group == stone.group && s.key == stone.key && s.incarnation == stone.incarnation)
         {
-            self.tombstones.push(stone);
+            self.dead.push(stone);
         }
     }
 
@@ -162,26 +181,31 @@ impl ViewRoster {
         &self.created
     }
 
-    /// Every key ever dropped.
-    pub fn tombstones(&self) -> &[TombstonedView] {
-        &self.tombstones
+    /// Every incarnation that has died and not yet been reclaimed.
+    pub fn dead_incarnations(&self) -> &[DeadIncarnation] {
+        &self.dead
     }
 
     /// Is this key a view of this group right now?
     pub fn is_live(&self, group: &str, key: &str) -> bool {
-        self.live.contains(&(group.to_string(), key.to_string()))
+        self.live
+            .contains_key(&(group.to_string(), key.to_string()))
     }
 
-    pub fn is_tombstoned(&self, group: &str, key: &str) -> bool {
-        self.tombstones
-            .iter()
-            .any(|s| s.group == group && s.key == key)
+    /// Which incarnation this key is at right now, or `None` if it is not a view of this group.
+    ///
+    /// **The one resolution site, and it fails closed**: a caller that cannot resolve an
+    /// incarnation must treat the artifact as unreachable, never as live.
+    pub fn incarnation_of(&self, group: &str, key: &str) -> Option<ViewIncarnation> {
+        self.live
+            .get(&(group.to_string(), key.to_string()))
+            .copied()
     }
 
     /// What a publication carries forward — complete current state, never a diff, on the posture
     /// the segments manifest already takes for `deny`, `tombstones` and `layers`.
-    pub fn snapshot(&self) -> (Vec<CreatedView>, Vec<TombstonedView>) {
-        (self.created.clone(), self.tombstones.clone())
+    pub fn snapshot(&self) -> (Vec<CreatedView>, Vec<DeadIncarnation>) {
+        (self.created.clone(), self.dead.clone())
     }
 
     /// The record a `PUT /control/views/{group}/{key}` appends, or the refusal.
@@ -206,12 +230,9 @@ impl ViewRoster {
             )));
         }
         check_view_key(key).map_err(RosterError::Refused)?;
-        if self.is_tombstoned(facts.name, key) {
-            return Err(RosterError::Tombstoned {
-                group: facts.name.to_string(),
-                key: key.to_string(),
-            });
-        }
+        // **A dropped key is not refused** (decision 0115). What was a `409` on a tombstone is a
+        // `201` at a fresh incarnation: the key is a name the caller chose, and the predecessor's
+        // artifacts are kept out by the incarnation below, not by refusing the name.
         if self.is_live(facts.name, key) {
             return Err(RosterError::Exists {
                 group: facts.name.to_string(),
@@ -306,6 +327,9 @@ impl ViewRoster {
             view: CreatedView {
                 group: facts.name.to_string(),
                 key: key.to_string(),
+                // **Minted here and recorded**, never re-derived at replay: a re-derivation would
+                // hand a recreate the incarnation its predecessor's artifacts already carry.
+                incarnation: self.next_incarnation,
                 visibility,
                 metadata,
             },
@@ -314,18 +338,23 @@ impl ViewRoster {
 
     /// The record a `DELETE /control/views/{group}/{key}` appends, or the refusal.
     pub fn prepare_drop(&self, group: &str, key: &str) -> Result<WalRecord, RosterError> {
-        if !self.is_live(group, key) {
-            // A tombstoned key and a key that never existed are the same answer, and deliberately:
+        let Some(incarnation) = self.incarnation_of(group, key) else {
+            // A dropped key and a key that never existed are the same answer, and deliberately:
             // the drop's own 404 is what a request naming the view gets from then on.
             return Err(RosterError::Unknown {
                 group: group.to_string(),
                 key: key.to_string(),
             });
-        }
+        };
+        // **The incarnation travels with the drop**, because that is what makes the record
+        // self-sufficient: replay may meet it without its own create (rotation), and a death that
+        // did not say *which* incarnation died could not be told apart from a death of the one
+        // created after it.
         Ok(WalRecord::ViewDrop {
-            view: TombstonedView {
+            view: DeadIncarnation {
                 group: group.to_string(),
                 key: key.to_string(),
+                incarnation,
             },
         })
     }
@@ -378,10 +407,13 @@ mod tests {
         assert_eq!(order, ["2026-Q3", "2026-Q4"]);
     }
 
+    /// A live key is refused; a **dropped** key is not (decision 0115), and it comes back at a
+    /// new incarnation so that nothing of its predecessor's is reachable under it.
     #[test]
-    fn a_key_is_refused_once_taken_and_for_ever_once_dropped() {
+    fn a_live_key_is_refused_and_a_dropped_one_comes_back_at_a_new_incarnation() {
         let mut roster = ViewRoster::new();
         create(&mut roster, "quarter", "2026-Q2").unwrap();
+        let first = roster.incarnation_of("quarter", "2026-Q2").unwrap();
         assert!(matches!(
             create(&mut roster, "quarter", "2026-Q2"),
             Err(RosterError::Exists { .. })
@@ -389,31 +421,77 @@ mod tests {
         let drop = roster.prepare_drop("quarter", "2026-Q2").unwrap();
         roster.apply(&drop);
         assert!(matches!(
-            create(&mut roster, "quarter", "2026-Q2"),
-            Err(RosterError::Tombstoned { .. })
-        ));
-        assert!(matches!(
             roster.prepare_drop("quarter", "2026-Q2"),
             Err(RosterError::Unknown { .. })
         ));
+        assert_eq!(roster.incarnation_of("quarter", "2026-Q2"), None);
+        assert_eq!(
+            roster.dead_incarnations(),
+            [DeadIncarnation {
+                group: "quarter".to_string(),
+                key: "2026-Q2".to_string(),
+                incarnation: first,
+            }]
+        );
+
+        create(&mut roster, "quarter", "2026-Q2").expect("a dropped key is reusable");
+        let second = roster.incarnation_of("quarter", "2026-Q2").unwrap();
+        assert!(
+            second > first,
+            "the recreate must not reuse the incarnation its predecessor's artifacts carry"
+        );
+        // And the death of the first stays on the books: the fold reads it to know what it may
+        // reclaim, and the composition reads it to keep the old artifacts out.
+        assert_eq!(roster.dead_incarnations().len(), 1);
+    }
+
+    /// The seed is complete current state, and the two lists may be read in either order: a
+    /// recreate's live record must survive a death recorded *below* it.
+    #[test]
+    fn a_death_below_the_live_incarnation_does_not_retire_it() {
+        let mut roster = ViewRoster::new();
+        roster.seed(
+            &[CreatedView {
+                group: "quarter".to_string(),
+                key: "2026-Q2".to_string(),
+                incarnation: 7,
+                visibility: None,
+                metadata: BTreeMap::new(),
+            }],
+            &[DeadIncarnation {
+                group: "quarter".to_string(),
+                key: "2026-Q2".to_string(),
+                incarnation: 4,
+            }],
+        );
+        assert_eq!(roster.incarnation_of("quarter", "2026-Q2"), Some(7));
+        // And the next mint is above everything ever seen, dead included.
+        let record = roster
+            .prepare_create(facts("quarter", &[]), "2026-Q3", None, BTreeMap::new())
+            .unwrap();
+        match record {
+            WalRecord::ViewCreate { view } => assert!(view.incarnation > 7),
+            other => panic!("expected a create, got {other:?}"),
+        }
     }
 
     #[test]
     fn a_drop_replays_without_its_own_create() {
-        // The rotation case: the create's record is gone and the tombstone must still bite.
+        // The rotation case: the create's record is gone and the drop must still bite. A
+        // build-declared key is dropped here, so the death is of `DECLARED_INCARNATION`.
         let mut roster = ViewRoster::new();
         roster.seed_declared([("quarter".to_string(), "2026-Q1".to_string())]);
         roster.apply(&WalRecord::ViewDrop {
-            view: TombstonedView {
+            view: DeadIncarnation {
                 group: "quarter".to_string(),
                 key: "2026-Q1".to_string(),
+                incarnation: DECLARED_INCARNATION,
             },
         });
         assert!(!roster.is_live("quarter", "2026-Q1"));
-        assert!(matches!(
-            create(&mut roster, "quarter", "2026-Q1"),
-            Err(RosterError::Tombstoned { .. })
-        ));
+        // And the key is free again, at an incarnation above the build's.
+        create(&mut roster, "quarter", "2026-Q1").expect("a dropped key is reusable");
+        assert!(roster.incarnation_of("quarter", "2026-Q1").unwrap() > DECLARED_INCARNATION);
     }
 
     #[test]

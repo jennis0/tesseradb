@@ -1626,6 +1626,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         &published_layers,
         &[SegmentDescriptor {
             view: view.view_id.clone(),
+            incarnation: tessera_store::manifest::DECLARED_INCARNATION,
             seg_id: SEG_ID.to_string(),
             row_count: n as u32,
             entity_lo: 0,
@@ -1732,7 +1733,7 @@ fn write_manifests(
         layer_tombstones: Vec::new(),
         views: Vec::new(),
         scoped_columns: Vec::new(),
-        view_tombstones: Vec::new(),
+        dead_view_incarnations: Vec::new(),
         membership_extents: published_layers.membership_extents.clone(),
         level_versions: published_layers.level_versions.clone(),
         // **The post-bundle artifact pass's output** (`crate::artifact_pass`). Empty only where
@@ -1909,6 +1910,10 @@ fn write_manifests(
             .map(|view| ViewDescriptor {
                 id: view.view_id.clone(),
                 display_name: view.view_id.clone(),
+                // **The declared incarnation** (decision 0115). A key a build declared and a
+                // running service later drops comes back at 1 or above, which is what keeps the
+                // build's own segments out of the view created under the reused name.
+                incarnation: tessera_store::manifest::DECLARED_INCARNATION,
                 quantisation: Quantisation {
                     x_min: view.extent.x_min,
                     x_max: view.extent.x_max,

@@ -340,17 +340,39 @@ pub fn replay<'a>(
             // An artifact's own entity is an ordinary entity here too, on the same argument: its
             // suppression arrives as a `ChangeByEntity`. The membership the record carries belongs
             // to the artifact store, rebuilt in that same second pass.
-            // A view create and a drop are the roster's, rebuilt by the caller in that same
-            // second pass. Neither names an entity: **dropping a view deletes no entity**
-            // (`views.md` §3.4), and `delete_dangling`'s deletions arrive here as the ordinary
-            // `ChangeByEntity` records the arm above applies — which is what keeps the drop from
-            // being a second retirement route.
+            // **A drop discards the rows the buffer held for the view, here as on the live
+            // path** (`views.md` §3.4, `Executor::publish_roster`). They name a coordinate system
+            // that no longer exists, so nothing will ever give them geometry — and since a
+            // dropped key may be created again (decision 0115), a replay that left them would
+            // land the *predecessor's* rows in the new view. That is the reason a buffered row
+            // needs no incarnation of its own: replay is ordered, so the drop is met between the
+            // rows it discards and the rows the recreate takes, and it is the one and only place
+            // the two sets can be told apart.
+            //
+            // **Dropping a view still deletes no entity** (`views.md` §3.4).
+            // `delete_dangling`'s deletions arrive here as the ordinary `ChangeByEntity` records
+            // the arm above applies, which is what keeps the drop from being a second retirement
+            // route.
+            WalRecord::ViewDrop { view } => {
+                // `<group>:<key>`, the one id form a view of a group has — `:` being reserved out
+                // of both halves for exactly this reason (`tessera_types::view::check_view_key`).
+                let id = format!("{}:{}", view.group, view.key);
+                let orphaned: Vec<(EntityId, String)> = buffer
+                    .rows()
+                    .filter(|(_, item)| item.view == id)
+                    .map(|(entity, item)| (*entity, item.view.clone()))
+                    .collect();
+                for (entity, view) in orphaned {
+                    buffer.remove_in_view(entity, &view);
+                }
+            }
+            // A view create is the roster's, rebuilt by the caller in that same second pass, and
+            // names no entity.
             WalRecord::LayerCreate { .. }
             | WalRecord::LayerDrop { .. }
             | WalRecord::ArtifactPublish { .. }
             | WalRecord::ArtifactGrow { .. }
-            | WalRecord::ViewCreate { .. }
-            | WalRecord::ViewDrop { .. } => {}
+            | WalRecord::ViewCreate { .. } => {}
         }
     }
 

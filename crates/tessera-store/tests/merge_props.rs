@@ -97,6 +97,7 @@ fn write_input(root: &Path, index: usize, entity_lo: u64, shape: &Shape) -> Merg
         PARTITION,
         VIEW,
         FlushInput {
+            incarnation: 0,
             seg_id: &seg_id,
             rows,
             quantisation: quantisation(),
@@ -173,6 +174,7 @@ proptest! {
             PARTITION,
             VIEW,
             MergeSpec {
+                incarnation: 0,
                 seg_id: "merged",
                 inputs: &inputs,
                 identity_key: &key(),

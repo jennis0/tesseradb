@@ -1,6 +1,24 @@
 # Views — design
 
-**Date:** 2026-08-31
+**Date:** 2026-09-01
+**Status:** Normative (r27) — **a dropped view key is reusable** (r27, 2026-09-01, owner ruling;
+[decision 0115](../decisions/0115-a-dropped-view-key-is-reusable.md); `contracts.md` §2.3/§3.4
+r68). §3.4's burn is withdrawn: `PUT` on a previously dropped key is a `201` and the `409` remains
+for a key that is **live**, because a key is a name the caller chose rather than a system identity
+and the immutable-record correction workflow (§3.2) is useless if the correction cannot be made
+under the name everything already uses. The 0029 citation the burn rested on was an
+over-generalisation — 0029 names a cache coordinate that contains no view id — and the clause was
+never separately ruled. What the burn was really holding is closed by an **incarnation**: every
+roster record carries one, minted at create and recorded in `ViewCreate`; every segment, column and
+derived structure of a view carries the incarnation it was written under; composition, replay and
+restart attach only the live one, and the fold reclaims the rest by the omission it already
+performs. The incarnation is **internal** — on no wire surface, not part of a view id, and
+invisible to a principal, who cannot tell a recreated key from a fresh one. `view_tombstones`
+becomes `dead_view_incarnations` and stops being a refusal; `WAL_VERSION` moves to 18 and
+`bundle_format` stays at 4. Buffered rows resolve through replay order rather than carrying a
+stamp: `ViewDrop` is met between the rows it kills and the rows the recreate takes. `delete_dangling`
+and the two removal rules are untouched. *(Written on a branch beside other view work; if another
+revision lands first this one renumbers, and the `r27` references in the body renumber with it.)*
 **Status:** Normative (r26) — **`render` alone makes a group-scoped family a filter operand**
 (r26, 2026-08-31, owner ruling; `contracts.md` §3.2 r67). §5's last standing restriction goes: the
 licence is `index` **or** `render`, which is what an entity-scoped column has, and the asymmetry
@@ -82,7 +100,9 @@ group is addressed `<group>:<key>` and by nothing else. There is no ordinal on t
 roster record, in a WAL record or in the manifest, and the `#` form addresses nothing; a caller
 wanting a numeric ordering mints numeric keys. Views of a group are served in **creation order**,
 which is roster-record order, so the ordering a client walks survives without a stored number. Key
-tombstones are unchanged — a dropped key is refused for ever. Appendix C's C27 (the ordinal gap) is
+tombstones are unchanged — a dropped key is refused for ever *(no longer true — superseded at r27,
+annotated here 2026-09-01 because a reader meeting this entry first would take a stale one)*.
+Appendix C's C27 (the ordinal gap) is
 deleted and [decision 0110](../decisions/0110-the-ordinal-gap-is-accepted.md) is superseded by
 [0113](../decisions/0113-ordinals-are-removed-and-the-key-is-the-only-address.md): with no ordinal
 served there is no gap to observe. **The gate is built** (r15, 2026-08-31): spec §6 is end to end.
@@ -100,7 +120,7 @@ the gate deliberately does not do, both ruled: a view created after a session au
 to it until re-authorisation, and a filtered roster is a shorter list with nothing to count the
 withheld views by (spec §9, decision 0113). **a group grows while the service runs** (r14, 2026-08-31):
 `PUT /control/views/{group}/{key}` creates a view of a declared group and `DELETE` drops it,
-burning the key; the roster's durable home is the segments manifest, carried
+freeing the key (r27); the roster's durable home is the segments manifest, carried
 forward for ever as `layer_tombstones` is; a created view answers a viewer verb empty and takes
 its first row space at the next flush; and a known `external_id` naming a view the entity is not
 in is a **join** (spec §4), the row landing in that view with the entity, its label and its
@@ -398,11 +418,13 @@ way: a typo in a key must be a refusal, never a freshly minted view collecting t
 
 **The roster's durable home is the segments manifest, not the WAL.** The create and drop
 records are WAL entries for replay, and the served roster is the manifest's plus the WAL
-overlay — but WAL rotation reclaims records, so the roster and the tombstoned keys are published
-into the segments manifest at every flush and carried forward for ever, exactly as
+overlay — but WAL rotation reclaims records, so the roster and the dead incarnations are published
+into the segments manifest at every flush and carried forward, exactly as
 `entity_id_low_water` and `layer_tombstones` are and for the same reason: a mark that lives only
-in the log is lost at the first rotation, and a reused key silently repoints every client cache
-keyed on the view (decision 0029).
+in the log is lost at the first rotation, and a roster that came back short would serve a group as
+though nothing had ever been added to it — while a **dead incarnation** that came back forgotten
+would let a key created again adopt its predecessor's row spaces
+([decision 0115](../decisions/0115-a-dropped-view-key-is-reusable.md)).
 
 **Metadata names are bounded by the roster's own keys**: `key`, `source`, `visibility` and, on
 a form B group, the discriminator's field name are refused as metadata names — the inline block
@@ -413,13 +435,17 @@ refused — is preserved by checking against the declared set.
 
 > **Implemented 2026-08-31** (contracts §3.4 r55). `PUT /control/views/{group}/{key}` takes the
 > roster record — `visibility` and the declared metadata, typed — and creates the view: the key's
-> charset is checked, an existing or tombstoned key is a `409`, an unknown group and a group that
+> charset is checked, a **live** key is a `409` (a previously dropped one is a `201`, r27), an
+> unknown group and a group that
 > takes another's views are a `404` and a `422`, and a `visibility` that is not `public` is
 > refused for spec §6's reason. The record is a WAL entry (`ViewCreate`) replayed before
-> any row referencing it, and **the roster's durable home is the segments manifest**:
-> `SegmentsManifest.views` and `view_tombstones` are published at every flush and every deny
-> publication and carried forward for ever, exactly as `layer_tombstones` is; the served roster is
-> the build's plus those, with the WAL's own records replayed on top at open. Creating a key on
+> any row referencing it, and carries the **incarnation** minted for this create; **the roster's
+> durable home is the segments manifest**:
+> `SegmentsManifest.views` and `dead_view_incarnations` are published at every flush and every deny
+> publication and carried forward, exactly as `layer_tombstones` is; the served roster is
+> the build's plus those, with the WAL's own records replayed on top at open. A publication applies
+> the deaths before the creations, which is what makes a drop and a recreate in one window land as
+> the recreate rather than as the drop. Creating a key on
 > the owner creates it, empty, on every group sharing its views (spec §3.3).
 >
 > A created view **is a view from the acknowledgement**: it is in `/v1/meta` with its record, it
@@ -464,12 +490,31 @@ group the object is invisible, and with two it is a second name for the first gr
 
 ### 3.4 Drop
 
-Dropping a view of a group is a control operation: a WAL'd tombstone on the key. The view leaves
+Dropping a view of a group is a control operation: a WAL'd record that kills the key's current
+**incarnation**. The view leaves
 `/v1/meta` on acknowledgement, a request naming it is a 404 from then on, and its row-space
 artifacts are reclaimed at the next fold. Under `members` sharing the drop is of the key, and
-takes the view out of every group on it. A dropped key is never reused, because a recreated
-`2026-Q3` with different contents would silently repoint every bookmark, every cached θ and every
-client cache keyed on the view (decision 0029).
+takes the view out of every group on it.
+
+**The key is freed, and a recreate adopts nothing**
+([decision 0115](../decisions/0115-a-dropped-view-key-is-reusable.md), r27). A key is a name the
+caller chose, and the immutable-record rule of §3.2 makes a drop-and-recreate the *only* way to
+correct a wrong gate or wrong metadata — which is no remedy at all if the correction cannot be made
+under the name the operator's pipelines already carry. So `PUT` on a dropped key is a `201`, drop
+and recreate in one commit window is supported, and a recreated key's contents are what the name
+now means: no promise is made that a view id addresses the same rows across a drop, the drop being
+the event that says otherwise.
+
+What must never come back is the **predecessor's artifacts**, and that is what the incarnation is
+for. A create mints one, monotone and recorded in the WAL record rather than re-derived at replay;
+every segment, every group-scoped column, every derived row structure and the roster record itself
+carries the incarnation it belongs to; composition, replay and restart attach only the live one.
+The dead incarnation's files stay on disc, reachable by nothing, until the fold reclaims them by
+the same omission a drop already produced — so a recreated `2026-Q3` is an **empty** view rather
+than the old one under a new record. The incarnation is internal throughout: it is on no wire
+surface, it is not part of a view id, and a principal cannot tell a recreated key from one created
+for the first time. Buffered rows carry no stamp and need none — replay is ordered, and the drop
+record is met between the rows it discards and the rows the recreate takes.
 
 **Dropping a view deletes no entity, and entity deletion drops no view.** An entity whose only
 view was dropped still exists, with its label, its attributes and its artifact memberships, in
@@ -489,10 +534,15 @@ the fail-open the two removal rules exist to prevent. The cost is one permutatio
 other view per row of the view, paid once at the drop and reported in its acknowledgement
 with the count.
 
-> **Implemented 2026-08-31** (contracts §3.4 r55). `DELETE /control/views/{group}/{key}` appends a
-> `ViewDrop` record carrying the key, and the view leaves `/v1/meta` and every group sharing it at
+> **Implemented 2026-08-31** (contracts §3.4 r55; the key freed r27, 2026-09-01).
+> `DELETE /control/views/{group}/{key}` appends a
+> `ViewDrop` record carrying the key **and the incarnation that died**, and the view leaves
+> `/v1/meta` and every group sharing it at
 > the acknowledgement; a request naming it is the same 404 as one that never existed, and the key
-> is refused for ever. Any view of a group may be dropped, a declared one included.
+> is free to be created again. The incarnation travels with the record because rotation may
+> reclaim its own create: a death that did not say which incarnation died could not be told apart
+> from a death of the one made after it. Any view of a group may be dropped, a declared one
+> included.
 > The rows the buffer held for it are discarded with it: they name a coordinate system that no
 > longer exists, so nothing would ever give them geometry, and a row left in the buffer for a view
 > no flush will plan pins the WAL's reclaim bound for the life of the process. Their **entities**
@@ -511,7 +561,15 @@ with the count.
 > all — is reclaimed when its last reader lets go, the startup sweep taking any that stands:
 > reclamation by omission rather than by a sweep. Until a fold runs its files stay on disc, named
 > by a side-manifest and reachable by nothing: the view is not in the manifest a request resolves
-> against, and a reopened bundle re-applies the tombstone before it serves anything.
+> against, and a reopened bundle re-applies the drop before it serves anything.
+>
+> **The omission is by `(view, incarnation)`, not by the view** (r27). Once a key can be created
+> again, "is this view still declared" answers *yes* for a name whose leftovers are still on disc,
+> so every filter that used to ask it asks the pair instead: the fold's carry-forward of segments,
+> column extents and derived structures; `Bundle::with_views`, which blanks a view whose opened
+> row space is a dead incarnation's; and the publication of a group-scoped column's `(family, view)`
+> pair. A stamp that cannot be resolved is omitted, never treated as live — which loses a derived
+> structure and never serves another key's rows.
 >
 > **The test found the omission incomplete, and it is fixed.** The drop retains the view out of the
 > *bundle* but leaves its `SegmentDescriptor`s in the live side-manifest, so the fold's publication
@@ -1101,7 +1159,7 @@ ordinal (decision 0113). The C15/C17 notes stand.
 | Document | Change |
 |---|---|
 | Architecture §5.1, §9 | View generalised from the temporal case to a named coordinate system; groups and shared views; the paged permutation as the representation |
-| Contracts §2.1 | A bundle carries several views, `views/<view>/` and `views/<group>/<key>/`; the `group:key` id form; the roster and the key tombstones in the segments manifest, carried for ever |
+| Contracts §2.1 | A bundle carries several views, `views/<view>/` and `views/<group>/<key>/`; the `group:key` id form; the roster and the dead incarnations (r27; the key tombstones before it) in the segments manifest, carried forward |
 | Contracts §2.2, §2.5 | The quantisation extent moves onto the view descriptor — first, ahead of any multi-view build |
 | Contracts §2.2, §2.3 | **Done at contracts r55** for the attribute: a `groups` row carrying the roster and each group's `scoped_scalars`, with the column families under `attrs/<column>/<group>/<key>/`. **Done at contracts r59** for the layer: `scope` is a field of the declaration, so `SEGMENTS-<n>.json`'s `layers` carries it and a reopened bundle can tell a per-view artifact set from a shared one without the build's configuration |
 | Contracts §3.2 | `/v1/meta`: per-view `extent` (r52), groups with their rosters and typed metadata (r53–r54), `filter_operands` carrying the scope and the pinned leaf `name@key` in the filter grammar (r55), and every one of them gate-filtered per principal (r56) — all done |
@@ -1274,6 +1332,31 @@ each view under spec §4's rule.
 
 ## Appendix R — review trail
 
+- **r27 (2026-09-01)** — **a dropped view key is reusable** (owner ruling;
+  [decision 0115](../decisions/0115-a-dropped-view-key-is-reusable.md)). §3.4's burn is withdrawn
+  and the create verb's `409` narrows to a **live** key. The rule was never separately ruled: it
+  arrived with the roster work as a read-across from `layer_tombstones` and cited decision 0029,
+  which names a *cache coordinate* containing no view id — so the argument that a reused key
+  repoints a client cache was an over-generalisation, and the layer analogy does not carry either
+  (a layer name travels in bookmarks, edges and suppressions; a view key addresses a row space and
+  a roster record, and both go with the drop). What the burn was really holding is internal: a
+  dropped view's segments, columns, derived structures and buffered rows outlive the drop, and a
+  naive recreate would adopt them. That is closed by an **incarnation** — a monotone counter on
+  every roster record, minted at create and recorded rather than re-derived, stamped onto every
+  artifact of a view; composition, replay and restart attach only the live one, and the fold
+  reclaims the rest through the omission it already performs. It is internal throughout: on no
+  wire surface, not part of a view id, and with no timing structure, so a principal cannot tell a
+  recreated key from a fresh one. `SegmentsManifest.view_tombstones` becomes
+  `dead_view_incarnations` — renamed rather than repurposed, because it no longer refuses anything
+  — and a publication applies the deaths before the creations, which is what makes a drop and a
+  recreate in one window land as the recreate. Buffered rows resolve through replay order rather
+  than carrying a stamp: the drop is met between the rows it kills and the rows the recreate takes,
+  and the alternative would widen every row buffer in the commit window to record what the sequence
+  already states. `WAL_VERSION` moves to 18 (`ViewCreate` and `ViewDrop` both change shape);
+  `bundle_format` stays at 4 and the new manifest fields are required, an absent incarnation
+  otherwise reading as the build's — the one value a leftover artifact could carry.
+  `delete_dangling`, the two removal rules and the immutability of a roster record are untouched;
+  decision 0113's "key tombstones are unchanged" clause is superseded in part.
 - **r26 (2026-08-31)** — **`render` alone makes a scoped family a filter operand** (owner ruling),
   and §5's remaining restriction is withdrawn rather than discharged: it was a hole, not a rule.
   The licence is now `index` **or** `render` on both sides of the scope, one predicate each side
@@ -1410,7 +1493,8 @@ each view under spec §4's rule.
   refuses it, as it refuses every other punctuation — and an id in the old form now names a key
   nobody declared, which is the ordinary unknown-view `404`. **Key tombstones are unchanged**: a
   dropped key is refused for ever, and it was always the key rather than the number that repointed
-  a client cache (decision 0029). The disclosure this closes is spec §9's own: with no position
+  a client cache (decision 0029) *(no longer true — superseded at r27, decision 0115; annotated
+  here 2026-09-01 because a reader meeting this entry first would take a stale one)*. The disclosure this closes is spec §9's own: with no position
   served, a gate-filtered roster is a shorter list and nothing else, so Appendix C's **C27 is
   deleted** and decision 0110 is superseded by 0113 — the register does not carry a row for a
   channel that no longer exists. Design content did change in this revision, which is what the
@@ -1436,7 +1520,8 @@ each view under spec §4's rule.
   and the table says so. No design content changed in this revision.
 - **r14 (2026-08-31)** — the write half is built, and the markers at spec §1, §3.2, §3.4 and §4
   record it. `PUT`/`DELETE /control/views/{group}/{key}` create and drop a view of a declared
-  group; the roster's durable home is `SegmentsManifest.views`/`view_tombstones`, carried forward
+  group; the roster's durable home is `SegmentsManifest.views`/`view_tombstones` (renamed
+  `dead_view_incarnations` at r27), carried forward
   at every publication as `layer_tombstones` is, with the WAL's `ViewCreate`/`ViewDrop` replayed
   over it at open; a created view answers a viewer verb empty — a view with no files now has an
   empty row space rather than being absent from the bundle — and takes its first row space at the

@@ -10,6 +10,7 @@ fn segments_at(ranges: &[(u64, u64)]) -> Vec<SegmentDescriptor> {
         .iter()
         .enumerate()
         .map(|(i, (lo, hi))| SegmentDescriptor {
+            incarnation: 0,
             view: "s0".to_string(),
             seg_id: format!("s{i}"),
             row_count: (hi - lo + 1) as u32,

@@ -441,6 +441,10 @@ pub(crate) struct PlannedSegment {
 /// One view's half of a fold plan.
 pub(crate) struct FoldViewPlan {
     pub(crate) view: String,
+    /// The incarnation of `view` this plan folds (decision 0115) — the bundle's own, which
+    /// `Bundle::with_views` has already held to the live roster. Stamped into the new base
+    /// segment so that the fold's output is the successor's and not a predecessor's.
+    pub(crate) incarnation: tessera_types::view::ViewIncarnation,
     /// Every live segment of this view at the snapshot — the base plus every extent. Pass 1 merges
     /// them all; order does not matter to it, since the merge is driven by a heap over each
     /// cursor's `(morton, tessera_id)` key.
@@ -693,6 +697,7 @@ pub(crate) fn plan_fold(
             .map_or(row_space.base().bound(), |extent| extent.entity_hi + 1);
         views.push(FoldViewPlan {
             view: view.clone(),
+            incarnation: view_data.incarnation,
             segments: view_data
                 .segments
                 .iter()
@@ -1111,6 +1116,7 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
 
         segments.push(SegmentDescriptor {
             view: view.view.clone(),
+            incarnation: view.incarnation,
             seg_id: ctx.seg_id.clone(),
             row_count: out.row_count,
             entity_lo: 0,
@@ -1862,6 +1868,7 @@ mod tests {
 
     fn segment(seg_id: &str, entity_lo: u64, entity_hi: u64) -> SegmentDescriptor {
         SegmentDescriptor {
+            incarnation: 0,
             view: "s0".to_string(),
             seg_id: seg_id.to_string(),
             row_count: (entity_hi - entity_lo + 1) as u32,

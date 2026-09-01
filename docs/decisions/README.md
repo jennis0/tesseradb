@@ -130,4 +130,5 @@ prevent.
 | [0110](0110-the-ordinal-gap-is-accepted.md) | 2026-08-30 | The ordinal gap is accepted as a register row — **superseded by 0113** |
 | [0111](0111-a-shape-spans-projected-views-through-wgs84.md) | 2026-08-30 | A shape spans projected views through wgs84, and no geometry spans both kinds of space |
 | [0112](0112-the-anchor-view-orders-a-signature-groups-ids.md) | 2026-08-30 | A declared anchor view orders ids within a signature group |
-| [0113](0113-ordinals-are-removed-and-the-key-is-the-only-address.md) | 2026-08-31 | Ordinals are removed; the key is a view's only address (supersedes 0110) |
+| [0113](0113-ordinals-are-removed-and-the-key-is-the-only-address.md) | 2026-08-31 | Ordinals are removed; the key is a view's only address (supersedes 0110) — its tombstone clause superseded by 0115 |
+| [0115](0115-a-dropped-view-key-is-reusable.md) | 2026-09-01 | A dropped view key is reusable, and an internal incarnation keeps its predecessor's artifacts out |

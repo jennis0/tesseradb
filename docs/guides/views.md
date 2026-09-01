@@ -195,8 +195,11 @@ DELETE /control/views/quarter/2026-Q1
 DELETE /control/views/quarter/2026-Q1?delete_dangling=true
 ```
 
-Dropping a view tombstones the key for ever and reclaims its row-space artifacts at the next fold;
-requests naming it become the ordinary unknown-view 404. **Dropping a view does not delete an
+Dropping a view frees the key and reclaims its row-space artifacts at the next fold;
+requests naming it become the ordinary unknown-view 404. **The key can be created again**, in the
+same breath if you like — that is how you correct a record you got wrong. What does not come back
+is the view: a recreated `2026-Q1` starts empty, and the old one's points stay unreachable until
+the fold deletes them. **Dropping a view does not delete an
 entity.** An entity whose only view was `quarter:2026-Q1` still exists — with its label, its
 attributes, its layer memberships — in no view at all, and a later batch into a different view picks
 it back up by `external_id` under the ordinary join rule below. `delete_dangling=true` is sugar for
@@ -452,8 +455,10 @@ quarter — before that a request under it simply has no `sentiment`.
 
 ## Sharp edges
 
-- **A key, once created, is burnt for ever** — dropped or not, it never comes back under different
-  contents (decision 0029). Get the metadata right before creating, because there is no update.
+- **A record cannot be edited — drop and create again.** There is no update verb, so a wrong gate
+  or wrong metadata is `DELETE` then `PUT` under the same key. The key is reusable and the
+  recreated view is **empty**: none of the dropped view's points come back with it, and anyone
+  holding a bookmark into the old one gets the new one's contents under that name.
 - **Visibility is fixed per session.** A view created mid-session is invisible to that session until
   it re-authorises, whatever its gate says.
 - **A typo on ingest is a 404, never a new view.** `x-tessera-view: quater:2026-Q1` does not mint

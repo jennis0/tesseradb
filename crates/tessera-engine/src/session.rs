@@ -1145,10 +1145,10 @@ impl Engine {
             .values()
             .flat_map(|partition| partition.manifest.views.iter().cloned())
             .collect();
-        let manifest_view_tombstones: Vec<tessera_types::view::TombstonedView> = bundle
+        let manifest_dead_incarnations: Vec<tessera_types::view::DeadIncarnation> = bundle
             .partitions
             .values()
-            .flat_map(|partition| partition.manifest.view_tombstones.iter().cloned())
+            .flat_map(|partition| partition.manifest.dead_view_incarnations.iter().cloned())
             .collect();
         // The views the *build* declared, whose keys a create must not reissue.
         let declared_views: Vec<(String, String)> = bundle
@@ -1217,7 +1217,7 @@ impl Engine {
                 layers: &manifest_layers,
                 tombstones: &manifest_layer_tombstones,
                 created_views: &manifest_created_views,
-                view_tombstones: &manifest_view_tombstones,
+                dead_view_incarnations: &manifest_dead_incarnations,
                 declared_views,
                 membership_extents: &manifest_membership_extents,
                 level_versions: &manifest_level_versions,
@@ -1272,26 +1272,29 @@ impl Engine {
         // dropped. Applied here, before the first generation is built, because everything below
         // reads the manifest — the deny mask over every view, `/v1/meta`, view resolution on both
         // planes — and a created view absent from it comes back from a restart as a 404.
-        let (created_views, view_tombstones) = write_state.roster.snapshot();
+        let (created_views, dead_incarnations) = write_state.roster.snapshot();
         // **And the group-scoped columns a flush wrote** (`views.md` §5).
         // `scoped_scalars[..].views` names the views that have a column; a flush of a view created
         // since the build wrote one, and `SegmentsManifest::scoped_columns` is where that survives
         // a restart — `MANIFEST.json` being rewritten only by a fold.
-        let scoped_columns: Vec<(String, String)> = bundle
+        // The incarnation travels with the pair: a column of a dead incarnation is on disc under
+        // the same path a key created again would use, and `with_scoped_columns` drops it rather
+        // than publishing the predecessor's values as the new view's (decision 0115).
+        let scoped_columns: Vec<(String, String, tessera_types::view::ViewIncarnation)> = bundle
             .partitions
             .values()
             .flat_map(|p| p.manifest.scoped_columns.iter())
-            .map(|c| (c.column.clone(), c.view.clone()))
+            .map(|c| (c.column.clone(), c.view.clone(), c.incarnation))
             .collect();
         let bundle = if created_views.is_empty()
-            && view_tombstones.is_empty()
+            && dead_incarnations.is_empty()
             && scoped_columns.is_empty()
         {
             Arc::new(bundle)
         } else {
             let manifest = bundle
                 .manifest
-                .with_roster(&created_views, &view_tombstones)
+                .with_roster(&created_views, &dead_incarnations)
                 .with_scoped_columns(&scoped_columns);
             Arc::new(bundle).with_views(manifest)
         };
