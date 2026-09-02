@@ -49,10 +49,16 @@ export function flags(argv = process.argv.slice(2)) {
 export function launchBrowser(args) {
   const executablePath = args.executable;
   const beyond = executablePath ? {executablePath} : {};
+  // `--any-origin` drops the browser's origin checks for this run. The server enumerates the
+  // viewer's origin (`serve.dev_cors_origins`) and a deployment names one port, so a second
+  // viewer on a second port — a worktree's, beside the one already holding the deployment's —
+  // cannot reach it at all. Nothing this drives is about CORS, and a browser launched with it is
+  // this process's own; it is never a way to reach a server from a page a user loaded.
+  const origins = 'any-origin' in args ? ['--disable-web-security'] : [];
   return chromium.launch(
     'headed' in args
-      ? {headless: false, args: ['--disable-gpu-sandbox'], ...beyond}
-      : {args: ['--use-gl=swiftshader', '--enable-unsafe-swiftshader', '--disable-gpu-sandbox'], ...beyond}
+      ? {headless: false, args: ['--disable-gpu-sandbox', ...origins], ...beyond}
+      : {args: ['--use-gl=swiftshader', '--enable-unsafe-swiftshader', '--disable-gpu-sandbox', ...origins], ...beyond}
   );
 }
 

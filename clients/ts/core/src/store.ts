@@ -1526,10 +1526,36 @@ export function createStore(options: StoreOptions): Store {
     })();
   }
 
+  /**
+   * Take the shape an answer already carried into the held shapes, so the map draws it.
+   *
+   * The drill-down route answers `centroid`, `box` **and** the shape in one body, and
+   * {@link openArtifact} was reading the first two and discarding the third: the shape landed in
+   * `selection.artifact.detail` — where the card reads it and draws nothing with it — and never
+   * in `artifacts.shapes`, which is what `focusOutlines` looks in. So an artifact opened from
+   * `<tessera-artifact-list>` drew no outline at all on a layer that declares a hull, because the
+   * box the served row carries is refused for a layer whose declared shape is a hull; a layer
+   * declaring none drew its box and hid the fault. The map's own click and hover call
+   * {@link needShape} beside this, which is why a pick drew and a list row did not.
+   *
+   * Recorded as asked, so `needShape` never issues a second request for a shape already in hand.
+   */
+  function holdShape(id: bigint, shape: Shape | null): void {
+    if (!shape) return;
+    askedShapes.add(id);
+    heldShapes = new Map(heldShapes).set(id, shape);
+    heldKinds = new Map(heldKinds).set(id, shapeKindOf(id) ?? 'derived');
+    replaceProjection('artifacts', {...projections.artifacts, shapes: heldShapes});
+  }
+
   async function openArtifact(id: bigint): Promise<void> {
     if (!token) return;
+    const asked = token;
     try {
       const detail = await client.artifact(token, id, {view: viewId});
+      // The principal may have changed under the request, in which case this shape describes a
+      // mask that is no longer the one being drawn — the same guard `needShape` takes.
+      if (token === asked) holdShape(id, detail.shape);
       replaceProjection('selection', {...projections.selection, artifact: {id, detail}, artifactRefusal: null, item: null, itemRefusal: null});
     } catch (error) {
       const e = error as {code?: string; detail?: string; message?: string};

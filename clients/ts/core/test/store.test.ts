@@ -680,6 +680,24 @@ describe('needShape fetches the drawn shape by identifier', () => {
     expect(artifact).toHaveBeenCalledTimes(1);
   });
 
+  /**
+   * The rung 3 defect (`client-delivery.md`): the drill-down answers the shape beside the box, and
+   * opening an artifact read the box and dropped the shape on the floor. The map draws from
+   * `artifacts.shapes`, so a cluster opened from the list drew nothing at all on a layer that
+   * declares a hull — 253 served, 0 rings.
+   */
+  it('opening an artifact holds the shape its own answer carried, and asks for nothing more', async () => {
+    const parts: [number, number][][][] = [[[[0, 0], [10, 0], [10, 10]]]];
+    const {store, artifact, clock} = await storeWith(parts);
+    await store.openArtifact(5n);
+    expect(store.get('artifacts').shapes.get(5n)).toEqual(parts);
+    expect(artifact).toHaveBeenCalledTimes(1);
+    // The map calls `needShape` beside the open on its own click path; the shape is in hand.
+    store.needShape(5n);
+    await clock.advance(1);
+    expect(artifact).toHaveBeenCalledTimes(1);
+  });
+
   it('forgets every held shape on clear — a derived shape is this principal’s', async () => {
     const parts: [number, number][][][] = [[[[0, 0], [10, 0], [10, 10]]]];
     const {store, artifact, clock} = await storeWith(parts);

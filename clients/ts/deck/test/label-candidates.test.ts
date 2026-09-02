@@ -1,7 +1,8 @@
 import {describe, expect, it} from 'vitest';
 import {SessionArtifactTable, servedLineage, type Artifact, type ArtifactsProjection, type Meta} from '@tesseradb/client';
-import {artifactName, displayName, frontier, labelBudget, labelCandidates} from '../src/layer.js';
+import {LABEL_CANDIDATE_CEILING, artifactName, displayName, frontier, labelBudget, labelCandidates} from '../src/layer.js';
 import {LABEL_SIZE_MAX, LABEL_SIZE_MIN, placeLabels} from '../src/labels.js';
+import medcpt from './fixtures/medcpt-kmeans-labels.json' with {type: 'json'};
 
 /**
  * Which artifacts get a label (§5.10, the owner's review 2026-08-26): the frontier of the served
@@ -48,6 +49,19 @@ function projection(input: Artifact[]): ArtifactsProjection {
 const META = {layers: [{name: 'clusters', hierarchy: {kind: 'flat', pruneChildren: false}, depsOn: []}, {name: 'topics', hierarchy: {kind: 'flat', pruneChildren: false}, depsOn: ['clusters']}]} as unknown as Meta;
 
 const ids = (s: Iterable<bigint>) => [...s].map(String).sort();
+
+/**
+ * The rung 3 clustering as it was served, one artifact per row of the fixture — a real layout,
+ * because the budget's fault was a property of one and no synthetic set of centroids had it.
+ */
+function medcptClusters(): Artifact[] {
+  return (medcpt.clusters as [string, string, string, number, number][]).map(([id, count, text, x, y]) => ({
+    ...artifact(BigInt(id), BigInt(count), text.length > 0 ? [text] : [], 'clusters/kmeans'),
+    centroid: [x, y] as [number, number]
+  }));
+}
+
+const MEDCPT_META = {layers: [{name: 'clusters/kmeans', hierarchy: {kind: 'flat', pruneChildren: false}, depsOn: []}]} as unknown as Meta;
 
 describe('frontier', () => {
   it('is every served artifact with no served child — an ancestor of something drawn is not on it', () => {
@@ -220,9 +234,32 @@ describe('the candidate list is held per served set, not per zoom bucket', () =>
 });
 
 describe('labelBudget', () => {
-  it('is one label per 36,000 px² and never fewer than eight', () => {
-    expect(labelBudget(1280, 800)).toBe(28);
-    expect(labelBudget(1440, 900)).toBe(36);
-    expect(labelBudget(300, 200)).toBe(8);
+  it('is the drawn set, up to the work ceiling', () => {
+    expect(labelBudget(253)).toBe(253);
+    expect(labelBudget(0)).toBe(0);
+    expect(labelBudget(23_821)).toBe(LABEL_CANDIDATE_CEILING);
+  });
+
+  /**
+   * The defect this replaced, on the layout that had it: rung 3's 253 k-means clusters, as the
+   * wire served them to the widest principal (`fixtures/medcpt-kmeans-labels.json`). They sit in
+   * a ball 464 world units across, so at zoom 0 they are 464 px across on a 1280 × 800 screen and
+   * the twenty-eight a screen-derived budget offered all wanted the same ground. What is checked
+   * is the **relation** — the drawn set names several times what twenty-eight named — and not the
+   * two figures, which move with the font metrics.
+   */
+  it('names many more of a compact layout than a screen-derived budget did', () => {
+    const p = projection(medcptClusters());
+    const placed = (budget: number) => placeLabels(labelCandidates(p, MEDCPT_META, undefined, 0, budget).candidates).length;
+    const screenDerived = placed(28);
+    const drawnSet = placed(labelBudget(p.served.length));
+    expect(screenDerived).toBeLessThanOrEqual(4);
+    expect(drawnSet).toBeGreaterThanOrEqual(4 * screenDerived);
+  });
+
+  it('offers every drawn artifact, so a small cluster in a gap is a candidate at all', () => {
+    const p = projection(medcptClusters());
+    const {candidates} = labelCandidates(p, MEDCPT_META, undefined, 0, labelBudget(p.served.length));
+    expect(candidates).toHaveLength(253);
   });
 });
