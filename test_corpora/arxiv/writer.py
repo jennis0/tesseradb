@@ -73,6 +73,9 @@ class ArtifactSet:
     def members(self, layer, key, rows, *, rank=None, level=0):
         """One row per `(artifact, entity)`. A null `rank` is the artifact's own membership;
         `rank = k` is the generating set of `contents[k]`."""
+        assert layer not in self._streams, (
+            f"{layer}: its member file is being streamed; rows added here would be dropped"
+        )
         levels, keys, ranks, entities = self.member_rows[layer]
         for row in rows:
             levels.append(level)
@@ -107,7 +110,8 @@ class ArtifactSet:
     # right for a clustering — one row per point per layer — and impossible for an ancestor-closed
     # hierarchy, whose member file is several rows per point per *ancestor*. Rung 3's MeSH layer
     # is ~1.7e9 rows at full scale (`dag-hierarchies.md` §8), so it is written as it is produced:
-    # one row group per staged chunk, straight through a `ParquetWriter`, with `key`
+    # one `write_table` per staged chunk, straight through a `ParquetWriter` (which splits a
+    # call at its own default row-group size, so a chunk is several groups), with `key`
     # dictionary-encoded because a descriptor name recurs once per member.
     #
     # A layer written this way declares its artifacts through `artifact` as any other does — there
