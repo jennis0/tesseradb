@@ -25,8 +25,7 @@ each within seconds to minutes.
 - **Every count, sample, label and density shown is correct for the viewer**, computed from what
   they can see rather than filtered after the fact.
 - **Embeddable clients**: web components, a deck.gl layer, React bindings, and a Python notebook
-  widget.
-- **An HTTP API**, with an OpenAPI description.
+  widget, or the HTTP API directly.
 
 ## What using it looks like
 
@@ -72,42 +71,56 @@ Embedding it: `<tessera-explorer>` drops a full map into a page as a custom elem
 adds the same data to a deck.gl scene already running; and in a notebook, `tesseradb`'s `Map`
 widget opens the same view without leaving Python.
 
+## What it consists of
+
+- **TesseraDB**, the server. One binary that checks a declaration, builds a bundle, serves it, and
+  verifies it. It exposes an HTTP API on three planes (viewer, session, control) with an OpenAPI
+  description, so a deployment can be driven from any language without the clients below.
+- **Tessera Client**, the headless store: `@tesseradb/client` for TypeScript and `tesseradb` for
+  Python. It holds a session, keeps a replica of what has been served, composes filters and
+  regions, and exposes the current frame to whatever draws it. No DOM, no rendering.
+- **Components**: `@tesseradb/components` (a full explorer, the map, filter panel, pickers, item and
+  artifact cards, a hierarchy browser, and the rest, as custom elements), `@tesseradb/deck` (a
+  deck.gl layer), and `@tesseradb/react` (hooks and wrapped elements). The elements work in any
+  framework, and every colour, font and spacing is a CSS custom property, with parts and slots for
+  deeper restyling.
+
 ## How it scales
 
 Tessera has been built and served against a synthetic 10⁹-point corpus, and against three real
 corpora at smaller scale. All were measured on the same class of single machine: one box with
 47 GB of RAM, no cluster.
 
-| Corpus | Points | Build time | Peak RSS | Bundle size | Viewport p50 |
-|---|---|---|---|---|---|
-| Synthetic, low-cardinality categories | 10⁹ | 6 m 46 s | 27.6 GB | ~47 GB | 135–164 ms |
-| GeoNames | 13,463,857 | 2 m 59 s | 3.55 GB | 1.34 GB | to measure |
-| Overture places + divisions | 73,631,092 | 31 m 18 s | 26.75 GB | 12.57 GB | to measure |
-| MedCPT / PubMed | 35,920,666 | 12 m 10 s | 16.03 GB | 11.15 GB | to measure |
+| Corpus | Points | What it declares | Build time | Build rate | Peak RSS | Bundle | Viewport p50 |
+|---|---|---|---|---|---|---|---|
+| Synthetic | 10⁹ | about 130 low-cardinality category terms per item | 6 m 46 s | 2.5 M points/s | 27.6 GB | ~47 GB | 135–164 ms |
+| Overture places and divisions | 73,631,092 | 625,754 division polygons as spatial layers, a text index over names, a predicate layer | 31 m 18 s | 39 k points/s | 26.75 GB | 12.57 GB | to measure |
+| MedCPT / PubMed | 35,920,666 | an embedding view, titles indexed for text search, a MeSH hierarchy layer of 30,217 descriptors over 41,321 edges with 1.66×10⁹ membership entries | 12 m 10 s | 49 k points/s | 16.03 GB | 11.15 GB | to measure |
+| GeoNames | 13,463,857 | 8 vocabularies, 13 attributes, 2 layers | 2 m 59 s | 75 k points/s | 3.55 GB | 1.34 GB | to measure |
+| arXiv | 2,422,486 | two embedding views (kNN and PCA) with two clusterings each, clusters titled from their own text | 54 s | 44 k points/s | to measure | 1.5 GB | to measure |
 
 One streaming pass produces the whole bundle. There is no separate spatial-index build, because the
 row order the geometry is written in (Morton order) is the index, and memory is bounded by a plan
 made before the pass starts rather than by how much of the corpus fits in RAM. Peak memory follows
 that plan and the number of distinct terms rather than the point count. To measure: a 10⁹ build with
 117 million distinct terms on the batched build path. The test-corpus ladder is climbing past 10⁹
-points on the same machine.
+points on the same machine. Build rate falls with what a corpus declares rather than with its size:
+the synthetic corpus carries categories only, and the real corpora carry text indexes, polygons and
+hierarchy layers. To measure: the ingest rate into a running service, which has not been recorded
+since the write path was reworked.
 
 ## Compared with other systems
 
-Every system surveyed with document-level or row-level security draws its access boundary at
-retrieval: a viewer cannot open a record outside their access, but a count, a cluster boundary or a
-density estimate is typically computed over the whole corpus, with only the retrieval step
-filtered. Tessera moves that boundary to cover every derived quantity. The rows below are the
-closest match on each of scale, interactive rendering, precomputed serving and per-query access
-control.
+The rows below are the closest match on each of scale, interactive rendering, precomputed serving
+and per-query access control, and where each stops.
 
 | System | Scale reached | Per-viewer masking | Live ingest and delete | Build at 10⁹ | What leaks or costs |
 |---|---|---|---|---|---|
 | Nanocubes / imMens | up to ~2×10⁸ bins | No: one shared index for every viewer | No | 6 h at 2×10⁸ (Nanocubes); to measure (imMens) | No per-viewer view; nothing updates once the index is built |
 | deepscatter / Nomic Atlas | ~10⁸–10⁹ points | No (deepscatter); dataset-level only (Atlas) | No | to measure | One set of tiles served to every viewer |
 | Datashader / tippecanoe | corpus-scale, rasterised or tiled | No | No | to measure | Nothing computed per viewer; the same image or tiles serve everyone |
-| Elasticsearch document-level security | per-query, corpus-scale | Filters retrieval; aggregates leak | Yes | to measure | Its own documentation states a restricted principal can still count how many inaccessible documents contain a given term; a documented case went from a 30 ms query to 26 seconds once the filtering was applied |
-| PostgreSQL row-level security | per-query, corpus-scale | Filters retrieval; aggregates leak | Yes | to measure | A measured policy over a spatial predicate abandoned its index and ran 3,340× slower; `EXPLAIN` still discloses the exact count of excluded rows, and plain `EXPLAIN` the density of an invisible cluster |
+| Elasticsearch with document-level security | any size the cluster holds; each tile is a query | Yes, per query | Yes | to measure | Speed: a documented case went from 30 ms to 26 s once document-level filtering was applied, and interactive spatial aggregation at 10⁸ points and above needs a cluster. A minor term-count disclosure is documented |
+| PostgreSQL with row-level security | any size the database holds; each tile is a query | Yes, per query | Yes | to measure | Speed: a measured policy over a spatial predicate abandoned its index and ran 3,340× slower. `EXPLAIN` discloses excluded-row counts |
 | Tessera | 10⁹ points measured; the test ladder is climbing past it | Yes: every served quantity | Yes: ingest, deletion and suppression while serving | 6 m 46 s (low-cardinality categories) | A leak register enumerates what is accepted; anything not in it is a bug |
 
 We know of no system that does all of these at once.
