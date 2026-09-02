@@ -2969,6 +2969,11 @@ pub struct CategoryMembership<'a> {
 }
 
 impl CategoryMembership<'_> {
+    /// The column this predicate was built for, for a caller shaping a refusal that names it.
+    pub fn column(&self) -> &str {
+        &self.column
+    }
+
     /// Is `code` carried by at least one entity this principal may see?
     ///
     /// The extent half is answered first because it is a hash lookup against a set the sweep
