@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-02 · **Harness:** `suggestprobe/` (standalone crate, not a workspace member)
 **Raw:** `logs/arm1.log`, `logs/arm2-{zipf,uniform}.log`, `logs/arm3-{zipf,uniform}.log`, `logs/gen-*.log`,
-`logs/prep.log`; `logs/overlapped/` holds a first pass of arms 2–3 that ran concurrently with arm 1 (same
+`logs/prep.log`, `logs/arm4-decomp-{1e6,1e7}.log`; `logs/overlapped/` holds a first pass of arms 2–3 that ran concurrently with arm 1 (same
 numbers within noise, kept as the repeat).
 **Machine:** WSL2 on an AMD Ryzen 9 5900X (12 cores), 47 GB, kernel 6.18.33.2-microsoft-standard-WSL2;
 every run single-threaded, one process at a time except where stated. Page cache warm throughout: the
@@ -211,6 +211,128 @@ cache warm:
 | Uniform (10⁷ tag-0 records, length check only) | 0.048–0.057 s | 0.35–0.37 s |
 
 The cost is the Roaring validation (~8.5 µs per tag-1 record), not the record count.
+
+---
+
+### Arm 4 — where the shipped probe's time goes, and what (b) and (c) would buy
+
+**Date:** 2026-09-02 · **Harness:** `crates/tessera-bench/src/bin/suggest_walk.rs --decomp` (in the
+workspace, on branch `vs/bench-decomp`) · **Raw:** `logs/arm4-decomp-1e6.log`, `logs/arm4-decomp-1e7.log`
+**Machine:** the same WSL2 host as arms 1–3. One thread, one process; `pgrep -af cargo` was checked
+before the run and **no other cargo or bench process was running** — the host was quiet, and the two
+scales ran one after the other, never together. Fixtures under a scratchpad tmpdir, deleted after.
+
+**The question.** §6.2 measures the shipped walk at **61–68 ms** for the sparsest viewer at 10⁷ values
+where r1 had measured `Bitmap::intersect` alone at 1.9–10.4 ms. This arm splits one probe into the three
+things `ColumnPostings::intersects` does, over **the codes a real budgeted walk actually probes** — 26
+one-character prefixes at budget 10⁵, the gate closure recording each code as `Engine::suggest` would
+pass it — so the access pattern is the walk's own and not a scan of the code array.
+
+The three stages are reached through three `#[cfg(feature = "bench-timing")]` accessors added for this
+arm (`ColumnPostings::bench_base_record_index` / `bench_base_posting_at_index` / `bench_hits`, and the
+two `DeltaTier` entries under them). Each calls the shipped code, so the stages sum to the whole call up
+to the instrument; nothing is transcribed. The feature is off by default and enabled only by
+`tessera-bench`, as `tessera-engine/bench-timing` is.
+
+**Per probe, 10⁷ values over 10⁸ entities, ns, median / p99** — the 0.01% viewer, whose probes are
+99.99% *hidden* values (2.22–2.25M probes each; 322 and 303 visible). `search` is the binary search over
+the keyed base's 10⁷-entry code array; `view` is `read_posting` — the record slice, and the portable
+`BitmapView::deserialize` where the record is Roaring; `test` is `hits`, the existential intersect;
+`whole` is `intersects`, timed in its own pass.
+
+| Viewer | class | search | view | test | whole | search share |
+|---|---|---|---|---|---|---|
+| 0.01% contiguous | hidden | **550 / 950** | 190 / 520 | 20 / 30 | 730 / 1,162 | **72%** |
+| 0.01% contiguous | visible | 550 / 910 | 200 / 4,539 | 110 / 620 | 851 / 6,598 | 64% |
+| 0.01% scattered | hidden | **550 / 950** | 190 / 510 | 70 / 160 | 811 / 1,329 | **68%** |
+| 0.01% scattered | visible | 560 / 970 | 200 / 3,940 | 80 / 14,317 | 890 / 19,397 | 67% |
+
+At 10⁶ values the same probes are 130–210 / 160–230 / 30–100 ns for a whole call of 280–480 ns: the
+search is where the scale shows, and it is the only stage that moves between 10⁶ and 10⁷.
+
+**Instrument.** `Instant::now()` cost 19.7–21.1 ns on the host, measured in the same run, so each
+bracketed stage carries ~20 ns of it. Net of that the three stages are ~530 / ~170 / ~0–50 ns and sum to
+700–750 against a whole call of 730–811 — they agree, and the residue is the instrument's own
+perturbation. Percentages above are of the staged sum and are ±5 points.
+
+**The walk around the probe is not where the time is.** The same 26 walks with a gate that answers
+`false` without reading a posting cost **0.91–0.94 ms** per prefix over 10⁵ entries — **9.1–9.5 ns per
+value examined**, against 62.25 / 82.39 ms median for the same walks with the shipped gate on the same
+run. So the fold, the two binary searches over the index, the payload and code reads per entry and the
+emitted set together are **~1.5% of a keystroke**; ~98.5% is the posting probe, and 68–72% of that is
+the record search. (Those 62/82 ms reproduce §6.2's 61.2/68.2 ms at the median; the scattered figure is
+higher here because this arm walks 26 distinct prefixes rather than cycling them over 200 repeats, so
+it has 26 samples and its "p99" is a maximum.)
+
+**This corrects §6.2's "13–29% of a probe" for the search, and both figures are measured.** That one
+timed 10⁵ searches back to back with the code array warm in cache (299 ns of 1,037). Interleaved with
+the view and the test, as the walk runs them, the same search is **550 ns of 730** — the probe evicts
+the code array between searches. The interleaved figure is the shipped access pattern.
+
+**Minor page faults** (`/proc/self/stat` field 10, around each pass):
+
+| Pass | contiguous | scattered |
+|---|---|---|
+| first budgeted walk, mappings fresh | 395 (1.8 per 10⁴ probes) | 4 (0.0) |
+| whole-call pass | 0 | 0 |
+| staged pass | 0 | 0 |
+
+So **cold-page cost is not what makes the walk 62 ms**: the first walk over a freshly mapped 1.06 GB
+index and 281 MB postings file takes under two minor faults per 10⁴ probes, and every later pass takes
+none. The 550 ns search is cache misses inside a resident mapping, not faults. **⊘ Device-cold cost is
+still NOT measured** — the files were written seconds before being read.
+
+**Candidate container counts**, which decide what a container-key sidecar could reject: the 0.01%
+contiguous candidate (10,000 entities from `Bitmap::from_range`) is **1 container**; the 0.01% scattered
+candidate (10,000 entities strided over 10⁸) is **1,526 containers — every container in the entity
+space**.
+
+**Postings shape, measured over the fixture's own records:** at 10⁷ values, 10⁷ records of which
+**47,348 are Roaring** and the rest tag-0 arrays of ≤32 entities; **20,792,930 container keys** in all,
+2.08 per record. At 10⁶ values: 47,348 Roaring of 10⁶ records, 11,792,930 keys.
+
+#### What (b) and (c) would save — *modelled from the stages above*
+
+**(b) a code → record map built at open — removes the search.** It replaces 550 ns of a 730–811 ns
+probe with one lookup. A lookup is one hash and one random touch into a table larger than cache, which
+this fixture prices at ~100–150 ns (the `view` stage is 190 ns for two such touches). So **(b) saves
+~400–450 ns per probe, taking the sparsest viewer's keystroke from 62–82 ms to ~28–38 ms** *(modelled)*.
+Its cost is the design's own objection: an open-addressed `(u32 code, u32 ordinal)` table at 50% load is
+**160 MB per column** at 10⁷ records, which "memory as low as possible" declines.
+
+**(b′) the same saving for 4 MB, and it is not in the design** *(modelled)*. The search is slow because
+24 comparisons over a 40 MB sorted `u32` array miss cache on the last several. A bucket table over the
+code's **top 20 bits** — 2²⁰ `u32` offsets, **4.2 MB** — leaves ~10 records per bucket, one or two cache
+lines, so the search becomes ~1–2 misses rather than ~8: **~150–250 ns**, i.e. most of (b)'s saving for
+2.6% of its bytes. It is a build-time-free structure (the code array is already sorted), it needs no map
+from code to record, and it is worth pricing before (b) is.
+
+**(c) a per-record container-key sidecar — removes the view, and only sometimes.** It answers "can this
+record possibly meet the candidate?" from the record's container keys without deserialising the posting
+body. Three measured facts bound it:
+
+- It targets the `view` + `test` stages, which are **190 + 20–70 ns of a 730–811 ns probe: 26–32%**, and
+  the search it does not touch is 68–72%.
+- Reading the sidecar run is itself one random touch (~100–150 ns), so the saving where it *does* reject
+  is **~90–140 ns per probe: 12–17%, or 62 ms → ~53–55 ms** *(modelled)*.
+- **Against the scattered candidate it rejects nothing.** A 0.01% scattered viewer's candidate touches
+  all 1,526 containers of the entity space, so every record's keys intersect it and the sidecar always
+  answers "maybe" — the view and the test are paid anyway, plus the sidecar's own touch. **(c) is a
+  small loss for the scattered viewer, who is the slower of the two (82 ms against 62 ms).**
+
+**(c)'s bytes at 10⁷ records, measured on the fixture's postings:** 20,792,930 container keys ×
+2 B = **41.6 MB**, plus one `u32` run offset per record = **40.0 MB**, so **81.6 MB per column** — half of
+(b)'s and for a quarter of the saving, on the contiguous shape alone. Restricting it to the 47,348
+Roaring records (the only ones where "constructing a view" is more than a slice) would carry ~7.5M keys
+≈ **15 MB** *(modelled from the fixture's Zipf law)* plus a way to find them, and would save nothing on
+the 99.5% of probes that land on a tag-0 array. **These byte figures are this fixture's Zipf membership
+shape**, not a property of any vocabulary.
+
+**The recommendation this arm supports: (b), and (b′) before it.** The sparsest viewer's keystroke is
+not paying for Roaring arithmetic — the intersection itself is 3–9% of a probe and the whole walk
+machinery around it is 1.5% of the keystroke. It is paying to *find the record*, twice over: 68–72% of
+the probe is a binary search whose array does not fit in cache. (c) attacks the second-largest stage,
+helps only a viewer whose mask is contiguous, and costs half of (b)'s bytes.
 
 ---
 
