@@ -1,0 +1,1330 @@
+{
+  "chunks": [
+    {
+      "chunk": "chunk_0.parquet",
+      "footer_read_s": 0.004503965377807617,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4699752481,
+      "columns": {
+        "id": {
+          "compressed": 9759827,
+          "uncompressed": 71966192
+        },
+        "title": {
+          "compressed": 79501467,
+          "uncompressed": 193280248
+        },
+        "abstract": {
+          "compressed": 875634031,
+          "uncompressed": 2478793821
+        },
+        "embedding.list.element": {
+          "compressed": 3728550581,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_1.parquet",
+      "footer_read_s": 0.056856632232666016,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4864978833,
+      "columns": {
+        "id": {
+          "compressed": 7249658,
+          "uncompressed": 71993876
+        },
+        "title": {
+          "compressed": 53946810,
+          "uncompressed": 135185001
+        },
+        "abstract": {
+          "compressed": 1069836977,
+          "uncompressed": 4024220243
+        },
+        "embedding.list.element": {
+          "compressed": 3717501784,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_2.parquet",
+      "footer_read_s": 0.03969287872314453,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4721506307,
+      "columns": {
+        "id": {
+          "compressed": 10084916,
+          "uncompressed": 71950992
+        },
+        "title": {
+          "compressed": 79720093,
+          "uncompressed": 196172923
+        },
+        "abstract": {
+          "compressed": 897259247,
+          "uncompressed": 2557440710
+        },
+        "embedding.list.element": {
+          "compressed": 3728165100,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_4.parquet",
+      "footer_read_s": 0.04120063781738281,
+      "num_rows": 1380630,
+      "num_row_groups": 5,
+      "file_size_bytes": 3245788964,
+      "columns": {
+        "id": {
+          "compressed": 6846356,
+          "uncompressed": 49662050
+        },
+        "title": {
+          "compressed": 55486858,
+          "uncompressed": 136856981
+        },
+        "abstract": {
+          "compressed": 608131939,
+          "uncompressed": 1744102803
+        },
+        "embedding.list.element": {
+          "compressed": 2571223063,
+          "uncompressed": 5662239795
+        }
+      }
+    },
+    {
+      "chunk": "chunk_5.parquet",
+      "footer_read_s": 0.049901485443115234,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4450083706,
+      "columns": {
+        "id": {
+          "compressed": 8977667,
+          "uncompressed": 71946429
+        },
+        "title": {
+          "compressed": 71938928,
+          "uncompressed": 174017389
+        },
+        "abstract": {
+          "compressed": 638018704,
+          "uncompressed": 1831426955
+        },
+        "embedding.list.element": {
+          "compressed": 3727847376,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_6.parquet",
+      "footer_read_s": 0.022270679473876953,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4474340301,
+      "columns": {
+        "id": {
+          "compressed": 9179433,
+          "uncompressed": 71827584
+        },
+        "title": {
+          "compressed": 70792321,
+          "uncompressed": 173081907
+        },
+        "abstract": {
+          "compressed": 663079489,
+          "uncompressed": 1899874128
+        },
+        "embedding.list.element": {
+          "compressed": 3728134555,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_7.parquet",
+      "footer_read_s": 0.03920102119445801,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4656089889,
+      "columns": {
+        "id": {
+          "compressed": 9240544,
+          "uncompressed": 71896712
+        },
+        "title": {
+          "compressed": 76551726,
+          "uncompressed": 184906151
+        },
+        "abstract": {
+          "compressed": 840814523,
+          "uncompressed": 2389216316
+        },
+        "embedding.list.element": {
+          "compressed": 3724408824,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_8.parquet",
+      "footer_read_s": 0.03992199897766113,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4689083658,
+      "columns": {
+        "id": {
+          "compressed": 10072640,
+          "uncompressed": 71897288
+        },
+        "title": {
+          "compressed": 77539531,
+          "uncompressed": 188008175
+        },
+        "abstract": {
+          "compressed": 866731482,
+          "uncompressed": 2458192016
+        },
+        "embedding.list.element": {
+          "compressed": 3728874955,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_9.parquet",
+      "footer_read_s": 0.039298057556152344,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4670073125,
+      "columns": {
+        "id": {
+          "compressed": 9682769,
+          "uncompressed": 71888645
+        },
+        "title": {
+          "compressed": 77615588,
+          "uncompressed": 186930489
+        },
+        "abstract": {
+          "compressed": 848204053,
+          "uncompressed": 2395157214
+        },
+        "embedding.list.element": {
+          "compressed": 3729107992,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_10.parquet",
+      "footer_read_s": 0.04073381423950195,
+      "num_rows": 1808786,
+      "num_row_groups": 6,
+      "file_size_bytes": 4113957140,
+      "columns": {
+        "id": {
+          "compressed": 9022135,
+          "uncompressed": 65043642
+        },
+        "title": {
+          "compressed": 63751636,
+          "uncompressed": 152389875
+        },
+        "abstract": {
+          "compressed": 677973044,
+          "uncompressed": 1946230968
+        },
+        "embedding.list.element": {
+          "compressed": 3359569274,
+          "uncompressed": 7418193384
+        }
+      }
+    },
+    {
+      "chunk": "chunk_11.parquet",
+      "footer_read_s": 0.04775834083557129,
+      "num_rows": 1599907,
+      "num_row_groups": 6,
+      "file_size_bytes": 3542571508,
+      "columns": {
+        "id": {
+          "compressed": 6853217,
+          "uncompressed": 57501000
+        },
+        "title": {
+          "compressed": 49786896,
+          "uncompressed": 120959843
+        },
+        "abstract": {
+          "compressed": 505174143,
+          "uncompressed": 1484146037
+        },
+        "embedding.list.element": {
+          "compressed": 2978088072,
+          "uncompressed": 6561538683
+        }
+      }
+    },
+    {
+      "chunk": "chunk_12.parquet",
+      "footer_read_s": 0.047245025634765625,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4672532506,
+      "columns": {
+        "id": {
+          "compressed": 9617243,
+          "uncompressed": 71903390
+        },
+        "title": {
+          "compressed": 77444946,
+          "uncompressed": 188757634
+        },
+        "abstract": {
+          "compressed": 852221407,
+          "uncompressed": 2430611427
+        },
+        "embedding.list.element": {
+          "compressed": 3727701956,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_13.parquet",
+      "footer_read_s": 0.03966164588928223,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4619392416,
+      "columns": {
+        "id": {
+          "compressed": 9609561,
+          "uncompressed": 71956555
+        },
+        "title": {
+          "compressed": 75834702,
+          "uncompressed": 181770523
+        },
+        "abstract": {
+          "compressed": 798640378,
+          "uncompressed": 2251524822
+        },
+        "embedding.list.element": {
+          "compressed": 3729911388,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_14.parquet",
+      "footer_read_s": 0.02889561653137207,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4494545578,
+      "columns": {
+        "id": {
+          "compressed": 7975403,
+          "uncompressed": 71925713
+        },
+        "title": {
+          "compressed": 65748780,
+          "uncompressed": 165405626
+        },
+        "abstract": {
+          "compressed": 690296782,
+          "uncompressed": 2043960713
+        },
+        "embedding.list.element": {
+          "compressed": 3726531583,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_15.parquet",
+      "footer_read_s": 0.04692435264587402,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4689794746,
+      "columns": {
+        "id": {
+          "compressed": 9841585,
+          "uncompressed": 71964084
+        },
+        "title": {
+          "compressed": 79167063,
+          "uncompressed": 192787348
+        },
+        "abstract": {
+          "compressed": 866649265,
+          "uncompressed": 2474061840
+        },
+        "embedding.list.element": {
+          "compressed": 3728525288,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_16.parquet",
+      "footer_read_s": 0.03960156440734863,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4699616527,
+      "columns": {
+        "id": {
+          "compressed": 9809918,
+          "uncompressed": 71813155
+        },
+        "title": {
+          "compressed": 79137612,
+          "uncompressed": 191697724
+        },
+        "abstract": {
+          "compressed": 875703371,
+          "uncompressed": 2482372560
+        },
+        "embedding.list.element": {
+          "compressed": 3728660516,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_17.parquet",
+      "footer_read_s": 0.05422639846801758,
+      "num_rows": 1467292,
+      "num_row_groups": 5,
+      "file_size_bytes": 3464553161,
+      "columns": {
+        "id": {
+          "compressed": 7023613,
+          "uncompressed": 52795460
+        },
+        "title": {
+          "compressed": 59166616,
+          "uncompressed": 143223795
+        },
+        "abstract": {
+          "compressed": 660007170,
+          "uncompressed": 1883925278
+        },
+        "embedding.list.element": {
+          "compressed": 2734263409,
+          "uncompressed": 6017657997
+        }
+      }
+    },
+    {
+      "chunk": "chunk_18.parquet",
+      "footer_read_s": 0.04689931869506836,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4665298560,
+      "columns": {
+        "id": {
+          "compressed": 9262761,
+          "uncompressed": 71878819
+        },
+        "title": {
+          "compressed": 77274699,
+          "uncompressed": 185351506
+        },
+        "abstract": {
+          "compressed": 844721382,
+          "uncompressed": 2395268499
+        },
+        "embedding.list.element": {
+          "compressed": 3728639450,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_19.parquet",
+      "footer_read_s": 0.04921722412109375,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4730050378,
+      "columns": {
+        "id": {
+          "compressed": 10242136,
+          "uncompressed": 71961274
+        },
+        "title": {
+          "compressed": 78335708,
+          "uncompressed": 193042111
+        },
+        "abstract": {
+          "compressed": 907053667,
+          "uncompressed": 2593885210
+        },
+        "embedding.list.element": {
+          "compressed": 3728036597,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_20.parquet",
+      "footer_read_s": 0.040967702865600586,
+      "num_rows": 1995417,
+      "num_row_groups": 7,
+      "file_size_bytes": 4465788619,
+      "columns": {
+        "id": {
+          "compressed": 8809928,
+          "uncompressed": 71731932
+        },
+        "title": {
+          "compressed": 68047951,
+          "uncompressed": 159544328
+        },
+        "abstract": {
+          "compressed": 664053204,
+          "uncompressed": 1916010112
+        },
+        "embedding.list.element": {
+          "compressed": 3720701921,
+          "uncompressed": 8183604243
+        }
+      }
+    },
+    {
+      "chunk": "chunk_21.parquet",
+      "footer_read_s": 0.0515589714050293,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4681202868,
+      "columns": {
+        "id": {
+          "compressed": 9330853,
+          "uncompressed": 71930926
+        },
+        "title": {
+          "compressed": 77786306,
+          "uncompressed": 190445914
+        },
+        "abstract": {
+          "compressed": 862178185,
+          "uncompressed": 2471183642
+        },
+        "embedding.list.element": {
+          "compressed": 3726136696,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_22.parquet",
+      "footer_read_s": 0.046541690826416016,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4666827167,
+      "columns": {
+        "id": {
+          "compressed": 10198245,
+          "uncompressed": 71944676
+        },
+        "title": {
+          "compressed": 77210371,
+          "uncompressed": 187256780
+        },
+        "abstract": {
+          "compressed": 844913016,
+          "uncompressed": 2398822662
+        },
+        "embedding.list.element": {
+          "compressed": 3729055007,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_23.parquet",
+      "footer_read_s": 0.0409245491027832,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4713786564,
+      "columns": {
+        "id": {
+          "compressed": 9437808,
+          "uncompressed": 71790877
+        },
+        "title": {
+          "compressed": 80653771,
+          "uncompressed": 199101943
+        },
+        "abstract": {
+          "compressed": 893863756,
+          "uncompressed": 2556920462
+        },
+        "embedding.list.element": {
+          "compressed": 3723576564,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_24.parquet",
+      "footer_read_s": 0.046927452087402344,
+      "num_rows": 1478768,
+      "num_row_groups": 5,
+      "file_size_bytes": 3501183007,
+      "columns": {
+        "id": {
+          "compressed": 7415857,
+          "uncompressed": 53141484
+        },
+        "title": {
+          "compressed": 58517323,
+          "uncompressed": 143075528
+        },
+        "abstract": {
+          "compressed": 674010513,
+          "uncompressed": 1918820250
+        },
+        "embedding.list.element": {
+          "compressed": 2756633485,
+          "uncompressed": 6064723368
+        }
+      }
+    },
+    {
+      "chunk": "chunk_25.parquet",
+      "footer_read_s": 0.041448116302490234,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4714864311,
+      "columns": {
+        "id": {
+          "compressed": 8636965,
+          "uncompressed": 71983569
+        },
+        "title": {
+          "compressed": 81651123,
+          "uncompressed": 201415427
+        },
+        "abstract": {
+          "compressed": 893904623,
+          "uncompressed": 2575257948
+        },
+        "embedding.list.element": {
+          "compressed": 3724642811,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_26.parquet",
+      "footer_read_s": 0.034305572509765625,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4713201566,
+      "columns": {
+        "id": {
+          "compressed": 9552703,
+          "uncompressed": 71769691
+        },
+        "title": {
+          "compressed": 79750437,
+          "uncompressed": 196431231
+        },
+        "abstract": {
+          "compressed": 890815464,
+          "uncompressed": 2536107600
+        },
+        "embedding.list.element": {
+          "compressed": 3726720958,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_27.parquet",
+      "footer_read_s": 0.0421905517578125,
+      "num_rows": 1885507,
+      "num_row_groups": 7,
+      "file_size_bytes": 4217780129,
+      "columns": {
+        "id": {
+          "compressed": 8051858,
+          "uncompressed": 67808246
+        },
+        "title": {
+          "compressed": 68257588,
+          "uncompressed": 161687088
+        },
+        "abstract": {
+          "compressed": 622965761,
+          "uncompressed": 1774577578
+        },
+        "embedding.list.element": {
+          "compressed": 3514958990,
+          "uncompressed": 7732841556
+        }
+      }
+    },
+    {
+      "chunk": "chunk_28.parquet",
+      "footer_read_s": 0.04168105125427246,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4725796161,
+      "columns": {
+        "id": {
+          "compressed": 9821646,
+          "uncompressed": 71953148
+        },
+        "title": {
+          "compressed": 79916280,
+          "uncompressed": 195950272
+        },
+        "abstract": {
+          "compressed": 902881023,
+          "uncompressed": 2578103431
+        },
+        "embedding.list.element": {
+          "compressed": 3727055594,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_29.parquet",
+      "footer_read_s": 0.05713462829589844,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4663389372,
+      "columns": {
+        "id": {
+          "compressed": 9280744,
+          "uncompressed": 71933938
+        },
+        "title": {
+          "compressed": 78384416,
+          "uncompressed": 189335307
+        },
+        "abstract": {
+          "compressed": 841122911,
+          "uncompressed": 2377125923
+        },
+        "embedding.list.element": {
+          "compressed": 3728983517,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_30.parquet",
+      "footer_read_s": 0.037821292877197266,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4468874245,
+      "columns": {
+        "id": {
+          "compressed": 8190849,
+          "uncompressed": 71961193
+        },
+        "title": {
+          "compressed": 73595417,
+          "uncompressed": 176310673
+        },
+        "abstract": {
+          "compressed": 655571824,
+          "uncompressed": 1879634881
+        },
+        "embedding.list.element": {
+          "compressed": 3727763634,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_31.parquet",
+      "footer_read_s": 0.038849592208862305,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4750694594,
+      "columns": {
+        "id": {
+          "compressed": 8913459,
+          "uncompressed": 71978969
+        },
+        "title": {
+          "compressed": 73960076,
+          "uncompressed": 184977027
+        },
+        "abstract": {
+          "compressed": 935559257,
+          "uncompressed": 2976215961
+        },
+        "embedding.list.element": {
+          "compressed": 3724511732,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_32.parquet",
+      "footer_read_s": 0.036622047424316406,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4655122329,
+      "columns": {
+        "id": {
+          "compressed": 9161470,
+          "uncompressed": 71887341
+        },
+        "title": {
+          "compressed": 77748638,
+          "uncompressed": 186945592
+        },
+        "abstract": {
+          "compressed": 835509835,
+          "uncompressed": 2374182392
+        },
+        "embedding.list.element": {
+          "compressed": 3727213640,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_33.parquet",
+      "footer_read_s": 0.05630946159362793,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4632144679,
+      "columns": {
+        "id": {
+          "compressed": 9548968,
+          "uncompressed": 71943914
+        },
+        "title": {
+          "compressed": 76889076,
+          "uncompressed": 184436702
+        },
+        "abstract": {
+          "compressed": 811002589,
+          "uncompressed": 2280053225
+        },
+        "embedding.list.element": {
+          "compressed": 3729524405,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_34.parquet",
+      "footer_read_s": 0.05381035804748535,
+      "num_rows": 1965577,
+      "num_row_groups": 7,
+      "file_size_bytes": 4492053363,
+      "columns": {
+        "id": {
+          "compressed": 7667561,
+          "uncompressed": 70733663
+        },
+        "title": {
+          "compressed": 70222438,
+          "uncompressed": 181283884
+        },
+        "abstract": {
+          "compressed": 767001010,
+          "uncompressed": 2259426819
+        },
+        "embedding.list.element": {
+          "compressed": 3642693964,
+          "uncompressed": 8061224691
+        }
+      }
+    },
+    {
+      "chunk": "chunk_35.parquet",
+      "footer_read_s": 0.03710627555847168,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4690026846,
+      "columns": {
+        "id": {
+          "compressed": 9456898,
+          "uncompressed": 71965986
+        },
+        "title": {
+          "compressed": 79077295,
+          "uncompressed": 192607049
+        },
+        "abstract": {
+          "compressed": 867615742,
+          "uncompressed": 2473383563
+        },
+        "embedding.list.element": {
+          "compressed": 3728015752,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_36.parquet",
+      "footer_read_s": 0.03753352165222168,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4704370637,
+      "columns": {
+        "id": {
+          "compressed": 9432745,
+          "uncompressed": 71929928
+        },
+        "title": {
+          "compressed": 78774862,
+          "uncompressed": 195278878
+        },
+        "abstract": {
+          "compressed": 884636886,
+          "uncompressed": 2531382187
+        },
+        "embedding.list.element": {
+          "compressed": 3725627590,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_37.parquet",
+      "footer_read_s": 0.0527491569519043,
+      "num_rows": 1638022,
+      "num_row_groups": 6,
+      "file_size_bytes": 3744558326,
+      "columns": {
+        "id": {
+          "compressed": 6917659,
+          "uncompressed": 58889250
+        },
+        "title": {
+          "compressed": 56172356,
+          "uncompressed": 146610327
+        },
+        "abstract": {
+          "compressed": 643509167,
+          "uncompressed": 1948624131
+        },
+        "embedding.list.element": {
+          "compressed": 3034267377,
+          "uncompressed": 6717855948
+        }
+      }
+    },
+    {
+      "chunk": "chunk_38.parquet",
+      "footer_read_s": 0.046118974685668945,
+      "num_rows": 1759695,
+      "num_row_groups": 6,
+      "file_size_bytes": 3962152965,
+      "columns": {
+        "id": {
+          "compressed": 7869943,
+          "uncompressed": 63276572
+        },
+        "title": {
+          "compressed": 62267841,
+          "uncompressed": 153115399
+        },
+        "abstract": {
+          "compressed": 608796674,
+          "uncompressed": 1743170095
+        },
+        "embedding.list.element": {
+          "compressed": 3280499070,
+          "uncompressed": 7216861401
+        }
+      }
+    },
+    {
+      "chunk": "chunk_39.parquet",
+      "footer_read_s": 0.9620952606201172,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4668481443,
+      "columns": {
+        "id": {
+          "compressed": 9517948,
+          "uncompressed": 71961697
+        },
+        "title": {
+          "compressed": 77896001,
+          "uncompressed": 187371064
+        },
+        "abstract": {
+          "compressed": 847821132,
+          "uncompressed": 2402693805
+        },
+        "embedding.list.element": {
+          "compressed": 3727802079,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_40.parquet",
+      "footer_read_s": 0.03483986854553223,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4745901496,
+      "columns": {
+        "id": {
+          "compressed": 9104643,
+          "uncompressed": 71990658
+        },
+        "title": {
+          "compressed": 81968845,
+          "uncompressed": 205465827
+        },
+        "abstract": {
+          "compressed": 927313773,
+          "uncompressed": 2685378634
+        },
+        "embedding.list.element": {
+          "compressed": 3720991095,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_41.parquet",
+      "footer_read_s": 0.03264164924621582,
+      "num_rows": 1414017,
+      "num_row_groups": 5,
+      "file_size_bytes": 3350460696,
+      "columns": {
+        "id": {
+          "compressed": 6940203,
+          "uncompressed": 50863448
+        },
+        "title": {
+          "compressed": 57211208,
+          "uncompressed": 141129548
+        },
+        "abstract": {
+          "compressed": 647736508,
+          "uncompressed": 1861607552
+        },
+        "embedding.list.element": {
+          "compressed": 2633797233,
+          "uncompressed": 5799166767
+        }
+      }
+    },
+    {
+      "chunk": "chunk_42.parquet",
+      "footer_read_s": 0.041434288024902344,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4706697278,
+      "columns": {
+        "id": {
+          "compressed": 9729067,
+          "uncompressed": 71953575
+        },
+        "title": {
+          "compressed": 78762377,
+          "uncompressed": 194305346
+        },
+        "abstract": {
+          "compressed": 887291892,
+          "uncompressed": 2552227449
+        },
+        "embedding.list.element": {
+          "compressed": 3725013630,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_43.parquet",
+      "footer_read_s": 0.03758835792541504,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4415061228,
+      "columns": {
+        "id": {
+          "compressed": 7698852,
+          "uncompressed": 71967789
+        },
+        "title": {
+          "compressed": 53439189,
+          "uncompressed": 139296254
+        },
+        "abstract": {
+          "compressed": 631297144,
+          "uncompressed": 2277965521
+        },
+        "embedding.list.element": {
+          "compressed": 3718882619,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_44.parquet",
+      "footer_read_s": 0.03620290756225586,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4603808778,
+      "columns": {
+        "id": {
+          "compressed": 8883942,
+          "uncompressed": 71683721
+        },
+        "title": {
+          "compressed": 78598285,
+          "uncompressed": 177942089
+        },
+        "abstract": {
+          "compressed": 783767523,
+          "uncompressed": 2218813633
+        },
+        "embedding.list.element": {
+          "compressed": 3728187383,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_46.parquet",
+      "footer_read_s": 0.04345417022705078,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4451237815,
+      "columns": {
+        "id": {
+          "compressed": 8650247,
+          "uncompressed": 71813228
+        },
+        "title": {
+          "compressed": 70907652,
+          "uncompressed": 168968993
+        },
+        "abstract": {
+          "compressed": 638015170,
+          "uncompressed": 1824385932
+        },
+        "embedding.list.element": {
+          "compressed": 3730322611,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_47.parquet",
+      "footer_read_s": 0.020775556564331055,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4402143702,
+      "columns": {
+        "id": {
+          "compressed": 8268434,
+          "uncompressed": 71917148
+        },
+        "title": {
+          "compressed": 70511011,
+          "uncompressed": 174137669
+        },
+        "abstract": {
+          "compressed": 590929821,
+          "uncompressed": 1672666827
+        },
+        "embedding.list.element": {
+          "compressed": 3729531270,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_48.parquet",
+      "footer_read_s": 0.03755021095275879,
+      "num_rows": 1577751,
+      "num_row_groups": 6,
+      "file_size_bytes": 3515335048,
+      "columns": {
+        "id": {
+          "compressed": 7178029,
+          "uncompressed": 56704856
+        },
+        "title": {
+          "compressed": 55894484,
+          "uncompressed": 132330385
+        },
+        "abstract": {
+          "compressed": 504323411,
+          "uncompressed": 1414043299
+        },
+        "embedding.list.element": {
+          "compressed": 2944885479,
+          "uncompressed": 6470672643
+        }
+      }
+    },
+    {
+      "chunk": "chunk_49.parquet",
+      "footer_read_s": 0.04732632637023926,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4582686129,
+      "columns": {
+        "id": {
+          "compressed": 9271098,
+          "uncompressed": 71861137
+        },
+        "title": {
+          "compressed": 76161771,
+          "uncompressed": 183267330
+        },
+        "abstract": {
+          "compressed": 762999893,
+          "uncompressed": 2174725947
+        },
+        "embedding.list.element": {
+          "compressed": 3729414159,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_50.parquet",
+      "footer_read_s": 0.03963804244995117,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4662378650,
+      "columns": {
+        "id": {
+          "compressed": 8625513,
+          "uncompressed": 71732652
+        },
+        "title": {
+          "compressed": 75649468,
+          "uncompressed": 175808729
+        },
+        "abstract": {
+          "compressed": 848389840,
+          "uncompressed": 2444826128
+        },
+        "embedding.list.element": {
+          "compressed": 3725127232,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_51.parquet",
+      "footer_read_s": 0.05159807205200195,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4530941022,
+      "columns": {
+        "id": {
+          "compressed": 9372050,
+          "uncompressed": 71825628
+        },
+        "title": {
+          "compressed": 75166977,
+          "uncompressed": 170166172
+        },
+        "abstract": {
+          "compressed": 714538481,
+          "uncompressed": 2029831290
+        },
+        "embedding.list.element": {
+          "compressed": 3728196809,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_52.parquet",
+      "footer_read_s": 0.03281879425048828,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4423372424,
+      "columns": {
+        "id": {
+          "compressed": 8827115,
+          "uncompressed": 71958501
+        },
+        "title": {
+          "compressed": 66337296,
+          "uncompressed": 160072698
+        },
+        "abstract": {
+          "compressed": 616197856,
+          "uncompressed": 1781346515
+        },
+        "embedding.list.element": {
+          "compressed": 3729066397,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_53.parquet",
+      "footer_read_s": 0.0570988655090332,
+      "num_rows": 2000000,
+      "num_row_groups": 7,
+      "file_size_bytes": 4401954586,
+      "columns": {
+        "id": {
+          "compressed": 8472958,
+          "uncompressed": 71663976
+        },
+        "title": {
+          "compressed": 66044313,
+          "uncompressed": 156845569
+        },
+        "abstract": {
+          "compressed": 597312580,
+          "uncompressed": 1756935897
+        },
+        "embedding.list.element": {
+          "compressed": 3726965133,
+          "uncompressed": 8202400197
+        }
+      }
+    },
+    {
+      "chunk": "chunk_54.parquet",
+      "footer_read_s": 0.03525996208190918,
+      "num_rows": 2145974,
+      "num_row_groups": 11,
+      "file_size_bytes": 4848097061,
+      "columns": {
+        "id": {
+          "compressed": 9609827,
+          "uncompressed": 76957804
+        },
+        "title": {
+          "compressed": 70459956,
+          "uncompressed": 163954941
+        },
+        "abstract": {
+          "compressed": 773131161,
+          "uncompressed": 2435574372
+        },
+        "embedding.list.element": {
+          "compressed": 3989107195,
+          "uncompressed": 8801068794
+        }
+      }
+    }
+  ],
+  "total_rows": 102117343
+}

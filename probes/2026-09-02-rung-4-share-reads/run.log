@@ -1,0 +1,28 @@
+total parts: 2428
+chosen 20 parts across the range
+updated_date=2016-06-24/part_0000.parquet: rows=2439 size=3.6MB footer=0.003s proj=0.08s(2.2MB/s) whole=0.08s(46.4MB/s)
+updated_date=2020-02-14/part_0000.parquet: rows=1 size=0.1MB footer=0.022s proj=0.00s(0.8MB/s) whole=0.00s(35.9MB/s)
+updated_date=2025-10-10/part_0009.parquet: rows=287377 size=335.3MB footer=0.048s proj=1.06s(9.8MB/s) whole=6.92s(48.4MB/s)
+updated_date=2025-10-10/part_0132.parquet: rows=288301 size=331.8MB footer=0.086s proj=1.24s(8.2MB/s) whole=6.66s(49.8MB/s)
+updated_date=2025-11-06/part_0067.parquet: rows=146242 size=180.2MB footer=0.071s proj=0.96s(8.7MB/s) whole=3.45s(52.2MB/s)
+updated_date=2025-11-06/part_0189.parquet: rows=145718 size=181.1MB footer=0.038s proj=0.92s(9.1MB/s) whole=3.53s(51.2MB/s)
+updated_date=2025-11-06/part_0310.parquet: rows=145686 size=180.1MB footer=0.042s proj=0.95s(8.7MB/s) whole=3.33s(54.1MB/s)
+updated_date=2025-11-06/part_0431.parquet: rows=145453 size=181.6MB footer=0.072s proj=1.67s(5.0MB/s) whole=3.37s(53.9MB/s)
+updated_date=2025-11-06/part_0553.parquet: rows=144961 size=179.7MB footer=0.044s proj=0.83s(9.9MB/s) whole=3.43s(52.3MB/s)
+updated_date=2025-11-06/part_0674.parquet: rows=37755 size=49.8MB footer=0.038s proj=0.36s(6.5MB/s) whole=1.01s(49.3MB/s)
+updated_date=2025-11-06/part_0796.parquet: rows=145878 size=180.3MB footer=0.046s proj=0.83s(10.0MB/s) whole=3.59s(50.2MB/s)
+updated_date=2025-11-06/part_0917.parquet: rows=145915 size=180.8MB footer=0.060s proj=1.05s(7.9MB/s) whole=3.45s(52.4MB/s)
+updated_date=2025-11-06/part_1038.parquet: rows=146199 size=180.2MB footer=0.088s proj=0.99s(8.4MB/s) whole=3.61s(49.9MB/s)
+updated_date=2026-01-06/part_0000.parquet: rows=3026 size=6.5MB footer=0.035s proj=0.18s(1.1MB/s) whole=0.21s(31.7MB/s)
+updated_date=2026-02-09/part_0071.parquet: rows=279373 size=275.4MB footer=0.046s proj=1.54s(10.3MB/s) whole=5.29s(52.1MB/s)
+updated_date=2026-02-10/part_0033.parquet: rows=284439 size=288.6MB footer=0.041s proj=1.25s(7.9MB/s) whole=6.98s(41.3MB/s)
+updated_date=2026-03-20/part_0009.parquet: rows=266897 size=318.9MB footer=0.074s proj=1.48s(12.2MB/s) whole=6.40s(49.8MB/s)
+updated_date=2026-05-19/part_0000.parquet: rows=400000 size=1021.1MB footer=0.047s proj=3.92s(15.2MB/s) whole=21.98s(46.5MB/s)
+updated_date=2026-05-28/part_0000.parquet: rows=183860 size=273.0MB footer=0.034s proj=1.46s(7.5MB/s) whole=5.31s(51.4MB/s)
+updated_date=2026-06-26/part_0038.parquet: rows=358712 size=489.2MB footer=0.038s proj=2.25s(11.3MB/s) whole=9.31s(52.6MB/s)
+manifest.json: 510372821 rows, 724970323127 bytes, 2446 files (claimed)
+all 2428 footers read in 92.6s, total rows = 504861414
+
+real	3m38.282s
+user	0m34.619s
+sys	0m25.703s
