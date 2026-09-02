@@ -1703,6 +1703,24 @@ impl Engine {
         self.write.forget_suggestion_index(vocabulary.to_string())
     }
 
+    /// Rebuild one vocabulary's suggestion index from the live minter and publish it, returning
+    /// once the executor has swapped — the cadence a fixture cannot otherwise reach.
+    ///
+    /// **A test hook, gated so it cannot exist in a shipped build**, on
+    /// [`Self::forget_suggestion_index_for_test`]'s argument, and submitted through the executor
+    /// for that method's reason. It exists because a rebuild is dispatched only when a side map has
+    /// run 4,096 values ahead of its base — hundreds of ingest batches — and because it is the one
+    /// publication that moves neither `segments_version` nor `overlay_version`, which makes it
+    /// exactly the state a per-session suggestion set's key cannot see
+    /// (`crate::suggest_set::SuggestSets::get`).
+    ///
+    /// Requires a started write executor; `false` where there is none.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn rebuild_suggestion_index_for_test(&self, vocabulary: &str) -> bool {
+        self.write.rebuild_suggestion_index(vocabulary.to_string())
+    }
+
     /// Hold the background refresh, leaving it **in flight** — the window rung 3 of
     /// `Engine::session_geometry`'s ladder sheds a racer in. Distinct from
     /// [`Self::set_background_refresh_for_test`], which models a refresh that produces nothing and

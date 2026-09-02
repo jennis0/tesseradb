@@ -2851,6 +2851,13 @@ impl WritePath {
             .is_some_and(|handle| handle.forget_suggestion_index(vocabulary))
     }
 
+    #[cfg(feature = "fault-injection")]
+    pub(crate) fn rebuild_suggestion_index(&self, vocabulary: String) -> bool {
+        self.handle
+            .as_ref()
+            .is_some_and(|handle| handle.rebuild_suggestion_index(vocabulary))
+    }
+
     pub(crate) fn resolve_terms(&self, dict: &Dict, descriptors: &[Descriptor]) -> Vec<TermId> {
         self.live.resolve_terms(dict, descriptors)
     }
@@ -3175,6 +3182,22 @@ pub(crate) enum ExecutorWork {
         vocabulary: String,
         respond: SyncSender<()>,
     },
+    /// Rebuild one vocabulary's suggestion index from the live minter and publish it —
+    /// `Engine::rebuild_suggestion_index_for_test`.
+    ///
+    /// **A test hook for a cadence a test cannot otherwise reach.** A rebuild is dispatched when a
+    /// vocabulary's side map has run `SUGGEST_REBUILD_SIDE_VALUES` (4,096) values ahead of its
+    /// base, which is hundreds of ingest batches — far past what a fixture builds — and it is the
+    /// one publication that deliberately moves neither `segments_version` nor `overlay_version`
+    /// (`Executor::publish_completed_suggests`). So it is exactly the state a per-session set's key
+    /// cannot see, and the only way to put a test in it is to ask for the rebuild directly. It
+    /// comes through this queue for [`ExecutorWork::ForgetSuggestionIndex`]'s reason: it is a
+    /// publication, and the executor thread is the sole publisher.
+    #[cfg(feature = "fault-injection")]
+    RebuildSuggestionIndex {
+        vocabulary: String,
+        respond: SyncSender<()>,
+    },
 }
 
 /// Why a geometry publication produced no answer.
@@ -3332,6 +3355,25 @@ impl LifecycleHandle {
         if self
             .work
             .send(ExecutorWork::ForgetSuggestionIndex {
+                vocabulary,
+                respond: tx,
+            })
+            .is_err()
+        {
+            return false;
+        }
+        let _ = self.bell.try_send(());
+        rx.recv().is_ok()
+    }
+
+    /// Submit a suggestion-index rebuild and block until the executor has published it — the same
+    /// shape as [`Self::forget_suggestion_index`] and for the same reason.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) fn rebuild_suggestion_index(&self, vocabulary: String) -> bool {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        if self
+            .work
+            .send(ExecutorWork::RebuildSuggestionIndex {
                 vocabulary,
                 respond: tx,
             })
@@ -5695,6 +5737,45 @@ impl Executor {
         // Nothing acknowledged anything — the hook's own channel is what the caller waits on — so
         // the token is dropped here as the rebuild's is.
         let _published = self.publish(next, std::time::Instant::now());
+    }
+
+    /// Build one vocabulary's suggestion index from the live minter and publish it, inline —
+    /// `ExecutorWork::RebuildSuggestionIndex`.
+    ///
+    /// **The dispatch's own two steps, without the threshold and without the pool**: the same
+    /// `SuggestIndex::build` over the same `values_of` snapshot, submitted to the same channel and
+    /// published by the same [`Self::publish_completed_suggests`], so what a test observes is the
+    /// production path's result rather than a second one. Inline because the caller is blocked on
+    /// it and a test that returned before the swap would race the assertion it exists to make.
+    ///
+    /// A build that fails publishes nothing and is not an error here: the caller's next request
+    /// sees the index it already had, which is the same outcome the dispatch has.
+    #[cfg(feature = "fault-injection")]
+    fn rebuild_suggestion_index_now(&mut self, vocabulary: &str) {
+        let generation = self.generation.load_full();
+        let Some(covered_through) = generation
+            .suggest
+            .get(vocabulary)
+            .map(|live| live.next_seq())
+        else {
+            return;
+        };
+        let Some(minter) = generation.vocabularies.get(vocabulary) else {
+            return;
+        };
+        let values = crate::suggest::values_of(minter);
+        self.suggest_build += 1;
+        let dir = self.suggest_dir.join(vocabulary);
+        let Ok(index) = crate::suggest::SuggestIndex::build(&dir, self.suggest_build, &values, &self.pool)
+        else {
+            return;
+        };
+        let _ = self.suggest_submit.send(crate::suggest::CompletedSuggest {
+            vocabulary: vocabulary.to_string(),
+            index: Arc::new(index),
+            covered_through,
+        });
+        self.publish_completed_suggests();
     }
 
     /// Publish every finished rebuild, and report whether any did.
@@ -8800,6 +8881,23 @@ impl Executor {
                         window = self.close_and_reopen(window);
                     }
                     self.forget_suggestion_index(&vocabulary);
+                    let _ = respond.send(());
+                    did_work = true;
+                    continue;
+                }
+                #[cfg(feature = "fault-injection")]
+                ExecutorWork::RebuildSuggestionIndex {
+                    vocabulary,
+                    respond,
+                } => {
+                    // The open window closes first, on the arm above's reasoning: the rebuild reads
+                    // the live minter, and a window holding an ingest that mints has not published
+                    // its value yet — so a rebuild taken under it would omit exactly the value the
+                    // caller asked for the rebuild to pick up.
+                    if !window.is_empty() {
+                        window = self.close_and_reopen(window);
+                    }
+                    self.rebuild_suggestion_index_now(&vocabulary);
                     let _ = respond.send(());
                     did_work = true;
                     continue;

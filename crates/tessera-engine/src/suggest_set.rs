@@ -137,6 +137,10 @@ pub struct SuggestSetStats {
     /// Requests that found no set and started no sweep, because the viewer's own cardinality is
     /// over `selection.max_suggest_set_entities` or the column has nothing to sweep.
     pub declined: u64,
+    /// Entries dropped by the value-count guard — a set swept against an index a rebuild has since
+    /// superseded. Distinct from an eviction: nothing about residency caused it, and the pair it
+    /// belonged to sweeps again on the same request.
+    pub discarded: u64,
     pub evictions: u64,
     pub resident_bytes: u64,
     pub entries: usize,
@@ -167,6 +171,7 @@ pub struct SuggestSets {
     misses: AtomicU64,
     builds: AtomicU64,
     declined: AtomicU64,
+    discarded: AtomicU64,
     evictions: AtomicU64,
 }
 
@@ -193,6 +198,7 @@ impl SuggestSets {
             misses: AtomicU64::new(0),
             builds: AtomicU64::new(0),
             declined: AtomicU64::new(0),
+            discarded: AtomicU64::new(0),
             evictions: AtomicU64::new(0),
         }
     }
@@ -211,6 +217,7 @@ impl SuggestSets {
             misses: self.misses.load(Ordering::Relaxed),
             builds: self.builds.load(Ordering::Relaxed),
             declined: self.declined.load(Ordering::Relaxed),
+            discarded: self.discarded.load(Ordering::Relaxed),
             evictions: self.evictions.load(Ordering::Relaxed),
             resident_bytes: inner.resident,
             entries: inner.entries.len(),
@@ -218,21 +225,47 @@ impl SuggestSets {
         }
     }
 
-    /// The set for this exact key, or `None`.
+    /// The set for this exact key, swept against an index of exactly `values` values, or `None`.
     ///
     /// **Exact, and that is the disclosure control** (module doc): a key differing only in
     /// `overlay_version` names a set taken before a suppression, and answering with it would offer
     /// a value whose last visible member the viewer may no longer see. There is deliberately no
     /// nearest-match, no fallback and no "close enough" — a miss costs the probe route.
-    pub(crate) fn get(&self, key: &SuggestSetKey) -> Option<std::sync::Arc<SuggestSet>> {
+    ///
+    /// **`values` is the second half of that, and the key cannot carry it.** A suggestion-index
+    /// rebuild appends what the side map minted and re-sorts, which moves the dense positions of
+    /// everything after each insertion — so a set swept against the older, shorter index would name
+    /// *other values'* positions. A rebuild publishes its own generation and deliberately moves
+    /// neither `segments_version` nor `overlay_version` (`crate::write`'s
+    /// `publish_completed_suggests`), so nothing in the key sees it; the vocabulary only ever grows,
+    /// so the value count does.
+    ///
+    /// **A rejected entry is dropped here rather than left to expire.** Left in place it would be
+    /// found by [`Self::claim`], which refuses to sweep for a key it holds a set for — so the pair
+    /// would stay on the probe route until the key rotated or eviction reached it, which for a
+    /// steady session is neither. Dropping it at the point of rejection makes the same request that
+    /// found it stale the one that starts the replacement.
+    pub(crate) fn get(
+        &self,
+        key: &SuggestSetKey,
+        values: u32,
+    ) -> Option<std::sync::Arc<SuggestSet>> {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.clock += 1;
         let clock = inner.clock;
         match inner.entries.get_mut(key) {
-            Some(entry) => {
+            Some(entry) if entry.set.values() == values => {
                 entry.touched = clock;
                 self.hits.fetch_add(1, Ordering::Relaxed);
                 Some(std::sync::Arc::clone(&entry.set))
+            }
+            Some(_) => {
+                if let Some(entry) = inner.entries.remove(key) {
+                    inner.resident -= entry.bytes;
+                }
+                self.discarded.fetch_add(1, Ordering::Relaxed);
+                self.misses.fetch_add(1, Ordering::Relaxed);
+                None
             }
             None => {
                 self.misses.fetch_add(1, Ordering::Relaxed);
@@ -436,10 +469,10 @@ mod tests {
         let sets = SuggestSets::default();
         sets.finish(key(1, 7, 3), set(&[4, 9]));
 
-        assert!(sets.get(&key(1, 7, 3)).is_some());
-        assert!(sets.get(&key(1, 7, 4)).is_none(), "a deny landed");
-        assert!(sets.get(&key(1, 8, 3)).is_none(), "a flush landed");
-        assert!(sets.get(&key(2, 7, 3)).is_none(), "another principal");
+        assert!(sets.get(&key(1, 7, 3), 1_000).is_some());
+        assert!(sets.get(&key(1, 7, 4), 1_000).is_none(), "a deny landed");
+        assert!(sets.get(&key(1, 8, 3), 1_000).is_none(), "a flush landed");
+        assert!(sets.get(&key(2, 7, 3), 1_000).is_none(), "another principal");
     }
 
     /// One sweep in flight per key (§6.3 rule 2), and a claim is released either way.
@@ -465,7 +498,7 @@ mod tests {
         sets.finish(key(1, 7, 3), set(&[1, 2, 3]));
         sets.finish(key(1, 7, 4), set(&[1, 2]));
         assert_eq!(sets.stats().entries, 1);
-        assert!(sets.get(&key(1, 7, 4)).is_some());
+        assert!(sets.get(&key(1, 7, 4), 1_000).is_some());
 
         // Another principal's set at the old versions is untouched.
         sets.finish(key(2, 7, 3), set(&[5]));
@@ -482,7 +515,7 @@ mod tests {
         assert!(stats.resident_bytes <= 1024, "{stats:?}");
         assert!(stats.evictions > 0, "{stats:?}");
         assert!(
-            sets.get(&key(8, 1, 1)).is_some(),
+            sets.get(&key(8, 1, 1), 1_000).is_some(),
             "the newest entry survives"
         );
     }
@@ -565,6 +598,27 @@ mod tests {
         assert!(sweep(std::iter::once(&numbers), &candidate, &index).is_none());
     }
 
+    /// **A set swept against a superseded index is rejected *and dropped*.** Rejecting without
+    /// removing would leave [`SuggestSets::claim`] finding a set for the key and refusing to sweep,
+    /// so the pair would stay on the probe route until the key rotated or eviction reached it —
+    /// which for a session typing steadily into one column is neither. The same request that finds
+    /// it stale must be the one that starts its replacement.
+    #[test]
+    fn a_set_swept_against_a_shorter_index_is_rejected_and_dropped() {
+        let sets = SuggestSets::default();
+        sets.finish(key(1, 7, 3), set(&[4, 9]));
+        assert!(!sets.claim(&key(1, 7, 3)), "a held set needs no sweep");
+
+        // The vocabulary grew: a rebuild folded the side map into the base, moving positions, and
+        // moved neither version in the key.
+        assert!(sets.get(&key(1, 7, 3), 1_001).is_none());
+        let stats = sets.stats();
+        assert_eq!(stats.discarded, 1, "{stats:?}");
+        assert_eq!(stats.entries, 0, "the entry is gone, not merely unserved");
+        assert_eq!(stats.resident_bytes, 0, "{stats:?}");
+        assert!(sets.claim(&key(1, 7, 3)), "the pair may sweep again at once");
+    }
+
     #[test]
     fn pruning_a_token_frees_its_bytes() {
         let sets = SuggestSets::default();
@@ -572,6 +626,6 @@ mod tests {
         sets.finish(key(2, 7, 3), set(&[3]));
         sets.prune_token(1);
         assert_eq!(sets.stats().entries, 1);
-        assert!(sets.get(&key(2, 7, 3)).is_some());
+        assert!(sets.get(&key(2, 7, 3), 1_000).is_some());
     }
 }

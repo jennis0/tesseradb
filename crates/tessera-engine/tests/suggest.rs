@@ -1206,3 +1206,126 @@ fn a_public_column_never_gets_a_set() {
     assert_eq!(stats.builds, 0, "{stats:?}");
     assert_eq!(stats.in_flight, 0, "{stats:?}");
 }
+
+/// **A rebuild between the sweep and the read discards the set, and the same request starts its
+/// replacement** (§6.3 rule 1's other half).
+///
+/// A rebuild appends what the side map minted and re-sorts, so it moves the dense positions of
+/// every value after each insertion — and it is the one publication that deliberately moves neither
+/// `segments_version` nor `overlay_version`, so nothing in the key sees it. The value count is what
+/// does. Reading the old set against the new index would name *other values'* positions, which is
+/// value names offered to a viewer with no member of them.
+///
+/// The rejected entry is dropped where it is rejected, not left to expire: left in place, the claim
+/// that starts a sweep would find a set held for the key and refuse, so the pair would stay on the
+/// probe route until the key rotated or eviction reached it — which for a session typing steadily
+/// into one column is neither.
+///
+/// **Mutations this kills:** reading a set against an index it was not swept over; guarding on the
+/// key alone; rejecting the entry without removing it.
+#[test]
+fn a_rebuild_between_the_sweep_and_the_read_discards_the_set_and_resweeps() {
+    let dir = tempfile::tempdir().unwrap();
+    let points = dir.path().join("points.parquet");
+    let pairs = dir.path().join("pairs.parquet");
+    // An **open, `derived`** vocabulary carried by no row at build: every value it acquires is
+    // minted through ingest, so a rebuild between two ingests genuinely lengthens the index —
+    // which is the only way a value's dense position moves.
+    write_points_with_absent_column(&points, "team");
+    write_pairs_n(&pairs, N);
+    let schema = parse_schema(dir.path(), OPEN_DERIVED);
+    let bundle = dir.path().join("bundle");
+    build(&build_args(&points, &pairs, &bundle, schema)).expect("the fixture builds");
+
+    let mut engine = open_engine(
+        &bundle,
+        &dir.path().join("cache"),
+        &dir.path().join("wal.log"),
+    );
+    engine.start_write_executor(8).expect("the executor starts");
+    engine.set_background_refresh_for_test(false);
+
+    let mint = |engine: &Engine, key: &str, batch: &str| {
+        engine
+            .accept_ingest(
+                vec![UnallocatedRow {
+                    external_id: Some(batch.as_bytes().to_vec()),
+                    view: "s0".to_string(),
+                    join: None,
+                    descriptors: vec![b"0".to_vec()],
+                    x: 1.0,
+                    y: 1.0,
+                    scalars: vec![WalScalar::Utf8(key.to_string())],
+                    terms: engine.resolve_terms(&[b"0".to_vec()]),
+                    scoped: Vec::new(),
+                }],
+                batch.to_string(),
+                [0u8; 32],
+            )
+            .expect("the ingest is accepted");
+    };
+
+    // Two values, flushed and then rebuilt, so the base index holds them and the side map is empty
+    // — the state a warm set is swept in. The flush is what gives a `derived` value a member the
+    // gate can see at all: a buffered entity has no row and no extent, so it carries no membership
+    // until its flush (`filter-index.md` §5, in its vocabulary form).
+    mint(&engine, "alpha", "batch-a");
+    mint(&engine, "zulu", "batch-z");
+    flush(&engine);
+    assert!(
+        engine.rebuild_suggestion_index_for_test("team"),
+        "the executor must publish the rebuild"
+    );
+
+    // A third value, minted into the **side map** and left there: it sorts first, so folding it
+    // into the base moves every existing value's dense position rather than appending harmlessly
+    // past them. It is minted *before* the set is swept so that nothing between the sweep and the
+    // read is an ingest — an ingest closes a commit window and publishes, which rotates the key and
+    // would leave the case asserting about the key instead of about the guard.
+    mint(&engine, "aaa-first", "batch-first");
+
+    let full = full_coverage_credential();
+    let session = engine.authorise(&full).expect("the credential resolves");
+    wait_for_set(&engine, &session, "team");
+    let before = engine.suggest_set_stats();
+    assert!(before.entries >= 1, "{before:?}");
+
+    // **The rebuild alone**, between the sweep and the read: it folds the side map into the base,
+    // lengthening the index and moving positions, and it deliberately moves neither
+    // `segments_version` nor `overlay_version` — so the only thing that has changed is the one
+    // thing the key cannot carry.
+    assert!(engine.rebuild_suggestion_index_for_test("team"));
+
+    // `aaa-first` is buffered, so it has no visible member yet and is not offered — the page is
+    // unchanged, which is what makes a page read through the *stale* set (whose positions now name
+    // other values) a visible failure rather than a coincidence.
+    let got = suggest_with(&engine, &session, "team", "", 20, false, 100_000, WIDE_CEILING);
+    let mut served = keys(&got);
+    served.sort_unstable();
+    assert_eq!(served, ["alpha", "zulu"]);
+
+    let after = engine.suggest_set_stats();
+    assert_eq!(
+        after.discarded,
+        before.discarded + 1,
+        "the set must be rejected by the value-count guard, not by the key: {after:?}"
+    );
+
+    // And the pair is not stranded on the probe route: the rejecting request started the
+    // replacement sweep, which lands and then answers.
+    wait_for_set(&engine, &session, "team");
+    let warm = engine.suggest_set_stats();
+    assert!(warm.builds > before.builds, "no re-sweep landed: {warm:?}");
+    let mut served = keys(&suggest_with(
+        &engine,
+        &session,
+        "team",
+        "",
+        20,
+        false,
+        100_000,
+        WIDE_CEILING,
+    ));
+    served.sort_unstable();
+    assert_eq!(served, ["alpha", "zulu"]);
+}

@@ -550,18 +550,11 @@ impl Engine {
                 segments_version: generation.segments_version,
                 overlay_version: generation.overlay_version,
             };
-            // **The index the set was swept against must still be the one the walk reads.** A
-            // rebuild appends the values the side map minted and re-sorts, which moves the dense
-            // positions of everything after each insertion — so a set taken against the older,
-            // shorter index would name *other values'* positions, and would offer names this
-            // viewer has no member of. The rebuild only ever grows the vocabulary, so the value
-            // count discriminates it; the key cannot, a rebuild being published on its own cadence
-            // rather than on the generation's (`crate::suggest`'s cadence note).
-            match self
-                .suggest_sets
-                .get(&key)
-                .filter(|set| set.values() == live.base().values())
-            {
+            // **The index the set was swept against must still be the one the walk reads**, which
+            // the value count is what says: a rebuild moves dense positions and moves neither
+            // version in the key (`SuggestSets::get` carries the argument, and drops what it
+            // rejects so this request starts the replacement).
+            match self.suggest_sets.get(&key, live.base().values()) {
                 Some(set) => Some(set),
                 None => {
                     // `candidate` is `Some` on this arm — `derived` composes it above or refuses.
