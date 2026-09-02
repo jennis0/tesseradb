@@ -539,7 +539,14 @@ def main() -> None:
             else:
                 # `resolve` wants the id spelling the extract carries, which is the full URL; the
                 # staged column holds the `W…` part alone. Rebuilt in Arrow a slice at a time.
-                urls = pc.binary_join_element_wise(sources.ID_PREFIX, ids, "")
+                # Both operands and the separator must be one type: the staged column is
+                # `large_string` and a Python `str` scalar arrives as `string`, which has no
+                # matching kernel.
+                urls = pc.binary_join_element_wise(
+                    pa.scalar(sources.ID_PREFIX, pa.large_string()),
+                    ids,
+                    pa.scalar("", pa.large_string()),
+                )
                 got = oa.resolve(urls)
                 del urls
                 assert got.num_rows == m, f"resolve returned {got.num_rows} rows against {m}"
