@@ -198,6 +198,46 @@ class Labeller:
 BASE_COLUMNS = ("row", "pmid", "published", "title", "mesh")
 
 
+def check_closure_contains(explicit, closed, descriptors: int, first_row: int) -> None:
+    """Refuse a closure that does not contain the descriptors it was closed over.
+
+    **The one property that fails silently.** A closure is a superset of its row's explicit ids by
+    construction, so a violation cannot come from the data — it comes from a row boundary having
+    moved, and a moved boundary produces a *well-formed* list whose rows hold each other's members.
+    Nothing downstream can tell: the counts still sum, the offsets still ascend, and what a viewer
+    is served is a wrong number beside a real artifact. That is the one thing this repository fails
+    closed on, so this refuses rather than warns.
+
+    Vectorised over the whole slice: both lists are ascending within a row, so packing `(row, id)`
+    into one injective key makes containment a `searchsorted` rather than a set per article.
+    """
+    e_off = np.asarray(explicit.offsets, dtype=np.int64)
+    c_off = np.asarray(closed.offsets, dtype=np.int64)
+    e_val = np.asarray(explicit.values, dtype=np.int64)
+    c_val = np.asarray(closed.values, dtype=np.int64)
+    assert len(explicit) == len(closed), "the closure has a different row count from its input"
+    if not e_val.size:
+        return
+
+    n = len(explicit)
+    e_key = np.repeat(np.arange(n, dtype=np.int64), np.diff(e_off)) * descriptors + e_val
+    c_key = np.repeat(np.arange(n, dtype=np.int64), np.diff(c_off)) * descriptors + c_val
+    at = np.searchsorted(c_key, e_key)
+    held = (at < len(c_key)) & (c_key[np.minimum(at, len(c_key) - 1)] == e_key)
+    if held.all():
+        return
+
+    missing = np.flatnonzero(~held)
+    rows = np.unique(e_key[missing] // descriptors)
+    named = ", ".join(f"{first_row + int(r):,}" for r in rows[:20])
+    raise AssertionError(
+        f"the MeSH closure drops {len(missing):,} explicit (article, descriptor) pair(s) over "
+        f"{len(rows):,} article(s) — a row boundary has moved, and the served counts would be "
+        f"wrong rather than absent. Rows (source entity ids): {named}"
+        + (" …" if len(rows) > 20 else "")
+    )
+
+
 def take_strings(column, rows: np.ndarray) -> list[str | None]:
     """A chunked string column's values at `rows` (sorted), walked one chunk at a time.
 
@@ -519,6 +559,8 @@ def main() -> None:
                 hi = min(lo + MESH_SLICE, n)
                 explicit, major, stats = mesh.resolve(raw.slice(lo, hi - lo))
                 closed = mesh.closure(explicit)
+                # Before a single member row is written: the closure contains what it closed over.
+                check_closure_contains(explicit, closed, len(mesh.descriptors), int(take[lo]))
                 mesh.write_layer(out, artifacts, closed,
                                  np.arange(lo, hi, dtype=np.uint64))
                 access_parts.append(mesh.branches(explicit, empty=UNINDEXED))
