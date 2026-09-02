@@ -4560,6 +4560,20 @@ fn compile_attributes(
                 RESERVED_COLUMN_NAMES.join(", ")
             )));
         }
+        // **The frames' own reserved name.** `highlighted` is a column of the *tiles*, *points* and
+        // *artifacts* frames (`highlight-and-hierarchy.md` §2), so a render column of that name
+        // would put two columns of one name on the points frame and a by-name reader would take
+        // the wrong one.
+        if decl.name == "highlighted" {
+            return Err(declaration_error(format!(
+                "attribute '{}': that name is the *points* frame's highlight column \
+                 (`highlight-and-hierarchy.md` §2), so a render column of it would put two \
+                 columns of one name on one frame and a by-name reader would take the wrong one. \
+                 Reserved: {}",
+                decl.name,
+                RESERVED_COLUMN_NAMES.join(", ")
+            )));
+        }
         // The attribute's own one-field map: `field` locates the column when it differs from the
         // served name, and the attribute pass reads it (`Attribute::field`). Empty is refused
         // rather than read as *the same as the name*: it names no column at all.
@@ -4907,8 +4921,17 @@ fn declared_names(vocabularies: &HashMap<String, Vocabulary>) -> String {
 /// (decision 0062); `region` is the spatial leaf (`selection-operand.md` §2); `member_of` names
 /// one artifact's membership (`highlight-and-hierarchy.md` §3). A filter expression names columns
 /// directly — there is no wrapper object — so a column of any of these names would make a request
-/// mean two things.
-pub const RESERVED_COLUMN_NAMES: [&str; 5] = ["all_of", "any_of", "none_of", "region", "member_of"];
+/// mean two things. `highlighted` is not a leaf but a **frame column**
+/// (`highlight-and-hierarchy.md` §2): a render column of that name would put two columns of one
+/// name on the points frame, and a by-name reader would take the wrong one.
+pub const RESERVED_COLUMN_NAMES: [&str; 6] = [
+    "all_of",
+    "any_of",
+    "none_of",
+    "region",
+    "member_of",
+    "highlighted",
+];
 
 fn check_column_name(name: &str) -> Result<()> {
     const FIXED: [&str; 2] = ["tessera_id", "residual"];

@@ -311,8 +311,15 @@ paths:
         schema entirely when no served layer draws a shape or the request did not ask for one** —
         an absent column is distinguishable from a null one, so a per-row null keeps its one
         meaning: *this layer declares no such property*, never *withheld* (decision 0076).
-        `artifact_rows: "identity"` answers with the **same rows** in a fixed four-column schema —
+        `artifact_rows: "identity"` answers with the **same rows** in a fixed five-column schema —
         see its property.
+
+        A request carrying a `highlight` gains three columns and loses none: `highlighted` fifth on
+        the tiles frame (`uint64`, **always present**, equal to `matched` where the request carried
+        no highlight), `highlighted` on the points frame (`bool`, after the render scalars and
+        before the membership columns, **present only with a highlight**), and `highlighted`
+        fifteenth on the artifacts frame (`bool?`, after `matched`). The served set is identical
+        with and without one — see `highlight`.
 
         `layers` decides whether an artifacts frame can appear — see its schema; the semantics
         there are the owner's ruling of 2026-08-25 and the server change is landing on the s3
@@ -1101,6 +1108,30 @@ components:
             down (**I12**).
           allOf:
             - $ref: "#/components/schemas/FilterExpr"
+        highlight:
+          description: |
+            A second boolean expression in **exactly `filters`' grammar**, and a second field of
+            the one request rather than a second endpoint: a viewer narrowed by one clause and lit
+            by another sends both here and reads both answers off the same frames
+            (`highlight-and-hierarchy.md` §2).
+
+            **It never changes which rows the response holds.** The cap clause, the density
+            sampling and `served` all run over the `filters` candidate exactly as they do without
+            it, so the served set is identical with and without a highlight — the map does not
+            move, the marks do not resample, and a point the viewer was looking at stays where it
+            is with its brightness changed. A client that wants the map to narrow uses `filters`;
+            one that wants it lit uses this.
+
+            It is evaluated over the candidate `filters` produced, so every answer is the
+            conjunction `all_of[filters, highlight]`: the tiles frame's `highlighted` count (of
+            this tile's `matched`, how many also satisfy it), the points frame's `highlighted` bit
+            per served point, and the artifacts frame's `highlighted` bit — decision 0104's bit
+            under the second expression. `highlighted ≤ matched ≤ visible` per tile.
+
+            There is no list form, for the reason `filters` is one expression: two highlights are
+            one expression under `all_of` or `any_of`.
+          allOf:
+            - $ref: "#/components/schemas/FilterExpr"
         pin:
           $ref: "#/components/schemas/Pin"
         underlay_offset:
@@ -1190,9 +1221,10 @@ components:
           description: |
             Which columns each served artifact row answers with. **Absent or `"full"`: every
             column** — the default, and the answer a caller who has read nothing receives.
-            **`"identity"`: the same rows in a fixed four-column schema** — `layer`
-            (dictionary-encoded), `tessera_id`, `rung`, `matched`, the payload columns absent from
-            the schema rather than null. **The row set, the `matched` bits and the `rung` values
+            **`"identity"`: the same rows in a fixed five-column schema** — `layer`
+            (dictionary-encoded), `tessera_id`, `rung`, `matched`, `highlighted`, the payload
+            columns absent from the schema rather than null. **The row set, the `matched` and
+            `highlighted` bits and the `rung` values
             are identical under either value; only the columns change** — which keeps `parent_id`
             and the points frames' membership columns resolvable, and is why the projection
             discloses nothing: a column subset of what the same caller's identical request would
@@ -1200,6 +1232,23 @@ components:
             value is `422`.
           type: string
           enum: [full, identity]
+        point_rows:
+          description: |
+            Which columns each served point answers with, mirroring `artifact_rows`
+            (`highlight-and-hierarchy.md` §2). **Absent or `"full"`: every column.**
+            **`"highlight"`: the same points as `(tessera_id, highlighted)`**, the other columns
+            absent from the schema rather than null. **The row set and the per-tile `served` split
+            are identical under either value; only the columns change** — which is why the
+            projection discloses nothing: the served set does not depend on the highlight at all.
+
+            Nine bytes a point against the render columns' width. It is for the client that changed
+            only its highlight and already holds every point it needs; the bits join its held
+            points by `tessera_id`. **Bound to a generation**: a stamp move (`x-tessera-stale`)
+            means the held set may no longer be what the same request serves, and the client
+            re-asks with `"full"`. Without a `highlight` on the request there is nothing to project
+            to and this answers as `"full"` does. Any other value is `422`.
+          type: string
+          enum: [full, highlight]
 
     FilterExpr:
       description: |

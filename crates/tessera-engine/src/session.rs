@@ -425,6 +425,11 @@ pub enum EngineError {
     /// existence and family are published to every principal alike — so naming them back discloses
     /// nothing. An unknown *value* is neither of these: it is an empty operand, never an error.
     FilterMalformed(String),
+    /// A browse request named something this deployment does not publish to this principal — a
+    /// layer, a level, or a zero-length page (`crate::browse::BrowseRefused`). **Always the
+    /// caller's fault and always a `422`**: every arm names deployment schema the caller reads off
+    /// `/v1/meta`, and no arm is ever about an *artifact*, which is the empty page instead.
+    BrowseRefused(crate::browse::BrowseRefused),
     Store(StoreError),
     Wal(WalError),
     Plugin(PluginError),
@@ -563,6 +568,7 @@ impl std::fmt::Display for EngineError {
         match self {
             EngineError::FilterRefused(why) => write!(f, "filter refused: {why}"),
             EngineError::FilterMalformed(why) => write!(f, "filter refused: {why}"),
+            EngineError::BrowseRefused(why) => write!(f, "browse refused: {why}"),
             EngineError::Store(e) => write!(f, "store error: {e}"),
             EngineError::Wal(e) => write!(f, "wal error: {e}"),
             EngineError::Plugin(e) => write!(f, "plugin error: {e}"),

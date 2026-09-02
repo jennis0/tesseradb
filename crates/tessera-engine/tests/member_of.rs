@@ -255,7 +255,7 @@ fn it_composes_under_the_three_combinators() {
         );
         assert_eq!(
             matched(&both),
-            visible_members(200..300, &sees),
+            visible_members(200..300, sees),
             "the overlap is source ids 200..300, inside this principal's own mask"
         );
 

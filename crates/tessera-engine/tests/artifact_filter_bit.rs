@@ -113,7 +113,7 @@ fn viewports() -> Vec<(u8, [f64; 4])> {
     ]
 }
 
-/// What one layer serves one principal at one viewport: key against masked count and the bit.
+/// What one layer serves one principal at one viewport: key against masked count and the two bits.
 fn served(
     engine: &Engine,
     grant: &str,
@@ -122,11 +122,29 @@ fn served(
     bbox: [f64; 4],
     filter: Option<FilterExpr>,
 ) -> BTreeMap<String, (u64, Option<bool>)> {
+    lit(engine, grant, layer, zoom, bbox, filter, None)
+        .into_iter()
+        .map(|(key, (count, matched, _))| (key, (count, matched)))
+        .collect()
+}
+
+/// The same, with a `highlight` beside the filter: key against masked count, `matched` and
+/// `highlighted` (`highlight-and-hierarchy.md` §2).
+fn lit(
+    engine: &Engine,
+    grant: &str,
+    layer: &str,
+    zoom: u8,
+    bbox: [f64; 4],
+    filter: Option<FilterExpr>,
+    highlight: Option<FilterExpr>,
+) -> BTreeMap<String, (u64, Option<bool>, Option<bool>)> {
     let session = engine.authorise(&credential(grant)).unwrap();
     let names = [layer];
     let mut request = ViewportRequest::new("s0", zoom, bbox, N as usize);
     request.layers = tessera_engine::LayerSelection::Named(&names);
     request.filter = filter;
+    request.highlight = highlight;
     engine
         .viewport(&session, request)
         .expect("a viewport over the fixture")
@@ -135,7 +153,7 @@ fn served(
         .map(|artifact| {
             (
                 artifact.key.expect("both layers carry the value's key"),
-                (artifact.masked_count, artifact.matched),
+                (artifact.masked_count, artifact.matched, artifact.highlighted),
             )
         })
         .collect()
@@ -633,4 +651,100 @@ fn a_filter_moves_neither_containment_nor_the_description_it_serves() {
              unchanged"
         );
     }
+}
+
+/// **The `highlighted` bit is this bit under a second expression** — decision 0104's probe with
+/// the highlight's crossed set in place of the filter's (`highlight-and-hierarchy.md` §2).
+///
+/// Three things at once, each of which fails looking like the feature working:
+///
+/// - **It is the conjunction's bit.** A request carrying `filters = A` and `highlight = B` must
+///   report, per artifact, exactly the `matched` a request carrying `all_of[A, B]` in `filters`
+///   reports. That is C32's whole argument — a highlight discloses what one such request would
+///   have disclosed, differently arranged — so an implementation that answered `B` alone would
+///   satisfy every other check here and make the register row wrong.
+/// - **`null` is *there was no question*.** A request with no highlight leaves the column null on
+///   every row, including the rows whose `matched` is `false`; a `false` there would answer a
+///   question that was never asked, and no client could tell it from a highlight matching nothing.
+/// - **It moves nothing else.** The served set, the masked counts and `matched` itself are
+///   identical with and without a highlight (**I3**, **I12**), exactly as they are with and
+///   without a filter.
+#[test]
+fn the_highlighted_bit_is_the_conjunctions_bit_and_moves_nothing_else() {
+    let fx = fixture();
+    // The far-corner viewport serves no artifact to some principals, which makes the checks below
+    // vacuous there rather than wrong; this counts the rows actually compared so a fixture that
+    // stopped serving anything cannot pass silently.
+    let mut compared = 0usize;
+    for grant in grants() {
+        for layer in [BY_LIST, BY_RULE] {
+            for (zoom, bbox) in viewports() {
+                // No highlight: the column is null on every row, whatever `matched` says.
+                let plain = lit(&fx.engine, grant, layer, zoom, bbox, Some(bay_is(BAY)), None);
+                assert!(
+                    plain.values().all(|(_, _, h)| h.is_none()),
+                    "{layer}/{grant}: no highlight, and yet a bit"
+                );
+
+                let a = bay_is(BAY);
+                let b = bay_is("dune");
+                let lit_rows = lit(
+                    &fx.engine,
+                    grant,
+                    layer,
+                    zoom,
+                    bbox,
+                    Some(a.clone()),
+                    Some(b.clone()),
+                );
+                let conjoined = served(
+                    &fx.engine,
+                    grant,
+                    layer,
+                    zoom,
+                    bbox,
+                    Some(FilterExpr::AllOf(vec![a.clone(), b.clone()])),
+                );
+                let what = format!("{layer}/{grant} at zoom {zoom} over {bbox:?}");
+                for (key, (count, matched, highlighted)) in &lit_rows {
+                    assert_eq!(
+                        (*count, *matched),
+                        (plain[key].0, plain[key].1),
+                        "{what}: the highlight moved artifact {key}'s count or its filter bit"
+                    );
+                    assert_eq!(
+                        *highlighted,
+                        conjoined[key].1,
+                        "{what}: artifact {key}'s highlight bit is not the conjunction's"
+                    );
+                }
+                assert_eq!(
+                    lit_rows.len(),
+                    conjoined.len(),
+                    "{what}: the two requests served different artifacts"
+                );
+
+                // A highlight matching nothing is `false` everywhere, and still not `null`: the
+                // question was asked and the answer is no.
+                let empty = lit(
+                    &fx.engine,
+                    grant,
+                    layer,
+                    zoom,
+                    bbox,
+                    None,
+                    Some(tag_is_absent()),
+                );
+                assert!(
+                    empty.values().all(|(_, _, h)| *h == Some(false)),
+                    "{what}: a highlight matching nothing is false, never null"
+                );
+                compared += lit_rows.len();
+            }
+        }
+    }
+    assert!(
+        compared > 100,
+        "only {compared} artifact rows were compared, too few for this to mean anything"
+    );
 }

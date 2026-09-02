@@ -1072,7 +1072,7 @@ async fn identity_rows_are_the_full_rows_with_the_payload_columns_absent() {
         .unwrap();
     assert_eq!(
         artifact_schema_names(&identity_body).unwrap(),
-        vec!["layer", "tessera_id", "rung", "matched"],
+        vec!["layer", "tessera_id", "rung", "matched", "highlighted"],
         "the identity projection is its own four-column schema — absent columns, not null ones"
     );
     let decoded = decode_viewport_frames(&identity_body);
@@ -1122,7 +1122,7 @@ async fn the_shape_columns_trail_and_are_absent_when_no_served_layer_declares_on
     let names = artifact_schema_names(&without).unwrap();
     assert_eq!(
         names.last().map(String::as_str),
-        Some("matched"),
+        Some("highlighted"),
         "no served layer declares a hull, so the schema ends at the fixed prefix: {names:?}"
     );
     assert!(!names.iter().any(|n| n.starts_with("shape_")));

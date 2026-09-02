@@ -2,14 +2,16 @@
 `streamed-serving.md`): a sequence of frames, each `u8 kind` + `u32 LE payload length` + payload,
 every payload a complete Arrow IPC stream (JSON for the trailer):
 
-    kind 1  tiles      (tile, visible, matched, served)      exactly one, first
+    kind 1  tiles      (tile, visible, matched, served,      exactly one, first
+                        highlighted)
     kind 2  sub-cells  (cell, count)                          exactly one, iff underlay requested
     kind 3  points     (tessera_id, code, ...scalars)         zero or more; concatenate in order
     kind 4  trailer    JSON                                   exactly one, last
     kind 5  artifacts  (layer dict<u16,utf8>, tessera_id,  at most one, after tiles and before
                         key, masked_count, the derived           any points; absent when none served
                         geometry, content, parent_ids,
-                        rung, matched — then shape_x/shape_y,
+                        rung, matched, highlighted — then
+                        shape_x/shape_y,
                         in the schema only when a served
                         row carries a drawn geometry; §3.2 r45)
 
@@ -70,6 +72,15 @@ class Artifact(NamedTuple):
     #: layer. Empty for a root, for a flat artifact, and for a parent the response withheld alike
     #: — the wire does not distinguish them (C29, per entry), and neither may a reader.
     parent_ids: list[int]
+    #: Whether a member this principal may see, inside the request's tiles, matches the request's
+    #: `filters` ([decision 0104](../../docs/decisions/0104-a-filter-answers-a-boolean-per-served-artifact.md)).
+    #: `None` — a null on the wire — where the request carried none: *there was no question*,
+    #: never *no matches*. A boolean and never a count, and clipped to the request's tiles where
+    #: `masked_count` is not.
+    matched: bool | None
+    #: The same bit for `all_of[filters, highlight]` (`highlight-and-hierarchy.md` §2), and `None`
+    #: where the request carried no `highlight`.
+    highlighted: bool | None
 
 
 FRAME_TILES = 1
@@ -145,7 +156,7 @@ def _batches(payload: bytes):
 def decode_frames(data: bytes):
     """`(tiles, points, sub_cells, trailer)` — the full grammar-checked decode.
 
-    - `tiles`: `(tile, visible, matched, served)` per row.
+    - `tiles`: `(tile, visible, matched, served, highlighted)` per row.
     - `points`: `(tessera_id, code)` per point, concatenated across every points frame in order.
     - `sub_cells`: `(cell, count)` rows, or `None` when no kind-2 frame was present (underlay
       unrequested — distinct from `[]`, a present-but-empty frame; contracts §3.2's r12 rule).
@@ -179,6 +190,11 @@ def decode_frames(data: bytes):
                         batch.column("visible").to_pylist(),
                         batch.column("matched").to_pylist(),
                         batch.column("served").to_pylist(),
+                        # `highlighted` is always present and equals `matched` where the request
+                        # carried no `highlight` (`highlight-and-hierarchy.md` §2): an absent
+                        # highlight is the identity for this quantity, so a reader needs no
+                        # schema branch and a response without one is not a special case.
+                        batch.column("highlighted").to_pylist(),
                     )
                 )
         elif kind == FRAME_SUB_CELLS:
@@ -240,6 +256,8 @@ def decode_frames(data: bytes):
                         "content",
                         "parent_ids",
                         "rung",
+                        "matched",
+                        "highlighted",
                     )
                 }
                 shapes = "shape_x" in names
@@ -275,6 +293,8 @@ def decode_frames(data: bytes):
                             content=list(columns["content"][row] or []),
                             rung=columns["rung"][row],
                             parent_ids=list(columns["parent_ids"][row] or []),
+                            matched=columns["matched"][row],
+                            highlighted=columns["highlighted"][row],
                         )
                     )
             if not artifacts:
@@ -289,12 +309,20 @@ def decode_frames(data: bytes):
                 # oracle must not translate it — it is opaque here, and the differential compares
                 # point sets by position code precisely so that agreement never depends on either
                 # side interpreting an identifier.
-                points.extend(
-                    zip(
-                        batch.column("tessera_id").to_pylist(),
-                        batch.column("code").to_pylist(),
-                    )
+                #
+                # **`code` is absent under `point_rows: "highlight"`** — that projection is
+                # `(tessera_id, highlighted)` and nothing else (`highlight-and-hierarchy.md` §2),
+                # the client joining the bits to points it already holds. The row *set* and the
+                # per-tile `served` split are identical under either projection, which is what the
+                # consistency checks below actually test, so this reads a `None` position rather
+                # than refusing a well-formed body.
+                names = set(batch.schema.names)
+                codes = (
+                    batch.column("code").to_pylist()
+                    if "code" in names
+                    else [None] * batch.num_rows
                 )
+                points.extend(zip(batch.column("tessera_id").to_pylist(), codes))
         elif kind == FRAME_TRAILER:
             if trailer is not None:
                 raise ValueError("more than one trailer frame")
@@ -320,7 +348,7 @@ def decode_frames(data: bytes):
 
 
 def decode_viewport(data: bytes):
-    """`(tiles, points)`; tile rows are 4-tuples `(tile, visible, matched, served)`."""
+    """`(tiles, points)`; tile rows are 5-tuples `(tile, visible, matched, served, highlighted)`."""
     tiles, points, _sub_cells, _artifacts, _trailer = decode_frames(data)
     return tiles, points
 

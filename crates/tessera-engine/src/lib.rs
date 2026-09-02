@@ -8,6 +8,7 @@
 
 pub mod artifact_content;
 pub mod artifacts;
+pub mod browse;
 mod cache;
 pub mod cancel;
 mod categories;
@@ -82,7 +83,8 @@ pub use tessera_authz::fragment::CacheStats as FragmentCacheStats;
 pub use timing::{Probe, StageTimings};
 pub use viewport::{
     ArtifactOut, ArtifactRows, ColumnBuf, ComputedSelection, EngineMeta, ItemOut, LayerSelection,
-    LeafColumn, LevelSelection, MetaGroup, MetaRoster, MetaView, PointColumns, ScalarOut, SinkClosed,
+    LeafColumn, LevelSelection, MetaGroup, MetaRoster, MetaView, PointColumns, PointRows, ScalarOut,
+    SinkClosed,
     SinkResult, SubCellCount, TileAddress, TileCount, ViewCoordinates, ViewportHead, ViewportOut,
     ViewportRequest, ViewportSink,
 };

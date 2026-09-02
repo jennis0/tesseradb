@@ -25,7 +25,7 @@ use tessera_wire::{
 #[test]
 fn the_frame_header_is_a_kind_byte_then_a_little_endian_length() {
     // Two frames, so the second's position also pins the header width and the length's meaning.
-    let tiles = tiles_frame(&[30, 31], &[10, 5], &[10, 5], &[2, 1]);
+    let tiles = tiles_frame(&[30, 31], &[10, 5], &[10, 5], &[2, 1], &[10, 5]);
     let mut body = tiles.clone();
     body.extend_from_slice(&trailer_frame(b"{}"));
 
@@ -106,17 +106,19 @@ fn entity_of_an_unminted_handle_is_none() {
 fn build_body() -> Vec<u8> {
     let counts_a = [70u64, 80];
     let counts_b = [90u64];
-    let mut body = tiles_frame(&[30, 31], &[10, 5], &[10, 5], &[2, 1]);
+    let mut body = tiles_frame(&[30, 31], &[10, 5], &[10, 5], &[2, 1], &[10, 5]);
     body.extend_from_slice(&points_frame(
         &[0, 1],
         &[1, 2],
         &[("count", ScalarColumn::U64(&counts_a))],
+        None,
         &[],
     ));
     body.extend_from_slice(&points_frame(
         &[2],
         &[3],
         &[("count", ScalarColumn::U64(&counts_b))],
+        None,
         &[],
     ));
     body.extend_from_slice(&trailer_frame(
@@ -212,8 +214,8 @@ fn frame_bytes_never_contain_a_raw_entity_id_encoding() {
     let codes = vec![1u64; handles.len()];
 
     let n = handles.len() as u64;
-    let mut body = tiles_frame(&[0], &[n], &[n], &[n]);
-    body.extend_from_slice(&points_frame(&handles, &codes, &[], &[]));
+    let mut body = tiles_frame(&[0], &[n], &[n], &[n], &[n]);
+    body.extend_from_slice(&points_frame(&handles, &codes, &[], None, &[]));
     body.extend_from_slice(&trailer_frame(b"{}"));
 
     for &raw in &sensitive_ids {
@@ -230,7 +232,7 @@ fn frame_bytes_never_contain_a_raw_entity_id_encoding() {
 /// used to emit.
 #[test]
 fn the_points_frame_identity_column_is_tessera_id() {
-    let frame = points_frame(&[10, 20, 30], &[1, 2, 3], &[], &[]);
+    let frame = points_frame(&[10, 20, 30], &[1, 2, 3], &[], None, &[]);
     let (kind, payload) = split_frames(&frame).unwrap()[0];
     assert_eq!(kind, FRAME_POINTS);
 
@@ -730,6 +732,7 @@ fn artifact_frame_bytes_per_row_hold_the_measured_bounds() {
             },
             rung: (i % 3) as u32,
             matched: Some(i % 2 == 0),
+            highlighted: Some(i % 3 == 0),
         })
         .collect();
 
