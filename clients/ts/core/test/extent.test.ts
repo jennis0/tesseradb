@@ -42,7 +42,7 @@ const FAR: Artifact = {
 
 function response(): ViewportResponse {
   const result: ViewportResult = {
-    tiles: [{tile: 0n, visible: 10n, matched: 10n, served: 1n}],
+    tiles: [{tile: 0n, visible: 10n, matched: 10n, highlighted: 10n, served: 1n}],
     ids: BigUint64Array.from([1n]),
     codes: BigUint64Array.from([0n]),
     positions: Float64Array.from([1, 1]),

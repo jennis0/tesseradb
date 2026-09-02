@@ -190,6 +190,13 @@ export class Driver {
   /** Deferred by a foreground in flight — re-evaluated when it clears, not discarded. */
   private anticipationEligible = false;
 
+  /**
+   * The `depth:rect` a settle has already asked for because the derived frame was not held there
+   * — so the ask happens once per uncovered frame and a shed or refused request does not become
+   * a settle-rate retry loop. Cleared by the next camera move.
+   */
+  private askedUncovered: string | null = null;
+
   constructor(
     private readonly replica: Replica,
     private readonly meta: DriverMeta,
@@ -319,6 +326,8 @@ export class Driver {
     this.bitesSincePause = 0;
     this.bytesSincePause = 0;
     this.anticipationEligible = false;
+    // A moved camera is a new frame: whatever the last settle asked for, it was for other ground.
+    this.askedUncovered = null;
     if (this.idleHandle) this.clock.cancel(this.idleHandle);
     if (this.prefetch) {
       this.idleHandle = this.clock.after(this.o.idleMs, () => {
@@ -369,7 +378,9 @@ export class Driver {
     this.lastView = view;
     this.width = width;
     this.height = height;
-    this.reconcile('settle', view);
+    // `ask: false` — a view redrawn from what it holds must issue no request (`view-switching.md`
+    // §8): this is the switch's immediate publish, not the settle of a view being looked at.
+    this.reconcile('settle', view, false);
   }
 
   /** An absorb landed mid-fetch: pieces paint as they arrive. The consumer coalesces to frames. */
@@ -385,7 +396,7 @@ export class Driver {
    * {@link DriverOptions.deriveMinGapMs} while the view is moving, and unconditionally at the
    * settle — which is also the only trigger allowed to clear `standInStale`.
    */
-  private reconcile(trigger: 'schedule' | 'absorb' | 'response' | 'settle', view: ViewState): void {
+  private reconcile(trigger: 'schedule' | 'absorb' | 'response' | 'settle', view: ViewState, ask = true): void {
     const planned = this.planFor(view);
     const handle = this.presented;
     const covered =
@@ -404,6 +415,10 @@ export class Driver {
       // Reuse under an unheld plan is agreement — the suspension has done its job.
       this.holdSuspended = false;
       this.trace('reuse', {depth: handle.depth});
+      // Reuse says the *frame* is the one this plan wants; it says nothing about whether the
+      // replica holds anything at that depth. A derive under an absorb reaches here on the settle
+      // that follows it, which is precisely the case the ask exists for.
+      if (trigger === 'settle' && ask) this.askUncovered(view, planned);
       return;
     }
 
@@ -434,6 +449,39 @@ export class Driver {
     this.holdSuspended = false;
     if (trigger === 'settle') this.bankReady = true;
     this.events.onFrame({tier: 'derive', plan: planned, frame});
+    if (trigger === 'settle' && ask) this.askUncovered(view, planned);
+  }
+
+  /**
+   * Ask for the depth the settle just derived at, when the replica holds nothing there.
+   *
+   * **The depth a request is made at and the depth the frame is derived at are chosen by two
+   * different models, and they disagree on the first view of a session.** The average model
+   * answers the first request, because no counts describe the view yet (`budget.ts`); the
+   * response's own per-tile counts then answer every plan after it, and where the average
+   * overshot — measured on rung 3: depth 8 asked, 1,014,597 points served against a 500,000
+   * budget — the count-driven choice is two levels shallower. The settle then derives at that
+   * shallower depth, where nothing has been fetched, and the frame it publishes is entirely
+   * stand-ins with **no counts at all**: the strip reads *0 shown, 0 matched, 0 visible* and the
+   * marks on screen are whatever the slab still held.
+   *
+   * Nothing repaired that, because a request is issued only from {@link schedule} — a camera
+   * move. At rest the map stayed on the stand-ins indefinitely, and a filter or a highlight,
+   * which requeries without moving the camera, landed in exactly the same state.
+   *
+   * So the settle asks. It is the one trigger that means *the view is finished*, it is guarded to
+   * once per uncovered frame, and it converges by construction: the response covers the rect at
+   * this depth, so the next settle's {@link covers} is true and asks for nothing.
+   */
+  private askUncovered(view: ViewState, planned: Plan): void {
+    if (this.inFlight || this.queued || this.revalidating) return;
+    const depth = planned.choice.depth;
+    if (this.replica.novelIn(planned.visible.rect, depth, this.meta.kMaxMarks) === 0) return;
+    const key = `${depth}:${planned.visible.rect.x0},${planned.visible.rect.y0},${planned.visible.rect.x1},${planned.visible.rect.y1}`;
+    if (this.askedUncovered === key) return;
+    this.askedUncovered = key;
+    this.trace('uncovered', {depth, n: planned.choice.tiles});
+    void this.request(view);
   }
 
   private storeCanAnswer(view: ViewState): boolean {
@@ -531,6 +579,7 @@ export class Driver {
     this.velocity = undefined;
     this.lastTarget = null;
     this.anticipationEligible = false;
+    this.askedUncovered = null;
     this.counts.clear();
   }
 

@@ -355,4 +355,18 @@ describe('driver', () => {
     await h.clock.advance(1_000);
     expect(h.calls.some((c) => c.zoom === 9)).toBe(true);
   });
+  it('a redraw asks for nothing, however uncovered it is — a view stepped through is silent', async () => {
+    // The settle asks for a depth the replica holds nothing at (`Driver.askUncovered`), and
+    // `redraw` reconciles on the settle's terms — so this is the pairing that has to hold:
+    // a view switch's immediate publish stays silent (`view-switching.md` §8) while the settle
+    // of a view being looked at does not.
+    const h = harness({prefetch: false, respond: () => servedResponse(10_000_000n, 8)});
+    h.driver.schedule(h.view, 400, 300);
+    await h.clock.advance(3_000);
+    const settled = h.calls.length;
+    h.driver.setBudget(2_000);
+    h.driver.redraw(h.view, 400, 300);
+    await h.clock.advance(3_000);
+    expect(h.calls.length).toBe(settled);
+  });
 });
