@@ -418,6 +418,7 @@ async fn a_spent_walk_budget_reports_more_even_on_a_short_page() {
         // for `d01`, the first this principal can see.
         max_suggestions: 20,
         max_suggestion_walk: 2,
+        max_browse_rows: 200,
         suggest_admission: tessera_server::state::SuggestAdmission::new(),
         max_shape_vertices: tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
         max_region_vertices: 10_000,
