@@ -16,7 +16,7 @@ The design set is being written into `system/`, chapter by chapter, from the cur
 | Chapter | Replaces |
 |---|---|
 | overview | `design/README.md`, `architecture.md` §1 to §3, `system-architecture.md` |
-| guarantees: the invariants, the leak register, the identifier, the deny rules | `architecture.md` §4 and Appendix C, `conformance.md` §4 |
+| security: the threat model, the properties and how each is enforced, the residual-disclosure register, what is not claimed, the evidence | `architecture.md` §4 and Appendix C, `conformance.md` §4 |
 | data model: entities, rows, views, projections, fields | `architecture.md` §5, `views.md`, `projections.md`, `records-and-search.md`, `per-point-attributes.md` |
 | access control: masks, the overlay, sessions, plugins | `architecture.md` §6, `concurrency-lifecycle.md`, `core-access-expressions.md` |
 | queries: viewport, filters, selection, suggest, search | `architecture.md` §7 and §8, `filter-index.md`, `filter-surface.md`, `selection-operand.md`, `value-suggestion.md`, `highlight-and-hierarchy.md` |

@@ -160,10 +160,10 @@ only which items a viewer can open, is a function of one per-viewer set.
   its own to enumerate or correlate records. It is a keyed permutation rather than encryption, and
   it is no defence against anyone holding the underlying data.
 
-The full set is thirteen guarantees; the guarantees chapter states them and how each is checked. A
-small number of residual disclosures are accepted rather than closed, each recorded with its
-severity and mitigation in a leak register. A disclosure found later that is not in that register is
-a bug.
+The security chapter states the threat model these sit in, the properties in full, how each is
+enforced and how each is checked. A small number of residual disclosures are accepted rather than
+closed, each recorded with its severity and mitigation in a register. A disclosure found later that
+is not in that register is a bug.
 
 ## What is built and what is not
 
@@ -182,7 +182,7 @@ a bug.
 
 ## Where to go next
 
-- Checking the security argument: the guarantees chapter.
+- Checking the security argument: the security chapter.
 - Evaluating the approach: the data model, access control, queries and write-path chapters.
 - Operating a deployment: the guide.
 - Building against the client, or against the wire directly: the clients chapter and the guide.
