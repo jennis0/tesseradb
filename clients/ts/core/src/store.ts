@@ -103,6 +103,19 @@ export type StoreOptions = {
   clock?: Clock;
   driver?: DriverOptions;
   replica?: Pick<ReplicaOptions, 'cacheBytes' | 'cache' | 'revalidateAfterMs' | 'onPhase'>;
+  /**
+   * A `/v1/meta` already in hand, fetched under the token {@link authorise} will return.
+   *
+   * The host that has to read meta *before* opening a store — to choose the layer and the colour
+   * the store opens pointed at, which is what the demo does — otherwise pays for the document
+   * twice, and pays for the session twice with it. Handing the one it read is the whole saving:
+   * the store's bring-up is unchanged in every other respect.
+   *
+   * **The caller's obligation is that it is this principal's meta.** The roster a principal
+   * reaches is theirs, so a document fetched under another token would open the store on layers
+   * and views this one may not have been served. Absent, the store fetches its own.
+   */
+  meta?: Meta;
   /** A client already built (a test's fake, or a host that owns `authorise`); else one is made. */
   client?: TesseraClient;
   clientOptions?: Omit<TesseraClientOptions, 'viewerUrl'>;
@@ -816,7 +829,9 @@ export function createStore(options: StoreOptions): Store {
   async function warm(): Promise<void> {
     const t = await ensureToken();
     tokenEverUsed = true;
-    meta = await client.meta(t);
+    // The host may have read this document already (see {@link StoreOptions.meta}); a second
+    // fetch of it is a round trip for something in hand.
+    meta = options.meta ?? (await client.meta(t));
     // A `setCurrentView` before meta names the view to open with, in place of `options.view` (§3);
     // an id the bundle does not declare is refused here exactly as it is afterwards.
     if (queuedCurrentView !== null) {

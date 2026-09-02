@@ -418,12 +418,26 @@ function mirror(): void {
 
 // ------------------------------------------------------------------------------- dataset and principal
 
-/** Open a store on one principal of the active dataset — the only writer of `dataStore`. */
-function openSession(preset: Dataset['presets'][number]): void {
+/**
+ * Open a store on one principal of the active dataset — the only writer of `dataStore`.
+ *
+ * `held` is the session and the meta {@link activate} has just fetched to choose the layer and the
+ * colour this store opens pointed at. Handed on rather than refetched: without it the first thing
+ * a cold page did was authorise twice and read `/v1/meta` twice, and the second authorisation
+ * materialises the principal's visible set again — 107 ms at 35.9 × 10^6 items, in front of every
+ * mark on the screen. The credential still never reaches the store; what it is given is the
+ * supplier, which simply answers with this token once before minting another.
+ */
+function openSession(
+  preset: Dataset['presets'][number],
+  held?: {session: Awaited<ReturnType<TesseraClient['authorise']>>; meta: Awaited<ReturnType<TesseraClient['meta']>>}
+): void {
   if (!client) return;
   const active = client;
   unsubscribe?.();
   dataStore?.dispose();
+  /** Answered once, then dropped: a renewal must mint a token and never replay an expiring one. */
+  let heldSession = held?.session;
 
   store.update((s) => {
     s.terms = preset.terms;
@@ -440,12 +454,15 @@ function openSession(preset: Dataset['presets'][number]): void {
     // The store never holds the session credential: it is handed a supplier that re-authorises
     // through the demo's own client (design §5.3, §5.4). Renewal runs before the first refusal.
     authorise: async () => {
-      const session = await active.authorise(preset.terms);
+      const session = heldSession ?? (await active.authorise(preset.terms));
+      heldSession = undefined;
       store.update((s) => {
         s.session = session;
       });
       return {token: session.token, expiresAt: session.expiresAt};
     },
+    // The document `activate` read under this very token (see the doc above).
+    ...(held ? {meta: held.meta} : {}),
     budget: store.state.budget,
     view: store.state.view,
     prefetch,
@@ -620,7 +637,7 @@ async function activate(dataset: Dataset, requestedView: string | null = null): 
       budget: store.state.budget,
       maxTiles: meta.maxTilesPerRequest
     });
-    openSession(first);
+    openSession(first, {session, meta});
   } else {
     // A dataset with no principals cannot open a session, and a page that then says nothing reads
     // as a server with no data. It is the bare address without a dataset document — say so.
