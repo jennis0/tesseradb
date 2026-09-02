@@ -136,7 +136,7 @@ class Labeller:
     gate, its own generating set and its own lifecycle.
     """
 
-    def __init__(self, titles: pa.Array, rows: np.ndarray, n: int):
+    def __init__(self, titles: list[str | None], rows: np.ndarray, n: int):
         """`rows` are the corpus rows `titles` came from, over a corpus of `n`, so a caller can map
         a cluster's members into the vectoriser's row space with one array lookup."""
         from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS, CountVectorizer
@@ -151,7 +151,7 @@ class Labeller:
             max_df=MAX_CORPUS_SHARE,
             binary=True,
         )
-        self.occurs = vec.fit_transform("" if t is None else t for t in titles.to_pylist())
+        self.occurs = vec.fit_transform("" if t is None else t for t in titles)
         self.vocab = np.array(vec.get_feature_names_out())
 
     def sampled(self, members: np.ndarray) -> np.ndarray:
@@ -196,6 +196,25 @@ class Labeller:
 #: The columns every run needs. `mesh` is here and is dropped the moment it is resolved: the raw
 #: `m` field averages ~300 bytes an article, which is 11 GB at 36M rows and larger than the titles.
 BASE_COLUMNS = ("row", "pmid", "published", "title", "mesh")
+
+
+def take_strings(column, rows: np.ndarray) -> list[str | None]:
+    """A chunked string column's values at `rows` (sorted), walked one chunk at a time.
+
+    **`ChunkedArray.take` combines the column first**, and a 36M-row title column is 3 GB of
+    characters — past the 2 GiB an Arrow `string` array's 32-bit offsets can address. It fails with
+    `offset overflow while concatenating arrays`, on the whole column, whatever the sample's size.
+    Taking within each chunk never concatenates anything.
+    """
+    out: list[str | None] = []
+    at = 0
+    for chunk in column.chunks:
+        lo = int(np.searchsorted(rows, at))
+        hi = int(np.searchsorted(rows, at + len(chunk)))
+        if hi > lo:
+            out.extend(chunk.take(pa.array(rows[lo:hi] - at)).to_pylist())
+        at += len(chunk)
+    return out
 
 
 def read_staged(take: np.ndarray, columns) -> pa.Table:
@@ -509,8 +528,10 @@ def main() -> None:
                 print(f"    mesh {hi:,}/{n:,}: {len(closed.values):,} closed pairs", flush=True)
                 del explicit, major, closed
             artifacts.close_streams()
-            access = pa.chunked_array(access_parts).combine_chunks()
-            major_names = pa.chunked_array(major_parts).combine_chunks()
+            # Left chunked: combining `mesh_major` into one array would concatenate ~2 GB of
+            # characters and meet the same 32-bit offset limit `take_strings` documents.
+            access = pa.chunked_array(access_parts)
+            major_names = pa.chunked_array(major_parts)
             mesh_stats = dict(mesh_stats) | {
                 "unresolved_top": unresolved.most_common(20),
                 "tree": mesh.shape(),
@@ -550,7 +571,7 @@ def main() -> None:
             if n <= LABEL_MAX_DOCS
             else np.sort(np.random.default_rng(SEED + 1).choice(n, LABEL_MAX_DOCS, replace=False))
         )
-        labeller = Labeller(table.column("title").take(pa.array(label_rows)), label_rows, n)
+        labeller = Labeller(take_strings(table.column("title"), label_rows), label_rows, n)
     print(f"{len(labeller.vocab):,} candidate terms over {len(label_rows):,} titles")
 
     with steps.step("titles"):
