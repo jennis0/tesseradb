@@ -63,6 +63,10 @@ SEED = 0
 VIEWS = ("knn",)
 KMEANS_LAYER = "clusters/kmeans"
 
+#: Rows the MeSH resolve, closure and member write handle at once. The closure is ~1.7x10^9 pairs
+#: over the corpus, so it is never held whole; a slice of this size is ~5x10^7 and costs seconds.
+MESH_SLICE = 1_000_000
+
 #: The access term an article with no resolved MeSH descriptor carries. It exists so that the
 #: access column is never empty, which is what keeps `point_visibility`'s `default` from firing.
 UNINDEXED = "unindexed"
@@ -226,56 +230,13 @@ def read_staged(out: Path, take: np.ndarray, columns) -> pa.Table:
 # --------------------------------------------------------------------------------- the MeSH join
 
 
-def _flat(array):
-    """One Arrow `ListArray`, whether a chunked column or an array, was handed over."""
-    if isinstance(array, pa.ChunkedArray):
-        return array.combine_chunks()
-    return array
-
-
-def branches_per_row(mesh, explicit) -> list[list[str]]:
-    """The access column: each article's top-level MeSH branch letters, `unindexed` where none.
-
-    **`branches_of` is called once per descriptor, not once per article.** The interface takes a
-    set of descriptor ids and returns letters; calling it 36M times would be 36M Python calls over
-    a 30,954-entry lookup. Instead each descriptor's letters become a 16-bit mask, the per-article
-    mask is one `bitwise_or.reduceat` over the list's own offsets, and the masks are decoded
-    through a cache — so the returned lists are shared objects and the column is pointers.
-    """
-    values = _flat(explicit)
-    letters = sorted({b for d in range(len(mesh.descriptors))
-                      for b in mesh.branches_of(np.array([d]))})
-    bit = {letter: 1 << i for i, letter in enumerate(letters)}
-    mask_of = np.zeros(len(mesh.descriptors), dtype=np.uint32)
-    for d in range(len(mesh.descriptors)):
-        for letter in mesh.branches_of(np.array([d])):
-            mask_of[d] |= bit[letter]
-
-    ids = np.asarray(values.values)
-    offsets = np.asarray(values.offsets)
-    lengths = np.diff(offsets)
-    row_mask = np.zeros(len(values), dtype=np.uint32)
-    has = lengths > 0
-    if has.any():
-        # `reduceat` on an empty span returns the element at that index rather than the identity,
-        # so only the non-empty rows are reduced and the rest keep their zero.
-        row_mask[has] = np.bitwise_or.reduceat(mask_of[ids], offsets[:-1][has])
-
-    unindexed = [UNINDEXED]
-    cache = {0: unindexed}
-    for m in np.unique(row_mask):
-        if m:
-            cache[int(m)] = [letter for letter, b in bit.items() if int(m) & b]
-    return [cache[int(m)] for m in row_mask]
-
-
 def joined_names(mesh, major) -> pa.Array:
     """`mesh_major`: the major-topic descriptor names joined with `; `, in Arrow throughout.
 
     The names are taken by index and re-listed against the same offsets, so nothing materialises a
     list of strings per row — the same trick the arXiv rung joins its author surnames with.
     """
-    values = _flat(major)
+    values = major.combine_chunks() if isinstance(major, pa.ChunkedArray) else major
     names = pa.array(mesh.descriptors, pa.string())
     taken = names.take(pa.array(np.asarray(values.values), pa.int32()))
     listed = pa.ListArray.from_arrays(pa.array(np.asarray(values.offsets), pa.int32()), taken)
@@ -287,8 +248,11 @@ def joined_names(mesh, major) -> pa.Array:
 # --------------------------------------------------------------------------------- the outputs
 
 
-def write_points(out: Path, *, entity, xy, access, extra) -> None:
+def write_points(out: Path, *, entity, xy, access: pa.Array, extra) -> None:
     """The view's positions and every entity-space column, one row per article.
+
+    `access` is the `branches` column as Arrow already — the MeSH module builds it a slice at a
+    time and nothing turns it back into Python.
 
     **Raw coordinates, written as they are.** `extent = "auto"` fits a square box around exactly
     these numbers; scaling by hand is the failure the extent moved into the declaration to prevent
@@ -298,7 +262,7 @@ def write_points(out: Path, *, entity, xy, access, extra) -> None:
         "entity_id": pa.array(entity, pa.uint64()),
         "x": pa.array(xy[:, 0].astype(np.float64), pa.float64()),
         "y": pa.array(xy[:, 1].astype(np.float64), pa.float64()),
-        "branches": pa.array(access, pa.list_(pa.string())),
+        "branches": access,
     }
     cols.update(extra)
     pq.write_table(pa.table(cols), out / "points.parquet")
@@ -360,9 +324,9 @@ env = "TESSERA_IDENTITY_KEY"
 token_max_lifetime = 3600
 
 [serve]
-viewer  = "127.0.0.1:8101"
-session = "127.0.0.1:8102"
-control = "127.0.0.1:8103"
+viewer  = "127.0.0.1:8111"
+session = "127.0.0.1:8112"
+control = "127.0.0.1:8113"
 max_k   = 5000
 session_credential_env  = "TESSERA_MEDCPT_SESSION_CRED"
 operator_credential_env = "TESSERA_MEDCPT_OPERATOR_CRED"
@@ -405,6 +369,16 @@ def write_declaration(out: Path, *, abstracts: bool, mesh_toml: str | None) -> N
     markers are filled here rather than committed conditional: the abstract attribute, which is an
     open owner ruling, and the MeSH layer, whose sources and block the MeSH track owns.
     """
+    def fill(text: str, marker: str, block: str) -> str:
+        """Replace the **whole line** that is the marker. A plain `str.replace` would also hit the
+        header comment that names the marker, which is how a TOML block landed inside a comment
+        and refused a build."""
+        lines = text.splitlines()
+        hit = [i for i, line in enumerate(lines) if line.strip() == marker]
+        assert len(hit) == 1, f"{marker} appears {len(hit)} times as a line of its own"
+        lines[hit[0]] = block
+        return "\n".join(lines) + "\n"
+
     text = (Path(__file__).parent / "corpus.toml").read_text()
     abstract_block = """
 # 36M x ~1 kB of prose. ⊘ Whether the rung takes this is an **open owner ruling** — the attribute
@@ -415,12 +389,12 @@ name  = "abstract"
 type  = "text"
 index = true
 """
-    text = text.replace("# <abstract-attribute>", abstract_block if abstracts else
-                        "# ⊘ `abstract` is not declared: this run took `--abstracts` off "
-                        "(the default), so the column is not in `points.parquet`.")
-    text = text.replace("# <mesh-layer>", mesh_toml or
-                        "# ⊘ `mesh/descriptors` is not declared: `mesh.py` was not present when "
-                        "this run wrote the corpus, so every article carries `unindexed`.")
+    text = fill(text, "# <abstract-attribute>", abstract_block if abstracts else
+                "# ⊘ `abstract` is not declared: this run took `--abstracts` off (the default),\n"
+                "# so the column is not in `points.parquet`.")
+    text = fill(text, "# <mesh-layer>", mesh_toml or
+                "# ⊘ `mesh/descriptors` is not declared: `mesh.py` was not present when this run\n"
+                "# wrote the corpus, so every article carries `unindexed`.")
     (out / "corpus.toml").write_text(text)
 
 
@@ -451,10 +425,11 @@ def main() -> None:
 
     # ------------------------------------------------------------------ the MeSH track's module
     try:
-        from .mesh import Mesh
+        from .mesh import LAYER as MESH_LAYER
         from .mesh import LAYER_TOML as MESH_TOML
+        from .mesh import Mesh
     except ImportError:
-        Mesh, MESH_TOML = None, None
+        Mesh, MESH_TOML, MESH_LAYER = None, None, None
         print("⊘ test_corpora/medcpt/mesh.py is not present — no MeSH layer, no branches, "
               f"every article carries {UNINDEXED!r}")
 
@@ -496,24 +471,56 @@ def main() -> None:
     )
 
     # ---------------------------------------------------------------------------------- MeSH
+    #
+    # **A slice at a time, because the closure does not fit.** `closure` expands each article's
+    # descriptors to its ancestors — ~1.7x10^9 pairs over the corpus (`dag-hierarchies.md` §8),
+    # which is 14 GB of int64 held at once. So the resolve, the closure and the member write run
+    # over `MESH_SLICE` rows at a time and only the access column and the major-topic names, both
+    # small, survive the loop. `write_layer` streams its member rows straight to the layer's
+    # parquet and re-declares its artifacts each call, so it needs no last-call signal;
+    # `close_streams` finishes the file.
+    artifacts = ArtifactSet()
     with steps.step("mesh"):
         if Mesh is None:
             mesh = None
-            explicit = closed = None
             mesh_stats = {"module": "absent"}
-            access = [[UNINDEXED]] * n
+            access = pa.array([[UNINDEXED]] * n, pa.list_(pa.string()))
             major_names = pa.nulls(n, pa.string())
         else:
             mesh = Mesh()
-            explicit, major, mesh_stats = mesh.resolve(table.column("mesh"))
-            closed = mesh.closure(explicit)
-            access = branches_per_row(mesh, explicit)
-            major_names = joined_names(mesh, major)
-            del major
+            raw = table.column("mesh")
+            access_parts, major_parts = [], []
+            mesh_stats = collections.Counter()
+            unresolved = collections.Counter()
+            for lo in range(0, n, MESH_SLICE):
+                hi = min(lo + MESH_SLICE, n)
+                explicit, major, stats = mesh.resolve(raw.slice(lo, hi - lo))
+                closed = mesh.closure(explicit)
+                mesh.write_layer(out, artifacts, closed,
+                                 np.arange(lo, hi, dtype=np.uint64))
+                access_parts.append(mesh.branches(explicit, empty=UNINDEXED))
+                major_parts.append(joined_names(mesh, major))
+                mesh_stats.update({k: v for k, v in stats.items() if k != "unresolved_top"})
+                unresolved.update(dict(stats["unresolved_top"]))
+                print(f"    mesh {hi:,}/{n:,}: {len(closed.values):,} closed pairs", flush=True)
+                del explicit, major, closed
+            artifacts.close_streams()
+            access = pa.chunked_array(access_parts).combine_chunks()
+            major_names = pa.chunked_array(major_parts).combine_chunks()
+            mesh_stats = dict(mesh_stats) | {
+                "unresolved_top": unresolved.most_common(20),
+                "tree": mesh.shape(),
+                "layer": mesh.artifact_shape(),
+                "streamed_member_rows": int(artifacts.streamed[MESH_LAYER]),
+            }
         table = table.drop_columns(["mesh"])
-    counts = collections.Counter(t for row in access for t in row)
-    print(f"MeSH: {mesh_stats}; {counts[UNINDEXED]:,} articles ({counts[UNINDEXED] / n:.1%}) "
-          f"carry {UNINDEXED!r}")
+    flat_access = pc.list_flatten(access)
+    counts = collections.Counter(
+        dict(zip(pc.value_counts(flat_access).field("values").to_pylist(),
+                 pc.value_counts(flat_access).field("counts").to_pylist()))
+    )
+    print(f"MeSH: { {k: v for k, v in mesh_stats.items() if k != 'unresolved_top'} }; "
+          f"{counts[UNINDEXED]:,} articles ({counts[UNINDEXED] / n:.1%}) carry {UNINDEXED!r}")
 
     # ----------------------------------------------------------------------------- the clustering
     from cuml.cluster import KMeans
@@ -564,10 +571,8 @@ def main() -> None:
             extra["abstract"] = read_staged(out, take, ["abstract"]).column("abstract")
         write_points(out, entity=entity, xy=xy, access=access, extra=extra)
     branch_terms = sorted(counts)
-    print(f"{sum(len(a) for a in access):,} (article, branch) labels over "
-          f"{len(branch_terms)} terms")
+    print(f"{len(flat_access):,} (article, branch) labels over {len(branch_terms)} terms")
 
-    artifacts = ArtifactSet()
     with steps.step("write artifacts"):
         for c in range(k):
             artifacts.artifact(KMEANS_LAYER, f"km-{c:06d}", contents=contents_of(text.get(c)))
@@ -578,11 +583,6 @@ def main() -> None:
             artifacts.generating_sets(KMEANS_LAYER, f"km-{c:06d}", members[c], rng=rng,
                                       sample=LABEL_SAMPLE, ranks=len(contents_of(text.get(c))))
 
-    mesh_volume = {}
-    if mesh is not None:
-        with steps.step("write mesh layer"):
-            mesh_volume = mesh.write_layer(out, artifacts, closed, take) or {}
-
     artifacts.check(n)
     artifact_rows, member_rows = artifacts.write(out)
     write_vocabulary(out, branch_terms)
@@ -592,7 +592,8 @@ def main() -> None:
     with steps.step("write the demo's terms"):
         write_demo_terms(out, counts)
 
-    write_declaration(out, abstracts=args.abstracts, mesh_toml=MESH_TOML)
+    write_declaration(out, abstracts=args.abstracts,
+                      mesh_toml=MESH_TOML if mesh is not None else None)
     write_deployment(out)
 
     manifest = {
@@ -610,9 +611,9 @@ def main() -> None:
                            "y": [float(xy[:, 1].min()), float(xy[:, 1].max())]}},
         "kmeans": {"k": k, "titles": len(text),
                    "sizes": [int(sizes.min()), int(np.median(sizes)), int(sizes.max())]},
-        "mesh": mesh_stats | mesh_volume,
+        "mesh": mesh_stats,
         "access_terms": len(branch_terms),
-        "access_labels": sum(len(a) for a in access),
+        "access_labels": len(flat_access),
         "artifact_rows": artifact_rows,
         "member_rows": member_rows,
         "seconds": dict(steps),
