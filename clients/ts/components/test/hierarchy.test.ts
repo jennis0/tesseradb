@@ -147,7 +147,7 @@ describe('<tessera-hierarchy>', () => {
 
   it('shows the matched count beside the masked one where the map carries a filter', async () => {
     const {host} = await panel({
-      filters: {draft: {}, expr: {archive: {in: ['cs']}}, highlight: null, members: [], suggestions: {}, suggestErrors: {}}
+      filters: {draft: {}, expr: {archive: {in: ['cs']}}, highlight: null, members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0}
     });
     // Existence and the masked count never move with the filter; the second figure is what does.
     expect(deep(host, '[part="count-masked"]')).not.toBeNull();

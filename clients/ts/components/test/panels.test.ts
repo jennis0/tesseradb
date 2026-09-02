@@ -1,5 +1,5 @@
 import {afterEach, describe, expect, it} from 'vitest';
-import type {Meta} from '@tesseradb/client';
+import type {FiltersProjection, Meta} from '@tesseradb/client';
 import '../src/item-card.js';
 import '../src/filter.js';
 import '../src/filter-panel.js';
@@ -99,7 +99,7 @@ describe('<tessera-filter>', () => {
     const host = await mount('<tessera-filter column="archive"></tessera-filter>');
     const el = host.querySelector('tessera-filter') as TesseraFilter;
     const store = fakeStore({meta: META, status: status({})});
-    store.set('filters', {draft: {archive: {family: 'category', keys: [], verb: 'filter'}}, expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {}});
+    store.set('filters', {draft: {archive: {family: 'category', keys: [], verb: 'filter'}}, expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0});
     el.store = store;
     await settle(host);
     const asked = store.calls.filter((c) => c.name === 'suggest');
@@ -119,7 +119,8 @@ describe('<tessera-filter>', () => {
       highlight: null,
       members: [],
       suggestions: {archive: {q: '', values: [{code: 1, key: 'cs', title: 'Computer Science', match: {field: 'key', start: 0, len: 0}}], more: true}},
-      suggestErrors: {}
+      suggestErrors: {},
+      suggestEpoch: 0
     });
     el.store = store;
     await settle(host);
@@ -150,7 +151,8 @@ describe('<tessera-filter>', () => {
       highlight: null,
       members: [],
       suggestions: {archive: {q: '', values, more: false}},
-      suggestErrors: {}
+      suggestErrors: {},
+      suggestEpoch: 0
     });
     el.store = store;
     await settle(host);
@@ -174,7 +176,7 @@ describe('<tessera-filter>', () => {
     const host = await mount('<tessera-filter column="archive"></tessera-filter>');
     const el = host.querySelector('tessera-filter') as TesseraFilter;
     const store = fakeStore({meta: META, status: status({})});
-    store.set('filters', {draft: {archive: {family: 'category', keys: [], verb: 'filter'}}, expr: null, highlight: null, members: [], suggestions: {archive: {q: '', values: [], more: true}}, suggestErrors: {}});
+    store.set('filters', {draft: {archive: {family: 'category', keys: [], verb: 'filter'}}, expr: null, highlight: null, members: [], suggestions: {archive: {q: '', values: [], more: true}}, suggestErrors: {}, suggestEpoch: 0});
     el.store = store;
     await settle(host);
     expect(deep(host, '[part="entry"]')).not.toBeNull();
@@ -190,19 +192,20 @@ describe('<tessera-filter>', () => {
     expect(deepAll(host, '[part="tick"] input[type="checkbox"]').length).toBe(0);
   });
 
-  it('re-decides the shape once the store invalidates the column’s suggestion — a view change or a re-authorise', async () => {
+  it('re-decides the shape once the store’s suggestEpoch moves — a view change or a re-authorise', async () => {
     const host = await mount('<tessera-filter column="archive"></tessera-filter>');
     const el = host.querySelector('tessera-filter') as TesseraFilter;
     const store = fakeStore({meta: META, status: status({})});
     const values = [{code: 1, key: 'v0', title: 'Value 0', match: {field: 'key' as const, start: 0, len: 0}}];
-    store.set('filters', {draft: {archive: {family: 'category', keys: [], verb: 'filter'}}, expr: null, highlight: null, members: [], suggestions: {archive: {q: '', values, more: false}}, suggestErrors: {}});
+    store.set('filters', {draft: {archive: {family: 'category', keys: [], verb: 'filter'}}, expr: null, highlight: null, members: [], suggestions: {archive: {q: '', values, more: false}}, suggestErrors: {}, suggestEpoch: 0});
     el.store = store;
     await settle(host);
     expect(deep(host, '[part="entry"]')).toBeNull(); // checklist
 
-    // The store clears the column's page and raises no refusal for it — `resetSuggestions`'s own
-    // shape on a view switch or a re-authorise, distinct from a fetch failure.
-    store.set('filters', {...store.get('filters'), suggestions: {}, suggestErrors: {}});
+    // `resetSuggestions` clears the column's page, raises no refusal for it, and bumps the epoch —
+    // the epoch moving is the signal this element acts on, not the page's absence on its own
+    // (`store.ts`'s own doc on why the `q` echo cannot tell the two apart unaided).
+    store.set('filters', {...store.get('filters'), suggestions: {}, suggestErrors: {}, suggestEpoch: 1});
     await settle(host);
     // Re-decided from scratch: the control asks again with an empty q for the (column, view) it
     // is now under, and shows neither shape until that page answers.
@@ -215,11 +218,45 @@ describe('<tessera-filter>', () => {
     expect(deep(host, '[part="entry"]')).not.toBeNull(); // lookahead this time
   });
 
+  it('re-asks under the new epoch even where nothing about this column changed at the reset — mid-flight or on a refusal', async () => {
+    // The column that never finished deciding a shape carries no signal of its own that an
+    // invalidation happened: `suggestions[column]` and `suggestErrors[column]` are both already
+    // absent before and after a reset alike, so the earlier `shape !== null` gate left this column
+    // sitting on its skeleton forever. Two starting states, both stuck with `shape === null`.
+    const starts: Pick<FiltersProjection, 'suggestions' | 'suggestErrors'>[] = [
+      // Still in flight: no page and no refusal yet, the first ask not answered.
+      {suggestions: {}, suggestErrors: {}},
+      // Sitting on a refusal: the empty-q ask came back refused.
+      {suggestions: {}, suggestErrors: {archive: {code: 'derived', detail: 'not listable'}}}
+    ];
+    for (const initial of starts) {
+      const host = await mount('<tessera-filter column="archive"></tessera-filter>');
+      const el = host.querySelector('tessera-filter') as TesseraFilter;
+      const store = fakeStore({meta: META, status: status({})});
+      store.set('filters', {draft: {archive: {family: 'category', keys: [], verb: 'filter'}}, expr: null, highlight: null, members: [], suggestions: initial.suggestions, suggestErrors: initial.suggestErrors, suggestEpoch: 0});
+      el.store = store;
+      await settle(host);
+      const askedBefore = store.calls.filter((c) => c.name === 'suggest' && c.args[0] === 'archive' && c.args[1] === '').length;
+      expect(askedBefore).toBe(1); // the mount's own ask
+
+      // The reset: still no page, still no fresh refusal, but the epoch has moved.
+      store.set('filters', {...store.get('filters'), suggestions: {}, suggestErrors: {}, suggestEpoch: 1});
+      await settle(host);
+      const askedAfter = store.calls.filter((c) => c.name === 'suggest' && c.args[0] === 'archive' && c.args[1] === '').length;
+      expect(askedAfter).toBe(2); // a second ask reached the store under the new epoch
+
+      // And it decides a shape once that ask answers, exactly as a fresh mount would.
+      store.set('filters', {...store.get('filters'), suggestions: {archive: {q: '', values: [], more: false}}});
+      await settle(host);
+      expect(deep(host, '[part="entry"]')).toBeNull(); // checklist
+    }
+  });
+
   it('asks the store on every keystroke, and renders only the page that answers the box in front of it', async () => {
     const host = await mount('<tessera-filter column="archive"></tessera-filter>');
     const el = host.querySelector('tessera-filter') as TesseraFilter;
     const store = fakeStore({meta: META, status: status({})});
-    store.set('filters', {draft: {archive: {family: 'category', keys: [], verb: 'filter'}}, expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {}});
+    store.set('filters', {draft: {archive: {family: 'category', keys: [], verb: 'filter'}}, expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0});
     el.store = store;
     await settle(host);
     const entry = deep(host, '[part="entry"]') as HTMLInputElement;
@@ -255,7 +292,7 @@ describe('<tessera-filter>', () => {
     const host = await mount('<tessera-filter column="archive"></tessera-filter>');
     const el = host.querySelector('tessera-filter') as TesseraFilter;
     const store = fakeStore({meta: META, status: status({})});
-    store.set('filters', {draft: {archive: {family: 'category', keys: [], verb: 'filter'}}, expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {archive: {code: 'derived', detail: 'not listable'}}});
+    store.set('filters', {draft: {archive: {family: 'category', keys: [], verb: 'filter'}}, expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {archive: {code: 'derived', detail: 'not listable'}}, suggestEpoch: 0});
     el.store = store;
     await settle(host);
     expect(deep(host, '[part="entry"]')).not.toBeNull();
@@ -266,7 +303,7 @@ describe('<tessera-filter>', () => {
     const host = await mount('<tessera-filter column="title"></tessera-filter>');
     const el = host.querySelector('tessera-filter') as TesseraFilter;
     const store = fakeStore({meta: META, status: status({})});
-    store.set('filters', {draft: {title: {family: 'text', query: '', mode: 'all', verb: 'filter'}}, expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {}});
+    store.set('filters', {draft: {title: {family: 'text', query: '', mode: 'all', verb: 'filter'}}, expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0});
     el.store = store;
     await settle(host);
     expect(deepAll(host, '[part="mode"] button').map((o) => o.getAttribute('data-mode'))).toEqual(['all', 'phrase']);
@@ -295,7 +332,8 @@ describe('<tessera-filter-panel>', () => {
       highlight: null,
       members: [],
       suggestions: {},
-      suggestErrors: {}
+      suggestErrors: {},
+      suggestEpoch: 0
     });
     (host.querySelector('tessera-filter-panel') as unknown as {store: unknown}).store = store;
     await settle(host);
@@ -313,7 +351,8 @@ describe('<tessera-filter-panel>', () => {
       highlight: null,
       members: [{layer: 'mesh/descriptors', artifact: 546_790n, outside: false, verb: 'highlight'}],
       suggestions: {},
-      suggestErrors: {}
+      suggestErrors: {},
+      suggestEpoch: 0
     });
     (host.querySelector('tessera-filter-panel') as unknown as {store: unknown}).store = store;
     await settle(host);
@@ -327,7 +366,7 @@ describe('<tessera-filter-panel>', () => {
   it('renders one control per operand meta offers, keyed, with chips and clear all', async () => {
     const host = await mount('<tessera-filter-panel></tessera-filter-panel>');
     const store = fakeStore({meta: META, status: status({})});
-    store.set('filters', {draft: {archive: {family: 'category', keys: ['cs'], verb: 'filter'}, title: {family: 'text', query: '', mode: 'all', verb: 'filter'}, submitted_at: {family: 'numeric', gte: null, lte: null, verb: 'filter'}}, expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {}});
+    store.set('filters', {draft: {archive: {family: 'category', keys: ['cs'], verb: 'filter'}, title: {family: 'text', query: '', mode: 'all', verb: 'filter'}, submitted_at: {family: 'numeric', gte: null, lte: null, verb: 'filter'}}, expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0});
     (host.querySelector('tessera-filter-panel') as unknown as {store: unknown}).store = store;
     await settle(host);
     const filters = deepAll(host, 'tessera-filter');

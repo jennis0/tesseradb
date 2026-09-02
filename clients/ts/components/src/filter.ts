@@ -153,9 +153,8 @@ export class TesseraFilter extends TesseraElement {
    * once it has and said `more: false` — the whole visible set fits on one page, so a search box
    * has nothing to narrow — and `'lookahead'` once it has said `more: true`. Decided **once** from
    * that page and held afterwards: a later keystroke's page in `'lookahead'` mode must not flip
-   * this back and forth as its own `more` varies with the prefix typed. Re-set to `null` only when
-   * the store invalidates the column's suggestion (a view switch or a re-authorise clears it
-   * without a refusal alongside — see `resolvedInvalidated`), so the next empty-`q` page decides
+   * this back and forth as its own `more` varies with the prefix typed. Re-set to `null` when the
+   * store's `suggestEpoch` moves — see `lastEpoch` below — so the next empty-`q` page decides
    * again.
    */
   @state() accessor shape: 'checklist' | 'lookahead' | null = null;
@@ -169,6 +168,16 @@ export class TesseraFilter extends TesseraElement {
    * store tick a no-op here, the way it already is for every other projection this element reads.
    */
   private lastAsked: string | null = null;
+  /**
+   * The store's `filters.suggestEpoch` as last seen here, `-1` before the first tick. A change
+   * against the live projection is what says every held page was invalidated (a view switch or a
+   * re-authorise, `store.ts`'s `resetSuggestions`) — **tested instead of `shape`**, because a
+   * column that never finished deciding a shape (still loading, or sitting on a refusal) carries
+   * no signal of its own that a reset happened: `suggestions[column]` and `suggestErrors[column]`
+   * are both already absent in that state, before and after the reset alike, so comparing them
+   * cannot tell an invalidation from "nothing has landed yet". The epoch can.
+   */
+  private lastEpoch = -1;
 
   private get resolvedOperand(): FilterOperandSet | null {
     if (this.operand) return this.operand;
@@ -203,22 +212,28 @@ export class TesseraFilter extends TesseraElement {
     }
     if (this.resolvedOperand?.family === 'category') {
       const filters = this.resolvedStore?.get('filters');
-      const page = filters?.suggestions[this.column];
-      const refused = filters?.suggestErrors[this.column];
-      // **Invalidated**, not merely mid-flight: the store dropped this column's page *and* raised
-      // no refusal for it in the same tick, which is what `resetSuggestions` does on a view switch
-      // or a re-authorise (`value-suggestion.md` §5.1) — a genuine fetch failure always leaves a
-      // refusal in its place, so that case is left alone rather than mistaken for invalidation.
-      // Forgetting `lastAsked` and the typed `q` is what makes the next tick's `ask('')` actually
-      // reach the store instead of reading as already-asked, and returns the control to the
+      const epoch = filters?.suggestEpoch ?? -1;
+      // **Invalidated**, unconditionally on the epoch moving — never on `shape`, `suggestions` or
+      // `suggestErrors` alone: a column stuck loading or sitting on a refusal shows the identical
+      // absence of both before and after a reset, so those cannot say a reset happened at all, and
+      // gating on `shape !== null` (the earlier version of this check) left exactly that column
+      // sitting on its skeleton forever after a view switch or a re-authorise. Forgetting
+      // `lastAsked` and the typed `q` is what makes the next tick's `ask('')` actually reach the
+      // store instead of reading as already-asked, and returns the control to the
       // picker's-list-before-typing state the design gives it on first mount.
-      if (!page && !refused && this.shape !== null) {
+      if (epoch !== this.lastEpoch) {
+        this.lastEpoch = epoch;
         this.shape = null;
         this.lastAsked = null;
         this.search = '';
-      } else if (page && page.q === '' && this.shape === null) {
-        this.shape = page.more ? 'lookahead' : 'checklist';
       }
+      // Not an `else`: the first tick after mount moves `lastEpoch` from its `-1` starting value
+      // in the branch above, and a page can already be sitting on the store at that same tick
+      // (every test that seeds `filters` before connecting does exactly this) — gating the decision
+      // behind the reset branch not firing would leave a pre-seeded page undecided until a second,
+      // unrelated tick happened to come along.
+      const page = filters?.suggestions[this.column];
+      if (page && page.q === '' && this.shape === null) this.shape = page.more ? 'lookahead' : 'checklist';
       // The picker's list before anything is typed (`value-suggestion.md` §4): an empty `q`
       // matches every value, so the first ask is for `this.search` as it stands — `''` on mount
       // and after an invalidation, above. `ask`'s own guard is what makes this safe to call on
@@ -281,7 +296,14 @@ export class TesseraFilter extends TesseraElement {
     const o = this.resolvedOperand;
     if (!o) return nothing;
     const draft = this.draft ?? this.emptyDraft(o);
-    return html`<label part="label" class="muted" for="ctl">${this.heading()}</label>${this.body(o, draft)}`;
+    // Every other shape's body carries an `id="ctl"` element `for` can bind to (an `input`); the
+    // checklist's body is a `role="group"` of checkboxes, which `for` cannot label at all — a
+    // `for="ctl"` pointing at nothing there was a dangling reference, not a working association.
+    const checklist = draft.family === 'category' && this.shape === 'checklist';
+    const label = checklist
+      ? html`<span part="label" class="muted" id="ctl-label">${this.heading()}</span>`
+      : html`<label part="label" class="muted" for="ctl">${this.heading()}</label>`;
+    return html`${label}${this.body(o, draft)}`;
   }
 
   private body(o: FilterOperandSet, draft: ColumnDraft) {
@@ -379,10 +401,16 @@ export class TesseraFilter extends TesseraElement {
     // `more: false`, so the whole visible set is on it and there is nothing a search box would
     // narrow. A checkbox per value — ticked for a chosen one, native `<input>` keyboard operation,
     // no entry field and no match span — using the same `pick`/`chips` a lookahead uses, so
-    // `setFilters` is sent the identical draft either way.
+    // `setFilters` is sent the identical draft either way. `aria-labelledby` rather than `for` on
+    // the heading label (`render`): `for` only binds a labelable element (an `input`, not a
+    // `role="group"` div), which is what the lookahead's entry field is and this group is not.
     if (this.shape === 'checklist') {
       const rows = suggestion?.values ?? [];
-      return html`${chips}<div part="values" class="list" role="group" aria-label=${`${this.column} values`}>
+      // A refusal is defensive here rather than reachable today — a checklist never re-asks, so
+      // nothing on the current epoch can turn a landed page into one — but it costs nothing to
+      // show rather than silently drop should that stop being true.
+      const refusalNote = refusal ? html`<span part="refusal" class="xs">${refusal.code}: values not listable</span>` : nothing;
+      return html`${chips}<div part="values" class="list" role="group" aria-labelledby="ctl-label">
         ${repeat(
           rows,
           (v) => v.code,
@@ -391,7 +419,7 @@ export class TesseraFilter extends TesseraElement {
               <span class="t">${this.checklistText(v)}</span>
             </label>`
         )}
-      </div>`;
+      </div>${refusalNote}`;
     }
 
     // What is typed is submitted on Enter whether or not it matched a suggestion (contracts
