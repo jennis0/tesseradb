@@ -116,20 +116,22 @@ ids, and it has no meaning outside the deployment that assigned it. An item's id
 anyone outside the server is concerned, is the external id the operator supplied and the
 `tessera_id` the client is given.
 
-The entity id MUST NOT appear in any response, log or on-wire structure a client can read, for two
-reasons. The number itself carries information: because ids are dense and ordered by access
-terms, a viewer holding a few of them could read off how many items exist, how they are grouped by
-access, and where the items they cannot see sit between the ones they can. And the id is the key to
-every internal structure, so a viewer holding one could ask about an item's existence and
-visibility across principals and sessions in ways the register below does not accept.
+The entity id MUST NOT appear in any response, log or on-wire structure a client can read. The
+number itself carries a little information: because ids are dense and ordered by access terms, a
+viewer holding a few of them could estimate a lower bound on how many items exist that they cannot
+see, and how the items they can see group by access. That is the whole of what this property
+protects. No content is at stake in it; content is protected by the first property, and an entity
+id gives a viewer no way to ask the server about an item, since no request accepts one. The other
+reason to keep it internal is that it is not stable: the index may renumber it, and a client that
+depended on it would break.
 
 What a client receives instead is a keyed permutation of the entity id, computed by an eight-round
 Feistel construction over a per-deployment key, so that two `tessera_id`s reveal nothing about
-whether their items are adjacent, and a client cannot enumerate them. Two facts about the layout
-hold regardless of how strong that construction is. No structure on the request path stores the
-entity id at all, so nothing on that path could hand one out even by mistake; and once an entity id
-is assigned it is never reused, so a deleted item's slot cannot later grant a new item the access
-the old one held.
+whether their items are adjacent and a client cannot enumerate them. The construction is not
+cryptographic, and does not need to be, given what it hides. Two facts about the layout hold
+regardless of its strength. No structure on the request path stores the entity id at all, so
+nothing on that path could hand one out even by mistake; and once an entity id is assigned it is
+never reused, so a deleted item's slot cannot later grant a new item the access the old one held.
 
 ## An incomplete answer is refused
 
@@ -153,7 +155,7 @@ means for compartmented isolation as a whole is stated below.
 
 | Not claimed | Why not |
 |---|---|
-| Cryptographic protection of the identifier a client receives | The permutation is an eight-round non-cryptographic mixer, chosen to blind a viewer holding only the scrambled values, not to resist an adversary who already holds matched pairs of the real and scrambled identity. If a viewer ever obtained such a pair, this half of the defence would no longer hold. |
+| Cryptographic protection of the identifier a client receives | Not needed. What the permutation hides is a lower bound on the number of hidden items and their grouping by access, a low-severity channel; content is protected by the mask, not by the identifier. The construction is an eight-round non-cryptographic mixer, and an adversary holding matched pairs of entity id and `tessera_id` could recover the key, which would return them to that low-severity channel and nothing more. |
 | A defence against a bundle holder | Anyone holding the built artifact already has the key, the term index and the coordinates; the identifier scheme adds nothing against them, and none of the properties above are claimed for that party. |
 | Isolation of compartmented partitions | **Not built yet.** The design specifies a second, physical separation for data that must be held apart, gated by a required-term check on every token. None of it exists: a deployment today has one store, so no isolation beyond masking is available, and a requirement for physical separation cannot be met by deploying the system as it stands. |
 | Agreement between the two authorisation functions | See the paragraph below this table. |
