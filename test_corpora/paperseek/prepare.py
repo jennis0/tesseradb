@@ -243,9 +243,14 @@ POINTS_SCHEMA = pa.schema(
         pa.field("publication_year", pa.int32()),
         pa.field("type", pa.string()),
         pa.field("is_oa", pa.bool_()),
-        pa.field("openalex_id", pa.large_string()),
-        pa.field("title", pa.large_string()),
-        pa.field("abstract", pa.large_string()),
+        # **`string`, not `large_string`.** The build bakes a width from the declaration and
+        # refuses a `LargeUtf8` column against a `keyword` or `text` attribute. A row group of
+        # 262,144 abstracts is ~330 MB of characters, an order of magnitude inside what a 32-bit
+        # offset addresses, so the cast at the boundary is safe at any corpus size this rung
+        # reaches — it is the *staged* column, read whole, that needed the wide offsets.
+        pa.field("openalex_id", pa.string()),
+        pa.field("title", pa.string()),
+        pa.field("abstract", pa.string()),
     ]
 )
 
@@ -363,14 +368,27 @@ def write_declaration(out: Path, *, licences: list[str], types: int, topics_toml
         return "\n".join(lines) + "\n"
 
     text = (Path(__file__).parent / "corpus.toml").read_text()
+    have = bool(licences)
     text = fill(text, "# <topics-layer>", topics_toml or
                 "# ⊘ `topics/openalex` is not declared: `openalex.py` was not present when this run\n"
-                "# wrote the corpus, so no work carries a topic and no work carries a licence — the\n"
-                "# whole corpus is public and the compartment does not exist.")
-    text = text.replace(
-        "# <licence-count>",
-        f"# This run wrote {len(licences)} licence key(s) and {types} work type(s).",
-    )
+                "# wrote the corpus, so no work carries a topic.")
+    text = fill(text, "# <point-visibility>",
+                'point_visibility = { field = "licence", default = "public" }' if have else
+                "# ⊘ `point_visibility` names no field: `openalex.py` was not present when this run\n"
+                "# wrote the corpus, so no work carries a licence and there is no compartment. Every\n"
+                "# point takes the declared default and the whole corpus is public.\n"
+                'point_visibility = { default = "public" }')
+    text = fill(text, "# <licence-vocabulary>",
+                f"# This run wrote {len(licences)} licence key(s) and {types} work type(s).\n"
+                '[[vocabulary]]\n'
+                'name       = "licence"\n'
+                'title      = "Licence"\n'
+                'width      = "u8"\n'
+                'value_set  = "closed"\n'
+                'visibility = "public"\n'
+                'source     = "licence"' if have else
+                "# ⊘ `licence` is not declared: `openalex.py` was not present when this run wrote the\n"
+                f"# corpus, so the column is null throughout. {types} work type(s) were written.")
     (out / "corpus.toml").write_text(text)
 
 
@@ -558,9 +576,9 @@ def main() -> None:
                         "publication_year": year.cast(pa.int32()),
                         "type": kind.cast(pa.string()),
                         "is_oa": is_oa.cast(pa.bool_()),
-                        "openalex_id": ids.cast(pa.large_string()),
-                        "title": table.column("title").combine_chunks().cast(pa.large_string()),
-                        "abstract": table.column("abstract").combine_chunks().cast(pa.large_string()),
+                        "openalex_id": ids.cast(pa.string()),
+                        "title": table.column("title").combine_chunks().cast(pa.string()),
+                        "abstract": table.column("abstract").combine_chunks().cast(pa.string()),
                     },
                     schema=POINTS_SCHEMA,
                 ),

@@ -4,9 +4,12 @@
 # `[sources]` is relative to the declaring document (configuration.md §3), so the copy beside the
 # data is what `tessera build` reads and this one is what gets reviewed.
 #
-# **One marker is filled by the run rather than committed conditional.** `# <topics-layer>` becomes
-# the `topics/openalex` block that `openalex.py` owns; where it is not filled the copy says so in
-# place, so the declaration beside the data always states what it does and does not carry.
+# **Three markers are filled by the run rather than committed conditional**, and all three are the
+# same fact: `openalex.py` owns the compartment as well as the topic tree, so a run without it
+# writes a corpus with no licence, no topic layer and no access column at all. `# <topics-layer>`
+# is the layer block, `# <licence-vocabulary>` the access vocabulary and `# <point-visibility>` the
+# view's own line. Where a marker is not filled the copy says so in place, so the declaration
+# beside the data always states what it does and does not carry.
 #
 # **Every path is named once.** A `source` anywhere below names one of these keys rather than
 # repeating a path.
@@ -55,25 +58,24 @@ projection       = "none"
 extent           = "auto"
 source           = "points"
 visibility       = "public"
-point_visibility = { field = "licence", default = "public" }
+# <point-visibility>
 
 # The licence keys are Creative Commons' and OpenAlex's own published names, so the value set
 # discloses nothing about this corpus's contents — the same reasoning that makes rung 3's MeSH
 # branch letters `public`. Closed: a licence neither set names is a refusal rather than a quietly
 # minted compartment, which is the one thing an access vocabulary must never do.
-# <licence-count>
-[[vocabulary]]
-name       = "licence"
-title      = "Licence"
-width      = "u8"
-value_set  = "closed"
-visibility = "public"
-source     = "licence"
+# <licence-vocabulary>
 
 # Work type — `article`, `book-chapter`, `dataset` and a dozen more. `open`: OpenAlex adds types,
 # and a type is not a compartment, so a key this build did not see is a value to mint rather than a
 # refusal to serve. The file is still written, because a closed roster is what makes the codes
 # stable across a rebuild.
+#
+# ⊘ **`check` warns that `open` plus `public` publishes data-derived value names on nobody's
+# authority, and it is intended.** These names are not this corpus's: `type` is OpenAlex's own
+# published list, taken from Crossref's, and the file below is a roster of which of its values this
+# corpus happened to contain. The warning is the right one to raise and the right one to answer
+# here rather than to silence by narrowing the gate.
 [[vocabulary]]
 name       = "type"
 title      = "Work type"
