@@ -424,39 +424,57 @@ impl RowColumn {
     /// obtained by narrowing an already-composed set. A caller handing it anything not derived
     /// from the composed mask would be counting rows outside `M_auth`, which is why the one
     /// production caller narrows [`WholeMask::visible_all`] and nothing else.
+    /// # Why it is split, and what the split does not change
+    ///
+    /// The walk is over **every visible row**, and a list column reads a row's whole label list —
+    /// rung 3's `mesh/descriptors` is ~46 labels over 3.6 × 10⁷ rows, so one pass is
+    /// 1.7 × 10⁹ increments and was **measured at 2.7 s** single-threaded, paid once per session
+    /// by whichever request first needs the level's counts (a browse page, or a `member_of`
+    /// leaf's gate).
+    ///
+    /// So the row space is cut into chunks and each is walked on its own thread into its own count
+    /// vector, summed at the end — the same shape the row route's own scan takes, on the pool the
+    /// caller installs. **The answer is identical**: addition is associative, every row lands in
+    /// exactly one chunk, and no chunk sees a row outside `visible`.
     pub fn histogram_over(&self, visible: &croaring::Bitmap) -> Vec<u32> {
-        let mut counts = vec![0u32; self.len()];
-        let base_rows = self.base_rows();
-        match &*self.pack {
-            Pack::Label(pack) => {
-                for row in visible.iter() {
-                    // **The freshness edge, and it is one comparison.** A point ingested since the
-                    // last fold has a row above the base, so its artifact's count rises here on the
-                    // next request with nothing rebuilt but this session's own histogram — which
-                    // was going to be rebuilt anyway, the key carrying `segments_version`
-                    // (`crate::histogram`).
-                    let label = if row < base_rows {
-                        pack.label(row as usize)
-                    } else {
-                        self.tail.as_ref().map_or(ROW_COLUMN_HOLE, |t| t.label(row))
-                    };
-                    if label != ROW_COLUMN_HOLE {
-                        counts[label as usize] += 1;
+        use rayon::prelude::*;
+
+        let ordinals = self.len();
+        let Some(last) = visible.maximum() else {
+            return vec![0u32; ordinals];
+        };
+        // One chunk per worker, floored so a small view is not split into slivers whose per-chunk
+        // count vector costs more than the walk it saves.
+        const MIN_CHUNK: u64 = 1 << 21;
+        let span = last as u64 + 1;
+        let workers = rayon::current_num_threads().max(1) as u64;
+        let chunk = (span.div_ceil(workers)).max(MIN_CHUNK);
+        let chunks = span.div_ceil(chunk);
+        (0..chunks)
+            .into_par_iter()
+            .map(|c| {
+                let lo = u32::try_from(c * chunk).unwrap_or(u32::MAX);
+                let end = (c + 1) * chunk;
+                let mut counts = vec![0u32; ordinals];
+                let mut rows = visible.iter();
+                rows.reset_at_or_after(lo);
+                for row in rows {
+                    if (row as u64) >= end {
+                        break;
                     }
+                    self.for_each_label(row, |ordinal| counts[ordinal as usize] += 1);
                 }
-            }
-            Pack::List(pack) => {
-                for row in visible.iter() {
-                    if row >= base_rows {
-                        continue;
+                counts
+            })
+            .reduce(
+                || vec![0u32; ordinals],
+                |mut acc, part| {
+                    for (a, b) in acc.iter_mut().zip(part) {
+                        *a += b;
                     }
-                    for ordinal in pack.list(row as usize) {
-                        counts[ordinal as usize] += 1;
-                    }
-                }
-            }
-        }
-        counts
+                    acc
+                },
+            )
     }
 
     /// The durable bytes — what the fold writes into the prefix.

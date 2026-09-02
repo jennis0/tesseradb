@@ -413,7 +413,8 @@ impl crate::Engine {
                 (Some(column), Some(rows_of_filter)) => {
                     let mut visible = mask.visible_all();
                     visible.and_inplace(rows_of_filter);
-                    Some(column.histogram_over(&visible))
+                    // The engine's pool, for `Engine::masked_counts`' reason: the walk splits.
+                    Some(self.pool.install(|| column.histogram_over(&visible)))
                 }
                 _ => None,
             };

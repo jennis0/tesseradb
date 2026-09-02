@@ -181,6 +181,44 @@ fn measure_pages(root: &Path, view: &str, layer: Option<&str>, repeat: usize) {
     };
     ask("roots", BrowseForm::Roots, None);
     ask("search 'a'", BrowseForm::Search("a".into()), None);
+
+    // **The first page a session asks for, which is a different number** (2026-09-02). On a
+    // row-major level the masked counts the order is taken in are one walk of the composed mask
+    // reading every visible row's labels — `RowColumn::histogram_over`, decision 0093's one named
+    // exception — and it is cached per `(session, layer, level, mask)`. So every page after the
+    // first is the figure above, and the first pays the walk: 2.7 s single-threaded over MedCPT's
+    // 3.6 × 10⁷ rows × ~46 labels, 0.52 s once the walk is split across the pool.
+    //
+    // A fresh session per sample rather than a fresh engine: the artifact projections and the
+    // level's row form are per deployment and built once at first use, and what is measured here
+    // is what the *second* viewer of a warm process waits for.
+    let mut samples = Vec::new();
+    for _ in 0..repeat {
+        let cold = engine
+            .authorise(&credential(&all_terms(root)))
+            .expect("the passthrough plugin authorises");
+        let started = Instant::now();
+        engine
+            .browse(
+                &cold,
+                BrowseRequest {
+                    view,
+                    layer: &layer,
+                    level: None,
+                    form: BrowseForm::Roots,
+                    filter: None,
+                    limit: 200,
+                    cursor: None,
+                },
+            )
+            .expect("a browse answers");
+        samples.push(started.elapsed().as_secs_f64() * 1e3);
+    }
+    println!(
+        "  {:<28} {:>9.1} ms",
+        "roots, first of a session",
+        median(samples)
+    );
 }
 
 /// The whole-view scan: a browse `filters` over a **render-only** column, on a synthetic bundle of
