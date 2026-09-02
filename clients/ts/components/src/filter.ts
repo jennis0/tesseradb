@@ -1,13 +1,14 @@
-import {css, html, nothing} from 'lit';
+import {css, html, nothing, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
 import {repeat} from 'lit/directives/repeat.js';
 import {
   composeFilters,
   isPopulated,
-  type CategoryValue,
   type ColumnDraft,
   type FilterOperandSet,
+  type MatchSpan,
   type Refusal,
+  type SuggestValue,
   type TextMode
 } from '@tesseradb/client';
 import {TesseraElement, emit} from './base.js';
@@ -18,26 +19,34 @@ import {chrome, tokens} from './tokens.js';
 /**
  * `<tessera-filter column="…">` — one operand, rendered by its type from `meta` (design §5.3
  * tier 2), as the boards draw it: a text column is a search field with an *all words / phrase*
- * toggle; a category is a search field over the enumeration with the top few values as
- * checkboxes and *Show N more…* — never a scrolling list of 171; a number or a date is two
- * inputs with *to* between them; a keyword or string is a field with its operator.
+ * toggle; a category is a typeahead over `/v1/categories/{column}/suggest`
+ * (`value-suggestion.md`) — a search field, the matched values with the matched span marked, the
+ * chosen ones as chips above it; a number or a date is two inputs with *to* between them; a
+ * keyword or string is a field with its operator.
  *
- * **A typed value is submitted, never validated against the enumeration.** A category's value
- * list is what `/v1/categories` was willing to list, and a key it did not list may still be one
- * this principal can filter by; an unresolvable one is an empty answer by contract (contracts
- * §3.2), indistinguishable from a value that does not exist. So the search field submits whatever
- * is typed on Enter, and the control never says "no such value". A refused enumeration renders as
- * a refusal beside the field, not as an absent control.
+ * **A typed value is submitted, never validated against the suggestion page.** A category's
+ * suggestions are what `/v1/categories/{column}/suggest` was willing to offer, and a key it did
+ * not offer may still be one this principal can filter by; an unresolvable one is an empty answer
+ * by contract (contracts §3.2), indistinguishable from a value that does not exist. So the search
+ * field submits whatever is typed on Enter, and the control never says "no such value". A refused
+ * suggestion renders as a refusal beside the field, not as an absent control.
+ *
+ * **The suggestion page is rendered only while it answers the box in front of it.** The store
+ * echoes `q` back on the projection precisely so a stale page — a slower response to an earlier
+ * keystroke, landing after a faster response to a later one — is never mistaken for an answer to
+ * what is now typed; this element applies the same `q` check the store already used to decide
+ * whether to keep the page at all, because a page can go stale here too, between the store's tick
+ * and this element's next render, in the case fewest visits: a very fast keystroke arriving inside
+ * one microtask queue flush.
  *
  * The draft is local to the element while a user is typing; the store's draft re-seeds it only
- * when it changes under the element (a *clear all*). Typing is debounced; a tick, a mode or a
- * date lands at once. Emits `tessera-filterchange` with the composed expression.
+ * when it changes under the element (a *clear all*). Typing asks the store's typeahead action on
+ * every keystroke, which debounces and single-flights it; a tick, a mode or a date lands at once.
+ * Emits `tessera-filterchange` with the composed expression.
  */
 
 /** How long a typed control must be quiet before its change is sent. */
 const TYPING_DEBOUNCE_MS = 350;
-/** How many of a category's values show as checkboxes before *Show N more…*. */
-const TOP_VALUES = 4;
 
 export class TesseraFilter extends TesseraElement {
   static override styles = [
@@ -68,6 +77,12 @@ export class TesseraFilter extends TesseraElement {
       .seg {
         margin-top: 6px;
       }
+      [part='value-chips'] {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        margin-top: 6px;
+      }
       [part='values'] {
         margin-top: 4px;
         display: flex;
@@ -78,6 +93,12 @@ export class TesseraFilter extends TesseraElement {
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+      }
+      /** The matched span, in the served string, exactly where the server said it sits. */
+      [part='tick'] mark {
+        background: var(--tessera-accent-soft);
+        color: var(--tessera-accent);
+        border-radius: 2px;
       }
       /**
        * **The title leads and the key follows it, muted**, where the two differ. A value's key is
@@ -110,12 +131,16 @@ export class TesseraFilter extends TesseraElement {
   @property() accessor column = '';
   /** The operand set by property, for a host with no store on the page. */
   @property({attribute: false}) accessor operand: FilterOperandSet | null = null;
-  @property({attribute: false}) accessor values: CategoryValue[] | null = null;
-  @property({attribute: false}) accessor valuesRefusal: Refusal | null = null;
 
   @state() accessor draft: ColumnDraft | null = null;
   @state() accessor search = '';
-  @state() accessor expanded = false;
+  /**
+   * The title last seen for a chosen key, so a chip shows a name rather than a bare key once its
+   * value has scrolled out of the current suggestion page. Filled in the moment a value is picked
+   * from a page that carried one; never fetched for its own sake — a chosen key with no title on
+   * record renders as its key, exactly as an unresolved one would.
+   */
+  @state() accessor labels: Record<string, string> = {};
   private sent: ColumnDraft | null = null;
   private typing: ReturnType<typeof setTimeout> | null = null;
 
@@ -124,10 +149,14 @@ export class TesseraFilter extends TesseraElement {
     return this.resolvedStore?.get('meta')?.filterOperands.find((o) => o.column === this.column) ?? null;
   }
 
-  private get resolvedValues(): {values: CategoryValue[] | null; refusal: Refusal | null} {
-    if (this.values || this.valuesRefusal) return {values: this.values, refusal: this.valuesRefusal};
-    const f = this.resolvedStore?.get('filters');
-    return {values: f?.values[this.column] ?? null, refusal: f?.valueErrors[this.column] ?? null};
+  /** The suggestion page for `this.search`, or `null` while it is stale or has not landed. */
+  private get resolvedSuggestion(): {q: string; values: SuggestValue[]; more: boolean} | null {
+    const s = this.resolvedStore?.get('filters').suggestions[this.column];
+    return s && s.q === this.search ? s : null;
+  }
+
+  private get resolvedSuggestRefusal(): Refusal | null {
+    return this.resolvedStore?.get('filters').suggestErrors[this.column] ?? null;
   }
 
   protected override onStoreChange(): void {
@@ -138,8 +167,13 @@ export class TesseraFilter extends TesseraElement {
       this.draft = structuredClone(stored);
       this.sent = stored;
     }
-    if (this.resolvedOperand?.family === 'category' && !this.resolvedValues.values && !this.resolvedValues.refusal) {
-      void this.resolvedStore?.loadFilterValues(this.column);
+    // The picker's list before anything is typed (`value-suggestion.md` §4): an empty `q` matches
+    // every value, so the first ask is for `this.search` as it stands — `''` on mount — rather
+    // than a separate enumeration call. Asked once per box's worth of unanswered state, the same
+    // guard `loadFilterValues` used for the enumeration: nothing landed yet, and nothing refused.
+    const filters = this.resolvedStore?.get('filters');
+    if (this.resolvedOperand?.family === 'category' && filters && !filters.suggestions[this.column] && !filters.suggestErrors[this.column]) {
+      this.resolvedStore?.suggest(this.column, this.search);
     }
     super.onStoreChange();
   }
@@ -230,60 +264,93 @@ export class TesseraFilter extends TesseraElement {
     </div>`;
   }
 
+  /**
+   * `field`'s text, the matched span marked where the server said it sits — in **characters of
+   * the served string**, so this never re-runs the fold (`value-suggestion.md` §5.1). Split on
+   * code points rather than UTF-16 units: the offsets are characters, and a naive `.slice` would
+   * cut a surrogate pair in half on any served string outside the basic plane.
+   */
+  private markedField(v: SuggestValue, field: MatchSpan['field'], text: string): TemplateResult | string {
+    if (v.match.field !== field) return text;
+    const chars = [...text];
+    const {start, len} = v.match;
+    return html`${chars.slice(0, start).join('')}<mark>${chars.slice(start, start + len).join('')}</mark>${chars.slice(start + len).join('')}`;
+  }
+
+  /** One suggested value's text: title leading, key muted after it, as a chosen value's does. */
+  private suggestionText(v: SuggestValue): TemplateResult {
+    const title = v.title ?? v.key;
+    return v.title && v.title !== v.key
+      ? html`${this.markedField(v, 'title', title)}<span class="k">${this.markedField(v, 'key', v.key)}</span>`
+      : html`${this.markedField(v, 'key', v.key)}`;
+  }
+
   private category(draft: {family: 'category'; keys: string[]}) {
-    const {values, refusal} = this.resolvedValues;
+    const suggestion = this.resolvedSuggestion;
+    const refusal = this.resolvedSuggestRefusal;
     const chosen = new Set(draft.keys);
+
+    const pick = (v: SuggestValue) => {
+      if (v.title) this.labels = {...this.labels, [v.key]: v.title};
+      this.change(chosen.has(v.key) ? {...draft, keys: draft.keys.filter((k) => k !== v.key)} : {...draft, keys: [...draft.keys, v.key]}, true);
+    };
+    const remove = (key: string) => this.change({...draft, keys: draft.keys.filter((k) => k !== key)}, true);
+
+    // What is typed is submitted on Enter whether or not it matched a suggestion (contracts
+    // §3.2): a key the page never offered may still be one this principal can filter by, and an
+    // unresolvable one is an empty answer, indistinguishable from one that does not exist — never
+    // a rejected keystroke.
     const submit = () => {
       const key = this.search.trim();
       if (!key || chosen.has(key)) return;
       this.search = '';
+      this.resolvedStore?.suggest(this.column, '');
       this.change({...draft, keys: [...draft.keys, key]}, true);
     };
-    // The search field over the enumeration: whatever is typed narrows the list and, on Enter,
-    // is submitted as a key. Never validated, never "no such value".
     const field = html`<div class="input">${icon('search', 14)}<input id="ctl" part="entry" type="search" autocomplete="off"
         aria-label=${`${this.column} value`} .value=${this.search}
-        @input=${(e: Event) => (this.search = (e.target as HTMLInputElement).value)}
+        @input=${(e: Event) => {
+          this.search = (e.target as HTMLInputElement).value;
+          this.resolvedStore?.suggest(this.column, this.search);
+        }}
         @keydown=${(e: KeyboardEvent) => {
           if (e.key === 'Enter') submit();
         }} /></div>`;
-    const listed = values ?? [];
-    const typed = draft.keys.filter((k) => !listed.some((v) => v.key === k)).map((k) => ({code: -1, key: k, title: null}));
-    const needle = this.search.trim().toLowerCase();
-    const matches = (v: {key: string; title: string | null}) => needle === '' || v.key.toLowerCase().includes(needle) || (v.title ?? '').toLowerCase().includes(needle);
-    // Chosen keys first, whether listed or typed, then the rest; the top few unless expanded.
-    const ordered = [...typed, ...listed.filter((v) => chosen.has(v.key)), ...listed.filter((v) => !chosen.has(v.key))].filter(matches);
-    const visible = this.expanded || needle !== '' ? ordered : ordered.slice(0, Math.max(TOP_VALUES, draft.keys.length));
-    const hidden = ordered.length - visible.length;
-    const ticks = html`<div part="values">
-      ${repeat(
-        visible,
-        (v) => v.key,
-        (v) => html`<label part="tick" class="check"
-            ><input type="checkbox" .checked=${chosen.has(v.key)} value=${v.key}
-              @change=${(e: Event) => {
-                const on = (e.target as HTMLInputElement).checked;
-                this.change({...draft, keys: on ? [...draft.keys, v.key] : draft.keys.filter((k) => k !== v.key)}, true);
-              }} />
-            <span class="t"
-              >${v.title && v.title !== v.key
-                ? html`${v.title}<span class="k">${v.key}</span>`
-                : v.key}</span
-            ></label
-          >`
-      )}
-      ${hidden > 0
-        ? html`<button part="more" type="button" @click=${() => (this.expanded = true)}>Show ${hidden.toLocaleString('en-GB')} more…</button>`
-        : this.expanded && ordered.length > TOP_VALUES && needle === ''
-          ? html`<button part="more" type="button" @click=${() => (this.expanded = false)}>Show fewer</button>`
-          : nothing}
-    </div>`;
+
+    const chips =
+      draft.keys.length > 0
+        ? html`<div part="value-chips">
+            ${repeat(
+              draft.keys,
+              (k) => k,
+              (k) => html`<span part="value-chip" class="chip">${this.labels[k] ?? k}<button type="button" aria-label=${`Remove ${k}`} @click=${() => remove(k)}>${icon('close', 12)}</button></span>`
+            )}
+          </div>`
+        : nothing;
+
+    const rows = suggestion?.values ?? [];
+    const list =
+      rows.length > 0
+        ? html`<div part="values" class="list">
+            ${repeat(
+              rows,
+              (v) => v.code,
+              (v) => html`<div part="tick" class="item" role="option" aria-selected=${chosen.has(v.key) ? 'true' : 'false'} @click=${() => pick(v)}>
+                  <span class="t">${this.suggestionText(v)}</span>
+                </div>`
+            )}
+          </div>`
+        : nothing;
+
     const note = refusal
       ? html`<span part="refusal" class="xs">${refusal.code}: values not listable</span>`
-      : values === null
+      : suggestion === null
         ? html`<span class="skel" aria-hidden="true"></span>`
-        : nothing;
-    return html`${field}${ordered.length > 0 ? ticks : nothing}${note}`;
+        : suggestion.more
+          ? html`<span part="more" class="xs">type more to narrow</span>`
+          : nothing;
+
+    return html`${field}${chips}${list}${note}`;
   }
 
   private numeric(draft: {family: 'numeric'; gte: number | null; lte: number | null}) {
