@@ -118,7 +118,7 @@ render     = true
 [[attribute]]
 name  = "publication_year"
 title = "Year"
-type  = "number"
+type  = "i32"
 render = true
 index = true
 
@@ -211,7 +211,11 @@ def prepare(oa: OpenAlex, out: Path, limit: int) -> dict:
                 "y": pa.array(xy[:, 1], pa.float64()),
                 "licence": resolved["licence"],
                 "publication_year": resolved["publication_year"],
-                "openalex_id": pc.utf8_slice_codeunits(ids, len(PREFIX) - 1),
+                # `string`, not `large_string`: the chunk's own `id` column is large and the
+                # width is baked into every row of a keyword column.
+                "openalex_id": pc.cast(
+                    pc.utf8_slice_codeunits(ids, len(PREFIX) - 1), pa.string()
+                ),
             }
         ),
         out / "points.parquet",
