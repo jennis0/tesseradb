@@ -67,6 +67,7 @@ bash scripts/check-test-reachability.sh --quick
 bash scripts/check-clients.sh
 bash clients/py/check.sh
 python3 scripts/check-doc-links.py
+bash scripts/check-register.sh
 ```
 
 Read the output before claiming a pass. Keep `--no-fail-fast` and check the test count: without it cargo stops at the first failing binary and a smaller passing total looks green. The TypeScript check is in the gate because the Rust build cannot see a broken client.

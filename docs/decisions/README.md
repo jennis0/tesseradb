@@ -1,48 +1,48 @@
 # Decisions
 
-Architecture and security rulings, one per file, immutable once written. A reversal is a new file that names the one it supersedes.
+Architecture and security rulings, one per file, unchanged once written. A reversal is a new file that names the one it supersedes.
 
-- [0001](0001-rust-build-pipeline.md) 0001 — The build pipeline is Rust, not Python
-- [0002](0002-no-real-label-rerun.md) 0002 — No real-label rerun
-- [0005](0005-tessera-id-keyed-bijection.md) 0005 — `tessera_id` is a keyed bijection, not a 128-bit random
-- [0008](0008-candidate-list-route-declined.md) 0008 — The candidate-list selection route is declined
-- [0011](0011-health-probes-off-control-plane.md) 0011 — `/healthz` and `/readyz` leave the control plane
-- [0014](0014-i10-weakened-to-construction.md) 0014 — I10 is weakened to what the construction defends
-- [0017](0017-c4-covers-published-timing.md) 0017 — C4 covers published timing as well as inferable timing
-- [0018](0018-manifest-disposition-split-is-contract.md) 0018 — The side-manifest disposition split is interchange contract
-- [0019](0019-i13-lettered-properties.md) 0019 — I13 names three lettered properties, and I13a is an addition
-- [0020](0020-no-auth-data-retained-beside-a-mask.md) 0020 — No authorisation data is retained beside a mask
-- [0021](0021-rust-not-jvm.md) 0021 — Rust rather than the JVM, and what that costs
-- [0022](0022-deepscatter-rejected.md) 0022 — deepscatter is rejected, on licence and on architecture
-- [0023](0023-derivable-quantities-are-not-disclosures.md) 0023 — A quantity derivable from published data is not a disclosure
-- [0024](0024-leak-register-scope-is-viewer-inference.md) 0024 — The leak register covers what a viewer can infer, not data at rest
-- [0025](0025-rotation-is-a-session-invalidation-event.md) 0025 — A key rotation invalidates sessions; identifiers are not stable across them
-- [0027](0027-i5-is-unverified.md) 0027 — I5 is unverified, and the specification says so
-- [0030](0030-determinism-is-not-a-guarantee.md) 0030 — Response determinism is an implementation detail, not a guarantee
-- [0041](0041-pins-become-a-staleness-stamp.md) 0041 — A pin becomes a staleness stamp, not retained geometry
-- [0047](0047-edit-is-delete-plus-reingest.md) 0047 — Edit is delete + re-ingest, and a deleted entity is forgotten at the boundary
-- [0048](0048-no-deployments-exist-so-delete-rather-than-support.md) 0048 — No deployments exist, so delete rather than support
-- [0056](0056-a-folds-schedule-is-a-gated-window-not-a-pure-timer.md) 0056 — A fold's schedule is a gated window, not a pure timer
-- [0061](0061-i13a-forbids-undetectable-partials-not-streaming.md) 0061 — I13a forbids undetectable or incorrect partials, not streamed truncation
-- [0062](0062-filters-compose-as-a-boolean-tree-inside-the-candidate.md) 0062 — Filters compose as a boolean tree evaluated inside the candidate
-- [0063](0063-category-postings-serve-public-listings-and-never-per-viewer-ones.md) 0063 — A category's postings serve a `public` listing and never a `per_viewer` one
-- [0066](0066-none-of-requires-a-value-and-names-one-column.md) 0066 — `none_of` requires a value and names one column, which is what makes a negation safe
-- [0067](0067-term-timing-is-accepted-for-text-and-keyword-postings.md) 0067 — The term-postings timing channel is accepted for text and keyword terms
-- [0069](0069-filter-do-not-rank-sharpens-to-no-corpus-global-statistics.md) 0069 — "Filter, do not rank" sharpens to "no corpus-global statistics"
-- [0072](0072-entity-ids-are-slots-and-are-reused-after-a-fold.md) 0072 — Entity IDs are slots and are reused after a fold; identity moves to `tessera_id`
-- [0075](0075-the-masked-count-is-an-existence-criterion.md) 0075 — The masked count is an existence criterion, declared absolute or proportional
-- [0076](0076-an-artifact-is-served-whole-or-not-at-all.md) 0076 — An artifact is served whole or not at all
-- [0080](0080-the-frontier-is-a-per-artifact-test.md) 0080 — The frontier is a per-artifact test, not a tree walk
-- [0081](0081-a-replacement-mints-identities-an-edit-keeps-them.md) 0081 — A replacement mints identities, an edit keeps them, and nothing carries across a replacement
-- [0084](0084-an-undeclared-criterion-declares-no-test.md) 0084 — An undeclared criterion declares no test, on every route
-- [0086](0086-the-attachment-term-does-not-inherit-the-targets-criterion.md) 0086 — The attachment term does not inherit the target's criterion
-- [0088](0088-visibility-is-two-axes-and-the-membership-test-is-one.md) 0088 — Visibility is two axes, and the membership requirement is one of them
-- [0089](0089-a-dependency-edge-carries-deletion-and-visibility.md) 0089 — A dependency edge carries deletion and visibility
-- [0091](0091-build-is-ingest-into-an-empty-database.md) 0091 — Build is ingest into an empty database
-- [0101](0101-the-client-is-never-responsible-for-disclosure.md) 0101 — The client is never responsible for disclosure; its obligations are truthfulness
-- [0102](0102-the-viewer-plane-gains-an-enumerated-cors-origin-list.md) 0102 — The viewer plane gains an enumerated production CORS origin list; the session plane does not
-- [0104](0104-a-filter-answers-a-boolean-per-served-artifact.md) 0104 — A filter answers a boolean per served artifact, and it answers about what is in view
-- [0107](0107-a-generating-set-with-no-survivors-is-not-served.md) 0107 — A generating set with no survivors is not served
-- [0114](0114-the-drill-down-serves-the-satisfied-labels-only.md) 0114 — The item drill-down serves the satisfied labels only
-- [0121](0121-the-suggestion-walk-probes-per-request-and-its-timing-is-accepted.md) 0121 — The suggestion walk probes per request, and its timing channel is accepted and registered
-- [0124](0124-the-suggestion-route-may-follow-the-viewers-cardinality.md) 0124 — The suggestion route may follow the viewer's own cardinality
+- [0001](0001-rust-build-pipeline.md): The build pipeline is Rust, not Python
+- [0002](0002-no-real-label-rerun.md): No real-label rerun
+- [0005](0005-tessera-id-keyed-bijection.md): `tessera_id` is a keyed bijection, not a 128-bit random
+- [0008](0008-candidate-list-route-declined.md): The candidate-list selection route is declined
+- [0011](0011-health-probes-off-control-plane.md): `/healthz` and `/readyz` leave the control plane
+- [0014](0014-i10-weakened-to-construction.md): I10 is weakened to what the construction defends
+- [0017](0017-c4-covers-published-timing.md): C4 covers published timing as well as inferable timing
+- [0018](0018-manifest-disposition-split-is-contract.md): The side-manifest disposition split is interchange contract
+- [0019](0019-i13-lettered-properties.md): I13 names three lettered properties, and I13a is an addition
+- [0020](0020-no-auth-data-retained-beside-a-mask.md): No authorisation data is retained beside a mask
+- [0021](0021-rust-not-jvm.md): Rust rather than the JVM, and what that costs
+- [0022](0022-deepscatter-rejected.md): deepscatter is rejected, on licence and on architecture
+- [0023](0023-derivable-quantities-are-not-disclosures.md): A quantity derivable from published data is not a disclosure
+- [0024](0024-leak-register-scope-is-viewer-inference.md): The leak register covers what a viewer can infer, not data at rest
+- [0025](0025-rotation-is-a-session-invalidation-event.md): A key rotation invalidates sessions; identifiers are not stable across them
+- [0027](0027-i5-is-unverified.md): I5 is unverified, and the specification says so
+- [0030](0030-determinism-is-not-a-guarantee.md): Response determinism is an implementation detail, not a guarantee
+- [0041](0041-pins-become-a-staleness-stamp.md): A pin becomes a staleness stamp, not retained geometry
+- [0047](0047-edit-is-delete-plus-reingest.md): Edit is delete + re-ingest, and a deleted entity is forgotten at the boundary
+- [0048](0048-no-deployments-exist-so-delete-rather-than-support.md): No deployments exist, so delete rather than support
+- [0056](0056-a-folds-schedule-is-a-gated-window-not-a-pure-timer.md): A fold's schedule is a gated window, not a pure timer
+- [0061](0061-i13a-forbids-undetectable-partials-not-streaming.md): I13a forbids undetectable or incorrect partials, not streamed truncation
+- [0062](0062-filters-compose-as-a-boolean-tree-inside-the-candidate.md): Filters compose as a boolean tree evaluated inside the candidate
+- [0063](0063-category-postings-serve-public-listings-and-never-per-viewer-ones.md): A category's postings serve a `public` listing and never a `per_viewer` one
+- [0066](0066-none-of-requires-a-value-and-names-one-column.md): `none_of` requires a value and names one column, which is what makes a negation safe
+- [0067](0067-term-timing-is-accepted-for-text-and-keyword-postings.md): The term-postings timing channel is accepted for text and keyword terms
+- [0069](0069-filter-do-not-rank-sharpens-to-no-corpus-global-statistics.md): "Filter, do not rank" sharpens to "no corpus-global statistics"
+- [0072](0072-entity-ids-are-slots-and-are-reused-after-a-fold.md): Entity IDs are slots and are reused after a fold; identity moves to `tessera_id`
+- [0075](0075-the-masked-count-is-an-existence-criterion.md): The masked count is an existence criterion, declared absolute or proportional
+- [0076](0076-an-artifact-is-served-whole-or-not-at-all.md): An artifact is served whole or not at all
+- [0080](0080-the-frontier-is-a-per-artifact-test.md): The frontier is a per-artifact test, not a tree walk
+- [0081](0081-a-replacement-mints-identities-an-edit-keeps-them.md): A replacement mints identities, an edit keeps them, and nothing carries across a replacement
+- [0084](0084-an-undeclared-criterion-declares-no-test.md): An undeclared criterion declares no test, on every route
+- [0086](0086-the-attachment-term-does-not-inherit-the-targets-criterion.md): The attachment term does not inherit the target's criterion
+- [0088](0088-visibility-is-two-axes-and-the-membership-test-is-one.md): Visibility is two axes, and the membership requirement is one of them
+- [0089](0089-a-dependency-edge-carries-deletion-and-visibility.md): A dependency edge carries deletion and visibility
+- [0091](0091-build-is-ingest-into-an-empty-database.md): Build is ingest into an empty database
+- [0101](0101-the-client-is-never-responsible-for-disclosure.md): The client is never responsible for disclosure; its obligations are truthfulness
+- [0102](0102-the-viewer-plane-gains-an-enumerated-cors-origin-list.md): The viewer plane gains an enumerated production CORS origin list; the session plane does not
+- [0104](0104-a-filter-answers-a-boolean-per-served-artifact.md): A filter answers a boolean per served artifact, and it answers about what is in view
+- [0107](0107-a-generating-set-with-no-survivors-is-not-served.md): A generating set with no survivors is not served
+- [0114](0114-the-drill-down-serves-the-satisfied-labels-only.md): The item drill-down serves the satisfied labels only
+- [0121](0121-the-suggestion-walk-probes-per-request-and-its-timing-is-accepted.md): The suggestion walk probes per request, and its timing channel is accepted and registered
+- [0124](0124-the-suggestion-route-may-follow-the-viewers-cardinality.md): The suggestion route may follow the viewer's own cardinality
