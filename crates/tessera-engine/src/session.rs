@@ -778,6 +778,11 @@ pub struct Engine {
     /// the same reason: the values are functions of the principal's own visible members, so an
     /// entry is never shared across principals.
     pub(crate) derived_geometry: Arc<crate::derived_cache::DerivedCache>,
+    /// One session's visible values per category column — see [`crate::suggest_set::SuggestSets`].
+    /// Per *session* like the two caches above it, and keyed on the generation and the overlay for
+    /// the reason stated there: a set taken before a suppression would keep offering the name of a
+    /// value whose last visible member has gone.
+    pub(crate) suggest_sets: Arc<crate::suggest_set::SuggestSets>,
     /// One lineage per `(layer, level)` — see [`crate::cut::Lineages`]. Keyed per *deployment* like
     /// the projections beside it, and on the store's version alone, because a level's parent
     /// pointers are the same whichever view is served.
@@ -1594,6 +1599,7 @@ impl Engine {
             shapes: Arc::clone(&shapes),
             masked_counts: Arc::new(crate::histogram::MaskedCountCache::default()),
             derived_geometry: Arc::new(crate::derived_cache::DerivedCache::default()),
+            suggest_sets: Arc::new(crate::suggest_set::SuggestSets::default()),
             lineages: Arc::new(crate::cut::Lineages::new()),
             level_contents: Arc::new(crate::artifact_content::LevelContents::new()),
             pool,
@@ -1711,6 +1717,24 @@ impl Engine {
     #[doc(hidden)]
     pub fn forget_suggestion_index_for_test(&self, vocabulary: &str) -> bool {
         self.write.forget_suggestion_index(vocabulary.to_string())
+    }
+
+    /// Rebuild one vocabulary's suggestion index from the live minter and publish it, returning
+    /// once the executor has swapped — the cadence a fixture cannot otherwise reach.
+    ///
+    /// **A test hook, gated so it cannot exist in a shipped build**, on
+    /// [`Self::forget_suggestion_index_for_test`]'s argument, and submitted through the executor
+    /// for that method's reason. It exists because a rebuild is dispatched only when a side map has
+    /// run 4,096 values ahead of its base — hundreds of ingest batches — and because it is the one
+    /// publication that moves neither `segments_version` nor `overlay_version`, which makes it
+    /// exactly the state a per-session suggestion set's key cannot see
+    /// (`crate::suggest_set::SuggestSets::get`).
+    ///
+    /// Requires a started write executor; `false` where there is none.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn rebuild_suggestion_index_for_test(&self, vocabulary: &str) -> bool {
+        self.write.rebuild_suggestion_index(vocabulary.to_string())
     }
 
     /// Hold the background refresh, leaving it **in flight** — the window rung 3 of
@@ -2156,6 +2180,7 @@ impl Engine {
         // session's is pinned by nothing else.
         self.masked_counts.prune_token(token_id);
         self.derived_geometry.prune_token(token_id);
+        self.suggest_sets.prune_token(token_id);
         self.row_projection_cache.prune_token(token_id)
     }
 

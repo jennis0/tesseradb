@@ -18,6 +18,10 @@
 //!   scattered shape;
 //! - **counts** — `?counts=true` for a page of twenty, which is one `and_cardinality` per served
 //!   value against the mapped view;
+//! - **the set route** (`--sets`, which runs alone) — §6.3's second route: the sweep that builds a
+//!   session's visible-value set at 10⁴, 10⁶ and 10⁷ candidate entities, the per-keystroke cost of
+//!   walking it, and the keystroke at which a session that paid for the sweep is ahead of one that
+//!   kept probing;
 //! - **the decomposition** (`--decomp`, which runs alone) — one probe split into the record search,
 //!   the view over the record's bytes and the existential test, over the codes a budgeted walk
 //!   actually probes; the walk's cost with the gate answered `false`; minor page faults; and the
@@ -196,6 +200,7 @@ fn main() {
     let mut entities = 100_000_000u32;
     let mut repeats = 200usize;
     let mut decomp = false;
+    let mut sets = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -205,6 +210,9 @@ fn main() {
             // Run the stage decomposition alone, and skip the arms above it: the whole-walk
             // figures are already in the design's table and re-measuring them costs minutes.
             "--decomp" => decomp = true,
+            // The set-route arm, which needs a value column over the whole entity space and so
+            // runs alone for the decomposition's reason.
+            "--sets" => sets = true,
             other => {
                 eprintln!("unknown argument {other}");
                 std::process::exit(2);
@@ -273,6 +281,10 @@ fn main() {
         decomposition(&live, &fold, &postings, &record_codes, entities, values_n);
         return;
     }
+    if sets {
+        set_route(&live, &fold, &postings, dir.path(), &values, entities);
+        return;
+    }
 
     println!();
     println!("# the extents sweep — `category_membership`'s own loop, over a {extent_len}-entity extent");
@@ -329,6 +341,7 @@ fn main() {
                         &|code| postings.intersects(AttrLocalId::new(code), &cand),
                         &|_| Ok(0u64),
                         &|e: io::Error| e,
+                        None,
                     )
                     .expect("the walk");
                     samples.push(started.elapsed().as_secs_f64() * 1e3);
@@ -424,6 +437,7 @@ fn main() {
                     &|code| postings.intersects(AttrLocalId::new(code), &cand),
                     &|code| postings.intersection_cardinality(AttrLocalId::new(code), &cand),
                     &|e: io::Error| e,
+                    None,
                 )
                 .expect("the walk");
                 samples.push(started.elapsed().as_secs_f64() * 1e3);
@@ -518,6 +532,7 @@ fn decomposition(
                 },
                 &|_| Ok(0u64),
                 &|e: io::Error| e,
+                None,
             )
             .expect("the walk");
             walks += 1;
@@ -554,6 +569,7 @@ fn decomposition(
                 },
                 &|_| Ok(0u64),
                 &|e: io::Error| e,
+                None,
             )
             .expect("the walk");
             null_ms.push(started.elapsed().as_secs_f64() * 1e3);
@@ -572,6 +588,7 @@ fn decomposition(
                 &|code| postings.intersects(AttrLocalId::new(code), &cand),
                 &|_| Ok(0u64),
                 &|e: io::Error| e,
+                None,
             )
             .expect("the walk");
             real_ms.push(started.elapsed().as_secs_f64() * 1e3);
@@ -704,4 +721,129 @@ fn decomposition(
     );
 
     println!("# ({values_n} values; every figure ns per probe unless marked)");
+}
+
+/// **The second route, priced** — §6.3's per-session visible-value set: what the sweep costs, what
+/// a keystroke over the set costs, and how many keystrokes it takes to pay the sweep back.
+///
+/// The value column is over the **whole** entity space, which is what a build writes and what the
+/// sweep walks: `entities` `u32` codes, one per entity, each the code of `entity % values`. So a
+/// candidate of *n* entities sees about *n* distinct values while *n* is under `V`, which is the
+/// shape the design's own arm 3 measured.
+fn set_route(
+    live: &VocabularySuggest,
+    fold: &tessera_analyse::SuggestionFold,
+    postings: &ColumnPostings,
+    dir: &std::path::Path,
+    values: &[SuggestValue],
+    entities: u32,
+) {
+    let started = Instant::now();
+    let values_path = dir.join("column.arrow");
+    let presence_path = dir.join("column-presence.arrow");
+    let codes: Vec<u32> = (0..entities)
+        .map(|e| values[e as usize % values.len()].code)
+        .collect();
+    tessera_filter::write_value_column(
+        &values_path,
+        &presence_path,
+        &tessera_filter::Codes::U32(codes.into()),
+        None,
+    )
+    .expect("the value column writes");
+    let column = ValueColumn::open(&values_path, None, Access::Mapped).expect("it opens");
+    println!();
+    println!(
+        "# the set route (§6.3) — a {entities}-entity value column, written in {:.1} s",
+        started.elapsed().as_secs_f64()
+    );
+    println!(
+        "{:<10} {:<12} {:>10} {:>10} {:>12} {:>12} {:>12} {:>12} {:>10}",
+        "candidate",
+        "shape",
+        "sweep ms",
+        "set KB",
+        "visible",
+        "probe ms",
+        "set ms",
+        "set p99 ms",
+        "keystroke"
+    );
+    let prefixes: Vec<String> = (b'a'..=b'z').map(|c| (c as char).to_string()).collect();
+    for (label, want) in [("1e4", 10_000u32), ("1e6", 1_000_000), ("1e7", 10_000_000)] {
+        for (shape, contiguous) in [("contiguous", true), ("scattered", false)] {
+            let fraction = want as f64 / entities as f64;
+            let cand = candidate(entities, fraction, contiguous);
+
+            let started = Instant::now();
+            let set = tessera_engine::suggest_set::sweep(
+                std::iter::once(&column),
+                &cand,
+                live.base().as_ref(),
+            )
+            .expect("a category sweeps");
+            let sweep_ms = started.elapsed().as_secs_f64() * 1e3;
+
+            let mut probe_ms = Vec::with_capacity(prefixes.len());
+            let mut set_ms = Vec::with_capacity(prefixes.len());
+            for q in &prefixes {
+                let started = Instant::now();
+                let (found, _) = walk(
+                    live,
+                    fold,
+                    q,
+                    WalkBudget {
+                        limit: 20,
+                        walk_budget: 100_000,
+                        counts: false,
+                    },
+                    &|code| postings.intersects(AttrLocalId::new(code), &cand),
+                    &|_| Ok(0u64),
+                    &|e: io::Error| e,
+                    None,
+                )
+                .expect("the walk");
+                probe_ms.push(started.elapsed().as_secs_f64() * 1e3);
+                std::hint::black_box(found.len());
+
+                let started = Instant::now();
+                let (found, _) = walk(
+                    live,
+                    fold,
+                    q,
+                    WalkBudget {
+                        limit: 20,
+                        walk_budget: 100_000,
+                        counts: false,
+                    },
+                    // Unreachable on this arm — every value under a prefix has a dense position, so
+                    // the set answers every gate test and the probe closure is never called.
+                    &|_| Ok(false),
+                    &|_| Ok(0u64),
+                    &|e: io::Error| e,
+                    Some(&set),
+                )
+                .expect("the walk");
+                set_ms.push(started.elapsed().as_secs_f64() * 1e3);
+                std::hint::black_box(found.len());
+            }
+            let probe = percentile(&mut probe_ms.clone(), 0.5);
+            let on_set = percentile(&mut set_ms.clone(), 0.5);
+            // Where the sweep pays for itself: the keystroke at which cumulative
+            // `sweep + k × set` first falls below `k × probe`. `—` where a keystroke on the set is
+            // no cheaper, which is the wide viewer the ceiling exists to keep off this route.
+            let payback = if on_set < probe {
+                format!("{:.0}", (sweep_ms / (probe - on_set)).ceil())
+            } else {
+                "—".to_string()
+            };
+            println!(
+                "{label:<10} {shape:<12} {sweep_ms:>10.1} {:>10.1} {:>12} {probe:>12.3} \
+{on_set:>12.4} {:>12.4} {payback:>10}",
+                set.serialized_bytes() as f64 / 1e3,
+                set.visible_values(),
+                percentile(&mut set_ms, 0.99),
+            );
+        }
+    }
 }

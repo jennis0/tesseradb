@@ -1079,6 +1079,51 @@ impl ValueColumn {
         }
     }
 
+    /// **Every code the candidate's entities carry in this column**, visited once per carrying
+    /// entity in slot order — the pass the per-session suggestion set is built by
+    /// (`value-suggestion.md` §6.3, decision 0124). `false` where this column is not a category at
+    /// all, having visited nothing.
+    ///
+    /// **The traversal is [`Self::for_each_slot_run`]'s, not a second one**, so this inherits the
+    /// property that module's header states: the runs are a function of `(candidate, presence)`
+    /// alone and never of what is being sought, and a caller cannot skip work by what it finds. It
+    /// hands out codes rather than a predicate's verdict for one reason — the caller accumulates a
+    /// set of *values* rather than of entities — and it visits a code once per carrying entity
+    /// rather than once, because deduplicating is the caller's business and doing it here would
+    /// need a set this function does not own.
+    ///
+    /// **Only a category has a code**, so every other family answers `false` rather than visiting
+    /// [`Codes::at`]'s `u32::MAX` sentinel: a caller building a value set from a `f64` column has
+    /// made a mistake, and a set holding one sentinel would look like an answer. The caller that
+    /// reaches here only ever holds a category; this is the second line of defence.
+    pub fn visit_codes(&self, candidate: &Bitmap, mut f: impl FnMut(u32)) -> bool {
+        macro_rules! visit {
+            ($values:expr) => {{
+                let values = $values;
+                self.for_each_slot_run(candidate, values.len(), |slot0, count, _entity0| {
+                    for value in &values[slot0..slot0 + count] {
+                        f(u32::from(*value));
+                    }
+                });
+                true
+            }};
+        }
+        match &self.codes {
+            Codes::U8(v) => visit!(v.as_ref()),
+            Codes::U16(v) => visit!(v.as_ref()),
+            Codes::U32(v) => {
+                let values: &[u32] = v.as_ref();
+                self.for_each_slot_run(candidate, values.len(), |slot0, count, _entity0| {
+                    for value in &values[slot0..slot0 + count] {
+                        f(*value);
+                    }
+                });
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// The value an entity carries, or `None` where it carries none.
     ///
     /// This is the direction an inverted index cannot answer, and having it is why the conformance

@@ -592,6 +592,9 @@ pub struct AppState {
     pub max_suggestions: usize,
     /// The suggestion walk's budget. See `Config::max_suggestion_walk`.
     pub max_suggestion_walk: u64,
+    /// The cardinality at or under which the suggestion verb takes the per-session set route. See
+    /// `Config::max_suggest_set_entities`.
+    pub max_suggest_set_entities: u64,
     /// At most one `/v1/categories/{column}/suggest` in flight per session
     /// (`value-suggestion.md` §5.1). Never touched by any other route.
     pub suggest_admission: SuggestAdmission,

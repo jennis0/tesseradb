@@ -531,6 +531,12 @@ async fn mount_server_with_flush(
         // `max_category_values` above.
         max_suggestions: 4,
         max_suggestion_walk: 1_000,
+        // **The probe route, for every principal these tests use**, so a case asserting `more` on
+        // a spent budget cannot be raced by an async sweep landing first (`value-suggestion.md`
+        // §6.3). One is the schema's floor and every test principal sees more than one entity. The
+        // set route is exercised end to end by the engine's own tests and by the conformance
+        // differential, both at the shipped default.
+        max_suggest_set_entities: 1,
         suggest_admission: tessera_server::state::SuggestAdmission::new(),
         max_shape_vertices: tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
         max_region_vertices: 10_000,

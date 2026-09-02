@@ -511,6 +511,14 @@ async fn meta(
             // its own arithmetic being wrong. Deployment constants, identical for every principal.
             "max_suggestions": state.max_suggestions,
             "max_suggestion_walk": state.max_suggestion_walk,
+            // The cardinality at or under which a suggestion is answered from this session's own
+            // set of visible values rather than by probing (`value-suggestion.md` §6.3, decision
+            // 0124). Published on the same argument, and it is the one constant on this surface a
+            // caller can compare against a quantity of their own — their composed cardinality,
+            // which a zoom-0 viewport already returns exactly as `visible`. What they learn from
+            // the pair is which side of a published constant their own mask falls on, which is a
+            // self-disclosure; nothing about another principal's mask and no corpus statistic.
+            "max_suggest_set_entities": state.max_suggest_set_entities,
             // The publication vertex cap a shape is held to (`polygon-membership.md` §9), so a
             // caller can simplify before submitting rather than learn the number from a `422`.
             // A deployment constant, identical for every principal.
@@ -864,12 +872,21 @@ async fn suggest(
     };
 
     let walk_budget = state.max_suggestion_walk;
+    let max_suggest_set_entities = state.max_suggest_set_entities;
     let q = query.q.clone();
     let page = tokio::task::spawn_blocking(move || {
         let _suggest_guard = _suggest_guard;
         state
             .engine
-            .suggest(&entry.session, &resolved, &q, limit, counts, walk_budget)
+            .suggest(
+                &entry.session,
+                &resolved,
+                &q,
+                limit,
+                counts,
+                walk_budget,
+                max_suggest_set_entities,
+            )
     })
     .await
     .map_err(map_join_error)?
