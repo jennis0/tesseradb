@@ -23,7 +23,7 @@ is the owner's to settle.
 | 0 | Re-run the 5×10⁷ artifact tier | — | **Deferred, deliberately.** It confirms W1 and W2, which bite at rung 2 and not at rung 1, and it costs a ~45 GB build. Take it before rung 2, not before rung 1 |
 | **1** | **GeoNames** | **13,463,857** | **Built, verified and served**, and rebuilt 2026-08-30 on a declared `web_mercator` projection. Not done against §7.1's bar — see §2 |
 | **2** | **Overture places + divisions** | **7.4×10⁷** | **Built and verified**, and rebuilt 2026-08-30 on a declared projection with its boundary polygons in longitude and latitude — see §3 |
-| **3** | **MedCPT / PubMed** | **35,920,666** | **Built, verified and served** 2026-09-02 — see §4.6. The ladder's largest embedding rung and its first `dag` layer: MeSH's 30,217 descriptors with members over 41,321 edges, membership closed upward to **1.66×10⁹ entries** (3.27× rung 2's spill), an 11.15 GB bundle in 12 m 10 s at 16.03 GB peak, `verify --deep` clean. ⊘ One anomaly, 45 member rows, §4.6 |
+| **3** | **MedCPT / PubMed** | **35,920,666** | **Built, verified and served** 2026-09-02 — see §4.6. The ladder's largest embedding rung and its first `dag` layer: MeSH's 30,217 descriptors with members over 41,321 edges, membership closed upward to **1.66×10⁹ entries** (3.27× rung 2's spill), an 11.15 GB bundle in 12 m 10 s at 16.03 GB peak, `verify --deep` clean. ⊘ Three non-reproducing host faults over two runs, §4.6 |
 | 4 | PaperSeek + OpenAlex | 1.02×10⁸ | Not started. Staged |
 | 5 | TreeOfLife | 2.33×10⁸ | Not started. Staged |
 | 6 | GBIF | 3.50×10⁹ | Not started. Staged; needs a second local volume |
@@ -567,17 +567,20 @@ ways: `points.parquet` 118.6 → 634.6 MB, `tessera build` 19.7 → 34.3 s, **bu
 47 GB box — modelled, not measured, and W2 says the peak is not bounded by `--memory-budget`, so it
 is a wall to meet rather than a refusal to expect.
 
-⊘ **One anomaly, and it is not attributed to the code.** The first whole-corpus build's containment
-report named 56 edges holding **45 member rows of 1.66×10⁹** under the wrong article, all inside a
-35-wide window of consecutive entities, each article losing its highest-id descriptors to the next
-with totals preserved. A second whole-corpus run on the same code and input differs in exactly those
-rows and matches an independent recompute; five candidate code paths are excluded with numbers; and
-that run's own `tessera build` then died of `SIGSEGV`. Attributed to a memory fault on this host and
-**stated as unproven** — a memtest is now the outstanding item (§8). The rung README carries the
-full account. Two things bear on the campaign rather than on this rung: the containment report named
-all 45 rows individually, by parent and child, without being asked; and `prepare.py` now refuses per
-slice on a property that cannot fail on sound data — a row's closure contains what it was closed
-over — for 19 s over the whole corpus.
+⊘ **Three distinct, non-reproducing, localised faults in one evening on this host, and none is
+attributed to the code.** The first whole-corpus build's containment report named 56 edges holding
+**45 member rows of 1.66×10⁹** under the wrong article, all inside a 35-wide window of consecutive
+entities, each article losing its highest-id descriptors to the next with totals preserved. A second
+whole-corpus run on the same code and the same staged input has that window **correct** and fails
+elsewhere and differently — one escaping member on an edge the first run had right, where a single
+entity is **missing two ancestor rows** rather than having any shifted, which is also why the two
+runs' membership totals differ by three. That run's build died of `SIGSEGV` after 3 m 12 s
+(`error 6`, a write to a non-present page) and then, relaunched on the same binary and inputs with
+the bundle directory cleared, **built cleanly**: 12 m 42 s, 16.07 GB, 11,152,157,764 bytes,
+`verify --deep` OK, hierarchy identical in shape. Two of the three are in Python/NumPy and one in
+the Rust build; **each run is otherwise bit-consistent with a recompute**; five candidate code paths
+are excluded with numbers in the rung README. Recorded as a **host fault, ⊘ not proven** — the
+action is a memtest (§8), not more detection machinery.
 
 ## 5. The machinery this campaign built
 
@@ -719,11 +722,17 @@ depth, `parent_ids` on the wire and the client — the engine and client tracks'
 **Host, not Tessera**
 
 - ⊘ **Run a memtest on this box before chasing any further one-off.** Three corruption-class
-  symptoms on 2026-08-22/23, and rung 3 added two more on 2026-09-02: 45 member rows of 1.66×10⁹
-  written under the wrong article in a structured, non-reproducing way that no code path accounts
-  for (§4.6), and a `SIGSEGV` in `tessera build` — `signal 11 … error 6`, a write to a non-present
-  page, from the kernel log — on a run whose inputs the same binary had already built cleanly.
-  Neither is attributed to Tessera and neither should be until a reproduction exists.
+  symptoms on 2026-08-22/23, and rung 3 added three more on 2026-09-02 — in three different places,
+  in three different shapes, across two processes, none reproducing (§4.6):
+  45 member rows of 1.66×10⁹ shifted under the wrong article in a structured way no code path
+  accounts for; one entity missing two ancestor rows in the next run, which had the first run's
+  window right; and a `SIGSEGV` in `tessera build` — `signal 11 … error 6`, a write to a
+  non-present page — that did not recur when the same binary was relaunched on the same inputs.
+  Each run is otherwise bit-consistent with a recompute. None is attributed to Tessera and none
+  should be until a reproduction exists. ⊘ **The per-slice check rung 3 added catches the first
+  shape and not the second** — a dropped ancestor row leaves every explicit id in place — and that
+  gap is deliberate: closing it would mean recomputing the closure to compare against itself, and
+  against a hardware fault a second run is not a defence.
 
 **Rung 1 work not done**
 

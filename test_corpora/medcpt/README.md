@@ -265,29 +265,53 @@ or `BATCH` boundary.
 | an off-by-one at a row boundary | the right shape, and recomputing the slice agrees exactly with an independent set-union reference over the window and 150 rows of margin, twice, bit for bit |
 | an int32 in the offsets | real, and 37× away: the largest slice expanded to 5.8×10⁷ entries and the offset at the affected row was 3.3×10⁷ against 2.147×10⁹ |
 
-**A second whole-corpus run does not reproduce it.** Same code, same staged input: the second run
-differs from the first in exactly those 45 rows, and its window matches an independent recompute
-(49,279 rows, none wrong, none missing). The two runs also disagree by **three rows** in the total
-MeSH membership they wrote — 1,658,437,807 against 1,658,437,804 — over an input and a code path
-that are deterministic in process, which is a second symptom of the same kind rather than a
-consequence of the first.
+**A second whole-corpus run does not reproduce it, and fails differently.** Same code, same staged
+input. The second run's 18,662,757 … 18,662,791 window is **correct** — it matches an independent
+recompute over 49,279 rows, none wrong and none missing — and its build reports **one** violation
+instead of 56, on an edge the first run had right: `embryonic and fetal development` under
+`morphogenesis`. Recomputed over an 80-entity window there, the file holds 4,737 rows against 4,739
+in truth: entity **12,149,178** (chunk 12) is **missing two ancestor rows**, `gestational age` and
+`morphogenesis`, with nothing wrong and one entity affected. That is a different fault from the
+first — **rows dropped, not shifted, and the totals not preserved** — which is also why the two runs
+disagree by three rows in the total MeSH membership written, 1,658,437,807 against 1,658,437,804.
 
-⊘ **Attributed to a memory fault on this host, and that is not proven.** It is the shape of one — a
-run of an int32 offsets buffer displaced while the values beside it are untouched, in a run peaking
-at 43.3 GB on a 47 GB box — and this machine has a standing memory-fault suspicion from three
-corruption-class symptoms on 2026-08-22/23. What rules the alternative *in* is that a logic error
-would move counts or shift a whole slice, and would recur. What has not been done is a memtest, so
-the attribution stands as the best fit and not as a finding. ⊘ The second run's own `tessera build`
-then **died of `SIGSEGV`** after 3 m 12 s at 5.3 GB (kernel: `error 6`, a write to a non-present
-page) where the first completed in 12 m 10 s at 16.03 GB — a third symptom, and the reason the
-memtest is now the thing to do before any of this is called a bug.
+**The second run's build also crashed once, and then did not.** `tessera build` died of `SIGSEGV`
+3 m 12 s in at 5.3 GB, immediately after the attribute pass. The kernel log:
 
-**Two things caught it, and one of them is new.** `tessera build`'s containment report named all 45
-rows individually, by parent and child, without being asked — after 1.66×10⁹ rows had been written.
-`prepare.py` now refuses per slice, before a single member row reaches the file, on the property
-that cannot fail on sound data: a row's closure contains the descriptors it was closed over. That
-check costs 19 s over the whole corpus against the MeSH step's 421 s. ⊘ Neither whole-corpus run
-above was produced with it — it was written after both.
+```
+tessera[6825]: segfault at 64c86c6fad9b ip 000064c82c388730 sp 00007ffcf8252f20 error 6
+               in tessera[ae7730,64c82c07c000+165f000] likely on CPU 5
+```
+
+`error 6` is a write to a non-present page. Relaunched on the **same binary and the same inputs**
+with the bundle directory cleared, it built cleanly: **12 m 42 s, 16.07 GB peak RSS,
+11,152,157,764 bytes**, `verify --deep` OK, and a hierarchy identical in shape to the first run's —
+30,217 artifacts, 41,321 edges, 107 roots, 9,095 with more than one parent, at most 6. *(Tooling
+note: a retry that did not clear the directory first failed on a missing
+`.build-tmp/x-of-ordinal-0.u32` — a crashed build's leftover, not a fault of its own.)*
+
+⊘ **Three distinct faults in one evening on this host, and it is recorded as a host fault, not
+proven.** They are in different places, in different shapes, across two processes — twice in
+Python/NumPy writing the closure stream, once in the Rust build — and **each run is otherwise
+bit-consistent with a recompute**. None reproduces. A logic error would recur, would sit on a
+boundary, and would not change shape between runs; this machine has a standing memory-fault
+suspicion from three corruption-class symptoms on 2026-08-22/23. **The action is a memtest**, not
+more code.
+
+**What caught it.** `tessera build`'s containment report named all 45 rows of the first fault
+individually, by parent and child, without being asked — and the second fault's single row too,
+after 1.66×10⁹ rows had been written each time. `prepare.py` now also refuses per slice, before a
+member row reaches the file, on the property that cannot fail on sound data: a row's closure
+contains the descriptors it was closed over, for 19 s over the whole corpus against the MeSH step's
+421 s.
+
+⊘ **That check catches the first fault's shape and not the second's**, and the gap is worth stating
+rather than closing: a *shifted* boundary moves an explicit id out of its own row, which the check
+sees, while a dropped **ancestor** row leaves every explicit id where it belongs and is invisible to
+it. Closing that would mean recomputing the closure to compare against itself, which is not a check
+but a second run — and against a hardware fault a second run is not a defence. The fix is the
+hardware. ⊘ Neither whole-corpus run above was produced behind the check either; it was written
+after both.
 
 ## Two things the scale broke, and what they cost
 
