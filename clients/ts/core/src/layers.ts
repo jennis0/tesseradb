@@ -78,10 +78,14 @@ export function drawableLayers(layers: readonly Layer[]): Layer[] {
  *
  * A `flat` layer is one page of roots and no row has children, which the browse verb still
  * answers; the panel's *layer picker over the bundle's hierarchical layers* is this list, so a
- * flat clustering is not offered a tree it does not have. A layer that attaches to another — a
- * label layer hanging from a clustering — has no lineage of its own and its text is what its
- * target shows as a name, so it is not browsed separately either.
+ * flat clustering is not offered a tree it does not have. **`flat` is the one kind with no
+ * lineage and it declares no levels** — the levelled shapes are `stacked` and `tiered` — so the
+ * kind decides this on its own and a *flat with levels* disjunct would be a state the wire cannot
+ * produce, written as though it could.
+ *
+ * A layer that attaches to another — a label layer hanging from a clustering — has no lineage of
+ * its own and its text is what its target shows as a name, so it is not browsed separately either.
  */
 export function browsableLayers(layers: readonly Layer[]): Layer[] {
-  return layers.filter((l) => l.depsOn.length === 0 && (l.hierarchy.kind !== 'flat' || l.levels.length > 0));
+  return layers.filter((l) => l.depsOn.length === 0 && l.hierarchy.kind !== 'flat');
 }
