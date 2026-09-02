@@ -75,24 +75,22 @@ widget opens the same view without leaving Python.
 ## How it scales
 
 Tessera has been built and served against a synthetic 10⁹-point corpus, and against three real
-corpora at smaller scale. All were measured on the same class of single machine: one NVMe-backed
-box with 47 GB of RAM, no cluster.
+corpora at smaller scale. All were measured on the same class of single machine: one box with
+47 GB of RAM, no cluster.
 
 | Corpus | Points | Build time | Peak RSS | Bundle size | Viewport p50 |
 |---|---|---|---|---|---|
 | Synthetic, low-cardinality categories | 10⁹ | 6 m 46 s | 27.6 GB | ~47 GB | 135–164 ms |
-| Synthetic, 117 million distinct terms (surname-shaped) | 10⁹ | 3 h 12 m | 47.6 GB | to measure | to measure |
 | GeoNames | 13,463,857 | 2 m 59 s | 3.55 GB | 1.34 GB | to measure |
 | Overture places + divisions | 73,631,092 | 31 m 18 s | 26.75 GB | 12.57 GB | to measure |
 | MedCPT / PubMed | 35,920,666 | 12 m 10 s | 16.03 GB | 11.15 GB | to measure |
 
 One streaming pass produces the whole bundle. There is no separate spatial-index build, because the
 row order the geometry is written in (Morton order) is the index, and memory is bounded by a plan
-made before the pass starts rather than by how much of the corpus fits in RAM. Peak RSS above
-tracks that plan and the term policy more than it tracks point count: the surname-shaped build holds
-nearly twice the categories build's peak at the same 10⁹ points, driven by its 117 million distinct
-terms rather than by anything spatial. The test-corpus ladder is climbing past 10⁹ points on the
-same machine.
+made before the pass starts rather than by how much of the corpus fits in RAM. Peak memory follows
+that plan and the number of distinct terms rather than the point count. To measure: a 10⁹ build with
+117 million distinct terms on the batched build path. The test-corpus ladder is climbing past 10⁹
+points on the same machine.
 
 ## Compared with other systems
 
@@ -110,7 +108,7 @@ control.
 | Datashader / tippecanoe | corpus-scale, rasterised or tiled | No | No | to measure | Nothing computed per viewer; the same image or tiles serve everyone |
 | Elasticsearch document-level security | per-query, corpus-scale | Filters retrieval; aggregates leak | Yes | to measure | Its own documentation states a restricted principal can still count how many inaccessible documents contain a given term; a documented case went from a 30 ms query to 26 seconds once the filtering was applied |
 | PostgreSQL row-level security | per-query, corpus-scale | Filters retrieval; aggregates leak | Yes | to measure | A measured policy over a spatial predicate abandoned its index and ran 3,340× slower; `EXPLAIN` still discloses the exact count of excluded rows, and plain `EXPLAIN` the density of an invisible cluster |
-| Tessera | 10⁹ points measured; the test ladder is climbing past it | Yes: every served quantity | Yes: ingest, deletion and suppression while serving | 6 m 46 s to 3 h 12 m, by term cardinality (above) | A leak register enumerates what is accepted; anything not in it is a bug |
+| Tessera | 10⁹ points measured; the test ladder is climbing past it | Yes: every served quantity | Yes: ingest, deletion and suppression while serving | 6 m 46 s (low-cardinality categories) | A leak register enumerates what is accepted; anything not in it is a bug |
 
 We know of no system that does all of these at once.
 
@@ -118,19 +116,18 @@ We know of no system that does all of these at once.
 
 A viewer's credentials resolve to the set of items they may see, computed once when they connect
 and reused for the rest of the session rather than recomputed on every request. Geometry is
-arranged so that a screen tile at any zoom level is one contiguous range of that set, rather than
-points scattered through storage, so a masked count over a tile is arithmetic over a range, not a
-scan of the tile's contents. Sampling, density and cluster labels are defined the same way:
+stored so that a screen tile at any zoom level is one contiguous range of rows, rather than points
+scattered through storage, so a masked count over a tile is arithmetic between that range and the
+visible set, not a scan of the tile's contents. Sampling, density and cluster labels are defined the same way:
 computed from the rows the viewer's own visible set admits, never computed over the whole corpus
 and then hidden. A corpus keeps changing while this runs: items arrive, are deleted or are
-suppressed, and each change is reflected within seconds to minutes, because the visible set is
-recomputed from the same postings the change updates.
+suppressed, and each change is applied to what the next request reads, within seconds to minutes.
 
 ```mermaid
 flowchart LR
   cred["a viewer's credentials"] --> vis["the items they may see<br/>computed once per session"]
-  vis --> tile["a screen tile<br/>one contiguous range of that set"]
-  tile --> out["count, sample, label, density<br/>read only from that range"]
+  vis --> tile["a screen tile<br/>one contiguous range of rows"]
+  tile --> out["count, sample, label, density<br/>from the visible rows in that range only"]
   ingest["ingest, deletion, suppression"] -.-> vis
 ```
 
@@ -144,16 +141,16 @@ visible set.
 - Every count, density, label and sample a viewer sees is computed from inside their own visible
   set. Computing a quantity over the whole corpus and then hiding it from the wrong viewer is
   treated as a defect.
-- Sampling happens after that computation, never before. A sparse viewer's sample is a real sample
-  of what they can see rather than the leftovers of someone else's.
+- Sampling happens after masking. A sparse viewer's sample is drawn from what they can see; it is
+  never a global sample with the hidden points removed.
 - The identifier a client receives is not the item's underlying identifier and cannot be used on
   its own to enumerate or correlate records. It is a blinding permutation, not encryption, and it is
   no defence against anyone holding the underlying data.
 
-These are not the whole guarantee. A small number of residual disclosures are accepted rather than
-closed, each recorded with its severity and mitigation in a leak register; a disclosure found later
-that is not already in that register is a bug. The guarantees chapter states the full set and how
-each is checked.
+The full set is thirteen guarantees; the guarantees chapter states them and how each is checked. A
+small number of residual disclosures are accepted rather than closed, each recorded with its
+severity and mitigation in a leak register. A disclosure found later that is not in that register is
+a bug.
 
 ## What is built and what is not
 
