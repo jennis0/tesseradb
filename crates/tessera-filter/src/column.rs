@@ -212,21 +212,20 @@ impl ColumnPostings {
         if candidate.is_empty() {
             return Ok(false);
         }
-        for posting in self.sources(value)? {
-            match posting {
-                PostingRef::Roaring(view) => {
-                    if candidate.intersect(&view) {
-                        return Ok(true);
-                    }
-                }
-                PostingRef::Array(bytes) => {
-                    // Bounded by `small_term_threshold`, so this is a handful of `contains` probes
-                    // against the candidate rather than a bitmap of its own.
-                    for chunk in bytes.chunks_exact(4) {
-                        if candidate.contains(u32::from_le_bytes(chunk.try_into().unwrap())) {
-                            return Ok(true);
-                        }
-                    }
+        // **Written against the sources one at a time rather than through [`Self::sources`]**, which
+        // collects them into a `Vec`. That allocation is nothing beside a materialised posting and
+        // it is not nothing beside a boolean: the suggestion walk runs this up to
+        // `max_suggestion_walk` times per keystroke, and measured at 10⁷ values the allocation was
+        // a visible share of the walk (`crates/tessera-bench/src/bin/suggest_walk.rs`).
+        if let Some(posting) = self.base.posting_at(value.raw())? {
+            if hits(&posting, candidate) {
+                return Ok(true);
+            }
+        }
+        for tier in &self.tiers {
+            if let Some(posting) = tier.posting_at(value.raw())? {
+                if hits(&posting, candidate) {
+                    return Ok(true);
                 }
             }
         }
@@ -338,6 +337,20 @@ impl ColumnPostings {
             out.extend(tier.posting_at(value.raw())?);
         }
         Ok(out)
+    }
+}
+
+/// Does one source share an entity with `candidate`?
+///
+/// The Roaring arm is a view over the mapped file's bytes, so this reads the containers the two
+/// sets have keys in common and stops at the first coincidence. The tag-0 arm is bounded by
+/// `small_term_threshold` — a handful of `contains` probes rather than a bitmap of its own.
+fn hits(posting: &PostingRef<'_>, candidate: &Bitmap) -> bool {
+    match posting {
+        PostingRef::Roaring(view) => candidate.intersect(view),
+        PostingRef::Array(bytes) => bytes
+            .chunks_exact(4)
+            .any(|chunk| candidate.contains(u32::from_le_bytes(chunk.try_into().unwrap()))),
     }
 }
 

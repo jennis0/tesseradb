@@ -536,8 +536,8 @@ impl SuggestionField {
 /// (`docs/design/value-suggestion.md` §7): a whole-key match precedes a whole-title match, which
 /// precedes a word-start match derived from a longer string.
 ///
-/// The discriminants are the sort key and are written to the index, so reordering them is a format
-/// change and moves `SUGGEST_FORMAT_VERSION`.
+/// The discriminants are the sort key and are written to the suggestion index, so reordering them
+/// changes the order of a page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
 pub enum EntryKind {

@@ -68,13 +68,14 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use tessera_analyse::{EntryKind, SuggestionField, SuggestionFold};
 use tessera_filter::{Access, SortedDict, SortedDictWriter};
 
-/// The on-disc shape of the four side arrays and the entry dictionary, together.
-///
-/// **A fail-closed guard, not compatibility** (decision 0048): nothing outside this process ever
-/// reads these files, and a stale one left by a killed build is refused rather than misread.
-pub const SUGGEST_FORMAT_VERSION: u32 = 1;
-
 /// The subdirectory of the engine's cache directory every vocabulary's index lives under.
+///
+/// **These files carry no format version, and deliberately.** Every other artefact here has one
+/// because a second reader may hold an older copy; nothing ever reads one of these but the process
+/// that wrote it. `Engine::open` deletes this whole directory before it builds, and a rebuild
+/// writes a fresh numbered subdirectory, so a file from another version cannot be reached — the
+/// checks in [`SuggestIndex::open`] are against a build this process interrupted, which is the only
+/// wrong state expressible.
 pub const SUGGEST_DIR: &str = "suggest";
 
 /// One payload record: 12 bytes, `u32`-aligned so that the three fields are read without shifts.
@@ -910,10 +911,15 @@ pub fn walk<E>(
             if live.is_retracted(code) {
                 continue;
             }
-            let (key, title) = base.served(payload.position).map_err(unreadable)?;
-            state.consider(
-                fold, &folded, code, key, title, payload.field, payload.start, visible, count,
-            )?;
+            // **The gate before the served strings**, which is where the ordering earns its keep: a
+            // sparse viewer rejects better than 99.9% of what it examines, and the two mapped reads
+            // and the UTF-8 validation below are paid only for what it keeps.
+            if state.admits(code, visible)? {
+                let (key, title) = base.served(payload.position).map_err(unreadable)?;
+                state.emit(
+                    fold, &folded, code, key, title, payload.field, payload.start, count,
+                )?;
+            }
         }
     } else {
         let mut side_at = 0usize;
@@ -927,17 +933,18 @@ pub fn walk<E>(
                 }
                 let value = side[side_at].1;
                 side_at += 1;
-                state.consider(
-                    fold,
-                    &folded,
-                    value.code,
-                    &value.key,
-                    value.title.as_deref(),
-                    value.field,
-                    value.start,
-                    visible,
-                    count,
-                )?;
+                if state.admits(value.code, visible)? {
+                    state.emit(
+                        fold,
+                        &folded,
+                        value.code,
+                        &value.key,
+                        value.title.as_deref(),
+                        value.field,
+                        value.start,
+                        count,
+                    )?;
+                }
             }
             for index in base.payload_range(ordinal..ordinal + 1) {
                 if state.stop() {
@@ -959,24 +966,30 @@ pub fn walk<E>(
                     }
                     let value = side[side_at].1;
                     side_at += 1;
-                    state.consider(
-                        fold,
-                        &folded,
-                        value.code,
-                        &value.key,
-                        value.title.as_deref(),
-                        value.field,
-                        value.start,
-                        visible,
-                        count,
-                    )?;
+                    if state.admits(value.code, visible)? {
+                        state.emit(
+                            fold,
+                            &folded,
+                            value.code,
+                            &value.key,
+                            value.title.as_deref(),
+                            value.field,
+                            value.start,
+                            count,
+                        )?;
+                    }
                 }
                 if live.is_retracted(code) {
                     continue;
                 }
-                state.consider(
-                    fold, &folded, code, key, title, payload.field, payload.start, visible, count,
-                )?;
+                // The served key was already read here, the merge's ordering comparison needing
+                // it — which is why this arm runs only where the side map has entries under the
+                // prefix, and the arm above runs otherwise.
+                if state.admits(code, visible)? {
+                    state.emit(
+                        fold, &folded, code, key, title, payload.field, payload.start, count,
+                    )?;
+                }
             }
         }
         // Whatever is left of the side map's range sorts after every base entry under it.
@@ -986,17 +999,18 @@ pub fn walk<E>(
             }
             let value = side[side_at].1;
             side_at += 1;
-            state.consider(
-                fold,
-                &folded,
-                value.code,
-                &value.key,
-                value.title.as_deref(),
-                value.field,
-                value.start,
-                visible,
-                count,
-            )?;
+            if state.admits(value.code, visible)? {
+                state.emit(
+                    fold,
+                    &folded,
+                    value.code,
+                    &value.key,
+                    value.title.as_deref(),
+                    value.field,
+                    value.start,
+                    count,
+                )?;
+            }
         }
     }
     Ok((state.found, state.more))
@@ -1027,8 +1041,30 @@ impl WalkState {
         false
     }
 
+    /// **Does this value reach the page?** — the emitted check, the budget accounting, and the
+    /// gate, in that order and before a single served byte is read.
+    ///
+    /// Separate from [`Self::emit`] because reading the served strings is a mapped read and a
+    /// UTF-8 validation per value, and at the sparsest viewer measured the gate rejects better than
+    /// 99.9% of what the walk examines. Fusing the two put that read on every rejection and cost a
+    /// measured multiple of the walk at 10⁷ values.
+    fn admits<E>(
+        &mut self,
+        code: u32,
+        visible: &dyn Fn(u32) -> Result<bool, E>,
+    ) -> Result<bool, E> {
+        if self.emitted.contains(&code) {
+            return Ok(false);
+        }
+        // **Counted at the value, not at the entry.** The budget bounds how many values one request
+        // *examines* — the quantity §6.2 measures and §8 registers — and a value already emitted is
+        // not one of them.
+        self.examined += 1;
+        visible(code)
+    }
+
     #[allow(clippy::too_many_arguments)]
-    fn consider<E>(
+    fn emit<E>(
         &mut self,
         fold: &SuggestionFold,
         folded_q: &str,
@@ -1037,19 +1073,8 @@ impl WalkState {
         title: Option<&str>,
         field: SuggestionField,
         start: u32,
-        visible: &dyn Fn(u32) -> Result<bool, E>,
         count: &dyn Fn(u32) -> Result<u64, E>,
     ) -> Result<(), E> {
-        if self.emitted.contains(&code) {
-            return Ok(());
-        }
-        // **Counted at the value, not at the entry.** The budget bounds how many values one request
-        // *examines* — the quantity §6.2 measures and §8 registers — and a value already emitted is
-        // not one of them.
-        self.examined += 1;
-        if !visible(code)? {
-            return Ok(());
-        }
         let served = match field {
             SuggestionField::Key => key,
             SuggestionField::Title => title.unwrap_or(key),
