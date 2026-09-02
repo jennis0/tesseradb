@@ -64,7 +64,7 @@ use crate::manifest::{
     ContainmentExtent, RowColumnExtent, ShapeHeldExtent, ShapeRowsExtent, TileIndexExtent,
 };
 use crate::membership::{
-    pack_containment, pack_label_column, pack_list_column, pack_shape_rows, pack_tile_index,
+    pack_containment, pack_label_column, pack_shape_rows, pack_tile_index, ListColumnWriter,
     ShapeRowsPack, ROW_COLUMN_HOLE, TILE_INDEX_EMPTY, TILE_INDEX_HOLE,
 };
 
@@ -409,19 +409,26 @@ pub fn project_row_column(
             for i in 1..at.len() {
                 at[i] += at[i - 1];
             }
-            let mut values = vec![0u32; *at.last().unwrap_or(&0) as usize];
-            let mut cursor = at.clone();
+            // **Pass two writes into the column itself**, not into a `Vec<u32>` the packer then
+            // narrows: at the 10⁷ MedCPT sample the MeSH level's 471,778,374 entries are 1.9 GB as
+            // `u32` beside the 0.9 GB of column they become, and that pair was the whole of the
+            // artifact pass's measured transient
+            // (`probes/2026-09-02-mapped-memberships/README.md`). The bytes are unchanged —
+            // [`crate::membership::ListColumnWriter`] frames what `pack_list_column` would have
+            // written and fills the same positions in the same order.
+            let mut writer = ListColumnWriter::frame(ordinals, &at);
+            let mut cursor = at;
             each(&mut |ordinal, rows| {
                 for row in rows.iter() {
                     let at = row as usize;
                     if at >= row_count as usize {
                         continue;
                     }
-                    values[cursor[at] as usize] = ordinal;
+                    writer.put(cursor[at], ordinal);
                     cursor[at] += 1;
                 }
             });
-            Some(pack_list_column(ordinals, &at, &values))
+            Some(writer.finish())
         }
     }
 }

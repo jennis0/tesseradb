@@ -40,6 +40,15 @@
 //! each. They are now files under `.build-tmp/`, mapped rather than held ([`crate::column`]), so
 //! they cost the machine page cache the kernel may evict and not memory it must have.
 //!
+//! The **published memberships** were on that list until 2026-09-02 and were the largest item on it
+//! at a hierarchy rung: one Roaring bitmap per artifact in the store, live from the layers stage to
+//! the artifact pass four stages later, **+1.2 GB of anonymous memory at the 10⁷ MedCPT sample**
+//! with 471,778,374 closed MeSH member rows and ~47 GB extrapolated at 10⁸
+//! (`probes/2026-09-02-mapped-memberships/README.md`). They are read back through the packed
+//! extent `layers.rs` has just written and fsynced — one write, no second format — so what stays on
+//! the heap is a Roaring container's descriptor and the members themselves are page cache. The
+//! publication's own window still holds them ([`BYTES_PER_MEMBER_ROW`]); nothing after it does.
+//!
 //! The segment's **row-order** tail moved the same way and at the same time
 //! ([`crate::pipeline::permute_attribute_tail`]): eight render columns at 7.4×10⁷ rows were ~2.4 GB
 //! of `Vec`, built by `push` immediately after the entity-order columns stopped being heap. ⊘ It
@@ -201,19 +210,37 @@ fn fixed_width(ty: ScalarType) -> u64 {
 /// plan holds a spill budget rather than the corpus and the term that is left is the published
 /// memberships alone.
 ///
-/// **Only the store's copy is corpus-wide, and that is what changed later the same day.** The
-/// packing used to encode every unpublished level's records into a `Vec<Vec<u8>>` at once and then
-/// concatenate each level again — two more copies of every membership in the bundle, both linear in
-/// the corpus. `layers.rs` streams a blob at a time into the extent now, so what stands beside the
-/// store is one blob and one level's publication rather than the whole corpus's.
+/// **Only the store's copy was corpus-wide, and it is a mapping now** — see
+/// [`MAPPED_BYTES_PER_MEMBER_ROW`]. The store used to carry one heap Roaring bitmap per artifact
+/// from the layers stage to the artifact pass four stages later: **+1.2 GB of anonymous memory at
+/// the 10⁷ MedCPT sample**, 2.7 B per closed member row, measured across the build's peak
+/// (`probes/2026-09-02-mapped-memberships/README.md`). `layers.rs` reads each membership back
+/// through the extent it has just written, so what is left here is the publication's own window and
+/// this constant no longer describes anything the build holds to the end.
 ///
 /// ⊘ **The Roaring figure is the scattered case and is not measured per build.** A dense membership
 /// costs an eighth of it; the model takes the expensive one, because the refusal it feeds is meant
 /// to be wrong in the direction that costs a rerun rather than a kill. It is loose in one more
-/// direction since the packing was streamed: the constant charges the corpus for terms that are now
-/// a level's, and it is left at 4 rather than lowered because a term that errs high refuses a build
+/// direction since the packing was streamed: the constant charges the corpus for terms that are a
+/// level's, and it is left at 4 rather than lowered because a term that errs high refuses a build
 /// that would have fitted, where one that errs low is the kill this module exists to pre-empt.
 const BYTES_PER_MEMBER_ROW: u64 = 4;
+
+/// What one member row costs the **disk**, and the process's page cache, as the packed membership
+/// extent the store then reads through: 2 bytes, an array container's own width.
+///
+/// ⊘ **Measured below that and charged above it.** The 10⁷ MedCPT sample's two extents are
+/// 543,884,239 bytes over 471,778,374 member rows — **1.15 B a row**, because a descriptor whose
+/// members are dense in entity space comes out as a run or a bitset container rather than an
+/// array. The model charges the array case for the reason the constant above does: a term that errs
+/// high costs a rerun and one that errs low is the ENOSPC this pre-flight exists to pre-empt.
+///
+/// **Charged in the column window**, which is where these bytes are: the extents are written at the
+/// layer publication (stage 8c) and mapped from there to the end of the build, and the declared
+/// columns are still on the disk until the release two stages later. They are the bundle's own
+/// bytes and would be needed whether or not the store read them back — what the mapping changes is
+/// that they are also resident, as page cache the kernel may evict.
+const MAPPED_BYTES_PER_MEMBER_ROW: u64 = 2;
 
 /// What one layer member row costs the **disk** while the publication is running: the sorted runs
 /// the member spill writes and the merged member table it reads back, both under `.build-tmp/` and
@@ -322,11 +349,19 @@ pub(crate) fn entity_order_residency(
     if member_rows > 0 {
         terms.push(Term {
             what: format!(
-                "{member_rows} layer member row(s) at {BYTES_PER_MEMBER_ROW} B — the published \
-                 memberships, as Roaring"
+                "{member_rows} layer member row(s) at {BYTES_PER_MEMBER_ROW} B — the publication's \
+                 own Roaring, while the level it is publishing is in flight"
             ),
             bytes: member_rows.saturating_mul(BYTES_PER_MEMBER_ROW),
             mapped: false,
+        });
+        terms.push(Term {
+            what: format!(
+                "the published memberships the store reads back through the packed extent, at \
+                 {MAPPED_BYTES_PER_MEMBER_ROW} B a member row"
+            ),
+            bytes: member_rows.saturating_mul(MAPPED_BYTES_PER_MEMBER_ROW),
+            mapped: true,
         });
         terms.push(Term {
             what: format!(
@@ -518,10 +553,11 @@ mod tests {
         );
     }
 
-    /// **The published memberships are charged and the spill is reported.** A member row is
-    /// Roaring in the store and a delta in two files under `.build-tmp/`, and only the first is
-    /// memory the machine must have — a model that kept charging the second would refuse builds
-    /// that now fit, which is the failure mode of carrying a cost model past the thing it
+    /// **The publication's Roaring is charged and every file beside it is reported.** A member row
+    /// is a heap bitmap only while its level is being published, a delta in two files under
+    /// `.build-tmp/`, and the packed extent the store then reads it back through — and only the
+    /// first is memory the machine must have. A model that kept charging the others would refuse
+    /// builds that now fit, which is the failure mode of carrying a cost model past the thing it
     /// modelled.
     #[test]
     fn a_member_row_is_charged_where_it_is_resident_and_reported_where_it_is_a_file() {
@@ -536,8 +572,13 @@ mod tests {
         );
         assert_eq!(
             with.mapped() - without.mapped(),
-            rows * SPILLED_BYTES_PER_MEMBER_ROW,
-            "the runs and the merged table are disk"
+            rows * (SPILLED_BYTES_PER_MEMBER_ROW + MAPPED_BYTES_PER_MEMBER_ROW),
+            "the runs, the merged table and the extent the store reads through are all disk"
+        );
+        assert!(
+            with.describe().contains("packed extent"),
+            "the mapped memberships must be a named term of their own: {}",
+            with.describe()
         );
         assert!(
             with.describe().contains("member spill"),

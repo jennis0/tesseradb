@@ -11,8 +11,8 @@ Run mode:
 
     sample_rss.py --out PREFIX -- tessera build ...
 
-polls `/proc/<pid>/status` every 100 ms for `RssAnon`, `RssFile`, `RssShmem`, `VmRSS`
-and `VmHWM`, writing `PREFIX.rss.csv`; every line the child writes to stderr is
+polls `/proc/<pid>/status` every 100 ms — or every `--interval` seconds — for `RssAnon`,
+`RssFile`, `RssShmem`, `VmRSS` and `VmHWM`, writing `PREFIX.rss.csv`; every line the child writes to stderr is
 timestamped on the same clock into `PREFIX.stages.csv`, which is what aligns a sample
 with the stage that produced it. Both streams are echoed so the run is watchable.
 
@@ -61,7 +61,7 @@ def read_status(pid: int) -> dict[str, int] | None:
     return out or None
 
 
-def run(out_prefix: Path, argv: list[str]) -> int:
+def run(out_prefix: Path, argv: list[str], interval: float = INTERVAL) -> int:
     rss_path = out_prefix.with_suffix(".rss.csv")
     stage_path = out_prefix.with_suffix(".stages.csv")
     out_prefix.parent.mkdir(parents=True, exist_ok=True)
@@ -96,7 +96,7 @@ def run(out_prefix: Path, argv: list[str]) -> int:
                 # One last sample was already taken above; the process may still be a
                 # zombie with a readable status, so stop on the exit rather than on it.
                 break
-            time.sleep(INTERVAL)
+            time.sleep(interval)
 
     rc = proc.wait()
     pump_thread.join(timeout=5)
@@ -151,6 +151,12 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--out", type=Path, required=True, help="CSV path prefix")
     ap.add_argument("--report", action="store_true", help="report over an existing prefix")
+    ap.add_argument(
+        "--interval",
+        type=float,
+        default=INTERVAL,
+        help="seconds between /proc samples (default 0.1); a finer one resolves a shorter stage",
+    )
     ap.add_argument("argv", nargs=argparse.REMAINDER)
     args = ap.parse_args()
     if args.report:
@@ -159,7 +165,7 @@ def main() -> None:
     argv = args.argv[1:] if args.argv and args.argv[0] == "--" else args.argv
     if not argv:
         ap.error("nothing to run — pass the command after `--`")
-    sys.exit(run(args.out, argv))
+    sys.exit(run(args.out, argv, args.interval))
 
 
 if __name__ == "__main__":

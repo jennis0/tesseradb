@@ -171,7 +171,7 @@ fn build_fixture(shape: Shape) -> Fixture {
             ArtifactRecord {
                 entity: EntityId::new(u64::from(u32::MAX - ordinal)),
                 key: None,
-                members,
+                members: members.into(),
                 contents,
                 attached_to: None,
                 parents: parent.iter().copied().collect(),
@@ -545,7 +545,10 @@ fn a_growth_between_two_reads_would_leave_the_extent_narrow() {
     let grown_lo = UNIVERSE - 500;
     let mut record = fx.store.get(LAYER, 0, ordinal).unwrap().clone();
     for row in grown_lo..UNIVERSE {
-        record.members.add(fx.order[row as usize].raw() as u32);
+        record
+            .members
+            .to_mut()
+            .add(fx.order[row as usize].raw() as u32);
     }
     assert!(
         was < grown_lo,
@@ -816,7 +819,8 @@ fn an_index_over_another_population_is_refused_and_the_level_derives_its_own() {
                 key: None,
                 members: [fx.order[ordinal as usize].raw() as u32]
                     .into_iter()
-                    .collect(),
+                    .collect::<Bitmap>()
+                    .into(),
                 contents: Vec::new(),
                 attached_to: None,
                 parents: Vec::new(),

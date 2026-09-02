@@ -494,12 +494,16 @@ pub struct PublishedLayers {
     ///
     /// The pass has to observe where each membership *landed in row space*, and row space does not
     /// exist yet at this stage — the tiler sort is two stages away. So the records travel to the end
-    /// of the build rather than being read back off the extents this just wrote, which would parse
-    /// every membership a second time to reach a structure that is already in hand.
+    /// of the build rather than being rebuilt from the extents this just wrote, which would decode
+    /// every key, content and attachment a second time to reach a structure already in hand.
     ///
-    /// It is carried across the build's residency peak, and that is a real cost stated rather than
-    /// hidden: the memberships are one bitmap per artifact over the corpus, tens of megabytes at
-    /// the campaign's 10⁵ artifacts against a peak measured in gigabytes.
+    /// It is carried across the build's residency peak, and **what it carries there is a mapping**
+    /// (2026-09-02). Each record's membership is read back through the packed extent
+    /// `write_membership_extents` has just written and fsynced, so what travels these four stages
+    /// is a Roaring container's descriptor per container and page cache for the members
+    /// themselves. Held as heap bitmaps it was +1.2 GB of anonymous memory at the 10⁷ MedCPT
+    /// sample with 471,778,374 closed MeSH member rows, and ~47 GB extrapolated at 10⁸
+    /// (`probes/2026-09-02-mapped-memberships/README.md`).
     pub store: ArtifactStore,
     /// The derived structures the post-bundle pass wrote, for `SEGMENTS-0.json`. Empty until it
     /// runs.
@@ -1689,7 +1693,7 @@ pub fn publish(
             },
         )
         .collect();
-    write_membership_extents(&store, prefix_dir, partition, &mut published)?;
+    write_membership_extents(&mut store, prefix_dir, partition, &mut published)?;
     write_content_extent(&store, prefix_dir, partition, &mut published)?;
     published.store = store;
     Ok(published)
@@ -2541,8 +2545,9 @@ fn load_members(
     }
 }
 
-/// Pack every level's memberships into one extent and fsync it — the same format, one file per
-/// level, that a control-plane publication writes.
+/// Pack every level's memberships into one extent, fsync it, and **read the store's copies back
+/// through the mapped file** — the same format, one file per level, that a control-plane
+/// publication writes.
 ///
 /// **A blob at a time, into the file.** The store answers a level's ordinal *range*
 /// (`pending_ranges`) and encodes an artifact's record where it stands (`encode_pending`), so what
@@ -2551,8 +2556,24 @@ fn load_members(
 /// across an fsync — encodes every unpublished level of the corpus before the first byte is
 /// written, and then `pack` concatenates each level again: two more copies of every membership in
 /// the bundle, at the stage that is already the build's peak.
+///
+/// **And a mapping at a time, back out of it.** The store is carried from here to the artifact
+/// pass, four stages later ([`PublishedLayers::store`]), holding one Roaring bitmap per artifact
+/// over the corpus: **+1.2 GB of anonymous memory** at the 10⁷ MedCPT sample with 471,778,374
+/// closed MeSH member rows, carried across the build's peak
+/// (`probes/2026-09-02-mapped-memberships/README.md`). The bytes have just been written and
+/// fsynced, so each record's bitmap is replaced by a view over the extent's own bytes
+/// ([`tessera_lifecycle::Members::mapped`]) — one write, no second format, and what stays on the
+/// heap is a container descriptor rather than the members.
+///
+/// ⊘ **A rehousing that does not take is reported and not refused.** Every failure route leaves
+/// the heap bitmap the store already holds, which is the same membership answering the same
+/// questions at the cost this exists to avoid — recoverable and disclosing nothing, so the build
+/// prints the number and carries on (`CLAUDE.md`, *what the strictness is for*). The check that
+/// *is* fail-closed is inside `rehouse_members`: a view whose cardinality differs from the bitmap
+/// it would replace is refused, because a short membership is an artifact served as absent.
 fn write_membership_extents(
-    store: &ArtifactStore,
+    store: &mut ArtifactStore,
     prefix_dir: &Path,
     partition: &str,
     published: &mut PublishedLayers,
@@ -2576,6 +2597,8 @@ fn write_membership_extents(
         .join(partition)
         .join("members");
     std::fs::create_dir_all(&dir).map_err(|e| BuildError::io(&dir, e))?;
+    let mut rehoused = 0u64;
+    let mut kept = 0u64;
     for (index, (layer, level, ordinal_lo, count)) in ready.into_iter().enumerate() {
         // **The layer name never reaches the filename.** It is path-shaped — `clusters/a` — so a
         // name-derived path would escape the directory, or collide after escaping.
@@ -2597,6 +2620,7 @@ fn write_membership_extents(
             writer.push(&blob).map_err(BuildError::Store)?;
         }
         writer.finish().map_err(BuildError::Store)?;
+        rehoused += map_level_memberships(store, &path, &layer, level, &mut kept)?;
         published.paths.push(path);
         published.membership_extents.push(MembershipExtent {
             path: format!("partitions/{partition}/members/{name}"),
@@ -2607,7 +2631,51 @@ fn write_membership_extents(
         });
     }
     tessera_store::fsync_dir(&dir).map_err(BuildError::Store)?;
+    if kept > 0 {
+        eprintln!(
+            "layers: {kept} of {} membership(s) stayed on the heap rather than being read back \
+             through the extent this build just wrote; every answer is unchanged and the build \
+             holds those bitmaps to the end of its run",
+            kept + rehoused
+        );
+    }
     Ok(())
+}
+
+/// One extent's memberships, read back through the mapped file and put into the store in place of
+/// the bitmaps they were encoded from. Returns how many took; `kept` counts the rest.
+///
+/// The pack is held by every view it hands out — an `Arc` per extent, cloned into each `Members` —
+/// so the mapping outlives the store exactly as far as the store's records reach.
+fn map_level_memberships(
+    store: &mut ArtifactStore,
+    path: &Path,
+    layer: &str,
+    level: u32,
+    kept: &mut u64,
+) -> Result<u64> {
+    let pack = std::sync::Arc::new(
+        tessera_store::membership::MembershipPack::open(path).map_err(BuildError::Store)?,
+    );
+    let owner: std::sync::Arc<dyn std::any::Any + Send + Sync> = pack.clone();
+    let mut rehoused = 0;
+    for (ordinal, blob) in pack.iter() {
+        // SAFETY: `blob` is a slice of `pack`'s read-only mapping, `owner` is that same pack, and
+        // the `Members` this produces holds `owner` for as long as it holds the view. The file is
+        // written, fsynced and closed for writing before this runs, and nothing in the build
+        // reopens it for writing.
+        let mapped = tessera_lifecycle::membership::members_bytes(blob)
+            .and_then(|bytes| unsafe { tessera_lifecycle::Members::mapped(bytes, owner.clone()) });
+        let took = match mapped {
+            Some(members) => store.rehouse_members(layer, level, ordinal, members),
+            None => false,
+        };
+        match took {
+            true => rehoused += 1,
+            false => *kept += 1,
+        }
+    }
+    Ok(rehoused)
 }
 
 /// Write every artifact's supplied content as one record-blob extent — the store points use, in an
@@ -3644,6 +3712,82 @@ mod tests {
         let (_, spelled) = canonical_pair(Some("view"), Projection::None, unprojected())
             .expect("the default spelled out");
         assert_eq!(draws, spelled);
+    }
+
+    /// **A published membership is read back through the extent this build has just written**, and
+    /// answers exactly what the heap bitmap it replaced did.
+    ///
+    /// The guard that matters is the *equality*: a view over the wrong bytes would be a membership
+    /// whose masked count is low for every viewer, which the existence criterion renders as absent
+    /// with nothing anywhere to notice. The `is_mapped` assertion is the second half — without it
+    /// the rehousing could quietly stop taking and only a memory measurement would ever say so.
+    #[test]
+    fn a_published_membership_is_read_back_through_the_extent_it_was_written_to() {
+        let declaration: LayerDeclaration = serde_json::from_value(serde_json::json!({
+            "name": "clusters/a",
+            "views": ["world"],
+            "visibility": null,
+            "artifact_visibility": { "field": null, "default": "inherited" },
+            "require_member_visibility": null,
+            "hierarchy": { "kind": "flat", "prune_children": false },
+            "membership": "enumerated",
+        }))
+        .expect("the fixture declaration is well-formed");
+        let row = |key: &str, members: &[u64]| -> InlineArtifact {
+            serde_json::from_value(serde_json::json!({ "key": key, "members": members }))
+                .expect("the fixture row is well-formed")
+        };
+        let sources = vec![LayerSources {
+            name: "clusters/a".to_string(),
+            artifacts: Some(ArtifactSource::Inline(vec![
+                row("a", &[1, 2, 3, 900]),
+                row("b", &[4, 5]),
+            ])),
+            members: None,
+        }];
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let prefix = tempfile::tempdir().expect("a prefix directory");
+        let mut plan = read(
+            std::slice::from_ref(&declaration),
+            &sources,
+            &BTreeMap::new(),
+            &[tessera_store::derived::ViewFrame::new(
+                "world",
+                Projection::None,
+                AlignedSquare::WORLD.bounds(),
+            )],
+            DEFAULT_MAX_SHAPE_VERTICES,
+            scratch.path(),
+            1 << 30,
+        )
+        .expect("an enumerated layer with two inline artifacts reads");
+        let published = publish(
+            &mut plan,
+            &|source| Some(source),
+            1_000,
+            prefix.path(),
+            "default",
+            &["world".to_string()],
+            &BTreeMap::new(),
+        )
+        .expect("two artifacts publish");
+
+        let members: Vec<(u32, Vec<u32>, bool)> = published
+            .store
+            .level("clusters/a", 0)
+            .map(|(ordinal, record)| {
+                (
+                    ordinal,
+                    record.members.iter().collect(),
+                    record.members.is_mapped(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            members,
+            vec![(0, vec![1, 2, 3, 900], true), (1, vec![4, 5], true),],
+            "each membership must be the set it was published with, read through the mapping"
+        );
     }
 
     /// The drawing layer on its own, so that a refusal below is the authored path's own and not

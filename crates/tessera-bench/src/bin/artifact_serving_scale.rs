@@ -2228,7 +2228,7 @@ fn main() {
             ArtifactRecord {
                 entity: EntityId::new(i as u64),
                 key: None,
-                members: to_entities(&in_rows, &space),
+                members: to_entities(&in_rows, &space).into(),
                 contents,
                 attached_to: None,
                 parents: Vec::new(),

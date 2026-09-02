@@ -1105,25 +1105,94 @@ pub fn pack_label_column(ordinals: u32, labels: &[u32]) -> Vec<u8> {
 }
 
 /// Serialise one `(view, layer, level)`'s list column: `at[row]..at[row + 1]` into `values`.
+///
+/// **[`ListColumnWriter`] with the values already in hand**, and the composer does not go this way:
+/// it frames the column and fills it, rather than materialising a `u32` per entry first (see the
+/// writer's own doc for what that cost). One implementation, so the two cannot produce different
+/// bytes for the same column.
 pub fn pack_list_column(ordinals: u32, at: &[u32], values: &[u32]) -> Vec<u8> {
-    let width = row_column_width(u64::from(ordinals));
-    let rows = at.len().saturating_sub(1) as u32;
-    let mut out =
-        Vec::with_capacity(LIST_HEADER_LEN + at.len() * 4 + values.len() * usize::from(width));
-    out.extend_from_slice(LIST_MAGIC);
-    out.extend_from_slice(&ROW_COLUMN_VERSION.to_le_bytes());
-    out.push(width);
-    out.push(0);
-    out.extend_from_slice(&rows.to_le_bytes());
-    out.extend_from_slice(&ordinals.to_le_bytes());
-    out.extend_from_slice(&(values.len() as u32).to_le_bytes());
-    for offset in at {
-        out.extend_from_slice(&offset.to_le_bytes());
+    debug_assert_eq!(
+        *at.last().unwrap_or(&0) as usize,
+        values.len(),
+        "the offset array's end is how many values there are"
+    );
+    let mut writer = ListColumnWriter::frame(ordinals, at);
+    for (index, value) in values.iter().enumerate() {
+        writer.put(index as u32, *value);
     }
-    for value in values {
-        put_narrow(&mut out, width, *value);
+    writer.finish()
+}
+
+/// The same bytes as [`pack_list_column`], **without the `Vec<u32>` of values in front of them**.
+///
+/// # Why it exists
+///
+/// The composer's two passes count each row's list and then fill it, and the fill used to land in a
+/// `Vec<u32>` that [`pack_list_column`] then narrowed into the output. At the 10⁷ MedCPT sample the
+/// MeSH level's lists hold 471,778,374 entries, so that vector is **1.9 GB** standing beside the
+/// 0.9 GB of column it is about to become — measured as the whole of the artifact pass's
+/// +2.6 GB transient (`probes/2026-09-02-mapped-memberships/README.md`). Framing the output first
+/// and writing each value straight into it at its stored width leaves the column and nothing else.
+///
+/// The bytes are [`pack_list_column`]'s exactly, and structurally so: that function is this writer
+/// with the values already in hand, so there is one implementation and this is where a value is
+/// written rather than what is written.
+pub struct ListColumnWriter {
+    out: Vec<u8>,
+    width: u8,
+    values_at: usize,
+    entries: usize,
+}
+
+impl ListColumnWriter {
+    /// The header and the offset array, with the values region reserved and zeroed.
+    ///
+    /// `at` is the finished prefix sum: `at[row]..at[row + 1]` is where row `row`'s entries go, and
+    /// `at.last()` is how many there are in all.
+    pub fn frame(ordinals: u32, at: &[u32]) -> Self {
+        let width = row_column_width(u64::from(ordinals));
+        let rows = at.len().saturating_sub(1) as u32;
+        let entries = *at.last().unwrap_or(&0) as usize;
+        let values_at = LIST_HEADER_LEN + at.len() * 4;
+        let mut out = Vec::with_capacity(values_at + entries * usize::from(width));
+        out.extend_from_slice(LIST_MAGIC);
+        out.extend_from_slice(&ROW_COLUMN_VERSION.to_le_bytes());
+        out.push(width);
+        out.push(0);
+        out.extend_from_slice(&rows.to_le_bytes());
+        out.extend_from_slice(&ordinals.to_le_bytes());
+        out.extend_from_slice(&(entries as u32).to_le_bytes());
+        for offset in at {
+            out.extend_from_slice(&offset.to_le_bytes());
+        }
+        out.resize(values_at + entries * usize::from(width), 0);
+        ListColumnWriter {
+            out,
+            width,
+            values_at,
+            entries,
+        }
     }
-    out
+
+    /// Put `value` at `index` in the values array — the position the caller's own cursor over `at`
+    /// hands it. An index past the array is ignored, on the composer's own rule for a row above the
+    /// view's base row space: the alternative is a panic on a shape this module does not control.
+    pub fn put(&mut self, index: u32, value: u32) {
+        let index = index as usize;
+        if index >= self.entries {
+            return;
+        }
+        let at = self.values_at + index * usize::from(self.width);
+        match self.width {
+            1 => self.out[at] = value as u8,
+            2 => self.out[at..at + 2].copy_from_slice(&(value as u16).to_le_bytes()),
+            _ => self.out[at..at + 4].copy_from_slice(&value.to_le_bytes()),
+        }
+    }
+
+    pub fn finish(self) -> Vec<u8> {
+        self.out
+    }
 }
 
 /// One `(view, layer, level)`'s label column, framed and checked once at open.
@@ -1561,7 +1630,10 @@ pub fn pack_shape_rows(
     row_count: u32,
     entries: &[Option<Vec<u8>>],
 ) -> Vec<u8> {
-    let payload: usize = entries.iter().map(|e| 4 + e.as_ref().map_or(0, Vec::len)).sum();
+    let payload: usize = entries
+        .iter()
+        .map(|e| 4 + e.as_ref().map_or(0, Vec::len))
+        .sum();
     let mut out = Vec::with_capacity(SHAPE_ROWS_HEADER_LEN + seg_id.len() + payload);
     out.extend_from_slice(SHAPE_ROWS_MAGIC);
     out.extend_from_slice(&SHAPE_ROWS_VERSION.to_le_bytes());

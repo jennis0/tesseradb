@@ -36,7 +36,7 @@ pub use alloc::{
     allocator_ceiling, allocator_floor, assign_sorted, high_water_from, low_water_from, Allocator,
     PendingItem,
 };
-pub use membership::{ArtifactRecord, ArtifactStore, IncomingArtifact, IncomingGrowth};
+pub use membership::{ArtifactRecord, ArtifactStore, IncomingArtifact, IncomingGrowth, Members};
 pub use registry::{no_pending, EdgeCheck, LayerRegistry, RegistryError, ResolvedLayers};
 pub use roster::{GroupFacts, RosterError, ViewRoster};
 pub use buffer::{BufferedItem, DescriptorResolver, IngestBuffer};

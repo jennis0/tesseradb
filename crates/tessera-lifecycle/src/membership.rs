@@ -27,9 +27,11 @@
 //! consumes it, and nothing serialises it to a client — because a corpus-wide count over items a
 //! principal may not see is C8's row, one careless line from being served beside a masked one.
 
+use std::any::Any;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
-use croaring::{Bitmap, Portable};
+use croaring::{Bitmap, BitmapView, Portable};
 use tessera_types::EntityId;
 
 /// Execute a layer's `withdraw_on_member_deletion` declaration against one record, for the members
@@ -421,6 +423,175 @@ pub struct Degradation {
     pub contents_lost: Vec<(u32, u64)>,
 }
 
+/// One artifact's membership — **the bitmap, or a read-only view of the same bitmap's bytes
+/// somewhere the heap is not**.
+///
+/// # Why the field is not simply a `Bitmap`
+///
+/// A membership is a bitmap for its whole serving life and is never anything else; what this adds
+/// is where the *containers* live. At a build the store is filled at the layers stage and read
+/// again at the artifact pass, four stages later, and in between it holds one Roaring bitmap per
+/// artifact over the whole corpus. Measured on the 10⁷ MedCPT sample with 471,778,374 closed MeSH
+/// member rows, that is **+1.2 GB of anonymous memory** carried across the build's peak — about
+/// 2.7 bytes per closed member row, array containers almost throughout
+/// (`probes/2026-09-02-mapped-memberships/README.md`).
+///
+/// The bytes are written to the bundle's own membership extent a moment later, and the build maps
+/// that file back ([`Members::mapped`]). A view costs the heap its container *descriptors* and
+/// nothing else: the two-byte values themselves stay page cache the kernel may evict. There is no
+/// second format and no second write — the mapped bytes are the extent's, in the portable Roaring
+/// form [`serialise_members`] already wrote.
+///
+/// # What a view may and may not do
+///
+/// Reads go through [`Deref`](std::ops::Deref), so every caller that asks a membership a question is unchanged and
+/// cannot tell the two apart. A *write* takes [`Members::to_mut`], which materialises an owned
+/// bitmap first — growth and retirement therefore behave identically on either form, which is what
+/// keeps write-path §5.4's two removal rules the only routes a bit leaves a membership.
+///
+/// ⊘ **The mapping's lifetime is the owner's, and the owner is held here.** `bytes` points into an
+/// allocation `owner` keeps alive — at a build, the mapped extent file — so the view is valid for
+/// exactly as long as this value is. Nothing outside [`Members::mapped`] can construct one.
+pub struct Members(MembersInner);
+
+enum MembersInner {
+    Owned(Bitmap),
+    /// Declared in drop order: the view's header is freed before the bytes it addresses can go.
+    Mapped {
+        view: BitmapView<'static>,
+        bytes: &'static [u8],
+        owner: Arc<dyn Any + Send + Sync>,
+    },
+}
+
+/// `Bitmap` carries croaring's own `Send`/`Sync`, and a view over bytes nothing else may write is
+/// no weaker: every operation reachable through [`Deref`](std::ops::Deref) is a read of a `roaring_bitmap_t` and of
+/// the immutable slice behind it, and the one route to a mutation ([`Members::to_mut`]) needs
+/// `&mut self`. The owner is `Send + Sync` by its own bound.
+unsafe impl Send for Members {}
+unsafe impl Sync for Members {}
+
+impl Members {
+    /// The membership on the heap — what a publication, a WAL replay and every test produce.
+    pub fn owned(bitmap: Bitmap) -> Self {
+        Members(MembersInner::Owned(bitmap))
+    }
+
+    /// The membership read through `bytes`, which `owner` keeps alive.
+    ///
+    /// `bytes` must be the **portable** Roaring form [`serialise_members`] writes — the form the
+    /// packed extent carries — and must live inside an allocation `owner` owns. Answers `None`
+    /// where the bytes are not a bitmap at all, on [`deserialise_members`]'s rule: a membership
+    /// that decodes short is one with a low masked count for every viewer, which the existence
+    /// criterion renders as absent with nothing to notice.
+    ///
+    /// # Safety
+    ///
+    /// `bytes` must remain valid and unwritten for as long as `owner` is held, and dropping
+    /// `owner` must not free them earlier. Both hold for a slice of a read-only file mapping the
+    /// `owner` itself keeps open.
+    pub unsafe fn mapped(bytes: &[u8], owner: Arc<dyn Any + Send + Sync>) -> Option<Self> {
+        // The checked deserialiser first: `BitmapView::deserialize` is unchecked, and bytes that
+        // are not a bitmap would be read as containers at whatever the header claimed. This costs
+        // one decode of the header region and is the same validation the WAL replay applies.
+        let checked = deserialise_members(bytes)?;
+        drop(checked);
+        // SAFETY: the caller's contract above pins the bytes for `owner`'s life, and `owner` is
+        // moved into the value that holds the view, so the two cannot be separated.
+        let bytes: &'static [u8] = unsafe { std::mem::transmute::<&[u8], &'static [u8]>(bytes) };
+        let view = unsafe { BitmapView::deserialize::<Portable>(bytes) };
+        Some(Members(MembersInner::Mapped { view, bytes, owner }))
+    }
+
+    /// The membership as something that can be written to, materialising an owned copy where this
+    /// was a view. Every mutation in this module goes through it.
+    pub fn to_mut(&mut self) -> &mut Bitmap {
+        if let MembersInner::Mapped { view, .. } = &self.0 {
+            self.0 = MembersInner::Owned(view.to_bitmap());
+        }
+        match &mut self.0 {
+            MembersInner::Owned(bitmap) => bitmap,
+            MembersInner::Mapped { .. } => unreachable!("the arm above replaced it"),
+        }
+    }
+
+    /// Whether this membership is read through a mapping rather than held on the heap — for the
+    /// build's own accounting and its tests, and for nothing on a serving path.
+    pub fn is_mapped(&self) -> bool {
+        matches!(self.0, MembersInner::Mapped { .. })
+    }
+}
+
+impl std::ops::Deref for Members {
+    type Target = Bitmap;
+
+    fn deref(&self) -> &Bitmap {
+        match &self.0 {
+            MembersInner::Owned(bitmap) => bitmap,
+            MembersInner::Mapped { view, .. } => view,
+        }
+    }
+}
+
+impl From<Bitmap> for Members {
+    fn from(bitmap: Bitmap) -> Self {
+        Members::owned(bitmap)
+    }
+}
+
+impl Default for Members {
+    fn default() -> Self {
+        Members::owned(Bitmap::new())
+    }
+}
+
+impl Clone for Members {
+    /// A clone of a view is a view: the owner is an `Arc` and the bytes outlive both.
+    fn clone(&self) -> Self {
+        match &self.0 {
+            MembersInner::Owned(bitmap) => Members::owned(bitmap.clone()),
+            MembersInner::Mapped { bytes, owner, .. } => Members(MembersInner::Mapped {
+                // SAFETY: `bytes` is the slice this value's own view already addresses, and
+                // `owner` — cloned beside it — is what keeps it alive.
+                view: unsafe { BitmapView::deserialize::<Portable>(bytes) },
+                bytes,
+                owner: Arc::clone(owner),
+            }),
+        }
+    }
+}
+
+impl std::fmt::Debug for Members {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Members({}{})",
+            self.cardinality(),
+            if self.is_mapped() { ", mapped" } else { "" }
+        )
+    }
+}
+
+impl PartialEq for Members {
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+
+impl Eq for Members {}
+
+impl PartialEq<Bitmap> for Members {
+    fn eq(&self, other: &Bitmap) -> bool {
+        **self == *other
+    }
+}
+
+impl PartialEq<Members> for Bitmap {
+    fn eq(&self, other: &Members) -> bool {
+        *self == **other
+    }
+}
+
 /// One artifact's durable state, as the registry holds it.
 #[derive(Debug, Clone)]
 pub struct ArtifactRecord {
@@ -430,8 +601,9 @@ pub struct ArtifactRecord {
     /// layer's edges point into**: an edge names its target, and at publish time the caller holds
     /// no `tessera_id` for it.
     pub key: Option<String>,
-    /// Entity-space membership — the canonical, view-invariant record.
-    pub members: Bitmap,
+    /// Entity-space membership — the canonical, view-invariant record. Owned, or read through a
+    /// mapping of the bytes that carry it (see [`Members`]).
+    pub members: Members,
     /// The ranked contents of this artifact's supplied content, most specific first.
     ///
     /// **The values are not here.** This carries each content's *generating set* — the thing the
@@ -844,7 +1016,7 @@ impl ArtifactStore {
                 ArtifactRecord {
                     entity: published.entity,
                     key: published.key.clone(),
-                    members,
+                    members: Members::owned(members),
                     contents,
                     attached_to: published.attached_to.clone().map(|a| Attachment {
                         layer: a.layer,
@@ -931,7 +1103,40 @@ impl ArtifactStore {
         else {
             return;
         };
-        record.members.or_inplace(joining);
+        record.members.to_mut().or_inplace(joining);
+    }
+
+    /// Replace one artifact's membership with the **same** membership held somewhere else — the
+    /// build's route from a heap bitmap to a view over the extent it has just written
+    /// ([`Members::mapped`]).
+    ///
+    /// **It refuses a membership that is not equal to the one it replaces**, by cardinality, which
+    /// a Roaring container answers from its own header and so costs the containers and not the
+    /// members. That check is the whole of what stands between a mis-sliced blob and an artifact
+    /// whose masked count is low for every viewer — the state the existence criterion renders as
+    /// absent with nothing anywhere to notice. `false` leaves the record exactly as it was.
+    ///
+    /// Nothing about what the artifact *is* changes: the same bits, addressed through a mapping.
+    pub fn rehouse_members(
+        &mut self,
+        layer: &str,
+        level: u32,
+        ordinal: u32,
+        members: Members,
+    ) -> bool {
+        let Some(record) = self
+            .levels
+            .get_mut(&(layer.to_string(), level))
+            .and_then(|slots| slots.get_mut(ordinal as usize))
+            .and_then(Option::as_mut)
+        else {
+            return false;
+        };
+        if members.cardinality() != record.members.cardinality() {
+            return false;
+        }
+        record.members = members;
+        true
     }
 
     pub fn get(&self, layer: &str, level: u32, ordinal: u32) -> Option<&ArtifactRecord> {
@@ -1328,7 +1533,7 @@ impl ArtifactStore {
                         return encode_record(record, shape);
                     }
                     let mut record = record.clone();
-                    record.members.andnot_inplace(retired);
+                    record.members.to_mut().andnot_inplace(retired);
                     let _ = apply_deletion_policy(&mut record, retired, on_deletion);
                     encode_record(&record, shape)
                 })
@@ -1384,7 +1589,7 @@ impl ArtifactStore {
                 // question the version needs without a second copy of the membership to compare
                 // against.
                 let shrinks = record.members.and_cardinality(retired) != 0;
-                record.members.andnot_inplace(retired);
+                record.members.to_mut().andnot_inplace(retired);
                 changed |= shrinks;
                 changed |= apply_deletion_policy(record, retired, on_deletion);
             }
@@ -1717,6 +1922,30 @@ pub fn encode_record(record: &ArtifactRecord, shape: Option<&ArtifactShapes>) ->
     out
 }
 
+/// Where one packed blob's membership bytes are, without decoding a bitmap.
+///
+/// **The build's one use for it**: an extent it has just written is mapped back, and a record's
+/// heap bitmap is replaced by a view over these bytes ([`Members::mapped`]). Nothing is copied and
+/// nothing is parsed but the three lengths [`encode_record`] puts in front — which is the whole
+/// reason the membership carries an explicit length rather than being the blob's tail.
+///
+/// `None` where the framing does not hold, on [`decode_record`]'s rule: the caller keeps the
+/// bitmap it already has rather than adopting bytes it could not locate.
+pub fn members_bytes(blob: &[u8]) -> Option<&[u8]> {
+    let key_len = u16::from_le_bytes(blob.get(0..2)?.try_into().ok()?) as usize;
+    if key_len == u16::MAX as usize {
+        return None;
+    }
+    let at = 2 + key_len;
+    let count = u16::from_le_bytes(blob.get(at..at + 2)?.try_into().ok()?) as usize;
+    if count == u16::MAX as usize {
+        return None;
+    }
+    let at = at + 2;
+    let members_len = u32::from_le_bytes(blob.get(at..at + 4)?.try_into().ok()?) as usize;
+    blob.get(at + 4..at + 4 + members_len)
+}
+
 /// The inverse, refusing anything it cannot read back exactly.
 ///
 /// **A refusal and never a partial record**, on [`deserialise_members`]'s argument: an artifact whose
@@ -1829,7 +2058,7 @@ pub fn decode_record(
         ArtifactRecord {
             entity,
             key,
-            members,
+            members: Members::owned(members),
             contents,
             attached_to,
             parents,
@@ -1893,7 +2122,7 @@ mod tests {
         ArtifactRecord {
             entity: EntityId::new(entity),
             key: None,
-            members: Bitmap::of(members),
+            members: Members::owned(Bitmap::of(members)),
             contents: Vec::new(),
             attached_to: None,
             parents: Vec::new(),
@@ -2006,7 +2235,7 @@ mod tests {
         // deletion that shrinks the membership shrinks the denominator with it, in one place.
         let mut r = record(100, &[1, 2, 3, 4]);
         assert_eq!(r.declared_size(), 4);
-        r.members.remove(3);
+        r.members.to_mut().remove(3);
         assert_eq!(r.declared_size(), 3);
     }
 
@@ -2125,6 +2354,108 @@ mod tests {
             }
         }
         out
+    }
+
+    /// **A membership read through bytes is the membership**, and a write to it materialises
+    /// first. The two together are what let the build swap where a membership lives without any
+    /// caller being able to tell — and what keep growth and retirement the only routes a bit
+    /// changes, whichever form the record happens to be in.
+    #[test]
+    fn a_mapped_membership_answers_as_the_bitmap_it_views() {
+        let bitmap = Bitmap::of(&[1, 2, 3, 70_000, 70_001]);
+        let bytes: Arc<Vec<u8>> = Arc::new(serialise_members(&bitmap));
+        let owner: Arc<dyn Any + Send + Sync> = bytes.clone();
+        let mapped = unsafe { Members::mapped(&bytes, owner) }.expect("the bytes are a bitmap");
+        assert!(mapped.is_mapped());
+        assert_eq!(mapped, bitmap);
+        assert_eq!(mapped.cardinality(), 5);
+        assert_eq!(
+            mapped.iter().collect::<Vec<u32>>(),
+            vec![1, 2, 3, 70_000, 70_001]
+        );
+        // A clone of a view is a view over the same bytes, and outlives the value it came from.
+        let clone = mapped.clone();
+        drop(mapped);
+        assert_eq!(clone, bitmap);
+
+        let mut written = clone;
+        written.to_mut().add(9);
+        assert!(!written.is_mapped(), "a write materialises before it lands");
+        assert_eq!(written.cardinality(), 6);
+        assert!(written.contains(9));
+        // And the bytes it viewed are untouched — the mapping is read-only by construction.
+        assert_eq!(deserialise_members(&bytes).expect("still a bitmap"), bitmap);
+    }
+
+    /// **Bytes that are not a bitmap are refused rather than read as containers.** The view
+    /// constructor is unchecked in croaring; this is the check in front of it, and it is the same
+    /// refusal [`deserialise_members`] makes for the same reason.
+    #[test]
+    fn a_mapped_membership_refuses_bytes_that_are_not_a_bitmap() {
+        let bytes: Arc<Vec<u8>> = Arc::new(vec![0xAB; 32]);
+        let owner: Arc<dyn Any + Send + Sync> = bytes.clone();
+        assert!(unsafe { Members::mapped(&bytes, owner) }.is_none());
+    }
+
+    /// **A rehousing that is not the same membership is refused**, and the record keeps what it
+    /// had. A view over another artifact's bytes would be a masked count that is low for every
+    /// viewer — served as absent, with nothing to notice.
+    #[test]
+    fn rehousing_refuses_a_membership_that_is_not_the_one_it_replaces() {
+        let mut store = ArtifactStore::new();
+        store.put("clusters/a", 0, 0, record(100, &[1, 2, 3]), None);
+
+        let wrong: Arc<Vec<u8>> = Arc::new(serialise_members(&Bitmap::of(&[1, 2])));
+        let owner: Arc<dyn Any + Send + Sync> = wrong.clone();
+        let members = unsafe { Members::mapped(&wrong, owner) }.expect("a bitmap");
+        assert!(!store.rehouse_members("clusters/a", 0, 0, members));
+        assert_eq!(
+            store.get("clusters/a", 0, 0).expect("still there").members,
+            Bitmap::of(&[1, 2, 3])
+        );
+
+        let right: Arc<Vec<u8>> = Arc::new(serialise_members(&Bitmap::of(&[1, 2, 3])));
+        let owner: Arc<dyn Any + Send + Sync> = right.clone();
+        let members = unsafe { Members::mapped(&right, owner) }.expect("a bitmap");
+        assert!(store.rehouse_members("clusters/a", 0, 0, members));
+        let record = store.get("clusters/a", 0, 0).expect("still there");
+        assert!(record.members.is_mapped());
+        assert_eq!(record.members, Bitmap::of(&[1, 2, 3]));
+        // An ordinal naming no record adopts nothing, exactly as a growth does not resurrect one.
+        let spare: Arc<Vec<u8>> = Arc::new(serialise_members(&Bitmap::new()));
+        let owner: Arc<dyn Any + Send + Sync> = spare.clone();
+        let members = unsafe { Members::mapped(&spare, owner) }.expect("a bitmap");
+        assert!(!store.rehouse_members("clusters/a", 0, 7, members));
+    }
+
+    /// **The membership's bytes are where [`members_bytes`] says they are**, over a record with a
+    /// key, contents and an attachment in front of and behind them — the framing the build's
+    /// rehousing walks without decoding a bitmap.
+    #[test]
+    fn members_bytes_finds_the_membership_encode_record_wrote() {
+        let mut record = record(100, &[1, 2, 3, 70_000]);
+        record.key = Some("a-key".to_string());
+        record.contents = vec![ContentSet {
+            values: Some(vec!["topic".to_string()]),
+            generated_from: Bitmap::of(&[2, 3]),
+        }];
+        record.attached_to = Some(Attachment {
+            layer: "labels/x".to_string(),
+            level: 0,
+            ordinal: 3,
+            entity: EntityId::new(400),
+        });
+        let blob = encode_record(&record, None);
+        let bytes = members_bytes(&blob).expect("the framing holds");
+        assert_eq!(
+            deserialise_members(bytes).expect("a bitmap"),
+            Bitmap::of(&[1, 2, 3, 70_000]),
+            "the slice must be the membership and not a content's generating set"
+        );
+        // **A blob cut inside the membership answers None rather than a shorter one** — which is
+        // the whole point of the explicit length `encode_record` puts in front of it.
+        let end = bytes.as_ptr() as usize - blob.as_ptr() as usize + bytes.len();
+        assert!(members_bytes(&blob[..end - 1]).is_none());
     }
 
     fn check_round_trip(members: &Bitmap) {
