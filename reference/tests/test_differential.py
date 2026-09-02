@@ -198,8 +198,8 @@ def _grid_differential(server, oracle_bundle: Bundle, *, require_partial: bool =
                 morton.tiles_for_bbox(bbox, zoom, oracle_bundle.extent)
             )
 
-            server_tile_map = {t: v for t, v, m, _s in server_tiles}
-            for t, v, m, _s in server_tiles:
+            server_tile_map = {t: v for t, v, m, _s, _h in server_tiles}
+            for t, v, m, _s, _h in server_tiles:
                 assert v == m, "Phase 1 has no filters: matched must equal visible"
             assert server_tile_map == oracle_tile_counts, (
                 f"tile counts disagree for zoom={zoom} bbox={bbox} grant_size={len(grant)}: "
@@ -213,7 +213,7 @@ def _grid_differential(server, oracle_bundle: Bundle, *, require_partial: bool =
             # which cannot be recomputed from k and visible alone. That is the whole reason `served`
             # is on the wire.
             cursor = 0
-            for t, _visible, _matched, served_n in server_tiles:
+            for t, _visible, _matched, served_n, _h in server_tiles:
                 tile_points = server_points[cursor : cursor + served_n]
                 cursor += served_n
                 # Counter, not set: two distinct entities can share a position within a tile,
@@ -251,7 +251,7 @@ def _grid_differential(server, oracle_bundle: Bundle, *, require_partial: bool =
 
 
 def _visible_of(server_tiles, tile):
-    for t, v, _m, _s in server_tiles:
+    for t, v, _m, _s, _h in server_tiles:
         if t == tile:
             return v
     raise AssertionError(f"tile {tile} not in the tiles batch")
@@ -280,7 +280,7 @@ def test_suppress_over_control_plane_drops_the_count(server, oracle_bundle: Bund
 
     raw_before = server.viewport(token, VIEW, zoom, bbox, k=200)
     tiles_before, _ = decode_viewport(raw_before)
-    counts_before = {t: v for t, v, m, _s in tiles_before}
+    counts_before = {t: v for t, v, m, _s, _h in tiles_before}
     oracle_before = _oracle_counts(oracle_bundle, base_mask, VIEW, zoom, bbox)
     assert counts_before == oracle_before
 
@@ -294,7 +294,7 @@ def test_suppress_over_control_plane_drops_the_count(server, oracle_bundle: Bund
 
     raw_after = server.viewport(token, VIEW, zoom, bbox, k=200)
     tiles_after, _ = decode_viewport(raw_after)
-    counts_after = {t: v for t, v, m, _s in tiles_after}
+    counts_after = {t: v for t, v, m, _s, _h in tiles_after}
     resolved_mask = changes.resolve(base_mask, {term_id})
     oracle_after = _oracle_counts(oracle_bundle, resolved_mask, VIEW, zoom, bbox)
 
@@ -368,7 +368,7 @@ def test_mixed_change_composition_stress(server, oracle_bundle: Bundle):
 
     raw = server.viewport(token, VIEW, zoom, bbox, k=200)
     tiles, _ = decode_viewport(raw)
-    server_counts = {t: v for t, v, m, _s in tiles}
+    server_counts = {t: v for t, v, m, _s, _h in tiles}
     oracle_counts = _oracle_counts(oracle_bundle, resolved_mask, VIEW, zoom, bbox)
 
     assert server_counts == oracle_counts

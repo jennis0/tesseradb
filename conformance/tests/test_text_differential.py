@@ -155,7 +155,7 @@ COMPOSED_EXPR = {
 
 
 def _tiles_by_id(tiles) -> dict[int, tuple[int, int, int]]:
-    return {t: (v, m, s) for t, v, m, s in tiles}
+    return {t: (v, m, s) for t, v, m, s, _h in tiles}
 
 
 def _served_entities(raw: bytes, entity_of_fx: dict[int, int]) -> set[int]:

@@ -86,6 +86,9 @@ def _canon(
                 "visible": pa.array([tiles[t][0] for t in sorted(tiles)], pa.uint64()),
                 "matched": pa.array([tiles[t][1] for t in sorted(tiles)], pa.uint64()),
                 "served": pa.array([tiles[t][2] for t in sorted(tiles)], pa.uint64()),
+                # Always present, and equal to `matched` where no highlight was asked for
+                # (`highlight-and-hierarchy.md` §2).
+                "highlighted": pa.array([tiles[t][1] for t in sorted(tiles)], pa.uint64()),
             }
         )
     )

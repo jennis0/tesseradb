@@ -104,7 +104,7 @@ def _server_view(server, token: str, depth: int, k: int):
     per_tile: dict[int, list[tuple[float, float]]] = {}
     counts: dict[int, tuple[int, int]] = {}
     cursor = 0
-    for tile, visible, matched, served in tiles:
+    for tile, visible, matched, served, _highlighted in tiles:
         assert visible == matched, "Phase 1 has no filters: matched must equal visible"
         per_tile[tile] = [code for _ident, code in points[cursor : cursor + served]]
         counts[tile] = (visible, served)
