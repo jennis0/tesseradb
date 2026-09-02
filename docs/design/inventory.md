@@ -67,7 +67,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | **C28** | A caller's membership requirement on supplied content — require_member_visibility | High if mis-declared | Accepted — caller's control (⊘ not built) |
 | **C29** | An artifact's parent identifiers on the wire | Low | Accepted — bounded to the response's own membership |
 | **C30** | An item's satisfied labels, its reachable views and their positions, and its scoped values, on the drill-down | Low | Accepted — the intersection is the disclosure, and it is the principal's own; the views and values are the principal's own too |
-| **C31** | Listing and suggestion time on a derived category column | Low | Accepted — owner ruling 2026-09-02; closed for indexed columns once the per-session set is warm (decision 0124), open on the probe route — the first keystrokes, viewers wider than the constant, blob-resident columns, and the enumeration. ⊘ The set is not built |
+| **C31** | Listing and suggestion time on a derived category column | Low | Accepted — owner ruling 2026-09-02; narrowed for indexed columns once the per-session set is warm (decision 0124): no posting is read, the walk over entries remains. Unnarrowed on the probe route — the first keystrokes on a session-column pair, viewers wider than the constant, a value minted since the sweep, blob-resident columns, and the enumeration. (0124 and r60 read this as closed, on a set walk over positions inside the prefix range that is not implementable; value-suggestion.md r5 §6.3 carries the correction) |
 | **C32** | A highlight's counts and bits — highlighted per tile, per served point and per served artifact (highlight-and-hierarchy.md §2) | Low | Accepted — a second filter over the same candidate (⊘ not built) |
 | **C33** | The browse verb — a layer's artifacts by lineage (highlight-and-hierarchy.md §4) | Low | Accepted — bounded to what a viewport already serves (⊘ not built) |
 
@@ -80,9 +80,9 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `annotation-representation.md` | Normative for the annotation representat | 40 |
 | `annotation-write-cycle.md` | Normative for the annotation write cycle | 18 |
 | `annotations.md` | Normative — r43 | 18 |
-| `architecture.md` | Normative — r60 | 50 |
+| `architecture.md` | Normative — r61 | 49 |
 | `artifact-fetch-protocol.md` | Normative — r3 | 7 |
-| `artifact-serving-at-scale.md` | Ruled, reviewed, amended, and re-measure | 21 |
+| `artifact-serving-at-scale.md` | Ruled, reviewed, amended, and re-measure | 22 |
 | `artifact-shapes.md` | Normative — r7 |  |
 | `artifact-system.md` | Descriptive. This document orients an ar | 6 |
 | `artifacts-from-points.md` | Draft | 2 |
@@ -118,7 +118,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `streamed-serving.md` | Normative — r2 |  |
 | `system-architecture.md` | Normative — r17 | 28 |
 | `tile-addressed-integration.md` | Provisional — under review |  |
-| `value-suggestion.md` | Normative — r4 | 18 |
+| `value-suggestion.md` | Normative — r5 | 13 |
 | `view-switching.md` | Provisional — under review | 4 |
 | `views.md` | Normative — r29 | 21 |
 | `write-path.md` | Normative for the write path. Owner sign | 20 |
