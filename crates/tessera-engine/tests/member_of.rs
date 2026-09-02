@@ -195,18 +195,34 @@ impl Fixture {
 /// `membership ∩ M_auth` — the same number the artifacts frame serves beside the artifact — for
 /// every principal, which is what makes the layout a cost decision (decision 0093/0094).
 ///
+/// **And the route is the membership, never the column.** Both answer the same number, so only a
+/// counter separates them: `Engine::member_of_column_walks` rises when the leaf falls back to
+/// walking every visible row of the view asking each of its labels whether it is this ordinal.
+/// That fallback is a correct answer at the wrong price — measured at 2.85 s against 22 ms on
+/// rung 3's 3.6 × 10⁷-row `mesh/descriptors` — and it is reachable only on a level with no
+/// artifact-major membership, which no level is today.
+///
 /// Mutations this kills: reading the membership without the mask (the broad principal's answer
 /// would be right and the narrow one's wrong); scanning the row column over the request's tiles
-/// rather than the whole view; taking the artifact's row set for the wrong ordinal.
+/// rather than the whole view; taking the artifact's row set for the wrong ordinal; and taking
+/// the column route where the membership would have answered.
 #[test]
 fn the_leaf_is_the_artifacts_masked_count_under_either_layout() {
     for layout in [
         None,
         Some(ServingLayout::ArtifactMajor),
         Some(ServingLayout::RowMajorLabel),
+        Some(ServingLayout::RowMajorList),
     ] {
         let fx = fixture(layout, BOTH_SERVED);
         let what = format!("{layout:?}");
+        // The declared layout is the served one here — a single artifact's memberships cannot
+        // overlap, so nothing falls back and each arm of the loop exercises the route it names.
+        assert_eq!(
+            fx.engine.recorded_layout(LAYER, 0),
+            Some(layout.unwrap_or(ServingLayout::ArtifactMajor)),
+            "{what}: the level is served in the layout the loop asked for"
+        );
         let broad = viewport(&fx.engine, &full_coverage_credential(), Some(member_of(fx.id)));
         let narrow = viewport(&fx.engine, &subset_credential(), Some(member_of(fx.id)));
         let want_broad = visible_members(MEMBERS, |_| true);
@@ -221,6 +237,11 @@ fn the_leaf_is_the_artifacts_masked_count_under_either_layout() {
         assert_eq!(visible(&broad), N_ITEMS, "{what}: visible is unmoved");
         // A `member_of` leaf carries no region, so no verdict rides on the response.
         assert_eq!(broad.region, None, "{what}: no region verdict");
+        assert_eq!(
+            fx.engine.member_of_column_walks(),
+            0,
+            "{what}: the leaf read the artifact-major membership, not the row column"
+        );
     }
 }
 

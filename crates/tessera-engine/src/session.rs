@@ -864,6 +864,16 @@ pub struct Engine {
     /// still count the one crossing such a request makes for its entity-space sub-trees; a
     /// pure-row tree crosses nothing and moves this counter alone.
     pub(crate) filter_row_routed: AtomicU64,
+    /// `member_of` leaves that could not read an artifact-major membership and walked the level's
+    /// row column instead (`viewport::Engine::resolve_member_of`).
+    ///
+    /// **It should stay at zero**, and it is a counter rather than an assertion because the walk
+    /// is a correct answer at the wrong price: every level carries the artifact-major form today,
+    /// so the fallback is unreachable, and if the ⊘ residency saving of `crate::row_column` ever
+    /// drops that form this is the number that says the leaf started costing a pass over the whole
+    /// view rather than an intersection. Measured at 2.85 s against 22 ms on rung 3's
+    /// `mesh/descriptors` (2026-09-02).
+    pub(crate) member_of_column_walks: AtomicU64,
     /// Requests served from a one-generation-stale entry — the steady-state observable behind
     /// decision 0044's stale-serve. A deployment where this rises and
     /// [`Self::full_projection_builds`] does not is one where the refresh is keeping up.
@@ -1597,6 +1607,7 @@ impl Engine {
             serial_fallback_max_rows: AtomicU64::new(crate::viewport::SERIAL_FALLBACK_MAX_ROWS),
             filter_crossings_projected: AtomicU64::new(0),
             filter_crossings_per_tile: AtomicU64::new(0),
+            member_of_column_walks: AtomicU64::new(0),
             filter_row_routed: AtomicU64::new(0),
             stale_serves: AtomicU64::new(0),
             refreshes: Arc::new(AtomicU64::new(0)),
@@ -1813,6 +1824,12 @@ impl Engine {
     /// counts here *and* in whichever crossing its entity sub-trees took.
     pub fn filter_row_routes(&self) -> u64 {
         self.filter_row_routed.load(Ordering::Relaxed)
+    }
+
+    /// `member_of` leaves served by the row-column walk rather than by the artifact-major
+    /// membership — see [`Self::member_of_column_walks`]. Zero in every deployment today.
+    pub fn member_of_column_walks(&self) -> u64 {
+        self.member_of_column_walks.load(Ordering::Relaxed)
     }
 
     #[cfg(feature = "bench-timing")]

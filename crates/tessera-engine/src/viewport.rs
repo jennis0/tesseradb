@@ -4800,7 +4800,11 @@ impl Engine {
         Some(
             self.masked_counts
                 .get_or_build(identity.key(view, layer, level, level_version), || {
-                    crate::histogram::MaskedCounts::new(column.histogram(mask))
+                    // On the engine's own pool, because the walk inside is split across it
+                    // (`RowColumn::histogram_over`) and a request must not spill onto rayon's
+                    // global pool, which nothing here sizes.
+                    self.pool
+                        .install(|| crate::histogram::MaskedCounts::new(column.histogram(mask)))
                 }),
         )
     }
@@ -5107,12 +5111,28 @@ impl Engine {
         let Some(gated) = gated.filter(|g| g.name == leaf.layer) else {
             return Ok(croaring::Bitmap::new());
         };
+        // **The artifact-major membership first, whatever the level's serving layout** — this is
+        // the cheap case `highlight-and-hierarchy.md` §2.1 names, and it is cheap because
+        // `MembershipRows` is already a row-space bitmap: the operand is one intersection with
+        // `M_auth`, O(containers touched) and independent of what the artifact matched.
+        //
+        // **A row-major level has one too**, and reading the column instead was measured at
+        // 2.85 s on rung 3's `mesh/descriptors` — a walk of every visible row of a 3.6 × 10⁷-row
+        // view asking each of its ~46 labels whether it is this ordinal, where the bitmap beside
+        // it answers the same question in microseconds. The two agree by construction: the column
+        // is a projection *of* this membership (`crate::row_column`), and the residency saving
+        // that would drop the artifact-major form is ⊘ **not taken**, so the form is there.
+        //
+        // The column walk stays as the fallback for the level that one day has no artifact-major
+        // form — an unreachable route today, and the honest answer rather than an empty operand
+        // if it ever is reached.
+        if let Some(rows) = gated.rows.get(gated.ordinal) {
+            return Ok(mask.visible_rows(rows));
+        }
         Ok(match gated.rows.column() {
-            None => match gated.rows.get(gated.ordinal) {
-                Some(rows) => mask.visible_rows(rows),
-                None => croaring::Bitmap::new(),
-            },
+            None => croaring::Bitmap::new(),
             Some(column) => {
+                self.member_of_column_walks.fetch_add(1, Ordering::Relaxed);
                 let visible = mask.visible_all();
                 let mut out = croaring::Bitmap::new();
                 for row in visible.iter() {
