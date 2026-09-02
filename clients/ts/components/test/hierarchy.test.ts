@@ -164,4 +164,26 @@ describe('<tessera-hierarchy>', () => {
     await settle(host);
     expect(deepAll(host, '[part="row"] [part="name"]').map((n) => n.textContent?.trim())).toEqual(['Lymphocytes']);
   });
+
+  it('a panel that is not being shown asks for nothing, and browses when it is', async () => {
+    // The roots are the widest request this panel makes, and a host with the panel in a closed
+    // drawer was paying for it on the page's first meta — beside the first viewport, against a
+    // server still materialising the session.
+    const host = await mount('<tessera-hierarchy style="display:none"></tessera-hierarchy>');
+    const el = host.querySelector('tessera-hierarchy') as TesseraHierarchy;
+    const store = fakeStore({meta: META, status: status({})});
+    store.setBrowse('roots', {artifacts: [row(1n, 'Neoplasms', 27_000_000n)], parents: [], next: null});
+    el.store = store;
+    await settle(host);
+    await settle(host);
+    expect(store.calls.filter((c) => c.name === 'browse')).toHaveLength(0);
+
+    el.style.display = '';
+    el.requestUpdate();
+    await settle(host);
+    await settle(host);
+    expect(store.calls.filter((c) => c.name === 'browse')).toHaveLength(1);
+    expect(deepAll(host, '[part="row"] [part="name"]').map((n) => n.textContent?.trim())).toEqual(['Neoplasms']);
+  });
+
 });

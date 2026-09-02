@@ -1,4 +1,4 @@
-import {css, html, nothing} from 'lit';
+import {css, html, nothing, type PropertyValues} from 'lit';
 import {property, state} from 'lit/decorators.js';
 import {browsableLayers, isFilterLayer, withMember, withoutMember, type BrowsePage, type BrowseRow, type ClauseVerb, type Layer, type Masked, type Refusal} from '@tesseradb/client';
 import {TesseraElement, UNNAMED, emit, idString} from './base.js';
@@ -202,17 +202,69 @@ export class TesseraHierarchy extends TesseraElement {
     return `${this.current()?.name ?? ''}|${JSON.stringify(this.resolvedStore?.requestFilters() ?? null)}`;
   }
 
-  protected override onStoreChange(): void {
+  /**
+   * Whether the panel is being shown. **A panel that is not asks nothing.**
+   *
+   * The walk is a request per layer and the roots are the widest one there is; a panel in a closed
+   * drawer, a collapsed accordion or a tab nobody opened was making it anyway — on the page's
+   * first meta, beside the first viewport, against a server still materialising the session.
+   * Measured on rung 3: 320 ms of server time for roots nothing was drawing. So the ask waits
+   * until the element is shown, and follows the moment it is. In the demo's overlay layout the
+   * panel *is* shown, so it still browses on load; what changes is that a host who put it away no
+   * longer pays for it.
+   *
+   * `checkVisibility` is the test — display, visibility and `content-visibility`, which is what
+   * *put away* means here — and it is re-asked on every render. A reveal that re-renders nothing
+   * (a drawer opening above it) is caught by the observer instead. A runtime with neither answers
+   * *shown*, which is the behaviour this panel has always had.
+   */
+  @state() private accessor shown = false;
+  private observer: IntersectionObserver | null = null;
+
+  override connectedCallback(): void {
+    super.connectedCallback();
+    if (typeof IntersectionObserver === 'undefined') return;
+    this.observer ??= new IntersectionObserver((entries) => {
+      if (!entries.some((e) => e.isIntersecting) || this.shown) return;
+      this.shown = true;
+      this.loadRootsIfStale();
+    });
+    this.observer.observe(this);
+  }
+
+  override disconnectedCallback(): void {
+    this.observer?.disconnect();
+    this.observer = null;
+    super.disconnectedCallback();
+  }
+
+  /** Whether this element is displayed at all — see {@link shown}. */
+  private displayed(): boolean {
+    return typeof this.checkVisibility === 'function' ? this.checkVisibility() : true;
+  }
+
+  /** The roots, where the question they were fetched under is no longer the one being asked. */
+  private loadRootsIfStale(): void {
     const q = this.question();
-    if (q !== this.fetchedUnder && this.current()) {
+    if (this.shown && q !== this.fetchedUnder && this.current()) {
       this.fetchedUnder = q;
       void this.loadRoots();
     }
+  }
+
+  protected override onStoreChange(): void {
+    this.loadRootsIfStale();
     super.onStoreChange();
   }
 
+  /** Re-asked before every render, so putting the panel away and taking it out again both count. */
+  protected override willUpdate(changed: PropertyValues<this>): void {
+    super.willUpdate(changed);
+    if (!this.shown && this.displayed()) this.shown = true;
+  }
+
   protected override updated(): void {
-    if (this.roots === null && this.current() && this.resolvedStore && !this.loading && this.fetchedUnder === '') {
+    if (this.shown && this.roots === null && this.current() && this.resolvedStore && !this.loading && this.fetchedUnder === '') {
       this.fetchedUnder = this.question();
       void this.loadRoots();
     }
