@@ -93,9 +93,9 @@ corpora at smaller scale. All were measured on the same class of single machine:
 
 | Corpus | Points | What it declares | Build time | Build rate | Peak RSS | Bundle | Viewport p50 |
 |---|---|---|---|---|---|---|---|
-| Synthetic | 10⁹ | about 130 low-cardinality category terms per item | 6 m 46 s | 2.5 M points/s | 27.6 GB | ~47 GB | 135–164 ms |
+| Synthetic | 10⁹ | about 130 access terms per item, drawn from a small vocabulary | 6 m 46 s | 2.5 M points/s | 27.6 GB | ~47 GB | 135–164 ms |
 | Overture places and divisions | 73,631,092 | 625,754 division polygons as spatial layers, a text index over names, a predicate layer | 31 m 18 s | 39 k points/s | 26.75 GB | 12.57 GB | to measure |
-| MedCPT / PubMed | 35,920,666 | an embedding view, titles indexed for text search, a MeSH hierarchy layer of 30,217 descriptors over 41,321 edges with 1.66×10⁹ membership entries | 12 m 10 s | 49 k points/s | 16.03 GB | 11.15 GB | to measure |
+| MedCPT / PubMed | 35,920,666 | an embedding view, titles indexed for text search, a MeSH hierarchy layer of 30,217 headings over 41,321 edges with 1.66×10⁹ membership entries | 12 m 10 s | 49 k points/s | 16.03 GB | 11.15 GB | to measure |
 | GeoNames | 13,463,857 | 8 vocabularies, 13 attributes, 2 layers | 2 m 59 s | 75 k points/s | 3.55 GB | 1.34 GB | to measure |
 | arXiv | 2,422,486 | two embedding views (kNN and PCA) with two clusterings each, clusters titled from their own text | 54 s | 44 k points/s | to measure | 1.5 GB | to measure |
 
@@ -127,8 +127,10 @@ We know of no system that does all of these at once.
 
 ## How it works
 
-A viewer's credentials resolve to the set of items they may see, computed once when they connect
-and reused for the rest of the session rather than recomputed on every request. Geometry is
+Every item carries one or more terms, derived from its access label, and a viewer's credentials
+resolve to the terms they hold. The set of items a viewer may see follows from the two, computed
+once when they connect and reused for the rest of the session rather than recomputed on every
+request. Geometry is
 stored so that a screen tile at any zoom level is one contiguous range of rows, rather than points
 scattered through storage, so a masked count over a tile is arithmetic between that range and the
 visible set, not a scan of the tile's contents. Sampling, density and cluster labels are defined the same way:

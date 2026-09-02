@@ -88,9 +88,12 @@ knowing:
 1. An admission limit bounds how many ingest requests run at once, and a buffer limit bounds how
    many rows may wait for a flush. Past either, the request is refused with a retry interval
    rather than queued.
-2. Each item's access label is resolved to terms through the caller's plugin. An item with more
-   terms than the declared bound is indexed anyway, with a warning, because refusing it would look
-   like an authorisation decision and a resource limit must not produce one.
+2. Each item's access label is resolved to terms through the caller's plugin. A term is one unit
+   of access: an item carries the terms its label resolves to, a viewer's token carries the terms
+   they hold, and with the built-in plugin an item is visible to a viewer who holds at least one
+   of its terms. An item with more terms than the declared bound is indexed anyway, with a
+   warning, because refusing it would look like an authorisation decision and a resource limit
+   must not produce one.
 3. A batch id, required on every request, makes a retry safe: identical bytes under the same id
    replay the recorded result, and different bytes under the same id are refused.
 4. Every external id in the batch is checked against ids already bound to a live item. A deleted
@@ -140,7 +143,7 @@ nothing: every waiter is refused, and a caller retries under the same batch id.
 An accepted item has an entity id, and its authorisation is complete, but it has no row in any
 segment yet. Every count, density figure and selection is a question about rows, so the item
 contributes to none of them until a flush gives it one. Two checks that work in entity space
-rather than row space are not affected: whether the item's descriptors satisfy a mask, and
+rather than row space are not affected: whether the item's terms satisfy a mask, and
 drill-down. Drill-down on an item with no row returns the same unresolved answer as an identifier
 naming nothing at all.
 
@@ -406,9 +409,9 @@ stamp that request presents. The stamp carries no authorisation weight of any ki
 - **The replica freshness bound.** A limit on how long a replica may go on serving a manifest that
   predates a deny it should already carry. No replication exists yet, so there is nothing for the
   bound to apply to.
-- **A wire representation of descriptor staleness.** A session that holds an unresolved descriptor
-  when a flush promotes it becomes stale in a way distinct from the geometry stamp above. The
-  condition is tracked on the session. A client has no way to read it directly.
+- **A wire representation of term staleness.** A session opened before a flush promoted a new term
+  into the dictionary cannot see items carrying that term until it re-authorises. The condition is
+  tracked on the session, but a client has no way to read it.
 - **Cell-granular staleness.** The stamp above tells a client only that something has changed,
   never which cells. A protocol narrowing that to the affected regions has not been designed.
 - **Entity id reuse after compaction.** An entity id freed by a fold that drops its row is not
