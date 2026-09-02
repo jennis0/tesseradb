@@ -1,9 +1,9 @@
 # Highlight, member-of, and browsing a hierarchy — design
 
 **Date:** 2026-09-02
-**Status:** Provisional r3 — under review. **The three rulings of §9 were taken 2026-09-02, each as
-recommended, (c) with a clarification.** What remains before it is normative: one adversarial
-review; the two leak-register rows of §6 accepted into `architecture.md`
+**Status:** Provisional r4 — reviewed once (Appendix R), findings dispositioned. **The three rulings
+of §9 were taken 2026-09-02**, and one more is open: §9 (d), what browse does with a filter over a
+render-only column. What remains before it is normative: that ruling; the two leak-register rows of §6 (C32, C33) accepted into `architecture.md`
 Appendix C; `contracts.md` §3.2 amended with §2–§4's wire. ⊘ **Nothing here is built.** Owner
 direction 2026-09-02, recorded because the design turns on it: **a filter has a mode — `filter`
 narrows the draw, `highlight` keeps every point and lights the matched ones — and the same
@@ -64,11 +64,16 @@ combinators; the same nesting bound). It is evaluated **over the candidate `filt
 absent `filters`, over the masked candidate — and it never changes which rows the response holds.
 What it adds:
 
-| frame | column | value |
-|---|---|---|
-| *tiles* | `highlighted: uint64` | of this tile's `matched`, how many also satisfy `highlight`; equal to `matched` when `highlight` is absent |
-| *points* | `highlighted: bool` | whether this served point satisfies `highlight`; the column is present only when the request carried one |
-| *artifacts* | `highlighted: bool?` | decision 0104's `matched` bit, computed for `highlight` instead of `filters`: `true` where a member this principal may see, inside the request's tiles, satisfies it; `null` when the request carried none |
+| frame | column | position | value |
+|---|---|---|---|
+| *tiles* | `highlighted: uint64` | fifth, after `served`; always present | of this tile's `matched`, how many also satisfy `highlight`; equal to `matched` when `highlight` is absent |
+| *points* | `highlighted: bool` | after the render scalars and before the `membership:<layer>` columns; present only when the request carried a `highlight` | whether this served point satisfies `all_of[filters, highlight]` — which for a served point is `highlight`, every served point being in the candidate |
+| *artifacts* | `highlighted: bool?` | fifteenth fixed column, after `matched` | decision 0104's `matched` bit computed for **`all_of[filters, highlight]`**: `true` where a member this principal may see, inside the request's tiles, satisfies both; `null` when the request carried no `highlight` |
+
+Every answer is the **conjunction** with the `filters` candidate — the three rows say one thing.
+`highlighted` joins `region` and `member_of` as a **reserved column name, refused at the build**:
+a corpus declaring a render column of that name would put two columns of one name on the points
+frame, and a by-name reader would take the wrong one.
 
 **The draw is unchanged by `highlight`.** The cap clause, the density sampling and `served` run
 over the `filters` candidate exactly as before, so the set of points a viewer sees is the same
@@ -100,9 +105,13 @@ with what is on screen rather than with what matched.
 
 1. **Evaluate.** The expression is evaluated exactly as `filters` is (`viewport.rs`,
    `filter::evaluate_routed`): leaves over the postings produce an **entity-space** verdict, and
-   a `region` or `member_of` leaf produces a **row-space** one directly. The entity-space verdict
-   is what the filter-result cache holds, keyed by expression and mask, so a clause moved from
-   `filters` to `highlight` is a cache hit and a highlight held across pans is evaluated once.
+   a `region` or `member_of` leaf produces a **row-space** one directly. ⊘ **The filter clause
+   cache does not exist** (`filter-result-cache.md` is provisional and unbuilt): today a
+   highlight's entity-space verdict is re-evaluated on every request, at the filter's own
+   per-request cost, exactly as `filters` is. When that cache lands — keyed by the canonical
+   top-level clause, `token_id`, `segments_version` and prefix, and holding `Entity` verdicts
+   only — a clause held across pans is evaluated once, and a clause moved between the two
+   positions is a hit where it routes entity-space and a re-evaluation where it routes row-space.
 2. **Cross, over the request's tiles only.** A filter has two crossings into row space — project
    the whole verdict, at ~20–30 ns per matched entity, or walk the rows the request's tiles span
    and ask each whether its entity matched, at ~20–100 ns per row on screen
@@ -122,7 +131,9 @@ with what is on screen rather than with what matched.
    filter's: early-exiting intersection per served artifact, the same cost the `matched` bit has.
 
 **A `member_of` highlight is the cheap case.** An artifact-major membership is already a
-row-space bitmap (`MembershipRows`), so step 1 is a lookup and step 2 is an intersection with
+row-space bitmap (`MembershipRows`, built for every level at open and at a generation move, on no
+request path — a filter layer's included, since §5.4 keeps it out of `layers` but not out of the
+bundle), so step 1 is a lookup and step 2 is an intersection with
 the tile ranges — no postings read, no entity-space verdict, no crossing. A root descriptor's
 27 million members cost the same as a leaf's fifty: containers touched inside the viewport. A
 row-major level (one label per row, decision 0093) is a scan of the on-screen rows comparing
@@ -134,8 +145,11 @@ bits. `/v1/viewport` gains `point_rows`, mirroring `artifact_rows` (r44): omitte
 every column; `"highlight"` is the same points as `(tessera_id, highlighted)` — the row set and the
 `served` split identical under either value, only the columns change, so it discloses nothing the
 full answer would not. Nine bytes a point against the render columns' width, and the *tiles*
-frame beside it carries the wash. A client asking for it while holding nothing meets identifiers
-it cannot draw, knows it, and re-asks with `"full"`, exactly as `artifact_rows` does.
+frame beside it carries the wash. The bits join the held points by `tessera_id`, and the served
+set is deterministic (`select.rs` carries no random draw) **within one generation**: a stamp move
+(`x-tessera-stale`) means the held set may no longer be what the same request serves, and the
+client re-asks with `"full"`. A client asking for it while holding nothing meets identifiers it
+cannot draw, knows it, and re-asks with `"full"`, exactly as `artifact_rows` does.
 
 **What is not cheap, and where it is paid.** A broad highlight over a *category* or *text* leaf
 still reads the postings to make its entity-space verdict on first use — the filter's own cost,
@@ -176,15 +190,18 @@ the membership; nothing is stored twice.
 
 ## 4. `POST /v1/artifacts/browse`
 
-`{layer, level?, parent?, q?, filters?, limit?, cursor?, pin?}` → `{artifacts: [...], parents: [...], next}`.
+`{layer, level?, parent?, q?, filters?, limit?, cursor?}` → JSON `{artifacts: [...], parents: [...], next}`.
+JSON rather than Arrow: a page is at most `max_browse_rows` small rows, and the verb is read by
+the panel and the notebook alike.
 
 Three forms, one gate:
 
 - **Roots** — `parent` and `q` absent: the layer's artifacts with no served parent, by count
   descending, paged. On a `stacked` or `tiered` layer `level` names which level's artifacts are
   the roots — a `stacked` level has no edges and every artifact is a root of it; `tiered` roots
-  are level 0 and `level` starts the walk lower. Ignored on `flat`, `nested` and `dag`, whose
-  roots are the layer's.
+  are level 0 and `level` starts the walk lower. On `flat`, `nested` and `dag`, which have one
+  level, `level` is `422` — a kind's levels are deployment schema, and a parameter accepted and
+  ignored is a wrong answer that looks right.
 - **Children** — `parent` given: the artifacts naming it among their parents, same order, paged;
   `parents` carries the requested artifact's own parents. On a `dag` layer a child is served under
   each parent that is served, as the artifacts frame already does (0117).
@@ -206,7 +223,10 @@ its target shows as a name, so it is not browsed separately.
 
 **Counts under a filter.** `filters` is the viewport's own object, evaluated by the same routes to
 a row-space verdict, and each row's `matched_count` is `|membership ∩ M_auth ∩ filter|`, one
-`and_cardinality` per row against the verdict the filter-result cache holds. **Existence and
+`and_cardinality` per row against the filter's whole-view verdict — which exists for the
+entity-space routes and for `region`, and ⊘ **not for a leaf over a render-only column**, which
+today is answered only inside a request's tiles; §9 (d) rules what browse does with one.
+**Existence and
 `masked_count` never move with the filter** — the same anchoring as everywhere else — and a row
 whose `matched_count` is zero is still served. Order is by `matched_count` when `filters` is
 present and by `masked_count` otherwise. This is deliberately *not* decision 0104's rule: the
@@ -215,7 +235,13 @@ whole-view masked count with nothing on the wire to say so, and because a filter
 one bit of a held row. Browse has no tiles and no held payload, so a count is exact over the
 whole view and costs `limit` intersections, and neither objection applies.
 
-**Every artifact served passed its own criterion**, the one the viewport applies (decision 0080);
+**The gate runs before the page.** Every artifact served passed its own criterion, the one the
+viewport applies (decision 0080), and the criterion is evaluated over the form's whole candidate
+set *before* `limit` and `cursor` are applied — so a page's fill and `next` count only artifacts
+this principal may see, and a withheld artifact leaves no gap a caller could count. **The order
+is total**: count descending, then `tessera_id` ascending, so a cursor over tied counts neither
+duplicates nor drops a row. `parents` is present on the children form only and is `[]` on the
+others;
 `masked_count` is `|membership ∩ M_auth|`, computed per request and never precomputed (C8's
 `and_cardinality`). **A relation is named only where both ends are served** — C29 per entry: a
 child whose parent is withheld is a root here, a parent below its floor is absent from `parents`,
@@ -284,7 +310,7 @@ is, the viewport's cut, for the layers that draw. *Filter to this artifact* and 
 artifact* on the card become §3 clauses in `filters`, replacing the shape-by-published-artifact
 spelling of the `region` leaf for that use, which stays for a region drawn by hand.
 
-## 6. The invariants, and two register rows
+## 6. The invariants, and two register rows (C32, C33)
 
 **I2.** Every quantity served is computed inside `M_auth`: a `highlighted` count is an
 `and_cardinality` over the masked candidate; a `member_of` operand is `membership ∩ M_auth`; a
@@ -296,8 +322,8 @@ after masking exactly as before; `highlight` adds a bit to sampled points and ne
 
 | | Surface | What is observable | Severity | Why accepted |
 |---|---|---|---|---|
-| **C31** | A highlight's counts and bits | Per tile, per served point and per served artifact, whether the request's second expression holds — a second filter's answer beside the first, over the same candidate | Low | **A second evaluation of the filter contract over the same masked candidate**, disclosing what one request with that expression in `filters` would have disclosed, differently arranged: `highlighted` per tile is the `matched` count that request would carry, and the per-point bit is set on points already served. The per-artifact bit is 0104's bit under a second expression. Nothing derived from outside `M_auth` and no quantity a caller could not already obtain in two requests. `point_rows = "highlight"` is a column subset of the full answer to the same request, on `artifact_rows`' argument (r44) |
-| **C32** | The browse verb | A layer's artifacts by lineage — existence, masked count, name and parents — without a viewport and without a budget, so a principal can enumerate every artifact of a layer that passes their criterion | Low | **Enumeration was already available**: `artifact_budget` is a request bound and never a disclosure control (`contracts.md` §3.2 r38), so a zoom-0 viewport at a large budget with every level named serves the same set; this verb serves it paged and by relation instead of by position. Each row is the artifacts frame's identity row plus a name the principal may read, and each relation is C29's, named only where both ends passed their own criterion. The counts are C8's `and_cardinality`, per request — the filtered one against a verdict computed inside `M_auth` by the filter contract's own routes. **The residual is the search form**: a substring over keys and names that this principal may read — an existence test over artifacts already servable to them, and nothing about one that is not; an artifact below its floor matches no query |
+| **C32** | A highlight's counts and bits | Per tile, per served point and per served artifact, whether the request's second expression holds — a second filter's answer beside the first, over the same candidate | Low | **A second evaluation of the filter contract over the same masked candidate**, disclosing what one request carrying `all_of[filters, highlight]` in `filters` would have disclosed, differently arranged: `highlighted` per tile is the `matched` count that request would carry, and the per-point bit is set on points already served. The per-artifact bit is 0104's bit under a second expression. Nothing derived from outside `M_auth` and no quantity a caller could not already obtain in two requests. `point_rows = "highlight"` is a column subset of the full answer to the same request, on `artifact_rows`' argument (r44) |
+| **C33** | The browse verb | A layer's artifacts by lineage — existence, masked count, name and parents — without a viewport and without a budget, so a principal can enumerate every artifact of a layer that passes their criterion | Low | **Enumeration was already available**: `artifact_budget` is a request bound and never a disclosure control (`contracts.md` §3.2 r38), so a zoom-0 viewport at a large budget with every level named serves the same set; this verb serves it paged and by relation instead of by position. Each row is the artifacts frame's identity row plus a name the principal may read, and each relation is C29's, named only where both ends passed their own criterion. The counts are C8's `and_cardinality`, per request — the filtered one against a verdict computed inside `M_auth` by the filter contract's own routes. **The residual is the search form**: a substring over keys and names that this principal may read — an existence test over artifacts already servable to them, and nothing about one that is not; an artifact below its floor matches no query. The `member_of` leaf's empty operand (§3) has a timing residual of the C4/C24–C26 family — a withheld artifact's criterion is evaluated where an unknown identifier is a lookup miss — which is the one posture the register's head note says those rows share, and it is registered here rather than as a row |
 
 **No row for `member_of`.** It is a row-space operand over a membership the principal may already
 count, composed like every other leaf; `selection-operand.md` §7's argument for the `region` leaf
@@ -324,14 +350,23 @@ and the label budget names three of 253 compact clusters at zoom 0. Both are on
 
 ## 9. Owner rulings sought
 
-All three taken 2026-09-02.
+Three taken 2026-09-02; one open.
 
 - **(a) One verb or two.** `browse` as one verb with three forms (§4) — **ruled: one verb.**
-- **(b) Search in this design or deferred.** — **Ruled: in**; the register residual is C32's.
+- **(b) Search in this design or deferred.** — **Ruled: in**; the register residual is C33's.
 - **(c) A filter layer's place.** — **Ruled: a filter layer is still a layer.** It stays in the
   meta's and the client's layer lists as a layer that lists no visible elements; it is not
   presented for viewing and the client never names it in a viewport's `layers`. The server
   changes nothing for it (§5.4).
+- **(d) Browse under a filter that routes row-space — open.** A leaf over a render-only column
+  (`render = true`, `index = false`) is evaluated only over a request's tiles today, and browse
+  has none; served naively its `matched_count` would be silently zero (review finding 1, the
+  failure 0104 exists to prevent). Two shapes: **(i) refuse** — a browse `filters` whose leaves
+  route row-space is `422`, a column's placement being deployment schema a caller reads off
+  `filter_operands`; or **(ii) scan** — a whole-view pass over the row column, priced in §7.
+  Recommended: (i), because (ii) is a new whole-view route whose cost is the corpus's row count
+  per request and whose only user would be a count in a side panel. `region` is unaffected, being
+  whole-view by construction.
 
 ## 10. Order of build
 
@@ -360,3 +395,13 @@ schema with the frame columns.
   re-sends bits rather than points.
 - **r3 (2026-09-02).** The three rulings taken: one verb, search in, and a filter layer is still
   a layer — listed, not presented for viewing (§5.4 reworded). Sent for its adversarial review.
+- **r4 (2026-09-02).** One adversarial review, seven findings, all dispositioned. Taken: browse's
+  filtered count is undefined for a row-routed leaf and 0104's real reason is route silence, not
+  the two objections r2 answered — put to the owner as §9 (d); the clause cache does not exist
+  and was written in the present tense — ⊘ marked, key corrected, cost stated as re-evaluation
+  per request; gate-before-page and a total order fixed for browse; the three columns given
+  positions and `highlighted` reserved at the build; the artifacts bit and C32 say the
+  conjunction `all_of[filters, highlight]`; C31 was taken (r58), rows renumbered C32/C33; the
+  smaller seven (filter-layer `MembershipRows` at open, `pin` dropped, `parents` on other forms,
+  JSON encoding, `level` refused on one-level kinds, `point_rows` bound to a generation, the
+  empty-operand timing residual in C33). Not taken: nothing.
