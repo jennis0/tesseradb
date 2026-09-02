@@ -1056,9 +1056,10 @@ impl WalkState {
         if self.emitted.contains(&code) {
             return Ok(false);
         }
-        // **Counted at the value, not at the entry.** The budget bounds how many values one request
-        // *examines* — the quantity §6.2 measures and §8 registers — and a value already emitted is
-        // not one of them.
+        // **One unit per gate test.** The budget bounds how many values one request *examines* —
+        // the quantity §6.2 measures and §8 registers — so a value already on the page costs
+        // nothing, and a value under the prefix by two entries and *not* on the page costs two:
+        // it is probed twice, and what the budget bounds is the probing.
         self.examined += 1;
         visible(code)
     }
