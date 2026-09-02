@@ -1,19 +1,7 @@
-# DAG-hierarchies campaign file ownership — the allowlist behind `scripts/check-track-allowlist.sh`.
-#
-# Rewritten 2026-09-01 (controller) for the delivery of decision 0117 / `docs/design/dag-hierarchies.md`,
-# replacing the client-components campaign's map, whose tracks have all merged. Three tracks branch
-# from `main` at the promotion commit and merge back into it; the briefs are in
-# `.superpowers/sdd/2026-09-01-dag-hierarchies/` and the status record is `docs/ingest-campaign.md` §8.
-#
-# The rule this file gives teeth to: ownership is an allowlist, not an intention. A track that
-# needs a file outside its list **stops and reports** — the controller reassigns or sequences.
-# Editing this file to make a check pass is the failure mode it exists to prevent.
-#
-# Path syntax: shell glob, matched with bash `[[ path == pattern ]]`, so `*` spans `/`. Paths
-# are repo-relative, exactly as `git diff --name-only` prints them.
+# Value-suggestion campaign file ownership (controller, 2026-09-02). Briefs in
+# .superpowers/sdd/2026-09-02-value-suggestion/. Tracks branch from the promotion commit and are
+# merged in order engine → server → conformance, client alongside.
 
-# FROZEN (controller, 2026-09-01). Decisions and the normative designs change only through the
-# owner — the design for this campaign is already promoted; a track that finds it wrong reports.
 [frozen]
 paths = [
   "crates/tessera-authz/*",
@@ -23,51 +11,34 @@ paths = [
   "scripts/*",
 ]
 
-# Shared: `artifacts.rs` holds the record → engine interface (the store track changes what a record
-# carries; the engine track changes what is read from it) and is expected to conflict textually at
-# merge, resolved by the controller. The tracker is appended by every track.
 [shared]
 paths = [
   "Cargo.lock",
-  "crates/tessera-engine/src/artifacts.rs",
-  "docs/ingest-campaign.md",
 ]
 
-# Track store — the declaration, the build, the durable record, the ingest refusals and cycle check.
-[track.store]
-paths = [
-  "crates/tessera-types/*",
-  "crates/tessera-build/*",
-  "crates/tessera-lifecycle/*",
-  "crates/tessera-store/*",
-  "crates/tessera-engine/src/write.rs",
-  "crates/tessera-engine/tests/artifact_hierarchy.rs",
-  "crates/tessera-cli/*",
-  "crates/tessera-corpus/*",
-  "test_corpora/*",
-]
-
-# Track engine — the cut over the viewer's tree, the lineage over parent lists, the membership
-# column's tie, `rung`, and the wire column.
 [track.engine]
 paths = [
-  "crates/tessera-engine/src/cut.rs",
-  "crates/tessera-engine/src/membership_column.rs",
-  "crates/tessera-engine/src/viewport.rs",
-  "crates/tessera-engine/src/derived.rs",
-  "crates/tessera-engine/src/lib.rs",
-  "crates/tessera-engine/tests/artifact_row_major.rs",
-  "crates/tessera-engine/tests/artifact_projection.rs",
-  "crates/tessera-engine/tests/membership_column.rs",
-  "crates/tessera-engine/tests/cut*.rs",
-  "crates/tessera-wire/*",
-  "crates/tessera-server/*",
-  "reference/oracle/*",
+  "crates/tessera-analyse/*",
+  "crates/tessera-filter/*",
+  "crates/tessera-store/*",
+  "crates/tessera-engine/*",
+  "crates/tessera-bench/*",
 ]
 
-# Track client — the TypeScript client and its harness.
+[track.server]
+paths = [
+  "crates/tessera-server/*",
+  "docs/openapi/tessera.yaml",
+]
+
 [track.client]
 paths = [
-  "clients/*",
-  "docs/client-delivery.md",
+  "clients/ts/*",
+  "clients/py/tesseradb/static/*",
+]
+
+[track.conformance]
+paths = [
+  "conformance/*",
+  "docs/design/conformance.md",
 ]
