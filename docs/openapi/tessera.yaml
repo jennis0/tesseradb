@@ -200,9 +200,13 @@ paths:
 
         **An unresolvable code is omitted, never refused**, and an empty `values` is a real answer
         served with `200` — "no such code", "a code no key explains" and "a value you cannot see"
-        are one outcome. No counts: a legend with counts is a separate surface.
+        are one outcome. No counts on this route: a legend with counts is a separate surface.
+        A count beside a value the caller *asked for by prefix* is served by
+        `/v1/categories/{column}/suggest`.
 
-        Not behind the compute-admission gate.
+        Not behind the compute-admission gate. For a `public` column that is a walk of an in-memory
+        map; a `derived` column composes the candidate and probes one memory-mapped posting per
+        value it walks, over the whole vocabulary.
       security:
         - sessionToken: []
       parameters:
@@ -273,6 +277,98 @@ paths:
                 $ref: "#/components/schemas/Error"
         "422":
           $ref: "#/components/responses/Contract"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+
+  /v1/categories/{column}/suggest:
+    get:
+      tags: [viewer]
+      operationId: suggestCategoryValues
+      summary: Typeahead over a category vocabulary — the values whose key, title or a word start of either has `q` as a prefix, gated by the vocabulary's `visibility`.
+      description: |
+        **Not implemented.** No server serves this route and no suggestion index exists; it is
+        specified by `value-suggestion.md` (normative r2) and decisions 0118–0123.
+
+        The matching rule is declared and fixed: Unicode NFKC, then default case folding, then
+        whitespace collapsed and trimmed, applied to `q` and to every indexed string alike. Each
+        value contributes its whole folded key, its whole folded title where one exists, and the
+        folded title (or key, where there is no title) from each word boundary after the first. A
+        match is a **prefix** of one of those entries — no infix, no fuzziness, no stemming.
+
+        Ordering is the matched text's own: ascending by folded entry string, ties by entry kind
+        (key, then title, then word start), then by key. It is fixed at index build and identical
+        for every principal — never frequency, never recency, and never the count. A value appears
+        at most once, at its first matching entry.
+
+        **One gate with the enumeration**: a `public` vocabulary is suggested as authored; a
+        `derived` one offers a value iff at least one item carrying it is visible against the
+        composed candidate. Address resolution is the enumeration's too, including the `@key` pin
+        and the group gate's `404` collapse.
+
+        **There is no cursor.** A typeahead does not page: the user types another character.
+        `more` says the walk stopped early — the page filled, or the deployment's
+        `selection.max_suggestion_walk` values were examined.
+
+        Not behind the compute-admission gate, and at most one suggest in flight per session: a
+        second while one is running is the shared `429 backpressure`, shed whole and refused before
+        any work is done, with `Retry-After` as every other shed request carries it.
+      security:
+        - sessionToken: []
+      parameters:
+        - name: column
+          in: path
+          required: true
+          description: As on `/v1/categories/{column}` — any column carrying a `category` block, or a group-scoped family pinned `<column>@<key>`.
+          schema:
+            type: string
+            pattern: "^[A-Za-z0-9_-]+(@[A-Za-z0-9_.:-]+)?$"
+        - name: q
+          in: query
+          required: true
+          description: The text typed. Echoed in the response **as received**, not folded, so a client can match a response to the request it has in flight. Empty matches every value and returns the first `limit` visible ones in index order — the picker's list before anything is typed. Over 256 bytes is `422`.
+          schema:
+            type: string
+            maxLength: 256
+        - name: limit
+          in: query
+          required: false
+          description: Page bound. Clamped to `selection.max_suggestions`, which is also the default; `0` is refused, a zero-length suggestion page being a request for no answer.
+          schema:
+            type: integer
+            minimum: 1
+        - name: counts
+          in: query
+          required: false
+          description: Serve `count` beside each value — the number of items carrying it that this principal may see, exact, computed per request. Absent from the response entirely when this is not `true`. It never orders the page.
+          schema:
+            type: boolean
+        - name: view
+          in: query
+          required: false
+          description: The request's own view, for a **group-scoped** category. Resolved exactly as on `/v1/categories/{column}`, and before the column is, whatever that column's scope.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: At most `limit` values this principal may be told about, in matched-entry order.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuggestResponse"
+        "401":
+          $ref: "#/components/responses/BadCredential"
+        "403":
+          $ref: "#/components/responses/ExpiredToken"
+        "404":
+          description: No such column, a column that is not a category, or a column whose vocabulary is missing — one answer for all three, as on the enumeration; and the answer a group-scoped family gives whole when its group gate fails.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          $ref: "#/components/responses/Contract"
+        "429":
+          $ref: "#/components/responses/Backpressure"
         "500":
           $ref: "#/components/responses/FailClosed"
 
@@ -899,7 +995,7 @@ components:
       type: object
       additionalProperties: false
       description: Design §7.2's clause parameters and the request-shape ceilings. All deployment constants, identical for every principal; a client cannot read a mark count as a density without them.
-      required: [k_min, k_max_marks, max_k, theta_target_marks, max_underlay_offset, max_tiles_per_request, max_category_values, max_shape_vertices, max_region_vertices, max_region_cells]
+      required: [k_min, k_max_marks, max_k, theta_target_marks, max_underlay_offset, max_tiles_per_request, max_category_values, max_shape_vertices, max_region_vertices, max_region_cells, max_suggestions, max_suggestion_walk]
       properties:
         k_min:
           type: integer
@@ -938,6 +1034,14 @@ components:
           type: integer
           minimum: 0
           description: The most boundary cells a `region` leaf's decomposition may hold at one depth (`selection-operand.md` §6). **Not a refusal** — over it the descent stops at the deepest depth that fits and the answer is exact for a cover, said on `x-tessera-region`.
+        max_suggestions:
+          type: integer
+          minimum: 1
+          description: "`/v1/categories/{column}/suggest`'s page ceiling and `limit`'s default; recommended 20. It is what lets a client tell a short list that means *that is all* from one the deployment truncated, which `more` alone does not."
+        max_suggestion_walk:
+          type: integer
+          minimum: 1
+          description: "The most values one suggestion request may examine before it stops and answers `more: true`; recommended 10⁵. It bounds latency and not disclosure — the enumeration walks the whole vocabulary unbudgeted — and a client that receives `more` on an unfilled page reads it as this budget rather than as its own arithmetic being wrong."
 
     Layer:
       type: object
@@ -1045,6 +1149,58 @@ components:
         next:
           type: [string, "null"]
           description: The last key returned, to pass as `?after=`; `null` when the set is complete, and always `null` for `?codes=`.
+
+    SuggestResponse:
+      type: object
+      additionalProperties: false
+      required: [column, q, values, more]
+      description: "`value-suggestion.md` §5.1. **Not implemented.**"
+      properties:
+        column:
+          type: string
+          description: The caller's own spelling, echoed back.
+        q:
+          type: string
+          description: The query **as received**, not folded.
+        values:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [code, key, title, match]
+            properties:
+              code:
+                type: integer
+                minimum: 1
+                description: Never `0`, the reserved *absent* sentinel.
+              key:
+                type: string
+              title:
+                type: [string, "null"]
+                description: The authored presentation; `null` where no author wrote one.
+              match:
+                type: object
+                additionalProperties: false
+                required: [field, start, len]
+                description: Where the match sits, in **characters of the served string**, so a client highlights without re-implementing the fold.
+                properties:
+                  field:
+                    type: string
+                    enum: [key, title]
+                    description: Which field matched. A word-start match reports the field the word came from, and is `key` for a word start on a value with no title.
+                  start:
+                    type: integer
+                    minimum: 0
+                  len:
+                    type: integer
+                    minimum: 0
+              count:
+                type: integer
+                minimum: 0
+                description: Present **iff** `counts=true` — the items carrying this value that this principal may see, exact and computed per request. Never `0` or `null` as a stand-in for absence, and never a sort key.
+        more:
+          type: boolean
+          description: "`true` iff the walk stopped before its range was exhausted — the page filled, or `selection.max_suggestion_walk` values were examined. There is no cursor; the client's response either way is to type more."
 
     Pin:
       type: object

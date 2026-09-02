@@ -1,0 +1,69 @@
+cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm3 /home/joe/code/tessera/data/ladder/probe-suggest 10000000 zipf
+== arm3 zipf V=10000000
+open: PostingsReader::open(10000000 records) median of 3: mmap 1.402s, read 1.702s (page-cache warm)
+fixture: N=100000000 V=10000000; member counts read in 0.23s; 200000 empty, 169039 Roaring, max 10910812
+-- candidate 1e-4 contiguous |cand|=10000
+   setup (i) value column pass: roaring add 0.4 ms | bitset 0.3 ms | collect+sort+add_many 0.2 ms  → 5938 visible values
+   setup (ii) all-postings pass: narrow 0.60 s | intersect 0.30 s   (60 ns / 30 ns per value)
+   visible set bytes: roaring portable 13.1 KB (run-optimised 13.1 KB) | V bits 1250.0 KB | 4V bits 5000.0 KB  (density 0.059%)
+   keystroke prefix 1: roaring reset_at_or_after n=1000 median 0.33 us  p99 4.62 us  mean 0.46 us  max 10.2 us | bitset scan median 0.63 us p99 1.10 us | page filled 990/1000 mean emitted 19.8
+   keystroke prefix 2: roaring reset_at_or_after n=1000 median 1.10 us  p99 4.36 us  mean 1.43 us  max 63.6 us | bitset scan median 0.75 us p99 1.14 us | page filled 719/1000 mean emitted 16.6
+   keystroke prefix 3: roaring reset_at_or_after n=1000 median 1.61 us  p99 3.64 us  mean 1.78 us  max 30.7 us | bitset scan median 0.43 us p99 0.94 us | page filled 109/1000 mean emitted 6.2
+   keystroke prefix 4: roaring reset_at_or_after n=1000 median 1.57 us  p99 2.90 us  mean 1.63 us  max 20.8 us | bitset scan median 0.33 us p99 0.78 us | page filled 32/1000 mean emitted 2.6
+-- candidate 1e-4 scattered |cand|=9860
+   setup (i) value column pass: roaring add 1.3 ms | bitset 0.4 ms | collect+sort+add_many 0.3 ms  → 5796 visible values
+   setup (ii) all-postings pass: narrow 2.89 s | intersect 1.83 s   (289 ns / 183 ns per value)
+   visible set bytes: roaring portable 12.8 KB (run-optimised 12.8 KB) | V bits 1250.0 KB | 4V bits 5000.0 KB  (density 0.058%)
+   keystroke prefix 1: roaring reset_at_or_after n=1000 median 0.32 us  p99 17.12 us  mean 0.69 us  max 47.9 us | bitset scan median 0.69 us p99 1.24 us | page filled 990/1000 mean emitted 19.8
+   keystroke prefix 2: roaring reset_at_or_after n=1000 median 1.26 us  p99 77.67 us  mean 4.66 us  max 169.6 us | bitset scan median 0.78 us p99 15.51 us | page filled 714/1000 mean emitted 16.6
+   keystroke prefix 3: roaring reset_at_or_after n=1000 median 2.00 us  p99 84.92 us  mean 7.35 us  max 127.4 us | bitset scan median 0.47 us p99 14.61 us | page filled 80/1000 mean emitted 6.0
+   keystroke prefix 4: roaring reset_at_or_after n=1000 median 1.81 us  p99 59.09 us  mean 5.95 us  max 138.0 us | bitset scan median 0.35 us p99 0.97 us | page filled 17/1000 mean emitted 2.3
+-- candidate 1e-3 contiguous |cand|=100000
+   setup (i) value column pass: roaring add 4.9 ms | bitset 1.0 ms | collect+sort+add_many 1.4 ms  → 47070 visible values
+   setup (ii) all-postings pass: narrow 0.58 s | intersect 0.28 s   (58 ns / 28 ns per value)
+   visible set bytes: roaring portable 95.4 KB (run-optimised 95.4 KB) | V bits 1250.0 KB | 4V bits 5000.0 KB  (density 0.471%)
+   keystroke prefix 1: roaring reset_at_or_after n=1000 median 0.33 us  p99 3.31 us  mean 0.46 us  max 7.2 us | bitset scan median 0.29 us p99 0.75 us | page filled 997/1000 mean emitted 19.9
+   keystroke prefix 2: roaring reset_at_or_after n=1000 median 1.22 us  p99 4.56 us  mean 1.50 us  max 12.3 us | bitset scan median 0.48 us p99 0.78 us | page filled 936/1000 mean emitted 19.2
+   keystroke prefix 3: roaring reset_at_or_after n=1000 median 1.89 us  p99 3.62 us  mean 1.96 us  max 45.8 us | bitset scan median 0.48 us p99 0.83 us | page filled 591/1000 mean emitted 14.8
+   keystroke prefix 4: roaring reset_at_or_after n=1000 median 1.63 us  p99 2.97 us  mean 1.72 us  max 24.4 us | bitset scan median 0.37 us p99 0.67 us | page filled 253/1000 mean emitted 7.8
+-- candidate 1e-3 scattered |cand|=99809
+   setup (i) value column pass: roaring add 13.1 ms | bitset 4.0 ms | collect+sort+add_many 2.1 ms  → 46986 visible values
+   setup (ii) all-postings pass: narrow 3.17 s | intersect 2.01 s   (317 ns / 201 ns per value)
+   visible set bytes: roaring portable 95.2 KB (run-optimised 95.2 KB) | V bits 1250.0 KB | 4V bits 5000.0 KB  (density 0.470%)
+   keystroke prefix 1: roaring reset_at_or_after n=1000 median 0.34 us  p99 4.27 us  mean 0.47 us  max 7.1 us | bitset scan median 0.30 us p99 0.73 us | page filled 995/1000 mean emitted 19.9
+   keystroke prefix 2: roaring reset_at_or_after n=1000 median 1.22 us  p99 6.32 us  mean 1.61 us  max 11.1 us | bitset scan median 0.47 us p99 1.02 us | page filled 937/1000 mean emitted 19.2
+   keystroke prefix 3: roaring reset_at_or_after n=1000 median 1.98 us  p99 7.23 us  mean 2.16 us  max 17.2 us | bitset scan median 0.49 us p99 0.97 us | page filled 589/1000 mean emitted 14.8
+   keystroke prefix 4: roaring reset_at_or_after n=1000 median 1.60 us  p99 2.95 us  mean 1.68 us  max 15.3 us | bitset scan median 0.37 us p99 0.69 us | page filled 246/1000 mean emitted 7.8
+-- candidate 1e-2 contiguous |cand|=1000000
+   setup (i) value column pass: roaring add 63.3 ms | bitset 5.1 ms | collect+sort+add_many 14.2 ms  → 347799 visible values
+   setup (ii) all-postings pass: narrow 0.66 s | intersect 0.31 s   (66 ns / 31 ns per value)
+   visible set bytes: roaring portable 696.8 KB (run-optimised 696.8 KB) | V bits 1250.0 KB | 4V bits 5000.0 KB  (density 3.478%)
+   keystroke prefix 1: roaring reset_at_or_after n=1000 median 0.35 us  p99 4.92 us  mean 0.52 us  max 10.0 us | bitset scan median 0.26 us p99 0.65 us | page filled 998/1000 mean emitted 20.0
+   keystroke prefix 2: roaring reset_at_or_after n=1000 median 1.31 us  p99 4.76 us  mean 1.65 us  max 29.1 us | bitset scan median 0.41 us p99 0.78 us | page filled 987/1000 mean emitted 19.9
+   keystroke prefix 3: roaring reset_at_or_after n=1000 median 2.13 us  p99 4.01 us  mean 2.19 us  max 27.5 us | bitset scan median 0.45 us p99 0.78 us | page filled 883/1000 mean emitted 18.6
+   keystroke prefix 4: roaring reset_at_or_after n=1000 median 1.85 us  p99 3.31 us  mean 1.91 us  max 19.2 us | bitset scan median 0.42 us p99 0.72 us | page filled 562/1000 mean emitted 13.8
+-- candidate 1e-2 scattered |cand|=999431
+   setup (i) value column pass: roaring add 119.1 ms | bitset 39.9 ms | collect+sort+add_many 36.1 ms  → 347006 visible values
+   setup (ii) all-postings pass: narrow 4.52 s | intersect 2.56 s   (452 ns / 256 ns per value)
+   visible set bytes: roaring portable 695.2 KB (run-optimised 695.2 KB) | V bits 1250.0 KB | 4V bits 5000.0 KB  (density 3.470%)
+   keystroke prefix 1: roaring reset_at_or_after n=1000 median 0.35 us  p99 33.66 us  mean 1.14 us  max 116.2 us | bitset scan median 0.26 us p99 0.91 us | page filled 998/1000 mean emitted 20.0
+   keystroke prefix 2: roaring reset_at_or_after n=1000 median 1.32 us  p99 74.52 us  mean 5.06 us  max 145.6 us | bitset scan median 0.40 us p99 1.22 us | page filled 987/1000 mean emitted 19.9
+   keystroke prefix 3: roaring reset_at_or_after n=1000 median 2.33 us  p99 75.44 us  mean 9.18 us  max 114.5 us | bitset scan median 0.48 us p99 1.12 us | page filled 886/1000 mean emitted 18.6
+   keystroke prefix 4: roaring reset_at_or_after n=1000 median 2.08 us  p99 60.09 us  mean 7.46 us  max 140.8 us | bitset scan median 0.46 us p99 1.06 us | page filled 553/1000 mean emitted 13.6
+-- candidate 1e-1 contiguous |cand|=10000000
+   setup (i) value column pass: roaring add 348.5 ms | bitset 46.1 ms | collect+sort+add_many 147.5 ms  → 2224699 visible values
+   setup (ii) all-postings pass: narrow 1.21 s | intersect 0.42 s   (121 ns / 42 ns per value)
+   visible set bytes: roaring portable 1254.6 KB (run-optimised 1254.6 KB) | V bits 1250.0 KB | 4V bits 5000.0 KB  (density 22.247%)
+   keystroke prefix 1: roaring reset_at_or_after n=1000 median 0.34 us  p99 4.02 us  mean 0.45 us  max 8.1 us | bitset scan median 0.25 us p99 0.56 us | page filled 1000/1000 mean emitted 20.0
+   keystroke prefix 2: roaring reset_at_or_after n=1000 median 1.12 us  p99 4.54 us  mean 1.44 us  max 17.3 us | bitset scan median 0.36 us p99 0.71 us | page filled 999/1000 mean emitted 20.0
+   keystroke prefix 3: roaring reset_at_or_after n=1000 median 1.87 us  p99 3.83 us  mean 1.92 us  max 17.8 us | bitset scan median 0.41 us p99 0.71 us | page filled 968/1000 mean emitted 19.6
+   keystroke prefix 4: roaring reset_at_or_after n=1000 median 1.76 us  p99 3.04 us  mean 1.77 us  max 3.7 us | bitset scan median 0.40 us p99 0.68 us | page filled 819/1000 mean emitted 17.7
+-- candidate 1e-1 scattered |cand|=9999273
+   setup (i) value column pass: roaring add 368.2 ms | bitset 60.8 ms | collect+sort+add_many 167.0 ms  → 2225037 visible values
+   setup (ii) all-postings pass: narrow 5.07 s | intersect 1.48 s   (507 ns / 148 ns per value)
+   visible set bytes: roaring portable 1254.6 KB (run-optimised 1254.6 KB) | V bits 1250.0 KB | 4V bits 5000.0 KB  (density 22.250%)
+   keystroke prefix 1: roaring reset_at_or_after n=1000 median 0.33 us  p99 3.65 us  mean 0.44 us  max 6.9 us | bitset scan median 0.24 us p99 0.55 us | page filled 1000/1000 mean emitted 20.0
+   keystroke prefix 2: roaring reset_at_or_after n=1000 median 1.13 us  p99 4.61 us  mean 1.42 us  max 14.0 us | bitset scan median 0.37 us p99 0.60 us | page filled 999/1000 mean emitted 20.0
+   keystroke prefix 3: roaring reset_at_or_after n=1000 median 1.92 us  p99 4.08 us  mean 1.99 us  max 17.4 us | bitset scan median 0.41 us p99 0.69 us | page filled 969/1000 mean emitted 19.6
+   keystroke prefix 4: roaring reset_at_or_after n=1000 median 1.78 us  p99 3.02 us  mean 1.83 us  max 14.1 us | bitset scan median 0.41 us p99 0.71 us | page filled 821/1000 mean emitted 17.6
+end: RSS 2045 MB peak 2087 MB heap 878 MB

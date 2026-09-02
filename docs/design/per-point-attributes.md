@@ -1,6 +1,6 @@
 # Per-point attributes and categories — design
 
-**Date:** 2026-08-02
+**Date:** 2026-08-02 · **Revised:** 2026-09-02
 **Status:** **Provisional — reviewed, no open decisions.** **A field is declared by a `type` and
 three booleans** — `render`, `index`, `multi`, each defaulting false —
 [`records-and-search.md`](records-and-search.md) §2–§3 being the design that owns the declaration
@@ -390,6 +390,18 @@ caller could enumerate hidden values by observing which keys are refused. This f
 §3.2's unmatched-token precedent, and makes "no such value" and "a value you cannot see"
 indistinguishable in outcome *and* in work.
 
+**The in-work half is a filter's property, and does not carry to the two listing surfaces**
+(2026-09-02; [decision 0121](../decisions/0121-the-suggestion-walk-probes-per-request-and-its-timing-is-accepted.md),
+[`value-suggestion.md`](value-suggestion.md) §3). A `derived` column's operand is answered by the
+masked scan and never by the postings, so its work is a function of `(candidate, column)` and of
+nothing the caller named — which is why the property holds there structurally (Appendix C, C24).
+`/v1/categories` and the suggestion verb *do* read the postings, one per value walked, so their
+service time is a function of how many values are walked: the whole vocabulary on the enumeration,
+and the values under a caller's typed prefix on the suggestion verb, hidden ones included. Both
+listing surfaces are indistinguishable **in outcome** — no status, no field and no gap in the page
+separates an invisible value from an absent one — and carry that timing channel, registered as
+**C31**.
+
 **Counts are a different question.** A legend with counts is C8, not C11: every count is an
 `and_cardinality` against `M_auth`, never precomputed. Colour-by-category leads there quickly, and
 this design does not (§7).
@@ -543,8 +555,13 @@ describe**. Nothing here is waiting on someone to type it out.
 
 ## 7. What this does not do
 
-- **No aggregation.** Category counts are C8's existing shape; a breakdown surface is a separate
-  design against §8.2.
+- **No aggregation.** Category counts are C8's existing shape — an `and_cardinality` against
+  `M_auth`, per request, never precomputed — and a breakdown surface is a separate design against
+  §8.2. The one place a count is served is beside a **suggestion**, on request
+  ([decision 0122](../decisions/0122-a-count-is-served-beside-a-suggestion-on-request.md),
+  `value-suggestion.md` §3): the caller chose the prefix and the page is at most `limit` values, and
+  the number never orders it. ⊘ Not built. `/v1/categories` still serves none, because a count
+  beside every code a client drew is the per-viewport breakdown this design does not do.
 - **No multi-valued attributes** (⊘, §3.7). No cold `inspect` sidecar either — the placement is
   gone rather than deferred, the record blob having taken over §10.3's per-interaction intention.
 - **No server-side multi-view composition** (§3.9).
@@ -572,6 +589,16 @@ The fixtures carry no attribute tail today, so no arm can see any of this.
 ---
 
 ## Appendix R — review trail
+
+**2026-09-02 — §3.8's indistinguishable-in-work claim is narrowed, and §7 names the one count that
+is served.** [`value-suggestion.md`](value-suggestion.md) r2 designs a typeahead over a category
+vocabulary, and its review found this document claiming for the listing surfaces a property that is
+the filter's: a `derived` operand is answered by the masked scan, so its work names nothing the
+caller typed, but both listing surfaces probe one posting per value walked and their time is a
+count of the values walked. §3.8 now claims outcome for the listings and points at the register row
+that carries the rest (**C31**, accepted by owner ruling). §7's "no aggregation" gains the single
+exception: a count beside a suggested value, on request, never as an order. Nothing this document
+refuses is withdrawn, and no key or default moves.
 
 **2026-08-18 — the configuration surface is rebuilt on two axes, and enumerated.** §4.0 is new: the
 whole surface in one place, six blocks, every key and every enumerated value. It is worth having

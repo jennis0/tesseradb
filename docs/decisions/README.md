@@ -135,4 +135,10 @@ prevent.
 | [0115](0115-a-dropped-view-key-is-reusable.md) | 2026-09-01 | A dropped view key is reusable, and an internal incarnation keeps its predecessor's artifacts out |
 | [0116](0116-a-scoped-values-address-is-the-attribute-and-the-key.md) | 2026-09-01 | A scoped value's address is (attribute → its group, key), and the join rule is decided on the serial writer |
 | [0117](0117-a-child-may-name-several-parents.md) | 2026-09-01 | A `dag` hierarchy kind: a child may name several parents; the artifacts frame names every served parent; a withheld artifact is not in the viewer's tree |
+| [0118](0118-value-suggestion-is-categories-only.md) | 2026-09-02 | Value suggestion is categories only; a keyword-shaped need is declared as an open `derived` category |
+| [0119](0119-suggestion-is-a-new-verb-not-a-parameter-on-the-enumeration.md) | 2026-09-02 | Suggestion is a new verb, `GET /v1/categories/{column}/suggest`, not `?q=` on the enumeration |
+| [0120](0120-matching-is-key-title-and-word-start-prefixes.md) | 2026-09-02 | Matching is a declared prefix over the key, the title and every word start of either |
+| [0121](0121-the-suggestion-walk-probes-per-request-and-its-timing-is-accepted.md) | 2026-09-02 | The suggestion walk probes per request under a budget, and its timing channel is accepted as C31 — widens 0063 |
+| [0122](0122-a-count-is-served-beside-a-suggestion-on-request.md) | 2026-09-02 | A count is served beside a suggestion on request, and never orders the page |
+| [0123](0123-cross-column-suggestion-is-deferred.md) | 2026-09-02 | Cross-column suggestion is deferred; it is composable from the per-column verb |
 
