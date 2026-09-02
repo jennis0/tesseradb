@@ -543,7 +543,10 @@ export class ArtifactChannel {
       const held = this.held.get(keyOf(row));
       if (!held) return null;
       const {artifact} = held;
-      out.push(row.matched === artifact.matched && row.rung === artifact.rung ? artifact : {...artifact, rung: row.rung, matched: row.matched});
+      // The three fields an identity row moves — the two bits a second expression each answers,
+      // and the rung. Everything else is the held payload's, by reference where nothing moved.
+      const same = row.matched === artifact.matched && row.highlighted === artifact.highlighted && row.rung === artifact.rung;
+      out.push(same ? artifact : {...artifact, rung: row.rung, matched: row.matched, highlighted: row.highlighted});
     }
     return out;
   }

@@ -440,8 +440,9 @@ export function decodeSubCells(payload: Uint8Array): SubCell[] {
  * Decode the kind-5 frame, in whichever projection the server sent.
  *
  * The projection is read off the frame's own schema, never off the request: the identity frame is
- * exactly the four columns `(layer, tessera_id, rung, matched)` (contracts §3.2 r44), the full
- * frame's fixed prefix is fourteen with the two shape columns trailing.
+ * exactly the five columns `(layer, tessera_id, rung, matched, highlighted)` (contracts §3.2 r73 —
+ * four until `highlighted` joined them), the full frame's fixed prefix is fifteen with the two
+ * shape columns trailing.
  */
 export function decodeArtifactsFrame(payload: Uint8Array): {
   artifacts: Artifact[];
@@ -454,13 +455,17 @@ export function decodeArtifactsFrame(payload: Uint8Array): {
   // never the key — so the column reads exactly as the plain-utf8 encoding did; verified by
   // test rather than assumed (`artifacts-frame.test.ts`).
   const layer = t.getChild('layer')!;
-  if (t.schema.fields.length === 4) {
+  if (t.schema.fields.length === 5) {
     const tesseraId = u64Column(t, 'tessera_id');
     const rung = t.getChild('rung');
     const matched = t.getChild('matched');
-    if (rung == null || matched == null) {
+    // Fifth since `highlight-and-hierarchy.md` §2: the row set, the two bits and the `rung` values
+    // are identical under either projection, so the identity frame carries the highlight's bit for
+    // the reason it carries the filter's — it is the one field a second expression moves.
+    const highlighted = t.getChild('highlighted');
+    if (rung == null || matched == null || highlighted == null) {
       throw new Error(
-        'viewport artifacts frame has four columns but is not the identity projection: expected (layer, tessera_id, rung, matched)'
+        'viewport artifacts frame has five columns but is not the identity projection: expected (layer, tessera_id, rung, matched, highlighted)'
       );
     }
     const artifactsIdentity: ArtifactIdentity[] = [];
@@ -469,7 +474,8 @@ export function decodeArtifactsFrame(payload: Uint8Array): {
         layer: String(layer.get(i)),
         tesseraId: tesseraId[i]!,
         rung: Number(rung.get(i)),
-        matched: matched.get(i) === null ? null : Boolean(matched.get(i))
+        matched: matched.get(i) === null ? null : Boolean(matched.get(i)),
+        highlighted: highlighted.get(i) === null ? null : Boolean(highlighted.get(i))
       });
     }
     return {artifacts, artifactsIdentity};

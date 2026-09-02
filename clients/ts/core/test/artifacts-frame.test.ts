@@ -7,7 +7,7 @@ import {splitFramedStreams} from '../src/frame.js';
  * The artifacts frame as contracts §3.2 r44 cuts it: `layer` dictionary-encoded, the fourteen
  * fixed columns `layer` through `matched` at their positions, the two hull columns trailing and
  * **absent from the schema** when no served layer declares a hull, `level` renamed and re-meant as
- * `rung`, and the identity projection (`artifact_rows: "identity"`) — the same rows in four
+ * `rung`, and the identity projection (`artifact_rows: "identity"`) — the same rows in five
  * columns. Every body here is assembled with apache-arrow's own writer, so what these tests pin is
  * the decoder's reading of the layout, not the server's framing; the captured goldens cover that.
  */
@@ -35,7 +35,7 @@ const TEXTS = new List(new Field('item', new Utf8(), true));
 const PARENTS = new List(new Field('item', new Uint64(), false));
 const LAYER = new Dictionary(new Utf8(), new Uint16());
 
-type Row = {layer: string; id: bigint; rung: number; matched: boolean | null; parentIds?: bigint[]; shape?: number[][][] | null};
+type Row = {layer: string; id: bigint; rung: number; matched: boolean | null; highlighted?: boolean | null; parentIds?: bigint[]; shape?: number[][][] | null};
 
 const TILES = tableToIPC(new Table({tile: u64([0n]), visible: u64([1n]), matched: u64([1n]), served: u64([0n]), highlighted: u64([1n])}), 'stream');
 const TRAILER = new TextEncoder().encode(JSON.stringify({arrow_serialise_ns: 0, flushes: 0, points: 0, stream_us: 0}));
@@ -81,14 +81,15 @@ function fullBody(rows: Row[], opts: {shapes?: boolean; layerType?: unknown; one
   return frame([{kind: 1, payload: TILES}, {kind: 5, payload: artifacts}, {kind: 4, payload: TRAILER}]);
 }
 
-/** The identity projection's body: exactly `(layer, tessera_id, rung, matched)`. */
+/** The identity projection's body: exactly `(layer, tessera_id, rung, matched, highlighted)`. */
 function identityBody(rows: Row[]): Uint8Array {
   const artifacts = tableToIPC(
     new Table({
       layer: vectorFromArray(rows.map((r) => r.layer), LAYER),
       tessera_id: u64(rows.map((r) => r.id)),
       rung: vectorFromArray(rows.map((r) => r.rung), new Uint32()),
-      matched: vectorFromArray(rows.map((r) => r.matched), new Bool())
+      matched: vectorFromArray(rows.map((r) => r.matched), new Bool()),
+      highlighted: vectorFromArray(rows.map((r) => r.highlighted ?? null), new Bool())
     }),
     'stream'
   );
@@ -225,13 +226,15 @@ describe('the parent list (contracts §3.2 r71; decision 0117)', () => {
 });
 
 describe('the identity projection', () => {
-  it('decodes the four-column frame to identity rows and no full artifacts', () => {
+  it('decodes the five-column frame to identity rows and no full artifacts', () => {
     const r = decodeViewport(identityBody(ROWS));
     expect(r.artifacts).toEqual([]);
+    // `highlighted` is fifth, and null here for the reason `matched` is null on the third row:
+    // this body's request carried no highlight, so there was no question.
     expect(r.artifactsIdentity).toEqual([
-      {layer: 'clusters/x', tesseraId: 1n, rung: 0, matched: true},
-      {layer: 'clusters/x', tesseraId: 2n, rung: 1, matched: false},
-      {layer: 'labels/x', tesseraId: 3n, rung: 0, matched: null}
+      {layer: 'clusters/x', tesseraId: 1n, rung: 0, matched: true, highlighted: null},
+      {layer: 'clusters/x', tesseraId: 2n, rung: 1, matched: false, highlighted: null},
+      {layer: 'labels/x', tesseraId: 3n, rung: 0, matched: null, highlighted: null}
     ]);
     // The identifier stays a u64: it is what the caller resolves its store by.
     expect(r.artifactsIdentity![0]!.tesseraId).toBeTypeOf('bigint');

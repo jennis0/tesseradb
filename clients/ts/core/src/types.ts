@@ -744,11 +744,11 @@ export type Artifact = {
 };
 
 /**
- * One row of the identity projection (`artifact_rows: "identity"`, contracts §3.2 r44): the same
- * row set a full answer to the identical request would carry, in a fixed four-column schema.
+ * One row of the identity projection (`artifact_rows: "identity"`, contracts §3.2 r73): the same
+ * row set a full answer to the identical request would carry, in a fixed five-column schema.
  *
- * The row set, the `matched` bits and the `rung` values are identical under either value of
- * `artifact_rows`; only the columns change. The payload columns are absent from the schema rather
+ * The row set, the `matched` and `highlighted` bits and the `rung` values are identical under
+ * either value of `artifact_rows`; only the columns change. The payload columns are absent from the schema rather
  * than null, so a caller resolves each row against payloads it already holds by
  * `(layer, tesseraId)` — and one meeting an identifier its store cannot resolve knows it, and
  * re-asks with `"full"`: one round trip, never a wrong map.
@@ -761,6 +761,8 @@ export type ArtifactIdentity = {
   rung: number;
   /** See {@link Artifact.matched} — identical to the full row's value, null with no filter. */
   matched: boolean | null;
+  /** See {@link Artifact.highlighted} — identical to the full row's value, null with no highlight. */
+  highlighted: boolean | null;
 };
 
 export type ViewportResult = {
@@ -1054,6 +1056,11 @@ export type ArtifactDetail = {
  * zoom and does not move when the map does.
  */
 export type BrowseRequest = {
+  /**
+   * Which view's row space the counts are taken in — required here for the reason it is required
+   * on the drill-down: a masked count is an intersection in row space and row space is per view.
+   */
+  view: string;
   layer: string;
   level?: number;
   parent?: bigint;

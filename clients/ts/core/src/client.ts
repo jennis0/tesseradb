@@ -761,7 +761,7 @@ export class TesseraClient {
    * refusal, so nothing here is an existence oracle.
    */
   async browse(token: string, req: BrowseRequest): Promise<BrowsePage> {
-    const body: Record<string, unknown> = {layer: req.layer};
+    const body: Record<string, unknown> = {view: req.view, layer: req.layer};
     if (req.level !== undefined) body.level = req.level;
     if (req.parent !== undefined) body.parent = req.parent.toString();
     if (req.q !== undefined) body.q = req.q;

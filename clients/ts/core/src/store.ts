@@ -335,7 +335,7 @@ export interface Store {
    * question: `filters` is supplied from the store's own composition where the caller does not
    * name one, so a filtered map and a filtered tree read the same numbers.
    */
-  browse(req: Omit<BrowseRequest, 'filters'> & {filters?: FilterExpr | null}): Promise<BrowsePage>;
+  browse(req: Omit<BrowseRequest, 'filters' | 'view'> & {filters?: FilterExpr | null; view?: string}): Promise<BrowsePage>;
   /** Page a filterable category's value set into `filters.values` — for its picker. */
   loadFilterValues(column: string): Promise<void>;
   /** Turn layers on — each with its closure (decision 0096); `[]` turns every layer off. */
@@ -1403,12 +1403,14 @@ export function createStore(options: StoreOptions): Store {
     if (lastView) setView(lastView.input);
   }
 
-  async function browse(req: Omit<BrowseRequest, 'filters'> & {filters?: FilterExpr | null}): Promise<BrowsePage> {
+  async function browse(req: Omit<BrowseRequest, 'filters' | 'view'> & {filters?: FilterExpr | null; view?: string}): Promise<BrowsePage> {
     const t = await ensureToken();
     // The map's own filter unless the caller named one — including `null`, which asks for the
-    // unfiltered counts explicitly.
+    // unfiltered counts explicitly. The view is the store's own current one: a masked count is an
+    // intersection in row space and row space is per view, so a panel that named none would be
+    // asking about whichever view the server chose.
     const filters = 'filters' in req ? (req.filters ?? null) : requestFilters();
-    return client.browse(t, {...req, filters});
+    return client.browse(t, {view: viewId, ...req, filters});
   }
 
   function setMembers(clauses: readonly MemberClause[]): void {
