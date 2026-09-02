@@ -1,14 +1,14 @@
 # Tessera overview
 
 Tessera serves interactive, pannable, zoomable maps over millions to billions of documents or
-records, with access control at the level of the individual item. Each viewer gets a map
-generated for them, from a single machine. New data is ingested live, and a deletion takes effect
-on the next request.
+records, with access control at the level of the individual item. Each viewer gets their own map,
+generated on request, from a single machine. Ingest new data live; a deletion takes effect on the
+next request.
 
 Existing large-scale map servers bake a dataset into one shared view and serve the same tiles to
 everyone. Tessera computes each viewer's map from exactly the items they are permitted to see.
-Not only which points they can retrieve: every count, density, cluster and label is served only if
-they have permission to see what it is made of.
+Not only which points they can retrieve: every count, density, cluster and label is computed from
+the items they may see and nothing else.
 
 Use it as a backend database through its API and integrate it with your own visualisation, or
 build quickly with the customisable components.
@@ -32,10 +32,9 @@ build quickly with the customisable components.
 
 ## What using it looks like
 
-An operator declares a corpus in one TOML file: which files it reads, one or more coordinate
-systems over it, the categories a point may carry, and how a viewer's access is decided. This is
-trimmed from a working example, `test_corpora/geonames/corpus.toml`, down to the smallest fragment
-that still declares a real corpus:
+Declare a corpus in one TOML file: the files it reads, one or more coordinate systems over it, the
+categories a point may carry, and how a viewer's access is decided. Trimmed from
+`test_corpora/geonames/corpus.toml`:
 
 ```toml
 [sources]
@@ -65,13 +64,13 @@ vocabulary = "country"
 index      = true
 ```
 
-Three commands take it from there: `tessera check` validates the declaration against the Parquet
-schemas; `tessera build` produces the bundle in one streaming
-pass; `tessera serve` opens it on the HTTP API.
+Run three commands: `tessera check` validates the declaration against the Parquet schemas,
+`tessera build` produces the bundle in one streaming pass, and `tessera serve` opens it on the HTTP
+API.
 
-Embedding it: `<tessera-explorer>` drops a full map into a page as a custom element; `TesseraLayer`
-adds the same data to a deck.gl scene already running; and in a notebook, `tesseradb`'s `Map`
-widget opens the same view without leaving Python.
+Embed it: `<tessera-explorer>` drops a full map into a page as a custom element, `TesseraLayer`
+adds the same data to a deck.gl scene, and in a notebook `tesseradb`'s `Map` widget opens the same
+view without leaving Python.
 
 ## What it consists of
 
@@ -129,16 +128,13 @@ We know of no system that does all of these at once.
 
 ## How it works
 
-Every item carries one or more terms, derived from its access label, and a viewer's credentials
-resolve to the terms they hold. The set of items a viewer may see follows from the two, computed
-once when they connect and reused for the rest of the session rather than recomputed on every
-request. Geometry is
-stored so that a screen tile at any zoom level is one contiguous range of rows, rather than points
-scattered through storage, so a masked count over a tile is arithmetic between that range and the
-visible set, not a scan of the tile's contents. Sampling, density and cluster labels are defined the same way:
-computed from the rows the viewer's own visible set admits, never computed over the whole corpus
-and then hidden. A corpus keeps changing while this runs: items arrive, are deleted or are
-suppressed, and each change is applied to what the next request reads, within seconds to minutes.
+Every item carries one or more terms, derived from its access label. A viewer's credentials
+resolve to the terms they hold. The items a viewer may see follow from the two, and that set is
+computed once per session. Geometry is stored so that a screen tile at any zoom level is one
+contiguous range of rows, so a count over a tile is arithmetic between that range and the viewer's
+set rather than a scan of the tile's contents. Sampling, density and labels are computed the same
+way, from the viewer's rows and nothing else. New items, deletions and suppressions reach the next
+request within seconds to minutes.
 
 ```mermaid
 flowchart LR
@@ -148,10 +144,9 @@ flowchart LR
   ingest["ingest, deletion, suppression"] -.-> vis
 ```
 
-The compressed bitmap format and the row ordering that make this cheap (Roaring bitmaps and
-Morton, or Z-order, codes) are established techniques. What is not established elsewhere is using
-them so that every served quantity, not only which items a viewer can open, is a function of one
-visible set.
+The bitmap format and the row ordering that make this cheap (Roaring bitmaps and Morton order) are
+established techniques. Tessera's contribution is using them so that every served quantity, not
+only which items a viewer can open, is a function of one per-viewer set.
 
 ## What it guarantees
 
