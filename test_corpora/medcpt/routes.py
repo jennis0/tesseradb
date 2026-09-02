@@ -364,7 +364,7 @@ def main() -> None:
     from . import sources
 
     out = args.out or ladder(sources.RUNG)
-    matrix, meta = sources.vectors(out, complete=not args.partial)
+    matrix, meta = sources.vectors(complete=not args.partial)
     n_full = sources.staged_rows(meta) if args.partial else meta["rows"]
     if args.partial:
         print(f"⊘ measuring against the staged prefix: {n_full:,} of {meta['rows']:,} rows",

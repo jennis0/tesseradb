@@ -39,9 +39,14 @@ def share() -> Path:
     return staged(DATASET, VINTAGE)
 
 
-def staging(out: Path | None = None) -> Path:
-    """`$TESSERA_LADDER/medcpt/staging/`, the local copy everything after `stage.py` reads."""
-    path = (out or ladder(RUNG)) / "staging"
+def staging() -> Path:
+    """`$TESSERA_LADDER/medcpt/staging/`, the local copy everything after `stage.py` reads.
+
+    **It belongs to the rung, not to a run.** `prepare.py --out` moves where a run writes its
+    corpus — a 1M sample beside a whole-corpus one — and every run reads the same staged bytes,
+    which were paid for once.
+    """
+    path = ladder(RUNG) / "staging"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -97,7 +102,7 @@ def staged_rows(meta: dict) -> int:
     return at
 
 
-def vectors(out: Path | None = None, *, complete: bool = True) -> tuple[np.memmap, dict]:
+def vectors(*, complete: bool = True) -> tuple[np.memmap, dict]:
     """The staged matrix and its sidecar, opened read-only.
 
     **Refuses a partial matrix by default**: an unwritten chunk is a hole of zeros in a sparse
@@ -105,7 +110,7 @@ def vectors(out: Path | None = None, *, complete: bool = True) -> tuple[np.memma
     the measurement driver alone, which reads the prefix `staged_rows` reports while the staging
     pass is still running, and says so in what it prints.
     """
-    dirpath = staging(out)
+    dirpath = staging()
     meta = json.loads((dirpath / "vectors.json").read_text())
     missing = [n for n in CHUNKS if str(n) not in meta["chunks"]]
     if complete:

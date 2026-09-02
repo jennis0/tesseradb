@@ -169,7 +169,7 @@ def main() -> None:
 
     out = args.out or ladder(sources.RUNG)
     share = sources.share()
-    staging = sources.staging(out)
+    staging = sources.staging()
     wanted = (
         [int(c) for c in args.chunks.split(",")] if args.chunks else list(sources.CHUNKS)
     )

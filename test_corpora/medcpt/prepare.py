@@ -43,6 +43,7 @@ from __future__ import annotations
 import argparse
 import collections
 import json
+import os
 import resource
 import sys
 from pathlib import Path
@@ -197,7 +198,7 @@ class Labeller:
 BASE_COLUMNS = ("row", "pmid", "published", "title", "mesh")
 
 
-def read_staged(out: Path, take: np.ndarray, columns) -> pa.Table:
+def read_staged(take: np.ndarray, columns) -> pa.Table:
     """Named columns for the sample's rows, read one staged chunk at a time.
 
     `take` is sorted global row indices, and a chunk's parquet is in global row order, so the rows
@@ -209,7 +210,7 @@ def read_staged(out: Path, take: np.ndarray, columns) -> pa.Table:
     run reads the base columns before the route, drops `mesh` as soon as it is resolved, and reads
     the abstracts, if it takes them at all, in the step that writes them.
     """
-    staging = sources.staging(out)
+    staging = sources.staging()
     meta = json.loads((staging / "vectors.json").read_text())
     pieces = []
     for n in sources.CHUNKS:
@@ -333,8 +334,11 @@ operator_credential_env = "TESSERA_MEDCPT_OPERATOR_CRED"
 
 # Development only: the origin the demo viewer is served from (client-interaction §7). Without
 # it the viewer loads and every request from it fails CORS, which reads like a broken server.
-dev_cors_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
+# The port is `VITE_PORT` at the time this file was written, which is the same variable
+# `run_demo.sh` reads — a second session on one checkout needs its own, and 5173 is often held.
+dev_cors_origins = ["http://localhost:PORT", "http://127.0.0.1:PORT"]
 """
+    .replace("PORT", os.environ.get("VITE_PORT", "5173"))
     )
 
     # The directory the WAL and the cache sit in, which the server does not create: it refuses to
@@ -421,7 +425,7 @@ def main() -> None:
     out = args.out or ladder(RUNG)
     out.mkdir(parents=True, exist_ok=True)
     steps = Steps()
-    print(f"staging {sources.staging(out)}\noutput  {out}")
+    print(f"staging {sources.staging()}\noutput  {out}")
 
     # ------------------------------------------------------------------ the MeSH track's module
     try:
@@ -434,7 +438,7 @@ def main() -> None:
               f"every article carries {UNINDEXED!r}")
 
     # ---------------------------------------------------------------------- the corpus and sample
-    matrix, meta = sources.vectors(out)
+    matrix, meta = sources.vectors()
     n_full = meta["rows"]
     with steps.step("sample"):
         take = (
@@ -464,7 +468,7 @@ def main() -> None:
           f"{resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**20:.1f} GB)", flush=True)
 
     with steps.step("read staged columns"):
-        table = read_staged(out, take, BASE_COLUMNS)
+        table = read_staged(take, BASE_COLUMNS)
     assert table.num_rows == n, f"{table.num_rows} staged rows against {n} sampled"
     assert np.array_equal(table.column("row").to_numpy(), take.astype(np.uint32)), (
         "the staged chunks and the sample disagree about row order"
@@ -568,7 +572,7 @@ def main() -> None:
         if args.abstracts:
             # Read here rather than with the base columns: ~30 GB of Arrow buffers at 36M rows,
             # wanted by the write and by nothing before it.
-            extra["abstract"] = read_staged(out, take, ["abstract"]).column("abstract")
+            extra["abstract"] = read_staged(take, ["abstract"]).column("abstract")
         write_points(out, entity=entity, xy=xy, access=access, extra=extra)
     branch_terms = sorted(counts)
     print(f"{len(flat_access):,} (article, branch) labels over {len(branch_terms)} terms")
