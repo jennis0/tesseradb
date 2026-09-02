@@ -26,6 +26,11 @@ tessera-authz = { path = "../tessera-authz" }
 tessera-store = { path = "../tessera-store" }
 tessera-spatial = { path = "../tessera-spatial" }
 tessera-lifecycle = { path = "../tessera-lifecycle" }
+# **The container encoder**, for the same reason `tessera-store` and `tessera-filter` hold it: a row
+# column's transposition already holds one Roaring block's worth of finished words per artifact, so
+# the container is its output rather than something to insert value by value
+# (`row_column::RowColumn::transpose`).
+tessera-roaring = { path = "../tessera-roaring" }
 # The filter artefact's reader. Entity-space only — it never sees a `RowId`, which is what
 # `check-layers.sh` pins by denying it `tessera-store` and `tessera-spatial`.
 tessera-filter = { path = "../tessera-filter" }

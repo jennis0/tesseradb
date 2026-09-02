@@ -572,8 +572,8 @@ impl ArtifactRows {
     /// that column *is* the level's membership — addressed by row. Projecting every membership a
     /// second time to reach the artifact-major half costs a decode and a permutation of the whole
     /// level — 23.6–25.1 s at rung 3's `mesh/descriptors`, 1.66×10⁹ entries — and transposing the
-    /// column is the same set at one sequential read, **18.9–19.4 s** on the same host. [`RowColumn::transpose`] is the pass, and
-    /// `row_column.rs`'s tests assert the two forms are equal artifact for artifact, holes and
+    /// column is the same set at one sequential read, **13.8–15.4 s** on the same host.
+    /// [`RowColumn::transpose`] is the pass, and `row_column.rs`'s tests assert the two forms are equal artifact for artifact, holes and
     /// generating sets included.
     ///
     /// **The generating sets still project**: they are not in the column, they are a different set

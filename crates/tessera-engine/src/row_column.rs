@@ -40,8 +40,9 @@
 //! [`crate::artifacts::ArtifactRows::build_from_column`] is the caller): the column already holds
 //! the membership, addressed by row, so reaching the other address is one sequential pass instead
 //! of a decode and a permutation of every artifact's members. At rung 3's `mesh/descriptors` —
-//! 30,217 artifacts over 1.66×10⁹ membership entries — that is **19 s at open against 24 s**, and
-//! the open as a whole 18.5 s against 23.5 (`probes/2026-09-02-cold-start/`).
+//! 30,217 artifacts over 1.66×10⁹ membership entries — that is **14.5 s at open against 24 s**,
+//! the open as a whole 14.4 s against 23.9, and `/readyz` 24.8 s against 33.8
+//! (`probes/2026-09-02-cold-start/`).
 //!
 //! **Three things are not in the column and still project**: each content's **generating set**,
 //! which containment is tested against and which is a different set from the membership; a level
@@ -424,9 +425,8 @@ impl RowColumn {
     ///
     /// **Measured at rung 3's `mesh/descriptors`** — 30,217 artifacts, 36M rows, 1.66×10⁹ entries,
     /// warm cache, single-threaded (`probes/2026-09-02-cold-start/`): the projection takes
-    /// **23.6–25.1 s** and this takes **18.9–19.4 s**. A fifth off, and not more: what remains is
-    /// croaring's own insert cost, which is 1.66×10⁹ of them whichever address the members arrive
-    /// in.
+    /// **23.6–25.1 s** and this takes **13.8–15.4 s**, of which 0.9 s counts, 4.9 s places, 6.8 s
+    /// encodes and 1.3 s deserialises the finished bitmaps.
     ///
     /// **The base alone**, which is exactly what [`RowSpace::project_base`] produces and therefore
     /// what a projected form holds: `None` where a tail is attached, so a caller can never be
@@ -441,12 +441,17 @@ impl RowColumn {
     /// Appending each row to its ordinals' bitmaps as the walk reaches it touches a different
     /// container on every value — 30,217 of them interleaved at rung 3 — and that measured
     /// **68 s**, three times the projection it was meant to replace. The walk is instead cut into
-    /// blocks of rows, each block counting-sorted by ordinal so that every ordinal's rows arrive
-    /// **contiguous and ascending**, which is one container touched per ordinal per block and the
-    /// fast path `add_many` was written for: 19 s for the same answer, of which the counting pass
-    /// is 0.9 s, the placing pass 5.9 s and the inserts 11.6 s. **Bigger blocks were measured and
-    /// are not better** — 2¹⁸, 2²⁰ and 2²² rows all cost slightly more, the scatter of the placing
-    /// pass losing what the inserts gain. The block is at least 2¹⁶ rows — a Roaring block, so a short
+    /// blocks of **2¹⁶ rows, which is exactly one Roaring container**, each block counting-sorted
+    /// by ordinal so that every ordinal's rows arrive contiguous and ascending. Each run is then
+    /// the container's members, and it is handed to that ordinal's [`tessera_roaring::Sink`]
+    /// **finished** — the array form below croaring's threshold, stamped words above it — rather
+    /// than inserted value by value.
+    ///
+    /// The intermediate routes are all measured, because each looked like the answer:
+    /// `Bitmap::add_many` per run is **19 s** (the inserts alone 11.6 s); `Sink::push_block` for
+    /// every container is **24 s**, because a sparse container's payload is scanned out of 8 KB of
+    /// words whatever it holds; `Sink::push_members` staged is **17.3 s**, the staging flush
+    /// cloning every container a second time; and unstaged, which is this, **14.5 s**. The block is at least 2¹⁶ rows — a Roaring block, so a short
     /// ordinal's run lands inside one container — and grows with the ordinal count so that the
     /// per-block sweep over the offset table stays bounded by the row count rather than
     /// multiplying by it.
@@ -455,67 +460,125 @@ impl RowColumn {
             return None;
         }
         let ordinals = self.len();
-        let mut out = vec![Bitmap::new(); ordinals];
         if ordinals == 0 {
-            return Some(out);
+            return Some(Vec::new());
         }
         let base_rows = self.base_rows();
-        let block = u32::try_from((1u64 << 16).max((ordinals as u64).next_power_of_two()))
-            .unwrap_or(u32::MAX);
-        // `starts` is the block's offset table — one entry per ordinal plus the total — and
-        // `cursor` the filling half of it. Both are allocated once for the whole walk.
-        let mut starts = vec![0usize; ordinals + 1];
+        // **One sink per ordinal, each holding its containers until the walk is done.** A sink
+        // that flushed as it filled would hand croaring a stream every 128 containers and union
+        // it in, and a union clones every container it takes — at a few hundred members a
+        // container that second copy is most of what the encoder costs. Unstaged, each artifact's
+        // membership is deserialised once and becomes the bitmap without a merge; what it costs
+        // instead is the serialized bytes of the whole level held until [`Sink::finish`], which
+        // is the row form this is about to produce anyway.
+        //
+        // Empty for a hole and for an artifact this column labels no row with, which is the same
+        // answer an empty projection gives.
+        let mut sinks: Vec<tessera_roaring::Sink> =
+            (0..ordinals)
+                .map(|_| tessera_roaring::Sink::unstaged())
+                .collect();
+        // The block's counting sort: how many rows each ordinal takes, where its run starts, how
+        // far it has been filled, and which ordinals the block touched at all. All four are
+        // allocated once for the whole walk; only `touched` is swept per block, so a level with far
+        // more ordinals than a block has rows costs its own size once rather than once per block.
+        let mut counts = vec![0usize; ordinals];
+        let mut starts = vec![0usize; ordinals];
         let mut cursor = vec![0usize; ordinals];
+        let mut touched: Vec<u32> = Vec::new();
         let mut values: Vec<u32> = Vec::new();
+        let mut words = [0u64; tessera_roaring::WORDS];
+        let block = tessera_roaring::BLOCK as u32;
         let mut lo = 0u32;
         while lo < base_rows {
             let hi = lo.saturating_add(block).min(base_rows);
-            starts.iter_mut().for_each(|slot| *slot = 0);
-            match &*self.pack {
-                // **The values alone**, read straight through: counting needs the ordinal and not
-                // the row, so the offset table is touched twice for the whole block.
-                Pack::List(pack) => pack.for_each_value(lo as usize, hi as usize, |ordinal| {
-                    starts[ordinal as usize] += 1
-                }),
-                Pack::Label(_) => {
-                    for row in lo..hi {
-                        self.for_each_label(row, |ordinal| starts[ordinal as usize] += 1);
+            touched.clear();
+            {
+                let (counts, touched) = (&mut counts, &mut touched);
+                let mut count = |ordinal: u32| {
+                    let at = ordinal as usize;
+                    if counts[at] == 0 {
+                        touched.push(ordinal);
+                    }
+                    counts[at] += 1;
+                };
+                match &*self.pack {
+                    // **The values alone**, read straight through: counting needs the ordinal and
+                    // not the row, so the offset table is touched twice for the whole block.
+                    Pack::List(pack) => pack.for_each_value(lo as usize, hi as usize, count),
+                    Pack::Label(_) => {
+                        for row in lo..hi {
+                            self.for_each_label(row, &mut count);
+                        }
                     }
                 }
             }
             let mut total = 0usize;
-            for slot in starts.iter_mut() {
-                let count = *slot;
-                *slot = total;
-                total += count;
+            for ordinal in &touched {
+                let at = *ordinal as usize;
+                starts[at] = total;
+                cursor[at] = total;
+                total += counts[at];
             }
             values.clear();
             values.resize(total, 0);
-            cursor.copy_from_slice(&starts[..ordinals]);
-            let mut place = |ordinal: u32, row: u32| {
-                let at = ordinal as usize;
-                values[cursor[at]] = row;
-                cursor[at] += 1;
-            };
-            match &*self.pack {
-                Pack::List(pack) => pack.for_each_row_value(lo as usize, hi as usize, |row, ordinal| {
-                    place(ordinal, row)
-                }),
-                Pack::Label(_) => {
-                    for row in lo..hi {
-                        self.for_each_label(row, |ordinal| place(ordinal, row));
+            {
+                let (cursor, values) = (&mut cursor, &mut values);
+                let mut place = |row: u32, ordinal: u32| {
+                    let at = ordinal as usize;
+                    values[cursor[at]] = row;
+                    cursor[at] += 1;
+                };
+                match &*self.pack {
+                    Pack::List(pack) => pack.for_each_row_value(lo as usize, hi as usize, place),
+                    Pack::Label(_) => {
+                        for row in lo..hi {
+                            self.for_each_label(row, |ordinal| place(row, ordinal));
+                        }
                     }
                 }
             }
-            for (ordinal, rows) in out.iter_mut().enumerate() {
-                let (from, to) = (starts[ordinal], starts[ordinal + 1]);
-                if from < to {
-                    rows.add_many(&values[from..to]);
+            // **The container, handed over finished.** A block is 2¹⁶ rows and a Roaring block is
+            // 2¹⁶ values, so every row of this block lands in one container of one key — the words
+            // below *are* that container, and the sink writes it into the portable stream rather
+            // than croaring inserting it value by value.
+            let key = u16::try_from(lo >> 16).expect("a row below 2³² has a block key below 2¹⁶");
+            for ordinal in &touched {
+                let at = *ordinal as usize;
+                let (from, to) = (starts[at], cursor[at]);
+                // **The run is already the container's members, ascending**, which is the array
+                // form's whole case: below croaring's threshold the payload is those members as
+                // `u16`s, so stamping them into 8 KB of words for the encoder to scan back out
+                // would be 1,024 word reads for a few hundred members. Above it the payload *is*
+                // the words, and stamping them is what the block form takes.
+                if to - from <= tessera_roaring::ARRAY_MAX as usize {
+                    sinks[at].push_members(key, &values[from..to]);
+                } else {
+                    // Counted as it is stamped rather than taken from the run's length, because
+                    // `push_block` requires the popcount and a row a column listed twice would
+                    // otherwise inflate it — the descriptor and the payload must agree.
+                    let mut card = 0u32;
+                    for row in &values[from..to] {
+                        let offset = (row - lo) as usize;
+                        let bit = 1u64 << (offset & 63);
+                        let word = &mut words[offset >> 6];
+                        if *word & bit == 0 {
+                            *word |= bit;
+                            card += 1;
+                        }
+                    }
+                    sinks[at].push_block(key, card, &words);
+                    // Cleared by the rows that set it — O(members) rather than the 8 KB the block
+                    // is wide.
+                    for row in &values[from..to] {
+                        words[((row - lo) as usize) >> 6] = 0;
+                    }
                 }
+                counts[at] = 0;
             }
             lo = hi;
         }
-        Some(out)
+        Some(sinks.into_iter().map(tessera_roaring::Sink::finish).collect())
     }
 
     /// **The masked count for every artifact of this level, in one walk of the mask** — decision

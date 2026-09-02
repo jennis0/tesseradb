@@ -497,10 +497,11 @@ the column** rather than projected a second time from the level's memberships: o
 over bytes already on disk, against a decode and a permutation of every artifact's members. ⊘
 Measured at rung 3 only (`mesh/descriptors`, 30,217 artifacts over 1.66×10⁹ membership entries,
 warm cache, single-threaded, `probes/2026-09-02-cold-start/`): **23.6–25.1 s to project and
-18.9–19.4 s to transpose**, so a fifth off and not more — what is left is croaring's insert cost,
-which is one per member whichever address they arrive in. What the column does
-not hold still projects — each content's generating set, a level whose column this prefix does not
-hold, an attribute predicate's labels — and each of those is the route that existed before.
+13.8–15.4 s to transpose**, and `/readyz` 32.8–34.9 s against 24.6–25.1. The transposition hands
+each artifact's rows to `tessera-roaring`'s container encoder a Roaring block at a time rather
+than inserting them, which is where most of that is: inserting them measured 19 s. What the column
+does not hold still projects — each content's generating set, a level whose column this prefix does
+not hold, an attribute predicate's labels — and each of those is the route that existed before.
 
 **Not a new mechanism.** `artifacts-from-points` already *reads* this layout — an integer key column,
 or a list column naming the artifacts a point belongs to — and converts it into artifact-major

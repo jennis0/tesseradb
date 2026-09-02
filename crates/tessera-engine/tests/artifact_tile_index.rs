@@ -923,6 +923,15 @@ fn a_transposed_row_form_is_the_projected_one() {
                     there.map(Bitmap::to_vec),
                     "{shape:?}/{layout:?}: the membership disagreed at ordinal {ordinal}"
                 );
+                // **Bit for bit, not merely set for set.** Both forms are written through the same
+                // container encoder (`tessera_roaring::Sink`), so the serialized bytes agree too —
+                // which is what makes `blocks_per_artifact` and every other statistic over the row
+                // form the same number whichever route built it.
+                assert_eq!(
+                    here.map(|rows| rows.serialize::<croaring::Portable>()),
+                    there.map(|rows| rows.serialize::<croaring::Portable>()),
+                    "{shape:?}/{layout:?}: the encoded membership differs at ordinal {ordinal}"
+                );
                 assert_eq!(
                     transposed
                         .membership()

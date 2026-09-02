@@ -2788,6 +2788,7 @@ dependencies = [
  "tessera-filter-write",
  "tessera-lifecycle",
  "tessera-plugin",
+ "tessera-roaring",
  "tessera-spatial",
  "tessera-store",
  "tessera-types",

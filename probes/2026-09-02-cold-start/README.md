@@ -90,21 +90,41 @@ running throughout, `open.py` — three clean runs each, interleaved:
 
 | | projected | **transposed** |
 |---|---:|---:|
-| `mesh/descriptors` row form | 23.6 / 25.1 s | **18.9 / 19.4 / 19.0 s** |
-| `clusters/kmeans` row form *(artifact-major, unchanged)* | 0.21 / 0.20 s | 0.25 / 0.20 / 0.21 s |
-| the open's own `elapsed_ms` | 23.2 / 24.6 s | **18.5 / 18.9 / 18.5 s** |
-| time to `/readyz` 200 | 33.7 / 32.8 / 34.9 s | **29.8 / 30.0 / 29.1 s** |
-| peak RSS | 9.07 GB | 9.20 GB |
+| `mesh/descriptors` row form | 23.6 / 25.1 s | **13.8 / 15.1 / 15.4 s** |
+| `clusters/kmeans` row form *(artifact-major, unchanged)* | 0.21 / 0.20 s | 0.20 / 0.22 / 0.21 s |
+| the open's own `elapsed_ms` | 23.2 / 24.6 s | **13.8 / 14.5 / 14.8 s** |
+| time to `/readyz` 200 | 33.7 / 32.8 / 34.9 s | **24.7 / 24.6 / 25.1 s** |
+| peak RSS | 9.07 GB | **8.96 GB** |
 
-**A fifth off, and not more.** The projection is not where most of the time was: transposing costs
-0.9 s to count the block's entries, 5.9 s to place them and **11.6 s in croaring's inserts**, which
-is 1.66×10⁹ of them whichever address the members arrive in. Two negative results beside it:
-appending each row to its ordinals' bitmaps as the walk reaches it — no counting sort — measured
-**68 s**, three times the projection; and blocks of 2¹⁸, 2²⁰ and 2²² rows instead of 2¹⁶ all
-measured slightly *worse*, the placing pass's scatter losing what the inserts gain.
+**Where the 14 s goes**, over the three runs: 0.84–0.90 s counting each block's entries by ordinal,
+4.65–4.93 s placing them into the block's runs, 6.57–7.14 s encoding those runs as Roaring
+containers, and 1.25–1.32 s deserialising the 30,217 finished bitmaps.
 
-**The extra 130 MB of peak RSS is the column being read.** Adopted and never walked, its 3.46 GB of
-mapped bytes were touched only by the requests that scanned it; the transposition reads all of it.
+**Five routes were measured to get there**, because the first four each looked like the answer:
+
+| how the transposed rows reach a bitmap | mesh row form |
+|---|---:|
+| `Bitmap::add` per row, no counting sort | 68 s |
+| counting sort, `Bitmap::add_many` per run | 19 s |
+| counting sort, `Sink::push_block` per container | 24 s |
+| counting sort, `Sink::push_members`, staged flushes | 17.3 s |
+| **counting sort, `Sink::push_members`, one flush per artifact** | **14.5 s** |
+
+The insert route's cost is croaring's own — 11.6 s of its 19 was the inserts. `push_block` is
+*worse* than inserting because it takes the container as words and these containers are sparse: a
+few hundred members scanned out of 8 KB of words, 1,024 word reads whatever the container holds,
+which is what `Sink::push_members` was added for. Staging is worse than not staging because every
+flush unions a stream into the result and a union **clones every container it takes** — at a few
+hundred members a container, that second copy is most of what is left. Unstaged, each artifact's
+membership is deserialised once and becomes the bitmap with no merge at all.
+
+Two more negative results: blocks of 2¹⁸, 2²⁰ and 2²² rows measured slightly *worse* than 2¹⁶ on
+the insert route, and 2¹⁶ is now forced anyway — it is exactly one Roaring container, which is what
+lets a run be handed over finished.
+
+**Peak RSS is lower than the projection's**, not higher, though the transposition holds the level's
+serialized bytes until the end: the permutation's own scratch is bigger than what this holds, and
+the payload is freed artifact by artifact as the bitmaps are built.
 
 ## Re-running
 
