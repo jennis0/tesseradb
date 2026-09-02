@@ -48,7 +48,9 @@ use tessera_lifecycle::{IngestBuffer, Overlay};
 use tessera_store::Bundle;
 
 pub use cancel::CancelToken;
-pub use categories::{CategoryColumn, CategoryPage, CategoryQuery, CategoryValue};
+pub use categories::{
+    CategoryColumn, CategoryPage, CategoryQuery, CategoryValue, MatchSpan, SuggestPage, Suggestion,
+};
 // The fold's automatic trigger, as a value an operator's configuration builds. `tessera-server`
 // parses `ingest.compaction_*` into one of these and hands it over in `EngineConfig`; the executor
 // is the only reader. The rest of `compact` stays private — what a fold *is* is this crate's

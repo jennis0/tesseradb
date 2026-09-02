@@ -824,3 +824,233 @@ pub struct CompletedSuggest {
     /// The sequence the dispatch recorded — see [`SideValue::seq`].
     pub covered_through: u64,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pool() -> rayon::ThreadPool {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .expect("a pool")
+    }
+
+    fn value(key: &str, title: Option<&str>, code: u32) -> SuggestValue {
+        SuggestValue {
+            key: key.to_string(),
+            title: title.map(str::to_string),
+            code,
+        }
+    }
+
+    /// Values in key order, as `bindings()` yields them and as the dense position indexes.
+    fn fixture() -> Vec<SuggestValue> {
+        vec![
+            value("CS.lg", None, 900),
+            value("cs.AI", Some("Artificial Intelligence"), 41_000),
+            value("cs.LG", Some("Machine Learning"), 41_207),
+            value("machine_shop", None, 12),
+            value("stat.ML", Some("Machine Learning (Statistics)"), 9),
+        ]
+    }
+
+    /// Every (entry string, position) pair the index holds, in index order — the whole artefact,
+    /// flattened, so a shape assertion is one comparison rather than a walk.
+    fn flatten(index: &SuggestIndex) -> Vec<(String, u32, EntryKind)> {
+        let mut out = Vec::new();
+        let mut scratch = Vec::new();
+        for ordinal in 0..index.entry_count() {
+            let entry = index.entry_of(ordinal, &mut scratch).unwrap().to_string();
+            for at in index.payload_range(ordinal..ordinal + 1) {
+                let payload = index.payload_at(at).unwrap();
+                out.push((entry.clone(), payload.position, payload.kind));
+            }
+        }
+        out
+    }
+
+    /// **§7's total order, end to end**: ascending by folded entry string, ties by kind, then by
+    /// key — which the dense position is.
+    ///
+    /// `CS.lg` and `cs.LG` fold to one entry string, which is the duplicate case the run structure
+    /// exists for and which a plain `SortedDict` refuses outright.
+    ///
+    /// **Mutations this kills:** sorting by kind before the string; sorting positions before kinds;
+    /// dropping the second value of a shared entry string; writing the run starts against the entry
+    /// count instead of the payload count.
+    #[test]
+    fn the_index_is_one_sorted_order_over_every_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = SuggestIndex::build(dir.path(), 0, &fixture(), &pool()).unwrap();
+        assert_eq!(
+            flatten(&index),
+            vec![
+                // `CS.lg` and `cs.LG` share this entry string; the run holds both, in key order.
+                ("cs.lg".to_string(), 0, EntryKind::Key),
+                ("cs.lg".to_string(), 2, EntryKind::Key),
+                // `.` is not a letter or a digit, so `lg` is a word start of the *key* — the
+                // title-less value's word starts come from its key, "as the title would be".
+                ("lg".to_string(), 0, EntryKind::WordStart),
+                ("cs.ai".to_string(), 1, EntryKind::Key),
+                ("artificial intelligence".to_string(), 1, EntryKind::Title),
+                ("intelligence".to_string(), 1, EntryKind::WordStart),
+                // A whole-title match precedes the word start derived from a longer title.
+                ("machine learning".to_string(), 2, EntryKind::Title),
+                ("machine learning (statistics)".to_string(), 4, EntryKind::Title),
+                ("machine_shop".to_string(), 3, EntryKind::Key),
+                ("shop".to_string(), 3, EntryKind::WordStart),
+                ("statistics)".to_string(), 4, EntryKind::WordStart),
+                ("stat.ml".to_string(), 4, EntryKind::Key),
+                ("learning".to_string(), 2, EntryKind::WordStart),
+                ("learning (statistics)".to_string(), 4, EntryKind::WordStart),
+            ]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>(),
+            "the flattened index is not the sorted entry set"
+        );
+    }
+
+    /// A prefix is a contiguous payload range, and the range is exactly the values under it.
+    #[test]
+    fn a_prefix_is_a_contiguous_payload_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = SuggestIndex::build(dir.path(), 0, &fixture(), &pool()).unwrap();
+
+        let positions = |q: &str| -> Vec<u32> {
+            let entries = index.prefix_range(q).unwrap();
+            index
+                .payload_range(entries)
+                .map(|at| index.payload_at(at).unwrap().position)
+                .collect()
+        };
+        // Two values fold to `cs.lg`, and both are under `cs.`.
+        assert_eq!(positions("cs."), vec![1, 0, 2]);
+        // A word start, reached by a prefix of the word rather than of the title.
+        assert_eq!(positions("lear"), vec![2, 4]);
+        // A whole title and the word start of a longer one, in §7's order.
+        assert_eq!(positions("machine"), vec![2, 4, 3]);
+        assert!(positions("zzz").is_empty());
+        // The empty query is the whole index, which is the picker's initial list.
+        assert_eq!(positions("").len(), index.payload_count() as usize);
+    }
+
+    /// The served strings come out of the index rather than out of a walk of the minter's map, and
+    /// a value with no title reads back as having none — never as an empty string.
+    #[test]
+    fn the_served_strings_round_trip_through_the_blob() {
+        let dir = tempfile::tempdir().unwrap();
+        let values = fixture();
+        let index = SuggestIndex::build(dir.path(), 0, &values, &pool()).unwrap();
+        for (position, value) in values.iter().enumerate() {
+            let (key, title) = index.served(position as u32).unwrap();
+            assert_eq!(key, value.key);
+            assert_eq!(title, value.title.as_deref());
+            assert_eq!(index.code_at(position as u32).unwrap(), value.code);
+        }
+        assert!(index.served(values.len() as u32).is_err());
+        assert!(index.code_at(values.len() as u32).is_err());
+    }
+
+    /// A vocabulary with no values builds, opens and answers empty — the three side arrays are
+    /// legitimately zero-length and `mmap` refuses a zero-length file.
+    #[test]
+    fn an_empty_vocabulary_builds_and_answers_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = SuggestIndex::build(dir.path(), 0, &[], &pool()).unwrap();
+        assert_eq!(index.entry_count(), 0);
+        assert_eq!(index.payload_count(), 0);
+        assert!(index.payload_range(index.prefix_range("a").unwrap()).is_empty());
+    }
+
+    /// **A mint is suggestible before the rebuild lands**, which is what the side map is for.
+    #[test]
+    fn a_minted_value_is_in_the_side_range_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let fold = SuggestionFold::new();
+        let index = SuggestIndex::build(dir.path(), 0, &fixture(), &pool()).unwrap();
+        let mut live = VocabularySuggest::new(Arc::new(index));
+        assert_eq!(live.side_len(), 0);
+        assert!(!live.rebuild_wanted());
+
+        live.mint(&fold, "cs.CV", Some("Computer Vision"), 77);
+        assert!(live.rebuild_wanted());
+        // Three entries: the key, the title, and the title's one word start.
+        assert_eq!(live.side_len(), 3);
+        let under: Vec<&str> = live
+            .side_range("vis")
+            .flat_map(|(_, run)| run.iter().map(|v| &*v.key))
+            .collect();
+        assert_eq!(under, vec!["cs.CV"], "the word start is reachable");
+        let under: Vec<&str> = live
+            .side_range("cs.c")
+            .flat_map(|(_, run)| run.iter().map(|v| &*v.key))
+            .collect();
+        assert_eq!(under, vec!["cs.CV"]);
+        assert!(live.side_range("zz").next().is_none());
+    }
+
+    /// **A title amendment withdraws the value's base entries and restates it**, so the old title
+    /// stops matching and the new one starts, with no rebuild in between.
+    #[test]
+    fn an_amendment_retracts_the_base_and_restates_the_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let fold = SuggestionFold::new();
+        let index = SuggestIndex::build(dir.path(), 0, &fixture(), &pool()).unwrap();
+        let mut live = VocabularySuggest::new(Arc::new(index));
+
+        live.amend_title(&fold, "cs.LG", Some("Statistical Learning"), 41_207);
+        assert!(live.is_retracted(41_207));
+        assert!(!live.is_retracted(41_000), "one value, not the vocabulary");
+        let under: Vec<&str> = live
+            .side_range("statistical")
+            .flat_map(|(_, run)| run.iter().map(|v| &*v.key))
+            .collect();
+        assert_eq!(under, vec!["cs.LG"]);
+
+        // Amending again drops the first amendment's entries rather than accumulating them.
+        live.amend_title(&fold, "cs.LG", Some("Deep Learning"), 41_207);
+        assert!(live.side_range("statistical").next().is_none());
+        let under: Vec<&str> = live
+            .side_range("deep")
+            .flat_map(|(_, run)| run.iter().map(|v| &*v.key))
+            .collect();
+        assert_eq!(under, vec!["cs.LG"]);
+    }
+
+    /// **A rebuild keeps exactly what its snapshot did not see.** The sequence, not the new base's
+    /// code set, is what decides — so a mint that lands while the sort runs is not lost, and one
+    /// the sort covered is not held twice.
+    #[test]
+    fn a_rebuild_keeps_only_what_arrived_after_it_was_dispatched() {
+        let dir = tempfile::tempdir().unwrap();
+        let fold = SuggestionFold::new();
+        let index = SuggestIndex::build(dir.path(), 0, &fixture(), &pool()).unwrap();
+        let mut live = VocabularySuggest::new(Arc::new(index));
+
+        live.mint(&fold, "cs.CV", Some("Computer Vision"), 77);
+        // The dispatch's snapshot: everything minted so far is in the rebuild's input.
+        let covered_through = live.next_seq();
+        // …and this one arrives while the sort runs.
+        live.mint(&fold, "cs.RO", Some("Robotics"), 78);
+
+        let mut rebuilt_values = fixture();
+        rebuilt_values.push(value("cs.CV", Some("Computer Vision"), 77));
+        rebuilt_values.sort_by(|a, b| a.key.cmp(&b.key));
+        let rebuilt = SuggestIndex::build(dir.path(), 1, &rebuilt_values, &pool()).unwrap();
+
+        let live = live.rebuilt(Arc::new(rebuilt), covered_through);
+        assert!(
+            live.side_range("computer").next().is_none(),
+            "the rebuild's own snapshot is folded in, not held twice"
+        );
+        let under: Vec<&str> = live
+            .side_range("robot")
+            .flat_map(|(_, run)| run.iter().map(|v| &*v.key))
+            .collect();
+        assert_eq!(under, vec!["cs.RO"], "a mint during the sort survives it");
+        assert!(live.rebuild_wanted(), "and the next rebuild is still owed");
+    }
+}
