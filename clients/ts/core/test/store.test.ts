@@ -604,6 +604,76 @@ describe('suggest — the typeahead action (value-suggestion.md §5.1)', () => {
     expect(store.get('filters').suggestErrors['admin4']?.code).toBe('backpressure');
     expect(store.get('filters').suggestions['admin4']).toBeUndefined();
   });
+
+  it('clear() (a re-authorise) drops every column’s held page and refusal, and its debounce dedupe', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client} = fakeClient(() => response('ck'));
+    const suggest = vi.fn(async (_token: string, column: string, q: string) => ({status: 'ok' as const, column, q, values: [], more: false}));
+    (client as unknown as {suggest: typeof suggest}).suggest = suggest;
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    await clock.advance(1);
+
+    store.suggest('archive', '');
+    await clock.advance(200);
+    expect(store.get('filters').suggestions['archive']).toEqual({q: '', values: [], more: false});
+
+    store.clear();
+    expect(store.get('filters').suggestions).toEqual({});
+    expect(store.get('filters').suggestErrors).toEqual({});
+
+    // The dedupe is cleared alongside the projection — a re-ask for the identical q the mask
+    // change just invalidated must still reach the client, not read as already-answered.
+    store.suggest('archive', '');
+    await clock.advance(200);
+    expect(suggest).toHaveBeenCalledTimes(2);
+    expect(store.get('filters').suggestions['archive']).toEqual({q: '', values: [], more: false});
+  });
+
+  it('an in-flight response straddling a reset is dropped, even where its (column, q) matches a fresh ask that followed the reset', async () => {
+    // The race `resetSuggestions`'s own doc explains: a request is still in flight when `clear()`
+    // (or a view switch) invalidates it, and a caller — a mounted `<tessera-filter>`, here played
+    // by hand — re-asks the identical `q` right after, because that is what the empty-`q` page
+    // asks for both on mount and after an invalidation. The `q` echo alone cannot tell the stale
+    // response from the fresh ask's; only the epoch can.
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client} = fakeClient(() => response('ck'));
+    const calls: {resolve: (v: {status: 'ok'; column: string; q: string; values: never[]; more: boolean}) => void}[] = [];
+    const suggest = vi.fn(
+      (_token: string, column: string, q: string) =>
+        new Promise((resolve) => {
+          calls.push({resolve: (v) => resolve(v)});
+        })
+    );
+    (client as unknown as {suggest: typeof suggest}).suggest = suggest;
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    await clock.advance(1);
+
+    // Request A: in flight, unresolved.
+    store.suggest('archive', '');
+    await clock.advance(200);
+    expect(calls.length).toBe(1);
+
+    // Invalidated before A lands — and the caller re-asks the identical q straight away, arming
+    // request B.
+    store.clear();
+    store.suggest('archive', '');
+    await clock.advance(200);
+    expect(calls.length).toBe(2);
+
+    // B lands first, saying `more: true` — this session's answer under the new epoch.
+    calls[1]!.resolve({status: 'ok', column: 'archive', q: '', values: [], more: true});
+    await clock.advance(1);
+    expect(store.get('filters').suggestions['archive']).toEqual({q: '', values: [], more: true});
+
+    // A lands after it, saying `more: false` — the old epoch's answer, sharing B's exact (column, q).
+    // Applying it would silently overwrite B's landed page with a stale one a shape decision could
+    // have already been taken from.
+    calls[0]!.resolve({status: 'ok', column: 'archive', q: '', values: [], more: false});
+    await clock.advance(1);
+    expect(store.get('filters').suggestions['archive']).toEqual({q: '', values: [], more: true});
+  });
 });
 
 describe('subscription', () => {

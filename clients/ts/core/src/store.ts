@@ -303,6 +303,14 @@ export type FiltersProjection = {
    */
   suggestions: Record<string, {q: string; values: SuggestValue[]; more: boolean}>;
   suggestErrors: Record<string, Refusal>;
+  /**
+   * Bumped every time {@link resetSuggestions} invalidates every column's held page (a view
+   * switch, a re-authorise) — a control's own bookkeeping (`filter.ts`'s `lastEpoch`) compares
+   * against this to notice an invalidation even where it never receives one through `suggestions`
+   * or `suggestErrors` directly (a column stuck on a refusal, or still in flight when the reset
+   * lands). Not meaningful on its own; only the fact that it moved matters.
+   */
+  suggestEpoch: number;
 };
 
 export type LegendProjection = {
@@ -577,7 +585,7 @@ export function createStore(options: StoreOptions): Store {
     artifacts: {layer: null, layers: [], served: [], lineage: servedLineage([]), status: 'idle', refusal: null, version: 0, held: 0, table, servedOrdinals: new Set(), shapes: new Map(), colours: new Map(), palette, coverage: {current: 0, stale: 0}},
     selection: {item: null, itemRefusal: null, artifact: null, artifactRefusal: null},
     region: null,
-    filters: {draft: {}, expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {}},
+    filters: {draft: {}, expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0},
     legend: {ranks: {}, domains: {}, categories: {}, categoryErrors: {}, colourBy: null},
     replica: {bytes: 0, points: 0, bands: 0, views: 0, lastPlan: null}
   };
@@ -1303,6 +1311,10 @@ export function createStore(options: StoreOptions): Store {
 
     const from = viewId;
     const kept = sameFrame(quantisationOf(from), quantisationOf(id));
+    // A category's suggestion page is per `(column, view)` — the vocabulary a `derived` column
+    // walks is view-addressed (`value-suggestion.md` §5.1) — so the page held for the view being
+    // left answers nothing about the one being entered, whether or not the two share a frame.
+    resetSuggestions();
 
     // Nothing of a view that is not current may be in flight, and nothing of it may be scheduled:
     // a debounce left armed would put a request on the wire for a view nobody is looking at.
@@ -1506,6 +1518,43 @@ export function createStore(options: StoreOptions): Store {
   /** Per column: how many `superseded` retries the current `q` has spent (§ the retry cap below). */
   const suggestRetries = new Map<string, number>();
 
+  /**
+   * Bumped by every {@link resetSuggestions}, and checked by {@link runSuggest} against the value
+   * it captured at its own start — an in-flight request that straddles a reset must not land, even
+   * where its `(column, q)` pair coincidentally matches a fresh ask under the new epoch.
+   *
+   * **Why the existing `q` echo is not enough on its own.** `resetSuggestions` publishes the
+   * cleared `filters` projection synchronously, and a mounted `<tessera-filter>` reacts inside that
+   * same publish (`onStoreChange` runs from `subscribe`'s callback) — so by the time this function
+   * returns, a control has often already re-asked the identical `q` (most commonly `''`, the
+   * empty-q page every category control asks on mount and after an invalidation alike). That
+   * repopulates `suggestWant` with the same value the stale in-flight request is still carrying, so
+   * the `suggestWant.get(column) !== q` guard alone cannot tell the two apart — only the epoch can.
+   */
+  let suggestEpoch = 0;
+
+  /**
+   * Drop every column's held suggestion page and refusal, and the debounce/retry bookkeeping
+   * behind them — a view switch or a re-authorise invalidates them (`value-suggestion.md` §5.1):
+   * a category's visible values, and so its empty-`q` page, are per `(column, view)`, and a mask
+   * change can only narrow or widen who a value is served to. Clearing `suggestWant` alongside the
+   * projection is what lets the next `ask('')` actually reach the server — otherwise the debounce
+   * dedupe (`suggestWant.get(column) === q`) would read the old `q` as already asked and answer
+   * from a page that no longer applies. A control re-derives its shape (checklist or lookahead)
+   * from whatever page lands next, the same as on first mount.
+   */
+  function resetSuggestions(): void {
+    // Bumped unconditionally — even where nothing is held in `suggestions`/`suggestErrors` there
+    // may be a request in flight (a fetch already sent, its result not yet landed), and the epoch
+    // is exactly what tells that stale landing apart from a fresh ask sharing its `(column, q)`.
+    suggestEpoch++;
+    for (const timer of suggestTimers.values()) clock.cancel(timer);
+    suggestTimers.clear();
+    suggestWant.clear();
+    suggestRetries.clear();
+    replaceProjection('filters', {...projections.filters, suggestions: {}, suggestErrors: {}, suggestEpoch});
+  }
+
   function suggest(column: string, q: string): void {
     if (!token || disposed) return;
     // Idempotent per (column, q): a caller re-asking for the identical q it already asked for —
@@ -1537,9 +1586,13 @@ export function createStore(options: StoreOptions): Store {
 
   async function runSuggest(column: string, q: string): Promise<void> {
     if (!token || disposed) return;
+    // Captured once, at entry: every landing below — success, the catch, and the superseded
+    // re-arm — requires this unchanged against the live `suggestEpoch`, which is what `resetSuggestions`'s
+    // doc above explains is not the same question the `q` echo answers.
+    const epoch = suggestEpoch;
     try {
       const result = await client.suggest(token, column, q, {view: viewId});
-      if (disposed || suggestWant.get(column) !== q) return; // a later keystroke already wants a different page
+      if (disposed || suggestWant.get(column) !== q || suggestEpoch !== epoch) return; // a later keystroke, or a reset, already wants something else
       if (result.status === 'superseded') {
         // The session already has one suggest in flight (§5.1's one-in-flight rule): retry once
         // it should have returned, still guarded by the same `q` check, rather than surface the
@@ -1579,7 +1632,7 @@ export function createStore(options: StoreOptions): Store {
         suggestErrors: without(projections.filters.suggestErrors, column)
       });
     } catch (error) {
-      if (disposed || suggestWant.get(column) !== q) return;
+      if (disposed || suggestWant.get(column) !== q || suggestEpoch !== epoch) return;
       const e = error as {code?: string; detail?: string; message?: string};
       replaceProjection('filters', {
         ...projections.filters,
@@ -1995,6 +2048,10 @@ export function createStore(options: StoreOptions): Store {
   }
 
   function clear(): void {
+    // A re-authorise moves the mask, and a category's suggestion page answers `visible(code)`
+    // under the mask it was fetched against (`value-suggestion.md` §5.1) — held across a mask
+    // change it would show values the new mask does not, or hide ones it now does.
+    resetSuggestions();
     // **Every held view, not the current one alone**: a mask change invalidates all of them
     // (`view-switching.md` §4), and a view left warm across it would draw the previous
     // principal's marks the moment it was returned to.
