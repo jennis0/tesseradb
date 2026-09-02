@@ -526,6 +526,12 @@ async fn mount_server_with_flush(
         // Small enough that the fixtures' vocabularies page rather than arriving whole, so the
         // cursor is exercised by an ordinary request rather than only by a contrived one.
         max_category_values: 4,
+        // Small enough that a suggestion fixture's page and walk-budget behaviour are exercised
+        // by an ordinary request rather than only by a contrived one — the same argument as
+        // `max_category_values` above.
+        max_suggestions: 4,
+        max_suggestion_walk: 1_000,
+        suggest_admission: tessera_server::state::SuggestAdmission::new(),
         max_shape_vertices: tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
         max_region_vertices: 10_000,
         max_region_cells: tessera_engine::DEFAULT_MAX_REGION_CELLS,
