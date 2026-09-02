@@ -62,6 +62,10 @@ LAYER = "mesh/descriptors"
 #: nothing, so the work is cut into batches whose peak is bounded and whose result is identical.
 BATCH = 200_000
 
+#: The largest value an Arrow `list`'s 32-bit offsets can address. `_list` refuses past it rather
+#: than letting an int32 cumulative sum wrap into a well-formed list with the wrong row boundaries.
+_OFFSET_LIMIT = 2**31 - 1
+
 
 def _unique(key: np.ndarray) -> np.ndarray:
     """The sorted distinct values of an integer array, in place where it can be.
@@ -410,9 +414,31 @@ class Mesh:
         )
 
     def _list(self, counts: np.ndarray, values: np.ndarray, n: int) -> pa.ListArray:
-        offsets = np.zeros(n + 1, np.int32)
-        np.cumsum(counts, out=offsets[1:])
-        return pa.ListArray.from_arrays(pa.array(offsets, pa.int32()), pa.array(values, pa.int32()))
+        """Per-row counts and a flat value array as an Arrow `list`.
+
+        **The cumulative sum is taken in int64 and checked before it is narrowed.** An Arrow `list`
+        addresses its values with 32-bit offsets, and this accumulation used to run in int32 —
+        `np.cumsum` into an int32 buffer wraps *silently*, and a wrapped offset does not corrupt the
+        values, it moves a row's boundary. What comes out is a well-formed list whose rows hold each
+        other's members: a wrong **count** on a served artifact, not a crash.
+
+        The closure is the caller that could reach it. At `prepare.py`'s `MESH_SLICE` of 10^6 rows
+        the largest slice measured expanded to 5.8x10^7 entries, 37x under the limit — but the slice
+        size is a dial, and ~3.7x10^7 rows would cross it. So this refuses, loudly, naming both
+        numbers. `large_list` would carry it, at the cost of a wider offset on every consumer for a
+        size nothing here needs.
+        """
+        offsets = np.zeros(n + 1, np.int64)
+        np.cumsum(counts, dtype=np.int64, out=offsets[1:])
+        if offsets[-1] > _OFFSET_LIMIT:
+            raise ValueError(
+                f"{n:,} rows expanded to {int(offsets[-1]):,} entries, past the "
+                f"{_OFFSET_LIMIT:,} an Arrow list's 32-bit offsets address. Lower prepare.py's "
+                f"MESH_SLICE, or give this a large_list."
+            )
+        return pa.ListArray.from_arrays(
+            pa.array(offsets.astype(np.int32), pa.int32()), pa.array(values, pa.int32())
+        )
 
     def _rows(self, rows: np.ndarray, ids: np.ndarray, n: int) -> pa.ListArray:
         return self._list(*self._dedup(rows, ids, n), n)
