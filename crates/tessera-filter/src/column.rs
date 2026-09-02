@@ -326,6 +326,39 @@ impl ColumnPostings {
         Ok(())
     }
 
+    /// [`Self::intersects`]' first stage alone, over the base tier: the binary search that turns a
+    /// scattered code into a record ordinal. `None` for a code with no base record, and `None`
+    /// for a positional base, which has no search to do.
+    ///
+    /// The three `bench_*` entries exist so the walk's constant can be decomposed without
+    /// transcribing `intersects` — each calls the same code the shipped path calls
+    /// (`probes/2026-09-02-value-suggestion/`, the decomposition arm).
+    #[cfg(feature = "bench-timing")]
+    pub fn bench_base_record_index(&self, value: AttrLocalId) -> Option<usize> {
+        match &self.base {
+            BaseTier::Keyed(tier) => tier.bench_record_index(value.raw()),
+            BaseTier::Positional(_) => None,
+        }
+    }
+
+    /// The second stage alone: the borrowed view over the mapped record's bytes.
+    #[cfg(feature = "bench-timing")]
+    pub fn bench_base_posting_at_index(&self, idx: usize) -> io::Result<PostingRef<'_>> {
+        match &self.base {
+            BaseTier::Keyed(tier) => tier.bench_posting_at_index(idx),
+            BaseTier::Positional(_) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "bench_base_posting_at_index is for a keyed base",
+            )),
+        }
+    }
+
+    /// The third stage alone: the existential test against the candidate.
+    #[cfg(feature = "bench-timing")]
+    pub fn bench_hits(posting: &PostingRef<'_>, candidate: &Bitmap) -> bool {
+        hits(posting, candidate)
+    }
+
     /// Every record holding `value`, base first then the tiers in serving order.
     ///
     /// The value's entities are the **union** of these; nothing here unions them, which is the
