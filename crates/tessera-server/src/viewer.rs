@@ -44,6 +44,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     let router = Router::new()
         .route("/v1/meta", get(meta))
         .route("/v1/categories/{column}", get(categories))
+        .route("/v1/categories/{column}/suggest", get(suggest))
         .route("/v1/viewport", post(viewport))
         .route("/v1/items/{tessera_id}", post(item))
         .route("/v1/artifacts/{tessera_id}", post(artifact))
@@ -501,6 +502,13 @@ async fn meta(
             // client that pages must know when a short page means "the set ended" rather than
             // "the deployment truncated".
             "max_category_values": state.max_category_values,
+            // `/v1/categories/{column}/suggest`'s two ceilings (`value-suggestion.md` §5.3),
+            // published on `max_category_values`' own argument. `max_suggestions` is the page
+            // ceiling and `limit`'s default; `max_suggestion_walk` is the walk budget a client
+            // reads `more: true` against on a page it did not fill, rather than mistaking it for
+            // its own arithmetic being wrong. Deployment constants, identical for every principal.
+            "max_suggestions": state.max_suggestions,
+            "max_suggestion_walk": state.max_suggestion_walk,
             // The publication vertex cap a shape is held to (`polygon-membership.md` §9), so a
             // caller can simplify before submitting rather than learn the number from a `422`.
             // A deployment constant, identical for every principal.
@@ -615,10 +623,14 @@ struct CategoriesQuery {
 /// caller may learn about which columns exist is `/v1/meta`'s answer, and this route must not
 /// become a second, finer one.
 ///
-/// **Not behind the compute gate**, unlike `/v1/viewport` and `/v1/items`. The work is a bounded
-/// walk of an in-memory `BTreeMap` — no mask composition, no projection, no file IO — so it is the
-/// same class of request as `/v1/meta`, which is also ungated. There is nothing here for a queue
-/// to protect.
+/// **Off the compute gate**, unlike `/v1/viewport` and `/v1/items`. **For a `public` column** the
+/// work is a bounded walk of an in-memory map with no mask composition, no projection and no file
+/// IO — the same class of request as `/v1/meta`. **A `derived` column is not that** (corrected
+/// alongside the suggestion verb, contracts §3.2 r72): it composes the candidate and probes one
+/// memory-mapped posting per value it walks, over the whole vocabulary, so it is neither IO-free
+/// nor bounded by the page. There is still nothing here a compute-admission queue is sized to
+/// protect: both this route and `suggest` below are read-only, per-request, memory-mapped work,
+/// not the `/v1/viewport` sweep the gate exists for.
 async fn categories(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -628,58 +640,10 @@ async fn categories(
     let token = bearer_token(&headers).ok_or(ApiError::BadCredential)?;
     let entry = state.authenticated_session(token)?;
 
-    // **The column, resolved the way a filter leaf naming it is resolved** (`views.md` §5): an
-    // entity-scoped column is its own name and takes no view; a group-scoped family resolves to
-    // one view's column, by the request's own view or by a pin, `sentiment@2026-Q3`. One site and
-    // one gate for the scoped half of both surfaces — a value list served for a group whose gate
-    // this principal fails would be the discovery half of exactly what the filter parse refuses.
-    //
-    // `resolve_category_column` and not the filter's own: a category has a value list whether or
-    // not it is an *operand*, and a blob-resident one — neither `render` nor `index`, the default
-    // placement — is exactly that. It resolves the entity-scoped names by declaration, ahead of
-    // the filter admission, and hands everything scoped to the one site unchanged.
-    //
-    // The request's view is itself resolved through the visible-view set first, so a principal who
-    // may reach the *group* but not one of its views cannot name that view here and read its
-    // column: without that the `view` parameter would be a route around the per-view gate that the
-    // viewport route closes.
     let meta = state.engine.meta();
     let visible = &entry.session.visible_views;
-    let view = match query.view.as_deref() {
-        None => "",
-        Some(requested) => match meta.resolve_visible_view(requested, visible) {
-            Some(view) => view.id.as_str(),
-            None => return Err(ApiError::Unknown(format!("unknown view '{requested}'"))),
-        },
-    };
-    let resolved = match meta.resolve_category_column(&column, view, visible) {
-        // A non-category column is the same `404` a name that is nothing at all gets, which is
-        // this route's own rule and the reason it cannot be used to probe which columns are
-        // categories beyond what `/v1/meta` already says.
-        tessera_engine::LeafColumn::Resolved {
-            column,
-            family: tessera_engine::filter::Family::Category,
-        } => column,
-        tessera_engine::LeafColumn::Unpinned { group } => {
-            return Err(ApiError::Contract(format!(
-                "'{column}' is scoped to view group '{group}' and this request names no view of \
-                 it, so the name decides no value set. Pass `view=` a view of that group, or pin \
-                 the one it means — '{column}@<key>'"
-            )))
-        }
-        tessera_engine::LeafColumn::UnknownPin { group, pin } => {
-            return Err(ApiError::Unknown(format!(
-                "unknown view '{pin}' of group '{group}'"
-            )))
-        }
-        tessera_engine::LeafColumn::PinOnUnscoped { column } => {
-            return Err(ApiError::Contract(format!(
-                "'{column}' is not scoped to a view group, so there is nothing for the pin to \
-                 choose between: it is one value set for the corpus"
-            )))
-        }
-        _ => return Err(ApiError::Unknown("unknown category column".to_string())),
-    };
+    let resolved =
+        resolve_category_column(&meta, &column, query.view.as_deref(), visible)?;
 
     // Clamped, not refused: the ceiling is a response bound rather than a disclosure control, so a
     // caller asking for more than the deployment serves gets the deployment's answer plus a cursor
@@ -740,6 +704,195 @@ async fn categories(
             "title": v.title,
         })).collect::<Vec<_>>(),
         "next": page.next,
+    })))
+}
+
+/// The column resolution `/v1/categories/{column}` and `/v1/categories/{column}/suggest` share
+/// (`value-suggestion.md` §5.1: "one gate, one address resolution"). An entity-scoped column is
+/// its own name; a group-scoped family is view-addressed through `?view=` or the `{column}@{key}`
+/// pin, resolved through the session's visible-view set exactly as a viewer verb's `view` is — so
+/// a view this principal cannot reach is the same `404` an unknown view gets, whatever the
+/// column's scope. Factored out of `categories` (design r72) so the two listing surfaces cannot
+/// silently diverge on which column a spelling names — a gate reached by one door and not the
+/// other is the existence oracle by the second door.
+///
+/// `Ok` carries the resolved column name (an engine-internal `name@view` for a scoped family);
+/// every failure is the caller's `ApiError`, already shaped as `/v1/categories` shapes it, so
+/// both handlers return the identical body for the identical mistake.
+fn resolve_category_column(
+    meta: &tessera_engine::EngineMeta,
+    column: &str,
+    requested_view: Option<&str>,
+    visible: &tessera_engine::gate::VisibleViews,
+) -> Result<String, ApiError> {
+    // **`view` is resolved first and on its own terms**, before the column is looked at
+    // (contracts §3.2): an entity-scoped column has one value set and no view decides anything
+    // about it, but a `view` naming nothing or naming a view this principal may not reach is
+    // still the unknown-view 404, applied ahead of the branch rather than inside one of its arms.
+    let view = match requested_view {
+        None => "",
+        Some(requested) => match meta.resolve_visible_view(requested, visible) {
+            Some(view) => view.id.as_str(),
+            None => return Err(ApiError::Unknown(format!("unknown view '{requested}'"))),
+        },
+    };
+    match meta.resolve_category_column(column, view, visible) {
+        // A non-category column is the same `404` a name that is nothing at all gets, which is
+        // this route's own rule and the reason it cannot be used to probe which columns are
+        // categories beyond what `/v1/meta` already says.
+        tessera_engine::LeafColumn::Resolved {
+            column: resolved,
+            family: tessera_engine::filter::Family::Category,
+        } => Ok(resolved),
+        tessera_engine::LeafColumn::Unpinned { group } => Err(ApiError::Contract(format!(
+            "'{column}' is scoped to view group '{group}' and this request names no view of \
+             it, so the name decides no value set. Pass `view=` a view of that group, or pin \
+             the one it means — '{column}@<key>'"
+        ))),
+        tessera_engine::LeafColumn::UnknownPin { group, pin } => Err(ApiError::Unknown(format!(
+            "unknown view '{pin}' of group '{group}'"
+        ))),
+        tessera_engine::LeafColumn::PinOnUnscoped { column } => Err(ApiError::Contract(format!(
+            "'{column}' is not scoped to a view group, so there is nothing for the pin to \
+             choose between: it is one value set for the corpus"
+        ))),
+        _ => Err(ApiError::Unknown("unknown category column".to_string())),
+    }
+}
+
+/// `GET /v1/categories/{column}/suggest`'s query string.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SuggestQuery {
+    /// The text typed, echoed back **as received**, not folded (`value-suggestion.md` §5.1).
+    /// Bounded at 256 bytes; empty matches every value.
+    #[serde(default)]
+    q: String,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    counts: Option<bool>,
+    /// As `/v1/categories`' own `view` — resolved through the same site, before the column.
+    #[serde(default)]
+    view: Option<String>,
+}
+
+/// `GET /v1/categories/{column}/suggest` (contracts §3.2, r72; `value-suggestion.md`): the values
+/// whose folded key, title, or a word start of either has `q` as a prefix.
+///
+/// **One gate with the enumeration, and one address resolution** — [`resolve_category_column`],
+/// shared with [`categories`]. Everything about who may be told a value name is
+/// `Engine::suggest`'s predicate, which is `Engine::categories`' own; this handler's job is the
+/// wire shape, the two 422s the enumeration has no need of (`q` too long, an unknown parameter),
+/// and the per-session admission below.
+///
+/// **`limit=0` is `422`**, on its own reason from the enumeration's: a zero-length suggestion page
+/// is a request for no answer rather than a cursor that cannot advance (this route has no cursor
+/// at all). **Unresolved parameters are `422`**: this route has no cursor and no bulk form to
+/// compose with, so a parameter it does not define is refused rather than silently ignored —
+/// `#[serde(deny_unknown_fields)]` on [`SuggestQuery`] is what that refusal actually is, since a
+/// spelling mistake in a client's `q` or `limit` must not be read as an empty prefix or the
+/// deployment default.
+///
+/// **Off the compute-admission gate, and admitted at most once per session.** The walk faults on
+/// mapped files and probes up to `max_suggestion_walk` postings — not reactor work — so it runs in
+/// `spawn_blocking`, exactly as `/v1/items` and `/v1/artifacts` do; unlike them it takes no
+/// `compute_gate` permit; a per-keystroke surface queued behind viewport renders would be
+/// unusable. What it takes instead is [`crate::state::SuggestAdmission`]'s one-per-session slot: a
+/// second request for a session already walking is refused with the shared `429 backpressure`
+/// (`ApiError::Backpressure`, `Retry-After: 1`) **before any work runs**, which is what stops a
+/// client that does not debounce its keystrokes from turning a held key into a queue.
+async fn suggest(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(column): AxumPath<String>,
+    query: Result<AxumQuery<SuggestQuery>, axum::extract::rejection::QueryRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let token = bearer_token(&headers).ok_or(ApiError::BadCredential)?;
+    let entry = state.authenticated_session(token)?;
+
+    // An unknown query parameter is `deny_unknown_fields`'s rejection, which axum reports as an
+    // extractor error rather than routing it through `SuggestQuery`'s `Deserialize` impl and back
+    // out here — caught explicitly so the response is this route's own `422 contract` rather than
+    // axum's default plain-text rejection body. A fixed detail, not the rejection's own `Display`
+    // (`map_store_error`'s rule, applied here too): the query string is caller-supplied and its
+    // exact serde error is not this crate's to forward verbatim.
+    let AxumQuery(query) = query.map_err(|_| {
+        ApiError::Contract(
+            "the query string is malformed, or carries a parameter this route does not define; \
+             it accepts only `q`, `limit`, `counts` and `view`"
+                .to_string(),
+        )
+    })?;
+
+    if query.q.len() > 256 {
+        return Err(ApiError::Contract(format!(
+            "q must be at most 256 bytes, got {}",
+            query.q.len()
+        )));
+    }
+    let limit = match query.limit {
+        Some(0) => {
+            return Err(ApiError::Contract(
+                "limit must be at least 1; a zero-length suggestion page is a request for no \
+                 answer"
+                    .to_string(),
+            ))
+        }
+        Some(n) => n.min(state.max_suggestions),
+        None => state.max_suggestions,
+    };
+    let counts = query.counts.unwrap_or(false);
+
+    let meta = state.engine.meta();
+    let visible = &entry.session.visible_views;
+    let resolved = resolve_category_column(&meta, &column, query.view.as_deref(), visible)?;
+
+    // **At most one walk in flight per session, refused before any work runs.** `token_id` rather
+    // than the bearer token itself: the admission set is process-wide, and a token never crosses a
+    // response or a log line here either way, but the id is the same handle `/session/revoke`
+    // already addresses this session by.
+    let Some(_suggest_guard) = state.suggest_admission.try_begin(entry.session.token_id) else {
+        return Err(ApiError::Backpressure);
+    };
+
+    let walk_budget = state.max_suggestion_walk;
+    let q = query.q.clone();
+    let page = tokio::task::spawn_blocking(move || {
+        let _suggest_guard = _suggest_guard;
+        state
+            .engine
+            .suggest(&entry.session, &resolved, &q, limit, counts, walk_budget)
+    })
+    .await
+    .map_err(map_join_error)?
+    .map_err(map_engine_error)?
+    .ok_or_else(|| ApiError::Unknown("unknown category column".to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        // The caller's own spelling, as `/v1/categories` echoes it — never the resolved,
+        // engine-internal `name@view` form of a scoped family.
+        "column": column,
+        "q": query.q,
+        "values": page.values.iter().map(|v| {
+            let mut value = serde_json::json!({
+                "code": v.code,
+                "key": v.key,
+                "title": v.title,
+                "match": {
+                    "field": v.span.field.as_str(),
+                    "start": v.span.start,
+                    "len": v.span.len,
+                },
+            });
+            // Present iff `counts=true`, and never `0`/`null` as a stand-in for absent — `count`
+            // is only ever inserted here when the engine actually returned one.
+            if let Some(count) = v.count {
+                value["count"] = serde_json::json!(count);
+            }
+            value
+        }).collect::<Vec<_>>(),
+        "more": page.more,
     })))
 }
 

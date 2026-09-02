@@ -374,6 +374,15 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
         unavailable @ EngineError::VocabularyVisibilityUnavailable { .. } => {
             ApiError::FailClosed(unavailable.to_string())
         }
+        // `/v1/categories/{column}/suggest` on a `derived` column whose member sets could not be
+        // read, or a read that failed part-way through the walk (`value-suggestion.md` §3): the
+        // whole column is refused, exactly as `VocabularyVisibilityUnavailable` is above, and for
+        // the same reason — an empty page is a real answer and must stay distinguishable from an
+        // underivable predicate. Named explicitly, though the catch-all maps it identically, so
+        // the choice reads at the call site rather than being inherited.
+        unavailable @ EngineError::SuggestionUnavailable { .. } => {
+            ApiError::FailClosed(unavailable.to_string())
+        }
         other => ApiError::FailClosed(other.to_string()),
     }
 }

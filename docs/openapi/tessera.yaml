@@ -286,8 +286,7 @@ paths:
       operationId: suggestCategoryValues
       summary: Typeahead over a category vocabulary — the values whose key, title or a word start of either has `q` as a prefix, gated by the vocabulary's `visibility`.
       description: |
-        **Not implemented.** No server serves this route and no suggestion index exists; it is
-        specified by `value-suggestion.md` (normative r2) and decisions 0118–0123.
+        Specified by `value-suggestion.md` (normative r2) and decisions 0118–0123.
 
         The matching rule is declared and fixed: Unicode NFKC, then default case folding, then
         whitespace collapsed and trimmed, applied to `q` and to every indexed string alike. Each
@@ -1154,7 +1153,7 @@ components:
       type: object
       additionalProperties: false
       required: [column, q, values, more]
-      description: "`value-suggestion.md` §5.1. **Not implemented.**"
+      description: "`value-suggestion.md` §5.1."
       properties:
         column:
           type: string

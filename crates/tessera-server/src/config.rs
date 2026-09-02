@@ -858,6 +858,10 @@ struct RawServe {
     #[serde(default)]
     max_category_values: Option<usize>,
     #[serde(default)]
+    max_suggestions: Option<usize>,
+    #[serde(default)]
+    max_suggestion_walk: Option<u64>,
+    #[serde(default)]
     max_shape_vertices: Option<u64>,
     #[serde(default)]
     max_region_vertices: Option<u64>,
@@ -971,6 +975,22 @@ pub struct Config {
     /// **A performance knob, so it defaults** (SA §7). It bounds a response, not a disclosure:
     /// what a principal may be *told* is `visibility`'s question and is settled before paging starts.
     pub max_category_values: usize,
+    /// `/v1/categories/{column}/suggest`'s page ceiling and `limit`'s default
+    /// (`value-suggestion.md` §5.3). Published in `/v1/meta`'s `selection` block on
+    /// `max_category_values`' own argument: a client must be able to tell a short list that means
+    /// *that is all* from one the deployment truncated, which `more` alone does not.
+    ///
+    /// **A performance knob, so it defaults.** What a principal may be *told* is `visibility`'s
+    /// question, settled before the page is cut.
+    pub max_suggestions: usize,
+    /// The walk budget `Engine::suggest` spends before it stops and answers `more: true`
+    /// (`value-suggestion.md` §5.3, §6.2). A client that receives `more` on an unfilled page reads
+    /// it as this deployment constant rather than as its own arithmetic being wrong.
+    ///
+    /// **Bounds latency, not disclosure**: the enumeration walks the whole vocabulary unbudgeted,
+    /// and this bound exists only because a suggestion is per keystroke. A performance knob, so it
+    /// defaults, identical for every principal.
+    pub max_suggestion_walk: u64,
     /// The most vertices a published polygon may carry after canonicalisation
     /// (`polygon-membership.md` §9, ruling (e)): over it, `PUT /control/layers/{name}/artifacts`
     /// is a `422` naming the count and the cap. Published on `/v1/meta`. The held decomposition
@@ -1212,6 +1232,15 @@ const DEFAULT_MAX_TILES_PER_REQUEST: usize = 262_144;
 /// thousands of values, where an unpaged response is megabytes against a measured 79 KB viewport
 /// response and, being per-principal, shares no cache with anyone.
 const DEFAULT_MAX_CATEGORY_VALUES: usize = 1_000;
+
+/// `/v1/categories/{column}/suggest`'s page ceiling and default (`value-suggestion.md` §5.3,
+/// contracts §3.2's r72). The owner's recommended default: a typeahead page, not a legend.
+const DEFAULT_MAX_SUGGESTIONS: usize = 20;
+
+/// The suggestion walk's budget (`value-suggestion.md` §5.3, §6.2). The owner's recommended
+/// default — measured (`probes/2026-09-02-value-suggestion/`) as the smallest budget that fills
+/// the sparsest measured viewer's page on a one-character prefix at 10⁷ values.
+const DEFAULT_MAX_SUGGESTION_WALK: u64 = 100_000;
 
 /// A `region` leaf's vertex cap. A lasso is drawn with a mouse at one vertex per pointer event, so
 /// a few hundred is an elaborate one; ten thousand leaves room for a client that hands over a
@@ -2573,6 +2602,14 @@ fn parse(text: &str) -> Result<Config> {
             .serve
             .max_category_values
             .unwrap_or(DEFAULT_MAX_CATEGORY_VALUES),
+        max_suggestions: raw
+            .serve
+            .max_suggestions
+            .unwrap_or(DEFAULT_MAX_SUGGESTIONS),
+        max_suggestion_walk: raw
+            .serve
+            .max_suggestion_walk
+            .unwrap_or(DEFAULT_MAX_SUGGESTION_WALK),
         max_shape_vertices: raw
             .serve
             .max_shape_vertices
