@@ -28,6 +28,23 @@ export TESSERA_LADDER=/home/joe/code/tessera/data/ladder
 cd "$TESSERA_LADDER/paperseek" && tessera check --payloads && tessera build --stage-timings
 ```
 
+## ⊘ Two licence claims on the share are wrong, and neither is this corpus's `licence` column
+
+Both are about the *dataset's* rights, not the per-work compartment below, and both are recorded
+here because a figure quoted from either would be quoted wrongly.
+
+- **The PaperSeek acquisition README says the rung is "unencumbered end to end" on a CC0 reading of
+  the dataset card.** The card's own licence section says something narrower: OpenAlex's data is
+  CC0, and *"embeddings generated as part of the PaperSeek framework are released for research
+  purposes"* — which is not CC0 and is not a licence with terms. The Hugging Face metadata block
+  says `cc0-1.0`; the prose beside it does not. This is a measurement fixture that is not
+  distributed, so nothing here turns on it, and nothing should be published from these vectors on
+  the strength of the README's sentence.
+- **The OpenAlex acquisition README named a top-level `license` column on `works`.** There is none,
+  on this vintage or any partition sampled; the licence lives at `best_oa_location.license`
+  (`../../probes/2026-09-02-rung-4-share-reads/` §2). Corrected on the share 2026-09-02 by the
+  OpenAlex track.
+
 ## Two tracks, one package
 
 `stage.py`, `sources.py`, `routes.py`, `prepare.py`, `spread.py`, `drive.py`, `corpus.toml` and
