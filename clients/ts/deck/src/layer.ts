@@ -24,7 +24,7 @@ import {shapeBbox, smoothRing, type ContourShape, type Part} from './contours.js
 import {binDensity, filterDensity} from './density.js';
 import {LABEL_LINE_HEIGHT, labelSize, placeLabels, wrapLabel, type LabelCandidate, type PlacedLabel} from './labels.js';
 import {LookupTexture} from './lut.js';
-import {MarksLayer} from './marks-layer.js';
+import {MarksLayer, type HighlightPass} from './marks-layer.js';
 import {deckOpacity, markStyle} from './marks-style.js';
 import {MarkSlab, type GpuSlab} from './slab.js';
 
@@ -836,6 +836,10 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     dragPolygon: null,
     hoveredArtifact: null,
     wash: true,
+    // Declared, so deck's prop machinery carries them like every other host-computed property
+    // (`components/src/map.ts` repaints when either changes).
+    highlighting: false,
+    washChannel: 'matched',
     radius: null,
     pickable: true,
     onDrawn: null,
@@ -1024,44 +1028,12 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     // Layers toggle `visible`; they are never omitted — deck destroys an absent layer and re-uploads
     // everything it held when it returns. One layer per retained slab partition, addressed by slot,
     // so a depth flip is a swap and flipping back uploads nothing.
+    const passes: HighlightPass[] = highlighting ? ['dull', 'lit'] : ['all'];
     const partitions = slab.layers();
     // The slab's own warm layer only: the stand-in layer is added below whatever the partitions
     // hold, and pushing the warm one here too gave deck two layers under `marks-standin`, which it
     // warned about and resolved by keeping one of them.
     if (partitions.length === 0) layers.push(...this.warmMarksLayers(false));
-    for (const held of partitions) {
-      layers.push(
-        new MarksLayer(
-          this.getSubLayerProps({id: `marks-p${held.slot}`}),
-          {
-            visible: held.active && held.draw.length > 0,
-            data: {
-              length: held.draw.length,
-              attributes: held.draw.gpu
-                ? gpuAttributes(held.draw.gpu)
-                : {
-                    getPosition: binary(held.draw.positions, 2),
-                    getFillColor: binary(held.draw.colours, 4, true),
-                    getOrdinal: binary(held.draw.ordinals, 1),
-                    getHighlight: binary(held.draw.highlights, 1)
-                  }
-            },
-            tesseraIds: held.draw.ids,
-            useLut,
-            highlighting,
-            lutTexture: lut.gpu,
-            radiusUnits: 'pixels' as const,
-            getRadius: style.radius,
-            radiusMinPixels: 1,
-            antialiasing: style.antialiasing,
-            opacity,
-            pickable: this.props.pickable && held.active,
-            parameters: {depthCompare: 'always' as const}
-          } as never
-        )
-      );
-    }
-
     // The stand-ins: drawn at the same alpha as any other mark. What guards the reading is the
     // number channel — no count is shown against a non-exact tile — not the alpha channel.
     //
@@ -1077,34 +1049,76 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
         `colour buffer covers ${colours.length / 4} of ${standIn.count} stand-in marks. Colour is presentation and must never decide what is drawn.`
       );
     }
-    layers.push(
-      new MarksLayer(
-        this.getSubLayerProps({id: 'marks-standin'}),
-        {
-          visible: standIn.count > 0,
-          data: {
-            length: standIn.count,
-            attributes: {
-              getPosition: binary(standIn.positions, 2),
-              getFillColor: binary(colours, 4, true),
-              getOrdinal: binary(standIn.ordinals, 1),
-              getHighlight: binary(standIn.highlights, 1)
-            }
-          },
-          tesseraIds: standIn.ids,
-          useLut,
-          highlighting,
-          lutTexture: lut.gpu,
-          radiusUnits: 'pixels' as const,
-          getRadius: style.radius,
-          radiusMinPixels: 1,
-          antialiasing: style.antialiasing,
-          opacity,
-          pickable: this.props.pickable,
-          parameters: {depthCompare: 'always' as const}
-        } as never
-      )
-    );
+    // **Under a highlight every mark layer is drawn twice** — the dulled marks first, then the lit
+    // ones over them (`marks-layer.ts`'s `HighlightPass`). Instances rasterise in buffer order, so
+    // in a single pass a lit mark sits under every unlit mark later in the slab, which at a
+    // million marks buries most of them; the second pass is what makes a lit mark visible in dense
+    // ground. With no highlight there is one pass and nothing changes.
+    for (const pass of passes) {
+      for (const held of partitions) {
+        layers.push(
+          new MarksLayer(
+            this.getSubLayerProps({id: pass === 'all' ? `marks-p${held.slot}` : `marks-p${held.slot}-${pass}`}),
+            {
+              visible: held.active && held.draw.length > 0,
+              data: {
+                length: held.draw.length,
+                attributes: held.draw.gpu
+                  ? gpuAttributes(held.draw.gpu)
+                  : {
+                      getPosition: binary(held.draw.positions, 2),
+                      getFillColor: binary(held.draw.colours, 4, true),
+                      getOrdinal: binary(held.draw.ordinals, 1),
+                      getHighlight: binary(held.draw.highlights, 1)
+                    }
+              },
+              tesseraIds: held.draw.ids,
+              useLut,
+              highlighting,
+              highlightPass: pass,
+              lutTexture: lut.gpu,
+              radiusUnits: 'pixels' as const,
+              getRadius: style.radius,
+              radiusMinPixels: 1,
+              antialiasing: style.antialiasing,
+              opacity,
+              // One pass answers a pick, or the same mark is reported twice.
+              pickable: this.props.pickable && held.active && pass !== 'lit',
+              parameters: {depthCompare: 'always' as const}
+            } as never
+          )
+        );
+      }
+      layers.push(
+        new MarksLayer(
+          this.getSubLayerProps({id: pass === 'all' ? 'marks-standin' : `marks-standin-${pass}`}),
+          {
+            visible: standIn.count > 0,
+            data: {
+              length: standIn.count,
+              attributes: {
+                getPosition: binary(standIn.positions, 2),
+                getFillColor: binary(colours, 4, true),
+                getOrdinal: binary(standIn.ordinals, 1),
+                getHighlight: binary(standIn.highlights, 1)
+              }
+            },
+            tesseraIds: standIn.ids,
+            useLut,
+            highlighting,
+            highlightPass: pass,
+            lutTexture: lut.gpu,
+            radiusUnits: 'pixels' as const,
+            getRadius: style.radius,
+            radiusMinPixels: 1,
+            antialiasing: style.antialiasing,
+            opacity,
+            pickable: this.props.pickable && pass !== 'lit',
+            parameters: {depthCompare: 'always' as const}
+          } as never
+        )
+      );
+    }
 
     this.props.onDrawn?.(slab.drawn, standIn.count);
     // The outlines go under everything: the marks show through the hovered one's faint fill.
