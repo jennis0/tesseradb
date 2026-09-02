@@ -221,6 +221,7 @@ function open(opts: {
     item: async () => ({fields: {}, externalId: null}),
     artifact: async () => ({layer: 'l', key: 'k', maskedCount: 42n, centroid: null, box: null, shape: null}),
     categories: async () => [],
+    suggest: async (_token: string, column: string, q: string) => ({status: 'ok' as const, column, q, values: [], more: false}),
     close: () => {}
   } as unknown as TesseraClient;
   const store = createStore({
@@ -313,6 +314,29 @@ describe('a switch within a group keeps the camera and the selection (§4)', () 
     expect(store.get('view').composition).not.toBeNull();
     expect(store.get('status').status).toBe('shown');
     expect(asked('v0')).toHaveLength(askedV0);
+  });
+
+  it('drops every column’s held suggestion page and refusal on a switch, even within the same frame (value-suggestion.md §5.1)', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {store} = open({view: 'v0', clock, scheduler});
+    await clock.advance(1);
+
+    store.suggest('archive', '');
+    await clock.advance(200);
+    expect(store.get('filters').suggestions['archive']).toEqual({q: '', values: [], more: false});
+
+    store.setCurrentView('v1');
+    // A category's suggestion page is per (column, view) — v0's page answers nothing about v1,
+    // whether or not the two views share a frame, so it does not carry over.
+    expect(store.get('filters').suggestions).toEqual({});
+    expect(store.get('filters').suggestErrors).toEqual({});
+
+    // And the debounce dedupe was cleared with it: an identical `suggest('archive', '')` under
+    // the new view reaches the client rather than reading as already-asked.
+    store.suggest('archive', '');
+    await clock.advance(200);
+    expect(store.get('filters').suggestions['archive']).toEqual({q: '', values: [], more: false});
   });
 });
 

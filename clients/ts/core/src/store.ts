@@ -1303,6 +1303,10 @@ export function createStore(options: StoreOptions): Store {
 
     const from = viewId;
     const kept = sameFrame(quantisationOf(from), quantisationOf(id));
+    // A category's suggestion page is per `(column, view)` — the vocabulary a `derived` column
+    // walks is view-addressed (`value-suggestion.md` §5.1) — so the page held for the view being
+    // left answers nothing about the one being entered, whether or not the two share a frame.
+    resetSuggestions();
 
     // Nothing of a view that is not current may be in flight, and nothing of it may be scheduled:
     // a debounce left armed would put a request on the wire for a view nobody is looking at.
@@ -1505,6 +1509,25 @@ export function createStore(options: StoreOptions): Store {
   const suggestWant = new Map<string, string>();
   /** Per column: how many `superseded` retries the current `q` has spent (§ the retry cap below). */
   const suggestRetries = new Map<string, number>();
+
+  /**
+   * Drop every column's held suggestion page and refusal, and the debounce/retry bookkeeping
+   * behind them — a view switch or a re-authorise invalidates them (`value-suggestion.md` §5.1):
+   * a category's visible values, and so its empty-`q` page, are per `(column, view)`, and a mask
+   * change can only narrow or widen who a value is served to. Clearing `suggestWant` alongside the
+   * projection is what lets the next `ask('')` actually reach the server — otherwise the debounce
+   * dedupe (`suggestWant.get(column) === q`) would read the old `q` as already asked and answer
+   * from a page that no longer applies. A control re-derives its shape (checklist or lookahead)
+   * from whatever page lands next, the same as on first mount.
+   */
+  function resetSuggestions(): void {
+    if (Object.keys(projections.filters.suggestions).length === 0 && Object.keys(projections.filters.suggestErrors).length === 0 && suggestWant.size === 0) return;
+    for (const timer of suggestTimers.values()) clock.cancel(timer);
+    suggestTimers.clear();
+    suggestWant.clear();
+    suggestRetries.clear();
+    replaceProjection('filters', {...projections.filters, suggestions: {}, suggestErrors: {}});
+  }
 
   function suggest(column: string, q: string): void {
     if (!token || disposed) return;
@@ -1995,6 +2018,10 @@ export function createStore(options: StoreOptions): Store {
   }
 
   function clear(): void {
+    // A re-authorise moves the mask, and a category's suggestion page answers `visible(code)`
+    // under the mask it was fetched against (`value-suggestion.md` §5.1) — held across a mask
+    // change it would show values the new mask does not, or hide ones it now does.
+    resetSuggestions();
     // **Every held view, not the current one alone**: a mask change invalidates all of them
     // (`view-switching.md` §4), and a view left warm across it would draw the previous
     // principal's marks the moment it was returned to.

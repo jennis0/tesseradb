@@ -604,6 +604,31 @@ describe('suggest — the typeahead action (value-suggestion.md §5.1)', () => {
     expect(store.get('filters').suggestErrors['admin4']?.code).toBe('backpressure');
     expect(store.get('filters').suggestions['admin4']).toBeUndefined();
   });
+
+  it('clear() (a re-authorise) drops every column’s held page and refusal, and its debounce dedupe', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client} = fakeClient(() => response('ck'));
+    const suggest = vi.fn(async (_token: string, column: string, q: string) => ({status: 'ok' as const, column, q, values: [], more: false}));
+    (client as unknown as {suggest: typeof suggest}).suggest = suggest;
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    await clock.advance(1);
+
+    store.suggest('archive', '');
+    await clock.advance(200);
+    expect(store.get('filters').suggestions['archive']).toEqual({q: '', values: [], more: false});
+
+    store.clear();
+    expect(store.get('filters').suggestions).toEqual({});
+    expect(store.get('filters').suggestErrors).toEqual({});
+
+    // The dedupe is cleared alongside the projection — a re-ask for the identical q the mask
+    // change just invalidated must still reach the client, not read as already-answered.
+    store.suggest('archive', '');
+    await clock.advance(200);
+    expect(suggest).toHaveBeenCalledTimes(2);
+    expect(store.get('filters').suggestions['archive']).toEqual({q: '', values: [], more: false});
+  });
 });
 
 describe('subscription', () => {

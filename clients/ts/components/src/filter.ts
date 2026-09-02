@@ -147,6 +147,18 @@ export class TesseraFilter extends TesseraElement {
    * record renders as its key, exactly as an unresolved one would.
    */
   @state() accessor labels: Record<string, string> = {};
+  /**
+   * Which of the two category shapes this control draws (round 2 of `value-suggestion.md` §5.1):
+   * `null` while the empty-`q` page for this `(column, view)` has not yet answered, `'checklist'`
+   * once it has and said `more: false` — the whole visible set fits on one page, so a search box
+   * has nothing to narrow — and `'lookahead'` once it has said `more: true`. Decided **once** from
+   * that page and held afterwards: a later keystroke's page in `'lookahead'` mode must not flip
+   * this back and forth as its own `more` varies with the prefix typed. Re-set to `null` only when
+   * the store invalidates the column's suggestion (a view switch or a re-authorise clears it
+   * without a refusal alongside — see `resolvedInvalidated`), so the next empty-`q` page decides
+   * again.
+   */
+  @state() accessor shape: 'checklist' | 'lookahead' | null = null;
   private sent: ColumnDraft | null = null;
   private typing: ReturnType<typeof setTimeout> | null = null;
   /**
@@ -189,11 +201,31 @@ export class TesseraFilter extends TesseraElement {
       this.draft = structuredClone(stored);
       this.sent = stored;
     }
-    // The picker's list before anything is typed (`value-suggestion.md` §4): an empty `q` matches
-    // every value, so the first ask is for `this.search` as it stands — `''` on mount. `ask`'s own
-    // guard is what makes this safe to call on every store tick: it only ever reaches the store
-    // once for a `q` this element has not already asked for.
-    if (this.resolvedOperand?.family === 'category') this.ask(this.search);
+    if (this.resolvedOperand?.family === 'category') {
+      const filters = this.resolvedStore?.get('filters');
+      const page = filters?.suggestions[this.column];
+      const refused = filters?.suggestErrors[this.column];
+      // **Invalidated**, not merely mid-flight: the store dropped this column's page *and* raised
+      // no refusal for it in the same tick, which is what `resetSuggestions` does on a view switch
+      // or a re-authorise (`value-suggestion.md` §5.1) — a genuine fetch failure always leaves a
+      // refusal in its place, so that case is left alone rather than mistaken for invalidation.
+      // Forgetting `lastAsked` and the typed `q` is what makes the next tick's `ask('')` actually
+      // reach the store instead of reading as already-asked, and returns the control to the
+      // picker's-list-before-typing state the design gives it on first mount.
+      if (!page && !refused && this.shape !== null) {
+        this.shape = null;
+        this.lastAsked = null;
+        this.search = '';
+      } else if (page && page.q === '' && this.shape === null) {
+        this.shape = page.more ? 'lookahead' : 'checklist';
+      }
+      // The picker's list before anything is typed (`value-suggestion.md` §4): an empty `q`
+      // matches every value, so the first ask is for `this.search` as it stands — `''` on mount
+      // and after an invalidation, above. `ask`'s own guard is what makes this safe to call on
+      // every store tick: it only ever reaches the store once for a `q` this element has not
+      // already asked for.
+      this.ask(this.search);
+    }
     super.onStoreChange();
   }
 
@@ -311,6 +343,16 @@ export class TesseraFilter extends TesseraElement {
       : html`${this.markedField(v, 'key', v.key)}`;
   }
 
+  /**
+   * A checklist row's text — the same title-leads-key layout as {@link suggestionText}, with no
+   * match span: a checklist never asks with a typed `q`, so there is nothing a server-supplied
+   * span could be marking against.
+   */
+  private checklistText(v: SuggestValue): TemplateResult {
+    const title = v.title ?? v.key;
+    return v.title && v.title !== v.key ? html`${title}<span class="k">${v.key}</span>` : html`${v.key}`;
+  }
+
   private category(draft: ColumnDraft & {family: 'category'}) {
     const suggestion = this.resolvedSuggestion;
     const refusal = this.resolvedSuggestRefusal;
@@ -321,6 +363,36 @@ export class TesseraFilter extends TesseraElement {
       this.change(chosen.has(v.key) ? {...draft, keys: draft.keys.filter((k) => k !== v.key)} : {...draft, keys: [...draft.keys, v.key]}, true);
     };
     const remove = (key: string) => this.change({...draft, keys: draft.keys.filter((k) => k !== key)}, true);
+
+    const chips =
+      draft.keys.length > 0
+        ? html`<div part="value-chips">
+            ${repeat(
+              draft.keys,
+              (k) => k,
+              (k) => html`<span part="value-chip" class="chip">${this.labels[k] ?? k}<button type="button" aria-label=${`Remove ${k}`} @click=${() => remove(k)}>${icon('close', 12)}</button></span>`
+            )}
+          </div>`
+        : nothing;
+
+    // **The checklist shape** (round 2 of `value-suggestion.md` §5.1): the empty-`q` page said
+    // `more: false`, so the whole visible set is on it and there is nothing a search box would
+    // narrow. A checkbox per value — ticked for a chosen one, native `<input>` keyboard operation,
+    // no entry field and no match span — using the same `pick`/`chips` a lookahead uses, so
+    // `setFilters` is sent the identical draft either way.
+    if (this.shape === 'checklist') {
+      const rows = suggestion?.values ?? [];
+      return html`${chips}<div part="values" class="list" role="group" aria-label=${`${this.column} values`}>
+        ${repeat(
+          rows,
+          (v) => v.code,
+          (v) => html`<label part="tick" class="item">
+              <input type="checkbox" .checked=${chosen.has(v.key)} @change=${() => pick(v)} aria-label=${v.title ?? v.key} />
+              <span class="t">${this.checklistText(v)}</span>
+            </label>`
+        )}
+      </div>`;
+    }
 
     // What is typed is submitted on Enter whether or not it matched a suggestion (contracts
     // §3.2): a key the page never offered may still be one this principal can filter by, and an
@@ -342,17 +414,6 @@ export class TesseraFilter extends TesseraElement {
         @keydown=${(e: KeyboardEvent) => {
           if (e.key === 'Enter') submit();
         }} /></div>`;
-
-    const chips =
-      draft.keys.length > 0
-        ? html`<div part="value-chips">
-            ${repeat(
-              draft.keys,
-              (k) => k,
-              (k) => html`<span part="value-chip" class="chip">${this.labels[k] ?? k}<button type="button" aria-label=${`Remove ${k}`} @click=${() => remove(k)}>${icon('close', 12)}</button></span>`
-            )}
-          </div>`
-        : nothing;
 
     const rows = suggestion?.values ?? [];
     const list =
