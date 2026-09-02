@@ -1,5 +1,5 @@
 import {describe, expect, it, vi} from 'vitest';
-import {TesseraClient} from '../src/client.js';
+import {TesseraClient, TesseraError} from '../src/client.js';
 import type {Clock} from '../src/driver.js';
 import type {FrameScheduler} from '../src/presented.js';
 import {createStore, type Store} from '../src/store.js';
@@ -158,6 +158,7 @@ function fakeClient(reply: (req: FakeRequest) => ViewportResponse) {
     item: async () => ({fields: {archive: 'cs'}, externalId: null}),
     artifact: async () => ({layer: 'l', key: 'k', maskedCount: 42n, centroid: null, box: null, shape: null}),
     categories: async () => [{code: 5, key: 'cs', title: 'CS'}],
+    suggest: async () => ({status: 'ok' as const, column: 'admin4', q: '', values: [], more: false}),
     close: () => {}
   } as unknown as TesseraClient;
   return {client, viewport};
@@ -255,33 +256,6 @@ describe('status.stale keys on the content key, never on x-tessera-stale', () =>
 });
 
 describe('the drops', () => {
-  it('enumerates a column’s values once, however many controls ask while the walk is in flight', async () => {
-    const clock = fakeClock();
-    const scheduler = fakeScheduler();
-    const {client, viewport} = fakeClient(() => response('ck'));
-    // A slow enumeration — the shape of a large `derived` vocabulary paged from the server — that
-    // resolves only when told to.
-    let release: (() => void) | null = null;
-    const categories = vi.fn(
-      () => new Promise<{code: number; key: string; title: string | null}[]>((resolve) => {
-        release = () => resolve([{code: 1, key: 'FR.84', title: null}]);
-      })
-    );
-    (client as unknown as {categories: typeof categories}).categories = categories;
-    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
-    await clock.advance(1);
-    void viewport;
-    // Every store change re-asks, as `<tessera-filter>` does until the values land.
-    for (let i = 0; i < 25; i++) void store.loadFilterValues('admin4');
-    expect(categories).toHaveBeenCalledTimes(1);
-    release!();
-    await clock.advance(1);
-    expect(store.get('filters').values['admin4']?.map((v) => v.key)).toEqual(['FR.84']);
-    // Landed: a further ask is answered from the projection, not the wire.
-    void store.loadFilterValues('admin4');
-    expect(categories).toHaveBeenCalledTimes(1);
-  });
-
   it('drops the replica and marks a refetch on setFilters — the identity key excludes filters', async () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
@@ -316,6 +290,161 @@ describe('the drops', () => {
     store.clear();
     expect(store.get('view').composition).toBeNull();
     expect(store.get('legend').ranks).toEqual({});
+  });
+});
+
+describe('suggest — the typeahead action (value-suggestion.md §5.1)', () => {
+  it('debounces per column: a burst of keystrokes issues one request, for the last q named', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client} = fakeClient(() => response('ck'));
+    const suggest = vi.fn(async (_token: string, column: string, q: string) => ({status: 'ok' as const, column, q, values: [], more: false}));
+    (client as unknown as {suggest: typeof suggest}).suggest = suggest;
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    await clock.advance(1);
+
+    store.suggest('admin4', 'm');
+    store.suggest('admin4', 'ma');
+    store.suggest('admin4', 'mac');
+    await clock.advance(200);
+    expect(suggest).toHaveBeenCalledTimes(1);
+    expect(suggest).toHaveBeenCalledWith('tok', 'admin4', 'mac', {view: 's0'});
+    expect(store.get('filters').suggestions['admin4']).toEqual({q: 'mac', values: [], more: false});
+  });
+
+  it('discards a slower page that answers an earlier keystroke once a later one has landed', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client} = fakeClient(() => response('ck'));
+    const releases = new Map<string, () => void>();
+    const suggest = vi.fn(
+      (_token: string, column: string, q: string) =>
+        new Promise((resolve) => {
+          releases.set(q, () => resolve({status: 'ok' as const, column, q, values: [{code: 1, key: q, title: null, match: {field: 'key' as const, start: 0, len: q.length}}], more: false}));
+        })
+    );
+    (client as unknown as {suggest: typeof suggest}).suggest = suggest;
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    await clock.advance(1);
+
+    // Two distinct columns' worth of debounce windows, so both requests are actually in flight
+    // together rather than one superseding the other before either is sent.
+    store.suggest('admin4', 'ma');
+    await clock.advance(200);
+    store.suggest('admin4', 'mac');
+    await clock.advance(200);
+    expect(releases.size).toBe(2);
+
+    // The later request (mac) lands first; the earlier one (ma) lands after it — and must not
+    // overwrite the fresher answer with a stale one.
+    releases.get('mac')!();
+    await clock.advance(1);
+    expect(store.get('filters').suggestions['admin4']?.q).toBe('mac');
+    releases.get('ma')!();
+    await clock.advance(1);
+    expect(store.get('filters').suggestions['admin4']?.q).toBe('mac');
+  });
+
+  it('retries a superseded (429) suggest after retryAfterS, and still applies the q-echo guard', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client} = fakeClient(() => response('ck'));
+    let calls = 0;
+    const suggest = vi.fn(async (_token: string, column: string, q: string) => {
+      calls++;
+      if (calls === 1) return {status: 'superseded' as const, retryAfterS: 1};
+      return {status: 'ok' as const, column, q, values: [], more: false};
+    });
+    (client as unknown as {suggest: typeof suggest}).suggest = suggest;
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    await clock.advance(1);
+
+    store.suggest('admin4', 'fr');
+    await clock.advance(200); // the debounce fires, the session's other suggest sheds it
+    expect(calls).toBe(1);
+    expect(store.get('filters').suggestions['admin4']).toBeUndefined();
+    await clock.advance(1000); // retryAfterS
+    expect(calls).toBe(2);
+    expect(store.get('filters').suggestions['admin4']).toEqual({q: 'fr', values: [], more: false});
+  });
+
+  it('churn re-asking the same q, faster than the debounce, does not starve it — the request still fires', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client} = fakeClient(() => response('ck'));
+    const suggest = vi.fn(async (_token: string, column: string, q: string) => ({status: 'ok' as const, column, q, values: [], more: false}));
+    (client as unknown as {suggest: typeof suggest}).suggest = suggest;
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    await clock.advance(1);
+
+    // The shape a caller that does not dedupe its own asks takes: a store tick unrelated to this
+    // control re-asks the identical q, faster than the debounce window, indefinitely. Before the
+    // fix, every ask cancelled and re-armed the timer, so it never got to fire.
+    for (let i = 0; i < 50; i++) {
+      store.suggest('admin4', 'fr');
+      await clock.advance(10);
+    }
+    expect(suggest).toHaveBeenCalledTimes(1);
+    expect(suggest).toHaveBeenCalledWith('tok', 'admin4', 'fr', {view: 's0'});
+    expect(store.get('filters').suggestions['admin4']).toEqual({q: 'fr', values: [], more: false});
+  });
+
+  it('a landed success clears a refusal the same column carried, and a refusal clears a stale page', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client} = fakeClient(() => response('ck'));
+    let fail = true;
+    const suggest = vi.fn(async (_token: string, column: string, q: string) => {
+      if (fail) throw new TesseraError(500, 'fail-closed', 'admin4 postings unreadable');
+      return {status: 'ok' as const, column, q, values: [], more: false};
+    });
+    (client as unknown as {suggest: typeof suggest}).suggest = suggest;
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    await clock.advance(1);
+
+    store.suggest('admin4', 'fr');
+    await clock.advance(200);
+    expect(store.get('filters').suggestErrors['admin4']).toEqual({code: 'fail-closed', detail: 'admin4 postings unreadable'});
+    expect(store.get('filters').suggestions['admin4']).toBeUndefined();
+
+    // A later ask that lands cleanly must not leave the earlier refusal showing beside it.
+    fail = false;
+    store.suggest('admin4', 'fra');
+    await clock.advance(200);
+    expect(store.get('filters').suggestErrors['admin4']).toBeUndefined();
+    expect(store.get('filters').suggestions['admin4']).toEqual({q: 'fra', values: [], more: false});
+  });
+
+  it('a 429 with retry_after_s = 0 floors the retry delay rather than spinning, and stops after a bounded number of retries', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client} = fakeClient(() => response('ck'));
+    let calls = 0;
+    const suggest = vi.fn(async () => {
+      calls++;
+      return {status: 'superseded' as const, retryAfterS: 0};
+    });
+    (client as unknown as {suggest: typeof suggest}).suggest = suggest;
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    await clock.advance(1);
+
+    store.suggest('admin4', 'fr');
+    await clock.advance(120); // the debounce fires: call 1, superseded, at t=~121
+    expect(calls).toBe(1);
+    // retry_after_s = 0 is floored at 250 ms from call 1 (~t=371) — 200 ms further is short of it.
+    await clock.advance(200);
+    expect(calls).toBe(1);
+    await clock.advance(100); // past the floor
+    expect(calls).toBe(2);
+
+    // Every retry is superseded too: the session gives up after a bounded number of them rather
+    // than retrying forever, and surfaces the last refusal.
+    await clock.advance(5_000);
+    const stalled = calls;
+    await clock.advance(5_000);
+    expect(calls).toBe(stalled); // no further retries once the cap is reached
+    expect(store.get('filters').suggestErrors['admin4']?.code).toBe('backpressure');
+    expect(store.get('filters').suggestions['admin4']).toBeUndefined();
   });
 });
 

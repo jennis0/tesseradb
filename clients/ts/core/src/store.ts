@@ -32,6 +32,7 @@ import type {
   RegionVerdict,
   Shape,
   ShapeKind,
+  SuggestValue,
   ViewportResult
 } from './types.js';
 
@@ -250,8 +251,15 @@ export type RegionProjection = {
 export type FiltersProjection = {
   draft: FilterDraft;
   expr: FilterExpr | null;
-  values: Record<string, CategoryValue[]>;
-  valueErrors: Record<string, Refusal>;
+  /**
+   * The typeahead's last landed page per column (`value-suggestion.md` §5.1) — `q` is the query
+   * it answers, so a control can tell a page that answers what is in the box from one that
+   * answers what used to be. `suggest`'s only source: the enumeration's page-the-whole-set path
+   * (`loadFilterValues`) is gone — the legend resolves codes it drew through `resolveCategoryCodes`
+   * instead, and a category's picker is this typeahead everywhere else.
+   */
+  suggestions: Record<string, {q: string; values: SuggestValue[]; more: boolean}>;
+  suggestErrors: Record<string, Refusal>;
 };
 
 export type LegendProjection = {
@@ -285,8 +293,12 @@ export interface Store {
 
   setView(input: ViewInput): void;
   setFilters(draft: FilterDraft): void;
-  /** Page a filterable category's value set into `filters.values` — for its picker. */
-  loadFilterValues(column: string): Promise<void>;
+  /**
+   * Ask a category's typeahead for `q`, debounced per column (`value-suggestion.md` §5.1) — lands
+   * in `filters.suggestions[column]`, or `filters.suggestErrors[column]` on a refusal. Fire and
+   * forget: a control calls it on every keystroke it actually changes and reads the projection.
+   */
+  suggest(column: string, q: string): void;
   /** Turn layers on — each with its closure (decision 0096); `[]` turns every layer off. */
   setLayers(names: string[]): void;
   /**
@@ -374,6 +386,27 @@ export const REGION_HELD_LIMIT = 500;
  * stillness, which every stepped-to view is.
  */
 const VIEW_SETTLE_MS = 140;
+
+/**
+ * How long a category typeahead waits, after a keystroke, before it asks (`value-suggestion.md`
+ * §5.1: keystroke cadence, 10–100 ms of server work). Short enough that the control still reads
+ * as live, long enough that a held key or a fast typist spends one request rather than one per
+ * character — and short of the debounce mattering less than it looks: the session's own
+ * single-flight admission (one suggest in flight at a time) is what actually bounds the request
+ * rate under a control that fires faster than this.
+ */
+const SUGGEST_DEBOUNCE_MS = 120;
+
+/**
+ * The floor on a `superseded` retry's delay. `retry_after_s` may be `0`, and a filter panel mounts
+ * a control per category column in the same tick — every one's first ask can be shed by the same
+ * in-flight suggest and, with no floor, would retry in the same tick again, colliding in lockstep
+ * indefinitely rather than spreading out.
+ */
+const SUGGEST_MIN_RETRY_S = 0.25;
+
+/** How many `superseded` retries one `q` gets before the session gives up and surfaces it as a refusal. */
+const SUGGEST_MAX_RETRIES = 5;
 
 const NO_STATUS: StatusProjection = {
   status: 'idle',
@@ -466,7 +499,7 @@ export function createStore(options: StoreOptions): Store {
     artifacts: {layer: null, layers: [], served: [], lineage: servedLineage([]), status: 'idle', refusal: null, version: 0, held: 0, table, servedOrdinals: new Set(), shapes: new Map(), colours: new Map(), palette, coverage: {current: 0, stale: 0}},
     selection: {item: null, itemRefusal: null, artifact: null, artifactRefusal: null},
     region: null,
-    filters: {draft: {}, expr: null, values: {}, valueErrors: {}},
+    filters: {draft: {}, expr: null, suggestions: {}, suggestErrors: {}},
     legend: {ranks: {}, domains: {}, categories: {}, categoryErrors: {}, colourBy: null},
     replica: {bytes: 0, points: 0, bands: 0, views: 0, lastPlan: null}
   };
@@ -1316,35 +1349,102 @@ export function createStore(options: StoreOptions): Store {
     requery();
   }
 
+  /** Per column: the debounce or retry timer armed by the most recent {@link suggest} call. */
+  const suggestTimers = new Map<string, unknown>();
   /**
-   * Columns whose values are being enumerated. **One enumeration per column, however many times
-   * it is asked for**: a control asks on every store change until the values land, and a large
-   * `derived` vocabulary lands only after every page has been walked — on GeoNames' 231,645-value
-   * `admin4`, 232 pages. Without this guard each store change in that window started another
-   * walk, every completed page was a store change, and the demo issued 21,500 category requests
-   * in its first minute (2026-08-28) — the load never settled.
+   * Per column: the `q` the *last* {@link suggest} call named — not what was last sent, what was
+   * last *asked for*. A landed response is applied only when its echoed `q` still matches this,
+   * which is what makes a response stale by keystroke rather than by request order: a debounce
+   * collapses same-column bursts to one request, but a slow response to request *N* can still
+   * land after a fast response to request *N+1* has, and the echo is what tells the two apart
+   * without a sequence number either side has to invent.
    */
-  const enumerating = new Set<string>();
+  const suggestWant = new Map<string, string>();
+  /** Per column: how many `superseded` retries the current `q` has spent (§ the retry cap below). */
+  const suggestRetries = new Map<string, number>();
 
-  async function loadFilterValues(column: string): Promise<void> {
+  function suggest(column: string, q: string): void {
     if (!token || disposed) return;
-    if (projections.filters.values[column] || projections.filters.valueErrors[column]) return;
-    if (enumerating.has(column)) return;
-    enumerating.add(column);
+    // Idempotent per (column, q): a caller re-asking for the identical q it already asked for —
+    // the shape a store tick that has nothing to do with this control takes, if the caller does
+    // not itself dedupe — must not re-arm the debounce, or churn frequent enough holds the timer
+    // just out of reach of firing, ever. Asking for the identical q a second time is a no-op
+    // whether the first ask is still debouncing, in flight, retrying or already landed.
+    if (suggestWant.get(column) === q) return;
+    const pending = suggestTimers.get(column);
+    if (pending !== undefined) clock.cancel(pending);
+    suggestWant.set(column, q);
+    suggestRetries.delete(column);
+    suggestTimers.set(
+      column,
+      clock.after(SUGGEST_DEBOUNCE_MS, () => {
+        suggestTimers.delete(column);
+        void runSuggest(column, q);
+      })
+    );
+  }
+
+  /** A record with `key` removed — used to drop the *other* half of the suggestion pair on a landing. */
+  function without<T>(record: Record<string, T>, key: string): Record<string, T> {
+    if (!(key in record)) return record;
+    const next = {...record};
+    delete next[key];
+    return next;
+  }
+
+  async function runSuggest(column: string, q: string): Promise<void> {
+    if (!token || disposed) return;
     try {
-      const values = await client.categories(token, column, {view: viewId});
-      if (disposed) return;
-      values.sort((a, b) => a.key.localeCompare(b.key));
-      replaceProjection('filters', {...projections.filters, values: {...projections.filters.values, [column]: values}});
+      const result = await client.suggest(token, column, q, {view: viewId});
+      if (disposed || suggestWant.get(column) !== q) return; // a later keystroke already wants a different page
+      if (result.status === 'superseded') {
+        // The session already has one suggest in flight (§5.1's one-in-flight rule): retry once
+        // it should have returned, still guarded by the same `q` check, rather than surface the
+        // 429 as a refusal a picker would have to render. `retry_after_s` may be `0`, and every
+        // category control in a panel mounts in the same tick and asks together, so a floor keeps
+        // a lockstep collision from spinning; a cap stops a session stuck superseded from retrying
+        // forever, surfacing the last refusal instead.
+        const attempt = (suggestRetries.get(column) ?? 0) + 1;
+        if (attempt > SUGGEST_MAX_RETRIES) {
+          suggestRetries.delete(column);
+          replaceProjection('filters', {
+            ...projections.filters,
+            suggestions: without(projections.filters.suggestions, column),
+            suggestErrors: {
+              ...projections.filters.suggestErrors,
+              [column]: {code: 'backpressure', detail: `still superseded after ${SUGGEST_MAX_RETRIES} retries`}
+            }
+          });
+          return;
+        }
+        suggestRetries.set(column, attempt);
+        suggestTimers.set(
+          column,
+          clock.after(Math.max(result.retryAfterS, SUGGEST_MIN_RETRY_S) * 1000, () => {
+            suggestTimers.delete(column);
+            void runSuggest(column, q);
+          })
+        );
+        return;
+      }
+      suggestRetries.delete(column);
+      replaceProjection('filters', {
+        ...projections.filters,
+        suggestions: {...projections.filters.suggestions, [column]: {q: result.q, values: result.values, more: result.more}},
+        // A landed page answers the question a prior refusal was about; carrying that refusal
+        // forward would leave "values not listable" showing beside a page that just listed some.
+        suggestErrors: without(projections.filters.suggestErrors, column)
+      });
     } catch (error) {
-      if (disposed) return;
+      if (disposed || suggestWant.get(column) !== q) return;
       const e = error as {code?: string; detail?: string; message?: string};
       replaceProjection('filters', {
         ...projections.filters,
-        valueErrors: {...projections.filters.valueErrors, [column]: {code: e.code ?? 'fetch-failed', detail: e.detail ?? e.message ?? String(error)}}
+        // A refusal answers the question a prior page was about too — a stale page must not
+        // render as though it still does.
+        suggestions: without(projections.filters.suggestions, column),
+        suggestErrors: {...projections.filters.suggestErrors, [column]: {code: e.code ?? 'fetch-failed', detail: e.detail ?? e.message ?? String(error)}}
       });
-    } finally {
-      enumerating.delete(column);
     }
   }
 
@@ -1771,6 +1871,8 @@ export function createStore(options: StoreOptions): Store {
     if (switchTimer !== null) clock.cancel(switchTimer);
     switchTimer = null;
     if (renewTimer) clock.cancel(renewTimer);
+    for (const timer of suggestTimers.values()) clock.cancel(timer);
+    suggestTimers.clear();
     client.close();
   }
 
@@ -1795,7 +1897,7 @@ export function createStore(options: StoreOptions): Store {
     },
     setView,
     setFilters,
-    loadFilterValues,
+    suggest,
     setLayers,
     setColourBy,
     setPalette,

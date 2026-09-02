@@ -394,6 +394,50 @@ export type CategoryValue = {
   title: string | null;
 };
 
+/**
+ * Where a suggestion's match sits, **in characters of the served string** (`key` or `title`, per
+ * `field`) — so a client highlights with `<mark>` over the string it is about to draw, and never
+ * re-implements the fold to find the span itself (`value-suggestion.md` §4).
+ */
+export type MatchSpan = {
+  field: 'key' | 'title';
+  start: number;
+  len: number;
+};
+
+/** One suggested value: `/v1/categories/{column}` fields, plus where it matched and, on request, a count. */
+export type SuggestValue = {
+  code: number;
+  key: string;
+  title: string | null;
+  match: MatchSpan;
+  /** Present iff the request carried `counts: true` — the viewer's own count, exact, per request. */
+  count?: number;
+};
+
+/** `GET /v1/categories/{column}/suggest`'s wire shape (`value-suggestion.md` §5.1). */
+export type SuggestPage = {
+  /** The caller's own spelling, echoed. */
+  column: string;
+  /** The query as received, not folded — so a caller matches a page to the request in flight. */
+  q: string;
+  values: SuggestValue[];
+  /**
+   * `true` iff the walk stopped before its range was exhausted — the page filled, or
+   * `selection.maxSuggestionWalk` values were examined. There is no cursor: either way the
+   * client's answer is the same, type more.
+   */
+  more: boolean;
+};
+
+/**
+ * The outcome of {@link TesseraClient.suggest}. A `429` — at most one suggest in flight per
+ * session — surfaces as `superseded` rather than a thrown `TesseraError`, because it is the
+ * *expected* shape of a caller that does not debounce quite enough, and a debounced caller's
+ * right answer is to retry after `retryAfterS`, not to render a refusal.
+ */
+export type SuggestResult = ({status: 'ok'} & SuggestPage) | {status: 'superseded'; retryAfterS: number};
+
 export type ViewportRequest = {
   view: string;
   zoom: number;
