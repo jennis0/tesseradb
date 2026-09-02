@@ -16,7 +16,13 @@ publish = false
 
 [features]
 default = ["bench-timing"]
-bench-timing = ["tessera-engine/bench-timing", "tessera-server/bench-timing"]
+bench-timing = [
+    "tessera-engine/bench-timing",
+    "tessera-server/bench-timing",
+    # `suggest_walk --decomp` prices `ColumnPostings::intersects` a stage at a time.
+    "tessera-filter/bench-timing",
+    "tessera-authz/bench-timing",
+]
 
 [dependencies]
 tessera-types = { path = "../tessera-types" }

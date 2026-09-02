@@ -3,6 +3,13 @@ name = "tessera-authz"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+# Per-stage bench accessors on `DeltaTier` — the record search and the view construction, which
+# `posting_at` does in one call. OFF by default; `tessera-bench` is the only crate that turns it
+# on (mirroring `tessera-engine/bench-timing`), and it adds no behaviour to either path.
+bench-timing = []
+
 [dependencies]
 croaring = { workspace = true }
 tessera-types = { path = "../tessera-types" }

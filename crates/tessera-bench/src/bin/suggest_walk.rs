@@ -17,7 +17,12 @@
 //!   budgets 10³/10⁴/10⁵, for viewers at 0.01%, 1% and 10% of the corpus, in a contiguous and a
 //!   scattered shape;
 //! - **counts** — `?counts=true` for a page of twenty, which is one `and_cardinality` per served
-//!   value against the mapped view.
+//!   value against the mapped view;
+//! - **the decomposition** (`--decomp`, which runs alone) — one probe split into the record search,
+//!   the view over the record's bytes and the existential test, over the codes a budgeted walk
+//!   actually probes; the walk's cost with the gate answered `false`; minor page faults; and the
+//!   container keys a per-record sidecar would have to store. `probes/2026-09-02-value-suggestion/`
+//!   arm 4 is what it was written for.
 //!
 //! **What it does not measure, and why.** ⊘ **Candidate composition.** `filter::candidate` takes a
 //! session's frozen fragment, its satisfied term set, the overlay and the ingest buffer, none of
@@ -35,7 +40,7 @@
 //!
 //! ```text
 //! cargo run --release -p tessera-bench --bin suggest_walk -- \
-//!     [--values 1000000] [--entities 100000000] [--repeats 200]
+//!     [--values 1000000] [--entities 100000000] [--repeats 200] [--decomp]
 //! ```
 
 use std::io;
@@ -45,6 +50,7 @@ use croaring::Bitmap;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
+use tessera_authz::PostingRef;
 use tessera_engine::suggest::{walk, SuggestIndex, SuggestValue, VocabularySuggest, WalkBudget};
 use tessera_filter::{Access, ColumnPostings, ValueColumn};
 use tessera_types::AttrLocalId;
@@ -135,6 +141,50 @@ fn candidate(entities: u32, fraction: f64, contiguous: bool) -> Bitmap {
     }
 }
 
+/// Field 10 of `/proc/self/stat` — minor faults since the process started.
+fn minor_faults() -> u64 {
+    let stat = std::fs::read_to_string("/proc/self/stat").expect("procfs");
+    // The comm field may hold spaces and parentheses; fields are counted after the last `)`.
+    let tail = &stat[stat.rfind(')').expect("a comm field") + 1..];
+    tail.split_whitespace()
+        .nth(7)
+        .expect("field 10")
+        .parse()
+        .expect("a number")
+}
+
+/// The cost of the two `Instant::now()` calls that bracket one stage, so the stage figures can be
+/// read net of the instrument.
+fn timer_overhead_ns() -> f64 {
+    let n = 200_000;
+    let started = Instant::now();
+    for _ in 0..n {
+        std::hint::black_box(Instant::now());
+    }
+    started.elapsed().as_secs_f64() * 1e9 / n as f64
+}
+
+/// The containers one posting touches — the sidecar option (c) would store one `u16` per one of
+/// these, per record.
+fn container_count(posting: &PostingRef<'_>) -> usize {
+    let mut last: i64 = -1;
+    let mut n = 0usize;
+    let mut note = |e: u32| {
+        let chunk = (e >> 16) as i64;
+        if chunk != last {
+            last = chunk;
+            n += 1;
+        }
+    };
+    match posting {
+        PostingRef::Roaring(view) => view.iter().for_each(&mut note),
+        PostingRef::Array(bytes) => bytes
+            .chunks_exact(4)
+            .for_each(|c| note(u32::from_le_bytes(c.try_into().unwrap()))),
+    }
+    n
+}
+
 fn percentile(samples: &mut [f64], p: f64) -> f64 {
     samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let at = ((samples.len() as f64 - 1.0) * p).round() as usize;
@@ -145,12 +195,16 @@ fn main() {
     let mut values_n = 1_000_000usize;
     let mut entities = 100_000_000u32;
     let mut repeats = 200usize;
+    let mut decomp = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--values" => values_n = args.next().unwrap().parse().unwrap(),
             "--entities" => entities = args.next().unwrap().parse().unwrap(),
             "--repeats" => repeats = args.next().unwrap().parse().unwrap(),
+            // Run the stage decomposition alone, and skip the arms above it: the whole-walk
+            // figures are already in the design's table and re-measuring them costs minutes.
+            "--decomp" => decomp = true,
             other => {
                 eprintln!("unknown argument {other}");
                 std::process::exit(2);
@@ -214,6 +268,11 @@ fn main() {
 
     let live = VocabularySuggest::new(std::sync::Arc::new(index));
     let fold = tessera_analyse::SuggestionFold::new();
+
+    if decomp {
+        decomposition(&live, &fold, &postings, &record_codes, entities, values_n);
+        return;
+    }
 
     println!();
     println!("# the extents sweep — `category_membership`'s own loop, over a {extent_len}-entity extent");
@@ -377,4 +436,272 @@ fn main() {
             );
         }
     }
+}
+
+/// **Where the walk's constant goes** — `ColumnPostings::intersects` a stage at a time, over the
+/// codes a real budgeted walk probes for the sparsest viewer.
+///
+/// The shipped probe is three things in one call: a binary search over the keyed base's code
+/// array, a borrowed view over the found record's bytes (a portable Roaring deserialise, or a
+/// slice for a tag-0 array), and the existential test against the candidate. The three
+/// `bench_*` accessors call exactly that code, so the sum of the stages is the whole probe up to
+/// the instrument, and the whole probe is timed beside them to show it.
+///
+/// It answers two questions the owner asked of the shipped 61–68 ms: what would a code → record
+/// map at open remove (option **b** — the search column), and what would a per-record container-key
+/// sidecar remove (option **c** — the view column, plus the part of the test that is a walk over
+/// containers the candidate cannot meet).
+fn decomposition(
+    live: &VocabularySuggest,
+    fold: &tessera_analyse::SuggestionFold,
+    postings: &ColumnPostings,
+    record_codes: &[u32],
+    entities: u32,
+    values_n: usize,
+) {
+    let overhead = timer_overhead_ns();
+    println!();
+    println!("# probe decomposition — one budgeted walk's probes, staged");
+    println!(
+        "# timer: {overhead:.1} ns per `Instant::now()`, so a bracketed stage carries ~{:.1} ns \
+         of instrument",
+        overhead
+    );
+
+    println!();
+    println!(
+        "{:<12} {:<8} {:>7} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}",
+        "shape",
+        "class",
+        "n",
+        "search50",
+        "search99",
+        "view50",
+        "view99",
+        "test50",
+        "test99",
+        "whole50",
+        "whole99"
+    );
+
+    for (shape, contiguous) in [("contiguous", true), ("scattered", false)] {
+        let cand = candidate(entities, 0.0001, contiguous);
+        let stats = cand.statistics();
+
+        // The codes a real walk probes, in the order it probes them — captured through the gate
+        // closure `Engine::suggest` would pass, so this is the walk's own access pattern and not a
+        // scan of the code array. Over the same 26 one-character prefixes the whole-walk arm
+        // cycles, and not one of them: the fixture's key order puts the fattest postings under
+        // `a`, so that prefix alone fills the page in twenty probes and measures the one keystroke
+        // that is cheap.
+        let probed = std::cell::RefCell::new(Vec::new());
+        let mut pages = 0usize;
+        let mut walks = 0usize;
+        // Faults over *this* loop are the only first-touch figure in the run: it is the first
+        // thing that reads the index and the postings after they are written, so every later pass
+        // finds the mapping resident. Cold-*device* cost is still not measured — the files were
+        // written seconds earlier and are in page cache.
+        let faults_before = minor_faults();
+        for c in b'a'..=b'z' {
+            let (found, _more) = walk(
+                live,
+                fold,
+                &(c as char).to_string(),
+                WalkBudget {
+                    limit: 20,
+                    walk_budget: 100_000,
+                    counts: false,
+                },
+                &|code| {
+                    probed.borrow_mut().push(code);
+                    postings.intersects(AttrLocalId::new(code), &cand)
+                },
+                &|_| Ok(0u64),
+                &|e: io::Error| e,
+            )
+            .expect("the walk");
+            walks += 1;
+            if found.len() == 20 {
+                pages += 1;
+            }
+        }
+        let probed = probed.into_inner();
+        let faults_capture = minor_faults() - faults_before;
+
+        // What the walk costs *around* the probe: the same 26 walks with a gate that answers
+        // `false` without reading a posting — the fold, the two binary searches, the payload and
+        // code reads per entry, the emitted set — against the same walks with the shipped gate.
+        // Neither (b) nor (c) touches this half, so it is the floor either option leaves behind.
+        let mut null_ms: Vec<f64> = Vec::new();
+        let mut real_ms: Vec<f64> = Vec::new();
+        let mut null_probes = 0u64;
+        for c in b'a'..=b'z' {
+            let q = (c as char).to_string();
+            let seen = std::cell::Cell::new(0u64);
+            let started = Instant::now();
+            walk(
+                live,
+                fold,
+                &q,
+                WalkBudget {
+                    limit: 20,
+                    walk_budget: 100_000,
+                    counts: false,
+                },
+                &|_| {
+                    seen.set(seen.get() + 1);
+                    Ok(false)
+                },
+                &|_| Ok(0u64),
+                &|e: io::Error| e,
+            )
+            .expect("the walk");
+            null_ms.push(started.elapsed().as_secs_f64() * 1e3);
+            null_probes += seen.get();
+
+            let started = Instant::now();
+            walk(
+                live,
+                fold,
+                &q,
+                WalkBudget {
+                    limit: 20,
+                    walk_budget: 100_000,
+                    counts: false,
+                },
+                &|code| postings.intersects(AttrLocalId::new(code), &cand),
+                &|_| Ok(0u64),
+                &|e: io::Error| e,
+            )
+            .expect("the walk");
+            real_ms.push(started.elapsed().as_secs_f64() * 1e3);
+        }
+
+        // Pass 1: the whole call, as the walk makes it.
+        let faults_before = minor_faults();
+        let mut whole: Vec<(bool, f64)> = Vec::with_capacity(probed.len());
+        for code in &probed {
+            let started = Instant::now();
+            let hit = postings
+                .intersects(AttrLocalId::new(*code), &cand)
+                .expect("a probe");
+            whole.push((hit, started.elapsed().as_secs_f64() * 1e9));
+        }
+        let faults_whole = minor_faults() - faults_before;
+
+        // Pass 2: the same probes, staged.
+        let faults_before = minor_faults();
+        let mut staged: Vec<(bool, bool, f64, f64, f64)> = Vec::with_capacity(probed.len());
+        for code in &probed {
+            let t0 = Instant::now();
+            let idx = postings.bench_base_record_index(AttrLocalId::new(*code));
+            let t1 = Instant::now();
+            let Some(idx) = idx else {
+                continue;
+            };
+            let posting = postings
+                .bench_base_posting_at_index(idx)
+                .expect("a base record");
+            let t2 = Instant::now();
+            let hit = ColumnPostings::bench_hits(&posting, &cand);
+            let t3 = Instant::now();
+            staged.push((
+                hit,
+                matches!(posting, PostingRef::Roaring(_)),
+                (t1 - t0).as_secs_f64() * 1e9,
+                (t2 - t1).as_secs_f64() * 1e9,
+                (t3 - t2).as_secs_f64() * 1e9,
+            ));
+        }
+        let faults_staged = minor_faults() - faults_before;
+
+        let roaring = staged.iter().filter(|r| r.1).count();
+        println!(
+            "# {shape}: {} candidate entities in {} containers; {} probes over {walks} prefixes \
+             ({pages} pages filled), {} visible, {roaring} on a Roaring record",
+            cand.cardinality(),
+            stats.n_containers,
+            probed.len(),
+            whole.iter().filter(|(hit, _)| *hit).count()
+        );
+        println!(
+            "# {shape}: minor faults — {faults_capture} over the first (cold-mapping) walk, \
+             {faults_whole} over the whole-call pass, {faults_staged} over the staged pass = \
+             {:.1}, {:.1} and {:.1} per 10^4 probes",
+            faults_capture as f64 * 1e4 / probed.len().max(1) as f64,
+            faults_whole as f64 * 1e4 / probed.len().max(1) as f64,
+            faults_staged as f64 * 1e4 / probed.len().max(1) as f64
+        );
+
+        println!(
+            "# {shape}: the walk itself, per prefix — null gate {:.2} ms median / {:.2} p99 over \
+             {null_probes} entries = {:.1} ns each; shipped gate {:.2} / {:.2} ms",
+            percentile(&mut null_ms.clone(), 0.5),
+            percentile(&mut null_ms.clone(), 0.99),
+            null_ms.iter().sum::<f64>() * 1e6 / null_probes.max(1) as f64,
+            percentile(&mut real_ms.clone(), 0.5),
+            percentile(&mut real_ms.clone(), 0.99),
+        );
+
+        for (class, want) in [("hidden", false), ("visible", true)] {
+            let mut search: Vec<f64> = staged
+                .iter()
+                .filter(|r| r.0 == want)
+                .map(|r| r.2)
+                .collect();
+            let mut view: Vec<f64> = staged.iter().filter(|r| r.0 == want).map(|r| r.3).collect();
+            let mut test: Vec<f64> = staged.iter().filter(|r| r.0 == want).map(|r| r.4).collect();
+            let mut all: Vec<f64> = whole
+                .iter()
+                .filter(|(hit, _)| *hit == want)
+                .map(|(_, ns)| *ns)
+                .collect();
+            if search.is_empty() {
+                println!("{shape:<12} {class:<8} {:>7}", 0);
+                continue;
+            }
+            println!(
+                "{shape:<12} {class:<8} {:>7} {:>9.1} {:>9.1} {:>9.1} {:>9.1} {:>9.1} {:>9.1} \
+{:>9.1} {:>9.1}",
+                search.len(),
+                percentile(&mut search, 0.5),
+                percentile(&mut search, 0.99),
+                percentile(&mut view, 0.5),
+                percentile(&mut view, 0.99),
+                percentile(&mut test, 0.5),
+                percentile(&mut test, 0.99),
+                percentile(&mut all, 0.5),
+                percentile(&mut all, 0.99),
+            );
+        }
+    }
+    println!();
+    // What option (c) would cost to store: one `u16` per container per record, plus a `u32` run
+    // offset per record. Measured over the fixture's own postings rather than modelled from the
+    // Zipf law that generated them.
+    let started = Instant::now();
+    let mut containers = 0usize;
+    let mut roaring_records = 0usize;
+    for code in record_codes {
+        let Some(idx) = postings.bench_base_record_index(AttrLocalId::new(*code)) else {
+            continue;
+        };
+        let posting = postings
+            .bench_base_posting_at_index(idx)
+            .expect("a base record");
+        if matches!(posting, PostingRef::Roaring(_)) {
+            roaring_records += 1;
+        }
+        containers += container_count(&posting);
+    }
+    println!(
+        "# postings: {} records, {roaring_records} of them Roaring; {containers} container keys \
+         in all ({:.1} MB as u16 + {:.1} MB of u32 run offsets)  [{:.1} s to count]",
+        record_codes.len(),
+        containers as f64 * 2.0 / 1e6,
+        (record_codes.len() + 1) as f64 * 4.0 / 1e6,
+        started.elapsed().as_secs_f64()
+    );
+
+    println!("# ({values_n} values; every figure ns per probe unless marked)");
 }

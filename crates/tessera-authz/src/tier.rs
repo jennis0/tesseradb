@@ -359,6 +359,23 @@ impl DeltaTier {
     pub fn ordinals(&self) -> impl Iterator<Item = u32> + '_ {
         self.terms.values().iter().copied()
     }
+
+    /// [`Self::posting_at`]'s first half alone: the binary search over the key array.
+    ///
+    /// Exists so a bench can price the search and the view construction separately without
+    /// transcribing either — `posting_at` is these two calls and nothing else, which is the
+    /// property the decomposition depends on
+    /// (`probes/2026-09-02-value-suggestion/`, the decomposition arm).
+    #[cfg(feature = "bench-timing")]
+    pub fn bench_record_index(&self, ordinal: u32) -> Option<usize> {
+        self.terms.values().binary_search(&ordinal).ok()
+    }
+
+    /// [`Self::posting_at`]'s second half alone: the view over the mapped record's bytes.
+    #[cfg(feature = "bench-timing")]
+    pub fn bench_posting_at_index(&self, idx: usize) -> io::Result<PostingRef<'_>> {
+        read_posting(&self.postings, idx)
+    }
 }
 
 /// Coalesce several delta tiers into one, at `out`.
