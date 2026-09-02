@@ -720,9 +720,15 @@ fn a_superseded_index_keeps_answering_after_its_files_are_unlinked() {
 #[test]
 fn a_column_with_no_index_refuses_rather_than_answering_empty() {
     let fx = fixture();
-    let engine = engine_for(&fx, "refuse");
+    let mut engine = engine_for(&fx, "refuse");
+    // The hook publishes through the executor, which is the sole publisher (lifecycle §1.3) — so
+    // there has to be one to publish through.
+    engine.start_write_executor(8).expect("the executor starts");
     let session = engine.authorise(&full_coverage_credential()).unwrap();
-    engine.forget_suggestion_index_for_test("department");
+    assert!(
+        engine.forget_suggestion_index_for_test("department"),
+        "the hook must have published, or the refusal below is asserting nothing"
+    );
 
     let refused = engine.suggest(&session, "department", "eng", 20, false, 100_000);
     match refused {

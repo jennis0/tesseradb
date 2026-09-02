@@ -2840,6 +2840,17 @@ impl WritePath {
             .publish_geometry(publication)
     }
 
+    /// Submit a suggestion-index drop to the executor and block until it has published.
+    ///
+    /// `false` where there is no executor to publish through — the hook's callers all start one,
+    /// and a test that did not would otherwise assert against an unchanged generation.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) fn forget_suggestion_index(&self, vocabulary: String) -> bool {
+        self.handle
+            .as_ref()
+            .is_some_and(|handle| handle.forget_suggestion_index(vocabulary))
+    }
+
     pub(crate) fn resolve_terms(&self, dict: &Dict, descriptors: &[Descriptor]) -> Vec<TermId> {
         self.live.resolve_terms(dict, descriptors)
     }
@@ -3151,6 +3162,19 @@ pub(crate) enum ExecutorWork {
         publication: GeometryPublication,
         respond: SyncSender<std::result::Result<(), GeometryRefused>>,
     },
+    /// Drop one vocabulary's suggestion index and publish — `Engine::forget_suggestion_index_for_test`.
+    ///
+    /// **A test hook that is nonetheless a publication**, so it comes through this queue like every
+    /// other. It swapped the generation directly at first, which is the second publisher
+    /// `check-layers.sh` forbids (lifecycle §1.3, #59): the executor thread reads the live
+    /// generation, builds a successor and stores it, so a store from anywhere else can be
+    /// overwritten by a swap already in flight — and a test that lost its swap would pass or fail
+    /// on timing rather than on the behaviour under test.
+    #[cfg(feature = "fault-injection")]
+    ForgetSuggestionIndex {
+        vocabulary: String,
+        respond: SyncSender<()>,
+    },
 }
 
 /// Why a geometry publication produced no answer.
@@ -3295,6 +3319,28 @@ impl LifecycleHandle {
         rx.recv()
             .map_err(|_| PublishGeometryError::NoExecutor)?
             .map_err(PublishGeometryError::Refused)
+    }
+
+    /// Submit a suggestion-index drop and block until the executor has published it.
+    ///
+    /// A blocking `send` on the work lane, exactly as [`Self::publish_geometry`] is and for the
+    /// same reason: it is a publication, not a client request, and shedding it would leave the
+    /// caller's next assertion racing a swap that never happened.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) fn forget_suggestion_index(&self, vocabulary: String) -> bool {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        if self
+            .work
+            .send(ExecutorWork::ForgetSuggestionIndex {
+                vocabulary,
+                respond: tx,
+            })
+            .is_err()
+        {
+            return false;
+        }
+        let _ = self.bell.try_send(());
+        rx.recv().is_ok()
     }
 
     /// Ring the executor's doorbell without submitting anything.
@@ -5615,6 +5661,40 @@ impl Executor {
             }
             in_flight.store(false, Ordering::SeqCst);
         });
+    }
+
+    /// Drop one vocabulary's suggestion index and publish — the executor half of
+    /// `Engine::forget_suggestion_index_for_test`.
+    ///
+    /// **On this thread, which is the whole point of the hook going through the queue.** The
+    /// executor is the sole publisher (lifecycle §1.3, #59), so a swap performed anywhere else can
+    /// be lost to one already in flight here. It carries everything else forward and moves neither
+    /// version counter, exactly as [`Self::publish_completed_suggests`] does and for the same
+    /// reason: what changed is which structure a value's entries are read out of.
+    #[cfg(feature = "fault-injection")]
+    fn forget_suggestion_index(&mut self, vocabulary: &str) {
+        let live = self.generation.load_full();
+        let next = Generation {
+            suggest: Arc::new(live.suggest.without(vocabulary)),
+            prefix: live.prefix.clone(),
+            vocabularies: Arc::clone(&live.vocabularies),
+            filter_columns: Arc::clone(&live.filter_columns),
+            segments_version: live.segments_version,
+            watermark: live.watermark,
+            bundle: Arc::clone(&live.bundle),
+            dict: Arc::clone(&live.dict),
+            postings: Arc::clone(&live.postings),
+            fragments: Arc::clone(&live.fragments),
+            external_index: Arc::clone(&live.external_index),
+            delta_postings: live.delta_postings.clone(),
+            overlay_version: live.overlay_version,
+            overlay: Arc::clone(&live.overlay),
+            buffer: Arc::clone(&live.buffer),
+            denied: Arc::clone(&live.denied),
+        };
+        // Nothing acknowledged anything — the hook's own channel is what the caller waits on — so
+        // the token is dropped here as the rebuild's is.
+        let _published = self.publish(next, std::time::Instant::now());
     }
 
     /// Publish every finished rebuild, and report whether any did.
@@ -8703,6 +8783,24 @@ impl Executor {
                     }
                     let _ = respond.send(self.publish_geometry(publication));
                     self.health.note_work_refused();
+                    did_work = true;
+                    continue;
+                }
+                #[cfg(feature = "fault-injection")]
+                ExecutorWork::ForgetSuggestionIndex {
+                    vocabulary,
+                    respond,
+                } => {
+                    // The open window closes first, on the arm above's reasoning exactly: this
+                    // swaps the whole generation, and doing it under a window that has not applied
+                    // its ingest would have the window's own swap carry the pre-drop indexes
+                    // forward — losing the drop, and leaving the test asserting against a state it
+                    // asked to leave.
+                    if !window.is_empty() {
+                        window = self.close_and_reopen(window);
+                    }
+                    self.forget_suggestion_index(&vocabulary);
+                    let _ = respond.send(());
                     did_work = true;
                     continue;
                 }
