@@ -1,567 +1,445 @@
 # The write path
 
-An engineer sending a byte to `/control/ingest` or `/control/changes` wants to know what happens
-to it between arrival and the moment a viewer's map changes. An assessor wants to know that a
-deny takes effect, stays in effect, and survives a crash. This chapter answers both: admission,
-the commit window, the write-ahead log (WAL), flush, the deny lane and its overlay, merge,
+This chapter covers what happens to a write between arrival at `/control/ingest` or
+`/control/changes` and the moment it changes what a viewer's map shows. It covers admission, the
+commit window, the write-ahead log (WAL), flush, the deny queue and its overlay, merge,
 compaction, and restart.
 
-Two kinds of write travel this path and never share a queue. An **ingest** adds items; because it
-does work of unbounded duration (writing segment files), it MAY be refused when the server is
-under load. A **deny** (delete, suppress, or unsuppress) changes what a viewer may see; refusing a
-security operation for load would leave an item visible when it should already be hidden, so a
-deny MUST NOT be refused for load. One thread per partition, the **write executor**, performs
-every mutation, always in the order **append to the WAL, fsync, apply, swap the generation
-pointer, then acknowledge**. That ordering is the property every guarantee below rests on.
+## The executor and the two lanes
 
-All serving state hangs off one atomically-swappable pointer to an immutable **generation**:
-which segments exist, the overlay, the buffered rows awaiting a flush, the dictionary, and the
-row-space deny mask derived from the overlay. A request loads this pointer once, at its start,
-and answers entirely from what it points to. A write is nothing until it produces a new
-generation and swaps the pointer to it; everything else, including writing files and gathering a
-window, is preparation for that one moment.
+| Kind | Effect | Refused for load | Why |
+|---|---|---|---|
+| Ingest | Adds an item | Yes, past a limit | Writing segment files takes unbounded time, and the server protects itself from unbounded queued work |
+| Delete, suppress, unsuppress (a deny) | Changes what a viewer may see | No, never | Refusing a security operation for load would leave an item visible when it should already be hidden |
 
-## The path whole
+One thread per partition, the write executor, performs every mutation. Ingest and denies queue
+separately, so a deny never waits behind an ingest request of unbounded duration. Both are applied
+by the same executor, always in this order:
 
-An item's life and a deny's life pass through the same executor and the same WAL, but on
-different terms: an item accumulates state across several publications before a viewer can see
-it, while a deny takes effect at the moment it is acknowledged and is removed by exactly one of
-two specific events.
+1. append the record to the WAL;
+2. fsync it;
+3. apply it to the generation being built;
+4. swap the pointer to the new generation;
+5. acknowledge the caller.
 
 ```mermaid
-stateDiagram-v2
-  direction LR
-  state "item" as item {
-    [*] --> accepted: /control/ingest
-    accepted --> durable: window fsync, then 200
-    durable --> buffered: applied, has no row yet
-    buffered --> visible: flush (bounded by flush_max_age_secs)
-    visible --> merged: merge (row space only)
-    merged --> compacted: compaction
-  }
-  state "deny" as deny {
-    [*] --> held: /control/changes, fsync, apply, swap, then 200
-    held --> lifted: unsuppress (suppression only)
-    held --> retired: the compaction that removes the rows (deletion only)
-  }
+flowchart TD
+  I["/control/ingest: admission"] --> W["commit window"]
+  W --> X["executor: append, fsync,\napply, swap, acknowledge"]
+  C["/control/changes: validate\nand resolve the batch"] --> D["deny window"]
+  D --> X
+  T["flush tick"] --> P["flush: plan, then write\nsegment files off-thread"]
+  P --> X
+  X --> G["new generation"]
+  G -.-> M["merge, on its own tick"]
+  G -.-> F["compaction fold, when a\ntrigger crosses its threshold"]
 ```
 
-*An item gains state at each publication; a deny is in force at acceptance and leaves the overlay
-only at its one designated event.*
+*Ingest and denies queue separately but share one executor and one swap. Flush, merge and
+compaction run on their own cadences against whatever generation is current.*
 
-What an acknowledgement means differs by kind.
+## Generations
 
-An ingest acknowledgement is a durability receipt, not a visibility promise. An accepted item is
-WAL-durable and its authorisation state is complete, but it has no row in any segment, and every
-count, density figure, and selection is a row-space question, so the item contributes to nothing
-a viewer can observe until a flush gives it a row. The bound on that gap is `flush_max_age_secs`
-(§Flush).
+All serving state hangs off one pointer to an immutable generation. A generation names which
+segments exist, the overlay, the rows buffered ahead of a flush, the dictionary, and the
+row-space deny mask derived from the overlay. A request loads the pointer once, when it starts,
+and answers entirely from what it names.
 
-A deny's acknowledgement asserts two things together: the record is durable (one fsync), and the
-generation that carries it has already been swapped in, because the swap happens before the
-acknowledgement. A caller's own next request already reflects its own accepted change. There is no
-200 for a deny that carries only one of these two facts. Nothing else, a manifest write or storage
-cleanup, has to happen first; everything after the acknowledgement is bookkeeping, not a
-precondition.
-
-A deletion's overlay entry survives until compaction removes the rows it names, and nowhere else.
-Until a compaction run does that, the overlay grows under every accepted deletion. This is
-correct, fail-closed behaviour, because an entry that has not retired can never let its item back
-into view.
+An ingest, a flush, a merge and a compaction fold each take effect by building a new generation
+and swapping the pointer to it. Nothing before that swap is visible to any request.
 
 ## Ingest
 
 ### Admission
 
-A request against `/control/ingest` is checked before the server commits any work to it: an
-operator credential; a byte cap on the request body (16 MiB by default), enforced before the body
-is decoded; an admission semaphore bounding how many ingest requests run at once, which refuses
-immediately with a 429 rather than queuing when it is exhausted; schema validation against the
-view's declared columns and a row cap (10,000 rows by default); and a coordinate-bounds check
-against the view's fixed quantisation, refused before anything is written and before an entity id
-is allocated (the bounds are index configuration and do not change for a view's life, so a row
-outside them can never enter this view at all).
+A request against `/control/ingest` is checked in order, before the server commits any work to
+it:
 
-Each item's access label is resolved to a set of descriptors through the caller's plugin. An item
-whose descriptor count exceeds the declared bound is indexed anyway, with a warning: a predicate
-with more terms usually means broader visibility, and a resource guard MUST NOT produce an
-outcome that looks like an authorisation decision. A descriptor the server has never seen before
-is given a temporary id that cannot yet satisfy anything; it becomes usable only when the flush
-that carries the item promotes it into the durable dictionary (§Flush).
-
-Two duplicate checks run before a batch is accepted: a **batch idempotency** check, keyed on a
-required batch id hashing the request body (a retry with identical bytes replays the recorded
-result, and different bytes under the same id are refused), and an **external-id duplicate**
-check against every id currently bound to a live item. A holder whose entity has been deleted does
-not count as a collision: a deleted item is forgotten at this boundary, and the service's
-retention of a stale binding must never refuse a user's re-ingest. A **suppressed** holder still
-collides, because suppression is temporary hiding, and a byte-identical re-ingest past a
-suppression is exactly the gap this check exists to close.
-
-If the ingest buffer already holds its configured maximum of rows awaiting a flush, the request is
-refused with a 429 naming a retry interval. This is the intended backpressure when flush falls
-behind arrival: between flush ticks the buffer is what grows.
-
-A partition that has been stepped down refuses ingest at this boundary, before anything is
-acknowledged or written to the WAL, and flush publishes nothing while the step-down stands.
+1. The operator credential is checked.
+2. The request body is capped at a fixed size, checked before it is decoded.
+3. An admission limit bounds how many ingest requests run at once. Past that limit the request is
+   refused rather than queued.
+4. The body is decoded and validated against the view's declared columns, and the row count is
+   capped.
+5. Each item's access label is resolved to descriptor terms through the caller's plugin. An item
+   with more descriptors than the declared bound is indexed anyway, with a warning. Refusing it
+   would look like an authorisation decision, and a resource limit must not produce one. A
+   descriptor no earlier item has used is given a temporary id that satisfies nothing, until a
+   later flush promotes it into the durable dictionary.
+6. A batch id, required on every request, resolves a retry: identical bytes under the same id
+   replay the recorded result, and different bytes under the same id are refused.
+7. Every external id in the batch is checked against ids already bound to a live item. A deleted
+   item's old binding does not count as a collision, so a re-ingest under the same external id
+   succeeds. A suppressed item's binding still collides, because suppression is temporary, and a
+   byte-identical copy ingested past a suppression would defeat it.
+8. If the buffer of rows awaiting a flush already holds its configured maximum, the request is
+   refused with a retry interval.
+9. Each row's coordinates are checked against the view's fixed bounds. A row outside them refuses
+   the request before anything is acknowledged, written to the WAL, or allocated an entity id.
 
 ### The commit window
 
-Rows arrive at the executor unallocated. Entity-id assignment happens once per **commit window**,
-on the executor rather than per request. This is what makes the scope of the sort described next a
-server decision rather than a function of how a client happened to chunk its upload.
+Rows arrive at the executor without an entity id. Allocation happens once per commit window, on
+the executor rather than per request. The window's size reflects the server's own pace of arrival,
+not how a client happened to chunk its upload.
 
-Within one window, entity ids are assigned in `(signature, external_id)` order, where an item's
-signature is its sorted, deduplicated term list. This groups postings for a term into contiguous
-runs across the window's id range, which is how a term's posting list is stored; nothing repairs
-this ordering later, so the value of the sort is bounded by how much is gathered into one window.
-The window closes when it reaches `commit_window_max_items` (10,000 rows by default) or when the
-server's incoming work queue is observed empty, whichever comes first. There is no age-based
-linger: a linger only closes a window earlier than one of those two triggers would, and cannot
-help a single client sending requests one at a time.
+Within one window, entity ids are assigned in order of each item's signature, its sorted,
+deduplicated list of terms, and then by external id. This groups the postings for a term into
+contiguous runs across the window's id range, which is how a term's posting list is stored on
+disc. Nothing repairs this ordering later: a wider window produces longer runs, and a narrower one
+does not.
 
-At close: the whole window is signature-sorted and its rows are allocated entity ids from the
-allocator's high-water mark in one call; one `IngestBatch` WAL record per submission is appended,
-in order; then **one fsync covers the entire window**. This is group commit, trading N separate
-syncs for one, and it is what makes a bulk load's WAL cost independent of how many requests it
-arrived as. The executor then applies the window (clones the buffer with the new rows added,
-builds one new generation), performs one swap of the generation pointer, and acknowledges every
-held request with its rows' `tessera_id`s. If any append or the fsync fails, the window applies
-nothing at all: every waiter is answered 500, and a caller retries under the same batch id.
+The window closes when it reaches a configured row count, or when the server's incoming work is
+observed empty, whichever comes first. There is no age-based delay. A delay can only close a
+window earlier than one of those two triggers would, and it cannot help a single client sending
+requests one at a time.
 
-```mermaid
-sequenceDiagram
-  participant W as writers
-  participant H as handler
-  participant E as executor
-  participant L as WAL
-  participant G as generation
-
-  W->>H: change (ingest row, or delete / suppress / unsuppress)
-  H->>E: enqueue, keep waiting
-  Note over E: gather up to the window bound, in arrival order
-  E->>L: append every record
-  E->>L: fsync once
-  alt fsync fails after repair
-    E->>G: apply deletes and suppresses anyway; skip unsuppresses
-    E-->>W: 500 to every waiter: retry
-  else
-    E->>G: apply to the overlay / buffer
-    E->>G: swap the generation pointer
-    E-->>W: 200 to every waiter
-  end
-```
-
-*One fsync serves the whole window; every waiter is acknowledged against the same swap.*
+At close, the whole window is sorted and allocated from the id allocator in one call. One WAL
+record per submission is appended, and one fsync covers the entire window. Only then is the
+window applied to build a new generation, the pointer is swapped, and every waiting request is
+acknowledged with its rows' `tessera_id`s. If the append or the fsync fails, the window applies
+nothing: every waiter is refused, and a caller retries under the same batch id.
 
 ### What the writer observes
 
-At quiescence, latency is the WAL fsync plus queue time; under load, a submission waits behind the
-window ahead of it. A 200 means every row in the batch is WAL-durable with its identity allocated,
-and **not yet visible**. A 409 or 422 means the whole batch had no effect. A 429 names a retry
-interval and means the server is declining the request for load, from the admission semaphore, the
-command queue, or the buffer bound. A 500 means the WAL append or the fsync failed and nothing was
-applied; the caller retries the identical bytes, and idempotency resolves it.
+| Outcome | Meaning | Retry |
+|---|---|---|
+| 200 | Every row is durable in the WAL, with its identity allocated. It is not yet visible | Not needed |
+| 409 | A duplicate external id, or the same batch id with different bytes. Nothing in the batch took effect | After fixing the request |
+| 422 | Validation failed: an undeclared column, a wrong type, too many rows, or coordinates outside the view's bounds. Nothing took effect | After fixing the request |
+| 429 | The server is declining the request for load, with a retry interval attached | After that interval |
+| 500 | The WAL append or the fsync failed. Nothing was applied | With identical bytes |
+| 503 | The executor is not running, or the partition is serving a manifest behind where it should be | Later |
 
 ### What the viewer observes
 
-Nothing, until the item's own flush. The item is fully authorised (it is already part of every
-principal's underlying set) but has no row, and every count, density figure, and selection is a
-row-space question, so it cannot appear in any of them yet. Drill-down on it resolves the same
-"unknown" answer an identifier naming nothing at all would produce. Other sessions learn only that
-something has changed, through a staleness stamp on their next response (§Geometry and
-staleness), never what changed, and never which item.
+An accepted item has an entity id, and its authorisation is complete, but it has no row in any
+segment yet. Every count, density figure and selection is a question about rows, so the item
+contributes to none of them until a flush gives it one. Two checks that work in entity space
+rather than row space are not affected: whether the item's descriptors satisfy a mask, and
+drill-down. Drill-down on an item with no row returns the same unresolved answer as an identifier
+naming nothing at all.
+
+Other sessions learn only that something has changed, on their next response, never what changed
+or which item (see Geometry and staleness, below).
 
 ## Flush
 
-Flush is the mechanism that makes an ingested item visible. It changes no authorisation state, retires no overlay entry, drops no row, and can re-expose
-nothing.
+Flush turns rows waiting in the buffer into a published segment. This is what makes an ingested
+item visible. It changes no authorisation state. It retires no overlay entry, drops no row, and
+cannot make a hidden item visible again.
 
-It runs on one cadence, `flush_max_age_secs` (90 seconds by default), evaluated at the top of the
-executor's loop before anything else, so it is never delayed by work that arrived after it came
-due. An operator can pull one forward with `POST /control/flush`, which runs through the same
-path the tick uses, at the next loop iteration; there is no separate publish-immediately route. At
-most one flush is ever in flight: a tick that arrives while one is already running is skipped,
-because two concurrent flushes could each try to remove the same rows from the buffer.
+Flush runs on a fixed cadence, checked at the start of the executor's loop before anything else,
+so a request that arrived after the cadence came due cannot delay it. An operator can pull the
+next flush forward, and only one flush runs at a time.
 
-Planning happens on the executor, against the live generation, and is a pure computation: the
-buffered rows for one view, ascending by entity id. A row whose entity has since been deleted is
-never written; the entity id stays allocated and the overlay entry alone hides the item,
-permanently, until a compaction retires it. A row whose entity has since been suppressed is
-flushed normally: suppression is reversible, and a flush that skipped it would leave a later
-unsuppress with nothing to reveal.
+Planning reads the current generation: the rows buffered for one view, in ascending order of
+entity id. A row whose entity has since been deleted is never written. The entity id stays
+allocated, and the deletion alone hides the item until a compaction fold removes it. A row whose
+entity has since been suppressed is flushed as normal, because a flush that skipped it would leave
+a later unsuppress with nothing to reveal.
 
-The work itself (writing segment files, appending postings, promoting any descriptor the flush
-carries that the dictionary has not seen before) runs on a background pool over inputs already
-snapshotted on the executor, so it never blocks ingest or denies. When the work completes, the
-executor publishes it by rebasing onto whichever generation is current at that moment, not the one
-planning started against: a suppression accepted while the flush was running is folded into the
-manifest the flush writes, and ingest that arrived during the same window is left in the buffer,
-because the rebase removes only the rows the flush actually consumed.
+Writing the segment files runs in the background, over inputs already captured on the executor, so
+it never blocks ingest or a deny. When that work finishes, the executor publishes it against
+whichever generation is current at that moment, not the one planning started against. A
+suppression accepted while the flush was running is included in the manifest the flush writes.
+Any ingest that arrived meanwhile is left in the buffer for the next flush.
 
-Publication is one swap: the new segment is added, the buffer is reduced by exactly the rows this
-flush consumed, and the row-space deny mask is re-derived against the enlarged row space. The
-moment a suppressed or deleted item acquires a row is the moment it must be represented in that
-mask.
+Publication is one swap. The new segment is added, the buffer is reduced by exactly the rows this
+flush consumed, and the row-space deny mask is re-derived against the larger row space. The moment
+a suppressed or deleted item acquires a row is the moment it must appear in that mask.
 
-A request in flight is unaffected by a flush landing underneath it, because a request loads its
-generation once, at its start, and holds a reference to it for the request's whole duration; the
-swap does not touch that reference. Flush only ever appends rows and never rewrites an existing
-one, so a session's already-cached geometry stays correct across a flush too, which bounds what a
-session pays for one:
+A flush only ever appends rows and never rewrites an existing one, so a session's own cached view
+of the map stays correct across a flush. What changes is how quickly a session picks up the new
+rows.
 
-- **The item appears**, in counts, density, and selection, on the response following the
-  publication. A background task refreshes every actively-cached session's fragment and projection
-  once per publication, so the request thread itself pays nothing for the rebuild.
-- A session whose cache entry could not be refreshed in time is served the previous,
-  one-generation-stale entry rather than rebuilding inline. This is sound for a flush
-  specifically, and only for a flush: because a flush only appends, a stale entry never names the
-  wrong row, and only misses rows that did not exist when it was built.
-- Every response carries a generation stamp. A session presenting an earlier one is told, on its
-  next response, that something has moved (`x-tessera-stale: 1`); advisory, never a refusal
-  (§Geometry and staleness).
+| Case | Served from | When | Cost to the session |
+|---|---|---|---|
+| 1 | The live entry | The steady state | Nothing |
+| 2 | The entry built one flush ago | A refresh has not finished yet | Nothing. Still correct, because a flush only adds rows |
+| 3 | A fresh build | No cached entry exists, or the entry no longer applies | The full rebuild cost |
+
+A background task refreshes every session's cached view after each flush, so a request does not
+pay for the rebuild itself. A session whose refresh has not finished by the time it asks is served
+the entry from before the flush, rather than made to wait. This is safe because a flush never
+removes or renumbers a row.
+
+An item's access label can name a descriptor no earlier item has used. Until a flush promotes it
+into the durable dictionary, that descriptor cannot satisfy any mask. This keeps an unresolved
+term from making an item visible before the server has committed to it. A session already open
+when a promotion happens does not see the newly satisfiable item until it re-authorises. The
+staleness signal below is what prompts it to.
 
 ## Denies
 
-`/control/changes` accepts three operations against an already-ingested item: **delete**,
-**suppress**, and **unsuppress**. A fourth, editing an item's access label directly, does not
-exist: an edit is a delete followed by a re-ingest under the same external id, with new labels,
-and a deleted holder does not block that re-ingest. The endpoint refuses a request naming the
-withdrawn operation with a 422 that names this flow. The re-ingested item is invisible for at most
-one flush interval and is issued a new `tessera_id`; identity for a client is carried by the
-external id and the `tessera_id` together, never by the entity id underneath them.
-
-Delete and suppress differ in what they mean and in what removes them, never in how they are
-accepted or applied.
-
-| | Delete | Suppress |
-|---|---|---|
-| Effect | removed for good | hidden while it stands |
-| Overlay store | `deleted` | `suppressed` |
-| Removed by | the compaction fold that executes it (Rule F) | an explicit unsuppress (Rule S) |
-| Reversible | only by a fresh ingest, as a new identity | yes |
+`/control/changes` accepts three operations against an already-ingested item: delete, suppress,
+and unsuppress. Editing an item's access label directly does not exist as an operation. Changing
+what an item is labelled is a delete followed by a re-ingest under the same external id, with the
+new label. A deleted item's binding does not block that re-ingest (Admission, step 7, above).
 
 ### Accepting a deny
 
-A deny names its item by one of two addresses: an `external_id`, resolved against the current
-live map and then the bundle; or a `tessera_id` presented together with the idset it was minted
-under. The idset is checked first, before the identifier is decoded, because identifiers are
-keyed: a list gathered before a key rotation would decode under the new key to different, live
-items, and denying the result would deny the wrong entities. A stale idset is refused outright
-(409).
+A change names its item by an external id, resolved against the current map of live items, or by
+a `tessera_id` presented together with the id set it was minted under. The id set is checked
+first, before the `tessera_id` is inverted, because the inversion is keyed. A list gathered before
+a key rotation would invert to different, live items under the new key. A stale id set is refused
+outright.
 
-Validation covers the whole batch before anything is accepted: every address is resolved, and if
-any one fails to resolve, the **entire batch** is refused and nothing is enqueued. An address that
-resolves is accepted even if it already names a deleted or suppressed item; re-applying a deny to
-an item already in that state has no further effect, so a retried batch is idempotent without any
-extra bookkeeping.
+The whole batch is validated and every address resolved before anything is accepted. If any one
+address fails to resolve, the whole batch is refused and nothing is queued. An address that
+resolves to an item already deleted or suppressed is accepted anyway. Applying a deny a second
+time has no further effect, so a retried batch is safe to resend.
 
-**Only the entity id is written to the WAL, never a `tessera_id`.** The address is resolved once,
-at admission, into the entity it names, and the WAL record carries that entity id, which is
-stable for the item's life. A `tessera_id` is a keyed permutation of it, so if it were written to
-the WAL instead, replay after a key rotation would decode it against the new key and could apply
-the change to a different, live item.
+Only the entity id is written to the WAL, never a `tessera_id`. The address is resolved once, when
+the request is accepted, into the entity it names, and that entity id is stable for the item's
+life. A `tessera_id` is a keyed permutation of it: writing it to the WAL instead would mean a
+replay after a key rotation could resolve it to a different item.
 
-The deny lane accepts a batch and never refuses one for load: there is no route from this lane to
-a 429. A partition that has been stepped down still accepts denies while it refuses ingest,
-because a deny threatens no segment the step-down is protecting.
+Denies are gathered into a window before any of them is written to the WAL, the same shape ingest
+uses: append every record, then one fsync for the whole window. That change took a 1,000-item
+request from about 3.3 seconds to about 32 milliseconds. Every waiter in the window is then
+acknowledged against the same swap.
 
-### The overlay
+A deny is queued separately from ingest and is never refused for load. There is no route from this
+queue to a 429. A partition that has stepped down still accepts a deny while it refuses ingest,
+because a deny does not touch the segments a step-down protects.
 
-The overlay is two independent stores, `deleted` and `suppressed`, one entity-space bitmap each,
-not one map with a disposition field. Collapsing them into a single map would make the last write
-win: the sequence delete, suppress, unsuppress would then leave whichever disposition was written
-last, and an unsuppress following a delete could restore an item that should stay hidden forever.
-Two separate stores make that sequence structurally unable to re-expose anything, because the
-unsuppress mutates a store the deletion never touched.
+### The overlay: two stores
 
-A **row-space mask**, `denied[view]`, is derived per view from the union of the two stores and
-subtracted last from every composed result, in one bitmap operation. Per-request cost therefore
-does not grow with how many denies have ever been accepted; it depends only on how deep the
-overlay currently is. Additions to the mask may be applied incrementally, because a window of
-delete or suppress operations only grows the union, but **any removal re-derives the mask from
-scratch**. Subtracting one row on an unsuppress, rather than recomputing, could subtract a row
-that a still-standing deletion also denies, exposing an item that is supposed to remain hidden.
-The entity-space stores stay authoritative for everything else: drill-down, label gating, and
-cluster visibility answer from the overlay directly and never consult the row-space mask.
+The overlay holds two separate records of what is hidden, one for deletions and one for
+suppressions, each a bitmap over entity ids. They are not one map with a status field. A single
+map would let the most recent write decide an item's status. The sequence delete, suppress,
+unsuppress would then leave the unsuppress as the last word and bring a deleted item back. Two
+separate stores rule that out. The unsuppress can only change the suppression record, which the
+deletion never touched.
 
-```mermaid
-flowchart TB
-  del["delete"] --> deleted["deleted<br/>entity-space bitmap"]
-  sup["suppress"] --> suppressed["suppressed<br/>entity-space bitmap"]
-  unsup["unsuppress"] -. "removes from suppressed only (Rule S)" .-> suppressed
-  compact["compaction that removes the rows"] -. "removes from deleted only (Rule F)" .-> deleted
+| Rule | Applies to | Removed by | Why only one route |
+|---|---|---|---|
+| Rule S | Suppression | An explicit unsuppress, and nothing else | No rebuild or timer excludes a suppressed item on its own, so its invisibility depends entirely on this record for as long as the suppression stands. Any other removal route would let the item become visible again with no unsuppress ever issued |
+| Rule F | Deletion | The compaction fold that removes the item's row and its postings, and nothing else | The row still exists in a segment until that fold runs. Removing the record any earlier would leave a segment reachable that still contains the item |
 
-  deleted --> union["union"]
-  suppressed --> union
-  union -- "derive per view; re-derive on any removal" --> denied["denied[view]<br/>row-space mask"]
-  denied -- "subtracted last in every composition" --> mauth["M_auth for the request"]
-
-  deleted -- "verdict: deleted > suppressed > buffered" --> entityq["entity-space answers:<br/>drill-down, labels, cluster visibility"]
-  suppressed --> entityq
-```
-
-*Two stores, one derived mask, and two removal events, each acting on one store only.*
-
-### Removing a deny: Rule S and Rule F
-
-- **Rule S.** An entry leaves `suppressed` only by its own unsuppress. Nothing else may touch it:
-  no rebuild of a fragment excludes a suppressed entity on its own, so the item's invisibility
-  rests entirely on that overlay entry for as long as the suppression stands. Giving a
-  suppression any other removal route, a time-based expiry for instance, means the entry
-  eventually retires on its own and the item becomes visible again with no unsuppress ever
-  issued.
-- **Rule F.** An entry leaves `deleted` only in the compaction fold that executes it: the pass
-  that actually removes the entity's row and its postings, publishing its own manifest. Before
-  that fold runs, the row still exists in a segment, so retiring the entry any earlier would
-  leave a fragment that still contains the deleted item reachable by a later request. A request
-  resolves the fragment identity it will answer from exactly once, and a compaction fold rotates
-  that identity as part of its publication, so no fragment built before the fold can be reached
-  by key afterwards. A request is answered entirely from the geometry before the fold or entirely
-  from the geometry after it, never a mixture. What a fold actually retires is computed from what
-  its own publication demonstrably removed, not from what it planned to remove at the start
-  (§Compaction).
+The row-space mask a request subtracts from its answer, `denied[view]`, is derived from the union
+of the two stores. It is derived again in full at every geometry publication (a flush, a merge, or
+a compaction fold), never patched by removing one row. Subtracting a single row could remove one
+that a still-standing deletion also covers. How a request composes an answer against this mask
+belongs to the access-control chapter.
 
 ### If the write-ahead log fails
 
-The executor gathers up to 1,000 queued deny entries per window, then appends every record and
-issues **one fsync for the whole window**, the same group-commit shape ingest uses. Batching
-denies this way is what took a 1,000-item request from roughly 3.3 seconds (one fsync per item)
-to about 32 milliseconds (measured).
+If the fsync for a deny window fails, the executor first tries to repair it. It rewinds to the
+last durable position and rewrites the affected records, because a second fsync on its own is not
+enough to confirm the true state on every filesystem.
 
-If that fsync fails, the executor first tries to repair it: rewind to the last durable offset and
-rewrite the affected records. A bare second fsync is not trusted on its own: on Linux a writeback
-error can be reported once and then treated as resolved, so a second call can report success with
-the data already gone. Rewriting the region is what makes the repair sound.
+If the repair does not succeed, the window is applied unevenly, by operation rather than by
+position in the batch. Every delete and every suppress is applied to the overlay anyway, because
+those items must stay hidden even without a durability guarantee, and every waiter in the batch is
+refused. Every unsuppress in the window is applied to nothing, because applying one without
+durability could let an item back into view that a restart would still hide.
 
-If the repair is exhausted, or the append itself failed and there was nothing to repair, the
-window folds by operation, never by position in the batch:
-
-- every `delete` and `suppress` in the window is applied to the overlay anyway (the items are
-  hidden immediately), and every waiter in the batch still receives a 500;
-- every `unsuppress` in the window is applied to **nothing**, because applying one without
-  durability could let an item back into view that a restart would still hide.
-
-These applied-anyway entries are **not** marked for the next manifest publication on purpose:
-they are in force on the live node with no durable record behind them, and publishing them would
-make a deny that was never acknowledged permanent in the restore path.
-
-A caller answered 500 must retry; retrying is always safe, because applying a deny twice has no
-further effect. If the caller never retries, the record lies past the WAL's last-synced offset, so
-a restart discards it along with the rest of the undurable tail, and the item becomes visible
-again. That is the only residual risk this failure carries.
+A caller that is refused must retry. Retrying is always safe, because applying a deny twice has no
+further effect. A caller that never retries leaves the record past the WAL's last confirmed
+position, so a restart discards it and the item becomes visible again. That is the only risk this
+failure carries.
 
 ### Publication and recovery
 
-An accepted deny marks the overlay dirty. The executor publishes a side-manifest at the close of
-each deny drain, off the acknowledgement path, with a floor of at least one publication every 64
-windows under sustained arrival, so a drain that never fully empties still publishes eventually.
-The write takes the manifest's `deny` and `tombstones` fields from the overlay's two bitmaps
-**separately, never from their union**: a union would make every standing deletion look retirable
-by an unrelated unsuppress. Neither field is ever copied forward from an older manifest, because
-doing so could republish an unsuppress the live overlay has already reverted.
+An accepted deny marks the overlay as changed. The executor writes a side record of the whole
+overlay at the close of a batch of deny windows, off the path that acknowledges the caller. A
+floor on how long a busy queue can go without one means a queue that never fully empties still
+publishes eventually.
 
-This publication is what a reader opening the bundle without replaying the WAL depends on. A
-manifest carrying `deny` or `tombstones` fields is honoured before its files are even verified,
-and a partition MUST NOT step past it to serve an older manifest that predates a deny it already
-holds.
+This write takes the deletion and suppression bitmaps from the live overlay directly, never from
+an earlier published record. Copying one forward could republish an unsuppress the live overlay
+has already reversed.
 
-On restart, the overlay is seeded from the newest verifying manifest's deny state **before** the
-WAL's durable prefix is replayed over it, and replay's records win where the two disagree. This
-order protects an unsuppress specifically: it is the one operation whose later WAL record must
-win over the manifest's seed, because seeding after replay instead would mean that a crash landing
-between an accepted unsuppress and the next manifest publication puts the suppression back,
-undoing an operation the caller was already told had succeeded.
+On restart, the overlay is seeded from the newest side record that verifies, and then the WAL's
+confirmed prefix is replayed over it, in that order. Where the two disagree, the later WAL record
+wins. This order protects an unsuppress. Seeding after replay instead would let a crash between an
+accepted unsuppress and the next published record put the suppression back. That would undo an
+operation the caller was already told had succeeded.
 
-### What the writer and the viewer see
+### What the writer and the viewer observe
 
-A 200 tells the writer two things: the disposition is durable, and every request from now on,
-including its own next one, already reflects it. A 500 tells the writer that durability could not
-be confirmed; if the operation was a delete or a suppress, the item is already hidden on the node
-that accepted it despite the error, and retrying is safe; if it was an unsuppress, nothing was
-applied, and the item stays hidden until the caller retries.
+| Outcome | Meaning | Retry |
+|---|---|---|
+| 200 | The disposition is durable, and every request from now on, including the caller's own next one, already reflects it | Not needed |
+| 404 | The address did not resolve to a live item. Nothing in the batch took effect. An item whose ingest is still in an open commit window also reads as unknown | After confirming the item exists |
+| 409 | A stale id set | After re-resolving by external id |
+| 422 | The batch failed validation. Nothing took effect | After fixing the request |
+| 500 | Durability could not be confirmed. A delete or suppress in the failed window is already in force on this node despite the error. An unsuppress in it was not applied | Always safe |
+| 503 | The executor is not running. Nothing was taken | Later |
 
-A viewer's next request after a deny is accepted excludes the item immediately: row-based results
-subtract it through the derived mask, and entity-space checks such as drill-down and label
-visibility consult the overlay directly. No cache stands between a deny and a request that should
-see it: the mask and the overlay are always applied after any cached artefact is composed, so no
-fragment held in a cache can bake in the item's absence or its presence.
+The next request from any session after a deny is accepted excludes the item immediately. A
+row-space answer subtracts it through the mask. Drill-down and label checks consult the overlay
+directly. Nothing cached stands in the way, because the mask and the overlay are applied after any
+cached result is composed.
 
 ## Merge
 
-Merge bounds what flush lets grow within one prefix: how many segments exist, how many delta
-posting tiers, how many external-id runs, and how many dictionary extents. It changes nothing
-about entity space and nothing about deny state.
+A merge bounds how many segments, posting tiers, external-id runs and dictionary entries a flush
+leaves behind, each of which costs a viewport something to read past. Merge does not touch entity
+space and does not change what is authorised.
 
-Merge splits into two halves, published separately. The **entity-space half**, coalescing delta
-tiers, external-id runs, dictionary extents, and the other per-entity artefacts, publishes as a
-manifest edit and moves no row, so no cache key changes and no session pays anything for it. The
-**row-space half**, merging live segments themselves, publishes as its own swap: it shortens the
-extent list and re-sorts rows within the merged span, so a row id inside that span names a
-different entity afterwards. Because of that, a merge advances the geometry version, which is the
-only value a cached row-space structure may use as its key; every entry keyed on the previous
-version is superseded rather than patched. A request racing the merge's own swap under the same
-key is answered from a fresh build rather than risking a structure built from two different row
-spaces.
+Merge publishes in two parts, on the same cadence. Artefacts that do not move a row, posting
+tiers, external-id runs, dictionary entries, coalesce as one change to the manifest. Live segments
+merge as a separate swap. This second part shortens the row space and re-sorts rows within the
+merged span, so a row id inside it names a different entity afterwards. Because of that, a merge
+advances the same generation counter a flush does, and any cached row-based structure keyed on the
+older value is rebuilt rather than reused.
 
-A pending deletion is not dropped by a merge: its row and its postings are carried into the merged
-output whole, because only compaction may drop a row (§Compaction). The deny mask is re-derived
-against the merged row space and never carried forward, because a denied row id inside the merged
-span may now name a different entity than it did before the merge.
-
-Merge is selected the same way a flush segment is planned, evaluated on the same tick: the
-executor takes the first window of adjacent, similarly-sized artefacts that fits within a
-configured cap.
+A pending deletion is not dropped by a merge. Its row and its postings are carried into the merged
+output unchanged, because only a compaction fold may drop a row. The deny mask is re-derived
+against the merged row space rather than carried forward, because a denied row id inside the
+merged span may now name a different entity.
 
 ## Compaction
 
-Compaction is the one operation permitted to drop a row and its postings, the one that reclaims
-disc space a merge or a coalesce has orphaned, and the one that returns a partition-view to one
-segment, one base postings tier, one external-id run, and one locator. It runs as a single pass
-called a **compaction fold**, and it is the one operation in this chapter that bears on the
-invariants directly: flush and merge change nothing about which entities are authorised, and only
-compaction can.
+Compaction is the one operation that may drop a row and its postings. It runs as a single pass
+called a compaction fold, and it does three things nothing else in the write path can do:
 
-**Why only compaction may retire a deletion.** A row survives flush and merge unchanged; the
-overlay entry for a deleted item is the only thing hiding its row until something actually removes
-it. Retiring that entry on a timer, or any signal short of the removal itself, would leave a
-fragment reachable that still contains the row: drawn and counted for anyone who can see it. A
-compaction fold is safe to retire against because it rewrites the row out of existence in the same
-step that publishes: it writes under a new prefix, and the manifest digest naming that prefix
-rotates the fragment identity, so no fragment built before the fold can be reached by key
-afterwards. A single request resolves its fragment identity once, so it is answered entirely from
-the geometry before the fold, or entirely from the geometry after it.
+- it is the only way a deletion's overlay record is ever removed (Rule F, above);
+- it is the only way disc space a merge or a coalesce has orphaned is reclaimed;
+- it is the only way a partition returns to one segment, one base posting tier, one external-id
+  run and one locator. Flush and merge only ever add to those counts.
 
-**What a fold retires is computed from what it actually removed, not from what it planned to
-remove.** The fold takes its snapshot, which rows and postings to fold, at the start of its run,
-and further flushes, merges, and denies may still land before it publishes. So an entity's
-deletion retires from the overlay only if, once the fold has published, no carried-forward
-artefact (segment, delta tier, or external-id run) still names it. An entity whose row survives
-a fold, because, for instance, a flush landed a fresh copy of it while the fold was running,
-simply is not retired this round; the next fold takes it. This keeps the rule fail-closed: at
-worst, an item stays hidden by its overlay entry one round longer than strictly necessary, never
-the reverse.
+A fold takes a snapshot at the start of its run. The snapshot names which rows and postings to
+remove, and which deletions to retire once they are gone. Between that snapshot and the fold's
+publication, more flushes, merges and denies can still land. A deletion retires only if, once the
+fold has published, nothing carried forward from before the fold still names that entity. Not its
+row, not its postings, and not its external-id binding. An entity a flush gave a fresh row to
+while the fold was running is not retired this round. The next fold takes it instead. Retiring
+against the plan instead of against what publication actually removed would leave an entity whose
+row survived retired anyway, with nothing left to hide it.
 
-A suppression is carried forward through a compaction fold untouched. Only an explicit unsuppress
-removes an entry from `suppressed` (Rule S, §Denies).
+Retiring an overlay entry does not remove every record of it at once. The WAL still holds the
+original delete, and a restart replays it. Until the WAL rotates past those records, a restart
+brings the retired entry back. This causes no harm. The entity it names has no row and no postings
+left for any request to find, so what a viewer sees does not change. The next fold clears the
+entry again, at little further cost, because there is nothing left for it to remove.
 
-**Entity ids after a fold.** Not built yet: decision 0072 rules that an entity id is a slot, freed
-by the compaction that drops its row and reusable by a later ingest, with a `tessera_id` carrying a
-discriminator so that two occupants of one slot never share an identifier. Today the allocator is
-append-only and an entity id is never reused, so a dropped row's id stays retired and the question
-of a recycled slot does not arise.
+A suppression is carried through a fold unchanged. Only an explicit unsuppress removes one
+(Rule S).
 
-**What a viewer pays.** Ingest, denies, and flush continue while a fold runs; merge and coalesce
-are held back until the fold publishes, because their outputs would be orphaned by the flip that
-follows and their own inputs are the fold's. A compaction fold streams the whole bundle through
-the same memory-mapped files a live viewport reads from, so an unthrottled fold can push a
-viewport's hot pages out of the page cache; the fold advises the kernel that its own reads are
-sequential and can be reclaimed quickly, to limit that effect. A fold's duration is otherwise
-unbounded on purpose: because it runs off the request path and against no deadline, a slower fold
-that is gentler on a concurrent viewport is preferred over a faster, more disruptive one.
+A compaction fold runs off the request path, over files a viewport is also reading. Its duration
+is not bounded. A slower fold that disturbs a live viewport less is preferred to a faster one that
+disturbs it more. The one moment a fold is visible to a client is the flip. Because it
+rewrites row space globally, every session's cached view of the map is invalid the instant the new
+generation is swapped in. A session's first request after the flip takes an ordinary cache miss
+and rebuilds, exactly as a newly opened session's request would. No request is turned away to
+protect that rebuild. Nothing a client already holds stops resolving. A tile is a Morton prefix
+and an item is a `tessera_id`, and both resolve against any generation. A fold moves the rows
+behind an identifier without breaking the identifier itself.
 
-The one moment a fold is genuinely visible to a client is the flip. A fold rewrites row space
-globally, so every session's cached projection is invalid the instant the new generation is
-swapped in, and every cached fragment is invalid too, because the fragment identity has rotated.
-The flip refuses nothing: a session takes an ordinary cache miss on its first request afterwards
-and rebuilds, exactly as a newly-established session does; no request is shed to protect the
-rebuild. Nothing a client already holds stops working: a tile is a Morton prefix and an item is a
-`tessera_id`, and both resolve against any generation, so identifiers survive a fold even though
-the rows behind them have moved.
+| Gauge | What it measures |
+|---|---|
+| Un-retired deletions | How far the overlay has grown past what a fold could reduce |
+| Live segment count, against a daily window | Read cost that degrades a viewport gradually, and can wait to be paid down |
+| Live segment count, against a higher ceiling | The same read cost past the point where waiting for the window costs more than folding now |
+| Dead bytes against named bytes | Disc space a merge or a coalesce has orphaned |
+| Tombstoned rows against live rows | Rows every viewport still reads past that no one may see |
 
-**When it runs.** Compaction is not scheduled on a plain timer: a timer would run the most
-expensive operation in the system against a bundle that may have nothing to reclaim. It is
-dispatched instead when a work threshold crosses a configured limit: the count of un-retired
-deletions, the number of live segments, the ratio of disc bytes to bytes the manifest names, or
-the fraction of rows that are dead, and a minimum interval always floors how often it can fire.
-Segment count carries two thresholds rather than one: a modest excess degrades a viewport's read
-cost gradually, so it can wait for a daily window, but past a higher, always-on ceiling it fires
-at any hour rather than making every viewer pay through a whole day waiting for the window to
-open. An operator may also request a fold directly through `/control/compact`; only one fold runs
-at a time, and a request arriving while one is running is refused rather than queued.
+A fold is dispatched when any one of these crosses its threshold and a minimum interval has passed
+since the last attempt. An operator may also request one directly. Only one fold runs at a time,
+and a request arriving while one is running is refused rather than queued.
+
+```mermaid
+flowchart TD
+  A["plan: name the files,\nsnapshot pending deletions"] --> B["run: streaming passes into\na new prefix, off the request path"]
+  B --> C["publish: carry forward what\nstill applies, write the new\nmanifest, flip to the new prefix"]
+  C --> D["one swap: new postings,\nre-derived deny mask,\nretirement of what the fold removed"]
+  D --> E["WAL rotation makes\nretirement durable"]
+  D --> F["a session's first request after\nthe flip rebuilds; every later\none is answered normally"]
+```
+
+*A fold plans, runs and publishes without holding the executor except at the plan and the swap.
+Retirement and the cache miss both happen at the swap.*
 
 ## Restart and recovery
 
-On open: read `CURRENT`, verify `MANIFEST.json`'s digest, then, per partition, take the newest
-side-manifest that is both fully written and verifies. Seed the overlay from that manifest's deny
-and tombstone fields, then replay the WAL's durable prefix over it, **in that order**. This
-ordering protects an unsuppress specifically: it is the one operation whose later WAL record must
-win over the manifest's seed, because if the overlay were seeded after replay instead, a crash
-landing between an accepted unsuppress and the next manifest publication would put the suppression
-back, undoing an operation the caller was already told had succeeded.
+On restart, the server reads the newest manifest that verifies, seeds the overlay from its
+deletion and suppression records, and then replays the WAL's confirmed prefix over it, in that
+order. Where the two disagree, the later WAL record wins. This protects an unsuppress. Seeding
+after replay instead would let a crash between an accepted unsuppress and the next published
+record put the suppression back.
 
-The allocator's high-water mark seeds from whichever is larger, the manifest's recorded value or
-the value replay reaches, across every rotation and restart, so an entity id already issued is
-never issued a second time. The ingest buffer is reconstructed as exactly the replayed rows whose
-entity has no row in any segment, rather than from a watermark comparison; this predicate stays
-correct regardless of how many views exist or how far allocation order and flush order have
-diverged from each other.
+The entity id allocator resumes from whichever is larger, the manifest's recorded high point or
+the value replay reaches, so an id already issued is never issued again. The buffer of rows
+awaiting flush is rebuilt as exactly the replayed rows whose entity has no row in any segment,
+rather than compared against a watermark. This predicate stays correct regardless of how flush and
+allocation order have diverged from each other.
 
-A record whose position lies past the WAL's last-synced offset is discarded on open, whatever its
-checksum says, because nothing past that offset was ever acknowledged. A framing or checksum
-failure **below** that offset is corruption of state that may include an acknowledged deny, and
-the node fails closed: it stays unready, and the operator restores from the bundle and object
-storage rather than serving a manifest that predates a deny it already holds.
+| Crash point | Recovery | At risk |
+|---|---|---|
+| Before any acknowledgement | The caller retries. The request was idempotent | Nothing |
+| After the fsync, before the swap | Replay rebuilds the same state | Nothing |
+| After acknowledgement | Replay rebuilds the same state | Nothing |
+| Mid-flush, files written, no manifest | The files are orphaned and ignored. Replay re-flushes | Nothing |
+| Mid-rotation of the WAL | The oldest-first deletion order leaves no gap | Nothing |
+| A durability failure, then a restart | The undurable tail is discarded | An under-durable deny's hiding, which no acknowledgement ever claimed |
+| Corruption below the WAL's confirmed point | The partition stays unready. An operator restores from the bundle and object storage | Availability. Deny state is bounded by the last published record |
 
 ## Geometry and staleness
 
 Every response carries a stamp naming the generation it was answered from, and a request may
-present one back. The stamp is advisory only: it never selects which geometry answers a request,
-it never expires, and presenting a stale one never produces an error. What it buys a client is one
-comparison against the live generation, reported back as a flag saying whether anything has moved
-since. A suppression or a deletion applies to every request from the moment it is accepted,
-whatever stamp that request presents. The stamp carries no authorisation weight of any kind.
+present one back. The stamp is advisory only. It never selects which generation answers a request,
+it never expires, and presenting an old one never produces an error. What it buys a client is one
+comparison against the current generation, reported back as a flag saying whether anything has
+moved since.
+
+This is safe because nothing a client holds depends on a particular generation to resolve. A tile
+is a Morton prefix computed against bounds fixed when the view was built, so it names a region of
+the grid rather than a set of rows. It resolves against any segment of any generation by the same
+search. An item is a `tessera_id`, which recovers the entity it names independently of geometry.
+The entity then resolves to a row through whichever generation answers the request. A client that
+re-issues a request always gets a correct answer, only a more or less current one. There is
+nothing for the server to keep alive on the client's behalf between requests.
+
+A suppression or a deletion applies to every request from the moment it is accepted, whatever
+stamp that request presents. The stamp carries no authorisation weight of any kind.
 
 ## What is not built
 
 - **The label invalidation feed.** A deletion invalidates every label whose generating set held
-  the deleted item, for every principal who could see it; the deny lane is the event that should
-  trigger a notification to interested clients, but neither the notification mechanism nor a
-  consumer for it exists. Enforcement does not depend on it (a label check always reads current
-  state), but nothing announces the change.
-- **The replica freshness bound.** The time limit on how long a replica may go on serving a
-  manifest that predates a deny it should already carry, once replication exists. No replication
-  exists today, so there is nothing for the bound to apply to.
-- **A wire representation of session-level descriptor staleness.** A session that holds an
-  unresolved descriptor when a flush promotes a term becomes stale in a way distinct from the
-  geometry staleness stamp above; the condition is computed and carried on the session, but a
-  client has no way to read it directly.
-- **A runtime ceiling on WAL size.** The configured hard limit is checked only at startup, against
-  the worst case the configured queue bounds could produce; nothing measures the live log's size
-  while the server runs.
-- **The write-side page-cache hint for a compaction fold's own spooled writes.** The read-side
-  hint, which tells the kernel a fold's own reads can be reclaimed quickly, exists; the equivalent
-  for what a fold writes does not yet have a place in the code.
-- **Cell-granular staleness.** The broadcast stamp in the previous section tells a client only
-  that something has changed, never which cells. A protocol that narrows that to the affected
-  Morton prefixes has not been designed.
+  the deleted item, for every principal who could see it. The deny queue is the event that should
+  trigger a notification, but neither the notification mechanism nor a consumer for it exists.
+  Enforcement does not depend on it, because a label check always reads current state, but nothing
+  announces the change to an interested client.
+- **The replica freshness bound.** A limit on how long a replica may go on serving a manifest that
+  predates a deny it should already carry. No replication exists yet, so there is nothing for the
+  bound to apply to.
+- **A wire representation of descriptor staleness.** A session that holds an unresolved descriptor
+  when a flush promotes it becomes stale in a way distinct from the geometry stamp above. The
+  condition is tracked on the session. A client has no way to read it directly.
+- **A runtime limit on WAL size.** The configured hard limit is checked only at startup, against
+  the worst case the configured queues could produce. Nothing measures the live log's size while
+  the server runs.
+- **The write-side page-cache hint for a compaction fold's own writes.** The read-side hint, which
+  lets the kernel reclaim a fold's own reads quickly, exists. The equivalent for what a fold writes
+  does not yet have a place in the code.
+- **Cell-granular staleness.** The stamp above tells a client only that something has changed,
+  never which cells. A protocol narrowing that to the affected regions has not been designed.
+- **Entity id reuse after compaction.** An entity id freed by a fold that drops its row is not
+  reissued to a later item. The allocator is append-only, and an id once retired stays retired.
 
 ## Where this is tested and where it lives
 
-The conformance suite covers the invariants a masked count and a selected mark depend on directly:
-I1, I2, I7, and I10, including their multi-view forms; where coverage stands is `conformance.md`
-§4.6. The two invariants the write path turns on most directly, I9 (an entity id is issued once and
-never reused) and I11 (a request resolves one generation and
-uses it throughout), are covered in Rust rather than in the differential suite. Two of the
-differential harness's interleaving scripts for deny retirement are permanently void, because they
-tested the deletion-stamp mechanism Rule S and Rule F replaced; the remaining ones that exercise a
-compaction fold wait on test-harness support (an observer for overlay entry state, a pause point
-at the fold's snapshot) that has not been written yet.
+Coverage of the invariants this chapter turns on is stated in `conformance.md` §4.6 and nowhere
+else. The properties this chapter states are pinned as integration tests across the write path's
+crates:
 
-The properties this chapter states are instead pinned as Rust integration tests, mostly in
-`crates/tessera-engine/tests/`: `rebind.rs` (a delete followed by a re-ingest re-binds an external
-id across flush, rotation, and restart, and a suppressed holder still collides); `rotation_e2e.rs`
-(a row deleted before its first flush stops pinning the WAL, and the entity stays denied, freed of
-its row, and unreused across reclamation); `flush_tick.rs` and `stepped_down.rs` (a deny-only node
-still rotates its WAL and a suppression survives reclamation; ingest is refused and flush publishes
-nothing while a partition is stepped down, and denies are not); `projection_patch.rs` (a flush
-costs a live session no full rebuild); and `merge.rs`, `coalesce.rs`, `fold.rs`, `artifact_fold.rs`,
-and `region_leaf.rs` (row-space artefacts stay keyed to the correct generation across a merge and a
-compaction fold). WAL recovery (truncation at the last-synced offset, the sidecar's guards, and
-fail-closed handling of corruption) is pinned in `crates/tessera-lifecycle/tests/wal.rs`.
+- a re-bound external id across a flush and a restart;
+- a row deleted before its first flush;
+- a suppression that survives log rotation;
+- ingest refused and flush withheld while a partition has stepped down;
+- row-space structures that stay keyed to the correct generation across a merge and a compaction
+  fold.
 
-The write path itself lives in `crates/tessera-lifecycle` (the WAL, the overlay, allocation, the
-commit window), `crates/tessera-engine` (flush, merge, coalesce, and the compaction passes and
-their publication), `crates/tessera-store` (the on-disc fold, merge, and reclamation routines the
-engine drives), and `crates/tessera-server`'s control plane (`crates/tessera-server/src/control.rs`),
-which exposes `/control/ingest`, `/control/changes`, `/control/flush`, and `/control/compact`.
+WAL recovery is tested separately: truncation at the confirmed offset, the sidecar's guards, and
+fail-closed handling of corruption.
+
+The write path lives in:
+
+- `tessera-lifecycle`: the WAL, the overlay, allocation, the commit window;
+- `tessera-engine`: flush, merge, coalesce, and the compaction passes and their publication;
+- `tessera-store`: the on-disc fold, merge, and reclamation routines the engine drives;
+- `tessera-server`'s control plane, which exposes the ingest, changes, flush and compact routes.
