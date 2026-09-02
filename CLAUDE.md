@@ -2,7 +2,7 @@
 
 ## What this is
 
-Tessera is a permission-masked point service: a pannable, zoomable map over a document corpus, where what a viewer may see determines every count, density, cluster and summary they are shown, not only which items they can retrieve. A viewer's visible set is computed once per session as a Roaring bitmap. Geometry is stored in Morton order, so a tile is a contiguous row-id range and a masked count is bitmap arithmetic.
+Tessera serves an interactive map over billions of documents or records from one machine, to many viewers, while the corpus changes underneath it. Each viewer sees the map computed over exactly the items they may see: every count, density, cluster, label and sample, not only which items they can retrieve. A viewer's visible set is computed once per session as a Roaring bitmap. Geometry is stored in Morton order, so a tile is a contiguous row-id range and a masked count is bitmap arithmetic.
 
 ## Where to look
 
