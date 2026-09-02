@@ -1,21 +1,26 @@
 # Tessera overview
 
-Tessera serves an interactive, pannable, zoomable map over a corpus of millions to billions of
-documents or records with item-level access controls. Serve your customers individually-generated billion-point maps from a single machine. Ingest new data live, and  with live data ingest. 
+Tessera serves interactive, pannable, zoomable maps over millions to billions of documents or
+records, with access control at the level of the individual item. Each viewer gets a map
+generated for them, from a single machine. New data is ingested live, and a deletion takes effect
+on the next request.
 
-Unlike existing large-scale map serving systems, that bake large datasets into a single, shared view. Tessera gives each viewer sees a map computed over exactly the items they are permitted to see:
-not only which points they can retrieve, but every count, density, cluster and label is only served if they have permission to see it. 
+Existing large-scale map servers bake a dataset into one shared view and serve the same tiles to
+everyone. Tessera computes each viewer's map from exactly the items they are permitted to see.
+Not only which points they can retrieve: every count, density, cluster and label is served only if
+they have permission to see what it is made of.
 
-Tessera runs as a backend database via API to integrate into existing visualisations, or use our customisable components for building quickly.
+Use it as a backend database through its API and integrate it with your own visualisation, or
+build quickly with the customisable components.
 
 ## What you can do with it
 
 - **A map over any records with a 2D layout**: geographic coordinates, or an embedding projection
-  such as T-SNE/UMAP.
+  such as t-SNE or UMAP.
 - **Several coordinate systems over one corpus**, sharing one item
   identity so a viewer can switch layout without losing their place.
-- **Composable filters** over categories, numbers, dates, keywords and full text, as well as user-defined regions (boxes, circles, ellipses, and polygons)
-- **Annotation layers**: clusters, hierarchies including DAGs, regions and hulls, each correct for the viewer and with support for access-controlled labels
+- **Composable filters** over categories, numbers, dates, keywords and full text, and over drawn regions (a box, circle, ellipse or polygon).
+- **Annotation layers**: clusters, hierarchies including DAGs, regions and hulls, each correct for the viewer, with access-controlled labels.
 - **Highlight mode**: light the matches, dull the rest.
 - **Item cards** for a selected point.
 - **Live ingest** into a running service, and deletion and suppression that take effect on the next
