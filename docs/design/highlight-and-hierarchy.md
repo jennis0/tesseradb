@@ -1,10 +1,10 @@
 # Highlight, member-of, and browsing a hierarchy — design
 
 **Date:** 2026-09-02
-**Status:** Provisional r4 — reviewed once (Appendix R), findings dispositioned. **The three rulings
-of §9 were taken 2026-09-02**, and one more is open: §9 (d), what browse does with a filter over a
-render-only column. What remains before it is normative: that ruling; the two leak-register rows of §6 (C32, C33) accepted into `architecture.md`
-Appendix C; `contracts.md` §3.2 amended with §2–§4's wire. ⊘ **Nothing here is built.** Owner
+**Status:** Normative — r5, 2026-09-02. Reviewed once (Appendix R) and every finding
+dispositioned; **all four rulings of §9 taken**. C32 and C33 are in `architecture.md` Appendix C
+(r59). `contracts.md` §3.2 is amended as each server stage of §10 lands, and the conformance
+comparator's schema with it. ⊘ **Nothing here is built.** Owner
 direction 2026-09-02, recorded because the design turns on it: **a filter has a mode — `filter`
 narrows the draw, `highlight` keeps every point and lights the matched ones — and the same
 capability serves an artifact selection and a general filter alike; the operand is named
@@ -223,10 +223,12 @@ its target shows as a name, so it is not browsed separately.
 
 **Counts under a filter.** `filters` is the viewport's own object, evaluated by the same routes to
 a row-space verdict, and each row's `matched_count` is `|membership ∩ M_auth ∩ filter|`, one
-`and_cardinality` per row against the filter's whole-view verdict — which exists for the
-entity-space routes and for `region`, and ⊘ **not for a leaf over a render-only column**, which
-today is answered only inside a request's tiles; §9 (d) rules what browse does with one.
-**Existence and
+`and_cardinality` per row against the filter's whole-view verdict. That verdict exists for the
+entity-space routes and for `region`; **for a leaf over a render-only column** (`render = true`,
+`index = false`), which the viewport answers only inside its tiles, **browse scans the whole view**
+— the row route's own predicate over the hot column, run over every row rather than the request's
+ranges (§9 (d), owner ruling). It is priced in §7: a count on a render-only attribute is the
+expensive kind, and this is where it is paid. **Existence and
 `masked_count` never move with the filter** — the same anchoring as everywhere else — and a row
 whose `matched_count` is zero is still served. Order is by `matched_count` when `filters` is
 present and by `masked_count` otherwise. This is deliberately *not* decision 0104's rule: the
@@ -337,7 +339,16 @@ viewport request a highlight costs one per-tile crossing over the rows on screen
 tens of milliseconds at a 300,000-row viewport by the crossing probe's figures, independent of
 how much the highlight matched. A `member_of` highlight skips the crossing. A browse page is
 `limit` rows at one masked `and_cardinality` each, plus one more per row under a filter, against
-memberships and a verdict the engine already holds. A search is a scan over the layer's keys and
+memberships and a verdict the engine already holds. **A browse filter over a render-only column
+is the one whole-view scan this design adds**: the row route's predicate over the hot column for
+every row of the view, once per page request. ⊘ Not measured as a whole-view pass. Bounded from
+the per-tile walk's measured 20–30 ns per row (`probes/2026-08-11-viewport-crossing/`), which
+reads a row's entity and tests a bitmap where this reads a fixed-width slot and compares: at
+rung 3's 3.6 × 10⁷ rows **under about a second** as a ceiling and likely a few hundred
+milliseconds; at 10⁹ rows **tens of seconds** as a ceiling — seconds-to-tens, once per request,
+under the compute-admission gate and cancellable like any filter. ⊘ Until the clause cache exists
+the scan repeats on every page of one walk; when it does, the whole-view verdict is what it holds
+and a walk pays the scan once. A search is a scan over the layer's keys and
 names, 30,217 strings at rung 3, bounded by the layer's artifact count and never by the corpus.
 The wash costs the client one more channel over the tile counts it already decodes.
 
@@ -350,7 +361,7 @@ and the label budget names three of 253 compact clusters at zoom 0. Both are on
 
 ## 9. Owner rulings sought
 
-Three taken 2026-09-02; one open.
+All four taken 2026-09-02.
 
 - **(a) One verb or two.** `browse` as one verb with three forms (§4) — **ruled: one verb.**
 - **(b) Search in this design or deferred.** — **Ruled: in**; the register residual is C33's.
@@ -358,7 +369,9 @@ Three taken 2026-09-02; one open.
   meta's and the client's layer lists as a layer that lists no visible elements; it is not
   presented for viewing and the client never names it in a viewport's `layers`. The server
   changes nothing for it (§5.4).
-- **(d) Browse under a filter that routes row-space — open.** A leaf over a render-only column
+- **(d) Browse under a filter that routes row-space — ruled: (ii), scan, and price it.** "Counts
+  on render-only attributes are expensive; a scan even over many points should be seconds" (owner).
+  A leaf over a render-only column
   (`render = true`, `index = false`) is evaluated only over a request's tiles today, and browse
   has none; served naively its `matched_count` would be silently zero (review finding 1, the
   failure 0104 exists to prevent). Two shapes: **(i) refuse** — a browse `filters` whose leaves
@@ -366,7 +379,7 @@ Three taken 2026-09-02; one open.
   `filter_operands`; or **(ii) scan** — a whole-view pass over the row column, priced in §7.
   Recommended: (i), because (ii) is a new whole-view route whose cost is the corpus's row count
   per request and whose only user would be a count in a side panel. `region` is unaffected, being
-  whole-view by construction.
+  whole-view by construction. §4 and §7 carry the ruling and the price.
 
 ## 10. Order of build
 
@@ -405,3 +418,5 @@ schema with the frame columns.
   smaller seven (filter-layer `MembershipRows` at open, `pin` dropped, `parents` on other forms,
   JSON encoding, `level` refused on one-level kinds, `point_rows` bound to a generation, the
   empty-operand timing residual in C33). Not taken: nothing.
+- **r5 (2026-09-02).** §9 (d) ruled — scan, priced in §7 — and the document promoted to Normative.
+  C32 and C33 carried into `architecture.md` Appendix C at its r59.
