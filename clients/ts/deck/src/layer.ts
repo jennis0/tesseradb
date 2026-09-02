@@ -1073,6 +1073,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
                     }
               },
               tesseraIds: held.draw.ids,
+              tesseraPositions: held.draw.positions,
               useLut,
               highlighting,
               highlightPass: pass,
@@ -1104,6 +1105,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
               }
             },
             tesseraIds: standIn.ids,
+            tesseraPositions: standIn.positions,
             useLut,
             highlighting,
             highlightPass: pass,

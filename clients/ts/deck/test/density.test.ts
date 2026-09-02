@@ -81,6 +81,14 @@ describe('resolvePick — a miss is not a broken pick', () => {
       worldXY: [3, 4]
     });
   });
+  it('answers the mark’s own position, not the pointer’s', () => {
+    const positions = Float32Array.from([1, 2, 30, 40]);
+    expect(resolvePick({index: 1, sourceLayer: {id: 'm', props: {tesseraIds: ids, tesseraPositions: positions}}, coordinate: [31, 41]})).toEqual({
+      kind: 'mark',
+      id: 12n,
+      worldXY: [30, 40]
+    });
+  });
   it('resolves an artifact marker on its own route', () => {
     expect(resolvePick({index: 0, sourceLayer: {id: 'a', props: {artifactIds: [99n]}}})).toEqual({kind: 'artifact', id: 99n});
   });
