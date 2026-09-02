@@ -217,7 +217,7 @@ Two defects the checker caught that reading had not: `number` is not a declarabl
 `large_string`, whose width is baked into every row and must match the declaration.
 
 `smoke.py` is **deleted** now it has done its job, per the brief; it is in commit
-`e5a1e7f` on `campaign/rung-4-openalex` if the build needs reproducing before `prepare.py` lands.
+`cef1bf5a` on `campaign/rung-4-openalex` if the build needs reproducing before `prepare.py` lands.
 
 ## 7. What this track did not do
 
