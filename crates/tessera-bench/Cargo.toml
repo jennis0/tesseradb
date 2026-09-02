@@ -41,6 +41,9 @@ tessera-server = { path = "../tessera-server" }
 # nothing there constrains this crate, which already sits above every other.
 tessera-filter = { path = "../tessera-filter" }
 tessera-filter-write = { path = "../tessera-filter-write" }
+# `suggest_walk` folds its synthetic keys and queries with the shipped fold, so the entry strings
+# it indexes are the ones a real vocabulary would produce.
+tessera-analyse = { path = "../tessera-analyse" }
 
 croaring = { workspace = true }
 # Calibration task: the load arm decodes just enough of a 200 response's tiles frame to sum the
@@ -70,6 +73,8 @@ rayon = { workspace = true }
 rustc-hash = "1"
 toml = "0.8"
 libc = "0.2"
+# `suggest_walk` writes its synthetic index and postings somewhere the run cleans up after itself.
+tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 # `blocking` for the campaign's ingest arm: a driver that posts one batch and reads its answer
 # before building the next has no use for a runtime, and the async arms beside it are unaffected.

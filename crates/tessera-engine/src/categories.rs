@@ -62,6 +62,7 @@
 //! filter naming an invisible value, and the same precedent contracts §3.2 sets for an unmatched
 //! token.
 
+use tessera_analyse::SuggestionField;
 use tessera_store::manifest::{Visibility, VocabularyKind};
 use tessera_store::vocabulary::ABSENT_CODE;
 
@@ -252,12 +253,26 @@ impl Engine {
 
         let (values, next) = match query {
             CategoryQuery::Codes(codes) => {
-                // Walked once in key order rather than probed per code: the map is keyed by key,
-                // so a per-code probe would need a reverse index built per request anyway, and the
-                // walk keeps the response in the same order the paged form returns.
-                let mut values = Vec::new();
-                for (key, code) in vocabulary.bindings() {
-                    if !codes.contains(&code) || !visible(code)? {
+                // **Probed per code, through the vocabulary's own reverse map.** It used to walk
+                // every binding testing `codes.contains`, which is a million-step walk per legend
+                // resolve at 10⁶ values — tens of milliseconds per viewport where this is
+                // microseconds (`value-suggestion.md` §9).
+                //
+                // **The response order is unchanged**: key order, as the paged form returns, taken
+                // by sorting the resolved values rather than by the walk's own order. Sorting a
+                // caller's page-sized list is not the walk it replaces.
+                let mut values: Vec<CategoryValue> = Vec::new();
+                let mut seen = rustc_hash::FxHashSet::default();
+                for &code in codes {
+                    // Duplicates in the request are tolerated (the header) and must not become
+                    // duplicates in the response, which the walk got for free and a probe does not.
+                    if !seen.insert(code) {
+                        continue;
+                    }
+                    let Some(key) = vocabulary.key_of(code) else {
+                        continue;
+                    };
+                    if !visible(code)? {
                         continue;
                     }
                     values.push(CategoryValue {
@@ -266,6 +281,7 @@ impl Engine {
                         title: vocabulary.title_of(key).map(str::to_string),
                     });
                 }
+                values.sort_by(|a, b| a.key.cmp(&b.key));
                 (values, None)
             }
             CategoryQuery::Page { after, limit } => {
@@ -276,8 +292,15 @@ impl Engine {
                 // invisible ones.
                 let mut page: Vec<CategoryValue> = Vec::new();
                 let mut next = None;
-                for (key, code) in vocabulary.bindings() {
-                    if after.is_some_and(|a| key <= a) || !visible(code)? {
+                // **Resumed by a range, not by walking from the start and discarding.** The cursor
+                // is a key and the map is keyed by key, so the second page of a 10⁶-value
+                // vocabulary need not step over the first (`value-suggestion.md` §9).
+                let bindings: Box<dyn Iterator<Item = (&str, u32)>> = match after {
+                    Some(after) => Box::new(vocabulary.bindings_after(after)),
+                    None => Box::new(vocabulary.bindings()),
+                };
+                for (key, code) in bindings {
+                    if !visible(code)? {
                         continue;
                     }
                     // One past the page, read rather than counted: "is there another page" is
@@ -308,3 +331,237 @@ impl Engine {
         }))
     }
 }
+
+/// Where a suggestion matched, in **characters of the served string** — so a client highlights
+/// without re-implementing the fold (`value-suggestion.md` §5.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MatchSpan {
+    /// Which served string matched: `key` or `title`. A word-start match reports the field the word
+    /// came from and the start of that word.
+    pub field: SuggestionField,
+    pub start: u32,
+    pub len: u32,
+}
+
+/// One suggested value.
+#[derive(Debug, Clone)]
+pub struct Suggestion {
+    pub code: u32,
+    pub key: String,
+    pub title: Option<String>,
+    pub span: MatchSpan,
+    /// The number of items carrying this value that this viewer may see — present iff the request
+    /// asked for counts. **Never `0` as a stand-in for absent**: a served `0` is a real answer that
+    /// this surface cannot produce, since a value with no visible member is not suggested at all.
+    pub count: Option<u64>,
+}
+
+/// One suggestion page. Uncursored: a typeahead never pages, the user types another character.
+#[derive(Debug, Clone)]
+pub struct SuggestPage {
+    pub column: String,
+    pub values: Vec<Suggestion>,
+    /// `true` iff the walk stopped before its range was exhausted — the page filled, or the walk
+    /// budget was spent.
+    ///
+    /// **On a spent budget this is a thresholded, pre-mask count of the values under the prefix**,
+    /// hidden ones included: it says at least `walk_budget` values sit there. That is the quantity
+    /// `architecture.md` Appendix C registers as **C31**, at one bit of resolution, and it is
+    /// registered as on the wire and not only in time. The alternative — `false` on a spent budget,
+    /// so the flag counted visible values alone — under-reports, and a broad prefix would hide
+    /// visible values behind a flag saying there were none.
+    pub more: bool,
+}
+
+impl Engine {
+    /// `GET /v1/categories/{column}/suggest` (contracts §3.2): the values whose key, title or word
+    /// start begins with what the caller typed, and that this viewer may see.
+    ///
+    /// # Two doors, one gate
+    ///
+    /// **Everything [`Engine::categories`] decides about who may be told a value name is decided
+    /// here, by the same code.** The same [`vocabulary_of`] resolution, the same composed candidate,
+    /// the same `category_membership`, the same refusal. A gate applied to one listing surface and
+    /// not to the other is the existence oracle reached by the second door, so the two differ in
+    /// shape — order, paging, titles, spans — and in nothing else.
+    ///
+    /// `Ok(None)` means the bundle declares no category column of this name, returned identically
+    /// for a name that is nothing at all and for a plain scalar, exactly as the enumeration does.
+    ///
+    /// # The walk
+    ///
+    /// Fold `q`; two binary searches give the entry range; walk it merged with the vocabulary's
+    /// side map in folded order, skipping what a title amendment retracted and what has already
+    /// been emitted, testing `carries` per value against the memory-mapped posting as a **boolean
+    /// that short-circuits**. Stop at `limit` values or when `walk_budget` values have been
+    /// examined.
+    ///
+    /// For a `public` column there is no predicate and every value in the range is emitted in
+    /// order — which is the whole of the difference, as it is on the enumeration.
+    ///
+    /// **The walk's cost is a function of how many values sit under the prefix, hidden ones
+    /// included.** That is the timing channel the owner accepted on 2026-09-02 and Appendix C
+    /// registers as **C31**; §8 of the design carries what bounds it. It is not a defect of this
+    /// implementation to fix, and closing it is §6.3's priced lever rather than a change here.
+    ///
+    /// # Errors
+    ///
+    /// A `derived` column whose member sets cannot be read refuses, as the enumeration does. **A
+    /// read that fails part-way through the walk refuses the whole column too**, rather than
+    /// serving the values found so far: refusing at the value the read failed at would make the
+    /// refusal a function of the prefix the caller typed, which is an oracle over value names in a
+    /// fault state.
+    pub fn suggest(
+        &self,
+        session: &Session,
+        column: &str,
+        q: &str,
+        limit: usize,
+        counts: bool,
+        walk_budget: u64,
+    ) -> Result<Option<SuggestPage>> {
+        let generation = self.generation.load_full();
+        let Some(vocabulary_name) = vocabulary_of(&generation.bundle.manifest, column) else {
+            return Ok(None);
+        };
+        let Some(vocabulary) = generation.vocabularies.get(&vocabulary_name) else {
+            return Ok(None);
+        };
+        let Some(live) = generation.suggest.get(&vocabulary_name) else {
+            return Err(EngineError::SuggestionUnavailable {
+                column: column.to_string(),
+                detail: format!("vocabulary '{vocabulary_name}' has no suggestion index"),
+            });
+        };
+
+        // **The gate, before a single entry is read**, and it is `Engine::categories`' gate
+        // verbatim. A `public` set has no predicate at all; a `derived` one is derived from inside
+        // `M_auth` per request, against the composed candidate rather than against the request's
+        // filters (I3, I12).
+        //
+        // A count is the viewer's own `and_cardinality` and needs the mask whatever the visibility
+        // says, so `counts` composes the candidate for a `public` column too. That only ever
+        // narrows a number; it never widens the set of values served, which the visibility alone
+        // still decides.
+        let derived = vocabulary.visibility() == Visibility::Derived;
+        let candidate = if derived || counts {
+            let fragment = self.fragment_for(session, &generation)?;
+            Some(crate::filter::candidate(
+                &fragment,
+                &session.satisfied,
+                &generation.overlay,
+                &generation.buffer,
+            ))
+        } else {
+            None
+        };
+        let membership = match &candidate {
+            None => None,
+            Some(candidate) => Some(
+                generation
+                    .filter_columns
+                    .category_membership(column, candidate)
+                    .map_err(|e| {
+                        // A `public` column reaches this only because a count was asked for, and a
+                        // count it cannot compute is refused rather than omitted: a page whose
+                        // `count` fields were silently absent would read as "asked and answered".
+                        if derived {
+                            EngineError::VocabularyVisibilityUnavailable {
+                                column: column.to_string(),
+                                detail: e.to_string(),
+                            }
+                        } else {
+                            EngineError::SuggestionUnavailable {
+                                column: column.to_string(),
+                                detail: format!("counts were asked for and {e}"),
+                            }
+                        }
+                    })?,
+            ),
+        };
+        let visible = |code: u32| -> Result<bool> {
+            match (&membership, derived) {
+                // Either no mask was composed at all, or one was composed only to count with —
+                // both are `public`, and a `public` value set is served as authored.
+                (_, false) => Ok(true),
+                // **Unreachable, and fail-closed rather than trusted to stay so.** A `derived`
+                // column composes a candidate above and builds a membership from it or refuses, so
+                // this pair cannot arise today. It is an error and not `Ok(true)` because the two
+                // wrong answers are not symmetric: `true` here publishes every value name of a
+                // `derived` vocabulary to a principal whose predicate was never evaluated, which is
+                // the C11 disclosure itself and would be invisible — the page would look like a
+                // wide principal's. A future edit that reorders the composition above turns that
+                // into a refusal instead.
+                (None, true) => Err(EngineError::VocabularyVisibilityUnavailable {
+                    column: column.to_string(),
+                    detail: "a derived column reached the walk with no composed membership"
+                        .to_string(),
+                }),
+                (Some(membership), true) => membership.carries(code).map_err(|e| {
+                    EngineError::VocabularyVisibilityUnavailable {
+                        column: column.to_string(),
+                        detail: e.to_string(),
+                    }
+                }),
+            }
+        };
+
+        let fold = tessera_analyse::SuggestionFold::new();
+        let unreadable = |e: std::io::Error| EngineError::SuggestionUnavailable {
+            column: column.to_string(),
+            detail: e.to_string(),
+        };
+        // **The walk itself is `crate::suggest`'s**, and everything above this line is the gate.
+        // The split is where it is so that the bench measures the shipped walk rather than a
+        // transcription of it, and so that this function reads as what it is: the same gate
+        // `Engine::categories` applies, over a different traversal.
+        let (found, more) = crate::suggest::walk(
+            live,
+            &fold,
+            q,
+            crate::suggest::WalkBudget {
+                limit,
+                walk_budget,
+                counts,
+            },
+            &|code| visible(code),
+            &|code| match &membership {
+                Some(membership) => membership.count(code).map_err(|e| {
+                    EngineError::SuggestionUnavailable {
+                        column: column.to_string(),
+                        detail: e.to_string(),
+                    }
+                }),
+                // Unreachable: `counts` composes a candidate for both visibilities, so a count is
+                // only ever asked for where a membership exists.
+                None => Ok(0),
+            },
+            &unreadable,
+        )?;
+        let values: Vec<Suggestion> = found
+            .into_iter()
+            .map(|found| Suggestion {
+                code: found.code,
+                key: found.key,
+                title: found.title,
+                span: MatchSpan {
+                    field: found.field,
+                    start: found.start,
+                    len: found.len,
+                },
+                count: found.count,
+            })
+            .collect();
+
+        debug_assert!(
+            !values.iter().any(|v| v.code == ABSENT_CODE),
+            "code 0 is the absent sentinel and is never bound to a key (§3.6)"
+        );
+        Ok(Some(SuggestPage {
+            column: column.to_string(),
+            values,
+            more,
+        }))
+    }
+}
+

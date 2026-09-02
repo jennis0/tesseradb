@@ -42,6 +42,8 @@ arc-swap = { workspace = true }
 # `deny tessera-engine tokio`) — rayon's work-stealing pool is a plain-thread mechanism.
 rayon = { workspace = true }
 rustc-hash = "1"
+# The suggestion index's five side arrays, mapped rather than heap-resident (value-suggestion.md §6.1).
+memmap2 = { workspace = true }
 arrow = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
