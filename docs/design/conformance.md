@@ -2,7 +2,7 @@
 
 **Status:** Draft r21 — **the highlight, the `member_of` leaf and the browse verb are driven**
 (r21, 2026-09-02; `highlight-and-hierarchy.md` §2–§4). Seventeen cases in three modules; the
-checked marker moves to **756**. No row of §4.6 is added and none moves position — the evidence
+checked marker moves to **757** (collected with the suite's venv after the two campaigns merged). No row of §4.6 is added and none moves position — the evidence
 lands in the existing I2, I3 and I12 cells, all three surfaces being the filter contract's own
 machinery asked a second question. §0 carries what each module holds.  **r20 — the suggestion verb gets a differential** (r20, 2026-09-02;
 `value-suggestion.md` §3, §4, §7): `conformance/tests/test_suggest_differential.py`, against a
@@ -78,7 +78,7 @@ collects, by a step in CI's `conformance` job; a hand-edit that disagrees with t
 there. Edit it when the suite's size changes and the step tells you the number, not to make a
 sentence read better — and read it as a size, never as a coverage claim, which is §4.6's business.
 
-    conformance-cases = 756
+    conformance-cases = 757
 
 
 **r20 (2026-09-02) — the highlight, the `member_of` leaf and the browse verb are driven**
