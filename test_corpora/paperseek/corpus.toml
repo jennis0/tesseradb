@@ -1,0 +1,186 @@
+# PaperSeek + OpenAlex — 102,117,343 works, the ladder's largest rung.
+#
+# Produced by `prepare.py`, which writes an edited copy of this file next to the parquets;
+# `[sources]` is relative to the declaring document (configuration.md §3), so the copy beside the
+# data is what `tessera build` reads and this one is what gets reviewed.
+#
+# **One marker is filled by the run rather than committed conditional.** `# <topics-layer>` becomes
+# the `topics/openalex` block that `openalex.py` owns; where it is not filled the copy says so in
+# place, so the declaration beside the data always states what it does and does not carry.
+#
+# **Every path is named once.** A `source` anywhere below names one of these keys rather than
+# repeating a path.
+
+[sources]
+points          = "points.parquet"
+licence         = "vocab-licence.parquet"
+type            = "vocab-type.parquet"
+kmeans          = "clusters-kmeans.parquet"
+kmeans_members  = "clusters-kmeans-members.parquet"
+topics          = "topics-openalex.parquet"
+topics_members  = "topics-openalex-members.parquet"
+
+[defaults]
+source          = "points"
+entity_id_field = "entity_id"
+
+# ---------------------------------------------------------------------------------------------
+# **One view.** Stella V5 embeds a title and an abstract as one general text encoding, so the map
+# is of what a work is *about* as much as anything on the ladder — hence *Scholarly map*. ⊘ No
+# claim about layout fidelity is made or measured: the rung is a demonstrator and a speed
+# benchmark (owner ruling 2026-09-01, speed over accuracy), and `README.md` says what was run.
+#
+# `projection = "none"` is the default and is written for clarity: an embedding layout is not a map
+# and there is no transform between these coordinates and any ground. `extent = "auto"` squares a
+# box around the coordinates the run produced; the build's frame report is the thing to read before
+# believing the map.
+#
+# **`point_visibility` reads `licence`, and this is the ladder's first compartment that is a real
+# property of the row.** GeoNames and Overture compartment on a country of convenience and MedCPT
+# on the branch letters of an indexing vocabulary; a work's licence is a rights fact about the work
+# itself, and the population it cuts is the one it actually cuts.
+#
+# **The `default` fires, and it fires for most of the corpus.** A work with no licence carries no
+# access term and takes `public`; a work with one carries exactly that key. So the principal ladder
+# runs the other way from rung 3's — a principal holding no term at all already sees the unlicensed
+# majority, and each licence key adds a compartment to it. That is the honest shape of the source
+# and it is not corrected: an `unlicensed` sentinel term would make the majority a compartment
+# nobody can see without being granted it, which is a policy this corpus does not carry.
+# ---------------------------------------------------------------------------------------------
+
+[[view]]
+name             = "knn"
+title            = "Scholarly map"
+projection       = "none"
+extent           = "auto"
+source           = "points"
+visibility       = "public"
+point_visibility = { field = "licence", default = "public" }
+
+# The licence keys are Creative Commons' and OpenAlex's own published names, so the value set
+# discloses nothing about this corpus's contents — the same reasoning that makes rung 3's MeSH
+# branch letters `public`. Closed: a licence neither set names is a refusal rather than a quietly
+# minted compartment, which is the one thing an access vocabulary must never do.
+# <licence-count>
+[[vocabulary]]
+name       = "licence"
+title      = "Licence"
+width      = "u8"
+value_set  = "closed"
+visibility = "public"
+source     = "licence"
+
+# Work type — `article`, `book-chapter`, `dataset` and a dozen more. `open`: OpenAlex adds types,
+# and a type is not a compartment, so a key this build did not see is a value to mint rather than a
+# refusal to serve. The file is still written, because a closed roster is what makes the codes
+# stable across a rebuild.
+[[vocabulary]]
+name       = "type"
+title      = "Work type"
+width      = "u8"
+value_set  = "open"
+visibility = "public"
+source     = "type"
+
+# ---------------------------------------------------------------------------------------------
+# Attributes. Two of them are the rung's reason for existing: `title` and `abstract` are 128 GB of
+# prose uncompressed across 10^8 works, indexed as text, which is what puts the bundle past this
+# box's memory. Nothing here is trimmed to make it fit (owner ruling, 2026-09-02).
+# ---------------------------------------------------------------------------------------------
+
+# `i32` rather than `u16`: OpenAlex writes a null year and, rarely, one outside a plausible range,
+# and a signed 32-bit column carries both without the rung deciding what a year may be. Indexed as
+# well as rendered — a map of the scholarly record is asked for a date range before anything else,
+# and a `render` column answers no filter.
+[[attribute]]
+name   = "publication_year"
+title  = "Published"
+type   = "i32"
+render = true
+index  = true
+
+[[attribute]]
+name       = "type"
+title      = "Work type"
+type       = "category"
+vocabulary = "type"
+render     = true
+
+# Open access, as OpenAlex records it. Null where the work was not matched, which is not the same
+# as `false` and is not written as one.
+[[attribute]]
+name   = "is_oa"
+title  = "Open access"
+type   = "bool"
+render = true
+
+# The `W…` part of the work's OpenAlex id. `render` on a keyword is refused — the hot column is
+# served, and an ordinal is an index internal that never crosses the trust boundary (I10) — so the
+# identifier is indexed, which puts the string in entity space and costs the hot column nothing.
+[[attribute]]
+name  = "openalex_id"
+title = "OpenAlex id"
+type  = "keyword"
+index = true
+
+# Prose lives in the record blob and reaches a client at drill-down: `render` on a text column is
+# refused, the hot column being a fixed-width slot per row. `index` builds the token index behind
+# `match` and `phrase`.
+[[attribute]]
+name  = "title"
+type  = "text"
+index = true
+
+# **On, by owner ruling 2026-09-02.** 102,117,343 abstracts are 118.9 GB of characters
+# uncompressed. Rung 3 left this open on a memory objection that
+# `probes/2026-09-02-text-peak-split/` answered — the columns are mapped, the text index spills
+# under a budget and cascades, and the record blob streams — so what the abstracts cost here is
+# bundle size and wall time rather than heap. That cost is the measurement this rung exists to
+# take, and trimming the column to make the bundle fit would delete the finding.
+[[attribute]]
+name  = "abstract"
+type  = "text"
+index = true
+
+# ---------------------------------------------------------------------------------------------
+# **The layer that certainly draws.** k-means over the 2D layout is compact in it by construction,
+# which is the test a layer has to pass to earn its place (the ruling that withdrew Overture's and
+# arXiv's taxonomies). The topic tree below is the layer the join exists for; this one is what
+# guarantees the view has something on it.
+#
+# **A cluster carries its own title** as ranked supplied content — the c-TF-IDF description first,
+# a generic fallback second — rather than a label artifact on a layer of its own that a client had
+# to join by attachment. A client names an artifact from its own first content.
+#
+# Both disclosure controls are stated, neither having a default: `visibility` is the label a viewer
+# must hold to know the layer exists, and `require_member_visibility` is how much of a cluster a
+# viewer must already see before that cluster is served to them. The content carries a third at its
+# own grain, and it is a **provenance declaration**: the text is a synthesis of the titles it was
+# drawn from, so `all`.
+# ---------------------------------------------------------------------------------------------
+
+[[layer]]
+name       = "clusters/kmeans"
+title      = "k-means clusters"
+source     = "kmeans"
+views      = ["knn"]
+membership = "enumerated"
+hierarchy  = { kind = "flat", prune_children = false }
+
+visibility          = "public"
+artifact_visibility = { default = "inherited" }
+# The absolute form: a fixed floor, whatever the cluster's size.
+require_member_visibility = { count = 50 }
+
+  [layer.members]
+  source = "kmeans_members"
+
+  [layer.content]
+  computed = ["centroid", "box", "hull"]
+
+    [[layer.content.supplied]]
+    name                      = "topic"
+    type                      = "text"
+    require_member_visibility = "all"
+
+# <topics-layer>
