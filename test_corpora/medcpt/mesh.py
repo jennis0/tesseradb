@@ -24,11 +24,14 @@ row — which a naive walk over ten descriptors' shared ancestors produces at on
 declared count. Everything below deduplicates per row, by sorting, and the sort is also what puts a
 row's ids in ascending order.
 
-**5.87% of descriptor mentions do not resolve** against the 2025 vintage and the miss is not random:
-89 headings carry all of it, weighted towards the ancestry and ethnicity terms the NLM revised in
-2022–23. They are **dropped and counted** (owner ruling, `ingest-campaign.md` §4.4); `resolve`
-returns the count and the worst offenders by name so a caller can state the slice beside its
-figures rather than discover it later.
+**Descriptor mentions that do not resolve against the 2025 vintage are dropped, and the miss is not
+random** — it is weighted towards the ancestry and ethnicity terms the NLM revised in 2022–23.
+Two figures, and they are not the same measurement: **5.87% of mentions over 89 headings** on
+chunk 18 alone (the acquisition README's number, which is where the shape of the miss was first
+seen), and **6.3% over 2,875 headings** over the whole corpus, which runs back to 1975 and so meets
+far more retired vocabulary. Quote the second beside a whole-corpus figure. They are **dropped and
+counted** (owner ruling, `ingest-campaign.md` §4.4); `resolve` returns the count and the worst
+offenders by name so a caller can state the slice beside its figures rather than discover it later.
 
 **Everything here is vectorised.** `resolve` and `closure` are called once per staged chunk of about
 a million rows, 38 times, so neither may build a Python object per article: the parse is Arrow
