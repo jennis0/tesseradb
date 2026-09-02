@@ -74,9 +74,8 @@ it:
    byte-identical copy ingested past a suppression would defeat it.
 8. If the buffer of rows awaiting a flush already holds its configured maximum, the request is
    refused with a retry interval.
-9. Each row's coordinates are checked against the view's fixed bounds before anything else
-   happens. Nothing is acknowledged, nothing is written to the WAL, and no entity id is allocated
-   for a row outside them.
+9. Each row's coordinates are checked against the view's fixed bounds. A row outside them refuses
+   the request before anything is acknowledged, written to the WAL, or allocated an entity id.
 
 ### The commit window
 
@@ -154,7 +153,7 @@ A flush only ever appends rows and never rewrites an existing one, so a session'
 of the map stays correct across a flush. What changes is how quickly a session picks up the new
 rows.
 
-| Rung | Served from | When | Cost to the session |
+| Case | Served from | When | Cost to the session |
 |---|---|---|---|
 | 1 | The live entry | The steady state | Nothing |
 | 2 | The entry built one flush ago | A refresh has not finished yet | Nothing. Still correct, because a flush only adds rows |
@@ -301,7 +300,7 @@ called a compaction fold, and it does three things nothing else in the write pat
 - it is the only way a deletion's overlay record is ever removed (Rule F, above);
 - it is the only way disc space a merge or a coalesce has orphaned is reclaimed;
 - it is the only way a partition returns to one segment, one base posting tier, one external-id
-  run and one locator, the state flush and merge only ever grow away from.
+  run and one locator. Flush and merge only ever add to those counts.
 
 A fold takes a snapshot at the start of its run. The snapshot names which rows and postings to
 remove, and which deletions to retire once they are gone. Between that snapshot and the fold's
