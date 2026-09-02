@@ -108,14 +108,28 @@ required, so the shortcut can change how quickly an answer arrives and never wha
 
 ## A client never sees an entity id
 
-Every item has a permanent identity that all access data, cluster membership and labels are
-expressed against. That identity MUST NOT appear in any response, log or on-wire structure a client
-can read. What a client receives instead is a keyed permutation of the identity, computed by an eight-round
-Feistel construction over a per-deployment key. Two facts about
-the data layout hold regardless of how strong that construction is. No structure on the request path
-stores the underlying identity at all, so nothing on that path could hand one out even by mistake;
-and once an item's identity is assigned, it is never reused, so a deleted item's slot cannot later
-grant a new item the access the old one held.
+Inside the server every item is addressed by an entity id: a dense integer assigned when the item
+is ingested, and the key under which its access terms, its cluster membership and its labels are
+stored. The entity id is an implementation detail of the index, not a property of the data. It is
+assigned in order of the item's access terms, so that items with the same terms sit in one run of
+ids, and it has no meaning outside the deployment that assigned it. An item's identity, as far as
+anyone outside the server is concerned, is the external id the operator supplied and the
+`tessera_id` the client is given.
+
+The entity id MUST NOT appear in any response, log or on-wire structure a client can read, for two
+reasons. The number itself carries information: because ids are dense and ordered by access
+terms, a viewer holding a few of them could read off how many items exist, how they are grouped by
+access, and where the items they cannot see sit between the ones they can. And the id is the key to
+every internal structure, so a viewer holding one could ask about an item's existence and
+visibility across principals and sessions in ways the register below does not accept.
+
+What a client receives instead is a keyed permutation of the entity id, computed by an eight-round
+Feistel construction over a per-deployment key, so that two `tessera_id`s reveal nothing about
+whether their items are adjacent, and a client cannot enumerate them. Two facts about the layout
+hold regardless of how strong that construction is. No structure on the request path stores the
+entity id at all, so nothing on that path could hand one out even by mistake; and once an entity id
+is assigned it is never reused, so a deleted item's slot cannot later grant a new item the access
+the old one held.
 
 ## An incomplete answer is refused
 
