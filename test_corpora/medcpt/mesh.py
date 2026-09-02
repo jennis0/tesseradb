@@ -584,7 +584,13 @@ require_member_visibility = { count = 50 }
   source = "mesh_members"
 
   [layer.content]
-  computed = ["centroid", "box", "hull"]
+  # **No computed content: this is a filter layer** (owner ruling, 2026-09-02). A descriptor's
+  # members are spread across the whole layout — 98% of these artifacts came back `everywhere` in
+  # the build's report — so a centroid places a label on nothing, a box is the map and a hull is
+  # the map's outline. What a descriptor is good for is naming a set of articles: browsed as a
+  # hierarchy and applied as a filter or a highlight, never drawn as a shape. The clustering layer
+  # keeps its shapes because its artifacts are compact.
+  computed = []
 
     [[layer.content.supplied]]
     name                      = "name"
