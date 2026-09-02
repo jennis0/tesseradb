@@ -329,6 +329,7 @@ fn main() {
                         &|code| postings.intersects(AttrLocalId::new(code), &cand),
                         &|_| Ok(0u64),
                         &|e: io::Error| e,
+                        None,
                     )
                     .expect("the walk");
                     samples.push(started.elapsed().as_secs_f64() * 1e3);
@@ -424,6 +425,7 @@ fn main() {
                     &|code| postings.intersects(AttrLocalId::new(code), &cand),
                     &|code| postings.intersection_cardinality(AttrLocalId::new(code), &cand),
                     &|e: io::Error| e,
+                    None,
                 )
                 .expect("the walk");
                 samples.push(started.elapsed().as_secs_f64() * 1e3);
@@ -518,6 +520,7 @@ fn decomposition(
                 },
                 &|_| Ok(0u64),
                 &|e: io::Error| e,
+                None,
             )
             .expect("the walk");
             walks += 1;
@@ -554,6 +557,7 @@ fn decomposition(
                 },
                 &|_| Ok(0u64),
                 &|e: io::Error| e,
+                None,
             )
             .expect("the walk");
             null_ms.push(started.elapsed().as_secs_f64() * 1e3);
@@ -572,6 +576,7 @@ fn decomposition(
                 &|code| postings.intersects(AttrLocalId::new(code), &cand),
                 &|_| Ok(0u64),
                 &|e: io::Error| e,
+                None,
             )
             .expect("the walk");
             real_ms.push(started.elapsed().as_secs_f64() * 1e3);

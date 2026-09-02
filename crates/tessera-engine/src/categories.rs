@@ -332,6 +332,63 @@ impl Engine {
     }
 }
 
+impl Engine {
+    /// **Dispatch one session's sweep onto the pool** (§6.3), and answer this request by the probe
+    /// route meanwhile.
+    ///
+    /// **Nothing waits for it**, which is decision 0093's rule kept rather than widened: the set is
+    /// not materialised in advance, it is started by the first suggest on a `(session, column)`
+    /// pair, and every keystroke until it lands is answered exactly as it would have been without
+    /// this route at all. A sweep that finds no value column, or a column that is not a category,
+    /// releases its claim and produces nothing — the pair simply stays on the probe route.
+    ///
+    /// The generation is captured, not re-loaded: the key names the `segments_version` the sweep
+    /// runs against, so a publication landing mid-sweep leaves an entry nothing will ask for, which
+    /// the next admitted sweep drops.
+    fn dispatch_suggest_sweep(
+        &self,
+        key: crate::suggest_set::SuggestSetKey,
+        generation: &std::sync::Arc<crate::Generation>,
+        vocabulary_name: &str,
+        column: &str,
+        candidate: &croaring::Bitmap,
+    ) {
+        if !self.suggest_sets.claim(&key) {
+            return;
+        }
+        let Some(index) = generation
+            .suggest
+            .get(vocabulary_name)
+            .map(|live| std::sync::Arc::clone(live.base()))
+        else {
+            self.suggest_sets.abandon(&key);
+            return;
+        };
+        let sets = std::sync::Arc::clone(&self.suggest_sets);
+        let generation = std::sync::Arc::clone(generation);
+        let candidate = candidate.clone();
+        let column = column.to_string();
+        self.pool.spawn(move || {
+            let swept = generation.filter_columns.value_layers(&column).and_then(|layers| {
+                crate::suggest_set::sweep(
+                    layers.base().into_iter().chain(layers.extents()),
+                    &candidate,
+                    &index,
+                )
+            });
+            match swept {
+                Some(set) => sets.finish(key, std::sync::Arc::new(set)),
+                None => sets.abandon(&key),
+            }
+        });
+    }
+
+    /// The per-session suggestion sets' operator gauges.
+    pub fn suggest_set_stats(&self) -> crate::suggest_set::SuggestSetStats {
+        self.suggest_sets.stats()
+    }
+}
+
 /// Where a suggestion matched, in **characters of the served string** — so a client highlights
 /// without re-implementing the fold (`value-suggestion.md` §5.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -411,6 +468,7 @@ impl Engine {
     /// serving the values found so far: refusing at the value the read failed at would make the
     /// refusal a function of the prefix the caller typed, which is an oracle over value names in a
     /// fault state.
+    #[allow(clippy::too_many_arguments)]
     pub fn suggest(
         &self,
         session: &Session,
@@ -419,6 +477,7 @@ impl Engine {
         limit: usize,
         counts: bool,
         walk_budget: u64,
+        max_suggest_set_entities: u64,
     ) -> Result<Option<SuggestPage>> {
         let generation = self.generation.load_full();
         let Some(vocabulary_name) = vocabulary_of(&generation.bundle.manifest, column) else {
@@ -479,6 +538,46 @@ impl Engine {
                     })?,
             ),
         };
+        // **The route** (§6.3, decision 0124). A `public` column has no predicate to answer, so it
+        // never wants a set; a `derived` one takes the set where this viewer's own composed
+        // cardinality is at or under the deployment's ceiling and the column has an entity-space
+        // value column to sweep. Every other request keeps the probe route, and the first keystroke
+        // on a pair keeps it too — the sweep is dispatched here and nothing waits for it.
+        let set = if derived {
+            let key = crate::suggest_set::SuggestSetKey {
+                token_id: session.token_id,
+                column: column.to_string(),
+                segments_version: generation.segments_version,
+                overlay_version: generation.overlay_version,
+            };
+            match self.suggest_sets.get(&key) {
+                Some(set) => Some(set),
+                None => {
+                    // `candidate` is `Some` on this arm — `derived` composes it above or refuses.
+                    let eligible = candidate.as_ref().is_some_and(|candidate| {
+                        candidate.cardinality() <= max_suggest_set_entities
+                    }) && generation
+                        .filter_columns
+                        .value_layers(column)
+                        .is_some_and(|layers| layers.base().is_some() || layers.extents().next().is_some());
+                    if eligible {
+                        self.dispatch_suggest_sweep(
+                            key,
+                            &generation,
+                            &vocabulary_name,
+                            column,
+                            candidate.as_ref().expect("a derived column composed one"),
+                        );
+                    } else {
+                        self.suggest_sets.note_declined();
+                    }
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let visible = |code: u32| -> Result<bool> {
             match (&membership, derived) {
                 // Either no mask was composed at all, or one was composed only to count with —
@@ -537,6 +636,7 @@ impl Engine {
                 None => Ok(0),
             },
             &unreadable,
+            set.as_deref(),
         )?;
         let values: Vec<Suggestion> = found
             .into_iter()

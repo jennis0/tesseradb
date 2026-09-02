@@ -313,6 +313,7 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         max_category_values: config.max_category_values,
         max_suggestions: config.max_suggestions,
         max_suggestion_walk: config.max_suggestion_walk,
+        max_suggest_set_entities: config.max_suggest_set_entities,
         suggest_admission: state::SuggestAdmission::new(),
         max_shape_vertices: config.max_shape_vertices,
         max_region_vertices: config.max_region_vertices,

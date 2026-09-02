@@ -418,6 +418,9 @@ async fn a_spent_walk_budget_reports_more_even_on_a_short_page() {
         // for `d01`, the first this principal can see.
         max_suggestions: 20,
         max_suggestion_walk: 2,
+        // The probe route, always: this case is about the walk budget, which the set route does
+        // not spend (§6.3).
+        max_suggest_set_entities: 1,
         max_browse_rows: 200,
         suggest_admission: tessera_server::state::SuggestAdmission::new(),
         max_shape_vertices: tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
@@ -529,6 +532,10 @@ async fn meta_publishes_the_two_suggest_ceilings() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["selection"]["max_suggestions"], 4, "{body}");
     assert_eq!(body["selection"]["max_suggestion_walk"], 1_000, "{body}");
+    // The set route's ceiling, published on the same argument (decision 0124). `spawn_server`
+    // pins the probe route, so the test default is 0 and the assertion is that the key is
+    // published rather than that it carries the shipped default.
+    assert_eq!(body["selection"]["max_suggest_set_entities"], 1, "{body}");
 }
 
 /// **At most one suggest in flight per session.** A second request for a session already holding

@@ -14,11 +14,11 @@
 //! correct: this file answers "which values could complete what was typed", and the answer includes
 //! every value the asking principal must never hear of.
 //!
-//! # The five structures, and why not one
+//! # The six structures, and why not one
 //!
 //! [`tessera_filter::SortedDict`] carries no payload and refuses duplicate keys, and two values can
 //! fold to one entry string — `cs.LG` and `CS.lg`, or two titles differing only in case — so the
-//! index is five mapped files rather than one:
+//! index is six mapped files rather than one:
 //!
 //! | File | What it holds |
 //! |---|---|
@@ -26,6 +26,7 @@
 //! | `runs.bin` | one `u32` per entry string plus a sentinel, indexing `payloads.bin`; entry `e`'s run is `runs[e]..runs[e + 1]` |
 //! | `payloads.bin` | one 12-byte record per (entry string, value) pair, ordered within a run by (kind, key) |
 //! | `codes.bin` | one `u32` per dense position: that value's vocabulary code |
+//! | `by_code.bin` | the same pairs the other way round, sorted by code — the direction the per-session set's build reads (§6.3) |
 //! | `strings.bin` + `offsets.bin` | the served keys and titles in position order |
 //!
 //! **The dense position, not the code, is the payload's identifier.** A code is drawn at random
@@ -80,6 +81,12 @@ pub const SUGGEST_DIR: &str = "suggest";
 
 /// One payload record: 12 bytes, `u32`-aligned so that the three fields are read without shifts.
 const PAYLOAD_LEN: usize = 12;
+
+/// One `by_code.bin` record: `(code, dense position)`, both `u32`, ascending by code.
+///
+/// **Interleaved rather than two parallel arrays**, because the search reads the code and then
+/// wants the position beside it: two arrays would make every hit a second random touch.
+const BY_CODE_LEN: usize = 8;
 
 // ---------------------------------------------------------------------------------------------
 // Mapped bytes
@@ -190,7 +197,7 @@ fn malformed(detail: impl Into<String>) -> io::Error {
 // The index
 // ---------------------------------------------------------------------------------------------
 
-/// One vocabulary's suggestion index: the five mapped structures and the directory holding them.
+/// One vocabulary's suggestion index: the six mapped structures and the directory holding them.
 #[derive(Debug)]
 pub struct SuggestIndex {
     dir: PathBuf,
@@ -198,6 +205,7 @@ pub struct SuggestIndex {
     runs: MappedBytes,
     payloads: MappedBytes,
     codes: MappedBytes,
+    by_code: MappedBytes,
     strings: MappedBytes,
     offsets: MappedBytes,
     /// The number of values — the length of `codes`, and half of `offsets` less its sentinel.
@@ -309,6 +317,22 @@ impl SuggestIndex {
         }
         offsets.extend_from_slice(&(strings.len() as u32).to_le_bytes());
 
+        // **The reverse of `codes.bin`** — see [`Self::positions_of_ascending`] for what reads it
+        // and why the direction is needed at all. Sorted by code, so the lookup is a binary search
+        // and a run of ascending codes is a forward walk.
+        let mut by_code: Vec<(u32, u32)> = values
+            .iter()
+            .enumerate()
+            .map(|(position, value)| (value.code, position as u32))
+            .collect();
+        pool.install(|| by_code.par_sort_unstable());
+        let mut by_code_bytes: Vec<u8> = Vec::with_capacity(by_code.len() * BY_CODE_LEN);
+        for (code, position) in &by_code {
+            by_code_bytes.extend_from_slice(&code.to_le_bytes());
+            by_code_bytes.extend_from_slice(&position.to_le_bytes());
+        }
+
+        std::fs::write(dir.join("by_code.bin"), &by_code_bytes)?;
         std::fs::write(dir.join("runs.bin"), &runs)?;
         std::fs::write(dir.join("payloads.bin"), &payloads)?;
         std::fs::write(dir.join("codes.bin"), &codes)?;
@@ -331,6 +355,7 @@ impl SuggestIndex {
             runs: MappedBytes::open(&dir.join("runs.bin"))?,
             payloads: MappedBytes::open(&dir.join("payloads.bin"))?,
             codes: MappedBytes::open(&dir.join("codes.bin"))?,
+            by_code: MappedBytes::open(&dir.join("by_code.bin"))?,
             strings: MappedBytes::open(&dir.join("strings.bin"))?,
             offsets: MappedBytes::open(&dir.join("offsets.bin"))?,
             entries,
@@ -356,6 +381,9 @@ impl SuggestIndex {
         }
         if index.codes.bytes().len() != values as usize * 4 {
             return Err(malformed("the code array does not have one entry per value"));
+        }
+        if index.by_code.bytes().len() != values as usize * BY_CODE_LEN {
+            return Err(malformed("the code→position array does not have one record per value"));
         }
         if index.offsets.bytes().len() != (values as usize * 2 + 1) * 4 {
             return Err(malformed("the string offsets do not have two entries per value"));
@@ -418,6 +446,61 @@ impl SuggestIndex {
             return Err(malformed(format!("position {position} is past the value set")));
         }
         Ok(u32_at(self.codes.bytes(), position as usize))
+    }
+
+    /// **The dense positions of an ascending, distinct run of codes**, in the order given —
+    /// `codes.bin` read backwards, and the one thing §6.3's set build needs that the walk does not.
+    ///
+    /// A code the vocabulary does not hold is **skipped, not refused**: a value minted since this
+    /// index was built lives in the side map and has no position here, and its entities are in the
+    /// same extents the sweep walks. Such a value is simply not in the set, and the walk takes the
+    /// probe route for it (§6.3) — the fail-closed direction, since a value missing from the set is
+    /// withheld rather than offered.
+    ///
+    /// **Ascending input, exponential search from where the last one landed.** The build hands over
+    /// millions of codes in one call, so a binary search each would pay `log V` cache misses per
+    /// code where a warm-started gallop pays about one; for a dense run it degenerates to the
+    /// linear merge that shape wants anyway. `codes` must ascend — an unordered call silently
+    /// finds fewer positions than it should, which withholds values rather than offering them, and
+    /// [`Self::positions_of_ascending`]'s one caller sorts.
+    pub fn positions_of_ascending(&self, codes: &[u32], mut found: impl FnMut(u32)) {
+        let bytes = self.by_code.bytes();
+        let n = self.values as usize;
+        let code_at = |at: usize| u32_at(bytes, at * 2);
+        let position_at = |at: usize| u32_at(bytes, at * 2 + 1);
+
+        let mut at = 0usize;
+        for &code in codes {
+            // The first index at or after `at` whose code is not below `code`.
+            let mut lo = at;
+            let mut step = 1usize;
+            while lo < n && code_at(lo) < code {
+                let hi = (lo + step).min(n);
+                if hi < n && code_at(hi) < code {
+                    lo = hi;
+                    step *= 2;
+                    continue;
+                }
+                let (mut a, mut b) = (lo + 1, hi);
+                while a < b {
+                    let mid = a + (b - a) / 2;
+                    if code_at(mid) < code {
+                        a = mid + 1;
+                    } else {
+                        b = mid;
+                    }
+                }
+                lo = a;
+                break;
+            }
+            at = lo;
+            if at >= n {
+                break;
+            }
+            if code_at(at) == code {
+                found(position_at(at));
+            }
+        }
     }
 
     /// The served key and title at a dense position — the strings a response carries, out of the
@@ -888,6 +971,21 @@ pub struct WalkBudget {
 /// how an index read failure becomes one. **A read that fails part-way refuses the whole walk**
 /// rather than serving what it found: refusing at the value the read failed at would make the
 /// refusal a function of the prefix the caller typed (§3).
+///
+/// # The two routes
+///
+/// `set` is the session's own visible-value set where one has been built (§6.3, decision 0124), and
+/// `None` where it has not — the first keystrokes on a session-column pair, a viewer wider than
+/// `selection.max_suggest_set_entities`, a column with nothing to sweep, and every `public` column,
+/// which has no predicate to answer.
+///
+/// **The two routes answer the same page**: the traversal, the order and the spans are identical,
+/// and the only thing the set replaces is *how* a value's visibility is decided — a bit in the
+/// caller's own set rather than a boolean probe against a memory-mapped posting. Where the set
+/// answers, **no posting is read and no walk budget is spent**, so `more` means the page filled and
+/// nothing else. A value the set cannot speak for — one minted since the sweep, which lives in the
+/// side map and has no dense position — takes the probe route, which is why both are supplied.
+#[allow(clippy::too_many_arguments)]
 pub fn walk<E>(
     live: &VocabularySuggest,
     fold: &SuggestionFold,
@@ -896,6 +994,7 @@ pub fn walk<E>(
     visible: &dyn Fn(u32) -> Result<bool, E>,
     count: &dyn Fn(u32) -> Result<u64, E>,
     unreadable: &dyn Fn(io::Error) -> E,
+    set: Option<&crate::suggest_set::SuggestSet>,
 ) -> Result<(Vec<Found>, bool), E> {
     let folded = fold.entry(q);
     let base = live.base();
@@ -907,6 +1006,7 @@ pub fn walk<E>(
         examined: 0,
         more: false,
         budget,
+        set,
     };
     let side: Vec<(&str, &SideValue)> = live
         .side_range(&folded)
@@ -931,7 +1031,7 @@ pub fn walk<E>(
             // **The gate before the served strings**, which is where the ordering earns its keep: a
             // sparse viewer rejects better than 99.9% of what it examines, and the two mapped reads
             // and the UTF-8 validation below are paid only for what it keeps.
-            if state.admits(code, visible)? {
+            if state.admits(code, Some(payload.position), visible)? {
                 let (key, title) = base.served(payload.position).map_err(unreadable)?;
                 state.emit(
                     fold, &folded, code, key, title, payload.field, payload.start, count,
@@ -950,7 +1050,7 @@ pub fn walk<E>(
                 }
                 let value = side[side_at].1;
                 side_at += 1;
-                if state.admits(value.code, visible)? {
+                if state.admits(value.code, None, visible)? {
                     state.emit(
                         fold,
                         &folded,
@@ -983,7 +1083,7 @@ pub fn walk<E>(
                     }
                     let value = side[side_at].1;
                     side_at += 1;
-                    if state.admits(value.code, visible)? {
+                    if state.admits(value.code, None, visible)? {
                         state.emit(
                             fold,
                             &folded,
@@ -1002,7 +1102,7 @@ pub fn walk<E>(
                 // The served key was already read here, the merge's ordering comparison needing
                 // it — which is why this arm runs only where the side map has entries under the
                 // prefix, and the arm above runs otherwise.
-                if state.admits(code, visible)? {
+                if state.admits(code, Some(payload.position), visible)? {
                     state.emit(
                         fold, &folded, code, key, title, payload.field, payload.start, count,
                     )?;
@@ -1016,7 +1116,7 @@ pub fn walk<E>(
             }
             let value = side[side_at].1;
             side_at += 1;
-            if state.admits(value.code, visible)? {
+            if state.admits(value.code, None, visible)? {
                 state.emit(
                     fold,
                     &folded,
@@ -1034,7 +1134,7 @@ pub fn walk<E>(
 }
 
 /// The walk's running state — the page, what it has already emitted, and what it has spent.
-struct WalkState {
+struct WalkState<'a> {
     found: Vec<Found>,
     /// Codes already on the page. **A value appears once**, at its first matching entry in §7's
     /// order, and its `match` reports that entry.
@@ -1042,9 +1142,11 @@ struct WalkState {
     examined: u64,
     more: bool,
     budget: WalkBudget,
+    /// The session's visible-value set where one has been built — see [`walk`]'s two routes.
+    set: Option<&'a crate::suggest_set::SuggestSet>,
 }
 
-impl WalkState {
+impl WalkState<'_> {
     /// Whether the walk is over, and — the same question — whether `more` is owed.
     ///
     /// Both stopping conditions set `more`, because both mean the range was not exhausted. Asked
@@ -1068,10 +1170,23 @@ impl WalkState {
     fn admits<E>(
         &mut self,
         code: u32,
+        position: Option<u32>,
         visible: &dyn Fn(u32) -> Result<bool, E>,
     ) -> Result<bool, E> {
         if self.emitted.contains(&code) {
             return Ok(false);
+        }
+        // **The set route, where there is a set and the value has a dense position for it to be
+        // over** (§6.3). It reads no posting, so it spends no budget: the budget bounds *probing*,
+        // which is what §6.2 measures and §8 registers, and a bit test is neither the cost nor the
+        // channel. That is what makes `more` exact here — the walk stops when the page fills and
+        // for no other reason.
+        //
+        // A side-map value has no position and falls through to the probe: it was minted after the
+        // sweep, so the set cannot speak for it either way, and asking the posting is the answer
+        // that is right rather than merely available.
+        if let (Some(set), Some(position)) = (self.set, position) {
+            return Ok(set.contains(position));
         }
         // **One unit per gate test.** The budget bounds how many values one request *examines* —
         // the quantity §6.2 measures and §8 registers — so a value already on the page costs

@@ -307,6 +307,14 @@ fn page(engine: &Engine, credential: &[u8], column: &str, q: &str) -> SuggestPag
     page_with(engine, credential, column, q, 20, false, 100_000)
 }
 
+/// **The probe route, always** — `max_suggest_set_entities = 0`, so no set is ever built and no
+/// case below can be answered by one.
+///
+/// Every case above the set-route section pins §6.2's route, which is where the walk budget is
+/// spent and where `more` may mean a spent budget. The set route is exercised deliberately, by the
+/// cases that hold a session still until a set lands (`with_set`), rather than raced into by
+/// whichever of the two an async sweep happened to win — a race that would make `more` on a spent
+/// budget flap.
 fn page_with(
     engine: &Engine,
     credential: &[u8],
@@ -317,8 +325,30 @@ fn page_with(
     budget: u64,
 ) -> SuggestPage {
     let session = engine.authorise(credential).expect("the credential resolves");
+    suggest_with(engine, &session, column, q, limit, counts, budget, 0)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn suggest_with(
+    engine: &Engine,
+    session: &tessera_engine::Session,
+    column: &str,
+    q: &str,
+    limit: usize,
+    counts: bool,
+    budget: u64,
+    max_suggest_set_entities: u64,
+) -> SuggestPage {
     engine
-        .suggest(&session, column, q, limit, counts, budget)
+        .suggest(
+            session,
+            column,
+            q,
+            limit,
+            counts,
+            budget,
+            max_suggest_set_entities,
+        )
         .expect("the column suggests")
         .expect("the column is a category")
 }
@@ -430,7 +460,7 @@ fn a_name_that_is_not_a_category_is_no_answer_rather_than_a_refusal() {
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     for column in ["nonesuch", "x", "entity_id"] {
         assert!(engine
-            .suggest(&session, column, "", 20, false, 100_000)
+            .suggest(&session, column, "", 20, false, 100_000, 0)
             .unwrap()
             .is_none());
     }
@@ -697,12 +727,12 @@ fn a_superseded_index_keeps_answering_after_its_files_are_unlinked() {
         .get("department")
         .expect("the fixture builds one");
     let before = engine
-        .suggest(&session, "department", "eng", 20, false, 100_000)
+        .suggest(&session, "department", "eng", 20, false, 100_000, 0)
         .unwrap()
         .unwrap();
     std::fs::remove_dir_all(index.base().dir()).expect("the directory is the engine's own");
     let after = engine
-        .suggest(&session, "department", "eng", 20, false, 100_000)
+        .suggest(&session, "department", "eng", 20, false, 100_000, 0)
         .expect("a mapped index outlives its directory entry")
         .unwrap();
     assert_eq!(keys(&before), keys(&after));
@@ -730,7 +760,7 @@ fn a_column_with_no_index_refuses_rather_than_answering_empty() {
         "the hook must have published, or the refusal below is asserting nothing"
     );
 
-    let refused = engine.suggest(&session, "department", "eng", 20, false, 100_000);
+    let refused = engine.suggest(&session, "department", "eng", 20, false, 100_000, 0);
     match refused {
         Err(EngineError::SuggestionUnavailable { column, detail }) => {
             assert_eq!(column, "department");
@@ -934,4 +964,245 @@ fn suppressing_a_minted_values_only_member_retires_it_from_the_side_map() {
     // Through its word start too, which is the entry a gate applied only to whole-key payloads
     // would leave reachable.
     assert!(keys(&page(&engine, &full, "team", "infra")).is_empty());
+}
+
+// ---------------------------------------------------------------------------------------------
+// The second route: the per-session visible-value set (§6.3, decision 0124)
+// ---------------------------------------------------------------------------------------------
+
+/// The ceiling every case below runs at — far above this fixture's sixty entities, so the route is
+/// decided by the rules under test and never by the number.
+const WIDE_CEILING: u64 = 10_000_000;
+
+/// **Hold a session still until its sweep lands**, then answer from the set.
+///
+/// The first suggest on a `(session, column)` pair dispatches the sweep and is answered by the
+/// probe route, so a case that wants the set route has to ask twice and wait between — which is the
+/// on-demand rule itself, asserted by every case that uses this rather than by one of its own.
+/// Returns the number of admitted sweeps, so a caller can tell "the set answered" from "the probe
+/// route answered a second time".
+fn wait_for_set(engine: &Engine, session: &tessera_engine::Session, column: &str) -> u64 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        // A **hit** is the signal, not a finished sweep: the counters are process-wide, so a build
+        // count that moved may be another session's, and a set already held for this one moves it
+        // not at all. Each request re-dispatches if nothing is in flight and nothing is held, so an
+        // abandoned sweep is retried rather than waited on for ever.
+        let before = engine.suggest_set_stats().hits;
+        suggest_with(engine, session, column, "", 20, false, 100_000, WIDE_CEILING);
+        let stats = engine.suggest_set_stats();
+        if stats.hits > before {
+            return stats.hits;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no sweep landed for '{column}': {stats:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+/// **The two routes answer the same page** (§6.3, decision 0124) — the same values, in the same
+/// order, with the same spans and the same counts, for the same prefix before and after the set
+/// lands. Which route answered is not on the wire, and this is what makes that true rather than
+/// merely intended.
+///
+/// **Mutations this kills:** a set built over codes rather than dense positions (every value would
+/// miss); a set built from the extents alone (the base build's values would vanish); a set that
+/// admitted a value the probe route rejects.
+#[test]
+fn the_two_routes_answer_the_same_page() {
+    let fx = fixture();
+    let engine = engine_for(&fx, "routes");
+    for credential in [
+        full_coverage_credential(),
+        subset_credential(),
+        zero_credential(),
+    ] {
+        let session = engine.authorise(&credential).expect("it resolves");
+        let mut before = Vec::new();
+        for q in ["", "e", "s", "l", "legal", "counsel", "zzz"] {
+            before.push(suggest_with(
+                &engine, &session, "department", q, 20, true, 100_000, 0,
+            ));
+        }
+        wait_for_set(&engine, &session, "department");
+        for (q, expected) in ["", "e", "s", "l", "legal", "counsel", "zzz"]
+            .iter()
+            .zip(&before)
+        {
+            let got = suggest_with(
+                &engine,
+                &session,
+                "department",
+                q,
+                20,
+                true,
+                100_000,
+                WIDE_CEILING,
+            );
+            assert_eq!(keys(&got), keys(expected), "prefix {q:?}");
+            let spans: Vec<_> = got.values.iter().map(|v| v.span).collect();
+            let was: Vec<_> = expected.values.iter().map(|v| v.span).collect();
+            assert_eq!(spans, was, "prefix {q:?}");
+            let counts: Vec<_> = got.values.iter().map(|v| v.count).collect();
+            let was: Vec<_> = expected.values.iter().map(|v| v.count).collect();
+            assert_eq!(counts, was, "prefix {q:?}");
+        }
+    }
+}
+
+/// **`more` is exact on the set route.** The probe route spends a budget on values it cannot see
+/// and reports `more` for it; the set route reads no posting, spends no budget, and says `more`
+/// when the page filled and at no other time — which is the one field the two routes may differ on
+/// (contracts §3.2, C31's disposition).
+#[test]
+fn more_goes_from_a_spent_budget_to_exact_once_the_set_lands() {
+    let fx = fixture();
+    let engine = engine_for(&fx, "more-set");
+    let session = engine
+        .authorise(&zero_credential())
+        .expect("the credential resolves");
+
+    // A principal who sees nothing, at a budget of one: the probe route examines one value and
+    // stops.
+    let probed = suggest_with(&engine, &session, "department", "", 20, false, 1, 0);
+    assert!(probed.values.is_empty());
+    assert!(probed.more, "the budget was spent");
+
+    wait_for_set(&engine, &session, "department");
+    let from_set = suggest_with(&engine, &session, "department", "", 20, false, 1, WIDE_CEILING);
+    assert!(from_set.values.is_empty());
+    assert!(
+        !from_set.more,
+        "the set route walks the range whole and answers exactly"
+    );
+}
+
+/// **One sweep in flight per key** (§6.3 rule 2). Eight keystrokes on one pair start one sweep, not
+/// eight — asserted through the admitted-build counter, which moves once per sweep that finishes.
+#[test]
+fn a_burst_of_keystrokes_starts_one_sweep() {
+    let fx = fixture();
+    let engine = engine_for(&fx, "in-flight");
+    let session = engine
+        .authorise(&full_coverage_credential())
+        .expect("it resolves");
+    for q in ["e", "en", "eng", "s", "sa", "sal", "l", "le"] {
+        suggest_with(&engine, &session, "department", q, 20, false, 100_000, WIDE_CEILING);
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while engine.suggest_set_stats().in_flight > 0 {
+        assert!(std::time::Instant::now() < deadline, "the sweep never ended");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let stats = engine.suggest_set_stats();
+    assert_eq!(stats.builds, 1, "one sweep for one key: {stats:?}");
+    assert_eq!(stats.entries, 1, "{stats:?}");
+}
+
+/// **A set that no longer matches the live overlay is discarded rather than served** (§6.3 rule 1)
+/// — the fail-closed half of the whole route.
+///
+/// A value's last visible member is suppressed *between* the sweep and the read. The set was taken
+/// when that value still had one, so serving it would offer the name of a value whose members this
+/// viewer can no longer see: exactly the C11 disclosure `derived` withholds. The overlay's counter
+/// moves at the acknowledgement's publication, so the key names an entry nothing will ask for and
+/// the request falls back to the probe route, which derives the answer afresh.
+///
+/// **Mutations this kills:** dropping `overlay_version` from the key; serving a nearest-match entry;
+/// keeping the set across a deny "because the vocabulary did not change".
+#[test]
+fn a_suppression_between_the_sweep_and_the_read_retires_the_value() {
+    let fx = fixture();
+    let mut engine = engine_for(&fx, "set-suppress");
+    engine.start_write_executor(8).expect("the executor starts");
+    engine.set_background_refresh_for_test(false);
+
+    let full = full_coverage_credential();
+    let session = engine.authorise(&full).expect("it resolves");
+    let entity_of = source_to_new_map(&fx.bundle, &fx.prefix);
+    let members: Vec<u64> = (0..N).filter(|&e| department_of(e) == Some("eng")).collect();
+
+    wait_for_set(&engine, &session, "department");
+    assert!(
+        keys(&suggest_with(
+            &engine,
+            &session,
+            "department",
+            "eng",
+            20,
+            false,
+            100_000,
+            WIDE_CEILING
+        ))
+        .contains(&"eng".to_string()),
+        "the set was built while 'eng' still had visible members"
+    );
+
+    for source in &members {
+        engine
+            .accept_change(
+                tessera_types::EntityId::new(entity_of[source]),
+                tessera_lifecycle::wal::ChangeOp::Suppress,
+            )
+            .expect("a suppression is an ordinary change");
+    }
+
+    // No wait, and deliberately: the response to a deny is at accept, so the very next request must
+    // already withhold the value — a set taken before it may not answer this one.
+    let got = suggest_with(
+        &engine,
+        &session,
+        "department",
+        "eng",
+        20,
+        false,
+        100_000,
+        WIDE_CEILING,
+    );
+    assert!(
+        !keys(&got).contains(&"eng".to_string()),
+        "a set taken before the suppression was served: {:?}",
+        keys(&got)
+    );
+}
+
+/// **Under the ceiling, and nowhere else** (§6.3 rule 3, decision 0124). At
+/// `max_suggest_set_entities = 0` no viewer is inside it, so no sweep is ever dispatched and every
+/// request takes the probe route — and answers the same page it would have from a set.
+#[test]
+fn a_viewer_wider_than_the_ceiling_never_gets_a_set() {
+    let fx = fixture();
+    let engine = engine_for(&fx, "ceiling");
+    let session = engine
+        .authorise(&full_coverage_credential())
+        .expect("it resolves");
+    for _ in 0..8 {
+        suggest_with(&engine, &session, "department", "", 20, false, 100_000, 0);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let stats = engine.suggest_set_stats();
+    assert_eq!(stats.builds, 0, "{stats:?}");
+    assert_eq!(stats.in_flight, 0, "{stats:?}");
+    assert!(stats.declined >= 8, "{stats:?}");
+}
+
+/// **A `public` column never gets a set**, having no predicate for one to answer: its value names
+/// are an authored assertion served to anybody with a session (§3.8), so a per-session set would be
+/// a per-session copy of a constant.
+#[test]
+fn a_public_column_never_gets_a_set() {
+    let fx = fixture();
+    let engine = engine_for(&fx, "public-set");
+    let session = engine
+        .authorise(&full_coverage_credential())
+        .expect("it resolves");
+    for _ in 0..4 {
+        suggest_with(&engine, &session, "archive", "", 20, false, 100_000, WIDE_CEILING);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let stats = engine.suggest_set_stats();
+    assert_eq!(stats.builds, 0, "{stats:?}");
+    assert_eq!(stats.in_flight, 0, "{stats:?}");
 }

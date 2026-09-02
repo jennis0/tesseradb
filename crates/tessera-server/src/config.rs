@@ -862,6 +862,8 @@ struct RawServe {
     #[serde(default)]
     max_suggestion_walk: Option<u64>,
     #[serde(default)]
+    max_suggest_set_entities: Option<u64>,
+    #[serde(default)]
     max_shape_vertices: Option<u64>,
     #[serde(default)]
     max_region_vertices: Option<u64>,
@@ -993,6 +995,15 @@ pub struct Config {
     /// and this bound exists only because a suggestion is per keystroke. A performance knob, so it
     /// defaults, identical for every principal.
     pub max_suggestion_walk: u64,
+    /// The composed cardinality at or under which the suggestion verb builds this session a set of
+    /// its visible values and answers from it (`value-suggestion.md` §6.3, decision 0124). A wider
+    /// viewer keeps the probe route, as does every keystroke before the set lands and every column
+    /// with nothing to sweep.
+    ///
+    /// **A performance knob, so it defaults**, and a deployment constant identical for every
+    /// principal: the quantity it is compared against is the caller's own composed cardinality,
+    /// which a zoom-0 viewport already returns exactly as `visible`.
+    pub max_suggest_set_entities: u64,
     /// The most vertices a published polygon may carry after canonicalisation
     /// (`polygon-membership.md` §9, ruling (e)): over it, `PUT /control/layers/{name}/artifacts`
     /// is a `422` naming the count and the cap. Published on `/v1/meta`. The held decomposition
@@ -1251,6 +1262,17 @@ const DEFAULT_MAX_SUGGESTIONS: usize = 20;
 /// default — measured (`probes/2026-09-02-value-suggestion/`) as the smallest budget that fills
 /// the sparsest measured viewer's page on a one-character prefix at 10⁷ values.
 const DEFAULT_MAX_SUGGESTION_WALK: u64 = 100_000;
+
+/// The composed cardinality at or under which a suggestion is answered from a per-session set of
+/// visible values rather than by probing a posting per value walked (`value-suggestion.md` §6.3,
+/// [decision 0124](../../../docs/decisions/0124-the-suggestion-route-may-follow-the-viewers-cardinality.md)).
+///
+/// The owner's recommended default: 10⁷ is the *measured* 46–61 ms point for the sweep the set is
+/// built by (`probes/2026-09-02-value-suggestion/` arm 3), and a wider viewer stays on the probe
+/// route, which fills that viewer's page in under a millisecond anyway. A deployment constant,
+/// identical for every principal — which is what makes a route keyed on the caller's own
+/// cardinality admissible under §8.2 at all.
+const DEFAULT_MAX_SUGGEST_SET_ENTITIES: u64 = 10_000_000;
 
 /// One page of a layer's hierarchy (`highlight-and-hierarchy.md` §4).
 ///
@@ -2630,6 +2652,10 @@ fn parse(text: &str) -> Result<Config> {
             .serve
             .max_suggestion_walk
             .unwrap_or(DEFAULT_MAX_SUGGESTION_WALK),
+        max_suggest_set_entities: raw
+            .serve
+            .max_suggest_set_entities
+            .unwrap_or(DEFAULT_MAX_SUGGEST_SET_ENTITIES),
         max_shape_vertices: raw
             .serve
             .max_shape_vertices

@@ -34,6 +34,7 @@ pub mod select;
 pub mod session;
 pub mod shapes;
 pub mod suggest;
+pub mod suggest_set;
 mod single_flight;
 pub mod tile_index;
 pub mod timing;
