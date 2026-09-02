@@ -17,7 +17,7 @@ register in particular, states what such a viewer can learn.
 
 A bundle holder holds the built artifact on disk: the manifest, the per-deployment key, the full
 term index and the geometry. None of the properties below defend against this party. Anyone with
-the bundle already has the masks, the term postings and the coordinates; the identifier scheme
+the bundle already has the masks, the term index and the coordinates; the identifier scheme
 described below adds nothing against them, and none is claimed.
 
 An operator drives the control plane: ingest, deletion, suppression and compaction. The design
@@ -31,11 +31,26 @@ that is covered in the clients chapter.
 
 ```mermaid
 flowchart LR
-  viewer["viewer<br/>(session token)"] -->|requests| server["server process<br/>(mask, geometry, term index)"]
-  operator["operator<br/>(control plane)"] -->|ingest, delete, suppress, compact| server
-  server -->|reads| bundle["bundle on disk<br/>(manifest, key, postings, geometry)"]
-  server -->|responses: tessera_id, counts,<br/>samples, labels| viewer
-  bundleholder["bundle holder"] -. full read access,<br/>not defended against .-> bundle
+  subgraph untrusted["outside the boundary: the adversary"]
+    viewer["a viewer<br/>valid token, any grant,<br/>unlimited requests, a clock"]
+    client["client code<br/>in the viewer's hands;<br/>never decides what is visible"]
+  end
+
+  subgraph trusted["inside the boundary"]
+    session["session plane<br/>turns a credential into a token<br/>that names the viewer's terms"]
+    serve["tessera serve<br/>composes the viewer's set once,<br/>answers only from inside it"]
+    control["control plane<br/>operator: ingest, delete,<br/>suppress, compact"]
+    bundle["bundle and log on disc<br/>everything, including the<br/>identifier key"]
+  end
+
+  issuer["your identity provider"] -- "session credential" --> session
+  session -- "token" --> client
+  client -- "token + query" --> serve
+  serve -- "counts, samples, labels:<br/>from the viewer's set only" --> client
+  control --> serve
+  serve <--> bundle
+
+  holder["a bundle holder"] -. "has everything;<br/>no property below holds against them" .-> bundle
 ```
 
 *What crosses each boundary. A viewer receives responses computed inside its own mask; an
@@ -49,8 +64,8 @@ against that set before display would be a defect here, not a filtered view.
 
 Access is expressed as a set of terms an item carries and a set of terms a token satisfies; an item
 is visible to a token if the two sets intersect. Effective visibility is composed once per request,
-from the token's own set, an in-progress record of recent changes, and everything ingested since
-the token's own baseline, before anything downstream reads it. Every consumer of that composition,
+from the token's own set, the overlay (deletions and suppressions not yet compacted), and
+everything ingested since the token's own baseline, before anything downstream reads it. Every consumer of that composition,
 whether it counts a tile, draws marks or walks a cluster's membership tree, reads the same composed
 set; nothing computes a quantity first and masks it afterward.
 
@@ -95,8 +110,8 @@ required, so the shortcut can change how quickly an answer arrives and never wha
 
 Every item has a permanent identity that all access data, cluster membership and labels are
 expressed against. That identity MUST NOT appear in any response, log or on-wire structure a client
-can read. What a client receives instead is a separate value: a keyed, order-free scramble of the
-identity, computed by an eight-round Feistel construction over a per-deployment key. Two facts about
+can read. What a client receives instead is a keyed permutation of the identity, computed by an eight-round
+Feistel construction over a per-deployment key. Two facts about
 the data layout hold regardless of how strong that construction is. No structure on the request path
 stores the underlying identity at all, so nothing on that path could hand one out even by mistake;
 and once an item's identity is assigned, it is never reused, so a deleted item's slot cannot later
@@ -124,7 +139,7 @@ means for compartmented isolation as a whole is stated below.
 
 | Not claimed | Why not |
 |---|---|
-| Cryptographic protection of the identifier a client receives | The scramble is an eight-round non-cryptographic mixer, chosen to blind a viewer holding only the scrambled values, not to resist an adversary who already holds matched pairs of the real and scrambled identity. If a viewer ever obtained such a pair, this half of the defence would no longer hold. |
+| Cryptographic protection of the identifier a client receives | The permutation is an eight-round non-cryptographic mixer, chosen to blind a viewer holding only the scrambled values, not to resist an adversary who already holds matched pairs of the real and scrambled identity. If a viewer ever obtained such a pair, this half of the defence would no longer hold. |
 | A defence against a bundle holder | Anyone holding the built artifact already has the key, the term index and the coordinates; the identifier scheme adds nothing against them, and none of the properties above are claimed for that party. |
 | Isolation of compartmented partitions | **Not built yet.** The design specifies a second, physical separation for data that must be held apart, gated by a required-term check on every token. None of it exists: a deployment today has one store, so no isolation beyond masking is available, and a requirement for physical separation cannot be met by deploying the system as it stands. |
 | Agreement between the two authorisation functions | See the paragraph below this table. |
@@ -139,7 +154,7 @@ the first indexes an item under a term, every principal for whom the second yiel
 be authorised for that item. Every property above rests on that agreement holding, and nothing
 checks it. The only authorisation logic that exists today passes an item's or a principal's own
 strings straight through, so its two functions cannot disagree, and there is nothing yet for a check
-to run against. This is an open dependency, not a mitigation in progress.
+to run against. It cannot be checked until a plugin exists whose two functions could disagree.
 
 ## Residual disclosure
 
@@ -156,11 +171,11 @@ the only place one of those codes appears in this chapter.
 | Density and coarse counts restate an already-served quantity | That a viewer's own visible items cluster together in a region, and how many visible marks a tile holds, at a finer grain than a bare count | Low | Accepted, no new channel: the exact masked count is already served for any region or zoom level; these are coarser or cached views of the same figure | C1, C18 |
 | Response time and corpus activity track work outside the viewer's own set | How much data outside their own set a request walked, from timing; and that the corpus is being written to, from a staleness signal, in both cases without any content reaching them | Low | Open for the core timing question: unmitigated and unquantified. Accepted elsewhere in the family, on the ground that a principal already knows how much of the corpus is its own | C4, C14, C15, C19, C21, C24, C25, C26, C31 |
 | A stable identifier admits existence-probing and linkage | Whether a held identifier still resolves, which timestamps a delete, a suppression or a grant change; that two principals or two sessions are looking at the same item; a caller's own external identifiers can leak structure if the caller chooses to keep them | Medium | Accepted as the intended trade of a bookmarkable identifier. Probing how identifiers moved across a key rotation is closed specifically: no parameter exists to vary | C6, C17, C20 |
-| Caller declarations the service cannot verify | Content or a vocabulary value the caller asserted rather than derived from membership, served exactly as declared | Medium, high if mis-declared | Accepted, the caller's control: provenance is not something the service can check. **Not built yet** for three of the five rows: nothing today lets a caller declare a vocabulary-value gate, an artifact-layer label gate or a membership requirement, so those three channels do not exist until a caller declares one | C7, C12, C23, C27, C28 |
+| Caller declarations the service cannot verify | Content or a vocabulary value the caller asserted rather than derived from membership, served exactly as declared | Medium, high if mis-declared | Accepted, the caller's control: provenance is not something the service can check. All five are built: a vocabulary's visibility, a layer's label and its membership requirement are declared in the corpus file, and supplied content arrives through the control plane with its declaration or is refused. The specification's rows still carry stale not-built markers for three of them | C7, C12, C23, C27, C28 |
 | A vocabulary's values, and a densely pinned ordinal | A value's existence, gated the same way a label is; where an author pins codes densely, the largest visible code coarsely bounds how many values exist | Low to medium | Closed for existence, gated on a visible member carrying the value. Accepted for the ordinal, an owner ruling that set-size leakage from a caller's own chosen numbering is not a threat this system defends against | C11, C22 |
-| Node metadata and a routing registry, once compartments exist | That a grouping or a label draws on a given compartment | Low to medium | Accepted, and meaningful only once compartmented partitions exist. **Not built yet:** with one store today there is nothing to separate | C13, C16 |
+| Node metadata and a routing registry, once compartments exist | That a grouping or a label draws on a given compartment | Low to medium | Node metadata is closed. The registry is accepted, and meaningful only once compartmented partitions exist. **Not built yet:** with one store today there is nothing to separate | C13, C16 |
 | A drill-down names relations already served in full | An artifact's served parents; an item's own satisfied labels, reachable views and scoped values | Low | Accepted, bounded to what the requesting principal already sees in full | C29, C30 |
-| The highlight and browse verbs answer a second question over an existing candidate set | Nothing beyond what two ordinary filtered requests would already disclose | Low | Accepted. **Not built yet** | C32, C33 |
+| The highlight and browse verbs answer a second question over an existing candidate set | Nothing beyond what two ordinary filtered requests would already disclose | Low | Accepted. Built; the specification's row still carries a stale not-built marker | C32, C33 |
 | Extractive-tier background frequencies | Corpus-wide term distributions, if drawn from the live corpus | Low | Closed: a fixed public reference corpus is used instead of the live one | C5 |
 | Pre-intersection filter cardinality | A raw match count taken over unauthorised records | High if exposed | Closed structurally: no route serves a match count before it has been intersected with the viewer's own set | C8 |
 | Text relevance scores and ranks | Corpus-wide statistics that would let unreadable content be inferred | High if ranking were added | Closed by scope: filtering is boolean only, and no ranking exists | C9 |
