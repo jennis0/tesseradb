@@ -90,7 +90,11 @@ fn vocabulary(values: usize) -> Vec<SuggestValue> {
 
 /// One posting per value, Zipf over the corpus: value *i* has `entities / 64 / (i + 1)` members,
 /// at least one, scattered by a stride so no two values share a container pattern.
-fn write_postings(path: &std::path::Path, values: &[SuggestValue], entities: u32) -> io::Result<()> {
+fn write_postings(
+    path: &std::path::Path,
+    values: &[SuggestValue],
+    entities: u32,
+) -> io::Result<Vec<u32>> {
     let mut entries: Vec<(u32, Vec<u32>)> = Vec::with_capacity(values.len());
     let mut rng = StdRng::seed_from_u64(0x5133);
     for (i, value) in values.iter().enumerate() {
@@ -110,7 +114,10 @@ fn write_postings(path: &std::path::Path, values: &[SuggestValue], entities: u32
     }
     entries.sort_by_key(|(code, _)| *code);
     entries.dedup_by_key(|(code, _)| *code);
-    tessera_authz::write_delta_tier_at(path, &entries, 32)
+    tessera_authz::write_delta_tier_at(path, &entries, 32)?;
+    // The base tier's code array, in the order the reader binary-searches it — kept so the
+    // decomposition below can price that search on its own.
+    Ok(entries.into_iter().map(|(code, _)| code).collect())
 }
 
 /// A viewer's composed candidate, in the two shapes §6.2 measures: one contiguous run, and every
@@ -180,7 +187,7 @@ fn main() {
 
     let started = Instant::now();
     let postings_path = dir.path().join("postings.arrow");
-    write_postings(&postings_path, &values, entities).expect("the postings write");
+    let record_codes = write_postings(&postings_path, &values, entities).expect("the postings write");
     let postings = ColumnPostings::open_keyed(&postings_path).expect("the postings open");
     println!(
         "postings     {:>9.2} s   {:.1} MB",
@@ -281,6 +288,58 @@ fn main() {
                     format!("{more_count}/{repeats}")
                 );
             }
+        }
+    }
+
+    println!();
+    println!("# probe decomposition — where the walk's constant goes, at budget 10⁵");
+    println!(
+        "# `search` is the keyed base's binary search over its {} code records, alone;",
+        record_codes.len()
+    );
+    println!("# `probe` is the whole `ColumnPostings::intersects` including that search.");
+    println!(
+        "{:<12} {:<12} {:>12} {:>12} {:>8}",
+        "viewer", "shape", "search ns", "probe ns", "search %"
+    );
+    // The codes a one-character prefix's walk actually probes, in the order it probes them — an
+    // arbitrary order over the code array, which is the access pattern that decides the search's
+    // cost. Taken from the index rather than invented, so the two columns are the same work.
+    let mut probed: Vec<u32> = Vec::new();
+    {
+        let base = live.base();
+        let entries = base.prefix_range("a").expect("a prefix range");
+        for at in base.payload_range(entries).take(100_000) {
+            let payload = base.payload_at(at).expect("a payload");
+            probed.push(base.code_at(payload.position).expect("a code"));
+        }
+    }
+    for (label, fraction) in [("0.01%", 0.0001), ("1%", 0.01), ("10%", 0.1)] {
+        for (shape, contiguous) in [("contiguous", true), ("scattered", false)] {
+            let cand = candidate(entities, fraction, contiguous);
+            let started = Instant::now();
+            let mut hits = 0usize;
+            for code in &probed {
+                if record_codes.binary_search(code).is_ok() {
+                    hits += 1;
+                }
+            }
+            let search = started.elapsed().as_secs_f64() * 1e9 / probed.len() as f64;
+            std::hint::black_box(hits);
+
+            let started = Instant::now();
+            for code in &probed {
+                std::hint::black_box(
+                    postings
+                        .intersects(AttrLocalId::new(*code), &cand)
+                        .expect("a probe"),
+                );
+            }
+            let probe = started.elapsed().as_secs_f64() * 1e9 / probed.len() as f64;
+            println!(
+                "{label:<12} {shape:<12} {search:>12.1} {probe:>12.1} {:>7.0}%",
+                search / probe * 100.0
+            );
         }
     }
 

@@ -451,15 +451,27 @@ impl SuggestionFold {
     /// The **byte offsets of every word start after the first**, in an already-entry-folded string.
     ///
     /// The first word is not a word *start* entry — it is the whole-string entry, which the index
-    /// holds under its own kind — so the offset 0 case is excluded here rather than filtered by
-    /// every caller.
+    /// holds under its own kind — so it is excluded here rather than filtered by every caller.
+    ///
+    /// **"The first" is the first *word*, not the byte at offset 0.** An entry opening with a
+    /// non-word character — `(cs.lg)`, `[draft] machine learning` — has its first word at a
+    /// non-zero offset, and treating offset 0 as the only exclusion would count that word as a
+    /// start. That is not merely one entry too many: [`Self::served_word_starts`] applies the rule
+    /// below, so the two lists would differ in length and [`Self::entries_of`] would drop **every**
+    /// word start of such a value. The entry fold trims leading whitespace and nothing else, so a
+    /// leading bracket survives into the entry string and this case is ordinary rather than exotic.
     pub fn word_starts(&self, entry: &str) -> Vec<usize> {
         let mut out = Vec::new();
         let mut previous_wordish = false;
+        let mut leading = true;
         for (at, c) in entry.char_indices() {
             let wordish = self.wordish(c);
-            if wordish && !previous_wordish && at > 0 {
-                out.push(at);
+            if wordish && !previous_wordish {
+                if leading {
+                    leading = false;
+                } else {
+                    out.push(at);
+                }
             }
             previous_wordish = wordish;
         }
@@ -480,9 +492,22 @@ impl SuggestionFold {
     /// **Where the two lists differ in length the caller must index no word starts for that
     /// value**, and [`Self::entries_of`] does. NFKC can move a boundary — `¼` becomes `1⁄4`, one
     /// word where there was one non-word character — and a pairing that assumed equal counts would
-    /// record an offset into the wrong word, which is a wrong highlight rather than a wrong match.
-    /// It is rare enough that dropping the word starts of the values it happens to is cheaper than
-    /// any machinery for getting it right.
+    /// record an offset into the wrong word. It is rare enough that dropping the word starts of the
+    /// values it happens to is cheaper than any machinery for getting it right.
+    ///
+    /// **Equal counts are a necessary check and not a proof, and the difference is stated because
+    /// it will not be rediscovered.** Two boundary changes that cancel leave the counts equal and
+    /// the pairing wrong: `a㎏b ¼` folds to `akgb 1⁄4` — the `㎏` splits `a…b` into two words where
+    /// the served string had one, and the `¼` adds another, so both lists come to the same length
+    /// over different boundaries. A cheap total check cannot see that; only a fold with an offset
+    /// map could, and icu4x has none.
+    ///
+    /// What bounds the damage is *where* the offset is used. It reaches `match.start` and
+    /// `match.len` and nothing else — a highlight drawn over the wrong characters of a string the
+    /// client was going to draw anyway. It is not an input to the entry string (which is the fold's
+    /// own output and is right either way), so **a mis-paired offset cannot change which values
+    /// match**, and it is not an input to anything the gate reads, so it cannot change which values
+    /// are served. A wrong highlight, never a wrong disclosure.
     pub fn served_word_starts(&self, served: &str) -> Vec<usize> {
         let mut out = Vec::new();
         let mut previous_wordish = false;
@@ -706,6 +731,48 @@ mod tests {
             .map(|at| &entry[at..])
             .collect();
         assert_eq!(starts, vec!["learning 2026.v2", "2026.v2", "v2"]);
+    }
+
+    /// **A value whose string opens with a non-word character keeps its word starts.**
+    ///
+    /// `word_starts` excluded only byte 0, where `served_word_starts` skipped the whole leading
+    /// non-word run; the two then disagreed by one for `(cs.LG)` and `[Draft] Machine Learning`,
+    /// and [`SuggestionFold::entries_of`]'s length check dropped **every** word start of such a
+    /// value rather than one. Found in review, and it is not an exotic shape: a bracketed prefix
+    /// on a title is ordinary and the entry fold trims only whitespace.
+    #[test]
+    fn a_leading_non_word_character_does_not_make_the_first_word_a_start() {
+        let s = SuggestionFold::new();
+        for (served, want) in [
+            ("(cs.LG)", vec!["lg)"]),
+            ("[Draft] Machine Learning", vec!["machine learning", "learning"]),
+            ("  ...cs.LG", vec!["lg"]),
+        ] {
+            let entry = s.entry(served);
+            let starts: Vec<&str> = s
+                .word_starts(&entry)
+                .into_iter()
+                .map(|at| &entry[at..])
+                .collect();
+            assert_eq!(starts, want, "{served:?} folded to {entry:?}");
+            assert_eq!(
+                s.word_starts(&entry).len(),
+                s.served_word_starts(served).len(),
+                "{served:?}: the folded and served boundary lists must agree in length, or \
+                 entries_of drops every word start"
+            );
+            // And the entries actually reach the index, which is the property the length check
+            // silently removed.
+            let entries = s.entries_of("k", Some(served));
+            assert_eq!(
+                entries
+                    .iter()
+                    .filter(|e| e.kind == EntryKind::WordStart)
+                    .count(),
+                want.len(),
+                "{served:?}"
+            );
+        }
     }
 
     /// **A script written without spaces yields no word starts** — the consequence §4 names, which

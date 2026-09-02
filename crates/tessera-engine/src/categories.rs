@@ -484,7 +484,19 @@ impl Engine {
                 // Either no mask was composed at all, or one was composed only to count with —
                 // both are `public`, and a `public` value set is served as authored.
                 (_, false) => Ok(true),
-                (None, true) => Ok(true),
+                // **Unreachable, and fail-closed rather than trusted to stay so.** A `derived`
+                // column composes a candidate above and builds a membership from it or refuses, so
+                // this pair cannot arise today. It is an error and not `Ok(true)` because the two
+                // wrong answers are not symmetric: `true` here publishes every value name of a
+                // `derived` vocabulary to a principal whose predicate was never evaluated, which is
+                // the C11 disclosure itself and would be invisible — the page would look like a
+                // wide principal's. A future edit that reorders the composition above turns that
+                // into a refusal instead.
+                (None, true) => Err(EngineError::VocabularyVisibilityUnavailable {
+                    column: column.to_string(),
+                    detail: "a derived column reached the walk with no composed membership"
+                        .to_string(),
+                }),
                 (Some(membership), true) => membership.carries(code).map_err(|e| {
                     EngineError::VocabularyVisibilityUnavailable {
                         column: column.to_string(),

@@ -11019,7 +11019,7 @@ impl Executor {
             // viewer typing its prefix on the next keystroke must be offered it rather than
             // waiting for the next rebuild (`value-suggestion.md` §6.1). Every other publication
             // carries the index forward.
-            suggest: Arc::new(suggest),
+            suggest,
             // Neither the deny sets nor the row space moved, so the mask is unchanged. An ingest
             // adds a *buffered* row, which has no row id to be denied at.
             denied: Arc::clone(&generation.denied),

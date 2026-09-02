@@ -703,6 +703,16 @@ impl SuggestIndexes {
         self.by_vocabulary.keys().map(String::as_str)
     }
 
+    /// The same set without one vocabulary — the fault state
+    /// [`crate::EngineError::SuggestionUnavailable`] exists for, which nothing request-shaped
+    /// produces. Reached only from `Engine::forget_suggestion_index_for_test`.
+    #[cfg(feature = "fault-injection")]
+    pub fn without(&self, vocabulary: &str) -> SuggestIndexes {
+        let mut by_vocabulary = self.by_vocabulary.clone();
+        by_vocabulary.remove(vocabulary);
+        SuggestIndexes { by_vocabulary }
+    }
+
     /// **Build every vocabulary's index**, at `Engine::open`.
     ///
     /// A vocabulary whose index will not build is **omitted rather than fatal**, and the omission
@@ -743,11 +753,18 @@ impl SuggestIndexes {
     /// The successor after a window that minted, carrying every other vocabulary's index forward
     /// untouched.
     pub fn with_mints(
-        &self,
+        self: &Arc<Self>,
         fold: &SuggestionFold,
         vocabularies: &tessera_store::vocabulary::Vocabularies,
         mints: &[(String, String, u32)],
-    ) -> SuggestIndexes {
+    ) -> Arc<SuggestIndexes> {
+        // **Every commit window publishes; almost none mints.** Taking the `Arc` rather than a
+        // clone on that path means the steady state pays a pointer, where cloning the map would
+        // pay a `BTreeMap` and a `HashMap` per vocabulary per window for a structure that did not
+        // change.
+        if mints.is_empty() {
+            return Arc::clone(self);
+        }
         let mut by_vocabulary = self.by_vocabulary.clone();
         for (vocabulary, key, code) in mints {
             let Some(live) = by_vocabulary.get_mut(vocabulary) else {
@@ -759,7 +776,7 @@ impl SuggestIndexes {
                 .map(str::to_string);
             live.mint(fold, key, title.as_deref(), *code);
         }
-        SuggestIndexes { by_vocabulary }
+        Arc::new(SuggestIndexes { by_vocabulary })
     }
 }
 
@@ -1125,9 +1142,14 @@ fn match_len(fold: &SuggestionFold, served: &str, start: u32, folded_q: &str) ->
             return characters;
         }
     }
-    // Unreachable from an entry the index produced — the entry *is* this tail's fold, and the query
-    // is a prefix of it. Answering with the whole tail rather than panicking keeps a malformed
-    // index a wrong highlight instead of a downed request.
+    // **The whole tail, where the loop consumed it without matching.** Reachable only from an
+    // offset that does not name the word the entry came from — `SuggestionFold::served_word_starts`
+    // pairs the folded and served boundary lists by position, and two cancelling boundary changes
+    // can leave the counts equal over different boundaries (see that function). The entry string is
+    // the fold's own output either way, so such a value still *matches* correctly and is still
+    // gated correctly; what is wrong is only the span. Returning the tail's length rather than
+    // panicking or refusing keeps it that way: an over-long highlight on a string the client was
+    // going to draw anyway.
     characters
 }
 

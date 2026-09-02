@@ -221,6 +221,45 @@ fn write_points_with_absent_column(path: &Path, column: &str) {
 struct Fixture {
     _dir: tempfile::TempDir,
     bundle: std::path::PathBuf,
+    /// The `CURRENT` prefix, so a test can map source ids to the entity ids the build assigned.
+    prefix: String,
+}
+
+fn build_args(points: &Path, pairs: &Path, out: &Path, schema: Schema) -> BuildArgs {
+    BuildArgs {
+        views: vec![tessera_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: points.to_path_buf(),
+            point_fields: Default::default(),
+            select: None,
+            access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
+        attribute_sources: tessera_build::config::AttributeSource::over(
+            points.to_path_buf(),
+            &schema,
+        ),
+        out: out.to_path_buf(),
+        limit: None,
+        identity_key: test_key(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        idset: 1,
+        shard_id: 0,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
+        mint_external_ids: true,
+        emit_oracle_pairs: false,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema,
+    }
 }
 
 fn parse_schema(dir: &Path, text: &str) -> Schema {
@@ -242,40 +281,16 @@ fn fixture() -> Fixture {
     let schema = parse_schema(dir.path(), SCHEMA_TOML);
     let bundle = dir.path().join("bundle");
 
-    build(&BuildArgs {
-        views: vec![tessera_build::ViewArgs {
-            visibility: None,
-            view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
-            extent: extent(),
-            points: points.clone(),
-            point_fields: Default::default(),
-            select: None,
-            access: tessera_build::config::AccessInput::relation(pairs.clone()),
-        }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
-        out: bundle.clone(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema,
-    })
-    .expect("the fixture builds");
+    build(&build_args(&points, &pairs, &bundle, schema)).expect("the fixture builds");
 
-    Fixture { _dir: dir, bundle }
+    let current: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(bundle.join("CURRENT")).unwrap()).unwrap();
+    let prefix = current["prefix"].as_str().unwrap().to_string();
+    Fixture {
+        _dir: dir,
+        bundle,
+        prefix,
+    }
 }
 
 fn engine_for(fx: &Fixture, tag: &str) -> Engine {
@@ -615,37 +630,7 @@ fn a_value_minted_at_ingest_is_suggested_before_any_flush() {
     write_pairs_n(&pairs, N);
     let schema = parse_schema(dir.path(), OPEN_PUBLIC);
     let bundle = dir.path().join("bundle");
-    build(&BuildArgs {
-        views: vec![tessera_build::ViewArgs {
-            visibility: None,
-            view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
-            extent: extent(),
-            points: points.clone(),
-            point_fields: Default::default(),
-            select: None,
-            access: tessera_build::config::AccessInput::relation(pairs.clone()),
-        }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
-        out: bundle.clone(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema,
-    })
+    build(&build_args(&points, &pairs, &bundle, schema))
     .expect("the fixture builds");
 
     let mut engine = open_engine(
@@ -698,32 +683,249 @@ fn a_value_minted_at_ingest_is_suggested_before_any_flush() {
     assert!(infra.values[0].title.is_none());
 }
 
-/// A column whose vocabulary has no suggestion index refuses, rather than answering empty — the
-/// same reasoning the enumeration refuses an underivable predicate on.
+/// **Unlinking a mapped index does not disturb a live reader**, which is the property the rebuild's
+/// own unlink depends on — it deletes the superseded directory *after* the swap, and a request
+/// still holding the old generation must keep answering out of its pages.
 #[test]
-fn a_column_with_no_index_refuses_rather_than_answering_empty() {
+fn a_superseded_index_keeps_answering_after_its_files_are_unlinked() {
     let fx = fixture();
-    let engine = engine_for(&fx, "refuse");
+    let engine = engine_for(&fx, "unlink");
     let session = engine.authorise(&full_coverage_credential()).unwrap();
-    // Reached by removing the built index from under the live engine, which is the fault state the
-    // refusal is for: nothing request-shaped can produce it.
     let generation = engine.generation();
     let index = generation
         .suggest
         .get("department")
         .expect("the fixture builds one");
-    std::fs::remove_dir_all(index.base().dir()).expect("the directory is the engine's own");
-    drop(generation);
-    // The mapping outlives the directory entry, so this still answers — which is the property the
-    // rebuild's unlink depends on, asserted here rather than assumed.
-    assert!(engine
+    let before = engine
         .suggest(&session, "department", "eng", 20, false, 100_000)
-        .is_ok());
+        .unwrap()
+        .unwrap();
+    std::fs::remove_dir_all(index.base().dir()).expect("the directory is the engine's own");
+    let after = engine
+        .suggest(&session, "department", "eng", 20, false, 100_000)
+        .expect("a mapped index outlives its directory entry")
+        .unwrap();
+    assert_eq!(keys(&before), keys(&after));
+    assert_eq!(keys(&after), ["eng"]);
+    drop(generation);
+}
 
-    // The refusal itself is reachable only through a vocabulary with no entry at all.
-    let missing = engine.suggest(&session, "department@s0:none", "", 20, false, 100_000);
-    assert!(matches!(
-        missing,
-        Ok(None) | Err(EngineError::SuggestionUnavailable { .. })
-    ));
+/// **A column whose vocabulary has no suggestion index refuses, rather than answering empty** — the
+/// same reasoning the enumeration refuses an underivable predicate on: an empty page is a real
+/// answer, and serving it here makes a broken surface indistinguishable from a working one.
+///
+/// Reached by taking the index out from under a live engine, which is the fault state the refusal
+/// is for — nothing request-shaped produces it, `Engine::open` building an index for every
+/// vocabulary a declared category column names.
+#[test]
+fn a_column_with_no_index_refuses_rather_than_answering_empty() {
+    let fx = fixture();
+    let engine = engine_for(&fx, "refuse");
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    engine.forget_suggestion_index_for_test("department");
+
+    let refused = engine.suggest(&session, "department", "eng", 20, false, 100_000);
+    match refused {
+        Err(EngineError::SuggestionUnavailable { column, detail }) => {
+            assert_eq!(column, "department");
+            assert!(
+                detail.contains("department"),
+                "the refusal must name the vocabulary it could not reach: {detail}"
+            );
+        }
+        other => panic!("expected SuggestionUnavailable, got {other:?}"),
+    }
+    // And it is this surface alone that is refused: the enumeration over the same column, under the
+    // same gate, is unaffected.
+    let listed = engine
+        .categories(
+            &session,
+            "department",
+            tessera_engine::CategoryQuery::Page {
+                after: None,
+                limit: 20,
+            },
+        )
+        .expect("the enumeration does not depend on the suggestion index")
+        .expect("the column is a category");
+    assert!(!listed.values.is_empty());
+}
+
+// ---------------------------------------------------------------------------------------------
+// Retirement under suppression
+// ---------------------------------------------------------------------------------------------
+
+/// An **open, `derived`** vocabulary: keys are minted at ingest, and a value is offered only to a
+/// principal who can see an item carrying it. The pair the retirement case needs.
+const OPEN_DERIVED: &str = r#"
+[[vocabulary]]
+name       = "team"
+width      = "u16"
+value_set  = "open"
+visibility = "derived"
+
+[[attribute]]
+name       = "team"
+type       = "category"
+render     = true
+index      = true
+vocabulary = "team"
+"#;
+
+fn flush(engine: &Engine) {
+    let before = engine.write_executor_stats().flushes;
+    engine.request_flush();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while engine.write_executor_stats().flushes == before {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the flush never published"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// **A value whose last visible member is suppressed stops being offered, on the next request** —
+/// membership-derivation self-retiring, which is §3.3's whole argument for deriving per request
+/// rather than maintaining a set.
+///
+/// Asserted through the **base index**, over the built vocabulary: `eng` has sixteen members and
+/// all sixteen are suppressed one at a time, so the value is offered until the last one goes and
+/// not after. That it is offered *up to* the last suppression is half the test — a retirement rule
+/// that fired early would withhold a value the viewer can still see, and would pass an
+/// assert-at-the-end.
+///
+/// **Mutations this kills:** caching the membership across requests; deriving visibility from the
+/// session's stale fragment rather than the composed verdict; maintaining a visible-value set.
+#[test]
+fn suppressing_a_values_last_visible_member_retires_it_from_the_base_index() {
+    let fx = fixture();
+    let mut engine = engine_for(&fx, "suppress-base");
+    engine.start_write_executor(8).expect("the executor starts");
+    engine.set_background_refresh_for_test(false);
+
+    let full = full_coverage_credential();
+    let entity_of = source_to_new_map(&fx.bundle, &fx.prefix);
+    let members: Vec<u64> = (0..N).filter(|&e| department_of(e) == Some("eng")).collect();
+    assert!(
+        members.len() > 1,
+        "the value must have several members, or 'the last one' is the only one"
+    );
+
+    for (suppressed, source) in members.iter().enumerate() {
+        assert!(
+            keys(&page(&engine, &full, "department", "eng")).contains(&"eng".to_string()),
+            "'eng' stopped being offered after {suppressed} of {} members were suppressed, with \
+             visible members left",
+            members.len()
+        );
+        engine
+            .accept_change(
+                tessera_types::EntityId::new(entity_of[source]),
+                tessera_lifecycle::wal::ChangeOp::Suppress,
+            )
+            .expect("a suppression is an ordinary change");
+    }
+
+    assert!(
+        !keys(&page(&engine, &full, "department", "eng")).contains(&"eng".to_string()),
+        "'eng' is still offered with every member suppressed"
+    );
+    // The other values are untouched — a retirement that took the vocabulary with it would pass
+    // the assertion above.
+    let mut left = keys(&page(&engine, &full, "department", ""));
+    left.sort_unstable();
+    assert_eq!(left, ["legal", "sales"]);
+
+    // And it comes back: a suppression is the reversible one of the two removal rules, and
+    // derivation retires and un-retires with it because it is derived per request.
+    engine
+        .accept_change(
+            tessera_types::EntityId::new(entity_of[&members[0]]),
+            tessera_lifecycle::wal::ChangeOp::Unsuppress,
+        )
+        .expect("an unsuppress is an ordinary change");
+    assert!(keys(&page(&engine, &full, "department", "eng")).contains(&"eng".to_string()));
+}
+
+/// The same rule through the **side map**: a value minted at ingest, made visible by the flush that
+/// gives its entity an extent, and retired when that entity is suppressed.
+///
+/// The base index is built at open and never rebuilt here, so this value exists only in the side
+/// map — which is the arm that would be missed by a gate applied to the base's payloads and not to
+/// the merged walk. It is also the case that shows a *minted derived* value is not offered before
+/// its flush: a buffered entity has no extent and no posting, so it contributes no membership at
+/// all (`filter-index.md` §5), and the value is in the index while being invisible.
+#[test]
+fn suppressing_a_minted_values_only_member_retires_it_from_the_side_map() {
+    let dir = tempfile::tempdir().unwrap();
+    let points = dir.path().join("points.parquet");
+    let pairs = dir.path().join("pairs.parquet");
+    write_points_with_absent_column(&points, "team");
+    write_pairs_n(&pairs, N);
+    let schema = parse_schema(dir.path(), OPEN_DERIVED);
+    let bundle = dir.path().join("bundle");
+    build(&build_args(&points, &pairs, &bundle, schema)).expect("the fixture builds");
+
+    let mut engine = open_engine(
+        &bundle,
+        &dir.path().join("cache"),
+        &dir.path().join("wal.log"),
+    );
+    engine.start_write_executor(8).expect("the executor starts");
+    engine.set_background_refresh_for_test(false);
+    let full = full_coverage_credential();
+
+    let entity = engine
+        .accept_ingest(
+            vec![UnallocatedRow {
+                external_id: Some(b"row-1".to_vec()),
+                view: "s0".to_string(),
+                join: None,
+                descriptors: vec![b"0".to_vec()],
+                x: 1.0,
+                y: 1.0,
+                scalars: vec![WalScalar::Utf8("Platform Infrastructure".to_string())],
+                terms: engine.resolve_terms(&[b"0".to_vec()]),
+                scoped: Vec::new(),
+            }],
+            "batch-1".to_string(),
+            [0u8; 32],
+        )
+        .expect("the ingest is accepted")[0];
+
+    // In the side map, and invisible: the entity is buffered, so it has neither a posting nor an
+    // extent and derives no membership. The value is in the index and behind the gate.
+    assert!(
+        keys(&page(&engine, &full, "team", "platform")).is_empty(),
+        "a buffered entity must derive no membership"
+    );
+    assert!(
+        engine
+            .generation()
+            .suggest
+            .get("team")
+            .expect("the vocabulary has an index")
+            .side_len()
+            > 0,
+        "…and the value must nonetheless be in the side map, or this proves nothing"
+    );
+
+    flush(&engine);
+    assert_eq!(
+        keys(&page(&engine, &full, "team", "platform")),
+        ["Platform Infrastructure"],
+        "the flush gives the entity an extent, and the value becomes derivable"
+    );
+
+    engine
+        .accept_change(entity, tessera_lifecycle::wal::ChangeOp::Suppress)
+        .expect("a suppression is an ordinary change");
+    assert!(
+        keys(&page(&engine, &full, "team", "platform")).is_empty(),
+        "the value's only member is suppressed and it is still offered — derivation did not retire"
+    );
+    // Through its word start too, which is the entry a gate applied only to whole-key payloads
+    // would leave reachable.
+    assert!(keys(&page(&engine, &full, "team", "infra")).is_empty());
 }

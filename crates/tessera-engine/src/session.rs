@@ -1655,6 +1655,39 @@ impl Engine {
         self.refresh_enabled.store(enabled, Ordering::SeqCst);
     }
 
+    /// Drop one vocabulary's suggestion index from the live generation — the fault state
+    /// `EngineError::SuggestionUnavailable` exists for.
+    ///
+    /// **A test hook, gated so it cannot exist in a shipped build**, on
+    /// [`Self::set_background_refresh_for_test`]'s argument. Nothing request-shaped reaches that
+    /// refusal: `Engine::open` builds an index for every vocabulary a declared category column
+    /// names, and only a build that failed at open leaves one absent — which is a host condition a
+    /// test cannot produce without either breaking the filesystem or reaching in here.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn forget_suggestion_index_for_test(&self, vocabulary: &str) {
+        let live = self.generation.load_full();
+        let next = Generation {
+            suggest: Arc::new(live.suggest.without(vocabulary)),
+            prefix: live.prefix.clone(),
+            vocabularies: Arc::clone(&live.vocabularies),
+            filter_columns: Arc::clone(&live.filter_columns),
+            segments_version: live.segments_version,
+            watermark: live.watermark,
+            bundle: Arc::clone(&live.bundle),
+            dict: Arc::clone(&live.dict),
+            postings: Arc::clone(&live.postings),
+            fragments: Arc::clone(&live.fragments),
+            external_index: Arc::clone(&live.external_index),
+            delta_postings: live.delta_postings.clone(),
+            overlay_version: live.overlay_version,
+            overlay: Arc::clone(&live.overlay),
+            buffer: Arc::clone(&live.buffer),
+            denied: Arc::clone(&live.denied),
+        };
+        self.generation.store(Arc::new(next));
+    }
+
     /// Hold the background refresh, leaving it **in flight** — the window rung 3 of
     /// `Engine::session_geometry`'s ladder sheds a racer in. Distinct from
     /// [`Self::set_background_refresh_for_test`], which models a refresh that produces nothing and
