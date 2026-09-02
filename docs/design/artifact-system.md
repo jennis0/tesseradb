@@ -243,7 +243,14 @@ The artifact system rides the map's write cycle rather than having one of its ow
   the flip and nothing shed silently — a stream shed, if one ever occurs, is logged with its
   cause.
 - On **restart**, the manifest's per-level versions seed the store before WAL replay; derived
-  files whose coordinates match exactly are adopted, everything else recomposes on first use.
+  files whose coordinates match exactly are adopted, and **every live level's row form is then
+  composed at open, before the server binds a listener** — with its lineage and its supplied
+  contents beside it, none of which depends on a principal
+  (`Engine::warm_artifact_projections`). Nothing here is per request: a lazy build put rung 3's
+  1.66×10⁹-row membership — a *measured* 23.3 s
+  ([the cold-start probe](../../probes/2026-09-02-cold-start/)) — on whichever request of a fresh
+  process arrived first, and a demo restarts often. The cost moves to the start; it does not go
+  away, and the open reports it.
 
 ## 9. The operating envelope
 

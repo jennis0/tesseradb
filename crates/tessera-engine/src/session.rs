@@ -1581,7 +1581,7 @@ impl Engine {
         let fold_publication_paused = Arc::new(AtomicBool::new(false));
         let merge_publication_paused = Arc::new(AtomicBool::new(false));
 
-        Ok(Engine {
+        let engine = Engine {
             generation: Arc::clone(&generation),
             plugin,
             // Unbounded until `set_cache_bounds` is called. `tessera-server` calls it immediately
@@ -1620,7 +1620,23 @@ impl Engine {
             fold_publication_paused: Arc::clone(&fold_publication_paused),
             merge_publication_paused: Arc::clone(&merge_publication_paused),
             full_projection_builds: AtomicU64::new(0),
-        })
+        };
+
+        // **Every level's row form, built before this engine serves a request** — the same rule
+        // the shapes above follow, one structure along, and for a cost an order larger: rung 3's
+        // `mesh/descriptors` projection is a *measured* 23.3 s over a 1.66×10⁹-row membership, and
+        // left lazy it landed on whichever request of a fresh process arrived first. See
+        // `Engine::warm_artifact_projections` for what it does and does not build.
+        let warmed = engine.warm_artifact_projections();
+        if warmed.levels > 0 {
+            tracing::info!(
+                levels = warmed.levels,
+                elapsed_ms = warmed.elapsed_ms,
+                builds = engine.artifact_projections.builds(),
+                "the engine built every level's artifact row form; no request pays for one"
+            );
+        }
+        Ok(engine)
     }
 
     /// Test-only override for the serial/parallel fan-out threshold

@@ -4752,7 +4752,191 @@ pub(crate) fn predicate_source<'a>(
     }
 }
 
+/// What [`Engine::warm_artifact_projections`] did, for the open's own log line — the shape
+/// `crate::shapes::Warmed` already has, and read the same way: a count of structures and a
+/// duration, naming no artifact and no principal.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct WarmedProjections {
+    /// How many `(view, layer, level)` forms were asked for. Every one is either built here or
+    /// already held, which at open can only be the second when two views share nothing — so this
+    /// is the number of builds unless a level was skipped.
+    pub(crate) levels: u64,
+    /// What the whole pass took. **The figure that moved off the request path**, and the one an
+    /// operator compares against the start they used to get.
+    pub(crate) elapsed_ms: u64,
+}
+
 impl Engine {
+    /// Build every live level's row-space projection **now**, so no request ever pays for one.
+    ///
+    /// # Why this is at open rather than on the first request that wants it
+    ///
+    /// `ArtifactProjections::get_or_build` is a cache, and its build is
+    /// `RowSpace::project_base` over a level's whole membership — "seconds, not milliseconds" at
+    /// corpus scale, and **measured at 23.3 s** for rung 3's `mesh/descriptors`, whose membership
+    /// is 1.66×10⁹ rows (`probes/2026-09-02-cold-start/`). Left lazy, that lands on whichever
+    /// request of a fresh process happens to be first — a viewport naming the layer, a browse of
+    /// it, or a `member_of` highlight over it — and the viewer sees a blank map for half a minute.
+    /// It is per **process**, so every restart re-arms it and a demo restarts often.
+    ///
+    /// Paid here, it is paid before the listeners are bound: `tessera_server::prepare` opens the
+    /// engine and `run` binds afterwards, so nothing can reach `/readyz` — let alone a request —
+    /// until this returns. **The cost does not disappear; it moves off the request and onto the
+    /// start**, which is the trade a restart-often deployment wants and the one an operator can
+    /// see, because it is reported below.
+    ///
+    /// # What it does not do
+    ///
+    /// **Nothing is materialised per token over the artifact population** (decision 0093). Every
+    /// structure built here is per `(view, layer, level)` and shared by every principal: the row
+    /// form, its tile index or its label column, and the containment partition. The per-principal
+    /// half — the masked counts, the gate, the verdicts — is not touched, and cannot be: there is
+    /// no session at open.
+    ///
+    /// **It holds no more than serving would.** These are exactly the entries the cache would
+    /// hold after one request of each shape, under the same replace-on-mismatch rule; what changes
+    /// is when they arrive, not how many there are. A deployment whose clients only ever ask for
+    /// one of many views does now hold the others' forms — and pays for them at start — which is
+    /// the honest cost of the trade.
+    ///
+    /// **Failure is an absence, not a refusal.** A view no partition carries, a view two carry
+    /// (which is a request error in its own right), a layer suppressed at open: each is skipped
+    /// and the level is built on first use, which is what every request did before this existed.
+    /// Refusing to open over a derived structure that has a correct fallback would be a refusal
+    /// outside the disclosure surface.
+    ///
+    /// ⊘ A fold's prefix rotation does not re-warm: a rotated prefix invalidates every key, and
+    /// the level is rebuilt by the first request after it, exactly as before. The engine adopts no
+    /// derived structures at a rotation either, so this would be the only half of that pair.
+    pub(crate) fn warm_artifact_projections(&self) -> WarmedProjections {
+        let started = std::time::Instant::now();
+        let mut warmed = WarmedProjections::default();
+        let generation = self.generation.load();
+        let layers = self.write.registered_layers();
+        if layers.is_empty() {
+            return warmed;
+        }
+        let source = generation.partition_source();
+        // The views this bundle carries, each with the partition that carries it. A view two
+        // partitions carry is `EngineError::MultiPartitionView` on the request path; here it is
+        // simply not warmed, so the request that hits the error is not preceded by a build for a
+        // row space no request will use.
+        let mut views: std::collections::BTreeMap<&str, Option<&tessera_store::read::ViewData>> =
+            std::collections::BTreeMap::new();
+        for partition in generation.bundle.partitions.values() {
+            for (name, data) in &partition.views {
+                views
+                    .entry(name.as_str())
+                    .and_modify(|held| *held = None)
+                    .or_insert(Some(data));
+            }
+        }
+        for (view, view_data) in views {
+            let Some(view_data) = view_data else { continue };
+            let Ok(segments) = segments_with_row_bases(view, view_data) else {
+                continue;
+            };
+            for layer in &layers {
+                if !layer.declaration.views.iter().any(|s| s == view) {
+                    continue;
+                }
+                // The same two live tests `serve_artifacts` takes, in the same order: a suppressed
+                // or deleted layer is served to nobody, so building its form would be work for a
+                // set no response can carry.
+                if generation.overlay.is_deleted(layer.entity)
+                    || generation.overlay.is_suppressed(layer.entity)
+                {
+                    continue;
+                }
+                let vocabulary = predicate_vocabulary(&generation, &layer.declaration);
+                let code_of_key = |key: &str| match vocabulary {
+                    Some(vocabulary) => vocabulary.code_of(key),
+                    None => key.parse::<u32>().ok(),
+                };
+                for level in 0..layer.runs.len() as u32 {
+                    let recorded = layer.layout_of(level);
+                    // **The engine's own pool**, for `Engine::masked_counts`' reason: the
+                    // projection's decode fans out, and a build outside `install` would take
+                    // rayon's global pool rather than the one the deployment sized.
+                    let (rows, level_version) = self.pool.install(|| {
+                        self.write.with_artifacts(|store| {
+                            let predicate = predicate_source(
+                                &layer.declaration,
+                                &generation,
+                                view,
+                                view_data,
+                                &segments,
+                                &code_of_key,
+                                &self.shapes,
+                                store,
+                                level,
+                            );
+                            (
+                                self.artifact_projections.get_or_build(
+                                    &generation.prefix,
+                                    view,
+                                    &layer.declaration.name,
+                                    level,
+                                    store,
+                                    &view_data.row_space,
+                                    Some(&source),
+                                    recorded,
+                                    predicate.as_ref(),
+                                    generation.segments_version,
+                                ),
+                                store.level_version(&layer.declaration.name, level),
+                            )
+                        })
+                    });
+                    warmed.levels += 1;
+                    // **The other two per-generation structures a first request would build**,
+                    // and they are here for the row form's reason rather than for their size: the
+                    // lineage is ~0.5 s at rung 3's 30,217-node DAG and the level's contents ~0.5 s
+                    // beside it, both derived from the level's records alone. Neither depends on a
+                    // mask, a viewport or a principal, so neither is work a request should be
+                    // doing — and leaving them lazy would leave *some* per-process build on the
+                    // first request after the expensive one had been moved.
+                    self.lineages
+                        .get_or_build(&layer.declaration.name, level, level_version, || {
+                            let records = rows.records();
+                            let edges = (0..records.len() as u32).map(|ordinal| {
+                                let within = records
+                                    .parents(ordinal)
+                                    .iter()
+                                    .filter(move |parent| parent.level == level)
+                                    .map(|parent| parent.ordinal);
+                                (ordinal, within)
+                            });
+                            match lineage_kind(layer.declaration.hierarchy.kind) {
+                                Some(true) => crate::cut::Lineage::dag(edges),
+                                _ => crate::cut::Lineage::new(edges),
+                            }
+                        });
+                    // Skipped where the layer declares no supplied content, exactly as the two
+                    // serving paths skip it: there is nothing to read.
+                    if !layer.declaration.content.supplied.is_empty() {
+                        if let Some(runs) = layer.runs.get(level as usize) {
+                            self.level_contents.get_or_build(
+                                &layer.declaration.name,
+                                level,
+                                level_version,
+                                generation.segments_version,
+                                || {
+                                    crate::artifact_content::LevelContent::build(
+                                        generation.filter_columns.records(),
+                                        runs,
+                                    )
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        warmed.elapsed_ms = started.elapsed().as_millis() as u64;
+        warmed
+    }
+
     /// What this request's composed mask is, for the masked-count cache's key.
     ///
     /// **Taken from the geometry that actually resolved**, never from the live generation's idea of

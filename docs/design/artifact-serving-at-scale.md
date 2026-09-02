@@ -696,8 +696,10 @@ passes everything leaves no fragmentation at all, and a principal who fails much
 sweep is already proportional to the little they can see.
 
 **Cold against warm is the lineage's question, not the cut's.** The walk reads a child index that is
-a property of the tree, built on first use and reused after. A lineage held per generation sees only
-the warm column; §8.2 is the difference between them.
+a property of the tree, built once per generation and reused after — at **open**, beside every
+level's row form (`Engine::warm_artifact_projections`), so a request finds it warm and only a
+publication into the level makes it cold again. A lineage held per generation sees only the warm
+column; §8.2 is the difference between them.
 
 ⊘ **Two things measured and reverted**, recorded so they are not re-attempted: pre-sizing the depth
 buckets from a counting pass (193 ms against 198 at full passing, and **32 against 24** at a level

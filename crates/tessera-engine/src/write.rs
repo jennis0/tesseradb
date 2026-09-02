@@ -1601,6 +1601,16 @@ impl LiveState {
         lock_recover(&self.registry).resolve_for(is_satisfied, resolve_label)
     }
 
+    /// Every registered layer, as the registry holds it. **The declarations, never a decision** —
+    /// `registered_layer`'s rule over the whole set, and the caller applies the gate.
+    ///
+    /// Its one caller is `Engine::warm_artifact_projections`, which has no principal to resolve
+    /// against: it builds a level's row form, which is the same structure for every principal, and
+    /// the gate is applied to what is *served* from it on the request that asks.
+    pub(crate) fn registered_layers(&self) -> Vec<tessera_types::layer::RegisteredLayer> {
+        lock_recover(&self.registry).snapshot().0
+    }
+
     /// One registered layer, by name. The caller has already established the name is reachable —
     /// this returns the declaration, never the decision.
     pub(crate) fn registered_layer(
@@ -2991,6 +3001,11 @@ impl WritePath {
         name: &str,
     ) -> Option<tessera_types::layer::RegisteredLayer> {
         self.live.registered_layer(name)
+    }
+
+    /// See `WriteState::registered_layers`.
+    pub(crate) fn registered_layers(&self) -> Vec<tessera_types::layer::RegisteredLayer> {
+        self.live.registered_layers()
     }
 
     /// Publish a batch of artifacts, returning their entities in the caller's submitted order.

@@ -846,14 +846,22 @@ fn a_publication_after_the_table_is_built_rebuilds_it() {
     published_and_log_free(&fx, &["the first label", "the second label"]);
 
     let engine = fx.open();
-    assert_eq!(engine.artifact_content_cache_stats().builds, 0);
+    // **One, at open, and not on a request** — `Engine::warm_artifact_projections` reads every
+    // level's contents beside its row form, because neither depends on a mask or a principal and a
+    // request that built one would be doing generation work. What this test is about is what moves
+    // the count *after* that: the level's version.
+    let stats = engine.artifact_content_cache_stats();
+    assert_eq!(stats.builds, 1, "the level's contents were read at open");
+    assert_eq!(stats.held, 1, "one table, for the one level there is");
+    assert_eq!(stats.artifacts, 2);
 
     let first = artifacts_of(&engine, &full_coverage_credential());
     assert_eq!(first.len(), 2);
-    let stats = engine.artifact_content_cache_stats();
-    assert_eq!(stats.builds, 1, "the level's contents were read once");
-    assert_eq!(stats.held, 1, "one table, for the one level served");
-    assert_eq!(stats.artifacts, 2);
+    assert_eq!(
+        engine.artifact_content_cache_stats().builds,
+        1,
+        "the request read the table the open built"
+    );
 
     // A second request at the same level version reads nothing.
     assert_eq!(artifacts_of(&engine, &full_coverage_credential()).len(), 2);
