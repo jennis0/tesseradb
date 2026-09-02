@@ -495,264 +495,61 @@ impl Engine {
         };
 
         let fold = tessera_analyse::SuggestionFold::new();
-        let folded = fold.entry(q);
         let unreadable = |e: std::io::Error| EngineError::SuggestionUnavailable {
             column: column.to_string(),
             detail: e.to_string(),
         };
-        let base = live.base();
-        let entries = base.prefix_range(&folded).map_err(unreadable)?;
-
-        let mut walk = SuggestWalk {
-            values: Vec::new(),
-            emitted: rustc_hash::FxHashSet::default(),
-            examined: 0,
-            more: false,
-            limit,
-            walk_budget,
-        };
-        let side: Vec<(&str, &crate::suggest::SideValue)> = live
-            .side_range(&folded)
-            .flat_map(|(entry, run)| run.iter().map(move |value| (entry.as_str(), value)))
+        // **The walk itself is `crate::suggest`'s**, and everything above this line is the gate.
+        // The split is where it is so that the bench measures the shipped walk rather than a
+        // transcription of it, and so that this function reads as what it is: the same gate
+        // `Engine::categories` applies, over a different traversal.
+        let (found, more) = crate::suggest::walk(
+            live,
+            &fold,
+            q,
+            crate::suggest::WalkBudget {
+                limit,
+                walk_budget,
+                counts,
+            },
+            &|code| visible(code),
+            &|code| match &membership {
+                Some(membership) => membership.count(code).map_err(|e| {
+                    EngineError::SuggestionUnavailable {
+                        column: column.to_string(),
+                        detail: e.to_string(),
+                    }
+                }),
+                // Unreachable: `counts` composes a candidate for both visibilities, so a count is
+                // only ever asked for where a membership exists.
+                None => Ok(0),
+            },
+            &unreadable,
+        )?;
+        let values: Vec<Suggestion> = found
+            .into_iter()
+            .map(|found| Suggestion {
+                code: found.code,
+                key: found.key,
+                title: found.title,
+                span: MatchSpan {
+                    field: found.field,
+                    start: found.start,
+                    len: found.len,
+                },
+                count: found.count,
+            })
             .collect();
 
-        // Two shapes of the same walk. **The side map is empty in the ordinary case** — a bundle
-        // that has not been ingested into since it opened — and then no entry string is decoded at
-        // all: the payload array is walked directly, which is the whole reason the run starts are a
-        // separate array from the dictionary. Where the side map has entries the merge needs the
-        // base's entry strings to order against, and pays a block decode per entry ordinal.
-        if side.is_empty() {
-            let payloads = base.payload_range(entries);
-            for index in payloads {
-                if walk.stop() {
-                    break;
-                }
-                let payload = base.payload_at(index).map_err(unreadable)?;
-                let code = base.code_at(payload.position).map_err(unreadable)?;
-                if live.is_retracted(code) {
-                    continue;
-                }
-                let (key, title) = base.served(payload.position).map_err(unreadable)?;
-                walk.consider(
-                    &fold, &folded, code, key, title, payload.field, payload.start, &visible,
-                    &membership, counts,
-                )?;
-            }
-        } else {
-            let mut side_at = 0usize;
-            let mut scratch = Vec::new();
-            'entries: for ordinal in entries.clone() {
-                let entry = base.entry_of(ordinal, &mut scratch).map_err(unreadable)?;
-                // Every side entry that sorts before this one, first — the merge's whole content.
-                // Within one entry string the two sides interleave by (kind, key), which is the
-                // order a base run is written in and the order `VocabularySuggest::mint` keeps.
-                while side_at < side.len() && side[side_at].0 < entry {
-                    if walk.stop() {
-                        break 'entries;
-                    }
-                    let value = side[side_at].1;
-                    side_at += 1;
-                    walk.consider(
-                        &fold,
-                        &folded,
-                        value.code,
-                        &value.key,
-                        value.title.as_deref(),
-                        value.field,
-                        value.start,
-                        &visible,
-                        &membership,
-                        counts,
-                    )?;
-                }
-                let run = base.payload_range(ordinal..ordinal + 1);
-                for index in run {
-                    if walk.stop() {
-                        break 'entries;
-                    }
-                    let payload = base.payload_at(index).map_err(unreadable)?;
-                    let code = base.code_at(payload.position).map_err(unreadable)?;
-                    // A side value sharing this entry string and sorting ahead of this payload
-                    // goes first, so the two sources are one order rather than two.
-                    while side_at < side.len()
-                        && side[side_at].0 == entry
-                        && (side[side_at].1.kind, side[side_at].1.key.as_ref())
-                            < (payload.kind, base.served(payload.position).map_err(unreadable)?.0)
-                    {
-                        if walk.stop() {
-                            break 'entries;
-                        }
-                        let value = side[side_at].1;
-                        side_at += 1;
-                        walk.consider(
-                            &fold,
-                            &folded,
-                            value.code,
-                            &value.key,
-                            value.title.as_deref(),
-                            value.field,
-                            value.start,
-                            &visible,
-                            &membership,
-                            counts,
-                        )?;
-                    }
-                    if live.is_retracted(code) {
-                        continue;
-                    }
-                    let (key, title) = base.served(payload.position).map_err(unreadable)?;
-                    walk.consider(
-                        &fold, &folded, code, key, title, payload.field, payload.start, &visible,
-                        &membership, counts,
-                    )?;
-                }
-            }
-            // Whatever is left of the side map's range sorts after every base entry under it.
-            while side_at < side.len() {
-                if walk.stop() {
-                    break;
-                }
-                let value = side[side_at].1;
-                side_at += 1;
-                walk.consider(
-                    &fold,
-                    &folded,
-                    value.code,
-                    &value.key,
-                    value.title.as_deref(),
-                    value.field,
-                    value.start,
-                    &visible,
-                    &membership,
-                    counts,
-                )?;
-            }
-        }
-
         debug_assert!(
-            !walk.values.iter().any(|v| v.code == ABSENT_CODE),
+            !values.iter().any(|v| v.code == ABSENT_CODE),
             "code 0 is the absent sentinel and is never bound to a key (§3.6)"
         );
         Ok(Some(SuggestPage {
             column: column.to_string(),
-            values: walk.values,
-            more: walk.more,
+            values,
+            more,
         }))
     }
 }
 
-/// The walk's running state — the page, what it has already emitted, and what it has spent.
-struct SuggestWalk {
-    values: Vec<Suggestion>,
-    /// Codes already on the page. **A value appears once**, at its first matching entry in §7's
-    /// order, and its `match` reports that entry.
-    emitted: rustc_hash::FxHashSet<u32>,
-    examined: u64,
-    more: bool,
-    limit: usize,
-    walk_budget: u64,
-}
-
-impl SuggestWalk {
-    /// Whether the walk is over, and — the same question — whether `more` is owed.
-    ///
-    /// Both stopping conditions set `more`, because both mean the range was not exhausted. Asked
-    /// *before* each item rather than after, so a page that fills exactly as the range ends reports
-    /// `more: false` rather than a truncation that did not happen.
-    fn stop(&mut self) -> bool {
-        if self.values.len() >= self.limit || self.examined >= self.walk_budget {
-            self.more = true;
-            return true;
-        }
-        false
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn consider(
-        &mut self,
-        fold: &tessera_analyse::SuggestionFold,
-        folded_q: &str,
-        code: u32,
-        key: &str,
-        title: Option<&str>,
-        field: SuggestionField,
-        start: u32,
-        visible: &dyn Fn(u32) -> Result<bool>,
-        membership: &Option<crate::filter::CategoryMembership<'_>>,
-        counts: bool,
-    ) -> Result<()> {
-        if self.emitted.contains(&code) {
-            return Ok(());
-        }
-        // **Counted here, at the value, and not at the entry.** The budget bounds how many values
-        // one request *examines* — the quantity §6.2 measures and §8 registers — and an already
-        // emitted value is not one of them.
-        self.examined += 1;
-        if !visible(code)? {
-            return Ok(());
-        }
-        let served = match field {
-            SuggestionField::Key => key,
-            SuggestionField::Title => title.unwrap_or(key),
-        };
-        let count = match (counts, membership) {
-            (true, Some(membership)) => Some(membership.count(code).map_err(|e| {
-                EngineError::SuggestionUnavailable {
-                    column: membership.column().to_string(),
-                    detail: e.to_string(),
-                }
-            })?),
-            _ => None,
-        };
-        self.emitted.insert(code);
-        self.values.push(Suggestion {
-            code,
-            key: key.to_string(),
-            title: title.map(str::to_string),
-            span: MatchSpan {
-                field,
-                start,
-                len: match_len(fold, served, start, folded_q),
-            },
-            count,
-        });
-        Ok(())
-    }
-}
-
-/// **`match.len`, derived at response time rather than stored** (§4).
-///
-/// The index records where an entry starts as a character offset into the *served* string; this
-/// re-folds that string forward from there until `q`'s folded bytes are consumed, and the
-/// characters consumed are the length. That is O(|q|) per emitted value — `q` is bounded at 256
-/// bytes by the contract — and it needs no second copy of the folded text beside the entry, which
-/// is what lets `match` be reported in characters of the string the client is about to draw rather
-/// than of a folded form the client never sees.
-///
-/// An empty query consumes nothing and highlights nothing, which is the picker's initial list.
-fn match_len(
-    fold: &tessera_analyse::SuggestionFold,
-    served: &str,
-    start: u32,
-    folded_q: &str,
-) -> u32 {
-    if folded_q.is_empty() {
-        return 0;
-    }
-    let Some((at, _)) = served.char_indices().nth(start as usize) else {
-        return 0;
-    };
-    let tail = &served[at..];
-    let mut characters = 0u32;
-    for (end, c) in tail.char_indices() {
-        characters += 1;
-        let folded = fold.entry(&tail[..end + c.len_utf8()]);
-        if folded.len() >= folded_q.len() && folded.starts_with(folded_q) {
-            return characters;
-        }
-    }
-    // Unreachable from an entry the index produced — the entry *is* this tail's fold, and the query
-    // is a prefix of it. Answering with the whole tail rather than panicking keeps a malformed
-    // index a wrong highlight instead of a downed request.
-    characters
-}

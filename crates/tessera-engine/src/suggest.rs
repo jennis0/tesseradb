@@ -64,7 +64,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use tessera_analyse::{EntryKind, SuggestionField, SuggestionFold};
 use tessera_filter::{Access, SortedDict, SortedDictWriter};
 
@@ -823,6 +823,286 @@ pub struct CompletedSuggest {
     pub index: Arc<SuggestIndex>,
     /// The sequence the dispatch recorded — see [`SideValue::seq`].
     pub covered_through: u64,
+}
+
+// ---------------------------------------------------------------------------------------------
+// The walk
+// ---------------------------------------------------------------------------------------------
+
+/// What the walk found for one value, before a response shape is put on it.
+#[derive(Debug, Clone)]
+pub struct Found {
+    pub code: u32,
+    pub key: String,
+    pub title: Option<String>,
+    pub field: SuggestionField,
+    pub start: u32,
+    pub len: u32,
+    pub count: Option<u64>,
+}
+
+/// What bounds one walk.
+#[derive(Debug, Clone, Copy)]
+pub struct WalkBudget {
+    /// The most values one page carries.
+    pub limit: usize,
+    /// The most values one request **examines** — a deployment constant, `max_suggestion_walk`.
+    ///
+    /// **It bounds latency, not disclosure.** The channel's bound is the vocabulary itself, which
+    /// the enumeration walks whole and unbudgeted; a budget only ever narrows what one request
+    /// examines (§6.2, §8).
+    pub walk_budget: u64,
+    pub counts: bool,
+}
+
+/// **One suggestion walk** (`docs/design/value-suggestion.md` §6.2), over the base index merged
+/// with the vocabulary's side map.
+///
+/// Free of the engine so that the gate and the traversal are separable — `Engine::suggest` supplies
+/// `visible` and `count`, and the bench supplies its own. Everything about *who may be told* is in
+/// those two closures and in nothing here; this function would happily emit every value of the
+/// vocabulary if handed a predicate that said yes.
+///
+/// `q` is the caller's text, folded here rather than by the caller, so the query and the index go
+/// through one fold.
+///
+/// The error type is the caller's, so a refusal keeps the shape its surface owes; `unreadable` is
+/// how an index read failure becomes one. **A read that fails part-way refuses the whole walk**
+/// rather than serving what it found: refusing at the value the read failed at would make the
+/// refusal a function of the prefix the caller typed (§3).
+pub fn walk<E>(
+    live: &VocabularySuggest,
+    fold: &SuggestionFold,
+    q: &str,
+    budget: WalkBudget,
+    visible: &dyn Fn(u32) -> Result<bool, E>,
+    count: &dyn Fn(u32) -> Result<u64, E>,
+    unreadable: &dyn Fn(io::Error) -> E,
+) -> Result<(Vec<Found>, bool), E> {
+    let folded = fold.entry(q);
+    let base = live.base();
+    let entries = base.prefix_range(&folded).map_err(unreadable)?;
+
+    let mut state = WalkState {
+        found: Vec::new(),
+        emitted: FxHashSet::default(),
+        examined: 0,
+        more: false,
+        budget,
+    };
+    let side: Vec<(&str, &SideValue)> = live
+        .side_range(&folded)
+        .flat_map(|(entry, run)| run.iter().map(move |value| (entry.as_str(), value)))
+        .collect();
+
+    // Two shapes of one walk. **The side map is empty in the ordinary case** — a bundle nothing has
+    // been ingested into since it opened — and then no entry string is decoded at all: the payload
+    // array is walked directly, which is the whole reason the run starts are an array beside the
+    // dictionary rather than inside it. Where the side map has entries the merge needs the base's
+    // entry strings to order against, and pays a block decode per entry ordinal.
+    if side.is_empty() {
+        for index in base.payload_range(entries) {
+            if state.stop() {
+                break;
+            }
+            let payload = base.payload_at(index).map_err(unreadable)?;
+            let code = base.code_at(payload.position).map_err(unreadable)?;
+            if live.is_retracted(code) {
+                continue;
+            }
+            let (key, title) = base.served(payload.position).map_err(unreadable)?;
+            state.consider(
+                fold, &folded, code, key, title, payload.field, payload.start, visible, count,
+            )?;
+        }
+    } else {
+        let mut side_at = 0usize;
+        let mut scratch = Vec::new();
+        'entries: for ordinal in entries {
+            let entry = base.entry_of(ordinal, &mut scratch).map_err(unreadable)?;
+            // Every side entry sorting before this one, first — the merge's whole content.
+            while side_at < side.len() && side[side_at].0 < entry {
+                if state.stop() {
+                    break 'entries;
+                }
+                let value = side[side_at].1;
+                side_at += 1;
+                state.consider(
+                    fold,
+                    &folded,
+                    value.code,
+                    &value.key,
+                    value.title.as_deref(),
+                    value.field,
+                    value.start,
+                    visible,
+                    count,
+                )?;
+            }
+            for index in base.payload_range(ordinal..ordinal + 1) {
+                if state.stop() {
+                    break 'entries;
+                }
+                let payload = base.payload_at(index).map_err(unreadable)?;
+                let code = base.code_at(payload.position).map_err(unreadable)?;
+                let (key, title) = base.served(payload.position).map_err(unreadable)?;
+                // A side value sharing this entry string and sorting ahead of this payload goes
+                // first, so the two sources are one order rather than two — which is what makes
+                // §7 hold across the seam.
+                while side_at < side.len()
+                    && side[side_at].0 == entry
+                    && (side[side_at].1.kind, side[side_at].1.key.as_ref())
+                        < (payload.kind, key)
+                {
+                    if state.stop() {
+                        break 'entries;
+                    }
+                    let value = side[side_at].1;
+                    side_at += 1;
+                    state.consider(
+                        fold,
+                        &folded,
+                        value.code,
+                        &value.key,
+                        value.title.as_deref(),
+                        value.field,
+                        value.start,
+                        visible,
+                        count,
+                    )?;
+                }
+                if live.is_retracted(code) {
+                    continue;
+                }
+                state.consider(
+                    fold, &folded, code, key, title, payload.field, payload.start, visible, count,
+                )?;
+            }
+        }
+        // Whatever is left of the side map's range sorts after every base entry under it.
+        while side_at < side.len() {
+            if state.stop() {
+                break;
+            }
+            let value = side[side_at].1;
+            side_at += 1;
+            state.consider(
+                fold,
+                &folded,
+                value.code,
+                &value.key,
+                value.title.as_deref(),
+                value.field,
+                value.start,
+                visible,
+                count,
+            )?;
+        }
+    }
+    Ok((state.found, state.more))
+}
+
+/// The walk's running state — the page, what it has already emitted, and what it has spent.
+struct WalkState {
+    found: Vec<Found>,
+    /// Codes already on the page. **A value appears once**, at its first matching entry in §7's
+    /// order, and its `match` reports that entry.
+    emitted: FxHashSet<u32>,
+    examined: u64,
+    more: bool,
+    budget: WalkBudget,
+}
+
+impl WalkState {
+    /// Whether the walk is over, and — the same question — whether `more` is owed.
+    ///
+    /// Both stopping conditions set `more`, because both mean the range was not exhausted. Asked
+    /// *before* each item rather than after, so a page that fills exactly as the range ends reports
+    /// `more: false` rather than a truncation that did not happen.
+    fn stop(&mut self) -> bool {
+        if self.found.len() >= self.budget.limit || self.examined >= self.budget.walk_budget {
+            self.more = true;
+            return true;
+        }
+        false
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn consider<E>(
+        &mut self,
+        fold: &SuggestionFold,
+        folded_q: &str,
+        code: u32,
+        key: &str,
+        title: Option<&str>,
+        field: SuggestionField,
+        start: u32,
+        visible: &dyn Fn(u32) -> Result<bool, E>,
+        count: &dyn Fn(u32) -> Result<u64, E>,
+    ) -> Result<(), E> {
+        if self.emitted.contains(&code) {
+            return Ok(());
+        }
+        // **Counted at the value, not at the entry.** The budget bounds how many values one request
+        // *examines* — the quantity §6.2 measures and §8 registers — and a value already emitted is
+        // not one of them.
+        self.examined += 1;
+        if !visible(code)? {
+            return Ok(());
+        }
+        let served = match field {
+            SuggestionField::Key => key,
+            SuggestionField::Title => title.unwrap_or(key),
+        };
+        let count = if self.budget.counts {
+            Some(count(code)?)
+        } else {
+            None
+        };
+        self.emitted.insert(code);
+        self.found.push(Found {
+            code,
+            key: key.to_string(),
+            title: title.map(str::to_string),
+            field,
+            start,
+            len: match_len(fold, served, start, folded_q),
+            count,
+        });
+        Ok(())
+    }
+}
+
+/// **`match.len`, derived at response time rather than stored** (§4).
+///
+/// The index records where an entry starts as a character offset into the *served* string; this
+/// re-folds that string forward from there until `q`'s folded bytes are consumed, and the
+/// characters consumed are the length. That is O(|q|) per emitted value — `q` is bounded at 256
+/// bytes by the contract — and it needs no second copy of the folded text beside the entry, which
+/// is what lets `match` be reported in characters of the string the client is about to draw rather
+/// than of a folded form the client never sees.
+///
+/// An empty query consumes nothing and highlights nothing, which is the picker's initial list.
+fn match_len(fold: &SuggestionFold, served: &str, start: u32, folded_q: &str) -> u32 {
+    if folded_q.is_empty() {
+        return 0;
+    }
+    let Some((at, _)) = served.char_indices().nth(start as usize) else {
+        return 0;
+    };
+    let tail = &served[at..];
+    let mut characters = 0u32;
+    for (end, c) in tail.char_indices() {
+        characters += 1;
+        let folded = fold.entry(&tail[..end + c.len_utf8()]);
+        if folded.len() >= folded_q.len() && folded.starts_with(folded_q) {
+            return characters;
+        }
+    }
+    // Unreachable from an entry the index produced — the entry *is* this tail's fold, and the query
+    // is a prefix of it. Answering with the whole tail rather than panicking keeps a malformed
+    // index a wrong highlight instead of a downed request.
+    characters
 }
 
 #[cfg(test)]
