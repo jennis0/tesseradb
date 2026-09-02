@@ -1,23 +1,21 @@
 # Tessera overview
 
 Tessera serves an interactive, pannable, zoomable map over a corpus of millions to billions of
-documents or records, from one machine, to many viewers at once, while the corpus keeps changing
-underneath it. Each viewer sees the map computed over exactly the items they are permitted to see:
-not only which points they can retrieve, but every count, density, cluster and label they are
-shown. Items arrive, are deleted or are suppressed while the service runs, and the map reflects
-each within seconds to minutes.
+documents or records with item-level access controls. Serve your customers individually-generated billion-point maps from a single machine. Ingest new data live, and  with live data ingest. 
+
+Unlike existing large-scale map serving systems, that bake large datasets into a single, shared view. Tessera gives each viewer sees a map computed over exactly the items they are permitted to see:
+not only which points they can retrieve, but every count, density, cluster and label is only served if they have permission to see it. 
+
+Tessera runs as a backend database via API to integrate into existing visualisations, or use our customisable components for building quickly.
 
 ## What you can do with it
 
 - **A map over any records with a 2D layout**: geographic coordinates, or an embedding projection
-  such as UMAP.
-- **Several coordinate systems over one corpus**, called views and view groups, sharing one item
+  such as T-SNE/UMAP.
+- **Several coordinate systems over one corpus**, sharing one item
   identity so a viewer can switch layout without losing their place.
-- **Composable filters** over categories, numbers, dates, keywords and full text.
-- **Typeahead** over category values.
-- **A drawn region as a filter**: a box, circle, ellipse or polygon.
-- **Annotation layers**: clusters, hierarchies including DAGs, regions and hulls, each with a
-  masked count correct for the viewer.
+- **Composable filters** over categories, numbers, dates, keywords and full text, as well as user-defined regions (boxes, circles, ellipses, and polygons)
+- **Annotation layers**: clusters, hierarchies including DAGs, regions and hulls, each correct for the viewer and with support for access-controlled labels
 - **Highlight mode**: light the matches, dull the rest.
 - **Item cards** for a selected point.
 - **Live ingest** into a running service, and deletion and suppression that take effect on the next
@@ -63,9 +61,8 @@ index      = true
 ```
 
 Three commands take it from there: `tessera check` validates the declaration against the Parquet
-schemas in seconds, without reading a row; `tessera build` produces the bundle in one streaming
-pass; `tessera serve` opens it on the HTTP API. A browser or an SDK never sees this file. It holds a
-token issued by a session server, and it asks `/v1/viewport` for what its holder may see.
+schemas; `tessera build` produces the bundle in one streaming
+pass; `tessera serve` opens it on the HTTP API.
 
 Embedding it: `<tessera-explorer>` drops a full map into a page as a custom element; `TesseraLayer`
 adds the same data to a deck.gl scene already running; and in a notebook, `tesseradb`'s `Map`
