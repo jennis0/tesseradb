@@ -309,7 +309,7 @@ paths:
         `selection.max_suggestion_walk` values were examined. That spent-budget form is the probe
         route's; where the server answers from a per-session set of visible values — built for a
         principal whose composed cardinality is at or under `selection.max_suggest_set_entities` —
-        `more` means the page filled and nothing else. ⊘ The set route is not built.
+        `more` means the page filled and nothing else.
 
         Not behind the compute-admission gate, and at most one suggest in flight per session: a
         second while one is running is the shared `429 backpressure`, shed whole and refused before
@@ -1126,7 +1126,7 @@ components:
         max_suggest_set_entities:
           type: integer
           minimum: 1
-          description: "The composed cardinality at or under which a suggestion is answered from a per-session set of the values this principal can see, rather than by probing one posting per value walked (`value-suggestion.md` §6.3, decision 0124); recommended 10⁷. Both routes serve the same page under the same gate and which answered is not on the wire; what differs is `more`, exact from the set route and possibly a spent walk budget from the probe route. A deployment constant, and the one here a caller can locate themselves against — they learn which side of it their own cardinality falls on, which a zoom-0 viewport already returns as `visible`. ⊘ The set route is not built; every request takes the probe route."
+          description: "The composed cardinality at or under which a suggestion is answered from a per-session set of the values this principal can see, rather than by probing one posting per value walked (`value-suggestion.md` §6.3, decision 0124); recommended 10⁷. Both routes serve the same page under the same gate and which answered is not on the wire; what differs is `more`, exact from the set route and possibly a spent walk budget from the probe route. A deployment constant, and the one here a caller can locate themselves against — they learn which side of it their own cardinality falls on, which a zoom-0 viewport already returns as `visible`."
 
     Layer:
       type: object
