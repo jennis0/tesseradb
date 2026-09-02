@@ -6,7 +6,7 @@ of the three label sets — the same figure the 210-cell two-axis sweep reported
 survives.**
 
 **What this is.** A check on the recommendation of
-[`docs/evidence/memos/2026-07-31-tile-parallelism-calibration.md`](../../docs/evidence/memos/2026-07-31-tile-parallelism-calibration.md)'s
+docs/evidence/memos/2026-07-31-tile-parallelism-calibration.md's
 "Follow-up 4, answered". That sweep varied tile count and row count over 210 cells, **all of them
 `categories-subclass`**. [`probes/results.md`](../results.md) §5 measures *run ratio* — mean mask
 run length over the random-mask expectation — at 1.00 → 5.11 across label sets at a comparable

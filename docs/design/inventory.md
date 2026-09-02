@@ -77,48 +77,48 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 
 | Document | Status | ⊘ |
 |---|---|---|
-| `annotation-representation.md` | Normative for the annotation representat | 40 |
-| `annotation-write-cycle.md` | Normative for the annotation write cycle | 18 |
-| `annotations.md` | Normative — r43 | 18 |
+| `annotation-representation.md` | Normative for the annotation representat | 38 |
+| `annotation-write-cycle.md` | Normative for the annotation write cycle | 15 |
+| `annotations.md` | Normative — r43 | 17 |
 | `architecture.md` | Normative — r61 | 48 |
-| `artifact-fetch-protocol.md` | Normative — r3 | 7 |
+| `artifact-fetch-protocol.md` | Normative — r3 | 6 |
 | `artifact-serving-at-scale.md` | Ruled, reviewed, amended, and re-measure | 22 |
 | `artifact-shapes.md` | Normative — r7 |  |
 | `artifact-system.md` | Descriptive. This document orients an ar | 6 |
-| `artifacts-from-points.md` | Draft | 2 |
+| `artifacts-from-points.md` | Draft | 1 |
 | `caching.md` | Provisional — under review |  |
 | `client-architecture.md` | Provisional — under review |  |
 | `client-components.md` | Provisional — under review | 10 |
 | `client-interaction.md` | Provisional — under review |  |
 | `client-obligations.md` | Provisional — under review |  |
-| `compaction.md` | Normative — r12 | 9 |
-| `concurrency-lifecycle.md` | Normative — r11 | 13 |
-| `configuration.md` | Normative for the build-time configurati | 28 |
-| `conformance.md` | Normative — r21 | 19 |
-| `contracts.md` | Normative — r76 | 39 |
+| `compaction.md` | Normative — r12 | 8 |
+| `concurrency-lifecycle.md` | Normative — r11 | 11 |
+| `configuration.md` | Normative for the build-time configurati | 22 |
+| `conformance.md` | Normative — r22 | 16 |
+| `contracts.md` | Normative — r76 | 29 |
 | `core-access-expressions.md` | Provisional — under review | 1 |
 | `correctness-suite.md` | Provisional — under review | 13 |
-| `dag-hierarchies.md` | Normative — r3 | 4 |
+| `dag-hierarchies.md` | Normative — r3 | 3 |
 | `deferred-index-ordinal-split.md` | Deferred |  |
 | `deferred-signature-major-layout.md` | Deferred |  |
 | `delta-serving.md` | Provisional — under review | 3 |
 | `filter-index.md` | Provisional — under review | 13 |
 | `filter-result-cache.md` | Provisional — under review | 7 |
-| `filter-surface.md` | Provisional — under review | 8 |
+| `filter-surface.md` | Provisional — under review | 6 |
 | `geometry-pinning.md` | Normative. Reviewed three times (invaria |  |
-| `highlight-and-hierarchy.md` | Normative — r6 | 14 |
+| `highlight-and-hierarchy.md` | Normative — r6 | 10 |
 | `hot-row-geometry.md` | Normative. The §6 amendments are folded  | 2 |
 | `measurement.md` | Provisional — under review | 5 |
-| `per-point-attributes.md` | Provisional — under review | 7 |
+| `per-point-attributes.md` | Provisional — under review | 6 |
 | `performance-suite.md` | Provisional — under review | 9 |
-| `polygon-membership.md` | Normative — r10 | 14 |
+| `polygon-membership.md` | Normative — r10 | 12 |
 | `projections.md` | Normative — r8 | 3 |
-| `records-and-search.md` | Provisional — under review | 29 |
-| `selection-operand.md` | Normative — r2 | 3 |
+| `records-and-search.md` | Provisional — under review | 25 |
+| `selection-operand.md` | Normative — r2 | 2 |
 | `streamed-serving.md` | Normative — r2 |  |
-| `system-architecture.md` | Normative — r17 | 28 |
+| `system-architecture.md` | Normative — r17 | 23 |
 | `tile-addressed-integration.md` | Provisional — under review |  |
-| `value-suggestion.md` | Normative — r5 | 13 |
+| `value-suggestion.md` | Normative — r5 | 12 |
 | `view-switching.md` | Provisional — under review | 4 |
-| `views.md` | Normative — r29 | 21 |
-| `write-path.md` | Normative for the write path. Owner sign | 20 |
+| `views.md` | Normative — r29 | 14 |
+| `write-path.md` | Normative for the write path. Owner sign | 11 |

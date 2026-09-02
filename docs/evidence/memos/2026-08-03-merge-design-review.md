@@ -6,7 +6,7 @@
 `MergePolicy::select` and `execute_merge` (`tessera-store/src/merge.rs`), `coalesce_delta_tiers`
 (`tessera-authz/src/tier.rs`) and `unsplit32` (`tessera-spatial/src/morton.rs`), all verified in
 the tree, with their tests. Written against decision
-[0043](../../decisions/0043-geometry-maintenance-never-blocks-a-request.md), which arrived
+0043, which arrived
 mid-review and changes the publication half of the answer.
 
 ---

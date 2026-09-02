@@ -7,17 +7,17 @@ under the correctness lens (r2), the build under the implementability lens (r6).
 normative:** owner sign-off; rulings on the three points marked *judgement call* at their claims
 (flush's entitlement in §10, the deep verifier's cadence in §11, and whether the source digest is
 amended into `contracts.md` §2.2). **How fault injection reaches a served binary is ruled** —
-decision [0071](../decisions/0071-fault-injection-reaches-a-served-binary-by-its-own-build.md), by
+decision 0071, by
 its own build rather than a runtime switch.
 **Reads against:** architecture §4 (I2, I7, I9, I11), §11.3; [`conformance.md`](conformance.md) §1,
 §2, §4.6, §6; [`write-path.md`](write-path.md) §5.4, §7, §14; [`compaction.md`](compaction.md) §3,
 §6, §9; [`records-and-search.md`](records-and-search.md) §1–§4; [`contracts.md`](contracts.md) §2.2,
 §3.2; [`measurement.md`](measurement.md) §1; decisions
 [0030](../decisions/0030-determinism-is-not-a-guarantee.md),
-[0042](../decisions/0042-a-dictionary-extent-never-repeats-a-descriptor.md),
-[0044](../decisions/0044-invisible-means-stale-serve-plus-background-refresh.md),
+0042,
+0044,
 [0047](../decisions/0047-edit-is-delete-plus-reingest.md),
-[0049](../decisions/0049-the-merge-ladder-saturates-and-the-cap-stays.md).
+0049.
 **Citation convention:** unprefixed §n is the architecture design; this document's own sections are
 cited as **spec §n**.
 
@@ -797,7 +797,7 @@ A pause site must park a thread **holding no lock**, or the deadlock is discover
 than in review.
 
 **The feature becomes declarable on `tessera-server` and `tessera-cli`, and a binary built with it
-goes to its own path** (decision [0071](../decisions/0071-fault-injection-reaches-a-served-binary-by-its-own-build.md)).
+goes to its own path** (decision 0071).
 The default-features build is unchanged and is what every deployment gets; the driver boots the
 faults build for a stage carrying a `kill`, and the ordinary one otherwise.
 
@@ -1074,150 +1074,3 @@ correctly with memory at half the bundle, and an out-of-memory kill is reported 
 rather than a correctness one. 17 A failing case at 10⁷ reduces, by seed, *n* and stage count alone,
 to a case a reader can inspect. 18 The census's cost at 10⁹ and the deep verifier's cost against a
 run's ingest cost are both measured, settling spec §9.2's modelled figures and spec §11's cadence.
-
-## Appendix R — Review record
-
-**r7** (2026-08-15) — §10's saturation precondition corrected at the claim, found by laddering
-the endurance tier to a 10⁷-item corpus. The section stated saturation as something the harness
-arranges — θ and the mark caps pinned above the corpus total — and that discharge has a ceiling
-the wording never noticed: no cap clears every corpus, and above it the whole-extent viewport is
-a bounded window over an unbounded visible set. Measured on a real run at a 10⁷ base: a write
-stage entitled to 15,300 appearing rows recorded four rows *vanishing* — displaced out of the
-served window, nothing wrong with the engine — the zoom levels disagreed with each other (each
-has a different visible-to-cap ratio), and tile 0's `visible` moved by exactly the ingested count
-while only two thirds of the rows were attributable in the sample. Saturation is now what it
-always was on the wire: a per-tile fact of each response (`served == matched`), observed by the
-diff rather than assumed from configuration. Point sets are compared over saturated tiles; capped
-tiles are held to their counts, per tile where attribution is complete and in full-extent sum
-always; displacement is recognised rather than reported as a defect; and a recording whose every
-tile is capped is declared uncheckable for point sets — stated in the result and equal to no
-entitlement, because a check that quietly stops checking is worse than one that fails. The
-battery gains a deep full-extent viewport (zoom 5 — the deepest whose underlay fits the default
-cell budget) so a membership surface outlives the shallow viewports' truncation, and unit tests
-pin the two edges: displacement in a capped tile satisfies the stage's entitlement, and a
-genuinely lost row in a saturated tile fails it even when every other tile is capped.
-
-**r6** (2026-08-15) — §12–§14 reviewed under the implementability lens, the review the r4 entry
-said they had not had. **No mechanism changed; §1–§11's rationale was out of scope and untouched.**
-Seven findings, all confirmed against the code rather than accepted from the report, and two of
-them would have stopped a builder outright.
-
-- **Three of the eight stages cannot be requested.** The control plane is five routes, and merge,
-  coalesce and rotation are none of them — they dispatch on eligibility at the executor's tick, and
-  the switches that suppress them are Rust-only. §12.3 gains the sequencing protocol a driver must
-  use instead, and records why trigger routes are not proposed: a control surface existing only for
-  tests sits on a plane where every route is operator contract.
-- **The barriers did not exist.** §12.3 claimed `/control/status` already exposes a geometry
-  version, a watermark and a coalesce counter. It exposes none of them — its own handler records
-  that the per-partition block is unbuilt, and the executor's counters never reach the JSON. That is
-  now build-order row 2, the first thing anyone hits.
-- **The pause sites cannot reach a booted binary.** Fault injection is enabled only through self
-  dev-dependencies, `cargo build` does not build those, and the harness builds the release binary
-  with default features by rule. Closing this moves a fail-closed guard, so §10.1 now carries the
-  two routes and **rules neither** — it is an owner decision, and build-order row 8 is marked as the
-  one row that cannot start on a reading of this document.
-- **The prerequisite this document was built around had already landed**, a week before it was
-  written: the corpus declaration exists, the fixtures declare `fx_key`, the points batch serves
-  it, and the strict xfail was removed on 2026-08-07 — behaving exactly as a strict marker should.
-  Total verification is unblocked now, the planted column *is* `fx_key` rather than a second name
-  for it, and `conformance.md` is stale about this as it was about the fold.
-- **`ingest_rows -> Vec<UnallocatedRow>` was wrong twice**: that type is the executor's post-parse
-  shape in a crate §13 forbids depending on, and `/control/ingest` takes Arrow rather than JSON. The
-  corpus emits a wire-shaped batch.
-- **The cold profile measured a warm cache.** Advising `DONTNEED` from the driver skips pages mapped
-  into the server, so the profile restarts the server and advises before boot.
-- **`discard_unsynced` had no mechanism.** Each seam now declares what a power cut takes, and the
-  `CURRENT` flip is named as the first to build because a single rename is the whole commit point.
-
-Smaller corrections: the canonical type gained a third arm for `/v1/region` (plain Arrow, three
-batches — and that route is unrouted, so the battery marks it); the chunking-determinism assumption
-the byte concatenation rests on is written down; `verify_deep` needs a public named-prefix open, and
-its vanishing-file carve-out is not prefix-scoped, the coalesce pruning inside the live prefix; the
-CLI precedent is `tessera tokenise`; and §16's commands became `pytest` invocations, the driver
-having been Python since r4 while the commands still said cargo.
-
-**r5** (2026-08-14) adds crash coverage, on the owner's question, and it costs one subsection
-rather than a section because **a crash is the invariance check with its right-hand side
-disjoined** (§10.1): a killed stage must land on one of its two endpoints and never between. The
-driver gains a `kill` modifier, the comparison gains a disjunct, and nothing else moves.
-
-What the addition made visible, and neither fact was in the document before: crash coverage stops
-at the WAL — **no test has ever killed a flush, a merge, a coalesce or a fold** — and for merge the
-pause site such a test needs does not exist either, which its own tests already record. The fold is
-the better-placed one: its crash behaviour is designed and its startup sweep built, so what is
-missing there is the test rather than the mechanism. Build order gains a row for the seam sites,
-which is the only row needing engine work rather than harness work.
-
-Two limits are stated at the claim rather than left to be discovered. A SIGKILL is not a power cut
-— the page cache survives, so an engine that acked before syncing passes every kill-and-restart
-test, measured rather than argued — and no black-box test can close that, fsync ordering not being
-observable through the API. And the seam sites must **extend** the write path's existing fault
-switchboard: a second pause mechanism beside the first is the natural mistake, the two designs
-sharing no vocabulary, and `conformance.md` §5 already flags it in both directions.
-
-**r4** (2026-08-14) adds the half that makes the document buildable rather than aspirational:
-§12 (what is written, in which language, against which seam), §13 (where it lands) and §14 (the
-order, and the one prerequisite outside this suite). No claim in §1–§11 changed.
-
-Three choices in it are load-bearing and should be attacked first by whoever reviews this:
-
-1. **The driver is Python over the real API**, not Rust over the engine's types — so it reuses the
-   conformance harness's boot machinery and one canonicalisation serves both suites. The rejected
-   alternative cannot see the serialisation layer, where half the compared surfaces only exist.
-2. **The generator is one implementation, in Rust**, reached from Python through two CLI verbs on
-   the `tessera analyse` precedent. It defines the corpus rather than Tessera's behaviour, so a
-   second implementation would put the fixture under test; the granularity of the verbs is what
-   keeps it one call per response and one per census rather than one per row.
-3. **Stage invariance is built first** because it needs no generator, no planted column and no
-   oracle — the cheapest mechanism is the one the r2 review found strongest, and the sequence in
-   §14 follows that rather than the document's own reading order.
-
-**r3** (2026-08-14) — the scope widens from a mechanism to a suite, on the owner's direction. The
-three mechanisms are unchanged and become spec §9–§11; what is new is the frame around them: the
-eight-stage sequence (spec §2), the read battery that runs after every one of them (spec §3), the
-home-rather-than-family reduction that makes the type axis finite (spec §4), the four reductions
-that make the matrix runnable at all (spec §5), the endurance backstop (spec §6) and the server
-profiles (spec §7). `data-fidelity.md` is superseded and deleted rather than left as a second place
-to look.
-
-Three things the widening settled that the narrower document had not asked:
-
-1. **The type axis is homes, not families.** A producer writes a home, and the families inside one
-   share its machinery — so the operation axis crosses three homes rather than five families times
-   three placements, and the family sweep runs once per home at fixture size. Without this the
-   matrix is several thousand cells and gets sampled silently.
-2. **A constrained-memory profile is a flag, not a machine.** The regime that matters is the
-   memory-to-data ratio, so capping the process reproduces the 10⁹ regime at 10⁷. The alternative
-   reading — that testing it requires a corpus large enough to exceed real memory — is what has kept
-   it untested, and it is wrong.
-3. **Endurance is a distinct axis from scale**, and the two are routinely conflated. Reclamation
-   keeping pace, identifier monotonicity and ladder saturation are defects of operation *count*;
-   none is reachable by making the corpus bigger, and all are reachable at 10⁶ by running long.
-
-**r2** (2026-08-14) — reviewed once under the correctness and implementability lenses. No mechanism
-changed; six claims within them did. Flush's refresh was on the invariance list and the refresh
-exists to change answers, so it takes a delta form. The fold's entitlement is *stronger* than the
-draft claimed — an accepted deletion leaves the served surface at acceptance, so a fold's own delta
-is empty. Byte-identical comparison is impossible on the wire (the trailer carries elapsed
-wall-clock), so the comparison inherits the canary comparator's canonicalisation. The item cannot be
-recovered from a served `tessera_id`, entity ids being assigned by signature and arrival order, so
-it is planted in its own row. Two verifier bullets were defective in opposite directions — one
-refusing every bundle that had absorbed a write, one unable to fail — and are respectively scoped
-and deleted. The verifier cannot simply be invoked after a merge: its identity loop restarts the row
-index per segment.
-
-**One factual claim was false, and it was the one r1 called its sharpest finding:** that the scale
-harness runs no fold. It runs two. The gap survives narrower — everything asserted after a fold at
-scale is a masked count — and that is what spec §1 and §9.1 now say. Two cost claims were corrected:
-the on-disc band of 2.0–2.6× is withdrawn by its own memo as a metric bug (1.32–1.59×), and a
-merge's 4.4–4.9× peak is against capped inputs rather than the corpus.
-
-**What the review attacked and did not move:** the census cost at 10⁹, the generator properties as
-mutually satisfiable, position collisions under a uniform spread as harmless, and the boundary
-against `conformance.md`.
-
-**r1** (2026-08-14) — first draft, as `data-fidelity.md`. Commissioned on the owner's question: how
-the system is shown to store, aggregate and serve correctly at a scale where nobody can inspect the
-answer. It found that the tree is strong at 10⁴ and thin above it — a seam of depth against size
-rather than a missing idea — and that stage invariance needs no ground truth, which is what makes it
-the mechanism most likely to survive contact with a real deployment.

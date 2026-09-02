@@ -21,7 +21,7 @@ marks in one self-contained response.
 
 Nor does a client hold any identifier that needs old geometry to resolve. A tile is a Morton prefix
 and a depth, resolved against any segment's own sorted codes by binary search; under
-[decision 0040](0040-quantisation-is-slice-scoped-index-config.md) that prefix is a *permanently*
+decision 0040 that prefix is a *permanently*
 stable address. An item is a `tessera_id`, invertible to `(shard, entity)` independently of geometry,
 with the row looked up last. So a re-issued request re-locates everything it needs.
 

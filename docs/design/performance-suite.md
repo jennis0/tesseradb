@@ -12,13 +12,13 @@ perf §2.2 is this document's load-bearing claim and the thing to attack first.
 [`filter-index.md`](filter-index.md) §2.2–§2.3, §5–§6 (**index §n**);
 [`compaction.md`](compaction.md) §6, §9; [`write-path.md`](write-path.md) §2.3, §4.3;
 [`conformance.md`](conformance.md) §6; decisions
-[0013](../decisions/0013-mark-specified-vs-implemented.md),
-[0052](../decisions/0052-the-folds-page-cache-mitigation-is-a-hint-not-a-throttle.md),
+0013,
+0052,
 [0056](../decisions/0056-a-folds-schedule-is-a-gated-window-not-a-pure-timer.md),
 [0063](../decisions/0063-category-postings-serve-public-listings-and-never-per-viewer-ones.md),
-[0064](../decisions/0064-an-absent-number-is-a-presence-bitmap-beside-the-column.md),
+0064,
 [0067](../decisions/0067-term-timing-is-accepted-for-text-and-keyword-postings.md),
-[0068](../decisions/0068-a-row-space-operand-bounded-by-the-requests-domain-is-admitted.md).
+0068.
 **Citation convention:** unprefixed §n is the architecture design; this document's own sections are
 cited as **perf §n**.
 
@@ -585,26 +585,3 @@ Four, each rulable without opening a source file.
    that fires too late to act on.
 
 ---
-
-## Appendix R — review record
-
-**Drafted 2026-08-13.** Not yet reviewed.
-
-The draft's spine is the audit in perf §2.2, taken by reading §6.4's eleven rows back to the
-evidence each cites. Three findings came out of that reading rather than out of the brief, and each
-is the reason a section exists: the corpus does not distinguish a constant timed at a library entry
-point from one taken through the engine, while §6.4's budgets are request budgets (perf §2.1); the
-row-space route is built for twelve fixed widths and measured on two, with decision 0064's presence
-bitmap — whose cost lands per run and per segment rather than per row — never timed at all
-(perf §3.3); and records §7's text-fold model has exactly one assumed term, the compression rate,
-which is measurable today on the shipped blob writer without the text family existing (perf §4.4).
-
-Two stale figures in §6.4 are recorded in perf §2.3 rather than corrected, this document owning no
-part of that file. §6.4 has since taken both corrections but one: row 8 carries the built reader's
-236–270 µs/block and row 6 the measured 7.4–8.5× divisor, while **row 7's bare `÷ cores` stands**.
-Perf §2.3 keeps the pair because the class is the audit's finding, not either figure.
-
-One expectation is carried as a falsifiable hypothesis rather than as a claim, because the corpus
-has been wrong about a neighbouring one: scan work invariant in layer count, setup linear in it
-(perf §3.2). The fragment build was modelled as growing with tier count and measured flat, so the
-sweep is specified to be capable of returning a negative result and reporting it.

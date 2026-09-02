@@ -9,7 +9,7 @@ rulings on the four decision points in expr §8, the first of which amends an in
 and the plugin ABI. Until those rulings are made this document binds nothing.
 **Reads against:** architecture §4 (I4, I5, I13b), §6.1–§6.4, §11.1, §12.2–§12.4, §15, Appendices
 D and E; [`contracts.md`](contracts.md) §2.4, §4; [`conformance.md`](conformance.md) §3;
-decisions [0013](../decisions/0013-mark-specified-vs-implemented.md),
+decisions 0013,
 [0048](../decisions/0048-no-deployments-exist-so-delete-rather-than-support.md).
 **Citation convention:** unprefixed §n is the architecture design; this document's own sections
 are cited as **expr §n**.
@@ -251,9 +251,3 @@ new auth function exactly as to the old.
    plugin (dimensions, canonicalisation, the referenced-category optimisation); its DNF and
    satisfaction machinery is absorbed by the core. Absorb-and-trim on promotion rather than
    maintain both.
-
-## Appendix R — Review record
-
-- **r1** (2026-08-14) — drafted from an exploratory discussion of matching Accumulo's AND/OR
-  semantics in the core rather than plugin-side. Not yet reviewed; expr §8's rulings not yet
-  sought.

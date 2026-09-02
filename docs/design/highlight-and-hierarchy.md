@@ -130,7 +130,7 @@ with what is on screen rather than with what matched.
    the ~216 ms rather than the ~18 ms. That is the same silent fallback the measured rule itself
    takes, and it is a latency difference and never an answer difference: the two routes agree over
    every range a request can ask about. Stated here because *always* would read as an assurance
-   ([decision 0013](../decisions/0013-mark-specified-vs-implemented.md)) and the test that pins the
+   (decision 0013) and the test that pins the
    route asserts the counter over a view that can invert.
 3. **Count per tile.** `highlighted` is one `and_cardinality` of the crossed set against each
    tile's row range, the operation the `matched` count already is; bitmap cost is containers
@@ -480,53 +480,3 @@ All four taken 2026-09-02.
 1–2 and 4's first half can run as one server track and one client track in parallel; 3 and the
 panel follow. Contracts §3.2 is amended with each server stage, and the conformance comparator's
 schema with the frame columns.
-
-## Appendix R — review trail
-
-- **r1 (2026-09-02).** Drafted from the owner's direction of the same day after rung 3 was served
-  and its DAG found invisible. Not yet reviewed.
-- **r2 (2026-09-02).** Owner questions, same day. Browse generalised across the five kinds with
-  `level`; **counts under a filter added** (`filters` on the request, `matched_count` on the row)
-  after the r1 refusal was found to rest on 0104's viewport reasons, neither of which holds off
-  the viewport; §2.1 written to say how a highlight is served on the filter path and why it
-  scales with the screen and not the match; `point_rows = "highlight"` added so a highlight change
-  re-sends bits rather than points.
-- **r3 (2026-09-02).** The three rulings taken: one verb, search in, and a filter layer is still
-  a layer — listed, not presented for viewing (§5.4 reworded). Sent for its adversarial review.
-- **r4 (2026-09-02).** One adversarial review, seven findings, all dispositioned. Taken: browse's
-  filtered count is undefined for a row-routed leaf and 0104's real reason is route silence, not
-  the two objections r2 answered — put to the owner as §9 (d); the clause cache does not exist
-  and was written in the present tense — ⊘ marked, key corrected, cost stated as re-evaluation
-  per request; gate-before-page and a total order fixed for browse; the three columns given
-  positions and `highlighted` reserved at the build; the artifacts bit and C32 say the
-  conjunction `all_of[filters, highlight]`; C31 was taken (r58), rows renumbered C32/C33; the
-  smaller seven (filter-layer `MembershipRows` at open, `pin` dropped, `parents` on other forms,
-  JSON encoding, `level` refused on one-level kinds, `point_rows` bound to a generation, the
-  empty-operand timing residual in C33). Not taken: nothing.
-- **r5 (2026-09-02).** §9 (d) ruled — scan, priced in §7 — and the document promoted to Normative.
-  C32 and C33 carried into `architecture.md` Appendix C at its r59.
-- **r7 (2026-09-02).** §2.1 and §7 corrected against measurement after the served rung 3 was
-  timed. Two costs the design priced as cheap were not: a `member_of` leaf on a **row-major** level
-  read the column rather than the artifact-major membership beside it — 2.85 s a request on rung
-  3's `mesh/descriptors`, now 22 ms — and browse's **first page of a session** pays that level's
-  masked-count histogram, 2.7 s, now 0.52 s with the walk split across the engine's pool. Neither
-  is a change to what is served: both routes answer `membership ∩ M_auth` and the zoom-0
-  `highlighted` total is the browse row's `masked_count` to the row. The wording that said a
-  row-major level is "a scan of the on-screen rows" is replaced rather than mended — it named a
-  whole-view walk — and §7's first ⊘ is discharged for the `member_of` shape only.
-- **r6 (2026-09-02).** **§7's two ⊘s replaced by measurement**, taken while §10's three server
-  stages were built (`tessera-bench --bin browse_cost`). A browse page is bounded by the layer's
-  artifact count and not by the corpus: 1.0 ms over MedCPT's 253-artifact clustering and 39.7 ms
-  over its 30,217-descriptor DAG, at the same 3.6 × 10⁷ items. The whole-view scan is 2.2 ms at
-  2.4 × 10⁶ rows and 20.7 ms at 3.6 × 10⁷ — **0.6–0.9 ns per row against the 20–30 ns the r4
-  estimate bounded it from**, because the row route runs under rayon and reads a fixed-width slot
-  where the per-tile crossing reads a row's entity and tests a bitmap. §9 (d)'s ruling stands and
-  its cost argument is now a measured one; the ⊘ that remains on the figure is its **medium**,
-  neither ladder corpus declaring a render-only column to ask. Stages 1–3 of §10 are built, so
-  the status line no longer says nothing here is. **Two claims are corrected against the built
-  code** at the referee's finding, and both are marked at the claim rather than mended in prose:
-  §2.1's per-tile crossing is *preferred*, not guaranteed — a view that published no
-  `row-entity.u32` has no walk to take and projects, at the ~216 ms the same paragraph prices —
-  and §7's whole-view scan is admission-gated but **not** cancellable, `scan_rows` carrying no
-  checkpoint on any path and the verb having no consumer-gone signal, so what is held is the
-  permit for the scan's own duration. No other claim of the design moves.

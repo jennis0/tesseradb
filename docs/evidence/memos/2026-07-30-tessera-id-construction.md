@@ -6,7 +6,7 @@
 `tessera-store`, `tessera-engine`, `tessera-wire`, the reference oracle, the byte-scanner.
 
 **Provenance:** the external-ID identity plan
-(`docs/archive/plans/2026-07-30-external-id-identity.md`, section *"The identity
+(docs/archive/plans/2026-07-30-external-id-identity.md, section *"The identity
 construction — specified, not assumed"*), Task 3. This memo is the normative statement;
 Task 4 lands it in the contracts spec, Task 5 implements it in Rust and Task 12
 reimplements it in Python.
@@ -510,7 +510,7 @@ happening by accident.
   it. *(Amended 2026-07-30: since `tessera_id` became the storage sort key, rotation also
   **reorders tied rows** and therefore changes `permutation.bin` — see §6.)*
 - **`priority`'s viewer-plane prohibition is RETIRED** *(amended 2026-07-30; the concurrent
-  memo `docs/evidence/memos/2026-07-30-priority-as-identity-prefix.md` was adopted by owner
+  memo docs/evidence/memos/2026-07-30-priority-as-identity-prefix.md was adopted by owner
   decision, and this bullet as first written — a prohibition, plan Important I-4 — is
   **superseded**)*. The prohibition rested entirely on `priority` being an **unkeyed**
   `splitmix64` of the entity ID, which is what publishing would have made dangerous: a

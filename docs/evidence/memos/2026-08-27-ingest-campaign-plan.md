@@ -5,9 +5,9 @@ direction, 2026-08-27: serve whole datasets and whole artifact sets. Where Tesse
 a defect to fix, not a scale to design around.** This memo is written on that premise: no rung is
 sampled, and every wall is named with the work that removes it.
 
-**Reads with:** [`2026-08-26-dataset-ladder.md`](2026-08-26-dataset-ladder.md) (what was acquired
+**Reads with:** 2026-08-26-dataset-ladder.md (what was acquired
 and why), [`2026-08-22-artifact-scale-campaign.md`](2026-08-22-artifact-scale-campaign.md) (the
-three walls, measured), [`../../artifact-delivery.md`](../../artifact-delivery.md) (the stage this
+three walls, measured), ../../artifact-delivery.md (the stage this
 work belongs to), [`../../design/configuration.md`](../../design/configuration.md) (the surface each
 rung is declared in), and [`../../../probes/dataset.md`](../../../probes/dataset.md) (the corpus
 this ladder joins).

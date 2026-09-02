@@ -1,10 +1,10 @@
 # Annotations — the representation
 
 **Date:** 2026-08-15 · **Promoted:** 2026-08-16
-**Status:** **Normative for the annotation representation** — what the model is made of: storage, addressing, the visibility predicate's evaluation, the fold's artifact pass, and serving. Reviewed under three lenses (Stage 0, 2026-08-15; the record is [`2026-08-15-artifact-design-review.md`](../evidence/memos/2026-08-15-artifact-design-review.md)) and ruled by decisions [0074](../decisions/0074-row-less-entities-are-allocated-downward.md)–[0083](../decisions/0083-the-frontier-is-a-request-time-budget.md). Companion to [`annotations.md`](annotations.md), which owns the *model*. The measurement campaign is run and reviewed ([`probes/2026-08-15-artifact-representation/`](../../probes/2026-08-15-artifact-representation/)); its three harness bugs are corrected in place and listed as negative results (§11.3). [`annotation-write-cycle.md`](annotation-write-cycle.md) supersedes the point-event halves of §5 and §5.0.3, and this document is corrected toward it. `architecture.md` remains the specification and wins every conflict.
-**⊘ Three things are open inside a normative document**, marked at their sites and each due at the stage that needs it rather than held against promotion: search's containment gate (§8 — Stage 8), membership packaging (§2.4 — Stage 2, the one layout question the rulings did not settle), and the edit pass ([decision 0077](../decisions/0077-supplied-content-lives-in-the-record-blob.md) defers it — Stage 7). **The filter axis closed on 2026-08-28** ([decision 0104](../decisions/0104-a-filter-answers-a-boolean-per-served-artifact.md)): a filter answers a boolean beside each served artifact and moves neither existence nor the count (§6.3). §11.3's unmeasured items are allocated to stages the same way; the fold's artifact pass is the largest of them and is Stage 4's first measurement, not its last.
+**Status:** **Normative for the annotation representation** — what the model is made of: storage, addressing, the visibility predicate's evaluation, the fold's artifact pass, and serving. Reviewed under three lenses (Stage 0, 2026-08-15; the record is [`2026-08-15-artifact-design-review.md`](../evidence/memos/2026-08-15-artifact-design-review.md)) and ruled by decisions 0074–0083. Companion to [`annotations.md`](annotations.md), which owns the *model*. The measurement campaign is run and reviewed ([`probes/2026-08-15-artifact-representation/`](../../probes/2026-08-15-artifact-representation/)); its three harness bugs are corrected in place and listed as negative results (§11.3). [`annotation-write-cycle.md`](annotation-write-cycle.md) supersedes the point-event halves of §5 and §5.0.3, and this document is corrected toward it. `architecture.md` remains the specification and wins every conflict.
+**⊘ Three things are open inside a normative document**, marked at their sites and each due at the stage that needs it rather than held against promotion: search's containment gate (§8 — Stage 8), membership packaging (§2.4 — Stage 2, the one layout question the rulings did not settle), and the edit pass (decision 0077 defers it — Stage 7). **The filter axis closed on 2026-08-28** ([decision 0104](../decisions/0104-a-filter-answers-a-boolean-per-served-artifact.md)): a filter answers a boolean beside each served artifact and moves neither existence nor the count (§6.3). §11.3's unmeasured items are allocated to stages the same way; the fold's artifact pass is the largest of them and is Stage 4's first measurement, not its last.
 **Why it is separate:** the model survived review under three lenses; the section that made it concrete did not. Three reviewers (2026-08-15) returned findings that clustered almost entirely on `annotations.md` §7 and §7.1 — a reuse claim asserting that artifacts are items and therefore inherit every entity-keyed structure. That section is withdrawn and replaced by this document. Keeping the model and the representation apart is what stops the next such finding invalidating both.
-**Reads against:** design §4 (I1, I2, I5, I7, I9, I12), §5.1, §6.3, §7.1–§7.9, §10.4, Appendix A, Appendix C; [`filter-index.md`](filter-index.md) §2 (the measured constants this design turns on); [`write-path.md`](write-path.md) §5; [`views.md`](views.md) §3; [`compaction.md`](compaction.md); decisions [0028](../decisions/0028-postings-requirement-and-the-pair-relation.md), [0039](../decisions/0039-multi-valued-categoricals-are-slow-path-only.md), [0062](../decisions/0062-filters-compose-as-a-boolean-tree-inside-the-candidate.md), [0064](../decisions/0064-an-absent-number-is-a-presence-bitmap-beside-the-column.md).
+**Reads against:** design §4 (I1, I2, I5, I7, I9, I12), §5.1, §6.3, §7.1–§7.9, §10.4, Appendix A, Appendix C; [`filter-index.md`](filter-index.md) §2 (the measured constants this design turns on); [`write-path.md`](write-path.md) §5; [`views.md`](views.md) §3; [`compaction.md`](compaction.md); decisions 0028, 0039, [0062](../decisions/0062-filters-compose-as-a-boolean-tree-inside-the-candidate.md), 0064.
 **Citation convention:** unprefixed §n is the architecture design; `model §n` is `annotations.md`; this document's own sections are **spec §n**.
 
 > **⊘ None of this is built.** No artifacts, no layers, no membership structure. Figures are marked
@@ -214,7 +214,7 @@ item's life, so a comparison key renumbers nothing and leaves **I9** intact.
 already beats by 28–118×. This is a disk-form and projection-input optimisation, not a request-path
 one. It is free, and it is **permanent** — unretrofittable under I9, so it is decided before the
 first build that writes artifacts or not at all. **Ruled and taken**
-([decision 0073](../decisions/0073-entity-ties-are-ordered-by-morton-code.md)).
+(decision 0073).
 
 **There is only one entity ordering, so this is not an artifact-local decision.** Taking it for
 artifact membership takes it for everything in entity space at once, and what else moves separates by
@@ -339,7 +339,7 @@ only at a cluster count three orders of magnitude beyond anything running
 
 **Supplied content itself is not here: it lives in the record blob — the store points use —
 addressed at the artifact's own entity**
-([decision 0077](../decisions/0077-supplied-content-lives-in-the-record-blob.md)). Two riders
+(decision 0077). Two riders
 travel with that. The blob addresses by rank in its **own** has-row bitmap — the bitmap of entities
 that carry a record, which has nothing to do with row space — so an artifact having no row is
 simply irrelevant to it; this is the one piece of the withdrawn reuse claim that survived review,
@@ -508,7 +508,7 @@ the same route a point does. The remaining branches are the conjuncts of the mod
 test (model §3, §5; decisions
 [0075](../decisions/0075-the-masked-count-is-an-existence-criterion.md),
 [0076](../decisions/0076-an-artifact-is-served-whole-or-not-at-all.md),
-[0079](../decisions/0079-the-gate-is-one-flag-not-three-modes.md)): the own-terms flag and the
+0079): the own-terms flag and the
 criterion are independent declarations, composed by conjunction and never disjunction, and a
 failure anywhere is the same absence.*
 
@@ -546,13 +546,13 @@ by entity. What they do not get is membership in `M_auth`, or the assumption tha
 intersection answers a visibility question. The reserved range is a **list** of 2¹⁶-aligned blocks,
 not one block, and a run that fills is extended by appending the next block **downward** — the
 artifact region grows from `u32::MAX` towards the points
-([decision 0074](../decisions/0074-row-less-entities-are-allocated-downward.md)), so an appended
+(decision 0074), so an appended
 block can never interleave with a point segment: interleaving is unrepresentable under two regions,
 not merely avoided. Each wholesale replacement consumes ~10⁷ IDs and any fixed block exhausts.
 
 ⊘ **Decision 0072 is settled and not built, and nothing in this document may assume it is in force**
 ([decision 0072](../decisions/0072-entity-ids-are-slots-and-are-reused-after-a-fold.md), marked per
-[decision 0013](../decisions/0013-mark-specified-vs-implemented.md); review 2026-08-15, verified
+decision 0013; review 2026-08-15, verified
 against the code). The decision relaxes I9 — a slot returns to the allocator at the fold that
 reconciles every durable structure naming it — but the allocator as built is monotone with no free
 list, and `tessera_id` carries no generation field. Until it is built, exhaustion is permanent, and
@@ -566,7 +566,7 @@ assumption that IDs come back. The block list stands in either state: a layer pu
 contiguous run it can take at once.
 
 **Where those runs come from is ruled**
-*(owner, 2026-08-15, [decision 0074](../decisions/0074-row-less-entities-are-allocated-downward.md))*:
+*(owner, 2026-08-15, decision 0074)*:
 artifacts keep entity IDs, and **row-less entities are allocated downward from `u32::MAX`** while
 points continue upward from 0; exhaustion is the two marks meeting. The hazard this dissolves: three
 point-side structures are dense over entity *ranges* derived from **segment extents** — a flush or
@@ -668,7 +668,7 @@ being edited rather than refusing the operation:
 
 ⊘ **The content row names an operation no structure currently performs** (review 2026-08-15).
 Supplied content lives in the record blob
-([decision 0077](../decisions/0077-supplied-content-lives-in-the-record-blob.md)), whose layers are
+(decision 0077), whose layers are
 disjoint and never updated in place (§2.4), so "in place" has no route yet — and an edit written as
 a new blob layer serves the pre-edit text silently. Supplying the route is the edit pass's first
 job.
@@ -885,7 +885,7 @@ off it (§5.0.2).
 A viewport response carries, per visible layer, the artifacts whose rows intersect the tile's ranges
 and which pass their own existence test. **What bounds that set depends on the layer's structure**
 (§6.2): a treed layer is cut to the request's artifact budget
-([decision 0083](../decisions/0083-the-frontier-is-a-request-time-budget.md)), and a levelled layer
+(decision 0083), and a levelled layer
 serves the levels asked for — or, where the request names none, the levels its own declared zoom
 ranges give for the depth it asked at (**built 2026-08-28**; the request field is `levels` and the
 response's *artifacts* frame carries each artifact's own `level`. Until then neither existed: every
@@ -930,7 +930,7 @@ own structure**, or **refuse** — never sample.
 ### 6.2 A tree and a level set are different structures
 
 **Lineage lives in a layer's edges; levels are declared resolutions. Neither carries the other**
-([decision 0082](../decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md)), and the
+(decision 0082), and the
 two are independent declarations rather than alternatives — a layer may have edges, levels, both or
 neither.
 
@@ -958,7 +958,7 @@ coarser feature is both an ancestor and a level up. This is what levels were for
 which reading one as the other is safe.
 
 **Its edges run between levels, and they are information rather than roll-up**
-([decision 0087](../decisions/0087-cross-level-edges-are-information-not-rollup.md)). A layer's edges
+(decision 0087). A layer's edges
 are all within a level or all between them — declared, never inferred, and a layer may not mix them —
 and which shape it has decides what they are *for*. **The value is `tiered` rather than
 `administrative`**: the other kinds name structures, and a subject taxonomy or a biological
@@ -1010,7 +1010,7 @@ Every candidate is tested independently against the existence criterion on its o
 ([decision 0080](../decisions/0080-the-frontier-is-a-per-artifact-test.md)). For a treed layer a
 viewport then intersects a root **and** every passing descendant of it, so something must bound the
 response, and **that bound is a request parameter in the shape of the mark budget a viewport already
-carries** ([decision 0083](../decisions/0083-the-frontier-is-a-request-time-budget.md)); the layer
+carries** (decision 0083); the layer
 declares only its default, which is what `prune_children` is. Since artifacts cannot be sampled
 (§6.1), a budget is met by **serving ancestors instead of their descendants** — the *reduce by the
 layer's own structure* route, and the reason rollup still has a job now that per-artifact testing has
@@ -1300,7 +1300,7 @@ in-memory by necessity as well as by design, and reports resident sizes alongsid
 - **M4 → §6's zoom-to-level map** is settled by ruling rather than by measurement, and the ruling
   moved: it was *advisory metadata that bounds no work*, and since 2026-08-28 it is the **default
   bound** on a levelled layer's response, overridable per request by `levels`. A treed layer still
-  has none ([decision 0082](../decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md),
+  has none (decision 0082,
   §6, §6.2, and the decision this section's change records).
 - **M5 → §2.3's width rule** becomes measured or is withdrawn.
 - **M6 → §8's escalation resolves**, either dissolving the register row or confirming it.
@@ -1366,17 +1366,17 @@ and needs nothing.)
 **The review's five, and where they landed:**
 
 1. ✔ **Where artifact entity IDs come from** —
-   [decision 0074](../decisions/0074-row-less-entities-are-allocated-downward.md): row-less entities
+   decision 0074: row-less entities
    allocate downward from `u32::MAX`, points continue upward, interleaving unrepresentable (§4).
 2. ✔ **The masked count is an existence criterion, independent of the gate** —
    [decision 0075](../decisions/0075-the-masked-count-is-an-existence-criterion.md), with the gate
    itself recast as one flag beside it
-   ([decision 0079](../decisions/0079-the-gate-is-one-flag-not-three-modes.md)) (§4, §7; model §5).
+   (decision 0079) (§4, §7; model §5).
 3. ✔ **An artifact is served whole or not at all** —
    [decision 0076](../decisions/0076-an-artifact-is-served-whole-or-not-at-all.md): existence
    follows containment because a failed containment removes the artifact; C3 holds (§9).
 4. ✔ **Supplied content lives in the record blob** —
-   [decision 0077](../decisions/0077-supplied-content-lives-in-the-record-blob.md) (§2.4); ⊘ the
+   decision 0077 (§2.4); ⊘ the
    edit route is deferred to its own design pass.
 5. ⊘ **Search gates on containment** (§8) — **still open, the one ruling that is.** The route is
    withdrawn until ruled; the term-signature shape is recorded there as under consideration, not
@@ -1384,16 +1384,16 @@ and needs nothing.)
    never `M_auth`.
 
 Alongside those: ranked contents are a general artifact property with a caller-supplied ranking
-([decision 0078](../decisions/0078-the-service-takes-no-opinion-on-which-variation.md)), the
+(decision 0078), the
 frontier is a per-artifact test
 ([decision 0080](../decisions/0080-the-frontier-is-a-per-artifact-test.md)), and replacement is
 distinguished from edit by identity
 ([decision 0081](../decisions/0081-a-replacement-mints-identities-an-edit-keeps-them.md), which
 withdrew §5.0.2's publish-time refusal). Two later rulings restructure §6: a layer's lineage is its
 **edges** and its levels are declared resolutions, which are independent structures
-([decision 0082](../decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md), §6.2), and
+(decision 0082, §6.2), and
 what bounds a treed layer's response is a **request-time artifact budget** rather than a declared
-depth ([decision 0083](../decisions/0083-the-frontier-is-a-request-time-budget.md), §6.3).
+depth (decision 0083, §6.3).
 
 **Still open beneath them:** the fold's Rule F membership clause (§5.0.3, live once decision 0072
 is built), ⊘ the filter axis (§6.3), ⊘ a packaging for membership (§2.4), ⊘ the proportional
@@ -1406,7 +1406,7 @@ criterion's denominator for predicate membership (model §5), and:
 **This document's own residue:**
 
 - ✔ **The signature-sort tiebreak** (§2.2) — **ruled, taken** *(owner, 2026-08-15,
-  [decision 0073](../decisions/0073-entity-ties-are-ordered-by-morton-code.md))*. Allocation becomes
+  decision 0073)*. Allocation becomes
   `(signature, morton_code, source_id)`, the last component for totality. **Measured: 4.08× on the
   disk form, and postings byte-identical at 1.00×**, with §2.1 bounding what it is worth — the hot
   path is row space, so this is disk and projection input. Two things the decision carries that this
@@ -1475,77 +1475,3 @@ artefact of storing membership in the wrong space.
 The retained superseded reasoning is in §2.7. It is kept at length because every wrong turn in this
 document had one cause — reasoning about entity space while designing a row-space hot path — and that
 error was invisible from inside the argument that made it.
-
-## Appendix R
-
-**r9 — 2026-08-28. The filter axis is settled: a boolean, and nothing else moves.** §6.3's ⊘ asked which number sits beside an artifact under a filter and what prunes one the filter has emptied. The answer is neither: the count stays the masked count, nothing is pruned, and the frame gains a nullable `matched` — whether a member this principal may see, inside the request's tiles, satisfies the filter ([decision 0104](../decisions/0104-a-filter-answers-a-boolean-per-served-artifact.md), owner ruling; built and on the wire the same day, contracts r42). A boolean rather than a filtered count, because two numbers on one artifact make the client choose which it is showing; and the server's to compute, because a client's points are a *sample* of the matches and the sample is empty for exactly the small artifacts a filter is used to find. Scoped to the request's tiles, that being the extent every filter-crossing route can answer over — stated in §6.3 and in contracts §3.2 rather than left to be discovered, since the count beside it is not so scoped.
-
-**r8 — 2026-08-28. The level is on the wire both ways, and there is no ceiling.** §6's two halves
-were each describing something that did not exist. The zoom→level map was *advisory* because nothing
-on the wire could name a level — the request now carries `levels` and the *artifacts* frame carries
-each artifact's own `level`, so the map becomes the **default** (the levels its ranges give for the
-depth asked at) and naming levels overrides it; a layer declaring no ranges is unaffected and serves
-all of them. And §2's argument that a fine-level request *"will be refused on its artifact ceiling
-regardless"* rested on a ceiling that was never built and now never will be: the owner ruled against
-one (2026-08-28) on the grounds that a large response is slow rather than wrong, so degraded service
-beats none, and the build reports the whole-layer artifact count per level instead. Measured on the
-GeoNames rung, where the map cuts an overview response from 464,655 artifacts to 5,096. M4 (§11.2)
-moves with the map. The evidence is
-[`../evidence/memos/2026-08-28-artifact-response-volume.md`](../evidence/memos/2026-08-28-artifact-response-volume.md).
-
-**r7 — 2026-08-19. A dependency edge carries deletion and visibility.** §4's extra term was three
-cheap questions — the target's deny state, its layer's reachability, and whether its slot still
-exists — and is now the target's whole `verdict`
-([decision 0089](../decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md), rule 2):
-a dependent is served only where what it depends on is served, per artifact, which closes the case
-0086 left open and pays the masked count 0086 declined to. §5.0.4 keeps its refusal and gains its
-boundary: replacement mints identities and so still refuses rather than repointing, while deletion
-cascades to dependents and rides the deletion lane, retiring at the fold that executes it. Both
-rules are non-configurable, and neither widens what a principal sees.
-
-**r6 — 2026-08-19. Vocabulary only.** *Variation* becomes an entry of an artifact's ranked
-**`contents`**, indexed by its **rank**, matching `annotations.md` §2.3 and `configuration.md` §1.
-The level layout's `artifacts.arrow` carries rank references rather than variation references, and
-the caller's key is `key`, not `stable_key`, wherever it appears. No mechanism moved.
-
-**r5 — 2026-08-16.** §2.4 records where an attachment lives — in the attached artifact's own
-record, the edge being read on exactly the path that reads the artifact — and §5.0's bulk-publication
-note becomes a statement of what exists: the build plane takes declarations, memberships, content and
-edges, running the control plane's own registry and publication. Nothing about the model moved.
-
-**r4 — 2026-08-16. Promoted to normative.** §6.2 is rewritten onto
-[decision 0082](../decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md): a tree and a
-level set are different structures and independently declared, so a treed layer declares no levels
-and sits entirely at level 0 on one reserved entity run, while levels remain for balanced semantic
-resolutions and for stacked independent analyses. §6.3 gains
-[decision 0083](../decisions/0083-the-frontier-is-a-request-time-budget.md)'s request-time budget and
-the reason a budget is not a disclosure control. §6's opener no longer claims the zoom-to-level map
-bounds the work — it contradicted this document's own §8 measurement two paragraphs later, and the
-map is advisory, absent entirely for a treed layer; M4 (§11.2) is thereby settled by ruling rather
-than by measurement. §10's table separates lineage from levels for each recast. The architecture
-amendments this design owed are performed (r43).
-
-**r3 — 2026-08-15.** The owner rulings (decisions 0074–0081) applied. The entity-ID region is
-settled downward (§4), the visibility predicate carries the flag, the criterion and variation
-containment as one conjunction (§4), supplied content's home is the record blob with the edit route
-⊘ deferred (§2.4), §5.0.2's publish-time suppression refusal is replaced by 0081's
-edit/replacement split with the key optional again, and §5 distinguishes the two refresh
-operations, replacement being the only one built. §12 now records four of the five rulings landed;
-search's gate remains the open one.
-
-**r2 — 2026-08-15.** Stage 0 adversarial review, three lenses
-([record](../evidence/memos/2026-08-15-artifact-design-review.md)), run after the campaign and the
-write cycle. What it attacked and what changed: the search route is withdrawn as a fail-open until
-it gates on containment (§8, ruling 5); the entity-ID source is recorded as the structural blocker
-it is (§4, ruling 1); decision 0072 is marked specified-not-implemented where this document had
-cited it as in force (§4), and Rule F's arm gains the membership clause reuse will need (§5.0.3);
-the substitutive-threshold sites are marked as one side of the model's contradiction (§4, §7); the
-levels matrix no longer claims to derive the count rule (§10). Claims the code cannot support are
-marked at their sites: membership packaging and supplied content's home (§2.4, ruling 4), the
-in-place edit (§5.0.1), the runtime artifact's durable home (§5.1), and the fold pass's assumed
-old-row stream (§5.0.3). §5's point-event rows and §5.0.3's re-base account are replaced by the
-reviewed write cycle's.
-
-**r1 — 2026-08-15.** Drafted to replace the model's withdrawn §7/§7.1. The measurement campaign ran
-the same day; its review found three harness bugs, corrected in place and kept as negative results
-(§11.3).

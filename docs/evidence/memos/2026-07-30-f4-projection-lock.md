@@ -136,7 +136,7 @@ with a 22 ms p99), so both c=1000 rows understate what the server could do.
 
 ## Related
 
-- `docs/evidence/memos/2026-07-30-f1-selection-overdraw.md` — same file, per-tile selection path.
+- docs/evidence/memos/2026-07-30-f1-selection-overdraw.md — same file, per-tile selection path.
 - **F2**, in `crates/tessera-engine/src/compose.rs`: `compose` iterates the entire overlay and
   buffer on every viewport. Measured at ~10 ns per buffer entry (rejected) and ~18.5 ns per
   overlay entry (resolved), zoom-independent because `compose` runs once per request before the

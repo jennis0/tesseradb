@@ -263,7 +263,7 @@ fn d_suppressing_an_item_drops_the_count_by_one() {
 /// and the second assertion below — that the served set is *not* the first three rows — is what
 /// actually pins the fix. A sample ordered by row order is a sample ordered by **permission
 /// signature**, because entity IDs are signature-sorted permanently under I9; that is the defect
-/// `docs/evidence/memos/2026-07-30-priority-as-identity-prefix.md` exists to close.
+/// docs/evidence/memos/2026-07-30-priority-as-identity-prefix.md exists to close.
 #[test]
 fn f_selection_returns_the_lowest_tessera_ids_not_the_first_rows() {
     let tmp = TempDir::new().unwrap();
@@ -2147,7 +2147,7 @@ fn warm_row_projection_cache_serves_output_identical_to_cold() {
 
 /// **The selection-overdraw canary.**
 ///
-/// Origin: `docs/evidence/memos/2026-07-30-f1-selection-overdraw.md`. The retired placeholder sampler
+/// Origin: docs/evidence/memos/2026-07-30-f1-selection-overdraw.md. The retired placeholder sampler
 /// asked `iter_range` for a tile's visible rows and kept the first `k`, and `iter_range` was eager —
 /// so every visible row was copied into a `Vec<u32>` and all but `k` discarded, ~100 MB per request
 /// at 10⁹. The memo asserted that waste as an equality and asked whoever fixed it to re-point the

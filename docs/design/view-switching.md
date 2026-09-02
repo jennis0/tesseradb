@@ -15,8 +15,8 @@ groups, one moving between the views of a group.**
 **Reads with:** [`views.md`](views.md) §2–§5, [`client-architecture.md`](client-architecture.md)
 (the replica and its bands), [`client-components.md`](client-components.md) §5.3 (the
 catalogue), §5.5 (the explorer's regions) and §7 (the demo and the notebook),
-[decision 0040](../decisions/0040-quantisation-is-slice-scoped-index-config.md) (the extent is
-the view's), [decision 0113](../decisions/0113-ordinals-are-removed-and-the-key-is-the-only-address.md)
+decision 0040 (the extent is
+the view's), decision 0113
 (a key is the only address, and creation order is the only order).
 
 ---
@@ -428,7 +428,7 @@ two-view arXiv rung before choosing another.
 
 ## 9. What lands, and what proves it
 
-Three steps, tracked in [`../client-delivery.md`](../client-delivery.md) as the client work is.
+Three steps, tracked in ../client-delivery.md as the client work is.
 The first two are independent of §10 and build together — the components against the fake store,
 the store against its tests — and integrate on the multi-view fixture.
 
@@ -447,29 +447,3 @@ the store against its tests — and integrate on the multi-view fixture.
   Recommended: (a), taken up with V3.
 - **The depth across a group switch** — decided at r2 as *not pinned* (§4), for reasons stated
   there; recorded here so it can be overruled in a letter rather than rediscovered.
-
-## Appendix R — review trail
-
-- **r1, 2026-09-01.** Drafted from an investigation of the client's handling of views, under the
-  owner's four directions in the status line. Unreviewed. Open: the depth rule across a group
-  switch (§4); the `positions` verb's leak-register row (§5); the cache budget's default (§7).
-- **r2, 2026-09-01.** Fleshed out to build against, under a fifth owner direction: the picker is
-  two drop-downs. The store's operation, projections and rules are named (§3): a non-current view
-  has no request in flight; shared state reaches a view when it becomes current; the session
-  artifact table is one, correcting r1's *one table per view*. The depth question is decided —
-  not pinned — with its reasons (§4). The pickers are specified with their entries, order, label
-  rule, hiding rule and events (§6.1–§6.3), and the item card, viewer and widget follow (§6.4–§6.6).
-  Found while reading the code: `viewsOfGroup` and `stepView` already exist, tested and uncalled;
-  `scopedScalars` is named in a comment and declared nowhere; the pinned leaf already composes.
-  The steps are laid out (§9) and one ruling is put (§10). The board `Views.dc.html` is added to
-  the canvas generator in the same change. Unreviewed beyond the author. **Same day, owner
-  question on reuse and restyling:** §6.7 added — the rules move into `@tesseradb/client` as pure
-  functions, the parts and the token rule are named, React wrappers owed, the native select kept
-  as a leaning. **V1 and V2 built the same day**, each refereed separately and fixed once (the
-  store: a colour-stale refetch outside the settle, the artifacts projection not rebound, the
-  switch flag armed on a cold switch; the components: a follow subscription surviving
-  disconnection, the basemap install without a generation guard), then smoked live, which found
-  one more (the incoming machinery built after `viewId` moved, so the map's refit landed on the
-  outgoing presenter). The document was corrected at the claim in three places: the switch settle
-  is the store's, the warm publish is a tick late, and a warm return across frames waits for the
-  refit's depth.

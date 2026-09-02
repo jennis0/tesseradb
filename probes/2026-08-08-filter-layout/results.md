@@ -503,7 +503,7 @@ quote a flat one.**
 ## Arms 8–10 (2026-08-09) — the unselective gap closed, the accelerator priced, the offsets priced
 
 Measured after the campaign above, and written up in
-[`docs/evidence/memos/2026-08-09-filter-performance-options.md`](../../docs/evidence/memos/2026-08-09-filter-performance-options.md),
+docs/evidence/memos/2026-08-09-filter-performance-options.md,
 which carries the tables; this section is the pointer, not the record.
 
 - **Arm 8, `resultbuild`** ([`src/bin/resultbuild.rs`](layoutprobe/src/bin/resultbuild.rs), raw
