@@ -161,7 +161,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use croaring::Bitmap;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use tessera_filter::{
     resolve_union, CodeSet, Codes, ColumnPostings, DictError, KeyMatcher, RecordExtentPaths,
     RecordStack, RecordValue, SortedDict, ValueColumn,
@@ -2563,20 +2563,33 @@ impl FilterColumns {
             .as_ref()
             .ok_or_else(|| FilterError::MembershipUnavailable(column.to_string()))?;
 
-        let mut from_extents = FxHashSet::default();
+        // **A count per code, not a set of codes.** The sweep is the same one pass over the same
+        // entities either way, and counting in it is what lets `?counts=true` be exact without a
+        // second sweep: the extents and the base postings are disjoint in entity space — a posting
+        // covers the base build and an extent covers entities ingested since it — so the two halves
+        // of a value's count add rather than overlapping.
+        let mut from_extents: FxHashMap<u32, u64> = FxHashMap::default();
         for layer in layers.layers.iter().filter(|l| l.values_rel.is_some()) {
             let layer = &layer.values;
             for entity in layer.present().and(candidate).iter() {
                 if let Some(code) = layer.value_of(entity) {
-                    from_extents.insert(code.raw());
+                    *from_extents.entry(code.raw()).or_default() += 1;
                 }
             }
         }
+        // **The one thing a count may not assume**, checked where it is cheap rather than argued
+        // where it is not: `intersection_cardinality` is exact per source and cardinality does not
+        // distribute over a union, so a category column that ever acquired delta postings tiers
+        // would need the materialising route. None does today — a flush writes extents for a
+        // category, never postings (decision 0063) — and this is where that stops being an
+        // assumption. `carries` is unaffected either way, existence *does* distribute.
+        let postings_are_single_source = !postings.has_tiers();
         Ok(CategoryMembership {
             column: column.to_string(),
             postings,
             candidate,
             from_extents,
+            postings_are_single_source,
         })
     }
 
@@ -2946,8 +2959,13 @@ pub struct CategoryMembership<'a> {
     column: String,
     postings: &'a ColumnPostings,
     candidate: &'a Bitmap,
-    /// The codes the candidate's *post-build* entities carry — the half no posting covers.
-    from_extents: FxHashSet<u32>,
+    /// The codes the candidate's *post-build* entities carry, **and how many of them carry each** —
+    /// the half no posting covers. Disjoint from the postings' half in entity space, which is what
+    /// lets [`Self::count`] add the two.
+    from_extents: FxHashMap<u32, u64>,
+    /// Whether the column's postings are one record per value rather than a base plus live tiers.
+    /// [`Self::count`] refuses otherwise; see [`FilterColumns::category_membership`].
+    postings_are_single_source: bool,
 }
 
 impl CategoryMembership<'_> {
@@ -2962,17 +2980,48 @@ impl CategoryMembership<'_> {
             // exactly the entities that carry no value. It is not a value and is never visible.
             return Ok(false);
         }
-        if self.from_extents.contains(&code) {
+        if self.from_extents.contains_key(&code) {
             return Ok(true);
         }
-        let members = self
+        // **A boolean against the mapped view, never a materialised posting.** A value's posting is
+        // corpus-wide — every entity carrying it, hidden ones included — and the question is one
+        // bit, asked once per value walked. `ColumnPostings::intersects` short-circuits at the
+        // first container the two sets share and allocates nothing.
+        self.postings
+            .intersects(AttrLocalId::new(code), self.candidate)
+            .map_err(|e| FilterError::PostingsUnreadable {
+                column: self.column.clone(),
+                detail: e.to_string(),
+            })
+    }
+
+    /// **How many items carrying `code` this principal may see** — C8's `and_cardinality` against
+    /// the composed mask, exact, computed per request and never precomputed
+    /// (`value-suggestion.md` §3).
+    ///
+    /// The two halves add because they are disjoint in entity space: the extents sweep counted the
+    /// candidate's *post-build* entities and the postings cover the base build alone.
+    ///
+    /// Never a sort key. The count is the viewer's own number and would be admissible as one under
+    /// **I2**, but a count-ordered page is a top-*k* over the prefix and depends on which values
+    /// were examined before the budget ran out (§8.2, and decision 0069 for the corpus-global
+    /// alternative). Ordering is the matched text's, and this is information beside a row.
+    pub fn count(&self, code: u32) -> Result<u64, FilterError> {
+        if code == UNRESOLVABLE_VALUE.raw() {
+            return Ok(0);
+        }
+        if !self.postings_are_single_source {
+            return Err(FilterError::MembershipUnavailable(self.column.clone()));
+        }
+        let extents = self.from_extents.get(&code).copied().unwrap_or(0);
+        let base = self
             .postings
-            .entities(AttrLocalId::new(code))
+            .intersection_cardinality(AttrLocalId::new(code), self.candidate)
             .map_err(|e| FilterError::PostingsUnreadable {
                 column: self.column.clone(),
                 detail: e.to_string(),
             })?;
-        Ok(members.intersect(self.candidate))
+        Ok(extents + base)
     }
 }
 

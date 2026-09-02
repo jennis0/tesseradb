@@ -108,6 +108,15 @@ impl ColumnPostings {
         self.base.record_count()
     }
 
+    /// Whether any delta tier is stacked over the base.
+    ///
+    /// Asked by a caller whose arithmetic distributes over a *single* source and not over a union —
+    /// `CategoryMembership::count`, whose `and_cardinality` is exact per record and wrong across
+    /// one. Existence distributes and never needs this.
+    pub fn has_tiers(&self) -> bool {
+        !self.tiers.is_empty()
+    }
+
     /// The entities carrying `value`, unioned across the base and every live tier.
     pub fn entities(&self, value: AttrLocalId) -> io::Result<Bitmap> {
         resolve_union(self, &[value])
@@ -170,6 +179,95 @@ impl ColumnPostings {
             }
         }
         Ok(out)
+    }
+
+    /// **Does any entity in `candidate` carry `value`** — as a boolean, short-circuiting at the
+    /// first container the two share, and never materialising the posting.
+    ///
+    /// # Why this exists beside [`Self::narrow`]
+    ///
+    /// The question `/v1/categories` and `/v1/categories/{column}/suggest` ask of a `derived`
+    /// column is `members(v) ∩ candidate ≠ ∅` — a *bit*, asked once per value walked
+    /// (`value-suggestion.md` §6.2). Answering it through [`Self::entities`] materialises the
+    /// value's corpus-wide posting and intersects it afterwards; answering it through
+    /// [`Self::narrow`] allocates the intersection and then throws it away. Neither can stop early,
+    /// and the enumeration runs one of them per value in the whole vocabulary.
+    ///
+    /// `Bitmap::intersect` against the mapped view answers the bit without allocating and returns
+    /// at the first coinciding container, so a hidden value costs the container keys the two sets
+    /// share and nothing more. The measured gap on a visible head value under a scattered candidate
+    /// at 10⁷ values over 10⁸ entities is **0.1–0.6 ms** median through the materialising route
+    /// against **0.15–16.6 µs** through this one (`probes/2026-09-02-value-suggestion/`).
+    ///
+    /// **Existential questions distribute over the union, which is what makes this exact across
+    /// tiers**: a value's entities are its base record ∪ every live tier's, and
+    /// `(A ∪ B) ∩ C ≠ ∅ ⟺ (A ∩ C ≠ ∅) ∨ (B ∩ C ≠ ∅)`. So each source is tested as it is read and
+    /// the first `true` returns — the union is never assembled at all. Cardinality does **not**
+    /// distribute this way, which is why [`crate::ColumnPostings`] has no `count` beside this one
+    /// and why `CategoryMembership::count` asserts the tier stack is empty before it counts.
+    ///
+    /// An empty candidate is `false` without reading a byte, on [`Self::narrow`]'s reasoning: a
+    /// principal who can see nothing reads no posting.
+    pub fn intersects(&self, value: AttrLocalId, candidate: &Bitmap) -> io::Result<bool> {
+        if candidate.is_empty() {
+            return Ok(false);
+        }
+        for posting in self.sources(value)? {
+            match posting {
+                PostingRef::Roaring(view) => {
+                    if candidate.intersect(&view) {
+                        return Ok(true);
+                    }
+                }
+                PostingRef::Array(bytes) => {
+                    // Bounded by `small_term_threshold`, so this is a handful of `contains` probes
+                    // against the candidate rather than a bitmap of its own.
+                    for chunk in bytes.chunks_exact(4) {
+                        if candidate.contains(u32::from_le_bytes(chunk.try_into().unwrap())) {
+                            return Ok(true);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    /// **`|members(value) ∩ candidate|`** against the mapped view, without materialising the
+    /// intersection — C8's `and_cardinality`, which is what `?counts=true` serves beside a
+    /// suggestion (`value-suggestion.md` §3).
+    ///
+    /// # The one thing this is not allowed to assume, and does not
+    ///
+    /// **Cardinality does not distribute over a union.** `|(A ∪ B) ∩ C|` is *not*
+    /// `|A ∩ C| + |B ∩ C|` where `A` and `B` share entities, and a value's entities are its base
+    /// record unioned with every live tier's — a flush republishing a value the base already holds
+    /// puts the same entity in both. So the several-source case unions the narrowed sets and counts
+    /// the result, which is [`Self::narrow`]'s allocation and is correct; only the single-source
+    /// case, which is every category column today (categories have no delta postings tiers — the
+    /// flush writes extents, not postings), takes the allocation-free route.
+    pub fn intersection_cardinality(
+        &self,
+        value: AttrLocalId,
+        candidate: &Bitmap,
+    ) -> io::Result<u64> {
+        if candidate.is_empty() {
+            return Ok(0);
+        }
+        let sources = self.sources(value)?;
+        match sources.len() {
+            0 => Ok(0),
+            1 => Ok(match &sources[0] {
+                PostingRef::Roaring(view) => candidate.and_cardinality(view),
+                PostingRef::Array(bytes) => bytes
+                    .chunks_exact(4)
+                    .filter(|chunk| {
+                        candidate.contains(u32::from_le_bytes((*chunk).try_into().unwrap()))
+                    })
+                    .count() as u64,
+            }),
+            _ => Ok(self.narrow(value, candidate)?.cardinality()),
+        }
     }
 
     /// [`Self::narrow`] with the running set narrowed **in place** — `live ∩= the value's entities`.
@@ -446,6 +544,99 @@ mod tests {
                 .narrow_inplace(AttrLocalId::new(0), &mut live)
                 .unwrap();
             assert_eq!(live, want, "in place, across a tier stack");
+        }
+    }
+
+    /// **`intersects` answers exactly `!narrow(..).is_empty()`**, across both encodings, an absent
+    /// record, an empty candidate and a tier stack.
+    ///
+    /// The point of the boolean route is that it stops early and never assembles the posting, so
+    /// its agreement with the materialising construction is the thing to check rather than assume —
+    /// and a walk that runs it once per value in a vocabulary turns a disagreement into a value
+    /// silently withheld from, or offered to, a principal.
+    ///
+    /// **Mutations this kills:** returning at the first source instead of at the first *hit*;
+    /// testing the tag-0 array's bytes against the wrong endianness; treating an absent record as
+    /// `true`; skipping the tiers.
+    #[test]
+    fn intersects_agrees_with_narrowing_across_a_tier_stack() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("postings.arrow");
+        let wide: Vec<u32> = (0..500).map(|i| i * 3).collect();
+        let boundary: Vec<u32> = (0..SMALL).collect();
+        write_postings(
+            &base,
+            &[vec![1, 2, 3, 900], wide, vec![], boundary],
+            SMALL,
+        )
+        .unwrap();
+        let tier_path = dir.path().join("tier.arrow");
+        // Value 0 gains entities the base does not hold, and value 7 exists only in the tier —
+        // both shapes a boolean that consulted the base alone would answer wrongly.
+        write_delta_tier_at(&tier_path, &[(0, vec![4, 5, 20]), (7, vec![77])], SMALL).unwrap();
+        let column = ColumnPostings::open(&base, false)
+            .unwrap()
+            .with_tiers(vec![Arc::new(DeltaTier::open(&tier_path).unwrap())]);
+
+        let candidates = [
+            Bitmap::new(),
+            Bitmap::of(&[2]),
+            Bitmap::of(&[20]),
+            Bitmap::of(&[77]),
+            Bitmap::of(&[1, 3, 900, 6, 12, 4_000]),
+            Bitmap::from_range(0..1_500),
+            Bitmap::of(&[999_999]),
+        ];
+        for value in [0u32, 1, 2, 3, 7, 50] {
+            for candidate in &candidates {
+                let id = AttrLocalId::new(value);
+                let narrowed = column.narrow(id, candidate).unwrap();
+                assert_eq!(
+                    column.intersects(id, candidate).unwrap(),
+                    !narrowed.is_empty(),
+                    "value {value} against {} entities",
+                    candidate.cardinality()
+                );
+                assert_eq!(
+                    column.intersection_cardinality(id, candidate).unwrap(),
+                    narrowed.cardinality(),
+                    "cardinality, value {value} against {} entities",
+                    candidate.cardinality()
+                );
+            }
+        }
+    }
+
+    /// The keyed base — a category's own shape — takes the same agreement, including the code with
+    /// no record at all, which is what "no members" is spelled as (index §2.5).
+    #[test]
+    fn intersects_agrees_over_a_keyed_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("postings.arrow");
+        write_delta_tier_at(
+            &base,
+            &[(7, vec![1, 2]), (40_000, vec![3]), (65_535, vec![4, 5])],
+            SMALL,
+        )
+        .unwrap();
+        let column = ColumnPostings::open_keyed(&base).unwrap();
+
+        for code in [0u32, 7, 8, 40_000, 65_535] {
+            for candidate in [
+                Bitmap::new(),
+                Bitmap::of(&[3]),
+                Bitmap::of(&[1, 4]),
+                Bitmap::from_range(0..10),
+                Bitmap::of(&[99]),
+            ] {
+                let id = AttrLocalId::new(code);
+                assert_eq!(
+                    column.intersects(id, &candidate).unwrap(),
+                    !column.narrow(id, &candidate).unwrap().is_empty(),
+                    "code {code} against {} entities",
+                    candidate.cardinality()
+                );
+            }
         }
     }
 

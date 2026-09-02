@@ -1810,6 +1810,49 @@ fn an_entity_whose_value_is_not_yet_reachable_matches_no_negation() {
 ///
 /// Asserted with a **narrow** principal, since a full-coverage one is offered everything and the
 /// oracle has nothing to reveal to it.
+/// **`count` is the viewer's own `and_cardinality`**, and it agrees with the filter that resolves
+/// the same value under the same candidate — which is the only cross-check available, the two being
+/// different code over the same postings and the same extents.
+///
+/// The property that makes the arithmetic sound is disjointness: the extents sweep counts entities
+/// ingested since the build and the postings cover the build, so the halves add. A test that only
+/// exercised a bundle with no extents would pass with the halves multiplied.
+///
+/// **Mutations this kills:** counting extent codes as a set rather than per entity; counting the
+/// posting whole instead of against the candidate; adding a half twice.
+#[test]
+fn a_values_count_is_what_a_filter_on_that_value_returns() {
+    let fx = fixture();
+    let (engine, cand) = candidate_for(&fx, &subset_credential());
+    let generation = engine.generation();
+    let membership = generation
+        .filter_columns
+        .category_membership("department", &cand)
+        .expect("a `derived` category carries membership postings");
+
+    for (key, code) in &fx.codes {
+        let resolved = generation
+            .filter_columns
+            .resolve(
+                "department",
+                &tessera_engine::filter::FilterOperand::Equals(AttrLocalId::new(*code)),
+                &cand,
+            )
+            .expect("a declared category resolves");
+        assert_eq!(
+            membership.count(*code).unwrap(),
+            resolved.cardinality(),
+            "{key} (code {code})"
+        );
+        // And the boolean is the count's own emptiness, so the two gates cannot disagree.
+        assert_eq!(
+            membership.carries(*code).unwrap(),
+            resolved.cardinality() > 0,
+            "{key}: carries and count disagree"
+        );
+    }
+}
+
 #[test]
 fn none_of_every_offered_value_proves_no_unoffered_value_exists() {
     let fx = fixture();
