@@ -7,8 +7,11 @@ import {
   assertCompositionMatchesServed,
   dataToWorldXY,
   worldBbox,
+  type FiltersProjection,
+  type RegionProjection,
   type Store,
-  type SelectionShape
+  type SelectionShape,
+  type ViewProjection
 } from '@tesseradb/client';
 import {LookupTexture, MarkSlab, TesseraLayer, artifactOfMark, clusterLayerOf, contourShapes, encodingOf, encodingSignature, hoverAt, resolvePick, type ContourShape, type Picked} from '@tesseradb/deck';
 import type {PaletteKind, PaletteScheme, Quantisation} from '@tesseradb/client';
@@ -123,6 +126,33 @@ export type MapProbe = {
 type ViewState = {target: [number, number, number]; zoom: number; minZoom: number; maxZoom: number};
 
 const VIEW = new OrthographicView({id: 'ortho', flipY: true});
+
+/**
+ * Which count the density wash reads (`highlight-and-hierarchy.md` §5.3), and so what the
+ * interface labels it as: `highlighted` where a highlight is set, `matched` where the request's
+ * `filters` carries anything and no highlight is, `visible` under neither.
+ *
+ * **The `matched` test has to be the request's**, not one control's. `filters` on the wire is the
+ * draft's filter-position leaves, the `member_of` clauses in that position and the drawn region's
+ * leaf, composed at one site in the store (`requestFilters`); a wash labelled *matched* while the
+ * request carried no filter is a number under the wrong name, and one labelled *visible* while it
+ * did is the same fault the other way. This was `filters.expr || selection` for a day —
+ * `selection` is the picked point and the opened artifact, a projection that is never null, so the
+ * `visible` branch was unreachable and every unfiltered wash was mislabelled.
+ *
+ * The three columns legitimately agree — `highlighted` equals `matched` with no highlight, and
+ * `matched` equals `visible` with no filter — which is why the label is chosen from what was
+ * *asked* and never from the numbers.
+ */
+export function washChannel(
+  filters: FiltersProjection,
+  view: ViewProjection,
+  region: RegionProjection | null
+): 'visible' | 'matched' | 'highlighted' {
+  if (view.highlighting) return 'highlighted';
+  const filtering = filters.expr !== null || filters.members.some((c) => c.verb === 'filter') || region !== null;
+  return filtering ? 'matched' : 'visible';
+}
 
 export class TesseraMap extends TesseraElement {
   static override styles = [
@@ -660,11 +690,9 @@ export class TesseraMap extends TesseraElement {
           wash: this.wash,
           // The two halves of the draw under a highlight (`highlight-and-hierarchy.md` §5.3): the
           // marks that satisfy it lit and the rest dulled, and the wash reading the count the
-          // question actually put — `highlighted` under a highlight, `matched` under a filter with
-          // no highlight, `visible` under neither. The legend beneath the map says which
-          // (`<tessera-status>`), because the three columns legitimately agree.
+          // question actually put ({@link washChannel}).
           highlighting: s.get('view').highlighting,
-          washChannel: s.get('view').highlighting ? 'highlighted' : s.get('filters').expr || s.get('selection') ? 'matched' : 'visible',
+          washChannel: washChannel(s.get('filters'), s.get('view'), s.get('region')),
           radius: this.radius,
           scheme: this.scheme(),
           onDrawn: (drawn, provisional) => {

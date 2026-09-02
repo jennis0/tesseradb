@@ -35,7 +35,7 @@ export {TesseraArtifactList, flatten} from './artifact-list.js';
 export {TesseraArtifactCard} from './artifact-card.js';
 export {TesseraHierarchy} from './hierarchy.js';
 export {TesseraLegend} from './legend.js';
-export {TesseraMap, type MapProbe} from './map.js';
+export {TesseraMap, washChannel, type MapProbe} from './map.js';
 export {TesseraExplorer} from './explorer.js';
 export {TesseraElement, emit, idString, type StoreSource} from './base.js';
 export {storeContext} from './context.js';
