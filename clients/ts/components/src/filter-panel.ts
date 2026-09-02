@@ -103,8 +103,10 @@ export class TesseraFilterPanel extends TesseraElement {
 
   /** What a `member_of` chip says: the artifact's name where the map served it, else its layer. */
   private memberText(clause: MemberClause): string {
+    // The clause's own label first: an artifact of a filter layer is never in the served set, so
+    // that is the only place a name for it can come from (§5.4).
     const served = this.resolvedStore?.get('artifacts').served.find((a) => a.tesseraId === clause.artifact && a.layer === clause.layer);
-    const name = served?.content[0] ?? served?.key ?? clause.layer;
+    const name = clause.label ?? served?.content[0] ?? served?.key ?? clause.layer;
     return clause.outside ? `outside ${name}` : name;
   }
 

@@ -14,6 +14,7 @@
   --tessera-ink: #1c1f23; --tessera-ink-2: #555b63; --tessera-ink-3: #6f757d;
   --tessera-line: #d6d6d0; --tessera-line-2: #e6e6e1;
   --tessera-accent: #2457a3; --tessera-accent-ink: #ffffff; --tessera-accent-soft: #e4ecf8;
+  --tessera-highlight: #6b3fa0; --tessera-highlight-ink: #ffffff; --tessera-highlight-soft: #efe6fa;
   --tessera-warn: #7a5600; --tessera-warn-soft: #fff1cf;
   --tessera-refuse: #a12b2b; --tessera-refuse-soft: #fbe5e5;
   --tessera-ok: #226b44;
@@ -28,6 +29,7 @@
   --tessera-ink: #e8eaec; --tessera-ink-2: #aab0b7; --tessera-ink-3: #868d95;
   --tessera-line: #30353b; --tessera-line-2: #262a2f;
   --tessera-accent: #86b0f0; --tessera-accent-ink: #0d1a2e; --tessera-accent-soft: #1f2d42;
+  --tessera-highlight: #c3a6ee; --tessera-highlight-ink: #1b1430; --tessera-highlight-soft: #2c2340;
   --tessera-warn: #e6b84a; --tessera-warn-soft: #3a2e0e;
   --tessera-refuse: #f29a9a; --tessera-refuse-soft: #3e1c1c;
   --tessera-ok: #6cc38e;
@@ -94,6 +96,9 @@
   .chip { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 6px 0 8px; border-radius: 3px;
           background: var(--tessera-accent-soft); color: var(--tessera-accent); font-size: 12px; font-weight: 500; }
   .chip svg { opacity: 0.8; }
+  .chip.hl { background: var(--tessera-highlight-soft); color: var(--tessera-highlight); }
+  .chip .verb { display: inline-flex; align-items: center; gap: 4px; height: 18px; padding: 0 5px; margin-left: -3px;
+                border-radius: 2px; background: color-mix(in srgb, currentColor 14%, transparent); font-size: 11px; }
   .input { white-space: nowrap; overflow: hidden; height: 30px; border: 1px solid var(--tessera-line); border-radius: var(--tessera-radius); background: var(--tessera-surface);
            padding: 0 10px; display: flex; align-items: center; gap: 8px; color: var(--tessera-ink); font-size: 13px; }
   .input.ph { color: var(--tessera-ink-3); }

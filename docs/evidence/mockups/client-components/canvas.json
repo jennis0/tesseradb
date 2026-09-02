@@ -108,6 +108,15 @@
       "w": 1160,
       "h": 660,
       "page": "page-1"
+    },
+    {
+      "file": "Highlight.dc.html",
+      "title": "Highlight, member-of and the hierarchy panel",
+      "x": 1260,
+      "y": 2400,
+      "w": 1760,
+      "h": 1080,
+      "page": "page-1"
     }
   ],
   "annotations": [

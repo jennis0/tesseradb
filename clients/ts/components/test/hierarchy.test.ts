@@ -96,15 +96,18 @@ describe('<tessera-hierarchy>', () => {
     (deep(host, '[part="expander"]') as HTMLButtonElement).click();
     await settle(host);
     await settle(host);
-    // The parent it is drawn under is not repeated; the other one is what the row says.
-    expect(deepText(deep(host, '[part="also"]'))).toContain('2');
+    // The parent it is drawn under is not repeated, and the other is named rather than numbered:
+    // the walk is the only place a name for one of these artifacts exists on this client.
+    expect(deepText(deep(host, '[part="also"]'))).toContain('also under Anatomy');
   });
 
   it('a click is a highlight, and the actions carry the filter beside it', async () => {
     const {host, store} = await panel();
     (deep(host, '[part="row"] [part="name"]') as HTMLButtonElement).click();
     const sent = store.calls.find((c) => c.name === 'setMembers')!.args[0] as {layer: string; artifact: bigint; verb: string; outside: boolean}[];
-    expect(sent).toEqual([{layer: 'mesh/descriptors', artifact: 1n, outside: false, verb: 'highlight'}]);
+    // The label rides the clause: nothing downstream can resolve the identifier, the artifacts of
+    // a filter layer never being served.
+    expect(sent).toEqual([{layer: 'mesh/descriptors', artifact: 1n, outside: false, verb: 'highlight', label: 'Neoplasms'}]);
     // And *fit* is absent on a filter layer — its artifacts are spread and there is nothing to fit.
     expect(deep(host, '[part="fit"]')).toBeNull();
     expect(deep(host, '[part="filter"]')).not.toBeNull();

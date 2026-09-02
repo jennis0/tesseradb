@@ -140,7 +140,7 @@ export class TesseraArtifactCard extends TesseraElement {
    * clause between the two positions by pressing the other button, which is the same *without
    * being re-entered* the chips give.
    */
-  private verb(layer: string, artifact: bigint, outside: boolean, verb: ClauseVerb, label: string) {
+  private verb(layer: string, artifact: bigint, outside: boolean, verb: ClauseVerb, label: string, name: string | null) {
     const s = this.resolvedStore;
     const held = s?.get('filters').members ?? [];
     const on = held.some((c) => c.layer === layer && c.artifact === artifact && c.outside === outside && c.verb === verb);
@@ -161,7 +161,7 @@ export class TesseraArtifactCard extends TesseraElement {
         if (!s) return;
         const members = on
           ? withoutMember(s.get('filters').members, layer, artifact)
-          : withMember(s.get('filters').members, {layer, artifact, outside, verb});
+          : withMember(s.get('filters').members, {layer, artifact, outside, verb, ...(name === null ? {} : {label: name})});
         s.setMembers(members);
         emit(this, 'tessera-clausechange', {id: idString(artifact), layer, outside, verb, on: !on});
       }}
@@ -176,7 +176,13 @@ export class TesseraArtifactCard extends TesseraElement {
     // *Admin 2*), the layer's title otherwise — read off the served row, whose `rung` is the wire's.
     const metaLayers = this.resolvedStore?.get('meta')?.layers ?? [];
     const row = artifact ? this.resolvedStore?.get('artifacts')?.served.find((a) => a.tesseraId === artifact.id) : undefined;
-    const decl = row ? metaLayers.find((l) => l.name === row.layer) : undefined;
+    // **The declaration comes from the artifact's own layer, not from a served row.** A filter
+    // layer is never named in a viewport request (§5.4), so its artifacts are never in the served
+    // set and a card resolving the layer through that row would find none — and would then offer
+    // *fit* on the one layer that has nothing to fit to. The served row is still preferred where
+    // there is one, because the card is also fed directly by a host with no store behind it.
+    const declaredLayer = row?.layer ?? artifact?.detail.layer;
+    const decl = declaredLayer === undefined ? undefined : metaLayers.find((l) => l.name === declaredLayer);
     const what = (row && decl?.levels.find((lv) => lv.level === row.rung)?.title) || decl?.title || 'Artifact';
     const heading = html`<h2 part="title">${what}<button part="close" type="button" aria-label="Close" @click=${() => emit(this, 'tessera-close', {what: 'artifact'})}>${icon('close', 14)}</button></h2>`;
     if (refusal) {
@@ -207,6 +213,9 @@ export class TesseraArtifactCard extends TesseraElement {
     // whether the outline they see moves with the principal. `decl` is the served row's layer;
     // an artifact opened with no served row (a host feeding the card directly) shows none.
     const shape = decl?.shape ? {kind: decl.shape, text: SHAPE_TEXT[decl.shape]} : null;
+    // What a clause made from this card calls the artifact: its drawn name, else its key. Carried
+    // on the clause because nothing downstream can resolve it — see `MemberClause.label`.
+    const clauseName = (here ? displayName(here, topics) : null) ?? artifact.detail.key;
     return html`<div class="panel">${heading}
       <span part="state" data-state="shown"></span>
       <div part="headline" class="card-title">${(here ? displayName(here, topics) : null) ?? UNNAMED}</div>
@@ -247,9 +256,9 @@ export class TesseraArtifactCard extends TesseraElement {
           : html`<button part="fit" class="btn" type="button" @click=${() => emit(this, 'tessera-artifactfit', {id})}>${icon('fit', 14)}Fit to cluster</button>`
       }
       <div part="verbs" role="group" aria-label="This artifact">
-        ${this.verb(artifact.detail.layer, artifact.id, false, 'filter', 'Filter to this')}
-        ${this.verb(artifact.detail.layer, artifact.id, false, 'highlight', 'Highlight this')}
-        ${this.verb(artifact.detail.layer, artifact.id, true, 'filter', 'Outside this')}
+        ${this.verb(artifact.detail.layer, artifact.id, false, 'filter', 'Filter to this', clauseName)}
+        ${this.verb(artifact.detail.layer, artifact.id, false, 'highlight', 'Highlight this', clauseName)}
+        ${this.verb(artifact.detail.layer, artifact.id, true, 'filter', 'Outside this', clauseName)}
       </div>
     </div>`;
   }

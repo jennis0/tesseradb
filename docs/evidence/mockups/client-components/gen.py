@@ -182,6 +182,8 @@ _ICONS = {
     'plus': '<path d="M8 3v10M3 8h10"/>',
     'minus': '<path d="M3 8h10"/>',
     'menu': '<path d="M2 4h12M2 8h12M2 12h12"/>',
+    # A marker pen over a ruled line — the highlight verb, beside `filter`'s funnel.
+    'highlight': '<path d="M4.5 10.5l5.5-5.5 2.5 2.5-5.5 5.5H4.5v-2.5z"/><path d="M2.5 14.5h11"/>',
     'user': '<circle cx="8" cy="5.5" r="3"/><path d="M2.5 14c.7-3 2.8-4.5 5.5-4.5s4.8 1.5 5.5 4.5"/>',
     'lock': '<rect x="3" y="7" width="10" height="7" rx="1"/><path d="M5 7V5a3 3 0 0 1 6 0v2"/>',
     'grid': '<rect x="2" y="2" width="5" height="5"/><rect x="9" y="2" width="5" height="5"/><rect x="2" y="9" width="5" height="5"/><rect x="9" y="9" width="5" height="5"/>',
@@ -209,6 +211,7 @@ TOKENS_LIGHT = """
   --tessera-ink: #1c1f23; --tessera-ink-2: #555b63; --tessera-ink-3: #6f757d;
   --tessera-line: #d6d6d0; --tessera-line-2: #e6e6e1;
   --tessera-accent: #2457a3; --tessera-accent-ink: #ffffff; --tessera-accent-soft: #e4ecf8;
+  --tessera-highlight: #6b3fa0; --tessera-highlight-ink: #ffffff; --tessera-highlight-soft: #efe6fa;
   --tessera-warn: #7a5600; --tessera-warn-soft: #fff1cf;
   --tessera-refuse: #a12b2b; --tessera-refuse-soft: #fbe5e5;
   --tessera-ok: #226b44;
@@ -223,6 +226,7 @@ TOKENS_DARK = """
   --tessera-ink: #e8eaec; --tessera-ink-2: #aab0b7; --tessera-ink-3: #868d95;
   --tessera-line: #30353b; --tessera-line-2: #262a2f;
   --tessera-accent: #86b0f0; --tessera-accent-ink: #0d1a2e; --tessera-accent-soft: #1f2d42;
+  --tessera-highlight: #c3a6ee; --tessera-highlight-ink: #1b1430; --tessera-highlight-soft: #2c2340;
   --tessera-warn: #e6b84a; --tessera-warn-soft: #3a2e0e;
   --tessera-refuse: #f29a9a; --tessera-refuse-soft: #3e1c1c;
   --tessera-ok: #6cc38e;
@@ -292,6 +296,9 @@ COMPONENT_CSS = """
   .chip { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 6px 0 8px; border-radius: 3px;
           background: var(--tessera-accent-soft); color: var(--tessera-accent); font-size: 12px; font-weight: 500; }
   .chip svg { opacity: 0.8; }
+  .chip.hl { background: var(--tessera-highlight-soft); color: var(--tessera-highlight); }
+  .chip .verb { display: inline-flex; align-items: center; gap: 4px; height: 18px; padding: 0 5px; margin-left: -3px;
+                border-radius: 2px; background: color-mix(in srgb, currentColor 14%, transparent); font-size: 11px; }
   .input { white-space: nowrap; overflow: hidden; height: 30px; border: 1px solid var(--tessera-line); border-radius: var(--tessera-radius); background: var(--tessera-surface);
            padding: 0 10px; display: flex; align-items: center; gap: 8px; color: var(--tessera-ink); font-size: 13px; }
   .input.ph { color: var(--tessera-ink-3); }
@@ -343,12 +350,23 @@ def fmt(n):
     return f'{n:,}'
 
 
-def status_strip(state='shown', shown=4812, matched=12465, visible=181900, retry=None, code=None, narrow=False):
-    """<tessera-status> compact. Only `shown` carries numbers."""
+def status_strip(state='shown', shown=4812, matched=12465, visible=181900, retry=None, code=None, narrow=False,
+                 highlighted=None):
+    """<tessera-status> compact. Only `shown` carries numbers.
+
+    `highlighted` adds the fourth cell — *the highlight matched N*, the owner's words
+    (`highlight-and-hierarchy.md` §5.2). It is drawn only where a highlight was asked: the wire's
+    `highlighted` equals `matched` where none was, so a cell drawn always would repeat a number and
+    read as a second answer to a question nobody put.
+    """
     def counts(dim=False):
         st = ' style="opacity:0.45"' if dim else ''
+        hl = ('' if highlighted is None else
+              f'<div class="count" part="count"{st} style="color:var(--tessera-highlight)"><b>{fmt(highlighted)}</b>'
+              f'<span>the highlight matched</span></div>')
         return (f'<div class="count" part="count"{st}><b>{fmt(shown)}</b><span>shown</span></div>'
                 f'<div class="count" part="count"{st}><b>{fmt(matched)}</b><span>matched</span></div>'
+                f'{hl}'
                 f'<div class="count" part="count"{st}><b>{fmt(visible)}</b><span>visible</span></div>')
     skel = ('<div class="count"><span class="skel"></span><span>shown</span></div>'
             '<div class="count"><span class="skel"></span><span>matched</span></div>'
@@ -430,9 +448,23 @@ def toolbar_panel(colour_by='archive', layer='2 of 3 on'):
             f'</div></div>')
 
 
+def chip(label, verb='filter'):
+    """A filter chip carrying its verb (`highlight-and-hierarchy.md` §5.2).
+
+    The word says which of the request's two expressions the clause joins, and clicking it moves
+    the clause without the predicate being re-entered. A highlighted clause is the same chip in
+    the highlight's own colour, so the position reads before the words do.
+    """
+    cls = 'chip hl' if verb == 'highlight' else 'chip'
+    return (f'<span class="{cls}"><span class="verb">{icon(verb, 11)}{verb}</span>{label}'
+            f'{icon("close", 12)}</span>')
+
+
 def filters_panel(applied=(('title', 'quantum entanglement'), ('archive', 'quant-ph')), compact=False,
-                  archives=ARCHIVES, checked=('quant-ph',), show_abstract=True, stack_seg=False):
-    chips = ''.join(f'<span class="chip">{k}: {v}{icon("close", 12)}</span>' for k, v in applied)
+                  archives=ARCHIVES, checked=('quant-ph',), show_abstract=True, stack_seg=False,
+                  verbs=None):
+    verbs = verbs or {}
+    chips = ''.join(chip(f'{k}: {v}', verbs.get(k, 'filter')) for k, v in applied)
     clear = '<button class="sm" style="color:var(--tessera-accent);font-weight:500">Clear all</button>' if applied else ''
     checks = ''.join(
         f'<div class="check"><span class="bx {"on" if a in checked else ""}">{icon("check", 11, sw=2.2) if a in checked else ""}</span>{a}</div>'
@@ -903,3 +935,96 @@ def datamap2(w, h, clusters, seed=7, n=1600, r=1.5, dark=False, wash=True, wash_
            f'style="position:absolute; inset:0; width:100%; height:100%;">{defs}'
            f'<style>circle{{r:{r}px}} .noise circle{{r:{r * 0.75:.1f}px}}</style>' + ''.join(parts) + '</svg>')
     return svg, members, colours
+
+
+# ----------------------------------------------------------------------------- the highlight (§5.3)
+#: What an unmatched mark's alpha is multiplied by while a highlight is set — `DULL_ALPHA` in
+#: `deck/src/marks-layer.ts`. Alpha alone, and not a desaturation: a mark's colour is the palette's
+#: answer about which cluster it belongs to, and washing that out would make the highlight change
+#: what the map says as well as what it emphasises.
+DULL_ALPHA = 0.22
+#: The wash's one hue, `WASH_HUE` in `deck/src/density.ts`.
+WASH_RGB = '#6084be'
+
+
+def datamap_highlight(w, h, clusters, lit, seed=7, n=1600, r=1.7, dark=False, wash=True):
+    """The map under a highlight (`highlight-and-hierarchy.md` §5.3).
+
+    **The map does not move.** Every point the unhighlighted map drew is still drawn, in its own
+    colour, at {@link DULL_ALPHA} where it does not satisfy the highlight — which is the whole
+    difference between a highlight and a filter.
+
+    Beside it, the **wash**: the per-tile `highlighted` count as a single-hue field. It is what
+    shows the members the cap clause did not draw — a highlight over 27 million articles draws
+    66,000 of them — and it is the only picture a spread artifact has. It reads the count column
+    and never a mark, so it is exact where the marks are a sample.
+
+    Returns `(svg, members, colours)` like {@link datamap}.
+    """
+    _svg, members, colours = datamap(w, h, clusters, seed=seed, n=n, r=r, dark=dark)
+    po = 0.7 if dark else 0.62
+    parts = []
+    if wash:
+        field, filt = density_wash(w, h, {ci: pts for ci, pts in members.items() if ci in lit},
+                                   {ci: WASH_RGB for ci in members}, cell=16, dark=dark,
+                                   alpha=0.42 if dark else 0.30)
+        parts.append(f'<defs>{filt}</defs>{field}')
+    for ci, pts in members.items():
+        circles = ''.join(f'<circle cx="{x}" cy="{y}"/>' for x, y in pts)
+        alpha = po if ci in lit else round(po * DULL_ALPHA, 3)
+        parts.append(f'<g fill="{colours[ci]}" opacity="{alpha}">{circles}</g>')
+    svg = (f'<svg viewBox="0 0 {w} {h}" width="{w}" height="{h}" xmlns="http://www.w3.org/2000/svg" '
+           f'style="position:absolute; inset:0; width:100%; height:100%;">'
+           f'<style>circle{{r:{r}px}}</style>' + ''.join(parts) + '</svg>')
+    return svg, members, colours
+
+
+def hierarchy_panel(rows, layer='mesh/descriptors', query='', filtered=False, clause=None,
+                    more=True, title='Hierarchy'):
+    """`<tessera-hierarchy>` (`highlight-and-hierarchy.md` §5.1).
+
+    `rows` is a list of `(depth, name, masked, matched, also, expanded)`: `matched` is drawn only
+    where the map carries a filter, `also` is the *also under* line a `dag` node carries beneath
+    it, and `expanded` chooses which way the chevron points. `clause` names the row carrying a
+    clause and which verb it is — the row is tinted the verb's own colour, as the chip is.
+    """
+    out = []
+    for depth, name, masked, matched, also, expanded in rows:
+        on = clause[0] == name if clause else False
+        tint = ('background:var(--tessera-highlight-soft);color:var(--tessera-highlight)' if on and clause[1] == 'highlight'
+                else 'background:var(--tessera-accent-soft);color:var(--tessera-accent)' if on else '')
+        counts = (f'<span class="n">{fmt(matched)}</span><span class="faint">/</span>' if filtered and matched is not None else '') + \
+                 f'<span class="n">{fmt(masked)}</span>'
+        actions = (f'<span class="row" style="gap:2px;opacity:{1 if on else 0.55}">'
+                   f'{icon("highlight", 13)}{icon("filter", 13)}</span>')
+        out.append(f'<div class="item" style="padding-left:{4 + depth * 14}px;{tint}">'
+                   f'<span class="faint" style="display:inline-flex;width:14px">{icon("chev" if expanded else "chevr", 12)}</span>'
+                   f'<span class="grow" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{name}</span>'
+                   f'{counts}{actions}</div>')
+        if also:
+            out.append(f'<div class="xs faint" style="padding-left:{18 + depth * 14}px">also under {also}</div>')
+    more_row = '<button class="sm" style="color:var(--tessera-accent);text-align:left;height:24px;padding-left:18px">More…</button>' if more else ''
+    picker = (f'<div class="select" style="height:28px;margin-bottom:8px">{layer}{icon("chev", 14)}</div>')
+    search = (f'<div class="input ph" style="margin-bottom:8px">{icon("search", 14)}'
+              f'{query or "Search names"}</div>')
+    return (f'<div class="panel"><div class="hd">{title}</div>{picker}{search}'
+            f'<div class="list col">{"".join(out)}</div>{more_row}</div>')
+
+
+def artifact_card_verbs(pressed=None, fit=True):
+    """The card's clause row (`highlight-and-hierarchy.md` §5.5): *filter to this*, *highlight
+    this* and *outside this* as `member_of` clauses, replacing the region-by-published-artifact
+    spelling. No *fit* on a filter layer — its artifacts are spread across the frame and there is
+    nothing to fit to (§5.4)."""
+    def b(name, ic, label, verb):
+        on = pressed == name
+        style = ('border-color:currentColor;background:var(--tessera-highlight-soft);color:var(--tessera-highlight)'
+                 if on and verb == 'highlight' else
+                 'border-color:currentColor;background:var(--tessera-accent-soft);color:var(--tessera-accent)' if on else '')
+        return f'<button class="btn" style="{style}">{icon(ic, 14)}{label}</button>'
+    fit_btn = f'<button class="btn">{icon("fit", 14)}Fit to cluster</button>' if fit else ''
+    return (f'<div class="row" style="flex-wrap:wrap;gap:6px;margin-top:12px">{fit_btn}</div>'
+            f'<div class="row" style="flex-wrap:wrap;gap:6px;margin-top:8px">'
+            f'{b("filter", "filter", "Filter to this", "filter")}'
+            f'{b("highlight", "highlight", "Highlight this", "highlight")}'
+            f'{b("outside", "filter", "Outside this", "filter")}</div>')

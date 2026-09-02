@@ -232,6 +232,14 @@ several (the demo's *medium* preset). Clusters cut from runs of consecutive ids 
 synthetic corpus whose positions are a modular sequence — every such run samples the whole extent,
 so every centroid lands in the middle and a decoder reading row 0 for every row would pass.
 
+**Every golden also predates the tiles frame's `highlighted` column** (`highlight-and-hierarchy.md`
+§2, fifth after `served` and always present), so `liftTilesHighlighted` in the same module gives
+each one that column with each tile's `matched` in it — which is exactly what the server serves for
+a request carrying no `highlight`, and these captures carried none. `liftGolden` is both lifts
+together. Both are rewrites of stale recordings, **in test code only**: the decoder keeps no shim
+(decision 0048) and refuses a body without the column. They go when the goldens are recaptured
+against a server serving the highlight columns.
+
 ## Annotation layers, and the number beside a cluster
 
 The viewer draws whatever annotation layers `/v1/meta` says this principal reaches. There are none
@@ -328,6 +336,44 @@ notice the publisher is owed, and it is written before anything retires.
 
 Run it with the viewer open over the cluster: the label disappears at step 2, and step 3 changes
 nothing a viewer can see, which is what a fold is supposed to look like from outside.
+
+## Filter, highlight, and a layer that draws nothing
+
+**A filter narrows the map; a highlight keeps every point and lights the matched ones.** They are
+two fields of one `POST /v1/viewport` — `filters` and `highlight`, in the same grammar — and the
+client holds them as one draft: a control carries a `verb`, and moving a clause between the two
+positions is that field changing and nothing else, so a predicate is never re-entered. The chips on
+`<tessera-filter-panel>` carry the word and move the clause when it is clicked; the words in the
+interface are **filter**, **highlight** and **matched** throughout.
+
+Under a highlight the marks that satisfy it draw lit and the rest at a fifth of their alpha — the
+map does not move and nothing is removed, which is the whole difference — and the density wash
+switches to the per-tile `highlighted` count, which is what shows the members the mark budget did
+not draw. `<tessera-status>` gains a fourth cell, *the highlight matched N*, and it is drawn only
+where a highlight was asked: the wire's `highlighted` equals `matched` where none was, so a cell
+drawn always would repeat a number.
+
+**A `member_of` clause names one artifact of one layer** and asks for its membership. It is what
+*Filter to this*, *Highlight this* and *Outside this* on `<tessera-artifact-card>` send, and what a
+node of `<tessera-hierarchy>` sends; it replaces the `region`-by-published-artifact spelling for
+that use, the drawn-region spelling staying for a region drawn by hand.
+
+**A layer declaring no computed content is a filter layer, and a filter layer is still a layer.**
+It is in `/v1/meta`'s roster and in `<tessera-layer-picker>`, in its own group with no draw toggle;
+it is never named in a viewport request's `layers`, so nothing draws it, nothing labels it and it
+is absent from *In view*. It is reached through `<tessera-hierarchy>` and applied as a clause. A
+MeSH descriptor's members are spread over the whole layout, which is what the rule is for: its hull
+would be the map's outline.
+
+**`<tessera-hierarchy>` does not depend on the viewport.** It walks `POST /v1/artifacts/browse` —
+the roots whatever the zoom, children on expansion, *More…* to page, a search box, and, on a `dag`
+layer, a node under each of its served parents saying *also under* the others. A click is a
+highlight; *filter* is beside it, and *fit* beside that where the layer draws something. Under a
+filter it sends the map's own `filters` and shows each row's matched count beside its masked one.
+
+`viewer/.highlight-boards.html` is the harness the element screenshots are taken through: the built
+components against a hand-made store, at `/.highlight-boards.html` on the dev server. It needs no
+service, which is the point — the states it draws are ones a live corpus reaches rarely.
 
 ## Testing
 

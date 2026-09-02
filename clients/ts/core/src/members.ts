@@ -35,6 +35,16 @@ export type MemberClause = {
   /** `none_of` over the leaf — *outside this artifact*. */
   outside: boolean;
   verb: ClauseVerb;
+  /**
+   * What the interface called the artifact when the clause was made — **presentation only, and
+   * never sent**.
+   *
+   * A clause on a filter layer names an artifact the viewport never serves (§5.4), so nothing on
+   * the map can resolve its identifier to a name; the panel or the card that made the clause is
+   * the only thing that knew one, and a chip reading `mesh/descriptors 546790` says nothing about
+   * what was asked. Absent where the caller had no name to give.
+   */
+  label?: string;
 };
 
 export function memberKey(layer: string, artifact: bigint): string {

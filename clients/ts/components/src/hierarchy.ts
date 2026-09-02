@@ -171,6 +171,12 @@ export class TesseraHierarchy extends TesseraElement {
 
   /** What the roots were fetched under, so a filter or a layer change refetches and nothing else does. */
   private fetchedUnder = '';
+  /**
+   * Every name the walk has seen, by identifier. **The only place a name for one of these
+   * artifacts exists on this client**: a filter layer is never named in a viewport request, so its
+   * artifacts are never served, and *also under 546790* says nothing about what a node sits under.
+   */
+  private names = new Map<bigint, string>();
   private searchTimer: ReturnType<typeof setTimeout> | null = null;
 
   private layers(): Layer[] {
@@ -188,7 +194,11 @@ export class TesseraHierarchy extends TesseraElement {
    */
   private question(): string {
     const s = this.resolvedStore;
-    return `${this.current()?.name ?? ''}|${JSON.stringify(s?.get('filters').expr ?? null)}|${JSON.stringify(s?.get('filters').members ?? [])}`;
+    const filters = s?.get('filters');
+    // The member clauses are written out by hand: they carry `bigint` identifiers, which
+    // `JSON.stringify` refuses outright rather than approximating.
+    const members = (filters?.members ?? []).map((c) => `${c.layer}:${c.artifact}:${c.outside ? 'out' : 'in'}:${c.verb}`).join(',');
+    return `${this.current()?.name ?? ''}|${JSON.stringify(filters?.expr ?? null)}|${members}`;
   }
 
   protected override onStoreChange(): void {
@@ -235,7 +245,13 @@ export class TesseraHierarchy extends TesseraElement {
   }
 
   private node(row: BrowseRow, parentPath: string): Node {
+    if (row.name !== null) this.names.set(row.tesseraId, row.name);
     return {row, path: `${parentPath}/${row.tesseraId}`, children: null, next: null, loading: false, refusal: null};
+  }
+
+  /** What to call an artifact this walk has met; its identifier where the walk has not. */
+  private nameOf(id: bigint): string {
+    return this.names.get(id) ?? idString(id);
   }
 
   /**
@@ -311,7 +327,12 @@ export class TesseraHierarchy extends TesseraElement {
     if (!s || !layer) return;
     const held = s.get('filters').members;
     const on = this.clauseOn(id) === verb;
-    s.setMembers(on ? withoutMember(held, layer.name, id) : withMember(held, {layer: layer.name, artifact: id, outside: false, verb}));
+    const label = this.names.get(id);
+    s.setMembers(
+      on
+        ? withoutMember(held, layer.name, id)
+        : withMember(held, {layer: layer.name, artifact: id, outside: false, verb, ...(label === undefined ? {} : {label})})
+    );
     emit(this, 'tessera-clausechange', {id: idString(id), layer: layer.name, outside: false, verb, on: !on});
   }
 
@@ -394,7 +415,7 @@ export class TesseraHierarchy extends TesseraElement {
           }
         </span>
       </div>
-      ${also.length > 0 ? html`<div part="also" style=${`--depth:${depth}`}>also under ${also.map(idString).join(', ')}</div>` : nothing}
+      ${also.length > 0 ? html`<div part="also" style=${`--depth:${depth}`}>also under ${also.map((p) => this.nameOf(p)).join(', ')}</div>` : nothing}
       ${node.refusal ? html`<div part="also" style=${`--depth:${depth}`}>${node.refusal.code}: ${node.refusal.detail}</div>` : nothing}
       ${open && node.children
         ? html`<ul part="children" class="list" style="list-style:none;margin:0;padding:0">
