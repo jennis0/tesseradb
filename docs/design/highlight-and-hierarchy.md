@@ -36,8 +36,8 @@ arrive at a zoom nobody reaches. The card shows children and not parents; the li
 sorted by count. Selecting a descriptor drew a hull, which for a spread artifact is the map's
 outline. Three things follow, and they are one design because they share an operand.
 
-- **`highlight`** *(§2)* — a second boolean expression on `/v1/viewport`, evaluated over the
-  candidate `filters` leaves, answering per tile (`highlighted` count), per point (`highlighted`
+- **`highlight`** *(§2)* — a second field of the one `/v1/viewport` request, beside `filters`
+  and in its grammar, evaluated over the candidate `filters` leaves, answering per tile (`highlighted` count), per point (`highlighted`
   bit) and per artifact (`highlighted` bit). The draw keeps every point; the client lights the
   matched ones and dulls the rest, and renders the per-tile count as a wash so the points that were
   *not* drawn show too.
@@ -53,9 +53,11 @@ And a client rule *(§5)*: **a layer declaring `computed = []` is a filter layer
 a viewport's `layers`, never drawn, never labelled; reached through the panel and applied as a
 clause. `mesh/descriptors` is declared so from 2026-09-02.
 
-## 2. The `highlight` operand
+## 2. The `highlight` field
 
-`POST /v1/viewport` gains `highlight?`, a boolean expression in exactly `filters`' grammar
+**Filter and highlight are two fields of one request, never two endpoints**: a viewer narrowed by
+one clause and lit by another sends both in the same `POST /v1/viewport` and reads both answers
+off the same frames. The request gains `highlight?`, a boolean expression in exactly `filters`' grammar
 (`contracts.md` §3.2: leaves over declared columns, `region`, and §3's `member_of`; the three
 combinators; the same nesting bound). It is evaluated **over the candidate `filters` produced** —
 absent `filters`, over the masked candidate — and it never changes which rows the response holds.
