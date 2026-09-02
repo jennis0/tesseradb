@@ -1,4 +1,5 @@
 import {calibrate, tileRectOfBbox, type CountCell, type CountField, type DepthChoice} from './budget.js';
+import {tileXY} from './coords.js';
 import {plan, worldBbox, type Plan, type PlannerInputs, type Viewport} from './prefetch.js';
 import {rectContains, rectContainsTile, rectIntersection, type TileRect} from './rects.js';
 import type {Replica, ReplicaFrame} from './replica.js';
@@ -196,6 +197,12 @@ export class Driver {
    * a settle-rate retry loop. Cleared by the next camera move.
    */
   private askedUncovered: string | null = null;
+
+  /**
+   * Whether the cold view's counts-only seed has been made (or has failed) — see
+   * {@link seedCounts}. One per session, never per uncovered pan.
+   */
+  private seeded = false;
 
   constructor(
     private readonly replica: Replica,
@@ -580,6 +587,7 @@ export class Driver {
     this.lastTarget = null;
     this.anticipationEligible = false;
     this.askedUncovered = null;
+    this.seeded = false;
     this.counts.clear();
   }
 
@@ -629,9 +637,63 @@ export class Driver {
     }
   }
 
+  /**
+   * Buy the counts before buying the marks, on the one view no counts describe.
+   *
+   * The first request of a session is planned by the average model, and where that model
+   * overshoots it overshoots by orders of magnitude: measured on rung 3 (MedCPT, 35.9 × 10^6
+   * items, budget 500,000), the cold view asked at depth 8 and was answered with **1,014,597
+   * points in 33.5 MB** — 2.1 s on the wire and a further 2.1 s of decode and absorb on the main
+   * thread, for a frame that was then re-derived at depth 6 and drawn from 2.4 MB. The client had
+   * paid fourteen times over for marks it did not draw, and the first marks reached the screen at
+   * 4.3 s.
+   *
+   * A counts-only request — `k = 0`, the tiles frame alone, ~170 ms and a few tens of kilobytes —
+   * answers exactly the question the average model was guessing at, and every plan after it is
+   * count-driven (`budget.ts`). So the cold view asks for counts first, adopts them, and re-plans;
+   * the marks request that follows is the one the second plan would have made anyway.
+   *
+   * **Once per session, and only where no counts exist at all.** A pan onto ground the replica has
+   * not covered also falls back to the average model, and seeding those would put a round trip in
+   * front of every such pan — the case the calibration loop and the held field already handle. The
+   * guard is `counts.size === 0`, which is true at session start (and after {@link cancel}) and
+   * false forever after the first response.
+   */
+  private async seedCounts(view: ViewState, planned: Plan, signal: AbortSignal): Promise<boolean> {
+    const depth = planned.choice.depth;
+    const started = this.clock.now();
+    let tiles;
+    try {
+      tiles = await this.replica.counts(planned.visible.rect, depth, signal);
+    } catch (error) {
+      // A refused seed is not a refused view: the marks request the average model planned is still
+      // worth making, and it is the request this client made before the seed existed. Reported and
+      // stepped over (an abort is not — the caller's generation check drops the whole request).
+      if (signal.aborted) throw error;
+      this.trace('seedfail', {depth, ms: this.clock.now() - started});
+      this.seeded = true;
+      return false;
+    }
+    const cells: CountCell[] = [];
+    let visible = 0;
+    for (const t of tiles) {
+      const {x, y} = tileXY(t.tile, depth);
+      cells.push({x, y, count: Number(t.visible)});
+      visible += Number(t.visible);
+    }
+    // Complete for the rectangle it was asked over by construction: a response omits only the
+    // cells whose masked count is zero, so `cells` is read over the whole of `covers` — the
+    // obligation `CountField` puts on whoever builds one.
+    this.counts.set(depth, {depth, cells, covers: planned.visible.rect});
+    this.lastVisibleInView = visible;
+    this.seeded = true;
+    this.trace('seed', {depth, ms: this.clock.now() - started, n: cells.length, visible});
+    return true;
+  }
+
   private async request(view: ViewState, attempt = 0): Promise<void> {
-    const planned = this.planFor(view);
-    const choice: DepthChoice = planned.choice;
+    let planned = this.planFor(view);
+    let choice: DepthChoice = planned.choice;
 
     // A real fetch displaces a running revalidation unconditionally — the refresh is the one
     // request the user must never wait behind.
@@ -647,18 +709,29 @@ export class Driver {
     this.inFlightAt = {rect: planned.render, depth: choice.depth, since: this.clock.now()};
     const generation = ++this.generation;
     const movedAt = this.movedAt || this.clock.now();
-    const startedAt = this.clock.now();
-    this.lastRequestAt = startedAt;
-    this.trace('request', {
-      depth: choice.depth,
-      n: choice.tiles,
-      waited: startedAt - movedAt,
-      predicted: Math.round(choice.predictedMarks),
-      from: choice.source
-    });
     this.events.onStatus?.('loading');
 
     try {
+      // The cold view buys its counts before its marks (see {@link seedCounts}), inside the
+      // foreground slot it already holds: the seed is the request, until it lands.
+      if (!this.seeded && this.counts.size === 0 && choice.source === 'average') {
+        const seeded = await this.seedCounts(view, planned, controller.signal);
+        if (generation !== this.generation) return;
+        if (seeded) {
+          planned = this.planFor(view);
+          choice = planned.choice;
+          this.inFlightAt = {rect: planned.render, depth: choice.depth, since: this.clock.now()};
+        }
+      }
+      const startedAt = this.clock.now();
+      this.lastRequestAt = startedAt;
+      this.trace('request', {
+        depth: choice.depth,
+        n: choice.tiles,
+        waited: startedAt - movedAt,
+        predicted: Math.round(choice.predictedMarks),
+        from: choice.source
+      });
       // `standIns: false` — the fetch absorbs and reports; what gets DERIVED is the
       // reconciler's decision, paid once under its own rate rule rather than per fetch.
       const frame = await this.replica.fetchRegion(

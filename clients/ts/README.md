@@ -393,6 +393,10 @@ the roots whatever the zoom, children on expansion, *More…* to page, a search 
 layer, a node under each of its served parents saying *also under* the others. A click is a
 highlight; *filter* is beside it, and *fit* beside that where the layer draws something. Under a
 filter it sends the map's own `filters` and shows each row's matched count beside its masked one.
+**A panel that is not being shown asks nothing**: the roots are the widest request it makes, and a
+panel in a closed drawer or an unopened tab was making it on the page's first meta, beside the
+first viewport, against a server still materialising the session. It browses when it is shown —
+which in the demo's overlay layout is at once, so nothing changes there.
 
 `viewer/.highlight-boards.html` is the harness the element screenshots are taken through: the built
 components against a hand-made store, at `/.highlight-boards.html` on the dev server. It needs no
@@ -477,11 +481,22 @@ could reach the wire, come back with its bits, be written into the slab, and sti
 `highlighting: false`: nothing repainted, because the camera had not moved. `onStoreChange` now
 repaints on a change in either.
 
-**Two depth models disagree on the first view of a session, and the settle asks.** The average
-model answers the first request, because no counts describe the view yet; the response's own
-per-tile counts answer every plan after it. Where the average overshoots — measured on rung 3,
-depth 8 asked and 1,014,597 points served against a 500,000 budget — the count-driven choice is
-two levels shallower, and the settle derives at a depth the replica holds nothing at. Before
+**The cold view buys its counts before its marks.** Two depth models decide what to ask for, and
+they disagree on the first view of a session: the average model answers where no counts describe
+the view, the response's own per-tile counts answer every plan after it. Where the average
+overshoots it overshoots by orders of magnitude — measured on rung 3, depth 8 asked and 1,014,597
+points served in 33.5 MB against a 500,000 budget, drawn two levels shallower from 2.4 MB the
+moment the counts landed. So the first request of a session is a counts-only one (`k = 0`, the
+tiles frame alone: 101 KB and 4 ms of server time on a warm session, and it is where the
+session's own materialisation is paid), and the marks request that follows is planned from it.
+**Once per session, and only where no counts exist at all** — a pan onto uncovered ground still
+falls back to the average model rather than putting a round trip in front of every such pan.
+Measured on rung 3 over the demo's broadest principal, first marks 4.3 s → 3.7 s and the load
+quiet at 6.2 s → 4.3 s, on a headless software renderer where the frame is itself the noise
+floor; on the wire the first marks request went from 33.5 MB to 2.4 MB.
+
+**A settle asks where the two models still disagree.** The count-driven choice can be shallower
+than the depth just fetched, and the settle then derives at a depth the replica holds nothing at. Before
 2026-09-02 the map simply stayed there: all stand-ins, `visible`, `matched` and `served` reading
 zero on the strip, and no request, because a request was only ever issued from a camera move — so
 a filter or a highlight, which requeries without moving the camera, landed in the same state.

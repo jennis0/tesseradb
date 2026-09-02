@@ -296,7 +296,9 @@ describe('driver', () => {
     await h.clock.advance(5_000); // interval long lapsed; foreground still hung
     h.driver.schedule(h.view, 400, 300);
     await h.clock.advance(10);
-    expect(h.calls.filter((c) => c.k === 0)).toHaveLength(0);
+    // The cold view's counts seed is a `k = 0` call and is the first one (it hangs here, like
+    // everything else); what must not appear is a *second* — the revalidation, beside a live fetch.
+    expect(h.calls.slice(1).filter((c) => c.k === 0)).toHaveLength(0);
   });
 
   it('a real fetch never queues behind a running revalidation — it displaces it', async () => {
@@ -369,4 +371,101 @@ describe('driver', () => {
     await h.clock.advance(3_000);
     expect(h.calls.length).toBe(settled);
   });
+
+  it('the cold view buys counts before marks — the first marks request is at the counted depth, not the average model\'s', async () => {
+    // The defect this pins, measured on rung 3 (2026-09-02): with no counts to plan from, the
+    // average model asked the first view of a session at depth 8 and was answered with 1,014,597
+    // points in 33.5 MB against a 500,000 budget, and the frame was then derived two levels
+    // shallower from 2.4 MB. The seed asks the same question for the price of the counting stage.
+    const clock = fakeClock();
+    const calls: {zoom: number; k?: number}[] = [];
+    const traces: {kind: string; fields: Record<string, number | string>}[] = [];
+    const replica = new Replica(
+      async (req) => {
+        calls.push({zoom: req.zoom, k: req.k});
+        if (req.k !== 0) return servedResponse(10_000n, 8);
+        // Every tile of this depth, saturated: the counted cost of a request here is `k` per
+        // tile, so the count-driven choice is bounded by the budget rather than by `maxTiles`.
+        const n = Math.min(4 ** req.zoom, 4096);
+        const result = emptyResponse().result;
+        return {
+          ...emptyResponse(),
+          result: {
+            ...result,
+            tiles: Array.from({length: n}, (_, i) => ({
+              tile: BigInt(i),
+              visible: 10_000n,
+              matched: 10_000n,
+              served: 0n,
+              highlighted: 10_000n
+            }))
+          }
+        };
+      },
+      Q,
+      {view: 's', now: () => clock.now(), revalidateAfterMs: Infinity}
+    );
+    replica.reset();
+    const driver = new Driver(
+      replica,
+      {kMaxMarks: 500, maxTilesPerRequest: 4096, thetaTargetMarks: 10},
+      clock,
+      {onFrame: () => {}, onTrace: (kind, fields) => traces.push({kind, fields})},
+      {budget: 50_000},
+      false
+    );
+    driver.schedule({target: [0.5, 0.5, 0], zoom: 3}, 400, 300);
+    await clock.advance(50);
+
+    // The seed is first, and it is counts-only.
+    expect(calls[0]!.k).toBe(0);
+    expect(traces.some((t) => t.kind === 'seed')).toBe(true);
+    const marks = calls.find((c) => c.k !== 0);
+    expect(marks).toBeDefined();
+    // The marks request was planned from those counts, not from the average.
+    const request = traces.find((t) => t.kind === 'request')!;
+    expect(request.fields.from).not.toBe('average');
+    // Saturated ground: `sum min(k, count)` over a 50,000 budget admits 100 tiles, which is
+    // shallower than the average model's own choice at m_target = 10.
+    expect(marks!.zoom).toBeLessThan(calls[0]!.zoom);
+    expect(request.fields.depth).toBe(marks!.zoom);
+
+    // Once per session: a second view asks for marks with no seed in front of it.
+    const seeds = () => calls.filter((c) => c.k === 0).length;
+    const seedsAfterFirst = seeds();
+    driver.schedule({target: [0.1, 0.9, 0], zoom: 6}, 400, 300);
+    await clock.advance(2_000);
+    expect(seeds()).toBe(seedsAfterFirst);
+  });
+
+  it('a refused seed is not a refused view — the marks request the average model planned still goes', async () => {
+    const clock = fakeClock();
+    const calls: {zoom: number; k?: number}[] = [];
+    const traces: {kind: string; fields: Record<string, number | string>}[] = [];
+    const replica = new Replica(
+      async (req) => {
+        calls.push({zoom: req.zoom, k: req.k});
+        if (req.k === 0) throw new TesseraError(500, 'internal', 'no counts for you');
+        return servedResponse(10_000n, 8);
+      },
+      Q,
+      {view: 's', now: () => clock.now(), revalidateAfterMs: Infinity}
+    );
+    replica.reset();
+    const statuses: string[] = [];
+    const driver = new Driver(
+      replica,
+      {kMaxMarks: 500, maxTilesPerRequest: 4096, thetaTargetMarks: 10},
+      clock,
+      {onFrame: () => {}, onStatus: (s) => statuses.push(s), onTrace: (kind, fields) => traces.push({kind, fields})},
+      {budget: 50_000},
+      false
+    );
+    driver.schedule({target: [0.5, 0.5, 0], zoom: 3}, 400, 300);
+    await clock.advance(50);
+    expect(traces.some((t) => t.kind === 'seedfail')).toBe(true);
+    expect(calls.some((c) => c.k !== 0)).toBe(true);
+    expect(statuses).not.toContain('refused');
+  });
+
 });

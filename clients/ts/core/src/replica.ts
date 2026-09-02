@@ -2,7 +2,7 @@ import {BandBudget, BandCache, bandSplitter, type Band, type Resolved} from './b
 import type {SessionArtifactTable} from './artifactTable.js';
 import {rectArea, type TileRect} from './rects.js';
 import {rectToRequestBbox, tileXY} from './coords.js';
-import type {Quantisation, ViewportPart, ViewportResponse, RegionVerdict} from './types.js';
+import type {Quantisation, TileCounts, ViewportPart, ViewportResponse, RegionVerdict} from './types.js';
 
 /**
  * Layer 1: the read-through replica.
@@ -321,6 +321,24 @@ export class Replica {
    */
   novelIn(want: TileRect, depth: number, k: number): number {
     return this.cache.planRegion(want, depth, this.contentKey, k).novel;
+  }
+
+  /**
+   * A region's per-tile masked counts, without its marks — `k = 0`, the tiles frame and the
+   * validator alone, for the price of the counting stage.
+   *
+   * **Nothing is stored.** A counts-only response carries no points, so absorbing it would put
+   * empty bands in the store and let a later plan subtract ground whose marks never arrived; the
+   * response's coordinates are observed (the validator is worth having) and the counts are handed
+   * back for the caller to keep. It is the same request {@link fetchRegion}'s revalidation makes,
+   * asked for a different reason: there, to bound staleness on a view answered entirely from the
+   * store; here, to know what the ground holds before paying for marks over it.
+   */
+  async counts(want: TileRect, depth: number, signal?: AbortSignal): Promise<TileCounts[]> {
+    const bbox = rectToRequestBbox(want, depth, this.quantisation);
+    const response = await this.fetchViewport({view: this.opts.view, zoom: depth, bbox, k: 0}, signal);
+    this.observe(response);
+    return response.result.tiles;
   }
 
   /** The byte budget the store was given, so a caller can size its look-ahead against it. */
