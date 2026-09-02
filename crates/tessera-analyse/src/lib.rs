@@ -63,6 +63,8 @@
 //! (`tests/golden.rs`), which are known answers per script family, checked in, and pinned to the
 //! version above.
 
+use std::borrow::Cow;
+
 use icu_casemap::{CaseMapper, CaseMapperBorrowed};
 use icu_normalizer::{ComposingNormalizer, ComposingNormalizerBorrowed};
 use icu_properties::props::{Alphabetic, GeneralCategory, GeneralCategoryGroup};
@@ -161,8 +163,10 @@ pub struct Analyser {
     // segmenter's deserialisation, not an allocation.
     // The three are not `Clone` — icu4x's borrowed handles are not — so a holder that must clone
     // itself, as a live generation's columns do per publication, holds this behind an `Arc`.
-    nfkc: ComposingNormalizerBorrowed<'static>,
-    case: CaseMapperBorrowed<'static>,
+    //
+    // The first two stages are [`Fold`], which is factored out because a second surface wants them
+    // without the segmenter: see that type.
+    fold: Fold,
     words: WordSegmenterBorrowed<'static>,
     // The token rule's two property lookups, from the same pin as the stages above rather than
     // from std — see [`UNICODE_VERSION`] for why the toolchain must not be an input here.
@@ -197,8 +201,7 @@ impl Analyser {
 
     pub fn new() -> Self {
         Analyser {
-            nfkc: ComposingNormalizer::new_nfkc(),
-            case: CaseMapper::new(),
+            fold: Fold::new(),
             // `new_auto` picks per script run: dictionary segmentation for Chinese, Japanese, Thai,
             // Lao, Khmer and Burmese, and the plain UAX #29 rules elsewhere. That per-run choice is
             // what lets one analyser serve a mixed-script corpus with nothing declared.
@@ -206,6 +209,17 @@ impl Analyser {
             alphabetic: CodePointSetData::new::<Alphabetic>(),
             general_category: CodePointMapData::<GeneralCategory>::new(),
         }
+    }
+
+    /// The first two stages alone — NFKC, then full case folding — for a caller that wants the
+    /// pipeline's *fold* without its segmentation.
+    ///
+    /// **One fold in the codebase, not two.** The suggestion surface
+    /// (`docs/design/value-suggestion.md` §4) folds a category key, a title and a typed query by
+    /// exactly this rule, and it is the same rule rather than a second one that could drift — a
+    /// query folded one way and an indexed entry the other match on nothing, silently.
+    pub fn fold(&self) -> &Fold {
+        &self.fold
     }
 
     /// Does this character make its segment a token? `Alphabetic ∪ General_Category ∈ {Nd, Nl, No}`
@@ -273,12 +287,7 @@ impl Analyser {
     /// dependency whose version has to track icu4x's own or the trait is a different type; the
     /// NFKC stage has an inherent sink method and takes the buffer.
     pub fn for_each_token(&self, text: &str, scratch: &mut TokenScratch, f: &mut impl FnMut(&str)) {
-        // Written unconditionally, where `normalize` returns a `Cow` that borrows an
-        // already-normalised input: that borrow costs a full normalising pass into a checking sink
-        // to discover, so the branch it saves is a copy, not the work.
-        scratch.normalised.clear();
-        let _ = self.nfkc.normalize_to(text, &mut scratch.normalised);
-        let folded = self.case.fold_string(&scratch.normalised);
+        let folded = self.fold.fold_into(text, &mut scratch.normalised);
         let mut breaks = self.words.segment_str(&folded);
         let Some(mut start) = breaks.next() else {
             return;
@@ -291,6 +300,351 @@ impl Analyser {
             start = end;
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The fold, and the suggestion surface's own rules beside it
+// ---------------------------------------------------------------------------------------------
+
+/// The `unicode` pipeline's first two stages — **NFKC, then full Unicode case folding** — with no
+/// segmenter.
+///
+/// Factored out of [`Analyser`] so that a surface wanting the fold and not the token stream calls
+/// the same code rather than restating the rule. There is one fold in this repository; a second
+/// spelling of it would mean a query folded one way and an indexed string the other, matching on
+/// nothing with no error anywhere.
+///
+/// The order is [`Analyser`]'s and is load-bearing for the same reason: normalising first means the
+/// case folder sees one spelling of each character.
+pub struct Fold {
+    nfkc: ComposingNormalizerBorrowed<'static>,
+    case: CaseMapperBorrowed<'static>,
+}
+
+impl Default for Fold {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Debug for Fold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Fold({UNICODE}/{UNICODE_VERSION})")
+    }
+}
+
+impl Fold {
+    pub fn new() -> Self {
+        Fold {
+            nfkc: ComposingNormalizer::new_nfkc(),
+            case: CaseMapper::new(),
+        }
+    }
+
+    /// `text`, NFKC-normalised and then case-folded.
+    pub fn fold(&self, text: &str) -> String {
+        let mut scratch = String::new();
+        self.fold_into(text, &mut scratch).into_owned()
+    }
+
+    /// [`Self::fold`] with the *normalisation* stage written into a buffer the caller keeps.
+    ///
+    /// The normalised copy is a whole second copy of the input, so a sweep over many strings holds
+    /// one buffer rather than allocating per string. ⊘ The case folder still allocates its own
+    /// output: writing it into a reused buffer needs `writeable::Writeable` in scope, which is a
+    /// direct dependency whose version has to track icu4x's own.
+    pub fn fold_into<'a>(&self, text: &str, normalised: &'a mut String) -> Cow<'a, str> {
+        // Written unconditionally, where `normalize` returns a `Cow` that borrows an
+        // already-normalised input: that borrow costs a full normalising pass into a checking sink
+        // to discover, so the branch it saves is a copy, not the work.
+        normalised.clear();
+        let _ = self.nfkc.normalize_to(text, normalised);
+        self.case.fold_string(&*normalised)
+    }
+}
+
+/// **The suggestion surface's own rules** — whitespace collapse and the word-boundary rule —
+/// beside the fold they run after (`docs/design/value-suggestion.md` §4).
+///
+/// These are *not* the analyser's. They decide what entries a category vocabulary's suggestion
+/// index holds and say nothing about how a `text` column is tokenised: [`Analyser`] segments by
+/// UAX #29 and never collapses whitespace, and neither behaviour changes because this type exists.
+/// The two share exactly one thing, [`Fold`], and share it so that a typed query and an indexed
+/// key fold identically.
+///
+/// **A word boundary is a transition into a letter or digit from anything else, after folding** —
+/// `Alphabetic ∪ General_Category ∈ {Nd, Nl, No}`, the same union [`Analyser`]'s token rule uses
+/// and from the same pinned tables, so this crate has one Unicode version and
+/// [`Analyser::identity`] covers all of it.
+///
+/// **A script written without spaces yields no word-start entries.** The rule is a transition into
+/// a letter from something that is not one, so a run of Han, Khmer or Thai written with no
+/// separators is one word however many words a reader sees in it — such a vocabulary is suggested
+/// on whole-key and whole-title prefixes alone. This is a deliberate consequence of using a
+/// boundary rule rather than the segmenter: a dictionary segmentation would multiply the index by
+/// the character count for those scripts and would make an entry set a function of icu4x's data
+/// version rather than of the string.
+pub struct SuggestionFold {
+    fold: Fold,
+    alphabetic: CodePointSetDataBorrowed<'static>,
+    general_category: CodePointMapDataBorrowed<'static, GeneralCategory>,
+}
+
+impl Default for SuggestionFold {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Debug for SuggestionFold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SuggestionFold({UNICODE}/{UNICODE_VERSION})")
+    }
+}
+
+impl SuggestionFold {
+    pub fn new() -> Self {
+        SuggestionFold {
+            fold: Fold::new(),
+            alphabetic: CodePointSetData::new::<Alphabetic>(),
+            general_category: CodePointMapData::<GeneralCategory>::new(),
+        }
+    }
+
+    /// The shared fold, for a caller that wants it without the two rules above.
+    pub fn fold(&self) -> &Fold {
+        &self.fold
+    }
+
+    /// **The entry string for `text`**: folded, then runs of Unicode whitespace collapsed to one
+    /// space, then trimmed.
+    ///
+    /// This is applied to the query and to every indexed string alike, so a match is an equality of
+    /// folded bytes and never a judgement. The empty string is an ordinary answer — a value whose
+    /// key is whitespace alone cannot exist (the ingest wire refuses an empty value), but a *title*
+    /// of whitespace is a shape an author can write, and it indexes nothing rather than refusing.
+    pub fn entry(&self, text: &str) -> String {
+        collapse_whitespace(&self.fold.fold(text))
+    }
+
+    /// [`Self::entry`] with the normalisation buffer reused across strings.
+    pub fn entry_into(&self, text: &str, normalised: &mut String) -> String {
+        let folded = self.fold.fold_into(text, normalised);
+        collapse_whitespace(&folded)
+    }
+
+    /// Is this character part of a word — `Alphabetic ∪ Number ∪ Mark`?
+    ///
+    /// The first two are [`Analyser`]'s token rule exactly. **`Mark` is this rule's own addition
+    /// and it is not decoration**: a combining mark is not `Alphabetic`, so without it the Thai
+    /// `เป็น` breaks at U+0E47 and the letter after it reads as a new word — and so does every
+    /// Devanagari, Thai, Arabic or Hebrew word carrying a diacritic. That would put spurious
+    /// word-start entries in the index for exactly the scripts a whole-word rule serves worst. A
+    /// mark never begins a word in well-formed text, so admitting it can only *join* runs.
+    fn wordish(&self, c: char) -> bool {
+        let category = self.general_category.get(c);
+        self.alphabetic.contains(c)
+            || GeneralCategoryGroup::Number.contains(category)
+            || GeneralCategoryGroup::Mark.contains(category)
+    }
+
+    /// The **byte offsets of every word start after the first**, in an already-entry-folded string.
+    ///
+    /// The first word is not a word *start* entry — it is the whole-string entry, which the index
+    /// holds under its own kind — so the offset 0 case is excluded here rather than filtered by
+    /// every caller.
+    pub fn word_starts(&self, entry: &str) -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut previous_wordish = false;
+        for (at, c) in entry.char_indices() {
+            let wordish = self.wordish(c);
+            if wordish && !previous_wordish && at > 0 {
+                out.push(at);
+            }
+            previous_wordish = wordish;
+        }
+        out
+    }
+
+    /// The **character offsets** of the same boundaries in a string that has *not* been folded —
+    /// the key or the title as an author wrote it, which is the string a response serves.
+    ///
+    /// Two lists rather than one map because the fold has no offset-preserving form: icu4x
+    /// normalises and folds whole strings, so nothing can say which source character a folded byte
+    /// came from. What makes the pairing sound instead is *where* the boundaries are: a word start
+    /// is a transition **into** a letter or digit, so the character before one is neither, and NFKC
+    /// never composes across such a character. Folding from a word start therefore gives exactly
+    /// the tail of the whole string's fold, and the k-th boundary in the served string is the k-th
+    /// in the folded one.
+    ///
+    /// **Where the two lists differ in length the caller must index no word starts for that
+    /// value**, and [`Self::entries_of`] does. NFKC can move a boundary — `¼` becomes `1⁄4`, one
+    /// word where there was one non-word character — and a pairing that assumed equal counts would
+    /// record an offset into the wrong word, which is a wrong highlight rather than a wrong match.
+    /// It is rare enough that dropping the word starts of the values it happens to is cheaper than
+    /// any machinery for getting it right.
+    pub fn served_word_starts(&self, served: &str) -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut previous_wordish = false;
+        let mut leading = true;
+        for (index, c) in served.chars().enumerate() {
+            // Leading whitespace is trimmed out of the entry string, so a served string that opens
+            // with it has its first word at a non-zero character index and that word is the
+            // *whole-string* entry rather than a word start. Everything before the first wordish
+            // character is therefore skipped here on the same rule the entry fold applies.
+            let wordish = self.wordish(c);
+            if wordish && !previous_wordish {
+                if leading {
+                    leading = false;
+                } else {
+                    out.push(index);
+                }
+            }
+            previous_wordish = wordish;
+        }
+        out
+    }
+
+    /// The character index the whole-string entry starts at in `served` — its leading whitespace,
+    /// which the entry fold trims.
+    pub fn served_start(&self, served: &str) -> usize {
+        served
+            .chars()
+            .position(|c| !c.is_whitespace())
+            .unwrap_or(0)
+    }
+}
+
+/// Which served string an entry came from — `key` or `title`, as `match.field` reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SuggestionField {
+    Key,
+    Title,
+}
+
+impl SuggestionField {
+    /// The wire spelling, which is the field name in the response and nothing else.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SuggestionField::Key => "key",
+            SuggestionField::Title => "title",
+        }
+    }
+}
+
+/// The three entry kinds, **in the order ties between them break**
+/// (`docs/design/value-suggestion.md` §7): a whole-key match precedes a whole-title match, which
+/// precedes a word-start match derived from a longer string.
+///
+/// The discriminants are the sort key and are written to the index, so reordering them is a format
+/// change and moves `SUGGEST_FORMAT_VERSION`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
+pub enum EntryKind {
+    Key = 0,
+    Title = 1,
+    WordStart = 2,
+}
+
+impl EntryKind {
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(EntryKind::Key),
+            1 => Some(EntryKind::Title),
+            2 => Some(EntryKind::WordStart),
+            _ => None,
+        }
+    }
+}
+
+/// One `(folded entry string, where it came from)` pair — what the suggestion index holds a run of
+/// per distinct entry string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SuggestionEntry {
+    /// The folded, whitespace-collapsed, trimmed string a prefix is matched against.
+    pub entry: String,
+    pub kind: EntryKind,
+    pub field: SuggestionField,
+    /// The **character** offset into the served string (`key` or `title` as an author wrote it)
+    /// this entry begins at — what `match.start` reports, and where a response re-folds forward
+    /// from to derive `match.len`.
+    pub start: u32,
+}
+
+impl SuggestionFold {
+    /// **Every entry one value contributes** (`docs/design/value-suggestion.md` §4): the whole key,
+    /// the whole title where an author wrote one, and every word start after the first of the title
+    /// — or of the key, where there is no title, which is what "a value with no title indexes its
+    /// key as the title would be" means.
+    ///
+    /// An entry that folds to the empty string is dropped rather than indexed: it would match every
+    /// prefix range's lower bound and stands for nothing a caller could have typed.
+    ///
+    /// Word starts are dropped for a value whose served and folded boundary counts disagree — see
+    /// [`Self::served_word_starts`] for the case and why dropping is the answer.
+    pub fn entries_of(&self, key: &str, title: Option<&str>) -> Vec<SuggestionEntry> {
+        let mut out = Vec::new();
+        let mut scratch = String::new();
+
+        let key_entry = self.entry_into(key, &mut scratch);
+        if !key_entry.is_empty() {
+            out.push(SuggestionEntry {
+                entry: key_entry,
+                kind: EntryKind::Key,
+                field: SuggestionField::Key,
+                start: self.served_start(key) as u32,
+            });
+        }
+
+        let (word_source, field) = match title {
+            Some(title) => {
+                let title_entry = self.entry_into(title, &mut scratch);
+                if !title_entry.is_empty() {
+                    out.push(SuggestionEntry {
+                        entry: title_entry,
+                        kind: EntryKind::Title,
+                        field: SuggestionField::Title,
+                        start: self.served_start(title) as u32,
+                    });
+                }
+                (title, SuggestionField::Title)
+            }
+            None => (key, SuggestionField::Key),
+        };
+
+        let folded = self.entry_into(word_source, &mut scratch);
+        let folded_starts = self.word_starts(&folded);
+        let served_starts = self.served_word_starts(word_source);
+        if folded_starts.len() == served_starts.len() {
+            for (at, served) in folded_starts.into_iter().zip(served_starts) {
+                out.push(SuggestionEntry {
+                    entry: folded[at..].to_string(),
+                    kind: EntryKind::WordStart,
+                    field,
+                    start: served as u32,
+                });
+            }
+        }
+        out
+    }
+}
+
+/// Runs of Unicode whitespace collapsed to one space, and the result trimmed.
+///
+/// `str::split_whitespace` is Unicode's `White_Space` property from **std's** tables, which move
+/// with the toolchain — acceptable here and not in the token rule, because whitespace is not part
+/// of any indexed identity: a code point becoming whitespace in a later revision would change how
+/// one value's title collapses, which is a rebuild of a derived index and never a stored ordinal.
+/// [`UNICODE_VERSION`] covers the fold, which is the part an artefact records.
+pub fn collapse_whitespace(folded: &str) -> String {
+    let mut out = String::with_capacity(folded.len());
+    for word in folded.split_whitespace() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    out
 }
 
 /// The buffers [`Analyser::for_each_token`] reuses across documents.
@@ -306,6 +660,141 @@ pub struct TokenScratch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The factored fold is the analyser's own first two stages**, not a second spelling of them.
+    /// If they ever diverge a typed query and an indexed key stop matching, silently — so the
+    /// property is asserted over the pairs whose equality the pipeline's order buys.
+    #[test]
+    fn the_factored_fold_is_the_analysers_own() {
+        let a = Analyser::new();
+        let fold = Fold::new();
+        for text in ["ﬁle", "ＦＵＬＬ", "İstanbul", "STRASSE", "Ω", "cs.LG", "Machine Learning"] {
+            assert_eq!(
+                a.fold().fold(text),
+                fold.fold(text),
+                "{text:?}: the analyser's fold and a free one disagree"
+            );
+            // And the token stream is still produced from that fold, so the two cannot drift
+            // without this failing too.
+            let folded = fold.fold(text);
+            assert_eq!(a.tokens(text), a.tokens(&folded));
+        }
+    }
+
+    /// The entry rule is fold, then collapse, then trim — asserted on one string that exercises
+    /// all three at once.
+    #[test]
+    fn an_entry_is_folded_collapsed_and_trimmed() {
+        let s = SuggestionFold::new();
+        assert_eq!(s.entry("  Machine\t\n  LEARNING  "), "machine learning");
+        assert_eq!(s.entry("cs.LG"), "cs.lg");
+        assert_eq!(s.entry("ﬁLE"), "file");
+        assert_eq!(s.entry("ＦＵＬＬ　width"), "full width");
+        assert_eq!(s.entry("   "), "", "whitespace alone is an entry of nothing");
+    }
+
+    /// **A word boundary is a transition into a letter or digit**, so an underscore, a dot and a
+    /// space all start the next word and a run of letters does not.
+    #[test]
+    fn word_starts_are_transitions_into_a_letter_or_digit() {
+        let s = SuggestionFold::new();
+        let entry = s.entry("machine_learning 2026.v2");
+        assert_eq!(entry, "machine_learning 2026.v2");
+        let starts: Vec<&str> = s
+            .word_starts(&entry)
+            .into_iter()
+            .map(|at| &entry[at..])
+            .collect();
+        assert_eq!(starts, vec!["learning 2026.v2", "2026.v2", "v2"]);
+    }
+
+    /// **A script written without spaces yields no word starts** — the consequence §4 names, which
+    /// is invisible to an English-language reader and would otherwise be discovered as a missing
+    /// feature rather than as a stated rule.
+    #[test]
+    fn a_script_without_spaces_has_no_word_starts() {
+        let s = SuggestionFold::new();
+        for sample in ["中文分词测试", "日本語のテキスト", "ภาษาไทยเป็นภาษา"] {
+            let entry = s.entry(sample);
+            assert!(
+                s.word_starts(&entry).is_empty(),
+                "{sample:?} produced word starts"
+            );
+        }
+    }
+
+    /// The three entry kinds, in the order §7 breaks ties in, and `start` in characters of the
+    /// **served** string rather than of the folded one.
+    #[test]
+    fn a_value_contributes_a_key_a_title_and_its_word_starts() {
+        let s = SuggestionFold::new();
+        let entries = s.entries_of("cs.LG", Some("Machine Learning"));
+        assert_eq!(
+            entries
+                .iter()
+                .map(|e| (e.entry.as_str(), e.kind, e.field, e.start))
+                .collect::<Vec<_>>(),
+            vec![
+                ("cs.lg", EntryKind::Key, SuggestionField::Key, 0),
+                ("machine learning", EntryKind::Title, SuggestionField::Title, 0),
+                ("learning", EntryKind::WordStart, SuggestionField::Title, 8),
+            ]
+        );
+    }
+
+    /// A value with no title indexes its **key**'s word starts, which is what "as the title would
+    /// be" means — and does not manufacture a title entry.
+    #[test]
+    fn a_value_with_no_title_takes_its_word_starts_from_its_key() {
+        let s = SuggestionFold::new();
+        let entries = s.entries_of("machine_learning", None);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|e| (e.entry.as_str(), e.kind, e.field, e.start))
+                .collect::<Vec<_>>(),
+            vec![
+                ("machine_learning", EntryKind::Key, SuggestionField::Key, 0),
+                ("learning", EntryKind::WordStart, SuggestionField::Key, 8),
+            ]
+        );
+    }
+
+    /// **`start` indexes the served string, so leading whitespace and non-ASCII characters shift
+    /// it** — a byte offset into the folded form would highlight the wrong characters of the string
+    /// the client draws.
+    #[test]
+    fn start_is_a_character_offset_into_the_served_string() {
+        let s = SuggestionFold::new();
+        let entries = s.entries_of("k", Some("  Café Noir"));
+        let title = entries
+            .iter()
+            .find(|e| e.kind == EntryKind::Title)
+            .expect("a title entry");
+        assert_eq!(title.start, 2, "the two leading spaces are trimmed out");
+        let word = entries
+            .iter()
+            .find(|e| e.kind == EntryKind::WordStart)
+            .expect("a word-start entry");
+        assert_eq!(word.entry, "noir");
+        // 'C','a','f','é' are four characters and five bytes; the offset counts characters.
+        assert_eq!(word.start, 7);
+    }
+
+    /// Where NFKC moves a boundary the served and folded counts disagree, and the value's word
+    /// starts are dropped rather than paired wrongly. `¼` folds to `1⁄4` — one non-word character
+    /// becoming a word, a digit and another word.
+    #[test]
+    fn a_value_whose_fold_moves_a_boundary_indexes_no_word_starts() {
+        let s = SuggestionFold::new();
+        let entries = s.entries_of("k", Some("a¼b"));
+        assert!(
+            entries.iter().all(|e| e.kind != EntryKind::WordStart),
+            "{entries:?}"
+        );
+        // The whole-title entry still stands, so the value is still suggestible.
+        assert!(entries.iter().any(|e| e.kind == EntryKind::Title));
+    }
 
     /// The pipeline's order is what makes these equal, and each pair differs at a different stage:
     /// the ligature and the fullwidth digits are NFKC's, the Turkish dotted capital and the German
