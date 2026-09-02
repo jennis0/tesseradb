@@ -31,6 +31,17 @@ stateDiagram-v2
 
 *The stages an item and a deny pass through. Each arrow is one event.*
 
+The stages exist because of how the map is stored. Rows are kept sorted by position on disc, so
+that a screen tile is one contiguous run of rows, and a sorted file cannot take a new row in the
+middle without being rewritten. So a new row is not written into the map directly. It waits in
+memory with other new rows until a **flush** writes the batch out as its own sorted file, a
+**segment**. Each flush adds a segment, and a request has to look in every segment, so from time
+to time a **merge** combines small segments into larger ones. A deleted row cannot be removed from
+a sorted file in place either, so a deletion is recorded in the overlay and the row stays on disc,
+hidden, until a **compaction** rewrites the whole partition into one segment without it. This is
+the same arrangement as a log-structured merge tree, the storage layout behind most write-heavy
+databases; what Tessera adds is that the sort order is the map itself.
+
 | Stage | What it means |
 |---|---|
 | accepted | The rows are in the write-ahead log (WAL) and have entity ids. Nothing is visible yet |
