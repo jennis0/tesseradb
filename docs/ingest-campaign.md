@@ -561,6 +561,27 @@ is not in doubt. GeoNames is the first corpus where the two come apart, and the 
 spelling for both. Routed around here by materialising the hole as an explicit artifact (1,373 of
 them, against 464,000 real); **not raised as an issue and not designed**.
 
+**A 4 GiB cgroup cap survives `tessera serve`'s open and then OOM-kills on the first request; 12
+GiB serves the whole drive cleanly, with byte-identical masked counts to an uncapped run.** Tested
+against `data/ladder/medcpt` (11.15 GB) under `systemd-run --user --scope -p MemoryMax=…`: open
+always completes and `/readyz` answers 200 at anon ≈ 2.06–2.17 GB resident, but at 4 GiB the first
+viewport request — even the cheapest principal measured — reliably exceeds the ~2 GB of headroom
+left and the kernel OOM-kills the process (reproduced three times; `dmesg` confirms reclaim was
+attempted and insufficient, not a reclaim that ran out of candidates). The category/text postings
+and value columns behave exactly as designed — mapped, resident only where a request scans, and
+confirmed both by code and by `/proc/<pid>/smaps` — so **that part of the design already tolerates
+a bundle larger than memory**. What does not yet tolerate it is a fixed, per-process anon floor at
+open, best-evidenced (not directly profiled) as `mesh/descriptors`'s DAG artifact-projection build
+now paid at open rather than lazily (`Engine::warm_artifact_projections`,
+`probes/2026-09-02-cold-start/`) over this bundle's 1.66×10⁹-row closed membership. Whether that
+floor scales sub- or super-linearly with a DAG's membership size was not measured — this bundle is
+the ladder's only DAG-layer data point — and is worth measuring with a heap profiler before rung 4
+(a ~60 GB bundle on a 47 GB box) commits to a hierarchy shape, because it is the one part of the
+request path that reads real, unavoidable memory into the heap at open rather than paging it in on
+demand. Full method, the three OOM attempts and the anon/file breakdown (including why `file`'s
+figure is contaminated by cgroup v2's first-toucher page-cache charging and should not be trusted
+across runs) in `probes/2026-09-02-serve-under-memory-cap/`.
+
 ## 7. Problems found in tooling, and what was done
 
 **`run_demo.sh` reported a scale ready when another process held the port.** The readiness poll asks

@@ -1,0 +1,44 @@
+{
+  "kinds": {
+    "viewport_pan_narrow": null
+  },
+  "correctness": {
+    "viewport_pan_narrow": []
+  },
+  "died": {
+    "during": "viewport_pan_narrow",
+    "error": "Response ended prematurely",
+    "server_alive_after": false
+  },
+  "principals": {
+    "narrow": [
+      "V"
+    ],
+    "medium": [
+      "K",
+      "J"
+    ],
+    "broad": [
+      "B",
+      "E",
+      "C",
+      "G",
+      "D",
+      "N",
+      "A",
+      "M",
+      "unindexed",
+      "F",
+      "Z",
+      "H",
+      "I",
+      "L",
+      "J",
+      "K",
+      "V"
+    ]
+  },
+  "view": "knn",
+  "mesh_view": null,
+  "note_mesh_view": "mesh/descriptors is a layer, not a view; served via viewport layers=all"
+}
