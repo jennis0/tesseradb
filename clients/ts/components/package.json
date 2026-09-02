@@ -19,6 +19,7 @@
     "./key-picker": "./src/key-picker.ts",
     "./artifact-list": "./src/artifact-list.ts",
     "./artifact-card": "./src/artifact-card.ts",
+    "./hierarchy": "./src/hierarchy.ts",
     "./legend": "./src/legend.ts",
     "./explorer": "./src/explorer.ts",
     "./src/*": "./src/*",

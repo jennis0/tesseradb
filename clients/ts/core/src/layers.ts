@@ -71,3 +71,17 @@ export function isFilterLayer(layer: Layer): boolean {
 export function drawableLayers(layers: readonly Layer[]): Layer[] {
   return layers.filter((l) => !isFilterLayer(l));
 }
+
+/**
+ * Whether a layer has a lineage to walk — anything but `flat`
+ * (`highlight-and-hierarchy.md` §4, §5.1).
+ *
+ * A `flat` layer is one page of roots and no row has children, which the browse verb still
+ * answers; the panel's *layer picker over the bundle's hierarchical layers* is this list, so a
+ * flat clustering is not offered a tree it does not have. A layer that attaches to another — a
+ * label layer hanging from a clustering — has no lineage of its own and its text is what its
+ * target shows as a name, so it is not browsed separately either.
+ */
+export function browsableLayers(layers: readonly Layer[]): Layer[] {
+  return layers.filter((l) => l.depsOn.length === 0 && (l.hierarchy.kind !== 'flat' || l.levels.length > 0));
+}

@@ -1,4 +1,4 @@
-import {NO_COUNT, NO_MASKED, servedLineage, SessionArtifactTable, type Projections, type ProjectionName, type Quantisation, type Store, type StatusProjection} from '@tesseradb/client';
+import {NO_COUNT, NO_MASKED, servedLineage, SessionArtifactTable, type BrowsePage, type Projections, type ProjectionName, type Quantisation, type Store, type StatusProjection} from '@tesseradb/client';
 
 /**
  * A store with no network and no driver: projections a test sets directly, and the subscription
@@ -11,6 +11,8 @@ export type FakeStore = Store & {
    * (`view-switching.md` §4), which the store makes by pointing at another view's quantisation.
    */
   setFrame(q: Quantisation): void;
+  /** Script one browse answer: `roots`, `roots:<cursor>`, `p:<id>`, `p:<id>:<cursor>`, `q:<text>`. */
+  setBrowse(key: string, page: BrowsePage): void;
   calls: {name: string; args: unknown[]}[];
 };
 
@@ -33,6 +35,7 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
   const all = new Set<() => void>();
   const perName = new Map<ProjectionName, Set<() => void>>();
   const calls: {name: string; args: unknown[]}[] = [];
+  const browsePages = new Map<string, BrowsePage>();
   const spy =
     (name: string) =>
     (...args: unknown[]) => {
@@ -62,6 +65,13 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
     setView: spy('setView'),
     setFilters: spy('setFilters'),
     setMembers: spy('setMembers'),
+    // Answered from `browsePages`, which a test sets: keyed by the form the request took, so a
+    // walk can be scripted without a network. Every call is still recorded as `browse`.
+    browse: async (req: {parent?: bigint; q?: string; cursor?: string}) => {
+      calls.push({name: 'browse', args: [req]});
+      const key = req.q !== undefined ? `q:${req.q}` : req.parent !== undefined ? `p:${req.parent}${req.cursor ? `:${req.cursor}` : ''}` : `roots${req.cursor ? `:${req.cursor}` : ''}`;
+      return browsePages.get(key) ?? {artifacts: [], parents: [], next: null};
+    },
     loadFilterValues: async (...args: unknown[]) => {
       calls.push({name: 'loadFilterValues', args});
     },
@@ -75,6 +85,9 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
     frame: () => held,
     setFrame(q: Quantisation) {
       held = q;
+    },
+    setBrowse(key: string, page: BrowsePage) {
+      browsePages.set(key, page);
     },
     pick: async (...args: unknown[]) => {
       calls.push({name: 'pick', args});

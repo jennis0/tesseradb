@@ -2,8 +2,9 @@ import {ContextProvider} from '@lit/context';
 import {css, html, nothing} from 'lit';
 import {property, state} from 'lit/decorators.js';
 import type {Store} from '@tesseradb/client';
-import {activeCount, artifactBudgetFor, emptyDraft, levelForBudget} from '@tesseradb/client';
+import {activeCount, artifactBudgetFor, browsableLayers, emptyDraft, levelForBudget} from '@tesseradb/client';
 import {clusterLayerOf} from '@tesseradb/deck';
+import './hierarchy.js';
 import {TesseraElement} from './base.js';
 import {storeContext} from './context.js';
 import {attachContextRoot, defineOnce} from './define.js';
@@ -35,10 +36,15 @@ import './legend.js';
  * panel top-left with the selects, the layers and the filters, the toolbar top-right, and a
  * floating panel at the right with IN VIEW and the card. Under a narrow container
  * (`ExplorerNarrow.png`) the strip runs full width above a tab bar — Filters, Layers, In view,
- * Item — and each tab opens its panel as a sheet. `panels="filters legend layers artifacts
- * detail"` chooses which appear; every region is a named slot with default content.
+ * Item — and each tab opens its panel as a sheet. `panels="filters legend layers hierarchy
+ * artifacts detail"` chooses which appear; every region is a named slot with default content.
+ *
+ * **`<tessera-hierarchy>` sits beneath the filters** (`highlight-and-hierarchy.md` §5.1) and is
+ * drawn only where the bundle has a hierarchical layer to browse — the element says so itself,
+ * and the section it sits in is collapsed by default because the *In view* list is the viewport's
+ * answer and this is the corpus's.
  */
-const ALL_PANELS = ['toolbar', 'legend', 'filters', 'artifacts', 'selection', 'detail'] as const;
+const ALL_PANELS = ['toolbar', 'legend', 'filters', 'hierarchy', 'artifacts', 'selection', 'detail'] as const;
 type Panel = (typeof ALL_PANELS)[number];
 type Sheet = 'filters' | 'layers' | 'artifacts' | 'detail';
 
@@ -357,6 +363,10 @@ export class TesseraExplorer extends TesseraElement {
     const toolbar = html`<slot name="toolbar"><tessera-view-picker></tessera-view-picker><tessera-key-picker></tessera-key-picker><tessera-legend selectable .level=${this.level} .autoLevel=${autoLevel} @tessera-levelchange=${(e: CustomEvent<{level: number | null}>) => (this.level = e.detail.level)}></tessera-legend></slot>`;
     const layersPanel = html`<slot name="layers"><tessera-layer-picker></tessera-layer-picker></slot>`;
     const filters = html`<slot name="filters"><tessera-filter-panel></tessera-filter-panel></slot>`;
+    const hierarchy = html`<slot name="hierarchy"><tessera-hierarchy></tessera-hierarchy></slot>`;
+    // Drawn only where there is a lineage to walk: a bundle of flat clusterings has none, and an
+    // empty section reads as a panel that failed rather than one with nothing to say.
+    const hasHierarchy = browsableLayers(meta?.layers ?? []).length > 0;
     const list = html`<slot name="artifacts"><tessera-artifact-list></tessera-artifact-list></slot>`;
     const selectionPanel = this.has('selection') && region ? html`<slot name="selection"><tessera-selection></tessera-selection></slot>` : nothing;
     const section = (name: IconName, title: string, summary: string, body: unknown, open = false) =>
@@ -368,6 +378,7 @@ export class TesseraExplorer extends TesseraElement {
       ${selectionPanel}
       ${this.has('detail') && hasDetail ? detail : nothing}
       ${this.has('filters') ? section('filter', 'Filters', active > 0 ? `${active} applied` : '', filters) : nothing}
+      ${this.has('hierarchy') && hasHierarchy ? section('layers', 'Hierarchy', '', hierarchy) : nothing}
       ${this.has('artifacts') ? section('list', 'In view', inView > 0 ? `${inView.toLocaleString('en-GB')} cluster${inView === 1 ? '' : 's'}` : '', list) : nothing}
     </aside>`;
 
@@ -376,6 +387,7 @@ export class TesseraExplorer extends TesseraElement {
         ${this.has('toolbar') ? toolbar : nothing}
         ${this.has('legend') ? layersPanel : nothing}
         ${this.has('filters') ? filters : nothing}
+        ${this.has('hierarchy') && hasHierarchy ? hierarchy : nothing}
       </div>
     </div>`;
     const overlayRight = html`<div class="float right">
@@ -397,7 +409,16 @@ export class TesseraExplorer extends TesseraElement {
       }}>Clear</button>
       <button class="btn primary" type="button" @click=${() => (this.sheet = null)}>${matchedText}</button>
     </div>`;
-    const sheetBody = this.sheet === 'filters' ? html`${filters}${sheetFooter}` : this.sheet === 'layers' ? html`${toolbar}${layersPanel}` : this.sheet === 'artifacts' ? html`${selectionPanel}${list}` : this.sheet === 'detail' ? detail : nothing;
+    const sheetBody =
+      this.sheet === 'filters'
+        ? html`${filters}${this.has('hierarchy') && hasHierarchy ? hierarchy : nothing}${sheetFooter}`
+        : this.sheet === 'layers'
+          ? html`${toolbar}${layersPanel}`
+          : this.sheet === 'artifacts'
+            ? html`${selectionPanel}${list}`
+            : this.sheet === 'detail'
+              ? detail
+              : nothing;
 
     // **The tooltip slot is forwarded only when the host supplied one.** A slot assigned another
     // slot counts as filled even when that slot has nothing in it, so forwarding unconditionally

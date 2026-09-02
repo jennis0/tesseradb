@@ -209,12 +209,14 @@ export type Layer = {
    * request may ask for more detail (`artifactBudget`).
    */
   /**
-   * The four kinds the wire declares (`tessera-types`' `HierarchyKind`): `flat` (no lineage),
-   * `nested` (a tree in the edges, no levels), and the two levelled shapes `stacked` and `tiered`.
-   * `tiered` was missing here until 2026-08-28 — the union is what the fetch model classifies
-   * layers by, so an absent member is a layer silently treated as something it is not.
+   * The five kinds the wire declares (`tessera-types`' `HierarchyKind`): `flat` (no lineage),
+   * `nested` (a tree in the edges, no levels), `dag` (several parents per child, decision 0117),
+   * and the two levelled shapes `stacked` and `tiered`. `tiered` was missing here until
+   * 2026-08-28 and `dag` until 2026-09-02 — the union is what the fetch model classifies layers
+   * by, and what the hierarchy panel walks, so an absent member is a layer silently treated as
+   * something it is not.
    */
-  hierarchy: {kind: 'flat' | 'nested' | 'stacked' | 'tiered'; pruneChildren: boolean};
+  hierarchy: {kind: 'flat' | 'nested' | 'dag' | 'stacked' | 'tiered'; pruneChildren: boolean};
   /**
    * The resolutions the layer declares. **Empty for a treed layer**, which declares none: its
    * lineage is in its edges, and a level number would say nothing about position in it.
