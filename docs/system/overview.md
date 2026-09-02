@@ -32,8 +32,8 @@ build quickly with the customisable components.
 
 ## What using it looks like
 
-Declare a corpus in one TOML file: the files it reads, one or more coordinate systems over it, the
-categories a point may carry, and how a viewer's access is decided. Trimmed from
+A corpus is declared in one TOML file: the files it reads, one or more coordinate systems over
+it, the categories a point may carry, and how a viewer's access is decided. This is trimmed from
 `test_corpora/geonames/corpus.toml`:
 
 ```toml
@@ -64,27 +64,27 @@ vocabulary = "country"
 index      = true
 ```
 
-Run three commands: `tessera check` validates the declaration against the Parquet schemas,
-`tessera build` produces the bundle in one streaming pass, and `tessera serve` opens it on the HTTP
-API.
+Three commands take it from there. `tessera check` validates the declaration against the Parquet
+schemas, `tessera build` produces the bundle in one streaming pass, and `tessera serve` opens it on
+the HTTP API.
 
-Embed it: `<tessera-explorer>` drops a full map into a page as a custom element, `TesseraLayer`
-adds the same data to a deck.gl scene, and in a notebook `tesseradb`'s `Map` widget opens the same
-view without leaving Python.
+On the client side, `<tessera-explorer>` drops a full map into a page as a custom element,
+`TesseraLayer` adds the same data to a deck.gl scene, and in a notebook `tesseradb`'s `Map` widget
+opens the same view without leaving Python.
 
 ## What it consists of
 
-- **TesseraDB**, the server. One binary that checks a declaration, builds a bundle, serves it, and
-  verifies it. It exposes an HTTP API on three planes (viewer, session, control) with an OpenAPI
-  description, so a deployment can be driven from any language without the clients below.
+- **TesseraDB**, the server. One binary that checks a declaration, builds a bundle, serves it and
+  verifies it. Its HTTP API has three planes (viewer, session, control) and an OpenAPI description,
+  so any language can drive a deployment without the clients below.
 - **Tessera Client**, the headless store: `@tesseradb/client` for TypeScript and `tesseradb` for
-  Python. It holds a session, keeps a replica of what has been served, composes filters and
-  regions, and exposes the current frame to whatever draws it. No DOM, no rendering.
+  Python. It holds the session, keeps a local copy of what has been served, composes filters and
+  regions, and hands the current frame to whatever draws it. It does no rendering of its own.
 - **Components**: `@tesseradb/components` (a full explorer, the map, filter panel, pickers, item and
   artifact cards, a hierarchy browser, and the rest, as custom elements), `@tesseradb/deck` (a
   deck.gl layer), and `@tesseradb/react` (hooks and wrapped elements). The elements work in any
-  framework, and every colour, font and spacing is a CSS custom property, with parts and slots for
-  deeper restyling.
+  framework. Every colour, font and spacing is a CSS custom property, and parts and slots are
+  exposed for deeper restyling.
 
 ## How it scales
 
@@ -112,8 +112,9 @@ since the write path was reworked.
 
 ## Compared with other systems
 
-The rows below are the closest match on each of scale, interactive rendering, precomputed serving
-and per-query access control, and where each stops.
+Other systems reach one of these properties at a time: scale, interactive rendering, precomputed
+serving, or per-query access control. The table shows the closest match on each and where it
+stops.
 
 | System | Scale reached | Per-viewer masking | Live ingest and delete | Build at 10⁹ | What leaks or costs |
 |---|---|---|---|---|---|
@@ -150,14 +151,14 @@ only which items a viewer can open, is a function of one per-viewer set.
 
 ## What it guarantees
 
-- Every count, density, label and sample a viewer sees is computed from inside their own visible
-  set. Computing a quantity over the whole corpus and then hiding it from the wrong viewer is
-  treated as a defect.
+- Every count, density, label and sample a viewer sees is computed from their own visible set. A
+  quantity computed over the whole corpus and then hidden from the wrong viewer is a defect, not a
+  filtered view.
 - Sampling happens after masking. A sparse viewer's sample is drawn from what they can see; it is
   never a global sample with the hidden points removed.
 - The identifier a client receives is not the item's underlying identifier and cannot be used on
-  its own to enumerate or correlate records. It is a blinding permutation, not encryption, and it is
-  no defence against anyone holding the underlying data.
+  its own to enumerate or correlate records. It is a keyed permutation rather than encryption, and
+  it is no defence against anyone holding the underlying data.
 
 The full set is thirteen guarantees; the guarantees chapter states them and how each is checked. A
 small number of residual disclosures are accepted rather than closed, each recorded with its
@@ -168,13 +169,13 @@ a bug.
 
 | Feature | Status |
 |---|---|
-| The engine and the map: build, serve, ingest, live delete and suppress | Built and measured |
+| The engine and the map: build, serve, ingest, live delete and suppress | Built. Build time, memory, bundle size and viewport latency measured at 10⁹ points (above) |
 | Filters and search: categories, numbers, dates, keywords, text | Built. List-valued fields are not |
 | Views and view groups | Built |
 | Annotation layers: clusters, hierarchies, regions, hulls | Built. The DAG hierarchy kind is built; no shipped corpus declares one yet |
 | Live ingest and denies | Built. A deletion's rows are physically removed at compaction, which is built and runs on a schedule |
 | Clients: web components, a deck.gl layer, React bindings, a Python notebook widget | Built. Not yet published to a package index |
-| Conformance suite (the check that the guarantees hold) | Built and running on every change. Its own record states exactly where its coverage stands |
+| Conformance suite (the check that the guarantees hold) | Built and run on every change against an independent oracle. Its own record states where its coverage stands |
 | Plugin host for custom authorisation logic | Not built. A passthrough plugin ships in its place |
 | Partitions and replication | Not built |
 | Licence and packaging | Undecided |
