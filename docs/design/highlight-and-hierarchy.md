@@ -147,9 +147,17 @@ row-space bitmap (`MembershipRows`, built for every level at open and at a gener
 request path — a filter layer's included, since §5.4 keeps it out of `layers` but not out of the
 bundle), so step 1 is a lookup and step 2 is an intersection with
 the tile ranges — no postings read, no entity-space verdict, no crossing. A root descriptor's
-27 million members cost the same as a leaf's fifty: containers touched inside the viewport. A
-row-major level (one label per row, decision 0093) is a scan of the on-screen rows comparing
-labels, step 2's cost and no more.
+27 million members cost the same as a leaf's fifty: containers touched inside the viewport.
+
+**And that is the route whatever the level's serving layout is.** A row-major level (decisions
+0093/0094) carries the artifact-major form beside its column — the residency saving that would
+drop it is ⊘ not taken — so the leaf reads the bitmap there too. Reading the *column* instead is a
+walk of every visible row of the view asking each of its labels whether it is this ordinal, which is a
+correct answer at the wrong price: **measured at 2.85 s against 22 ms** on rung 3's
+`mesh/descriptors`, a `dag` served `RowMajorList` at ~46 labels over 3.6 × 10⁷ rows (2026-09-02).
+The walk survives only as the fallback for a level with no artifact-major form, which no level is,
+and `Engine::member_of_column_walks` counts the times it is taken so that stays checkable rather
+than remembered.
 
 **A highlight change re-sends bits, not points.** Because the served set does not depend on the
 highlight, a client that changes only the highlight holds every point it needs and wants only the
@@ -350,8 +358,14 @@ holds unchanged, and the empty-operand rule of §3 is what keeps it from becomin
 Per viewport request a highlight costs one per-tile crossing over the rows on screen, one
 `and_cardinality` per tile, one `contains` per served point and one probe per served artifact —
 tens of milliseconds at a 300,000-row viewport by the crossing probe's figures, independent of
-how much the highlight matched. A `member_of` highlight skips the crossing. ⊘ Not measured as a
-whole; each part is a measured operation of the filter path (§2.1).
+how much the highlight matched. A `member_of` highlight skips the crossing.
+
+**A `member_of` highlight is measured** (2026-09-02, against a served rung 3 on this box): the
+whole request — zoom 2, the whole extent, `k = 200`, the full principal, highlighting *Health
+Occupations* and its 13.46 million members — is **22 ms**, beside **21 ms** for the same viewport
+with no highlight. The first such request of a *session* is **418 ms**, which is the level's
+masked-count histogram (below) and not the highlight. ⊘ The other leaf shapes are still not
+measured as a whole; each part is a measured operation of the filter path (§2.1).
 
 **A browse page is measured** (2026-09-02, `cargo run --release -p tessera-bench --bin
 browse_cost`; the box: twelve cores, 47 GB, load ~10 from concurrent work; medians of five):
@@ -362,6 +376,16 @@ browse_cost`; the box: twelve cores, 47 GB, load ~10 from concurrent work; media
 | arXiv | `clusters/hdbscan`, 197 artifacts | **0.5 ms** | 0.5 ms | 1 root, 184 matches |
 | MedCPT, 3.6 × 10⁷ items | `clusters/kmeans`, 253 artifacts | **1.0 ms** | 0.9 ms | 200, one page |
 | MedCPT | `mesh/descriptors`, 30,217 artifacts | **39.7 ms** | 43.4 ms | 107 roots, 200 matches |
+
+**The first page a session asks for is a different number, and on a row-major level it is the
+larger one.** The order is by count, so a page needs every artifact's masked count; on a row-major
+level the only route to those is one walk of the composed mask reading every visible row's labels
+(decision 0093's named exception), cached per `(session, layer, level, mask)`. So the figures above
+are every page after the first, and the first pays the walk — **2.7 s** over MedCPT's
+3.6 × 10⁷ rows × ~46 labels single-threaded, **0.52 s** since that walk was split across the
+engine's pool (2026-09-02). An artifact-major level pays nothing here: `clusters/kmeans` is 106 ms
+for its first page and 1.2 ms after. A `member_of` leaf over the same level pays the same walk
+once, and shares the cache with browse.
 
 **What the figures say is that the page is bounded by the layer and never by the corpus.** A
 36-million-item corpus browses its 253-artifact clustering in a millisecond and its
@@ -481,6 +505,15 @@ schema with the frame columns.
   empty-operand timing residual in C33). Not taken: nothing.
 - **r5 (2026-09-02).** §9 (d) ruled — scan, priced in §7 — and the document promoted to Normative.
   C32 and C33 carried into `architecture.md` Appendix C at its r59.
+- **r7 (2026-09-02).** §2.1 and §7 corrected against measurement after the served rung 3 was
+  timed. Two costs the design priced as cheap were not: a `member_of` leaf on a **row-major** level
+  read the column rather than the artifact-major membership beside it — 2.85 s a request on rung
+  3's `mesh/descriptors`, now 22 ms — and browse's **first page of a session** pays that level's
+  masked-count histogram, 2.7 s, now 0.52 s with the walk split across the engine's pool. Neither
+  is a change to what is served: both routes answer `membership ∩ M_auth` and the zoom-0
+  `highlighted` total is the browse row's `masked_count` to the row. The wording that said a
+  row-major level is "a scan of the on-screen rows" is replaced rather than mended — it named a
+  whole-view walk — and §7's first ⊘ is discharged for the `member_of` shape only.
 - **r6 (2026-09-02).** **§7's two ⊘s replaced by measurement**, taken while §10's three server
   stages were built (`tessera-bench --bin browse_cost`). A browse page is bounded by the layer's
   artifact count and not by the corpus: 1.0 ms over MedCPT's 253-artifact clustering and 39.7 ms
