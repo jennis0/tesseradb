@@ -113,6 +113,38 @@ describe('<tessera-hierarchy>', () => {
     expect(deep(host, '[part="filter"]')).not.toBeNull();
   });
 
+  /**
+   * The panel's counts answer the question the request carried, so the walk has to be dropped when
+   * that question moves — and the question is `requestFilters()`, which carries the **drawn
+   * region's leaf** as well as the controls and the clauses. Hashed from `filters.expr` alone, a
+   * region drawn on the map left the tree showing counts to the question before it, with nothing
+   * on screen saying so.
+   */
+  it('refetches when the drawn region changes, which the controls alone never say', async () => {
+    const {host, store} = await panel();
+    const before = store.calls.filter((c) => c.name === 'browse').length;
+    expect(before).toBeGreaterThan(0);
+
+    store.set('region', {
+      shape: {kind: 'box', bbox: [0, 0, 1, 1], outside: false},
+      status: 'shown', refusal: null, visible: null, matched: {value: 4, exact: true},
+      served: {shown: 4, total: 4, exact: true}, held: {shown: 4, total: 4, exact: true}
+    } as never);
+    await settle(host);
+    await settle(host);
+    expect(store.calls.filter((c) => c.name === 'browse').length).toBeGreaterThan(before);
+  });
+
+  it('does not refetch when nothing about the question moved', async () => {
+    const {host, store} = await panel();
+    const before = store.calls.filter((c) => c.name === 'browse').length;
+    // A store tick that changes nothing the request carries — the panel is told, and asks nothing.
+    store.set('status', {status: 'shown', sessionWarm: true, refusal: null, stale: false, expired: false, retrying: false});
+    await settle(host);
+    await settle(host);
+    expect(store.calls.filter((c) => c.name === 'browse').length).toBe(before);
+  });
+
   it('shows the matched count beside the masked one where the map carries a filter', async () => {
     const {host} = await panel({
       filters: {draft: {}, expr: {archive: {in: ['cs']}}, highlight: null, members: [], values: {}, valueErrors: {}}

@@ -336,6 +336,20 @@ export interface Store {
    * name one, so a filtered map and a filtered tree read the same numbers.
    */
   browse(req: Omit<BrowseRequest, 'filters' | 'view'> & {filters?: FilterExpr | null; view?: string}): Promise<BrowsePage>;
+  /**
+   * The expression every request carries as `filters`, composed: the draft's filter-position
+   * leaves, the `member_of` clauses in that position, and the drawn region's leaf. Null for the
+   * unfiltered request.
+   *
+   * **Read it rather than recomposing it.** A caller that needs to know *what question is being
+   * asked* — a panel deciding whether its counts are stale, a host labelling a number — has three
+   * projections to look in and no way to be told about a fourth. `filters.expr` is one of the
+   * three, and a reader that took it for the whole would miss a drawn region entirely.
+   *
+   * It is JSON-safe: a `member_of` leaf carries its artifact as a decimal string and a region
+   * leaf carries numbers, so this composes, hashes and logs without a replacer.
+   */
+  requestFilters(): FilterExpr | null;
   /** Page a filterable category's value set into `filters.values` — for its picker. */
   loadFilterValues(column: string): Promise<void>;
   /** Turn layers on — each with its closure (decision 0096); `[]` turns every layer off. */
@@ -1410,7 +1424,9 @@ export function createStore(options: StoreOptions): Store {
     // intersection in row space and row space is per view, so a panel that named none would be
     // asking about whichever view the server chose.
     const filters = 'filters' in req ? (req.filters ?? null) : requestFilters();
-    return client.browse(t, {view: viewId, ...req, filters});
+    // `req.view ?? viewId`, never a spread: an explicit `view: undefined` in the caller's object
+    // would clobber the store's own with a spread and the request would go out without one.
+    return client.browse(t, {...req, view: req.view ?? viewId, filters});
   }
 
   function setMembers(clauses: readonly MemberClause[]): void {
@@ -1933,6 +1949,7 @@ export function createStore(options: StoreOptions): Store {
     },
     setView,
     browse,
+    requestFilters,
     setFilters,
     setMembers,
     loadFilterValues,

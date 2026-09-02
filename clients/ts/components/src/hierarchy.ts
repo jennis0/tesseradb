@@ -193,12 +193,13 @@ export class TesseraHierarchy extends TesseraElement {
    * refetches the roots and drops the walk, because every count in it answers the old question.
    */
   private question(): string {
-    const s = this.resolvedStore;
-    const filters = s?.get('filters');
-    // The member clauses are written out by hand: they carry `bigint` identifiers, which
-    // `JSON.stringify` refuses outright rather than approximating.
-    const members = (filters?.members ?? []).map((c) => `${c.layer}:${c.artifact}:${c.outside ? 'out' : 'in'}:${c.verb}`).join(',');
-    return `${this.current()?.name ?? ''}|${JSON.stringify(filters?.expr ?? null)}|${members}`;
+    // **The composed request, not the projections.** `store.browse` sends `requestFilters()` —
+    // the draft's filter-position leaves, the `member_of` clauses in that position *and the drawn
+    // region's leaf* — so a question hashed from `filters.expr` and the clauses alone missed a
+    // region change entirely and the tree kept counts answering the question before it. One
+    // source, and it is the one the request is built from. It is JSON-safe by construction: a
+    // `member_of` leaf spells its artifact as a decimal string.
+    return `${this.current()?.name ?? ''}|${JSON.stringify(this.resolvedStore?.requestFilters() ?? null)}`;
   }
 
   protected override onStoreChange(): void {
