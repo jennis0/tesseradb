@@ -4908,12 +4908,6 @@ fn declared_names(vocabularies: &HashMap<String, Vocabulary>) -> String {
     names.join(", ")
 }
 
-/// A column name that can be written into `columns.arrow`'s schema without colliding with the
-/// fixed columns or with the ingest batch's reserved names.
-///
-/// The reserved set is transcribed rather than imported: `tessera-server`'s `RESERVED_COLUMNS`
-/// belongs to a crate this one must not depend on, and the two are checked against each other in
-/// this module's tests instead.
 /// The names an attribute may not take, in the order the refusals list them.
 ///
 /// **One list, read by the three refusals above**, so a name added to the request surface is added
@@ -4933,6 +4927,12 @@ pub const RESERVED_COLUMN_NAMES: [&str; 6] = [
     "highlighted",
 ];
 
+/// A column name that can be written into `columns.arrow`'s schema without colliding with the
+/// fixed columns or with the ingest batch's reserved names.
+///
+/// The reserved set is transcribed rather than imported: `tessera-server`'s `RESERVED_COLUMNS`
+/// belongs to a crate this one must not depend on, and the two are checked against each other in
+/// this module's tests instead.
 fn check_column_name(name: &str) -> Result<()> {
     const FIXED: [&str; 2] = ["tessera_id", "residual"];
     const INGEST_RESERVED: [&str; 5] = ["external_id", "x", "y", "access", "node_id"];

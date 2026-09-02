@@ -38,7 +38,7 @@
 //! than over a request's ranges. Served naively its `matched_count` would be silently zero, which
 //! is the failure decision 0104 exists to prevent.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use croaring::Bitmap;
@@ -202,12 +202,14 @@ impl std::fmt::Display for BrowseRefused {
 }
 
 /// One artifact of one level, as the gate left it.
+///
+/// **Its entity and its content rank are consumed inside the walk and not carried out of it**: the
+/// rank decides which content this viewer is served, and both are answered before the row is
+/// pushed. Keeping them here would be state a later reader could reach a second verdict from.
 struct Gated {
     level: u32,
     ordinal: u32,
-    entity: EntityId,
     masked_count: u64,
-    rank: Option<u32>,
     tessera_id: TesseraId,
     parents: Vec<(u32, u32)>,
 }
@@ -291,9 +293,12 @@ impl crate::Engine {
         }
         let level = req.level.unwrap_or(0);
 
-        let mut probe = crate::timing::Probe::new();
+        // `session_geometry` laps into a probe; this verb publishes no per-stage timings, so it
+        // is given one and its laps are dropped. Named `_probe` rather than silenced afterwards,
+        // so that a stage field arriving here is a change to this line and not to a discard.
+        let mut _probe = crate::timing::Probe::new();
         let geometry =
-            self.session_geometry(session, &generation, view, view_data, &None, &mut probe)?;
+            self.session_geometry(session, &generation, view, view_data, &None, &mut _probe)?;
         let denied = generation
             .denied
             .get(view)
@@ -481,9 +486,7 @@ impl crate::Engine {
                 gated.push(Gated {
                     level: walked,
                     ordinal,
-                    entity,
                     masked_count,
-                    rank,
                     tessera_id,
                     parents: rows
                         .parents(ordinal)
@@ -493,8 +496,6 @@ impl crate::Engine {
                 });
             }
         }
-        let _ = (&mut probe, |g: &Gated| (g.entity, g.rank));
-
         // Every served position, so a relation can be named only where both ends are served.
         let served: BTreeMap<(u32, u32), usize> = gated
             .iter()
@@ -687,6 +688,13 @@ impl crate::Engine {
             &generation.overlay,
             &generation.buffer,
         );
+        // **`Engine::browse` takes no cancellation token, and could not usefully hold one**: the
+        // row route's `scan_rows` carries no checkpoint on any path — the viewport's own
+        // coarse-zoom whole-view scan is equally uninterruptible — and this is a unary JSON verb
+        // with no consumer-gone signal of the kind the streamed viewport reads off its sink. So
+        // the scan is **admission-gated and not cancellable**, and the permit is held for its
+        // duration (`highlight-and-hierarchy.md` §7, which prices that). Making it interruptible
+        // is a change to the shared row route rather than to this verb.
         let cancel = None;
         let regions = |leaf: &crate::filter::RegionLeaf| {
             self.resolve_region(
@@ -769,7 +777,3 @@ fn kind_name(kind: HierarchyKind) -> &'static str {
         HierarchyKind::Tiered => "tiered",
     }
 }
-
-/// Silences the unused-import warning where the set type is only named in a signature.
-#[allow(dead_code)]
-type _Unused = BTreeSet<u32>;

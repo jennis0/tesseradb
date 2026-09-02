@@ -849,6 +849,11 @@ pub struct ViewCoordinates {
     pub content_key: [u8; 16],
 }
 
+/// An artifact's two filter answers — `(matched, highlighted)`, each `None` where the request
+/// asked no such question. They are named as a pair because a dependent inherits both or neither
+/// (`highlight-and-hierarchy.md` §2; decision 0104's D13 argument for the first).
+type FilterBits = (Option<bool>, Option<bool>);
+
 /// One artifact, as a viewport serves it.
 ///
 /// **The absences are the design.** There is no ordinal — a position in a dense
@@ -6270,13 +6275,12 @@ impl Engine {
         // expression and not a second kind of answer, so a shape that let one inherit and the
         // other keep the label's own would serve two answers to one question about one cluster —
         // which is what happened when this carried `matched` alone.
-        let bits_at: std::collections::BTreeMap<&(String, u32, u32), (Option<bool>, Option<bool>)> =
-            placed
-                .iter()
-                .zip(&out)
-                .map(|(place, artifact)| (&place.at, (artifact.matched, artifact.highlighted)))
-                .collect();
-        let target_bits: Vec<Option<(Option<bool>, Option<bool>)>> = placed
+        let bits_at: std::collections::BTreeMap<&(String, u32, u32), FilterBits> = placed
+            .iter()
+            .zip(&out)
+            .map(|(place, artifact)| (&place.at, (artifact.matched, artifact.highlighted)))
+            .collect();
+        let target_bits: Vec<Option<FilterBits>> = placed
             .iter()
             .map(|place| {
                 place

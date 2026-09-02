@@ -118,10 +118,20 @@ with what is on screen rather than with what matched.
    the whole verdict, at ~20–30 ns per matched entity, or walk the rows the request's tiles span
    and ask each whether its entity matched, at ~20–100 ns per row on screen
    (`probes/2026-08-11-viewport-crossing/`; the crossover rule in `viewport.rs`). A filter needs
-   the whole-view form for nothing this design adds, and **a highlight never does**: its three
-   answers are all inside the request's tiles, so it always takes the per-tile walk and its cost
-   is bounded by the rows on screen — a 300,000-row viewport is ~18 ms whatever the highlight
-   matched corpus-wide, where projecting a 10⁷-entity verdict is ~216 ms.
+   the whole-view form for nothing this design adds, and **a highlight never needs it**: its
+   three answers are all inside the request's tiles, so it asks for the per-tile walk whatever the
+   measured crossover rule would have chosen, and its cost is then bounded by the rows on screen —
+   a 300,000-row viewport is ~18 ms whatever the highlight matched corpus-wide, where projecting a
+   10⁷-entity verdict is ~216 ms.
+
+   ⊘ **The walk is preferred, not guaranteed, and the fallback is the projection.** Both crossing
+   sites take it only where the view's row space can be inverted — a view that published no
+   `row-entity.u32` has no walk to take — so on such a view a highlight silently projects and pays
+   the ~216 ms rather than the ~18 ms. That is the same silent fallback the measured rule itself
+   takes, and it is a latency difference and never an answer difference: the two routes agree over
+   every range a request can ask about. Stated here because *always* would read as an assurance
+   ([decision 0013](../decisions/0013-mark-specified-vs-implemented.md)) and the test that pins the
+   route asserts the counter over a view that can invert.
 3. **Count per tile.** `highlighted` is one `and_cardinality` of the crossed set against each
    tile's row range, the operation the `matched` count already is; bitmap cost is containers
    touched, and a tile is a contiguous run.
@@ -380,11 +390,20 @@ the per-tile crossing's 20–30 ns per row and is wrong by that whole factor, fo
 derivation could not carry: **the row route runs under rayon**, split over the same domain the
 tile sweep splits, and it reads a slot where the crossing reads a row's entity and tests a bitmap.
 At 0.6 ns a row a 10⁹-row view is **about 0.6 s** — still the largest single cost this design
-adds, still once per page request, still under the compute-admission gate and cancellable like
-any filter, and no longer the figure that decides whether the feature is affordable. §9 (d)'s
-ruling stands with a measured argument under it rather than a bound. ⊘ Until the clause cache
-exists the scan repeats on every page of one walk; when it does, the whole-view verdict is what
-it holds and a walk pays the scan once.
+adds, still once per page request, and no longer the figure that decides whether the feature is
+affordable. §9 (d)'s ruling stands with a measured argument under it rather than a bound.
+
+⊘ **The scan is admission-gated and NOT cancellable**, and the r4 wording that said otherwise is
+corrected here rather than carried. `Engine::browse` takes no cancellation token, and it could
+not usefully hold one: `scan_rows` carries no checkpoint on any path — the viewport's own
+coarse-zoom whole-view scan is equally uninterruptible — and the verb is a unary JSON route with
+no consumer-gone signal of the kind the streamed viewport reads off its sink. So a browse under a
+row-routed filter **holds its compute permit for the whole scan**: ~2 ms at 2.4 × 10⁶ rows, ~21 ms
+at 3.6 × 10⁷, ~0.6 s at 10⁹ — which is what a concurrent request waits behind at the gate's width,
+and is the figure to weigh rather than the scan's own. Making it cancellable is a change to the
+shared row route and not to this verb, and it is not made here. ⊘ Until the clause cache exists
+the scan repeats on every page of one walk; when it does, the whole-view verdict is what it holds
+and a walk pays the scan once.
 
 A search is a scan over the layer's keys and names, 30,217 strings at rung 3, bounded by the
 layer's artifact count and never by the corpus — measured above as the `search` column, within a
@@ -469,4 +488,10 @@ schema with the frame columns.
   where the per-tile crossing reads a row's entity and tests a bitmap. §9 (d)'s ruling stands and
   its cost argument is now a measured one; the ⊘ that remains on the figure is its **medium**,
   neither ladder corpus declaring a render-only column to ask. Stages 1–3 of §10 are built, so
-  the status line no longer says nothing here is. No claim of the design moves.
+  the status line no longer says nothing here is. **Two claims are corrected against the built
+  code** at the referee's finding, and both are marked at the claim rather than mended in prose:
+  §2.1's per-tile crossing is *preferred*, not guaranteed — a view that published no
+  `row-entity.u32` has no walk to take and projects, at the ~216 ms the same paragraph prices —
+  and §7's whole-view scan is admission-gated but **not** cancellable, `scan_rows` carrying no
+  checkpoint on any path and the verb having no consumer-gone signal, so what is held is the
+  permit for the scan's own duration. No other claim of the design moves.
