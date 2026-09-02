@@ -1,12 +1,12 @@
 # Tessera overview
 
-Tessera is a permission-masked point service: an interactive, pannable and zoomable map over a
-large corpus of documents or records, served to many viewers at once. What a viewer may see
-determines not only which items they can retrieve, but every count, density, cluster and summary
-shown to them. Each viewer's visible set is computed once per session, as a Roaring bitmap over the
-corpus, and every quantity served to that viewer, a count, a sample, a label, a density estimate,
-is computed from that set alone. The corpus continues to change while it is being served: items
-arrive, are deleted or are suppressed, on a target latency of seconds to minutes.
+Tessera serves an interactive, pannable, zoomable map over a corpus of billions of documents or
+records, from one machine, to many viewers at once, while the corpus keeps changing underneath it.
+Each viewer sees the map computed over exactly the items they are permitted to see: not only which
+points they can retrieve, but every count, density, cluster, label and sample. A viewer's visible
+set is computed once per session as a Roaring bitmap, and everything served to that viewer is
+computed from that set alone. Items arrive, are deleted or are suppressed while the service runs,
+and the map reflects each within seconds to minutes.
 
 ## What it is, and its scale
 
@@ -15,9 +15,9 @@ Measured on a synthetic corpus of 10⁹ points (about 130 terms per item) on a s
 50th percentile, of which selecting which points to draw is 83 to 89 percent; the cost that drives
 that latency is the number of rows visible in the requested viewport, not the number of points
 returned; and the build streams with external spill, its memory bounded by a pre-flight plan
-(`README.md`, "Scale and cost"). These are synthetic-corpus figures, on one machine, and three of
-the headline results depend on how a deployment's access labels are actually distributed, so they
-should be re-measured against real labels before being relied on. The raw records are in `probes/`.
+(`README.md`, "Scale and cost"). These are synthetic-corpus figures on one machine; the raw records are in `probes/`. The test-corpus
+ladder in `docs/ingest-campaign.md` is climbing past this size on the same machine, and the figures
+here are replaced as each rung lands.
 
 Three real corpora, smaller than the design target, have also been built and served on the same
 class of machine: GeoNames (13,463,857 points, a 1.34 GB bundle, built in 2 minutes 59 seconds);
@@ -80,7 +80,7 @@ found in this survey (`prior-art-synthesis.md` §1, §4).
 
 Two identifier spaces underlie everything else. Permissions are expressed over **entity space**:
 every item has a permanent entity ID, and a viewer's access is a Roaring bitmap of the entity IDs
-they may see. Geometry is expressed over **row space**: within one temporal view, items are ranked
+they may see. Geometry is expressed over **row space**: within one view, items are ranked
 by a Morton (Z-order) code and assigned a row ID equal to that rank. The two spaces meet at exactly
 one point, an explicit permutation between entity ID and row ID, and nowhere else derives one from
 the other (`architecture.md` §5.1, invariant I4).
@@ -103,14 +103,25 @@ is meant to stop that.
 
 ```mermaid
 flowchart LR
-  subgraph ES["entity space: permissions"]
-    T["terms satisfied by<br/>the presented auth data"] --> M["mask: a Roaring bitmap<br/>over entity IDs"]
+  subgraph entity["entity space (permissions)"]
+    direction TB
+    terms["viewer's terms<br/>from the token"]
+    postings["postings<br/>term → entity ids"]
+    mask["M_auth<br/>one Roaring bitmap per session,<br/>minus the overlay's denies"]
+    terms --> postings --> mask
   end
-  M -->|"the one permutation (I4)"| RS
-  subgraph RS["row space: geometry"]
-    P["rows in Morton order"] --> TI["a quadtree tile =<br/>one contiguous row range"]
+
+  perm["permutation<br/>entity id → row id<br/>the only path between the spaces"]
+
+  subgraph row["row space (geometry)"]
+    direction TB
+    rows["rows in Morton order"]
+    tile["a tile = one contiguous row range"]
+    count["count, sample, density, labels<br/>= bitmap arithmetic over the range,<br/>inside the mask only"]
+    rows --> tile --> count
   end
-  TI --> C["masked count: bitmap<br/>arithmetic over the range"]
+
+  mask --> perm --> count
 ```
 *Permissions and geometry are related by one explicit permutation; nothing else converts between
 the two spaces.*
@@ -135,21 +146,24 @@ One request, from a token to a response, follows the steps stated in full in `ar
 
 ```mermaid
 sequenceDiagram
-    participant C as client
-    participant Sess as session plane
-    participant View as viewer plane
-    participant Eng as engine
-    C->>Sess: auth data (once per session)
-    Sess->>Eng: resolve terms, build mask
-    Eng-->>C: token
-    C->>View: token + viewport query
-    View->>Eng: compose mask (token mask, overlay)
-    Eng->>Eng: apply filters, get a selection mask
-    Eng->>Eng: project into row space (the one join)
-    Eng->>Eng: decompose viewport into tile ranges
-    Eng->>Eng: count and select per tile, from the mask
-    Eng->>Eng: gather columns, translate to wire ids
-    Eng-->>C: counts, sampled points, labels
+  participant C as client
+  participant S as tessera serve
+  participant M as session mask
+  participant B as bundle
+
+  C->>S: GET /v1/viewport (token, bounds, zoom, filters)
+  S->>M: mask for this token
+  alt first request this session
+    M->>B: postings for the token's terms
+    M->>M: compose M_auth, subtract the overlay, project to row space
+  end
+  S->>S: bounds → Morton tile ranges
+  loop each tile
+    S->>M: rows in range ∩ mask
+    S->>B: geometry for the sampled rows
+  end
+  S->>S: masked counts, sample under the floor, labels gated on M_auth
+  S-->>C: framed Arrow stream: tiles, cells, artifacts, points
 ```
 *One viewport request. Everything after mask composition reads geometry only through a masked
 row-ID range.*
@@ -190,45 +204,56 @@ Three HTTP planes, each scoped to who holds its credential:
 - The **session plane** holds `POST /session/authorise` and `POST /session/revoke`, on its own
   listener and its own credential, held by the integrating application's server rather than the
   browser.
-- The **admin plane**, a Unix socket by default, takes an operator credential and carries ingest,
-  item changes (deletion, suppression), status reporting, and forced lifecycle actions such as a
-  flush or a compaction fold.
+- The **control plane**, a Unix socket by default, takes an operator credential and carries ingest
+  (`/control/ingest`), item changes (`/control/changes`: deletion, suppression, unsuppression),
+  layers and views, status, and forced lifecycle actions (`/control/flush`, `/control/compact`).
 
 ```mermaid
 flowchart LR
-    viewer["viewer<br/>(browser / SDK)"]
-    app["integrating app<br/>(app tier)"]
-    op["operator<br/>(ops / data tier)"]
-    ingest["ingest source"]
-    subgraph T["Tessera"]
-        vp["viewer plane"]
-        sp["session plane"]
-        ap["admin plane"]
-    end
-    viewer -->|"token + query"| vp
-    app -->|"auth data"| sp
-    op -->|"ingest, changes,<br/>status, flush, compact"| ap
-    ingest --> op
+  viewer["Viewer<br/>a person in a browser, or a program"]
+  session["Session issuer<br/>your identity provider or gateway"]
+  operator["Operator<br/>loads data, applies denies, runs compaction"]
+  source["Corpus<br/>Parquet files, or rows pushed while serving"]
+
+  subgraph tessera["Tessera, one process"]
+    vp["viewer plane<br/>/v1/viewport, /v1/items, /v1/categories, /v1/artifacts"]
+    sp["session plane<br/>mints a per-viewer token"]
+    cp["control plane<br/>/control/ingest, /control/changes, /control/compact, layers"]
+  end
+
+  session -- "session credential" --> sp
+  sp -- "token carrying the viewer's terms" --> viewer
+  viewer -- "token" --> vp
+  operator -- "operator credential" --> cp
+  source -- "tessera build, or ingest" --> cp
 ```
 *Who reaches Tessera, on which plane, and with what credential.*
 
 ```mermaid
 flowchart TB
-    build["tessera build<br/>(batch mode)"]
-    serve["tessera serve<br/>(three planes, one engine)"]
-    bundle[("bundle/<br/>versioned prefixes + CURRENT")]
-    wal[("wal/<br/>durability for ingest and denies")]
-    tsclient["TypeScript client<br/>(core, deck, components, react)"]
-    pyclient["tesseradb<br/>(Python widget; SDK to come)"]
-    conf["conformance suite<br/>(pytest)"]
-    oracle["reference/<br/>Python oracle"]
-    build -->|writes| bundle
-    serve -->|"mmap, read-only"| bundle
-    serve -->|fsync| wal
-    tsclient -->|"HTTP + Arrow IPC"| serve
-    pyclient -->|"HTTP + Arrow IPC"| serve
-    conf -->|drives, checks| serve
-    conf -->|differential| oracle
+  corpus["corpus.toml + Parquet"]
+  build["tessera build<br/>ingest into an empty database"]
+  bundle["bundle on disk<br/>geometry in Morton order, postings, dictionaries, manifests"]
+  wal["write-ahead log<br/>ingests and denies since the last flush"]
+  serve["tessera serve<br/>masks, tiles, sampling, labels, filters"]
+
+  subgraph clients["clients"]
+    store["@tesseradb/client<br/>headless store"]
+    comps["@tesseradb/components, /deck, /react<br/>map and panels"]
+    py["tesseradb (Python)<br/>notebook widget"]
+  end
+
+  subgraph check["conformance"]
+    suite["conformance suite<br/>drives the served binary"]
+    oracle["Python oracle<br/>independent answer for every masked count"]
+  end
+
+  corpus --> build --> bundle --> serve
+  wal <--> serve
+  serve --> store --> comps
+  serve --> py
+  suite --> serve
+  suite --> oracle
 ```
 *Build and serve share one engine over one bundle; the conformance suite drives the server and
 checks its answers against an independently written oracle.*
@@ -282,11 +307,11 @@ identifier's full threat model.
 |---|---|
 | Core engine: build, serve, check, verify; mask composition; Morton tiling; the WAL | Built and serving. Measured against a synthetic 10⁹-point corpus and against three smaller real corpora (see "What it is, and its scale") |
 | Viewer plane | `/v1/meta`, `/v1/viewport`, `/v1/items/{tessera_id}` are built, along with routes added since for categories, suggestion and artifacts. `/v1/labels` and `/v1/region` are not mounted (`docs/openapi/tessera.yaml`; `system-architecture.md` §4.2) |
-| Admin plane | Ingest and item changes (deletion, suppression) are built; the withdrawn `predicate` operation is not. Label submission, the label-invalidation pull queue, unmasked node iteration and entity-ID leasing are not mounted (`system-architecture.md` §4.2) |
+| Control plane | Ingest and item changes (deletion, suppression) are built; the withdrawn `predicate` operation is not. Label submission, the label-invalidation pull queue, unmasked node iteration and entity-ID leasing are not mounted (`system-architecture.md` §4.2) |
 | Compaction, the fold | Built: retires deletions on the rule that a deletion is removed only at the fold that executes it, dispatched on a nightly gated window plus four gauges. A deferred staging list and two page-cache hints named in its design are not built (`compaction.md`) |
 | Filters, views, annotations | The filter surface is built for every shipped field family except lists; views and view-switching are built through their second stage; the annotation and artifact model, including a `dag` hierarchy kind, is built through several delivery stages (`docs/design/README.md`'s document table) |
 | Clients | The TypeScript packages are built through the client-components delivery plan's six steps. The Python package's notebook-widget path is built; a documented proxy path for hosted notebooks and a general SDK are not (see "The shape of the system") |
-| Conformance suite | Largely built: 757 checked cases; the most recent full run before the last modules landed the same day was 734 of 739, with 5 skipped and none failing (2026-09-02). Covered as designed: I1, I2, I3, I4, I7, I10. Covered in substance, in Rust rather than in the suite: I8, I9, and I11's cross-request half (I11's within-request half has no test at all). Not covered: I5 (nothing exists yet that can genuinely disagree with the authorisation plugin, so there is nothing to test against), I6, I13b and I13c (`conformance.md` §0, §4.6) |
+| Conformance suite | Largely built; where coverage stands is `conformance.md` §4.6 and nowhere else. Covered as designed: I1, I2, I3, I4, I7, I10. Covered in substance, in Rust rather than in the suite: I8, I9, and I11's cross-request half (I11's within-request half has no test at all). Not covered: I5 (nothing exists yet that can genuinely disagree with the authorisation plugin, so there is nothing to test against), I6, I13b and I13c (`conformance.md` §0, §4.6) |
 | The plugin host | Not built. Only a compiled-in passthrough plugin ships; there is no sandbox, so I5 and I6 cannot be meaningfully tested against anything else (`system-architecture.md` §4.3) |
 | Partitions, I13b and I13c | Not built. There is one hardcoded partition and no router/worker split, so nothing computes a reachable-set gate. This is safe today only because a single partition makes both failure cases unreachable, not because either rule is enforced (`architecture.md` §12; `conformance.md` §4.6) |
 | Label-invalidation notification | Not built. The capability of notifying a caller which labels a deletion or a predicate change has invalidated is specified and unmounted (`architecture.md` §2.5; `system-architecture.md` §4.2) |
