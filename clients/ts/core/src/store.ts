@@ -32,6 +32,7 @@ import type {
   RegionVerdict,
   Shape,
   ShapeKind,
+  SuggestValue,
   ViewportResult
 } from './types.js';
 
@@ -252,6 +253,14 @@ export type FiltersProjection = {
   expr: FilterExpr | null;
   values: Record<string, CategoryValue[]>;
   valueErrors: Record<string, Refusal>;
+  /**
+   * The typeahead's last landed page per column (`value-suggestion.md` §5.1) — `q` is the query
+   * it answers, so a control can tell a page that answers what is in the box from one that
+   * answers what used to be. Never widened by a filter: it is the same gate `values` is, applied
+   * to a prefix instead of the whole vocabulary.
+   */
+  suggestions: Record<string, {q: string; values: SuggestValue[]; more: boolean}>;
+  suggestErrors: Record<string, Refusal>;
 };
 
 export type LegendProjection = {
@@ -287,6 +296,13 @@ export interface Store {
   setFilters(draft: FilterDraft): void;
   /** Page a filterable category's value set into `filters.values` — for its picker. */
   loadFilterValues(column: string): Promise<void>;
+  /**
+   * Ask a category's typeahead for `q`, debounced per column (`value-suggestion.md` §5.1) — lands
+   * in `filters.suggestions[column]`, or `filters.suggestErrors[column]` on a refusal. Fire and
+   * forget: a control calls it on every keystroke and reads the projection, the way it reads
+   * `filters.values` today.
+   */
+  suggest(column: string, q: string): void;
   /** Turn layers on — each with its closure (decision 0096); `[]` turns every layer off. */
   setLayers(names: string[]): void;
   /**
@@ -374,6 +390,16 @@ export const REGION_HELD_LIMIT = 500;
  * stillness, which every stepped-to view is.
  */
 const VIEW_SETTLE_MS = 140;
+
+/**
+ * How long a category typeahead waits, after a keystroke, before it asks (`value-suggestion.md`
+ * §5.1: keystroke cadence, 10–100 ms of server work). Short enough that the control still reads
+ * as live, long enough that a held key or a fast typist spends one request rather than one per
+ * character — and short of the debounce mattering less than it looks: the session's own
+ * single-flight admission (one suggest in flight at a time) is what actually bounds the request
+ * rate under a control that fires faster than this.
+ */
+const SUGGEST_DEBOUNCE_MS = 120;
 
 const NO_STATUS: StatusProjection = {
   status: 'idle',
@@ -466,7 +492,7 @@ export function createStore(options: StoreOptions): Store {
     artifacts: {layer: null, layers: [], served: [], lineage: servedLineage([]), status: 'idle', refusal: null, version: 0, held: 0, table, servedOrdinals: new Set(), shapes: new Map(), colours: new Map(), palette, coverage: {current: 0, stale: 0}},
     selection: {item: null, itemRefusal: null, artifact: null, artifactRefusal: null},
     region: null,
-    filters: {draft: {}, expr: null, values: {}, valueErrors: {}},
+    filters: {draft: {}, expr: null, values: {}, valueErrors: {}, suggestions: {}, suggestErrors: {}},
     legend: {ranks: {}, domains: {}, categories: {}, categoryErrors: {}, colourBy: null},
     replica: {bytes: 0, points: 0, bands: 0, views: 0, lastPlan: null}
   };
@@ -1326,6 +1352,64 @@ export function createStore(options: StoreOptions): Store {
    */
   const enumerating = new Set<string>();
 
+  /** Per column: the debounce timer armed by the most recent {@link suggest} call. */
+  const suggestTimers = new Map<string, unknown>();
+  /**
+   * Per column: the `q` the *last* {@link suggest} call named — not what was last sent, what was
+   * last *asked for*. A landed response is applied only when its echoed `q` still matches this,
+   * which is what makes a response stale by keystroke rather than by request order: a debounce
+   * collapses same-column bursts to one request, but a slow response to request *N* can still
+   * land after a fast response to request *N+1* has, and the echo is what tells the two apart
+   * without a sequence number either side has to invent.
+   */
+  const suggestWant = new Map<string, string>();
+
+  function suggest(column: string, q: string): void {
+    if (!token || disposed) return;
+    const pending = suggestTimers.get(column);
+    if (pending !== undefined) clock.cancel(pending);
+    suggestWant.set(column, q);
+    suggestTimers.set(
+      column,
+      clock.after(SUGGEST_DEBOUNCE_MS, () => {
+        suggestTimers.delete(column);
+        void runSuggest(column, q);
+      })
+    );
+  }
+
+  async function runSuggest(column: string, q: string): Promise<void> {
+    if (!token || disposed) return;
+    try {
+      const result = await client.suggest(token, column, q, {view: viewId});
+      if (disposed || suggestWant.get(column) !== q) return; // a later keystroke already wants a different page
+      if (result.status === 'superseded') {
+        // The session already has one suggest in flight (§5.1's one-in-flight rule): retry once
+        // it should have returned, still guarded by the same `q` check, rather than surface the
+        // 429 as a refusal a picker would have to render.
+        suggestTimers.set(
+          column,
+          clock.after(result.retryAfterS * 1000, () => {
+            suggestTimers.delete(column);
+            void runSuggest(column, q);
+          })
+        );
+        return;
+      }
+      replaceProjection('filters', {
+        ...projections.filters,
+        suggestions: {...projections.filters.suggestions, [column]: {q: result.q, values: result.values, more: result.more}}
+      });
+    } catch (error) {
+      if (disposed || suggestWant.get(column) !== q) return;
+      const e = error as {code?: string; detail?: string; message?: string};
+      replaceProjection('filters', {
+        ...projections.filters,
+        suggestErrors: {...projections.filters.suggestErrors, [column]: {code: e.code ?? 'fetch-failed', detail: e.detail ?? e.message ?? String(error)}}
+      });
+    }
+  }
+
   async function loadFilterValues(column: string): Promise<void> {
     if (!token || disposed) return;
     if (projections.filters.values[column] || projections.filters.valueErrors[column]) return;
@@ -1771,6 +1855,8 @@ export function createStore(options: StoreOptions): Store {
     if (switchTimer !== null) clock.cancel(switchTimer);
     switchTimer = null;
     if (renewTimer) clock.cancel(renewTimer);
+    for (const timer of suggestTimers.values()) clock.cancel(timer);
+    suggestTimers.clear();
     client.close();
   }
 
@@ -1796,6 +1882,7 @@ export function createStore(options: StoreOptions): Store {
     setView,
     setFilters,
     loadFilterValues,
+    suggest,
     setLayers,
     setColourBy,
     setPalette,
