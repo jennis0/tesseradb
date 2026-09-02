@@ -464,6 +464,74 @@ paths:
         "500":
           $ref: "#/components/responses/FailClosed"
 
+  /v1/artifacts/browse:
+    post:
+      tags: [viewer]
+      operationId: browseArtifacts
+      summary: One page of a layer's hierarchy, by lineage — its roots, an artifact's children and parents, or a name search.
+      description: |
+        **Independent of the viewport** (`highlight-and-hierarchy.md` §4). A layer whose artifacts
+        are spread across the map draws nothing at any zoom the viewport's budget cut reaches; this
+        verb serves the same artifacts by relation instead of by position, each row carrying the
+        masked count the artifacts frame carries.
+
+        **One verb, three forms.** `parent` and `q` absent is the **roots** form — the layer's
+        artifacts with no served parent. `parent` names the **children** form: the artifacts naming
+        it, with the requested artifact's own served parents in `parents`, which is `[]` on the
+        other two forms. `q` names the **search** form, matching a key or a first supplied text
+        content case-insensitively. Both together is a `422`.
+
+        **The gate runs before the page.** Every artifact served passed its own existence
+        criterion, evaluated over the form's whole candidate set before `limit` and `cursor` — so a
+        page's fill and its `next` count only artifacts this principal may see, and a withheld
+        artifact leaves no gap. **The order is total**: count descending, then `tessera_id`
+        ascending, so a cursor over tied counts neither duplicates nor drops a row. **A relation is
+        named only where both ends are served**: a child whose parent is withheld is a root here,
+        and a parent below this principal's floor is absent from `parents`.
+
+        **The refusals name deployment schema and never an artifact.** An unknown layer, an
+        attached layer, a `level` on a kind with one level, a level a layer does not hold, `limit =
+        0` and both `parent` and `q` are each a `422`. A `parent` that names nothing, one of another
+        layer, one suppressed and one below this principal's criterion answer an **empty page** —
+        refusing would make the verb an existence oracle over what the criterion withholds.
+
+        Behind the compute-admission gate.
+      security:
+        - sessionToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BrowseRequest"
+      responses:
+        "200":
+          description: One page of the layer's hierarchy as this principal sees it.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BrowseResponse"
+        "401":
+          $ref: "#/components/responses/BadCredential"
+        "403":
+          $ref: "#/components/responses/ExpiredToken"
+        "404":
+          description: "`404 unknown`: no such `view`, or one this principal's gate fails — the same answer, on the viewer plane's rule."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          description: "`422 contract`: an unknown or attached layer, a `level` the kind or the layer does not have, `limit = 0`, both `parent` and `q`, or a malformed `filters`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/Backpressure"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+
   /v1/artifacts/{tessera_id}:
     post:
       tags: [viewer]
@@ -906,7 +974,7 @@ components:
       type: object
       additionalProperties: false
       description: Design §7.2's clause parameters and the request-shape ceilings. All deployment constants, identical for every principal; a client cannot read a mark count as a density without them.
-      required: [k_min, k_max_marks, max_k, theta_target_marks, max_underlay_offset, max_tiles_per_request, max_category_values, max_shape_vertices, max_region_vertices, max_region_cells]
+      required: [k_min, k_max_marks, max_k, theta_target_marks, max_underlay_offset, max_tiles_per_request, max_category_values, max_shape_vertices, max_region_vertices, max_region_cells, max_browse_rows]
       properties:
         k_min:
           type: integer
@@ -941,6 +1009,10 @@ components:
           type: integer
           minimum: 0
           description: The most vertices a `region` filter leaf's `polygon` may carry (`selection-operand.md` §2). Over it the request is a `422` naming the count and the cap.
+        max_browse_rows:
+          type: integer
+          minimum: 1
+          description: The most rows `POST /v1/artifacts/browse` returns in one page, and the default page size when a caller names none (`highlight-and-hierarchy.md` §4). `limit` clamps to it; `limit = 0` is a `422`. A response bound and not a disclosure control — what a principal may be told is the artifact's own existence criterion, settled before paging starts.
         max_region_cells:
           type: integer
           minimum: 0
@@ -1249,6 +1321,85 @@ components:
             to and this answers as `"full"` does. Any other value is `422`.
           type: string
           enum: [full, highlight]
+
+    BrowseRequest:
+      type: object
+      additionalProperties: false
+      required: [view, layer]
+      properties:
+        view:
+          type: string
+          description: Which view's row space the counts are taken in. Required — a masked count is an intersection in row space, and row space is per view.
+        layer:
+          type: string
+          description: The layer to browse. A name outside the list `/v1/meta` publishes to this principal is a `422`; so is a layer that attaches to another, which has no lineage of its own.
+        level:
+          type: integer
+          minimum: 0
+          description: Which level the form addresses on a **levelled** layer (`stacked`, `tiered`). A `422` on `flat`, `nested` and `dag`, which have one level, and on a level the layer does not hold — a kind's levels are deployment schema, and a parameter accepted and ignored is a wrong answer that looks right.
+        parent:
+          description: The children form — the artifacts naming this one among their parents, with its own served parents in `parents`. A `tessera_id`, as a number or its decimal string. One that names nothing, one of another layer, one suppressed and one below this principal's criterion all answer an empty page.
+          oneOf:
+            - type: integer
+              minimum: 0
+            - type: string
+              pattern: "^[0-9]+$"
+        q:
+          type: string
+          description: The search form — the layer's artifacts whose key, or whose first supplied text content, contains this case-insensitively. Mutually exclusive with `parent`.
+        filters:
+          description: The viewport's own filter object. Each row then carries `matched_count = |membership ∩ M_auth ∩ filter|` and the page is ordered by it. **Existence and `masked_count` never move with it**, and a row whose `matched_count` is zero is still served.
+          allOf:
+            - $ref: "#/components/schemas/FilterExpr"
+        limit:
+          type: integer
+          minimum: 1
+          description: Page size, clamped to `selection.max_browse_rows` and defaulting to it. `0` is a `422`.
+        cursor:
+          type: string
+          description: A previous page's `next`, passed back unchanged. Opaque; it carries a count and an identifier this principal was already served.
+
+    BrowseResponse:
+      type: object
+      required: [artifacts, parents]
+      properties:
+        artifacts:
+          type: array
+          items: { $ref: "#/components/schemas/BrowseRow" }
+        parents:
+          type: array
+          description: The requested artifact's own served parents — **the children form only**, `[]` on the others so a client reads one shape.
+          items: { $ref: "#/components/schemas/BrowseRow" }
+        next:
+          type: string
+          description: The cursor for the next page. Absent where this page is the last.
+
+    BrowseRow:
+      type: object
+      required: [tessera_id, masked_count, rung, parent_ids]
+      properties:
+        tessera_id:
+          type: string
+          description: A decimal string, for the reason every other viewer-plane JSON identifier is one — a `u64` does not ride through a JavaScript number intact.
+        key:
+          type: string
+          description: The publisher's own key, where they supplied one.
+        name:
+          type: string
+          description: The artifact's first supplied text content, where this principal may read it. An artifact whose content cannot be served is absent from the page entirely rather than served with this field empty.
+        masked_count:
+          type: integer
+          description: How many of this artifact's members this principal can see — never how many it has, and never moved by `filters`.
+        matched_count:
+          type: integer
+          description: "`|membership ∩ M_auth ∩ filter|`. Present exactly when the request carried `filters`: absent is *there was no question*."
+        rung:
+          type: integer
+          description: The declared level on a levelled layer; the depth in the gated forest on a treed one; `0` on a flat one.
+        parent_ids:
+          type: array
+          description: This artifact's parents **that this principal is also served**, ascending. Empty for a root and for one whose parents were all withheld alike — the two are one shape, and a client reads it as *no parent here*.
+          items: { type: string }
 
     FilterExpr:
       description: |

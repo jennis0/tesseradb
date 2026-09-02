@@ -56,6 +56,10 @@ arrow = { workspace = true }
 # two sides of that comparison would differ by their string algorithm as well as by their format.
 # `tessera-filter` already takes this exact version for that scan.
 memchr = "2"
+# `browse_cost` builds its own synthetic bundle: neither ladder corpus declares a render-only
+# column, so the whole-view scan it prices is unreachable on them (its module doc says so).
+parquet = { workspace = true }
+tempfile = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

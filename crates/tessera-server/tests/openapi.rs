@@ -375,6 +375,7 @@ fn the_description_names_every_route_on_the_two_planes_and_no_other() {
             "/readyz",
             "/session/authorise",
             "/session/revoke",
+            "/v1/artifacts/browse",
             "/v1/artifacts/{tessera_id}",
             "/v1/categories/{column}",
             "/v1/items/{tessera_id}",
@@ -1071,6 +1072,7 @@ async fn every_viewer_route_requires_a_session_token() {
             "/v1/viewport" => viewport_body(json!({})),
             "/v1/items/{tessera_id}" => json!({}),
             "/v1/artifacts/{tessera_id}" => json!({ "view": "s0" }),
+            "/v1/artifacts/browse" => json!({ "view": "s0", "layer": "clusters/none" }),
             other => panic!(
                 "{other} is a described POST route and this test has no request body for it; add \
                  one rather than letting a new viewer route go unchecked"
@@ -1158,11 +1160,12 @@ async fn every_viewer_route_requires_a_session_token() {
         }
     }
 
-    // Non-vacuity, both halves: the loop must have found the five gated routes and the two
+    // Non-vacuity, both halves: the loop must have found the six gated routes and the two
     // probes, or it enumerated nothing and proved nothing.
     assert_eq!(
-        gated, 5,
-        "the viewer plane's gated routes are meta, categories, viewport, items and artifacts; \
+        gated, 6,
+        "the viewer plane's gated routes are meta, categories, viewport, items, artifacts and \
+         artifacts/browse; \
          a change to that set belongs in this test's reasoning, not silently in its count"
     );
     assert_eq!(

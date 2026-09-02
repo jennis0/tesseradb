@@ -611,6 +611,16 @@ class Server:
             timeout=10,
         )
 
+    def browse(self, token: str, **body) -> requests.Response:
+        """`POST /v1/artifacts/browse` (`highlight-and-hierarchy.md` §4) — the raw response, not
+        the parsed page, because half of what this verb has to be asked is its refusals."""
+        return requests.post(
+            f"{self.viewer_base}/v1/artifacts/browse",
+            headers={"Authorization": f"Bearer {token}"},
+            json={key: value for key, value in body.items() if value is not None},
+            timeout=30,
+        )
+
     def changes(self, items: list[dict]) -> requests.Response:
         return requests.post(
             f"{self.control_base}/control/changes",

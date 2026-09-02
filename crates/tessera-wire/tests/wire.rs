@@ -148,7 +148,10 @@ fn viewport_frames_round_trip_through_arrow_ipc() {
         // Appended, not inserted: decoders that index this batch positionally exist, so the
         // position of `served` is contract.
         assert_eq!(schema.field(3).name(), "served");
-        assert_eq!(schema.fields().len(), 4);
+        // And `highlighted` after it, always present and equal to `matched` where the request
+        // carried no highlight (`highlight-and-hierarchy.md` §2).
+        assert_eq!(schema.field(4).name(), "highlighted");
+        assert_eq!(schema.fields().len(), 5);
     }
     let tile_batch = tile_reader.next().unwrap().unwrap();
     assert_eq!(tile_batch.num_rows(), 2);
@@ -524,9 +527,14 @@ fn the_artifacts_frame_carries_the_filter_bit_with_null_meaning_no_filter() {
 
     let schema = batch.schema();
     assert_eq!(
-        schema.fields().len() - 1,
+        schema.fields().len() - 2,
         schema.index_of("matched").expect("column present"),
-        "`matched` is the last column, and its position is contract"
+        "`matched` is the second-last fixed column, and its position is contract"
+    );
+    assert_eq!(
+        schema.fields().len() - 1,
+        schema.index_of("highlighted").expect("column present"),
+        "`highlighted` is the last, immediately after it"
     );
     let field = schema.field_with_name("matched").unwrap();
     assert_eq!(field.data_type(), &DataType::Boolean);
@@ -627,6 +635,7 @@ fn the_artifacts_frame_fixes_its_column_order_and_dictionary_encodes_the_layer()
             "parent_ids",
             "rung",
             "matched",
+            "highlighted",
         ],
         "no row carries a shape, so the two trailing shape columns are ABSENT from the schema"
     );
@@ -642,11 +651,11 @@ fn the_artifacts_frame_fixes_its_column_order_and_dictionary_encodes_the_layer()
     assert_eq!(rung.values(), &[3u32, 0, 1]);
 }
 
-/// **The identity projection is its own fixed four-column schema** (`artifact-fetch-protocol.md`
+/// **The identity projection is its own fixed five-column schema** (`artifact-fetch-protocol.md`
 /// §5.2): `layer` (dictionary-encoded), `tessera_id`, `rung`, `matched` — the payload columns
 /// absent from the schema, never null, so decision 0076's null rule gains no third reading.
 #[test]
-fn the_identity_frame_is_four_columns_with_the_payload_absent_not_null() {
+fn the_identity_frame_is_five_columns_with_the_payload_absent_not_null() {
     let shape = vec![vec![vec![[1u32, 2], [3, 4], [5, 6]]]];
     let rows = vec![
         ArtifactRow {
@@ -676,7 +685,7 @@ fn the_identity_frame_is_four_columns_with_the_payload_absent_not_null() {
         .collect();
     assert_eq!(
         names,
-        vec!["layer", "tessera_id", "rung", "matched"],
+        vec!["layer", "tessera_id", "rung", "matched", "highlighted"],
         "a shape on the row does not put a shape column in the identity schema"
     );
     assert_eq!(layer_at(&batch, 0), "clusters/a");

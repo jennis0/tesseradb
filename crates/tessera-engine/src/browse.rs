@@ -739,7 +739,11 @@ impl crate::Engine {
                 // The whole view as the one domain: the row route's predicate runs over every row
                 // rather than over a request's ranges, which is what makes the count exact off the
                 // viewport and is the cost §7 prices.
-                let whole = vec![0u32..u32::try_from(total_rows).unwrap_or(u32::MAX)];
+                let whole = std::slice::from_ref(&std::ops::Range {
+                    start: 0u32,
+                    end: u32::try_from(total_rows).unwrap_or(u32::MAX),
+                })
+                .to_vec();
                 self.evaluate_row_route(
                     &tree,
                     &view_data.row_space,
