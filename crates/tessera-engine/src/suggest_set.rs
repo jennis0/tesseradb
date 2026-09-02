@@ -97,11 +97,17 @@ impl SuggestSet {
         self.values
     }
 
+    /// The bitmap's serialised size — the reading the byte budget charges an entry, exposed so a
+    /// bench prices the residency the design's own arm 3 reports rather than modelling it.
+    pub fn serialized_bytes(&self) -> u64 {
+        self.positions.get_serialized_size_in_bytes::<Portable>() as u64
+    }
+
     fn weight_bytes(&self) -> u64 {
         // A floor for the key, the map slot and the `Arc`, so a bound bounds a number of entries
         // and not only their payloads — `crate::derived_cache::weight_bytes`' argument.
         const FLOOR: u64 = 256;
-        FLOOR + self.positions.get_serialized_size_in_bytes::<Portable>() as u64
+        FLOOR + self.serialized_bytes()
     }
 }
 
@@ -363,7 +369,7 @@ impl SuggestSets {
 /// **A code with no dense position is skipped**, which is the fail-closed direction: a value minted
 /// since the index was built has none, is therefore not in the set, and is answered by the probe
 /// route at the walk's side-map arm.
-pub(crate) fn sweep<'a>(
+pub fn sweep<'a>(
     columns: impl Iterator<Item = &'a tessera_filter::ValueColumn>,
     candidate: &Bitmap,
     index: &crate::suggest::SuggestIndex,
