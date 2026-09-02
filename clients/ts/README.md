@@ -355,10 +355,24 @@ positions is that field changing and nothing else, so a predicate is never re-en
 `<tessera-filter-panel>` carry the word and move the clause when it is clicked; the words in the
 interface are **filter**, **highlight** and **matched** throughout.
 
-Under a highlight the marks that satisfy it draw lit and the rest at a fifth of their alpha — the
-map does not move and nothing is removed, which is the whole difference — and the density wash
-switches to the per-tile `highlighted` count, which is what shows the members the mark budget did
-not draw. `<tessera-status>` gains a fourth cell, *the highlight matched N*, and it is drawn only
+Under a highlight the marks that satisfy it draw lit and the rest **dulled in three channels at
+once** — an eighth of their alpha, four fifths of the way to a neutral grey, and a slightly
+smaller radius — with every lit mark drawn **over** every dulled one in a second pass and a little
+larger. The map does not move and nothing is removed, which is the whole difference. One channel
+was not enough: at 0.22 alpha alone, a dense region overdraws the same pixels several times and
+several coats of 0.22 composite back to very nearly the undulled wash, which is what *the
+highlight shows no visible difference* looked like on rung 3 (2026-09-02, measured: 872 of
+1,179,341 drawn marks lit and no perceptible change). The constants are `DULL_ALPHA`,
+`DULL_GREY`, `DULL_RADIUS_SCALE` and `LIT_RADIUS_SCALE` in `deck/src/marks-layer.ts`.
+
+**The drawn sample is chosen with no regard to the highlight, and the lit share of the marks on
+screen is therefore the tile's own share** — measured on rung 3: a descriptor whose members are
+0.065% of the visible set in view lights 0.069% of the drawn marks. That is why the wash matters,
+and why a highlight over a small descriptor is a scattering of lit points rather than a shape.
+Whether the server should promote highlighted points into the draw is open.
+
+The density wash switches to the per-tile `highlighted` count, which is what shows the members the
+mark budget did not draw. `<tessera-status>` gains a fourth cell, *the highlight matched N*, and it is drawn only
 where a highlight was asked: the wire's `highlighted` equals `matched` where none was, so a cell
 drawn always would repeat a number.
 
@@ -453,6 +467,26 @@ marks vary 2.33× — against ~25× for the tile-addressed version.
 **`k` is not a viewer control any more.** It is a per-tile cap that θ never reaches (measured:
 inert at every depth on every fixture), so the quantity worth setting is the budget. Raise
 `serve.theta_target_marks` if you want `k` to bite.
+
+**A host-computed property needs a repaint; the layer's own subscription is not enough.** The
+layer subscribes to the store and redraws itself when the projections move, so `marks`, `tiles`
+and `artifacts` look after themselves. Anything `<tessera-map>` computes and hands the layer as a
+property — the opened artifact, the region, and now `highlighting` and `washChannel` — is frozen
+at whatever the last paint passed until something calls `paint()` again. That is how a highlight
+could reach the wire, come back with its bits, be written into the slab, and still draw at
+`highlighting: false`: nothing repainted, because the camera had not moved. `onStoreChange` now
+repaints on a change in either.
+
+**Two depth models disagree on the first view of a session, and the settle asks.** The average
+model answers the first request, because no counts describe the view yet; the response's own
+per-tile counts answer every plan after it. Where the average overshoots — measured on rung 3,
+depth 8 asked and 1,014,597 points served against a 500,000 budget — the count-driven choice is
+two levels shallower, and the settle derives at a depth the replica holds nothing at. Before
+2026-09-02 the map simply stayed there: all stand-ins, `visible`, `matched` and `served` reading
+zero on the strip, and no request, because a request was only ever issued from a camera move — so
+a filter or a highlight, which requeries without moving the camera, landed in the same state.
+`Driver.askUncovered` asks once per uncovered frame at the settle; `redraw` (a view switch's
+immediate publish) still asks for nothing.
 
 **Calibration only ever goes deeper.** A shallower request returns a strict *subset* of what is
 already drawn, so marks would pop *out* while the user did nothing — the lever design §7.2 and §7.3
