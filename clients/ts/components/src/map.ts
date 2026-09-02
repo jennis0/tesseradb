@@ -577,6 +577,20 @@ export class TesseraMap extends TesseraElement {
       this.paintedOpened = opened;
       this.paint();
     }
+    // **The same rule, and the defect it was written for.** `highlighting` and `washChannel` are
+    // host-computed properties too: the layer subscribes to the store's projections and redraws
+    // itself when the marks move, but a property this element computed and handed it stays at
+    // whatever the last paint passed. So a highlight applied while the camera was still reached
+    // the wire, the response's bits reached the slab, and the layer went on drawing with
+    // `highlighting: false` — every mark lit, the dull uniform at 1.0 and the wash on the wrong
+    // channel — until something unrelated happened to repaint. On rung 3 that is the whole of
+    // *the highlight shows no visible difference*.
+    const wash = washChannel(s.get('filters'), view, region);
+    if (view.highlighting !== this.paintedHighlighting || wash !== this.paintedWashChannel) {
+      this.paintedHighlighting = view.highlighting;
+      this.paintedWashChannel = wash;
+      this.paint();
+    }
     super.onStoreChange();
   }
 
@@ -584,6 +598,9 @@ export class TesseraMap extends TesseraElement {
   private probedComposition: object | null = null;
   /** The opened artifact the last paint drew, so a change repaints once. */
   private paintedOpened: bigint | null = null;
+  /** What the last paint told the layer about the highlight — see {@link onStoreChange}. */
+  private paintedHighlighting = false;
+  private paintedWashChannel: ReturnType<typeof washChannel> | null = null;
   private regionShape: SelectionShape | null = null;
 
   /** See {@link MapProbe.cluster}: a sample of carried ordinals, each resolved through the table. */
