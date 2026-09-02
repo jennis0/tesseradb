@@ -286,6 +286,61 @@ async fn a_derived_column_is_filtered_per_principal_exactly_as_the_enumeration_i
     );
 }
 
+/// **The disclosure-shaped outcome**: a `derived` column where the narrow principal sees none
+/// of the values under a prefix that a wider principal does see. `d10` is even-numbered (carried
+/// only by items with `e % 3 != 0`, so the narrow principal — term `1` alone, which sees only
+/// `e % 3 == 0` — can see none of them) and is the only value `q = "d10"` matches, so its own
+/// range is exhausted inside the walk rather than the budget being spent — `more` is `false`
+/// here, not the C31 pre-mask reading the broader `q = "d"` prefix carries above. Asserted
+/// against the wide principal too, non-empty, so this cannot pass on a fixture where `d10` is
+/// carried by nothing at all.
+#[tokio::test]
+async fn a_narrow_principal_sees_an_empty_page_where_the_wide_one_does_not() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture_with_categories(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+    let wide = authorise(&server, &["0"]).await["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let narrow = authorise(&server, &["1"]).await["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (status, body) = get(&server, &wide, "/v1/categories/department/suggest?q=d10").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        keys_of(&body),
+        vec!["d10"],
+        "the fixture must carry d10 on at least one visible item, or this test proves nothing: \
+         {body}"
+    );
+
+    let (status, body) = get(&server, &narrow, "/v1/categories/department/suggest?q=d10").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body["values"].as_array().unwrap(),
+        &Vec::<serde_json::Value>::new(),
+        "the narrow principal may see none of d10's members: {body}"
+    );
+    assert_eq!(
+        body["more"], false,
+        "q = \"d10\" matches exactly one value, so the walk's own range is exhausted rather than \
+         its budget spent, whatever this principal can see: {body}"
+    );
+}
+
 /// `more` is `false` exactly when the walk's own range was exhausted — the page filled with
 /// everything under the prefix, budget untouched.
 #[tokio::test]
