@@ -4,7 +4,6 @@
 
 [frozen]
 paths = [
-  "crates/tessera-authz/*",
   "crates/tessera-plugin/*",
   "docs/decisions/*",
   "docs/design/*",
@@ -18,6 +17,10 @@ paths = [
 
 [track.engine]
 paths = [
+  "crates/tessera-authz/src/tier.rs",
+  "crates/tessera-server/*",
+  "conformance/*",
+  "docs/design/conformance.md",
   "crates/tessera-analyse/*",
   "crates/tessera-filter/*",
   "crates/tessera-store/*",
