@@ -89,6 +89,12 @@ export class TesseraFilter extends TesseraElement {
         flex-direction: column;
         gap: 2px;
       }
+      /* A row is a button (keyboard-operable, role=option inside [part=values]'s role=listbox),
+         stretched to the list's width by its column-flex parent; text-align is the one thing the
+         shared button reset does not set for us. */
+      [part='tick'] {
+        text-align: left;
+      }
       [part='tick'] .t {
         overflow: hidden;
         text-overflow: ellipsis;
@@ -143,6 +149,14 @@ export class TesseraFilter extends TesseraElement {
   @state() accessor labels: Record<string, string> = {};
   private sent: ColumnDraft | null = null;
   private typing: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * The last `q` this element actually asked the store's typeahead for. `onStoreChange` fires on
+   * every store tick — status, replica, points churn, none of it about this control — and asking
+   * again each time re-arms the store's own debounce without ever letting it fire: under fast
+   * enough churn no request goes out at all. Asking only when `q` has moved on from this makes a
+   * store tick a no-op here, the way it already is for every other projection this element reads.
+   */
+  private lastAsked: string | null = null;
 
   private get resolvedOperand(): FilterOperandSet | null {
     if (this.operand) return this.operand;
@@ -159,6 +173,14 @@ export class TesseraFilter extends TesseraElement {
     return this.resolvedStore?.get('filters').suggestErrors[this.column] ?? null;
   }
 
+  /** Ask the store's typeahead for `q`, but only once per distinct `q` this element has asked. */
+  private ask(q: string): void {
+    const s = this.resolvedStore;
+    if (!s || this.lastAsked === q) return;
+    this.lastAsked = q;
+    s.suggest(this.column, q);
+  }
+
   protected override onStoreChange(): void {
     // Re-seed from the store only when its draft moved under this control — a clear-all, or the
     // first meta — never while the user's own edit is the one in flight.
@@ -168,13 +190,10 @@ export class TesseraFilter extends TesseraElement {
       this.sent = stored;
     }
     // The picker's list before anything is typed (`value-suggestion.md` §4): an empty `q` matches
-    // every value, so the first ask is for `this.search` as it stands — `''` on mount — rather
-    // than a separate enumeration call. Asked once per box's worth of unanswered state, the same
-    // guard `loadFilterValues` used for the enumeration: nothing landed yet, and nothing refused.
-    const filters = this.resolvedStore?.get('filters');
-    if (this.resolvedOperand?.family === 'category' && filters && !filters.suggestions[this.column] && !filters.suggestErrors[this.column]) {
-      this.resolvedStore?.suggest(this.column, this.search);
-    }
+    // every value, so the first ask is for `this.search` as it stands — `''` on mount. `ask`'s own
+    // guard is what makes this safe to call on every store tick: it only ever reaches the store
+    // once for a `q` this element has not already asked for.
+    if (this.resolvedOperand?.family === 'category') this.ask(this.search);
     super.onStoreChange();
   }
 
@@ -304,14 +323,14 @@ export class TesseraFilter extends TesseraElement {
       const key = this.search.trim();
       if (!key || chosen.has(key)) return;
       this.search = '';
-      this.resolvedStore?.suggest(this.column, '');
+      this.ask('');
       this.change({...draft, keys: [...draft.keys, key]}, true);
     };
     const field = html`<div class="input">${icon('search', 14)}<input id="ctl" part="entry" type="search" autocomplete="off"
         aria-label=${`${this.column} value`} .value=${this.search}
         @input=${(e: Event) => {
           this.search = (e.target as HTMLInputElement).value;
-          this.resolvedStore?.suggest(this.column, this.search);
+          this.ask(this.search);
         }}
         @keydown=${(e: KeyboardEvent) => {
           if (e.key === 'Enter') submit();
@@ -331,13 +350,13 @@ export class TesseraFilter extends TesseraElement {
     const rows = suggestion?.values ?? [];
     const list =
       rows.length > 0
-        ? html`<div part="values" class="list">
+        ? html`<div part="values" class="list" role="listbox" aria-label=${`${this.column} suggestions`}>
             ${repeat(
               rows,
               (v) => v.code,
-              (v) => html`<div part="tick" class="item" role="option" aria-selected=${chosen.has(v.key) ? 'true' : 'false'} @click=${() => pick(v)}>
+              (v) => html`<button type="button" part="tick" class="item" role="option" aria-selected=${chosen.has(v.key) ? 'true' : 'false'} @click=${() => pick(v)}>
                   <span class="t">${this.suggestionText(v)}</span>
-                </div>`
+                </button>`
             )}
           </div>`
         : nothing;
