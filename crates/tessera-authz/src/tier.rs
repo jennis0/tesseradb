@@ -47,6 +47,46 @@ use crate::postings::{
 const TERM_COLUMN_NAME: &str = "term_id";
 const POSTING_COLUMN_NAME: &str = "posting";
 
+/// How many of a code's high bits the bucket table [`DeltaTier::open_indexed`] builds is indexed
+/// by — 20, so the table is 2²⁰ + 1 `u32` offsets, **4.2 MB**.
+///
+/// **The search, not the read, is what a keyed lookup spends** (`value-suggestion.md` §6.2,
+/// measured): two dozen comparisons over a 40 MB sorted `u32` array miss cache on the last several
+/// of them, and at 10⁷ records that is 550 ns of a 730–811 ns probe — 68–72%. Twenty bits leaves
+/// ~10 records per bucket at 10⁷, one or two cache lines, so the search inside a bucket is one or
+/// two misses rather than eight.
+const BUCKET_BITS: u32 = 20;
+
+/// `1 << BUCKET_BITS`, named because the table carries a sentinel and is one longer.
+const BUCKET_COUNT: usize = 1 << BUCKET_BITS;
+
+/// The record count below which [`DeltaTier::open_indexed`] builds no table.
+///
+/// **4.2 MB is not free, and below this it buys nothing.** A 65,536-record key array is 256 KB and
+/// stays in L2 across a walk, so its binary search is already the cheap kind; the table would be
+/// sixteen times the array it indexes. Above it the array leaves cache and the table is a fraction
+/// of it — 4.2 MB against 40 MB at 10⁷ records.
+const BUCKET_TABLE_MIN_RECORDS: usize = 1 << 16;
+
+/// `t[b]` is the first index whose code has bucket prefix `b`, with `t[BUCKET_COUNT]` the sentinel.
+///
+/// Free to build, which is the property that makes this the fix rather than a code → record map:
+/// the key array is already sorted, so one pass over it fills the table and no map from a code to
+/// a record ordinal is needed anywhere (a code with no members has no record, so rank in code
+/// order is *not* the record ordinal).
+fn build_bucket_table(codes: &[u32]) -> Box<[u32]> {
+    let mut table = vec![0u32; BUCKET_COUNT + 1];
+    let mut at = 0usize;
+    for (bucket, slot) in table.iter_mut().enumerate().take(BUCKET_COUNT) {
+        while at < codes.len() && (codes[at] >> (u32::BITS - BUCKET_BITS)) < bucket as u32 {
+            at += 1;
+        }
+        *slot = at as u32;
+    }
+    table[BUCKET_COUNT] = codes.len() as u32;
+    table.into_boxed_slice()
+}
+
 /// Write a sparse tier: `entries` is `(term, sorted entity list)` in **strictly ascending term
 /// order**.
 ///
@@ -273,6 +313,14 @@ impl KeyedPostingsSpool {
 pub struct DeltaTier {
     terms: UInt32Array,
     postings: LargeBinaryArray,
+    /// The bucket table over the key array's top [`BUCKET_BITS`] bits, or `None` where this tier
+    /// was opened without one — every tier a flush publishes, which is small and read a handful of
+    /// times, against the keyed **base** of a category column, which a suggestion walk searches
+    /// `max_suggestion_walk` times per keystroke. See [`Self::open_indexed`].
+    ///
+    /// In memory, per open: the file's format is untouched by it, so nothing on disk knows the
+    /// table exists.
+    buckets: Option<Box<[u32]>>,
 }
 
 impl DeltaTier {
@@ -323,7 +371,46 @@ impl DeltaTier {
         }
         crate::postings::validate_records(&postings)?;
 
-        Ok(DeltaTier { terms, postings })
+        Ok(DeltaTier {
+            terms,
+            postings,
+            buckets: None,
+        })
+    }
+
+    /// [`Self::open`], plus the bucket table its lookups then search inside
+    /// (`value-suggestion.md` §6.2 **(b′)**, decision 0124).
+    ///
+    /// **The answer is identical either way**, which is what makes this a cost decision rather than
+    /// a behavioural one: the table narrows the binary search's bounds and changes neither the
+    /// record found nor the `None` for a code this tier does not carry. A tier below
+    /// [`BUCKET_TABLE_MIN_RECORDS`] records gets no table and is not the worse for it.
+    pub fn open_indexed(path: &Path) -> io::Result<Self> {
+        let mut tier = Self::open(path)?;
+        if tier.terms.len() >= BUCKET_TABLE_MIN_RECORDS {
+            tier.buckets = Some(build_bucket_table(tier.terms.values()));
+        }
+        Ok(tier)
+    }
+
+    /// Whether this tier holds a bucket table — an operator/bench observable, never a behaviour.
+    pub fn is_bucketed(&self) -> bool {
+        self.buckets.is_some()
+    }
+
+    /// The record index for `ordinal`, or `None` where this tier carries no such key.
+    ///
+    /// **One transcription of the search**, so the bucketed and unbucketed forms cannot drift into
+    /// two answers: every lookup on this type reaches the key array through here.
+    fn index_of(&self, ordinal: u32) -> Option<usize> {
+        let codes = self.terms.values();
+        let Some(buckets) = self.buckets.as_deref() else {
+            return codes.binary_search(&ordinal).ok();
+        };
+        let bucket = (ordinal >> (u32::BITS - BUCKET_BITS)) as usize;
+        let lo = buckets[bucket] as usize;
+        let hi = buckets[bucket + 1] as usize;
+        codes[lo..hi].binary_search(&ordinal).ok().map(|at| lo + at)
     }
 
     /// How many terms this tier carries — its record count, never a dictionary bound.
@@ -349,7 +436,7 @@ impl DeltaTier {
     /// The same lookup, addressed by a bare record ordinal — the format core
     /// ([`crate::PostingsReader::posting_at`] carries the argument for why both exist).
     pub fn posting_at(&self, ordinal: u32) -> io::Result<Option<PostingRef<'_>>> {
-        let Ok(idx) = self.terms.values().binary_search(&ordinal) else {
+        let Some(idx) = self.index_of(ordinal) else {
             return Ok(None);
         };
         read_posting(&self.postings, idx).map(Some)
@@ -368,7 +455,7 @@ impl DeltaTier {
     /// (`probes/2026-09-02-value-suggestion/`, the decomposition arm).
     #[cfg(feature = "bench-timing")]
     pub fn bench_record_index(&self, ordinal: u32) -> Option<usize> {
-        self.terms.values().binary_search(&ordinal).ok()
+        self.index_of(ordinal)
     }
 
     /// [`Self::posting_at`]'s second half alone: the view over the mapped record's bytes.
@@ -432,4 +519,85 @@ pub fn coalesce_delta_tiers(
         })
         .collect();
     write_delta_tier(out, &entries, small_term_threshold)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::{Rng, SeedableRng};
+
+    fn entities_of(tier: &DeltaTier, code: u32) -> Option<Vec<u32>> {
+        tier.posting_at(code).unwrap().map(|posting| match posting {
+            PostingRef::Roaring(view) => view.iter().collect(),
+            PostingRef::Array(bytes) => bytes
+                .chunks_exact(4)
+                .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+                .collect(),
+        })
+    }
+
+    /// **(b′) The bucket table changes the search's bounds and nothing else** (`value-suggestion.md`
+    /// §6.2, decision 0124). Over 2¹⁷ codes scattered across the whole `u32` width — a category's
+    /// own draw (per-point-attributes §3.4) — every code the tier holds resolves to the same record
+    /// as the plain binary search, and **every code it does not hold answers `None` on both
+    /// routes**. The second half is the one worth a test: an empty bucket, and a code landing
+    /// between two held codes, are exactly where an off-by-one would hand back a neighbour's
+    /// posting — which on this path is a viewer being shown another value's members.
+    #[test]
+    fn the_bucket_table_resolves_every_code_as_the_plain_search_does() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0x0b7c);
+        let mut codes: Vec<u32> = (0..(1u32 << 17)).map(|_| rng.gen::<u32>()).collect();
+        // Both extremes and two codes either side of a bucket boundary: the table's first slot and
+        // its sentinel are the ends a scattered draw is unlikely to reach on its own.
+        codes.extend_from_slice(&[0, u32::MAX, 1 << 12, (1 << 12) - 1, 1u32 << 31]);
+        codes.sort_unstable();
+        codes.dedup();
+
+        let entries: Vec<(u32, Vec<u32>)> = codes
+            .iter()
+            .enumerate()
+            .map(|(at, code)| (*code, vec![at as u32]))
+            .collect();
+        let path = dir.path().join("bucketed.arrow");
+        write_delta_tier_at(&path, &entries, 32).unwrap();
+
+        let plain = DeltaTier::open(&path).unwrap();
+        let bucketed = DeltaTier::open_indexed(&path).unwrap();
+        assert!(!plain.is_bucketed());
+        assert!(bucketed.is_bucketed(), "2¹⁷ records is over the floor");
+
+        for code in &codes {
+            assert_eq!(entities_of(&bucketed, *code), entities_of(&plain, *code));
+            assert!(entities_of(&bucketed, *code).is_some(), "{code} is held");
+        }
+
+        let held: std::collections::HashSet<u32> = codes.iter().copied().collect();
+        let mut absent: Vec<u32> = (0..20_000).map(|_| rng.gen::<u32>()).collect();
+        for code in codes.iter().take(4096) {
+            absent.push(code.wrapping_add(1));
+            absent.push(code.wrapping_sub(1));
+        }
+        for code in absent.into_iter().filter(|c| !held.contains(c)) {
+            assert_eq!(entities_of(&bucketed, code), entities_of(&plain, code));
+            assert!(entities_of(&bucketed, code).is_none(), "{code} is absent");
+        }
+    }
+
+    /// A tier under the floor keeps the plain search — 4.2 MB for a 256 KB key array is the trade
+    /// the floor exists to decline — and answers identically.
+    #[test]
+    fn a_small_tier_is_not_bucketed_and_answers_the_same() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("small.arrow");
+        let entries: Vec<(u32, Vec<u32>)> = (0..1_000u32).map(|c| (c * 7919, vec![c])).collect();
+        write_delta_tier_at(&path, &entries, 32).unwrap();
+
+        let tier = DeltaTier::open_indexed(&path).unwrap();
+        assert!(!tier.is_bucketed());
+        for (code, _) in &entries {
+            assert!(tier.posting_at(*code).unwrap().is_some());
+        }
+        assert!(tier.posting_at(1).unwrap().is_none());
+    }
 }

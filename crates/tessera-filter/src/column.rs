@@ -84,9 +84,15 @@ impl ColumnPostings {
 
     /// Open a column whose identifiers are scattered — a category, addressed by its vocabulary
     /// code (index §2.5).
+    ///
+    /// **The base is opened with its bucket table** ([`DeltaTier::open_indexed`],
+    /// `value-suggestion.md` §6.2 **(b′)**): a suggestion walk searches this array up to
+    /// `max_suggestion_walk` times per keystroke and the search was 68–72% of a probe at 10⁷
+    /// records. The delta tiers attached by [`Self::with_tiers`] are not — a flush's tier is small
+    /// and the table would be many times the array it indexes.
     pub fn open_keyed(base_path: &Path) -> io::Result<Self> {
         Ok(ColumnPostings {
-            base: BaseTier::Keyed(DeltaTier::open(base_path)?),
+            base: BaseTier::Keyed(DeltaTier::open_indexed(base_path)?),
             tiers: Vec::new(),
         })
     }
