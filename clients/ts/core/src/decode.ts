@@ -440,7 +440,7 @@ export function decodeSubCells(payload: Uint8Array): SubCell[] {
  * Decode the kind-5 frame, in whichever projection the server sent.
  *
  * The projection is read off the frame's own schema, never off the request: the identity frame is
- * exactly the five columns `(layer, tessera_id, rung, matched, highlighted)` (contracts §3.2 r73 —
+ * exactly the five columns `(layer, tessera_id, rung, matched, highlighted)` (contracts §3.2 r74 —
  * four until `highlighted` joined them), the full frame's fixed prefix is fifteen with the two
  * shape columns trailing.
  */

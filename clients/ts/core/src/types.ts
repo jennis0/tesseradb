@@ -140,7 +140,8 @@ export type RegionOperand =
   | {artifact: string};
 
 /**
- * The `member_of` leaf (`highlight-and-hierarchy.md` §3): one artifact of one layer, resolved
+ * The `member_of` leaf (`highlight-and-hierarchy.md` §3; contracts §3.2 r73): one artifact of one
+ * layer, resolved
  * inside the trust boundary to that artifact's membership intersected with `M_auth`.
  *
  * Spelled like `region` and a reserved column name, refused at the build. It sits in `filters` or
@@ -513,7 +514,7 @@ export type ViewportRequest = {
   filters?: FilterExpr | null;
   /**
    * The highlight expression, in exactly `filters`' grammar, or null for no highlight
-   * (`highlight-and-hierarchy.md` §2).
+   * (`highlight-and-hierarchy.md` §2; contracts §3.2 r74).
    *
    * **It never changes which rows the response holds.** The cap clause, the density sampling and
    * `served` run over the `filters` candidate exactly as they would without it, so the set of
@@ -527,7 +528,8 @@ export type ViewportRequest = {
    */
   highlight?: FilterExpr | null;
   /**
-   * Which columns each served point answers with (`highlight-and-hierarchy.md` §2), mirroring
+   * Which columns each served point answers with (`highlight-and-hierarchy.md` §2, contracts §3.2
+   * r74), mirroring
    * `artifactRows`. Omitted or `'full'` is every column; `'highlight'` is the same points as
    * `(tessera_id, highlighted)`.
    *
@@ -788,7 +790,7 @@ export type Artifact = {
 };
 
 /**
- * One row of the identity projection (`artifact_rows: "identity"`, contracts §3.2 r73): the same
+ * One row of the identity projection (`artifact_rows: "identity"`, contracts §3.2 r74): the same
  * row set a full answer to the identical request would carry, in a fixed five-column schema.
  *
  * The row set, the `matched` and `highlighted` bits and the `rung` values are identical under
@@ -1081,7 +1083,8 @@ export type ArtifactDetail = {
 
 
 /**
- * `POST /v1/artifacts/browse` (`highlight-and-hierarchy.md` §4): a layer's hierarchy **by lineage
+ * `POST /v1/artifacts/browse` (`highlight-and-hierarchy.md` §4; contracts §3.2 r75): a layer's
+ * hierarchy **by lineage
  * rather than by viewport**, in three forms under one gate.
  *
  * - **Roots** — neither `parent` nor `q`: the layer's artifacts with no served parent. `level`
