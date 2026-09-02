@@ -124,6 +124,18 @@ pub struct TileCount {
     /// cited later as precedent that some *other* quantity must go on the wire because it is
     /// otherwise underivable.
     pub served: u64,
+    /// **Of this tile's `matched`, how many also satisfy the request's `highlight`**
+    /// (`highlight-and-hierarchy.md` §2) — the fifth column, always present, and equal to
+    /// `matched` where the request carried no highlight.
+    ///
+    /// **Always present rather than optional**, because an absent highlight is the identity for
+    /// this quantity: `highlighted = matched` says exactly what a missing column would, costs
+    /// eight bytes a tile, and leaves the wire with one schema instead of two.
+    ///
+    /// `highlighted ≤ matched ≤ visible` holds by construction — each is the count of a subset of
+    /// the last — which is what makes the wash the client draws from it comparable, tile to tile,
+    /// with the number beside it.
+    pub highlighted: u64,
 }
 
 /// The sampled points, column-major: one buffer per field, all of the same length.
@@ -164,6 +176,14 @@ pub struct PointColumns {
     /// buffers above, and named by the chunk rather than by the head because which layers get a
     /// column is not known until the artifact pass has run, which is after the head is delivered.
     pub membership: Vec<crate::membership_column::MembershipColumn>,
+    /// One bit per point: whether it satisfies the request's `highlight`
+    /// (`highlight-and-hierarchy.md` §2). `None` where the request carried none, which is an
+    /// **absent column** on the wire rather than an all-false one — a `false` would answer a
+    /// question nobody asked.
+    ///
+    /// Parallel to the three buffers above when present. It sits after the render scalars and
+    /// before the membership columns, so a decoder indexing scalars positionally is unaffected.
+    pub highlighted: Option<Vec<bool>>,
 }
 
 impl PointColumns {
@@ -217,6 +237,11 @@ impl PointColumns {
             );
             dst.ids.extend(src.ids);
         }
+        // Seeded from the request rather than from the first chunk, exactly as the scalars are, so
+        // presence is decided once for the response and a chunk cannot introduce or drop it.
+        if let (Some(dst), Some(src)) = (self.highlighted.as_mut(), other.highlighted) {
+            dst.extend(src);
+        }
         Ok(())
     }
 
@@ -232,6 +257,10 @@ impl PointColumns {
         // A u64 and a validity bit per point per membership column.
         bytes += self.membership.len()
             * (self.tessera_ids.len() * 8 + self.tessera_ids.len().div_ceil(8));
+        // A bit per point, in Arrow's packed boolean buffer.
+        if self.highlighted.is_some() {
+            bytes += self.tessera_ids.len().div_ceil(8);
+        }
         bytes
     }
 }
@@ -492,6 +521,31 @@ pub enum ArtifactRows {
     Identity,
 }
 
+/// Which columns each **served point** answers with (`highlight-and-hierarchy.md` §2), mirroring
+/// [`ArtifactRows`] exactly.
+///
+/// **The row set and the `served` split are identical under either value; only the columns
+/// change.** That sentence is the contract, and it is what makes the projection disclose nothing:
+/// a highlight answer is a column subset of what the same caller's identical request would have
+/// been served, because the served set does not depend on the highlight at all. A client that
+/// changes only its highlight already holds every point it needs and wants only the bits, which
+/// join its held points by `tessera_id`.
+///
+/// **Bound to a generation.** The served set is deterministic within one, and a stamp move
+/// (`x-tessera-stale`) means the held set may no longer be what the same request serves — the
+/// client re-asks with [`PointRows::Full`], exactly as it does for `artifact_rows`. A client
+/// asking for this while holding nothing meets identifiers it cannot draw, knows it, and re-asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PointRows {
+    /// Every column — the default, and the answer a caller who has read nothing receives.
+    #[default]
+    Full,
+    /// `tessera_id` and `highlighted` alone. **Without a `highlight` on the request there is
+    /// nothing to project to**, so this answers as [`PointRows::Full`] does rather than serving a
+    /// column of nulls.
+    Highlight,
+}
+
 /// Whether one level of one layer is answered for.
 ///
 /// Split out of the serving loop so the rule is readable on its own and a test can state it
@@ -663,6 +717,18 @@ pub struct ViewportRequest<'a> {
     /// Which columns each served artifact answers with — see [`ArtifactRows`]. The row set is
     /// identical under either value; [`ArtifactRows::Identity`] skips payload production only.
     pub artifact_rows: ArtifactRows,
+    /// The request's **highlight** expression, in exactly [`Self::filter`]'s grammar
+    /// (`highlight-and-hierarchy.md` §2).
+    ///
+    /// **It never changes which rows the response holds.** The cap clause, the density sampling
+    /// and `served` all run over the `filters` candidate exactly as they do without it, so the set
+    /// of points a viewer sees is the same with and without a highlight — the map does not move,
+    /// the marks do not resample, and a point the viewer was looking at stays where it is with its
+    /// brightness changed. What it adds is three answers, all conjunctions with the filter's
+    /// candidate: a count per tile, a bit per served point, and a bit per served artifact.
+    pub highlight: Option<crate::filter::FilterExpr>,
+    /// Which columns each served point answers with — see [`PointRows`].
+    pub point_rows: PointRows,
 }
 
 impl<'a> ViewportRequest<'a> {
@@ -683,6 +749,8 @@ impl<'a> ViewportRequest<'a> {
             levels: LevelSelection::Declared,
             computed: ComputedSelection::Declared,
             artifact_rows: ArtifactRows::Full,
+            highlight: None,
+            point_rows: PointRows::Full,
         }
     }
 
@@ -720,6 +788,18 @@ impl<'a> ViewportRequest<'a> {
     /// Attach a filter expression. See [`ViewportRequest::filter`].
     pub fn filter(mut self, filter: crate::filter::FilterExpr) -> Self {
         self.filter = Some(filter);
+        self
+    }
+
+    /// Attach a highlight expression. See [`ViewportRequest::highlight`].
+    pub fn highlight(mut self, highlight: crate::filter::FilterExpr) -> Self {
+        self.highlight = Some(highlight);
+        self
+    }
+
+    /// Answer each point with these columns. See [`PointRows`].
+    pub fn point_rows(mut self, rows: PointRows) -> Self {
+        self.point_rows = rows;
         self
     }
 
@@ -768,6 +848,11 @@ pub struct ViewCoordinates {
     /// [`Engine::view_coordinates`] for why each is there and why the segment-set version is not.
     pub content_key: [u8; 16],
 }
+
+/// An artifact's two filter answers — `(matched, highlighted)`, each `None` where the request
+/// asked no such question. They are named as a pair because a dependent inherits both or neither
+/// (`highlight-and-hierarchy.md` §2; decision 0104's D13 argument for the first).
+type FilterBits = (Option<bool>, Option<bool>);
 
 /// One artifact, as a viewport serves it.
 ///
@@ -858,6 +943,15 @@ pub struct ArtifactOut {
     /// **A dependent artifact carries its target's**, as its [`Self::masked_count`] does (D13): a
     /// label describes its cluster, and its own membership is a slice of that cluster at best.
     pub matched: Option<bool>,
+    /// **The same bit for `all_of[filters, highlight]`** (`highlight-and-hierarchy.md` §2):
+    /// whether a member this principal may see, inside the request's tiles, satisfies **both**
+    /// expressions — `None` where the request carried no `highlight`, which is *there was no
+    /// question* rather than *no matches*.
+    ///
+    /// Every rule [`Self::matched`] carries holds here unchanged, because this is that bit under a
+    /// second expression and not a second kind of answer: a boolean and never a count, clipped to
+    /// the viewport where the count is not, and the only other filter-dependent field on the row.
+    pub highlighted: Option<bool>,
 }
 
 /// The masked viewport response. No `serde` derive (I10) — see [`PointOut`]'s doc.
@@ -956,6 +1050,11 @@ pub struct ViewportHead {
     /// column's name. The full compiled schema is `/v1/meta`'s to publish ([`EngineMeta`]), where
     /// it describes the ingest plane rather than a row.
     pub render_scalars: Vec<DeclaredScalar>,
+    /// Whether the *points* frame carries a `highlighted` column — i.e. whether the request
+    /// carried a `highlight` (`highlight-and-hierarchy.md` §2). Settled here, before the first
+    /// byte, for the reason [`Self::render_scalars`] is: the frame's schema is fixed for the
+    /// response and a chunk may not introduce or drop a column.
+    pub highlighted: bool,
 }
 
 /// The sink told the producer to stop: the consumer is gone (a closed channel, an expired
@@ -2513,7 +2612,7 @@ impl Engine {
         }
     }
 
-    fn session_geometry(
+    pub(crate) fn session_geometry(
         &self,
         session: &Session,
         generation: &Generation,
@@ -2636,6 +2735,7 @@ impl Engine {
                 .map(|d| ColumnBuf::empty(d.arrow_type))
                 .collect(),
             membership: Vec::new(),
+            highlighted: head.highlighted.then(Vec::new),
         });
         Ok(ViewportOut {
             coordinates: head.coordinates,
@@ -2680,6 +2780,8 @@ impl Engine {
     ) -> Result<StageTimings> {
         let ViewportRequest {
             filter: _,
+            highlight: _,
+            point_rows,
             view,
             zoom,
             bbox,
@@ -3064,39 +3166,78 @@ impl Engine {
         // the answer is indistinguishable from a correct one. `/v1/categories` takes the same care
         // for the same reason. It costs nothing here: `session_geometry` above already resolved
         // the same fragment on this request, so this is the identity short-circuit or a cache hit.
+        //
+        // **`filters` and `highlight` are two expressions of one request, evaluated here together**
+        // (`highlight-and-hierarchy.md` §2.1). Both run against the same candidate and through the
+        // same resolvers, closed over the same **pre-filter** mask — a highlight is a conjunction
+        // with the filter's candidate by construction, and evaluating its region or `member_of`
+        // leaves against an already-filtered mask would make the two positions of one clause mean
+        // different things. The mask takes both results afterwards, in separate fields: only
+        // `with_filter`'s narrows what is drawn.
         let mut region_verdict: Option<crate::region::RegionVerdict> = None;
-        let mask = match &req.filter {
-            None => mask,
-            Some(expr) => {
-                check_cancelled(&cancel)?;
-                let fragment = self.fragment_for(session, &generation)?;
-                let candidate = crate::filter::candidate(
-                    &fragment,
-                    &session.satisfied,
-                    &generation.overlay,
-                    &generation.buffer,
-                );
-                // The region leaves' resolver (`crate::region`): a drawn shape through the
-                // generation-keyed decomposition cache, its boundary rows tested under **this
-                // request's composed mask**; a published shape through the artifact's own verdict.
-                // Closed over the mask so the boundary path cannot run without one.
-                let regions = |leaf: &crate::filter::RegionLeaf| {
-                    self.resolve_region(
-                        leaf,
-                        session,
-                        &generation,
-                        view,
-                        view_data,
-                        &segments,
-                        &mask,
-                        denied,
-                        mask_identity,
-                        &cancel,
-                    )
-                };
+        let mask = if req.filter.is_none() && req.highlight.is_none() {
+            mask
+        } else {
+            check_cancelled(&cancel)?;
+            let fragment = self.fragment_for(session, &generation)?;
+            let candidate = crate::filter::candidate(
+                &fragment,
+                &session.satisfied,
+                &generation.overlay,
+                &generation.buffer,
+            );
+            // The region leaves' resolver (`crate::region`): a drawn shape through the
+            // generation-keyed decomposition cache, its boundary rows tested under **this
+            // request's composed mask**; a published shape through the artifact's own verdict.
+            // Closed over the mask so the boundary path cannot run without one.
+            let regions = |leaf: &crate::filter::RegionLeaf| {
+                self.resolve_region(
+                    leaf,
+                    session,
+                    &generation,
+                    view,
+                    view_data,
+                    &segments,
+                    &mask,
+                    denied,
+                    mask_identity,
+                    &cancel,
+                )
+            };
+            // The `member_of` leaves' resolver, closed over the same mask for the same
+            // reason: the answer is `membership ∩ M_auth`, and a resolver that could be
+            // called without one would be a route to the unmasked membership.
+            let members = |leaf: &crate::filter::MemberOfLeaf| {
+                self.resolve_member_of(
+                    leaf,
+                    session,
+                    &generation,
+                    view,
+                    view_data,
+                    &segments,
+                    &mask,
+                    denied,
+                    mask_identity,
+                )
+            };
+            let resolvers = crate::filter::RowLeafResolvers {
+                regions: &regions,
+                members: &members,
+            };
+            let row_bases: Vec<u32> = segments.iter().map(|&(_, base)| base).collect();
+            let domain = crossing_domain(&ranges, &row_bases);
+            // One transcription of the evaluate-route-cross sequence, called for each expression,
+            // so the two positions of a clause cannot drift apart. `per_tile_only` is the
+            // highlight's route and `count_matched` its exclusion from the `filter_matched` probe
+            // — a highlight's own cardinality is not the filter's, and adding it there would make
+            // one gauge report two quantities.
+            let mut evaluate = |expr: &crate::filter::FilterExpr,
+                                per_tile_only: bool,
+                                count_matched: bool|
+             -> Result<(FilterRows, Option<crate::region::RegionVerdict>)> {
                 let routed = generation
                     .filter_columns
-                    .evaluate_routed(expr, &candidate, rows_in_ranges <= v_total, &regions)
+                    .evaluate_routed(expr, &candidate, rows_in_ranges <= v_total, &resolvers)
                     .map_err(|e| {
                         // Caller's fault or the deployment's — `FilterError` decides, at the
                         // variants, because that is where the argument for each one lives.
@@ -3108,24 +3249,28 @@ impl Engine {
                         }
                     })?;
                 probe.lap(|t| &mut t.filter_eval_ns);
-                // One crossing per request, whichever shape came back (0062's tree; 0068). The
+                // One crossing per expression, whichever shape came back (0062's tree; 0068). The
                 // row of `filter_matched` reports what the route produced: matched entities on
                 // the entity route, matched rows-in-domain on the row route.
-                let rows = match routed {
+                let out = match routed {
                     crate::filter::RoutedFilter::Entity(entities) => {
-                        probe.count(|t| &mut t.filter_matched, entities.cardinality());
-                        self.cross_filter_into_row_space(
-                            &view_data.row_space,
-                            &entities,
-                            &ranges,
-                            &segments,
-                            rows_in_ranges,
+                        if count_matched {
+                            probe.count(|t| &mut t.filter_matched, entities.cardinality());
+                        }
+                        (
+                            self.cross_filter_into_row_space(
+                                &view_data.row_space,
+                                &entities,
+                                &ranges,
+                                &segments,
+                                rows_in_ranges,
+                                per_tile_only,
+                            ),
+                            None,
                         )
                     }
                     crate::filter::RoutedFilter::Row(tree) => {
-                        let row_bases: Vec<u32> = segments.iter().map(|&(_, base)| base).collect();
-                        let domain = crossing_domain(&ranges, &row_bases);
-                        region_verdict = tree.region_verdict();
+                        let verdict = tree.region_verdict();
                         let rows = self.evaluate_row_route(
                             &tree,
                             &view_data.row_space,
@@ -3133,22 +3278,66 @@ impl Engine {
                             &domain,
                             rows_in_ranges,
                             view_data.row_space.total_rows(),
+                            per_tile_only,
                         )?;
                         self.filter_row_routed.fetch_add(1, Ordering::Relaxed);
                         // **Not counted when a region is in the tree.** Its interior rows have
                         // not met the mask yet, so the cardinality would be a pre-mask quantity
                         // about the region — the number selection-operand §7 says may not be
                         // computed, for a metric or for anything else.
-                        if !tree.has_region() {
+                        if count_matched && !tree.has_region() {
                             probe.count(|t| &mut t.filter_matched, rows.rows().cardinality());
                         }
-                        rows
+                        (rows, verdict)
                     }
                 };
                 probe.lap(|t| &mut t.filter_cross_ns);
-                mask.with_filter(rows)
+                Ok(out)
+            };
+            let filter_rows = match &req.filter {
+                None => None,
+                Some(expr) => {
+                    let (rows, verdict) = evaluate(expr, false, true)?;
+                    region_verdict = verdict;
+                    Some(rows)
+                }
+            };
+            // **The highlight always takes the per-tile walk**, whatever it matched corpus-wide:
+            // its three answers are all inside the request's tiles, so the whole-view projection
+            // would be paid for nothing (§2.1).
+            let highlight_rows = match &req.highlight {
+                None => None,
+                Some(expr) => {
+                    let (rows, verdict) = evaluate(expr, true, false)?;
+                    // The coarsest of the two, exactly as two region leaves of one expression
+                    // combine: a cover anywhere makes the response's verdict a cover.
+                    region_verdict = match (region_verdict, verdict) {
+                        (Some(a), Some(b)) => Some(a.coarser(b)),
+                        (a, b) => a.or(b),
+                    };
+                    Some(rows)
+                }
+            };
+            let mask = match filter_rows {
+                Some(rows) => mask.with_filter(rows),
+                None => mask,
+            };
+            match highlight_rows {
+                Some(rows) => mask.with_highlight(rows),
+                None => mask,
             }
         };
+
+        // **`point_rows = "highlight"` is a column projection and nothing else** (§2): the row
+        // set, the tile split and `served` are what the same request answers under `"full"`,
+        // because none of them depends on the highlight. What changes is that the gather reads no
+        // render column and the membership resolver is not built — so a client changing only its
+        // highlight is served the bits it asked for and not the payload it already holds. Without
+        // a `highlight` on the request there is nothing to project to, and this answers as
+        // `"full"` does rather than serving a column of nulls.
+        let highlight_only = point_rows == PointRows::Highlight && mask.has_highlight();
+        let render_scalars: &[DeclaredScalar] = if highlight_only { &[] } else { render_scalars };
+        let entity_scoped = if highlight_only { 0 } else { entity_scoped };
 
         // The head, delivered before the sweep: everything the response headers derive from is
         // known here — the region verdict last, settled by the decomposition above and never by a
@@ -3160,6 +3349,7 @@ impl Engine {
             stale,
             region: region_verdict,
             render_scalars: render_scalars.to_vec(),
+            highlighted: mask.has_highlight(),
         })
         .map_err(|SinkClosed| EngineError::Cancelled)?;
         // Reset the clock so the head's construction and delivery are unattributed rather than
@@ -3323,7 +3513,7 @@ impl Engine {
         // The per-point membership column, resolved once for the whole response against the
         // served set the artifacts frame just carried (`crate::membership_column`). No artifact
         // served, no work: the resolver is not built and no chunk carries a column.
-        let membership = if artifacts.is_empty() {
+        let membership = if artifacts.is_empty() || highlight_only {
             None
         } else {
             let gathered: Vec<u32> = swept
@@ -3352,6 +3542,7 @@ impl Engine {
                 .as_ref()
                 .map(|m| m.empty_columns())
                 .unwrap_or_default(),
+            highlighted: mask.has_highlight().then(Vec::new),
         };
         let mut buf = seed();
         let mut buf_bytes = 0usize;
@@ -3365,6 +3556,12 @@ impl Engine {
                 gather_tile_columns(&parts, &ts.rows, render_scalars, entity_scoped)?;
             if let Some(membership) = &membership {
                 tile_points.membership = membership.columns_for(&ts.rows);
+            }
+            // One `contains` per served point against the crossed highlight set — at most
+            // `k_max_marks` lookups for the whole response (`highlight-and-hierarchy.md` §2.1).
+            if mask.has_highlight() {
+                tile_points.highlighted =
+                    Some(ts.rows.iter().map(|&row| mask.is_highlighted(row)).collect());
             }
             stats.count(|t| &mut t.points_gathered, tile_points.len() as u64);
             buf_bytes += tile_points.wire_bytes_estimate();
@@ -3423,6 +3620,15 @@ impl Engine {
     /// can ask about, which is what [`FilterRows`] carries the domain to keep true, and what
     /// `filter_routes_agree_over_the_domain` asserts. A view that published no `row-entity.u32`
     /// cannot take the per-tile route at all and silently gets the projecting one.
+    ///
+    /// **`per_tile_only` is the highlight's route, and it is not an optimisation**
+    /// (`highlight-and-hierarchy.md` §2.1). All three of a highlight's answers — a count per tile,
+    /// a bit per served point, a bit per served artifact — are inside the request's own tiles, so
+    /// it never needs the whole-view form and must never pay for it: projecting a 10⁷-entity
+    /// verdict is ~216 ms where the walk over a 300,000-row viewport is ~18 ms whatever the
+    /// highlight matched corpus-wide. A view that cannot invert its row space still gets the
+    /// projecting route, there being no other, which is the same silent fallback the measured rule
+    /// takes.
     fn cross_filter_into_row_space(
         &self,
         row_space: &tessera_store::permutation::RowSpace,
@@ -3430,9 +3636,10 @@ impl Engine {
         ranges: &[Vec<(usize, Range<u32>)>],
         segments: &[(&SegmentData, u32)],
         rows_in_ranges: u64,
+        per_tile_only: bool,
     ) -> FilterRows {
-        let per_tile_looks_cheaper =
-            entities.cardinality() > rows_in_ranges.saturating_mul(PER_TILE_CROSSING_RATIO);
+        let per_tile_looks_cheaper = per_tile_only
+            || entities.cardinality() > rows_in_ranges.saturating_mul(PER_TILE_CROSSING_RATIO);
         if per_tile_looks_cheaper && row_space.can_invert() {
             let row_bases: Vec<u32> = segments.iter().map(|&(_, base)| base).collect();
             let domain = crossing_domain(ranges, &row_bases);
@@ -3485,7 +3692,8 @@ impl Engine {
     /// verdicts answers over the whole view and comes back [`FilterRows::Complete`]; a render
     /// leaf anywhere in it, or a per-tile crossing, bounds the answer to the request's domain
     /// and it comes back [`FilterRows::Viewport`] (selection-operand §5).
-    fn evaluate_row_route(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn evaluate_row_route(
         &self,
         tree: &crate::filter::RowExpr,
         row_space: &tessera_store::permutation::RowSpace,
@@ -3493,6 +3701,7 @@ impl Engine {
         domain: &[Range<u32>],
         rows_in_ranges: u64,
         total_rows: u64,
+        per_tile_only: bool,
     ) -> Result<FilterRows> {
         // The one crossing: every entity-space verdict's row image, computed together. The route
         // between the two crossing shapes is the measured rule the single-operand path uses,
@@ -3503,8 +3712,9 @@ impl Engine {
             Vec::new()
         } else {
             let total_matched: u64 = verdicts.iter().map(|v| v.cardinality()).sum();
-            let per_tile_looks_cheaper =
-                total_matched > rows_in_ranges.saturating_mul(PER_TILE_CROSSING_RATIO);
+            // `per_tile_only` is the highlight's route — see [`Engine::cross_filter_into_row_space`].
+            let per_tile_looks_cheaper = per_tile_only
+                || total_matched > rows_in_ranges.saturating_mul(PER_TILE_CROSSING_RATIO);
             let walked = (per_tile_looks_cheaper && row_space.can_invert())
                 .then(|| {
                     self.pool.install(|| {
@@ -3624,11 +3834,14 @@ fn eval_row_expr(
             scan_rows(segments, domain, column, values.predicate())
         }
         RowExpr::Region(region) => Ok(scope.clamp(&region.rows)),
-        RowExpr::NotInRegion(kids) => {
-            // The complement within the scope: every rowed entity carries a position, so the
-            // presence half of this negation is every row (selection-operand §5). No early exit
-            // on an empty difference — the image cursor's positional rule is simpler kept whole
-            // here than skipped, and a region leaf's kids are already resolved.
+        // Already `membership ∩ M_auth` over the whole view, clamped where a sibling leaf bounds
+        // the tree to the request's rows (`highlight-and-hierarchy.md` §3).
+        RowExpr::MemberOf(rows) => Ok(scope.clamp(rows)),
+        RowExpr::NotInRows(kids) => {
+            // The complement within the scope: every rowed entity carries a position and may be a
+            // member, so the presence half of this negation is every row (selection-operand §5).
+            // No early exit on an empty difference — the image cursor's positional rule is simpler
+            // kept whole here than skipped, and these leaves' kids are already resolved.
             let mut out = scope.all_rows();
             for kid in kids {
                 out.andnot_inplace(&eval_row_expr(
@@ -4464,7 +4677,7 @@ fn crossing_domain(ranges: &[Vec<(usize, Range<u32>)>], row_bases: &[u32]) -> Ve
 /// `None` also for a layer whose membership is not an attribute predicate at all, which is what
 /// makes the closure built from this total: it answers *no code* for every key of such a layer, and
 /// no such layer is ever asked.
-fn predicate_vocabulary<'a>(
+pub(crate) fn predicate_vocabulary<'a>(
     generation: &'a crate::Generation,
     declaration: &tessera_types::layer::LayerDeclaration,
 ) -> Option<&'a tessera_store::vocabulary::VocabularyMinter> {
@@ -4493,7 +4706,7 @@ fn predicate_vocabulary<'a>(
 /// level version — built at open and at every publication into the level, so a request finds them
 /// held; the join over the segments is the request's own O(containers) step.
 #[allow(clippy::too_many_arguments)]
-fn predicate_source<'a>(
+pub(crate) fn predicate_source<'a>(
     declaration: &tessera_types::layer::LayerDeclaration,
     generation: &'a crate::Generation,
     view: &str,
@@ -4546,7 +4759,7 @@ impl Engine {
     /// it: a session may be served a one-generation-stale projection (decision 0044), so the
     /// fragment a request composes against is the entry's and not the newest one there is. A key
     /// naming the wrong fragment would file one visible set's counts under another's.
-    fn mask_identity(
+    pub(crate) fn mask_identity(
         &self,
         session: &Session,
         generation: &crate::Generation,
@@ -4573,7 +4786,7 @@ impl Engine {
     /// rather than discovered: the column has no per-artifact route to a masked count, so the choice
     /// is between this and re-scanning the mask for every drill-down.
     #[allow(clippy::too_many_arguments)]
-    fn masked_counts(
+    pub(crate) fn masked_counts(
         &self,
         identity: &crate::histogram::MaskIdentity,
         view: &str,
@@ -4750,7 +4963,7 @@ impl Engine {
     /// layer draws an authored shape is an empty operand too — its drawing is content, not a
     /// membership (§4.1).
     #[allow(clippy::too_many_arguments)]
-    fn resolve_region(
+    pub(crate) fn resolve_region(
         &self,
         leaf: &crate::filter::RegionLeaf,
         session: &Session,
@@ -4832,6 +5045,86 @@ impl Engine {
                 })
             }
         }
+    }
+
+    /// Answer one `member_of` leaf for one request (`highlight-and-hierarchy.md` §3;
+    /// [`crate::filter::MemberResolver`]).
+    ///
+    /// **The gate, then the membership, in that order and never the other.** The layer must be one
+    /// this principal reaches — a name outside their own `/v1/meta` list is
+    /// [`FilterError::UnknownLayer`], deployment schema, and the registry's probe answers alike for
+    /// a gate-failed name and a never-registered one. Then the artifact must pass its **own**
+    /// existence criterion for this principal, through the same
+    /// [`Engine::gated_artifact`] the drill-down and the published-region leaf call, so that one
+    /// rule has one transcription. An artifact that does not pass — one that names nothing, one of
+    /// another layer, one suppressed, one below the criterion — is the **empty operand**, one
+    /// answer for every reason, because a `422` there would make the leaf an existence oracle over
+    /// exactly what the criterion withholds.
+    ///
+    /// **The membership is read two ways, decided by the level's layout and by nothing about the
+    /// request** (decision 0093). Artifact-major: the held row bitmap, intersected with the
+    /// composed mask — one `and`, no postings, no crossing, whatever the artifact's size. Row-
+    /// major: one scan of the principal's visible rows comparing labels, which is the only route a
+    /// label column has to the same set. Either way the answer is `membership ∩ M_auth`, whose
+    /// cardinality is the masked count the artifacts frame already serves.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn resolve_member_of(
+        &self,
+        leaf: &crate::filter::MemberOfLeaf,
+        session: &Session,
+        generation: &crate::Generation,
+        view: &str,
+        view_data: &tessera_store::read::ViewData,
+        segments: &[(&SegmentData, u32)],
+        mask: &EffectiveMask,
+        denied: &croaring::Bitmap,
+        mask_identity: crate::histogram::MaskIdentity,
+    ) -> std::result::Result<croaring::Bitmap, crate::filter::FilterError> {
+        use crate::compose::WholeMask;
+        use crate::filter::FilterError;
+        let reachable = self.write.resolve_layers(
+            |term| session.satisfied.contains(&term),
+            |label| generation.dict.lookup(label.as_bytes()),
+        );
+        if !reachable.contains(&leaf.layer) {
+            return Err(FilterError::UnknownLayer(leaf.layer.clone()));
+        }
+        let gated = self
+            .gated_artifact(
+                session,
+                generation,
+                view,
+                view_data,
+                segments,
+                mask,
+                denied,
+                mask_identity,
+                leaf.artifact,
+            )
+            .map_err(|e| FilterError::MemberOfUnavailable(e.to_string()))?;
+        // An identifier of *another* layer is a value that does not resolve within the one named,
+        // and is answered exactly as one that resolves to nothing at all.
+        let Some(gated) = gated.filter(|g| g.name == leaf.layer) else {
+            return Ok(croaring::Bitmap::new());
+        };
+        Ok(match gated.rows.column() {
+            None => match gated.rows.get(gated.ordinal) {
+                Some(rows) => mask.visible_rows(rows),
+                None => croaring::Bitmap::new(),
+            },
+            Some(column) => {
+                let visible = mask.visible_all();
+                let mut out = croaring::Bitmap::new();
+                for row in visible.iter() {
+                    column.for_each_label(row, |ordinal| {
+                        if ordinal == gated.ordinal {
+                            out.add(row);
+                        }
+                    });
+                }
+                out
+            }
+        })
     }
 
     /// Drill down on one artifact by the identifier a response handed out.
@@ -5033,6 +5326,8 @@ impl Engine {
             // The identifier route carries no filter to answer about (decision 0104), and there is
             // no viewport for the answer to be scoped to either.
             matched: None,
+            // Nor a highlight, for the same two reasons.
+            highlighted: None,
             shape_guard_fired,
         }))
     }
@@ -5156,7 +5451,7 @@ impl Engine {
     /// entity's row directly: the drill-down route asks about one artifact, and building a whole
     /// level's table to answer that would trade a block read for a pass over the level.
     #[allow(clippy::too_many_arguments)]
-    fn supplied_content(
+    pub(crate) fn supplied_content(
         &self,
         generation: &crate::Generation,
         layer: &str,
@@ -5502,6 +5797,10 @@ impl Engine {
         // `viewport ∩ M_auth ∩ M_sel`, the one set decision 0104's bit is asked against. `None` is
         // an unfiltered request — no question, and no column on the wire to answer it.
         let matched_here = mask.matched_rows(viewport.here());
+        // **The highlight's half of the same hoisting**: `viewport ∩ M_auth ∩ M_sel ∩ highlight`,
+        // the one set the conjunction's bit is asked against (`highlight-and-hierarchy.md` §2).
+        // `None` is a request carrying no highlight — no question, and a null column to say so.
+        let highlighted_here = mask.highlighted_rows(viewport.here());
 
         let shard = generation.bundle.manifest.identity.shard_id;
         // Built once for the whole response: the postings and the manifest's plugin are the
@@ -5640,6 +5939,7 @@ impl Engine {
                 // beside the verdict rather than inside it, and is skipped whole on an unfiltered
                 // request.
                 let matched = matched_here.as_ref().map(|here| rows.matched(here));
+                let highlighted = highlighted_here.as_ref().map(|here| rows.matched(here));
                 let view = crate::artifacts::ArtifactView {
                     declaration: &layer.declaration,
                     overlay: &generation.overlay,
@@ -5922,6 +6222,10 @@ impl Engine {
                         // Asked only of the artifacts that survived the cut: the bit describes what
                         // is served, and an artifact the response drops has no row to carry one.
                         matched: matched.as_ref().map(|m| rows.matches(m, ordinal)),
+                        // 0104's probe with the highlight's crossed set in place of the filter's
+                        // — the same early-exiting intersection, over `all_of[filters, highlight]`
+                        // (`highlight-and-hierarchy.md` §2).
+                        highlighted: highlighted.as_ref().map(|m| rows.matches(m, ordinal)),
                         shape_guard_fired,
                     });
                 }
@@ -5959,25 +6263,31 @@ impl Engine {
                     .and_then(|target| count_at.get(target).copied())
             })
             .collect();
-        // **And its target's filter bit, on D13's own argument** (decision 0104). A label describes
-        // its cluster, so *does anything here match* is a question about the cluster; the label's
-        // own membership is often empty, and a bit over it would read `false` for every label under
-        // every filter — the same defect the count rule exists to prevent, in the field beside it.
-        // Derivable from the target's own row in this response, which the drop above guarantees is
-        // present, so it discloses nothing new (decision 0023).
-        let matched_at: std::collections::BTreeMap<&(String, u32, u32), Option<bool>> = placed
+        // **And its target's two filter bits, on D13's own argument** (decision 0104;
+        // `highlight-and-hierarchy.md` §2 for the second). A label describes its cluster, so *does
+        // anything here match* is a question about the cluster; the label's own membership is often
+        // empty, and a bit over it would read `false` for every label under every filter — the same
+        // defect the count rule exists to prevent, in the fields beside it. Derivable from the
+        // target's own row in this response, which the drop above guarantees is present, so it
+        // discloses nothing new (decision 0023).
+        //
+        // **The two travel as one pair, deliberately.** `highlighted` is `matched` under a second
+        // expression and not a second kind of answer, so a shape that let one inherit and the
+        // other keep the label's own would serve two answers to one question about one cluster —
+        // which is what happened when this carried `matched` alone.
+        let bits_at: std::collections::BTreeMap<&(String, u32, u32), FilterBits> = placed
             .iter()
             .zip(&out)
-            .map(|(place, artifact)| (&place.at, artifact.matched))
+            .map(|(place, artifact)| (&place.at, (artifact.matched, artifact.highlighted)))
             .collect();
-        let target_matched: Vec<Option<Option<bool>>> = placed
+        let target_bits: Vec<Option<FilterBits>> = placed
             .iter()
             .map(|place| {
                 place
                     .attached_to
                     .as_ref()
                     .filter(|target| in_request.contains(&target.0))
-                    .and_then(|target| matched_at.get(target).copied())
+                    .and_then(|target| bits_at.get(target).copied())
             })
             .collect();
 
@@ -5995,7 +6305,7 @@ impl Engine {
             .zip(&placed)
             .zip(dropped)
             .zip(target_counts)
-            .zip(target_matched)
+            .zip(target_bits)
         {
             if dropped {
                 continue;
@@ -6003,8 +6313,9 @@ impl Engine {
             if let Some(count) = target_count {
                 artifact.masked_count = count;
             }
-            if let Some(bit) = target_bit {
-                artifact.matched = bit;
+            if let Some((matched, highlighted)) = target_bit {
+                artifact.matched = matched;
+                artifact.highlighted = highlighted;
             }
             artifact.parent_ids = place
                 .parents
@@ -6087,7 +6398,7 @@ fn lineage_kind(kind: tessera_types::layer::HierarchyKind) -> Option<bool> {
 /// [`crate::cut::Lineage`]'s is; the cycle guard is the in-progress mark — the publish and the
 /// mint refuse a cycle, so a parent still in progress when its child is resolved is a malformed
 /// store, and it contributes nothing rather than looping.
-fn response_rungs(
+pub(crate) fn response_rungs(
     parents_of: &std::collections::HashMap<u64, Vec<u64>>,
 ) -> std::collections::HashMap<u64, u32> {
     const PENDING: u32 = u32::MAX;
@@ -6661,6 +6972,15 @@ fn tile_sweep<'a>(
         // How many of those the filter admits. Equal to `visible` on an unfiltered request.
         matched,
         served: selected.rows.len() as u64,
+        // Of `matched`, how many also satisfy the highlight — one `and_cardinality` per segment
+        // range, the operation `matched` already is. Equal to `matched` with no highlight.
+        highlighted: tile_parts
+            .iter()
+            .map(|(s, range)| {
+                let (_, row_base) = segments[*s];
+                mask.count_highlighted_range(row_base + range.start..row_base + range.end)
+            })
+            .sum(),
     };
 
     // §3.3: the tile's sub-cells, each an exact masked count over a contiguous Morton range. Only
@@ -7083,6 +7403,10 @@ fn gather_tile_columns(
         codes,
         scalars,
         membership: Vec::new(),
+        // The gather is mask-blind by construction — it reads the segment's columns for rows
+        // selection already chose — so the highlight's bits are attached by the emit pass beside
+        // the membership columns rather than read here.
+        highlighted: None,
     })
 }
 

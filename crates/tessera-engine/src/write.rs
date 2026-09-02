@@ -2566,6 +2566,7 @@ impl WritePath {
         let (coalesce_tx, coalesce_rx) = std::sync::mpsc::channel();
         let (merge_tx, merge_rx) = std::sync::mpsc::channel();
         let (fold_tx, fold_rx) = std::sync::mpsc::channel();
+        let (suggest_tx, suggest_rx) = std::sync::mpsc::channel();
 
         // A clone, not a move: `ExecutorHealth` keeps the other end, which is what gives the
         // counters a reader outside the executor thread (`ExecutorStats::wal_fsyncs`).
@@ -2697,6 +2698,11 @@ impl WritePath {
                     fold_attempt: 0,
                     fold_done: fold_rx,
                     fold_submit: fold_tx,
+                    suggest_dir: flush.suggest_dir,
+                    suggest_in_flight: Arc::new(AtomicBool::new(false)),
+                    suggest_build: 0,
+                    suggest_done: suggest_rx,
+                    suggest_submit: suggest_tx,
                     configured_merge_bytes: flush.configured_merge_bytes,
                     fold_paused: flush.fold_paused,
                     fold_publication_paused: flush.fold_publication_paused,
@@ -2832,6 +2838,17 @@ impl WritePath {
             .as_ref()
             .ok_or(PublishGeometryError::NoExecutor)?
             .publish_geometry(publication)
+    }
+
+    /// Submit a suggestion-index drop to the executor and block until it has published.
+    ///
+    /// `false` where there is no executor to publish through — the hook's callers all start one,
+    /// and a test that did not would otherwise assert against an unchanged generation.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) fn forget_suggestion_index(&self, vocabulary: String) -> bool {
+        self.handle
+            .as_ref()
+            .is_some_and(|handle| handle.forget_suggestion_index(vocabulary))
     }
 
     pub(crate) fn resolve_terms(&self, dict: &Dict, descriptors: &[Descriptor]) -> Vec<TermId> {
@@ -3145,6 +3162,19 @@ pub(crate) enum ExecutorWork {
         publication: GeometryPublication,
         respond: SyncSender<std::result::Result<(), GeometryRefused>>,
     },
+    /// Drop one vocabulary's suggestion index and publish — `Engine::forget_suggestion_index_for_test`.
+    ///
+    /// **A test hook that is nonetheless a publication**, so it comes through this queue like every
+    /// other. It swapped the generation directly at first, which is the second publisher
+    /// `check-layers.sh` forbids (lifecycle §1.3, #59): the executor thread reads the live
+    /// generation, builds a successor and stores it, so a store from anywhere else can be
+    /// overwritten by a swap already in flight — and a test that lost its swap would pass or fail
+    /// on timing rather than on the behaviour under test.
+    #[cfg(feature = "fault-injection")]
+    ForgetSuggestionIndex {
+        vocabulary: String,
+        respond: SyncSender<()>,
+    },
 }
 
 /// Why a geometry publication produced no answer.
@@ -3289,6 +3319,28 @@ impl LifecycleHandle {
         rx.recv()
             .map_err(|_| PublishGeometryError::NoExecutor)?
             .map_err(PublishGeometryError::Refused)
+    }
+
+    /// Submit a suggestion-index drop and block until the executor has published it.
+    ///
+    /// A blocking `send` on the work lane, exactly as [`Self::publish_geometry`] is and for the
+    /// same reason: it is a publication, not a client request, and shedding it would leave the
+    /// caller's next assertion racing a swap that never happened.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) fn forget_suggestion_index(&self, vocabulary: String) -> bool {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        if self
+            .work
+            .send(ExecutorWork::ForgetSuggestionIndex {
+                vocabulary,
+                respond: tx,
+            })
+            .is_err()
+        {
+            return false;
+        }
+        let _ = self.bell.try_send(());
+        rx.recv().is_ok()
     }
 
     /// Ring the executor's doorbell without submitting anything.
@@ -3637,6 +3689,9 @@ pub(crate) struct MaintenanceDeps {
     /// The bundle **root**, from which the live prefix directory is derived per use — see
     /// [`Executor::prefix_dir`] and `Engine::bundle_root`.
     pub(crate) bundle_root: PathBuf,
+    /// Where a rebuilt suggestion index is written — the engine's own cache directory, never the
+    /// bundle (`crate::suggest`'s header).
+    pub(crate) suggest_dir: PathBuf,
     pub(crate) identity_key: IdentityKey,
     /// D-D's one shared compute pool — a flush's segment write runs on it, off this thread,
     /// because this thread is the one that must reach a queued deny promptly (§1.1).
@@ -4952,6 +5007,16 @@ struct Executor {
     fold_attempt: u64,
     fold_done: Receiver<crate::compact::CompletedFold>,
     fold_submit: Sender<crate::compact::CompletedFold>,
+    /// **The suggestion index's rebuild**, on the same in-flight / channel shape as the three
+    /// passes above, and deliberately the *smallest* of them: it reads a vocabulary out of the
+    /// generation and writes files the manifest does not name, so it has no plan, no gate and
+    /// nothing to refuse. One at a time across every vocabulary, because the cost it exists to
+    /// bound is the sort's memory and not its latency (`crate::suggest`).
+    suggest_dir: PathBuf,
+    suggest_in_flight: Arc<AtomicBool>,
+    suggest_build: u64,
+    suggest_done: Receiver<crate::suggest::CompletedSuggest>,
+    suggest_submit: Sender<crate::suggest::CompletedSuggest>,
     /// See [`MaintenanceDeps::configured_merge_bytes`].
     configured_merge_bytes: Option<u64>,
     /// See [`MaintenanceDeps::fold_paused`].
@@ -5143,7 +5208,8 @@ impl Executor {
             let published = self.publish_completed_flushes()
                 | self.publish_completed_coalesces()
                 | self.publish_completed_merges()
-                | self.publish_completed_folds();
+                | self.publish_completed_folds()
+                | self.publish_completed_suggests();
             self.tick_if_due();
             while self.run_deny_pass() {}
             // **At drain close**: one write covers a burst of consecutive windows rather than one
@@ -5195,6 +5261,9 @@ impl Executor {
         // tick that found a flush running would leave a whole prefix on disc for another period
         // for no reason.
         self.reclaim_superseded_prefixes();
+        // On the same argument, and ahead of the flush's in-flight gate for the same reason: it is
+        // owed to residency rather than to any request, and it waits on nothing this thread does.
+        self.dispatch_suggest_rebuild();
 
         let generation = self.generation.load_full();
 
@@ -5539,6 +5608,148 @@ impl Executor {
         });
     }
 
+    /// **Dispatch a suggestion-index rebuild** where one vocabulary's side map has run far enough
+    /// ahead of its base (`crate::suggest::SuggestIndexes::most_owed_rebuild`).
+    ///
+    /// Off this thread and onto the pool, on the flush's own argument: the sort is measured in
+    /// seconds to tens of seconds at 10⁷ values, and this thread is the one that must reach a
+    /// queued deny promptly (§1.1). Nothing waits on it — a value in the side map is suggested
+    /// exactly as one in the base is, so a rebuild that never finishes costs residency and no
+    /// answer.
+    fn dispatch_suggest_rebuild(&mut self) {
+        if self.suggest_in_flight.load(Ordering::SeqCst) {
+            return;
+        }
+        let generation = self.generation.load_full();
+        let Some((vocabulary, covered_through)) = generation.suggest.most_owed_rebuild() else {
+            return;
+        };
+        let vocabulary = vocabulary.to_string();
+        let Some(minter) = generation.vocabularies.get(&vocabulary) else {
+            return;
+        };
+        // Snapshotted here rather than read on the pool: the minter lives on the generation and the
+        // next window publishes a new one, so the build must own its input.
+        let values = crate::suggest::values_of(minter);
+        self.suggest_build += 1;
+        let build = self.suggest_build;
+        let dir = self.suggest_dir.join(&vocabulary);
+
+        self.suggest_in_flight.store(true, Ordering::SeqCst);
+        let in_flight = Arc::clone(&self.suggest_in_flight);
+        let submit = self.suggest_submit.clone();
+        let pool = Arc::clone(&self.pool);
+        self.pool.spawn(move || {
+            match crate::suggest::SuggestIndex::build(&dir, build, &values, &pool) {
+                Ok(index) => {
+                    let _ = submit.send(crate::suggest::CompletedSuggest {
+                        vocabulary,
+                        index: Arc::new(index),
+                        covered_through,
+                    });
+                }
+                Err(source) => {
+                    // The live index is still complete — the side map holds everything the base
+                    // does not — so this costs residency and is retried at the next tick.
+                    tracing::warn!(
+                        %vocabulary,
+                        %source,
+                        "a suggestion index rebuild failed; the side map keeps the live index \
+                         complete and the rebuild is retried at the next tick"
+                    );
+                }
+            }
+            in_flight.store(false, Ordering::SeqCst);
+        });
+    }
+
+    /// Drop one vocabulary's suggestion index and publish — the executor half of
+    /// `Engine::forget_suggestion_index_for_test`.
+    ///
+    /// **On this thread, which is the whole point of the hook going through the queue.** The
+    /// executor is the sole publisher (lifecycle §1.3, #59), so a swap performed anywhere else can
+    /// be lost to one already in flight here. It carries everything else forward and moves neither
+    /// version counter, exactly as [`Self::publish_completed_suggests`] does and for the same
+    /// reason: what changed is which structure a value's entries are read out of.
+    #[cfg(feature = "fault-injection")]
+    fn forget_suggestion_index(&mut self, vocabulary: &str) {
+        let live = self.generation.load_full();
+        let next = Generation {
+            suggest: Arc::new(live.suggest.without(vocabulary)),
+            prefix: live.prefix.clone(),
+            vocabularies: Arc::clone(&live.vocabularies),
+            filter_columns: Arc::clone(&live.filter_columns),
+            segments_version: live.segments_version,
+            watermark: live.watermark,
+            bundle: Arc::clone(&live.bundle),
+            dict: Arc::clone(&live.dict),
+            postings: Arc::clone(&live.postings),
+            fragments: Arc::clone(&live.fragments),
+            external_index: Arc::clone(&live.external_index),
+            delta_postings: live.delta_postings.clone(),
+            overlay_version: live.overlay_version,
+            overlay: Arc::clone(&live.overlay),
+            buffer: Arc::clone(&live.buffer),
+            denied: Arc::clone(&live.denied),
+        };
+        // Nothing acknowledged anything — the hook's own channel is what the caller waits on — so
+        // the token is dropped here as the rebuild's is.
+        let _published = self.publish(next, std::time::Instant::now());
+    }
+
+    /// Publish every finished rebuild, and report whether any did.
+    ///
+    /// **Its own swap, carrying everything else forward.** No geometry moved, no row is stale and
+    /// no cache key rotates: what changed is which of two structures a value's entries are read out
+    /// of, and both answer identically. `segments_version` and `overlay_version` therefore stand —
+    /// a rebuild that bumped either would invalidate every row projection in the process for a
+    /// change no request can observe.
+    fn publish_completed_suggests(&mut self) -> bool {
+        let mut any = false;
+        while let Ok(completed) = self.suggest_done.try_recv() {
+            let generation = self.generation.load_full();
+            let superseded = generation
+                .suggest
+                .get(&completed.vocabulary)
+                .map(|live| live.base().dir().to_path_buf());
+            let suggest = Arc::new(generation.suggest.with_rebuilt(
+                &completed.vocabulary,
+                completed.index,
+                completed.covered_through,
+            ));
+            let next = Generation {
+                suggest,
+                prefix: generation.prefix.clone(),
+                vocabularies: Arc::clone(&generation.vocabularies),
+                filter_columns: Arc::clone(&generation.filter_columns),
+                segments_version: generation.segments_version,
+                watermark: generation.watermark,
+                bundle: Arc::clone(&generation.bundle),
+                dict: Arc::clone(&generation.dict),
+                postings: Arc::clone(&generation.postings),
+                fragments: Arc::clone(&generation.fragments),
+                external_index: Arc::clone(&generation.external_index),
+                delta_postings: generation.delta_postings.clone(),
+                overlay_version: generation.overlay_version,
+                overlay: Arc::clone(&generation.overlay),
+                buffer: Arc::clone(&generation.buffer),
+                denied: Arc::clone(&generation.denied),
+            };
+            // Nothing acknowledged anything: a rebuild answers no caller, so the token is
+            // dropped here as the coalesce's is.
+            let _published = self.publish(next, std::time::Instant::now());
+            // **After the swap, and unlinking a mapped file is the point.** A request still holding
+            // the superseded generation keeps its pages — the mapping outlives the directory entry
+            // — and a rebuild that deleted before the swap would race a walk against a file whose
+            // name it had just removed.
+            if let Some(dir) = superseded {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+            any = true;
+        }
+        any
+    }
+
     /// Apply every completed merge waiting from the pool, and report whether any did.
     fn publish_completed_merges(&mut self) -> bool {
         // Left in the channel rather than dropped — see
@@ -5691,6 +5902,8 @@ impl Executor {
             // (`filter-index.md` §6.2), and it publishes through its own seam rather than through
             // this path.
             filter_columns: Arc::clone(&live.filter_columns),
+            // A merge changes no value and no title, so the index it holds is still the right one.
+            suggest: Arc::clone(&live.suggest),
             segments_version,
             // A merge moves neither, and both are the live values — see `MergeSpec::watermark`.
             watermark: live.watermark,
@@ -7600,6 +7813,8 @@ impl Executor {
             // values — the same set of `(entity, value)` pairs in fewer files, so a request holding
             // the old and one holding the new agree on every answer.
             filter_columns,
+            // A coalesce is content-preserving in value space too.
+            suggest: Arc::clone(&live.suggest),
             // **Unchanged, and this is the whole of D2.** Row space did not move, so no
             // projection is stale and no cache key may rotate.
             segments_version: live.segments_version,
@@ -8568,6 +8783,24 @@ impl Executor {
                     }
                     let _ = respond.send(self.publish_geometry(publication));
                     self.health.note_work_refused();
+                    did_work = true;
+                    continue;
+                }
+                #[cfg(feature = "fault-injection")]
+                ExecutorWork::ForgetSuggestionIndex {
+                    vocabulary,
+                    respond,
+                } => {
+                    // The open window closes first, on the arm above's reasoning exactly: this
+                    // swaps the whole generation, and doing it under a window that has not applied
+                    // its ingest would have the window's own swap carry the pre-drop indexes
+                    // forward — losing the drop, and leaving the test asserting against a state it
+                    // asked to leave.
+                    if !window.is_empty() {
+                        window = self.close_and_reopen(window);
+                    }
+                    self.forget_suggestion_index(&vocabulary);
+                    let _ = respond.send(());
                     did_work = true;
                     continue;
                 }
@@ -9969,7 +10202,7 @@ impl Executor {
         // One buffer clone, one generation, **one swap** for every entry in the window — carrying
         // the mutated `vocabularies`, so the next generation publishes this window's mints and not
         // merely its rows.
-        let published = self.apply_window(&mut closed, &positions, vocabularies);
+        let published = self.apply_window(&mut closed, &positions, vocabularies, &fresh_bindings);
 
         // **After the rows are in force, never before.** A membership is projected through rows, so
         // a store that held the join while the generation still lacked the row would describe an
@@ -10757,6 +10990,7 @@ impl Executor {
             buffer,
             vocabularies: Arc::clone(&generation.vocabularies),
             filter_columns: Arc::clone(&generation.filter_columns),
+            suggest: Arc::clone(&generation.suggest),
             denied,
         };
         self.publish(next, started)
@@ -10806,10 +11040,20 @@ impl Executor {
         closed: &mut [ClosedEntry<Responder>],
         positions: &[u64],
         vocabularies: Vocabularies,
+        mints: &[(String, String, u32)],
     ) -> Published {
         let started = std::time::Instant::now();
         let mut mark = StageMark::now();
         let generation = self.generation.load_full();
+        // The suggestion index's side map, grown by exactly the keys this window minted. Nothing
+        // is rebuilt: the base index and every other vocabulary's are carried behind their `Arc`s,
+        // and the fold's handles are borrows of data baked into the binary rather than a
+        // deserialisation.
+        let suggest = generation.suggest.with_mints(
+            &tessera_analyse::SuggestionFold::new(),
+            &vocabularies,
+            mints,
+        );
         let mut buffer = (*generation.buffer).clone();
         mark = self.health.lap(WriteStage::ApplyBufferClone, mark);
 
@@ -10868,6 +11112,12 @@ impl Executor {
             external_index: Arc::clone(&generation.external_index),
             delta_postings: generation.delta_postings.clone(),
             overlay: Arc::clone(&generation.overlay),
+            // **The one publication that changes the suggestion index**, and it changes it by the
+            // same mints that changed the bindings above: a novel key gets its code here, and a
+            // viewer typing its prefix on the next keystroke must be offered it rather than
+            // waiting for the next rebuild (`value-suggestion.md` §6.1). Every other publication
+            // carries the index forward.
+            suggest,
             // Neither the deny sets nor the row space moved, so the mask is unchanged. An ingest
             // adds a *buffered* row, which has no row id to be denied at.
             denied: Arc::clone(&generation.denied),
@@ -10999,6 +11249,11 @@ impl Executor {
 
         let next = Generation {
             filter_columns: Arc::clone(&generation.filter_columns),
+            // A deny changes who may be told a value name and never which value names exist, so
+            // the index is carried and the *predicate* answers differently — which is
+            // membership-derivation self-retiring, and is the whole reason it is derived per
+            // request rather than maintained (per-point-attributes §3.3).
+            suggest: Arc::clone(&generation.suggest),
             overlay_version: generation.overlay_version + 1,
             overlay: Arc::new(overlay),
             prefix: generation.prefix.clone(),
@@ -12769,6 +13024,11 @@ impl Executor {
             // The live columns with this flush's extents composed on — the whole of what makes an
             // entity ingested since the build answer a filter on its own value.
             filter_columns,
+            // **A flush changes which entities carry a value, not which values exist**, so this is
+            // carried rather than rebuilt — the sort a rebuild pays is measured in tens of seconds
+            // at 10⁷ values (§6.1). The values a flush's *rows* minted are already in the side map:
+            // they were put there at the commit window that minted them, not here.
+            suggest: Arc::clone(&live.suggest),
             segments_version,
             watermark,
             bundle: next_bundle,
@@ -13033,6 +13293,12 @@ impl Executor {
                 || Arc::clone(&previous.external_index),
                 |r| Arc::clone(&r.external_index),
             ),
+            // **Carried across a rotation too**, and this is not the oversight it looks like: a
+            // fold retires entities, never values — a code is pinned forever (§3.4) and no
+            // publication removes one from a vocabulary — so the value set the index is over is the
+            // set the new prefix carries. What a fold *can* change is a title, and it does so
+            // through a new bundle, which is a new `Engine::open` and therefore a fresh build.
+            suggest: Arc::clone(&previous.suggest),
             delta_postings,
             overlay_version,
             overlay,

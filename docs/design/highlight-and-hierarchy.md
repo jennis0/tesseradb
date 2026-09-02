@@ -1,10 +1,12 @@
 # Highlight, member-of, and browsing a hierarchy — design
 
 **Date:** 2026-09-02
-**Status:** Normative — r5, 2026-09-02. Reviewed once (Appendix R) and every finding
+**Status:** Normative — r6, 2026-09-02. Reviewed once (Appendix R) and every finding
 dispositioned; **all four rulings of §9 taken**. C32 and C33 are in `architecture.md` Appendix C
 (r59). `contracts.md` §3.2 is amended as each server stage of §10 lands, and the conformance
-comparator's schema with it. ⊘ **Nothing here is built.** Owner
+comparator's schema with it. **§10's three server stages are built** (`member_of`, `highlight`
+with `point_rows`, and `browse` with `max_browse_rows`), and §7's two ⊘ costs are measured at r6;
+⊘ **§5's client is not.** Owner
 direction 2026-09-02, recorded because the design turns on it: **a filter has a mode — `filter`
 narrows the draw, `highlight` keeps every point and lights the matched ones — and the same
 capability serves an artifact selection and a general filter alike; the operand is named
@@ -116,10 +118,20 @@ with what is on screen rather than with what matched.
    the whole verdict, at ~20–30 ns per matched entity, or walk the rows the request's tiles span
    and ask each whether its entity matched, at ~20–100 ns per row on screen
    (`probes/2026-08-11-viewport-crossing/`; the crossover rule in `viewport.rs`). A filter needs
-   the whole-view form for nothing this design adds, and **a highlight never does**: its three
-   answers are all inside the request's tiles, so it always takes the per-tile walk and its cost
-   is bounded by the rows on screen — a 300,000-row viewport is ~18 ms whatever the highlight
-   matched corpus-wide, where projecting a 10⁷-entity verdict is ~216 ms.
+   the whole-view form for nothing this design adds, and **a highlight never needs it**: its
+   three answers are all inside the request's tiles, so it asks for the per-tile walk whatever the
+   measured crossover rule would have chosen, and its cost is then bounded by the rows on screen —
+   a 300,000-row viewport is ~18 ms whatever the highlight matched corpus-wide, where projecting a
+   10⁷-entity verdict is ~216 ms.
+
+   ⊘ **The walk is preferred, not guaranteed, and the fallback is the projection.** Both crossing
+   sites take it only where the view's row space can be inverted — a view that published no
+   `row-entity.u32` has no walk to take — so on such a view a highlight silently projects and pays
+   the ~216 ms rather than the ~18 ms. That is the same silent fallback the measured rule itself
+   takes, and it is a latency difference and never an answer difference: the two routes agree over
+   every range a request can ask about. Stated here because *always* would read as an assurance
+   ([decision 0013](../decisions/0013-mark-specified-vs-implemented.md)) and the test that pins the
+   route asserts the counter over a view that can invert.
 3. **Count per tile.** `highlighted` is one `and_cardinality` of the crossed set against each
    tile's row range, the operation the `matched` count already is; bitmap cost is containers
    touched, and a tile is a contiguous run.
@@ -160,10 +172,12 @@ per page row against a verdict the cache already holds.
 ## 3. The `member_of` leaf
 
 A leaf of its own, spelled like `region` (`selection-operand.md` §2): `member_of` is a reserved
-column name, refused at the build, and takes `{layer: <name>, artifact: <tessera_id>}`.
+column name, refused at the build, and takes `{layer: <name>, artifact: <tessera_id>}` — the
+identifier a **decimal string**, as `region`'s published-artifact spelling already carries it, a
+bare JSON number losing the top of a `u64`.
 
 ```json
-{"all_of": [{"member_of": {"layer": "mesh/descriptors", "artifact": 546790}},
+{"all_of": [{"member_of": {"layer": "mesh/descriptors", "artifact": "546790"}},
             {"published": {"range": ["2015-01-01", "2020-12-31"]}}]}
 ```
 
@@ -331,26 +345,73 @@ after masking exactly as before; `highlight` adds a bit to sampled points and ne
 count, composed like every other leaf; `selection-operand.md` §7's argument for the `region` leaf
 holds unchanged, and the empty-operand rule of §3 is what keeps it from becoming an oracle.
 
-## 7. What it costs, modelled
+## 7. What it costs
 
-⊘ Not measured as a whole; each part is a measured operation of the filter path (§2.1). Per
-viewport request a highlight costs one per-tile crossing over the rows on screen, one
+Per viewport request a highlight costs one per-tile crossing over the rows on screen, one
 `and_cardinality` per tile, one `contains` per served point and one probe per served artifact —
 tens of milliseconds at a 300,000-row viewport by the crossing probe's figures, independent of
-how much the highlight matched. A `member_of` highlight skips the crossing. A browse page is
-`limit` rows at one masked `and_cardinality` each, plus one more per row under a filter, against
-memberships and a verdict the engine already holds. **A browse filter over a render-only column
-is the one whole-view scan this design adds**: the row route's predicate over the hot column for
-every row of the view, once per page request. ⊘ Not measured as a whole-view pass. Bounded from
-the per-tile walk's measured 20–30 ns per row (`probes/2026-08-11-viewport-crossing/`), which
-reads a row's entity and tests a bitmap where this reads a fixed-width slot and compares: at
-rung 3's 3.6 × 10⁷ rows **under about a second** as a ceiling and likely a few hundred
-milliseconds; at 10⁹ rows **tens of seconds** as a ceiling — seconds-to-tens, once per request,
-under the compute-admission gate and cancellable like any filter. ⊘ Until the clause cache exists
+how much the highlight matched. A `member_of` highlight skips the crossing. ⊘ Not measured as a
+whole; each part is a measured operation of the filter path (§2.1).
+
+**A browse page is measured** (2026-09-02, `cargo run --release -p tessera-bench --bin
+browse_cost`; the box: twelve cores, 47 GB, load ~10 from concurrent work; medians of five):
+
+| corpus | layer | roots | search | rows served |
+|---|---|---|---|---|
+| arXiv, 2.42 × 10⁶ items | `clusters/kmeans`, 64 artifacts | **0.1 ms** | 0.1 ms | 64 |
+| arXiv | `clusters/hdbscan`, 197 artifacts | **0.5 ms** | 0.5 ms | 1 root, 184 matches |
+| MedCPT, 3.6 × 10⁷ items | `clusters/kmeans`, 253 artifacts | **1.0 ms** | 0.9 ms | 200, one page |
+| MedCPT | `mesh/descriptors`, 30,217 artifacts | **39.7 ms** | 43.4 ms | 107 roots, 200 matches |
+
+**What the figures say is that the page is bounded by the layer and never by the corpus.** A
+36-million-item corpus browses its 253-artifact clustering in a millisecond and its
+30,217-descriptor DAG in forty; the corpus is the same on both rows and the artifact count is
+not. The 39.7 ms is the gate over 30,217 artifacts — a verdict and one masked `and_cardinality`
+each, ~1.3 µs an artifact — which is what §4's *the gate runs before the page* costs, and what
+paging by relation buys against a viewport that could not show the layer at all.
+
+**The whole-view scan is measured, and the r4 ceiling was pessimistic by a factor of about
+forty.** A browse `filters` whose leaf routes row space — a render-only column — runs the row
+route's own predicate over every row of the view:
+
+| rows | scan | per row |
+|---|---|---|
+| 2,422,486, arXiv's count | **2.2 ms** | 0.9 ns |
+| 36,000,000, MedCPT's count | **20.7 ms** | 0.6 ns |
+
+⊘ **The row counts are real and the corpus is not.** Neither ladder corpus declares a
+`render = true, index = false` column — arXiv's `archive`, `primary_category` and `submitted_at`
+are rendered *and* indexed, and MedCPT's `published` is too — so a both-routes column takes the
+entity route here and the scan is unreachable on either at all. It is measured instead on a
+bundle whose one attribute is declared render-only, at each corpus's own row count. What that
+costs the figure is the corpus's *shape*: one `i32` in a single build segment against a real
+view's segment ladder, where the scan's work is the same fixed-width read and compare either way.
+
+The r4 estimate — *under about a second at 3.6 × 10⁷, tens of seconds at 10⁹* — was bounded from
+the per-tile crossing's 20–30 ns per row and is wrong by that whole factor, for a reason the
+derivation could not carry: **the row route runs under rayon**, split over the same domain the
+tile sweep splits, and it reads a slot where the crossing reads a row's entity and tests a bitmap.
+At 0.6 ns a row a 10⁹-row view is **about 0.6 s** — still the largest single cost this design
+adds, still once per page request, and no longer the figure that decides whether the feature is
+affordable. §9 (d)'s ruling stands with a measured argument under it rather than a bound.
+
+⊘ **The scan is admission-gated and NOT cancellable**, and the r4 wording that said otherwise is
+corrected here rather than carried. `Engine::browse` takes no cancellation token, and it could
+not usefully hold one: `scan_rows` carries no checkpoint on any path — the viewport's own
+coarse-zoom whole-view scan is equally uninterruptible — and the verb is a unary JSON route with
+no consumer-gone signal of the kind the streamed viewport reads off its sink. So a browse under a
+row-routed filter **holds its compute permit for the whole scan**: ~2 ms at 2.4 × 10⁶ rows, ~21 ms
+at 3.6 × 10⁷, ~0.6 s at 10⁹ — which is what a concurrent request waits behind at the gate's width,
+and is the figure to weigh rather than the scan's own. Making it cancellable is a change to the
+shared row route and not to this verb, and it is not made here. ⊘ Until the clause cache exists
 the scan repeats on every page of one walk; when it does, the whole-view verdict is what it holds
-and a walk pays the scan once. A search is a scan over the layer's keys and
-names, 30,217 strings at rung 3, bounded by the layer's artifact count and never by the corpus.
-The wash costs the client one more channel over the tile counts it already decodes.
+and a walk pays the scan once.
+
+A search is a scan over the layer's keys and names, 30,217 strings at rung 3, bounded by the
+layer's artifact count and never by the corpus — measured above as the `search` column, within a
+few per cent of the roots form on every row, the difference being a substring test per artifact
+against a lineage walk. The wash costs the client one more channel over the tile counts it
+already decodes.
 
 ## 8. Not in scope
 
@@ -420,3 +481,19 @@ schema with the frame columns.
   empty-operand timing residual in C33). Not taken: nothing.
 - **r5 (2026-09-02).** §9 (d) ruled — scan, priced in §7 — and the document promoted to Normative.
   C32 and C33 carried into `architecture.md` Appendix C at its r59.
+- **r6 (2026-09-02).** **§7's two ⊘s replaced by measurement**, taken while §10's three server
+  stages were built (`tessera-bench --bin browse_cost`). A browse page is bounded by the layer's
+  artifact count and not by the corpus: 1.0 ms over MedCPT's 253-artifact clustering and 39.7 ms
+  over its 30,217-descriptor DAG, at the same 3.6 × 10⁷ items. The whole-view scan is 2.2 ms at
+  2.4 × 10⁶ rows and 20.7 ms at 3.6 × 10⁷ — **0.6–0.9 ns per row against the 20–30 ns the r4
+  estimate bounded it from**, because the row route runs under rayon and reads a fixed-width slot
+  where the per-tile crossing reads a row's entity and tests a bitmap. §9 (d)'s ruling stands and
+  its cost argument is now a measured one; the ⊘ that remains on the figure is its **medium**,
+  neither ladder corpus declaring a render-only column to ask. Stages 1–3 of §10 are built, so
+  the status line no longer says nothing here is. **Two claims are corrected against the built
+  code** at the referee's finding, and both are marked at the claim rather than mended in prose:
+  §2.1's per-tile crossing is *preferred*, not guaranteed — a view that published no
+  `row-entity.u32` has no walk to take and projects, at the ~216 ms the same paragraph prices —
+  and §7's whole-view scan is admission-gated but **not** cancellable, `scan_rows` carrying no
+  checkpoint on any path and the verb having no consumer-gone signal, so what is held is the
+  permit for the scan's own duration. No other claim of the design moves.

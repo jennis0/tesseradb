@@ -411,8 +411,21 @@ impl RowColumn {
     /// the cache holding these is byte-budgeted (`crate::histogram`). A count cannot exceed the row
     /// space, which is `u32`-addressed.
     pub fn histogram(&self, mask: &impl WholeMask) -> Vec<u32> {
+        self.histogram_over(&mask.visible_all())
+    }
+
+    /// The same walk over a row set the caller already holds — [`Self::histogram`]'s body, and its
+    /// only other caller is browse's **filtered** count (`highlight-and-hierarchy.md` §4), which
+    /// asks for `M_auth ∩ filter` rather than for `M_auth`.
+    ///
+    /// **Taking a bitmap rather than a mask is what makes that expressible without weakening the
+    /// mask-only rule above.** [`Self::histogram`] is filter-blind because the count beside an
+    /// artifact is what the principal may see; this is the *second* number §4 defines, and it is
+    /// obtained by narrowing an already-composed set. A caller handing it anything not derived
+    /// from the composed mask would be counting rows outside `M_auth`, which is why the one
+    /// production caller narrows [`WholeMask::visible_all`] and nothing else.
+    pub fn histogram_over(&self, visible: &croaring::Bitmap) -> Vec<u32> {
         let mut counts = vec![0u32; self.len()];
-        let visible = mask.visible_all();
         let base_rows = self.base_rows();
         match &*self.pack {
             Pack::Label(pack) => {

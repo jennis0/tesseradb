@@ -4542,19 +4542,36 @@ fn compile_attributes(
         if matches!(decl.name.as_str(), "all_of" | "any_of" | "none_of") {
             return Err(declaration_error(format!(
                 "attribute '{}': that name is a filter combinator (decision 0062), and a filter \
-                 expression names columns directly, so a column may not take one. Reserved: \
-                 all_of, any_of, none_of, region",
-                decl.name
+                 expression names columns directly, so a column may not take one. Reserved: {}",
+                decl.name,
+                RESERVED_COLUMN_NAMES.join(", ")
             )));
         }
-        // The fourth reserved word, on the same argument: `region` is the spatial leaf
-        // (selection-operand §2), and a column of that name would make a request mean two things.
-        if decl.name == "region" {
+        // The two reserved *leaves*, on the same argument: `region` is the spatial one
+        // (selection-operand §2) and `member_of` names one artifact's membership
+        // (`highlight-and-hierarchy.md` §3). A column of either name would make a request mean two
+        // things.
+        if matches!(decl.name.as_str(), "region" | "member_of") {
             return Err(declaration_error(format!(
-                "attribute '{}': that name is the filter surface's spatial leaf \
-                 (`selection-operand.md` §2), and a filter expression names columns directly, so \
-                 a column may not take it. Reserved: all_of, any_of, none_of, region",
-                decl.name
+                "attribute '{}': that name is a filter leaf of the request surface \
+                 (`selection-operand.md` §2, `highlight-and-hierarchy.md` §3), and a filter \
+                 expression names columns directly, so a column may not take it. Reserved: {}",
+                decl.name,
+                RESERVED_COLUMN_NAMES.join(", ")
+            )));
+        }
+        // **The frames' own reserved name.** `highlighted` is a column of the *tiles*, *points* and
+        // *artifacts* frames (`highlight-and-hierarchy.md` §2), so a render column of that name
+        // would put two columns of one name on the points frame and a by-name reader would take
+        // the wrong one.
+        if decl.name == "highlighted" {
+            return Err(declaration_error(format!(
+                "attribute '{}': that name is the *points* frame's highlight column \
+                 (`highlight-and-hierarchy.md` §2), so a render column of it would put two \
+                 columns of one name on one frame and a by-name reader would take the wrong one. \
+                 Reserved: {}",
+                decl.name,
+                RESERVED_COLUMN_NAMES.join(", ")
             )));
         }
         // The attribute's own one-field map: `field` locates the column when it differs from the
@@ -4890,6 +4907,25 @@ fn declared_names(vocabularies: &HashMap<String, Vocabulary>) -> String {
     names.sort_unstable();
     names.join(", ")
 }
+
+/// The names an attribute may not take, in the order the refusals list them.
+///
+/// **One list, read by the three refusals above**, so a name added to the request surface is added
+/// here and every message says the same set. `all_of`/`any_of`/`none_of` are the combinators
+/// (decision 0062); `region` is the spatial leaf (`selection-operand.md` §2); `member_of` names
+/// one artifact's membership (`highlight-and-hierarchy.md` §3). A filter expression names columns
+/// directly — there is no wrapper object — so a column of any of these names would make a request
+/// mean two things. `highlighted` is not a leaf but a **frame column**
+/// (`highlight-and-hierarchy.md` §2): a render column of that name would put two columns of one
+/// name on the points frame, and a by-name reader would take the wrong one.
+pub const RESERVED_COLUMN_NAMES: [&str; 6] = [
+    "all_of",
+    "any_of",
+    "none_of",
+    "region",
+    "member_of",
+    "highlighted",
+];
 
 /// A column name that can be written into `columns.arrow`'s schema without colliding with the
 /// fixed columns or with the ingest batch's reserved names.

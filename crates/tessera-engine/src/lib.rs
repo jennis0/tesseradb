@@ -8,6 +8,7 @@
 
 pub mod artifact_content;
 pub mod artifacts;
+pub mod browse;
 mod cache;
 pub mod cancel;
 mod categories;
@@ -32,6 +33,7 @@ pub mod row_column;
 pub mod select;
 pub mod session;
 pub mod shapes;
+pub mod suggest;
 mod single_flight;
 pub mod tile_index;
 pub mod timing;
@@ -47,7 +49,9 @@ use tessera_lifecycle::{IngestBuffer, Overlay};
 use tessera_store::Bundle;
 
 pub use cancel::CancelToken;
-pub use categories::{CategoryColumn, CategoryPage, CategoryQuery, CategoryValue};
+pub use categories::{
+    CategoryColumn, CategoryPage, CategoryQuery, CategoryValue, MatchSpan, SuggestPage, Suggestion,
+};
 // The fold's automatic trigger, as a value an operator's configuration builds. `tessera-server`
 // parses `ingest.compaction_*` into one of these and hands it over in `EngineConfig`; the executor
 // is the only reader. The rest of `compact` stays private — what a fold *is* is this crate's
@@ -82,7 +86,8 @@ pub use tessera_authz::fragment::CacheStats as FragmentCacheStats;
 pub use timing::{Probe, StageTimings};
 pub use viewport::{
     ArtifactOut, ArtifactRows, ColumnBuf, ComputedSelection, EngineMeta, ItemOut, LayerSelection,
-    LeafColumn, LevelSelection, MetaGroup, MetaRoster, MetaView, PointColumns, ScalarOut, SinkClosed,
+    LeafColumn, LevelSelection, MetaGroup, MetaRoster, MetaView, PointColumns, PointRows, ScalarOut,
+    SinkClosed,
     SinkResult, SubCellCount, TileAddress, TileCount, ViewCoordinates, ViewportHead, ViewportOut,
     ViewportRequest, ViewportSink,
 };
@@ -263,6 +268,16 @@ pub struct Generation {
     /// published prefix, so a new bundle brings new columns and a session reading the old
     /// generation keeps reading the old ones. Empty when the schema declares nothing filterable.
     pub filter_columns: Arc<crate::filter::FilterColumns>,
+    /// Every category vocabulary's suggestion index (`value-suggestion.md` §6.1).
+    ///
+    /// **Carried across publications rather than rebuilt with them.** A flush changes which
+    /// entities carry a value and changes nothing this index holds — it is over the value set, and
+    /// the mask never enters it — so a per-generation rebuild would pay a sort measured in tens of
+    /// seconds at 10⁷ values for a change it cannot see. It is on the generation all the same,
+    /// because a *mint* publishes: a novel key acquires its code at a commit window's close and
+    /// must be suggestible on the next keystroke, so the side map grows exactly when
+    /// [`Generation::vocabularies`] does and travels with it.
+    pub suggest: Arc<crate::suggest::SuggestIndexes>,
 }
 
 impl Generation {

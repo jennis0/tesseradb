@@ -131,7 +131,7 @@ def overlay_density_server(tmp_path_factory, private_catalogue_bundle):
 def _engine_counts(server, token: str) -> dict[int, int]:
     raw = server.viewport(token, VIEW, DEPTH, FULL_VIEWPORT, k=500)
     tiles, _points = decode_viewport(raw)
-    return {tile: visible for tile, visible, _matched, _served in tiles}
+    return {tile: visible for tile, visible, _matched, _served, _highlighted in tiles}
 
 
 def _oracle_counts(bundle: Bundle, mask: set[int]) -> dict[int, int]:
@@ -153,7 +153,7 @@ def _engine_view(server, token: str, k: int, depth: int = DEPTH):
     per_tile: dict[int, list[int]] = {}
     per_tile_ids: dict[int, list[int]] = {}
     cursor = 0
-    for tile, visible, matched, served in tiles:
+    for tile, visible, matched, served, _highlighted in tiles:
         assert visible == matched, "Phase 1 has no filters: matched must equal visible"
         window = points[cursor : cursor + served]
         counts[tile] = (visible, served)

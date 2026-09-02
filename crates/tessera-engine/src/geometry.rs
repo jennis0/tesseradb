@@ -386,6 +386,8 @@ mod tests {
         Generation {
             // A test fixture's schema declares nothing filterable, so there is nothing to open.
             filter_columns: Arc::new(crate::filter::FilterColumns::default()),
+            // And nothing categorical, so no vocabulary has an index.
+            suggest: Arc::new(crate::suggest::SuggestIndexes::default()),
             prefix: prefix.to_string(),
             vocabularies: Arc::new(tessera_store::vocabulary::Vocabularies::default()),
             segments_version,

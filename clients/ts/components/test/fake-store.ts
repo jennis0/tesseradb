@@ -26,7 +26,7 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
     artifacts: {layer: null, layers: [], served: [], lineage: servedLineage([]), status: 'idle', refusal: null, version: 0, held: 0, table: new SessionArtifactTable(), servedOrdinals: new Set(), shapes: new Map(), colours: new Map(), palette: 'positional', coverage: {current: 0, stale: 0}},
     selection: {item: null, itemRefusal: null, artifact: null, artifactRefusal: null},
     region: null,
-    filters: {draft: {}, expr: null, highlight: null, members: [], values: {}, valueErrors: {}},
+    filters: {draft: {}, expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {}},
     legend: {ranks: {}, domains: {}, categories: {}, categoryErrors: {}, colourBy: null},
     replica: {bytes: 0, points: 0, bands: 0, views: 0, lastPlan: null},
     ...overrides
@@ -72,9 +72,7 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
       const key = req.q !== undefined ? `q:${req.q}` : req.parent !== undefined ? `p:${req.parent}${req.cursor ? `:${req.cursor}` : ''}` : `roots${req.cursor ? `:${req.cursor}` : ''}`;
       return browsePages.get(key) ?? {artifacts: [], parents: [], next: null};
     },
-    loadFilterValues: async (...args: unknown[]) => {
-      calls.push({name: 'loadFilterValues', args});
-    },
+    suggest: spy('suggest'),
     setLayers: spy('setLayers'),
     setColourBy: spy('setColourBy'),
     setPalette: spy('setPalette'),

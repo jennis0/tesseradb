@@ -78,7 +78,7 @@ SWEEP_EXPR = {
 
 
 def _tiles_by_id(tiles) -> dict[int, tuple[int, int, int]]:
-    return {t: (v, m, s) for t, v, m, s in tiles}
+    return {t: (v, m, s) for t, v, m, s, _h in tiles}
 
 
 def _served_entities(raw: bytes, entity_of_fx: dict[int, int]) -> set[int]:
@@ -338,7 +338,7 @@ def test_the_empty_combinators_are_their_operators_identities(
     assert {t: v for t, (v, _m, _s) in _tiles_by_id(nothing_tiles).items()} == {
         t: v for t, (v, _m, _s) in plain_tiles.items()
     }, "`any_of: []` moved `visible`"
-    assert all(m == 0 and s == 0 for _t, _v, m, s in nothing_tiles)
+    assert all(m == 0 and s == 0 for _t, _v, m, s, _h in nothing_tiles)
     assert nothing_points == []
 
 
@@ -409,7 +409,7 @@ def test_a_hidden_value_a_hollow_value_and_a_nonexistent_value_are_one_outcome(
     assert {t: v for t, (v, _m, _s) in _tiles_by_id(tiles).items()} == {
         t: v for t, (v, _m, _s) in plain_tiles.items()
     }, "an empty-operand request moved `visible`"
-    assert all(m == 0 for _t, _v, m, _s in tiles)
+    assert all(m == 0 for _t, _v, m, _s, _h in tiles)
 
     # The positive control: one visible member, found.
     solo = catalogue_server.viewport(

@@ -425,6 +425,11 @@ pub enum EngineError {
     /// existence and family are published to every principal alike — so naming them back discloses
     /// nothing. An unknown *value* is neither of these: it is an empty operand, never an error.
     FilterMalformed(String),
+    /// A browse request named something this deployment does not publish to this principal — a
+    /// layer, a level, or a zero-length page (`crate::browse::BrowseRefused`). **Always the
+    /// caller's fault and always a `422`**: every arm names deployment schema the caller reads off
+    /// `/v1/meta`, and no arm is ever about an *artifact*, which is the empty page instead.
+    BrowseRefused(crate::browse::BrowseRefused),
     Store(StoreError),
     Wal(WalError),
     Plugin(PluginError),
@@ -485,6 +490,19 @@ pub enum EngineError {
     /// though it had been computed. Serving the set *unfiltered* is the other direction and is the
     /// C11 disclosure itself.
     VocabularyVisibilityUnavailable {
+        column: String,
+        detail: String,
+    },
+    /// `GET /v1/categories/{column}/suggest` was asked for a column whose vocabulary has no
+    /// suggestion index, or whose index could not be walked.
+    ///
+    /// **Refused rather than answered empty**, on the sibling variant's reasoning exactly: an empty
+    /// suggestion list is a real answer — it is what a viewer who may see nothing under their
+    /// prefix is told — so serving it for a missing index makes a broken surface indistinguishable
+    /// from a working one, and a client would read "no such value" where the truth is "not asked".
+    /// It is not a disclosure refusal: the enumeration over the same column is unaffected, and this
+    /// costs a typeahead rather than a value list.
+    SuggestionUnavailable {
         column: String,
         detail: String,
     },
@@ -563,6 +581,7 @@ impl std::fmt::Display for EngineError {
         match self {
             EngineError::FilterRefused(why) => write!(f, "filter refused: {why}"),
             EngineError::FilterMalformed(why) => write!(f, "filter refused: {why}"),
+            EngineError::BrowseRefused(why) => write!(f, "browse refused: {why}"),
             EngineError::Store(e) => write!(f, "store error: {e}"),
             EngineError::Wal(e) => write!(f, "wal error: {e}"),
             EngineError::Plugin(e) => write!(f, "plugin error: {e}"),
@@ -592,6 +611,12 @@ impl std::fmt::Display for EngineError {
                  visibility could not be derived ({detail}). This column's values are refused \
                  rather than published unfiltered, and rather than served empty — an empty value \
                  set is what a principal who may see none of them is told"
+            ),
+            EngineError::SuggestionUnavailable { column, detail } => write!(
+                f,
+                "column '{column}' cannot be suggested over ({detail}). The suggestion index is \
+                 derived rather than built, so this refuses a typeahead and nothing else — \
+                 /v1/categories over the same column is unaffected"
             ),
             EngineError::TooManyTiles { demanded, limit } => write!(
                 f,
@@ -781,6 +806,9 @@ pub struct Engine {
     /// is **derived** from the live generation's own `prefix` wherever it is needed
     /// (`Executor::prefix_dir`), so it cannot go stale by construction.
     pub(crate) bundle_root: std::path::PathBuf,
+    /// Where this engine writes its suggestion indexes — `<cache dir>/suggest`, engine-local and
+    /// never in the bundle (`crate::suggest`'s header).
+    pub(crate) suggest_dir: std::path::PathBuf,
     pub(crate) config: EngineConfig,
     next_token_id: AtomicU64,
     /// The write path: the WAL, the I9 allocator, the live external-id maps, the resolver's
@@ -1377,8 +1405,45 @@ impl Engine {
             )
         };
 
+        // **The suggestion indexes, built here and synchronously** (`value-suggestion.md` §6.1).
+        //
+        // At open rather than lazily because a first keystroke that paid the whole sort would be a
+        // request-shaped cold start; on the pool because the sort *is* the build cost — 34–38 s
+        // single-threaded for 22M entries at 10⁷ values, against 2.4–4.2 s to write the
+        // dictionary. Into the engine's own cache directory, which is where a derived, undigested,
+        // rebuilt-every-open file belongs: contracts §2.1 fixes what a bundle contains, and this
+        // is not part of it.
+        //
+        // **Only the vocabularies a declared category column draws on.** A vocabulary nothing
+        // names has no suggest surface to serve, and building an index for it would pay the sort
+        // for a value set no request can reach.
+        let suggest_dir = cache_dir.join(crate::suggest::SUGGEST_DIR);
+        // A previous run's indexes are stale by construction — every open rebuilds — and leaving
+        // them would accumulate a directory per restart under a name the next build reuses.
+        let _ = std::fs::remove_dir_all(&suggest_dir);
+        let suggest_names: std::collections::BTreeSet<String> = bundle
+            .manifest
+            .declared_scalars
+            .iter()
+            .filter_map(|scalar| scalar.vocabulary.clone())
+            .chain(
+                bundle
+                    .manifest
+                    .scoped_scalars()
+                    .into_iter()
+                    .filter_map(|family| family.vocabulary),
+            )
+            .collect();
+        let suggest = Arc::new(crate::suggest::SuggestIndexes::build(
+            &suggest_dir,
+            &vocabularies,
+            suggest_names,
+            &pool,
+        ));
+
         let generation = Arc::new(ArcSwap::new(Arc::new(Generation {
             prefix,
+            suggest,
             segments_version,
             watermark,
             bundle: Arc::clone(&bundle),
@@ -1523,6 +1588,7 @@ impl Engine {
             level_contents: Arc::new(crate::artifact_content::LevelContents::new()),
             pool,
             bundle_root: bundle_root.to_path_buf(),
+            suggest_dir,
             config,
             next_token_id: AtomicU64::new(0),
             write: WritePath::new(write_state),
@@ -1593,6 +1659,31 @@ impl Engine {
     #[doc(hidden)]
     pub fn set_background_refresh_for_test(&self, enabled: bool) {
         self.refresh_enabled.store(enabled, Ordering::SeqCst);
+    }
+
+    /// Drop one vocabulary's suggestion index from the live generation — the fault state
+    /// [`EngineError::SuggestionUnavailable`] exists for.
+    ///
+    /// **A test hook, gated so it cannot exist in a shipped build**, on
+    /// [`Self::set_background_refresh_for_test`]'s argument. Nothing request-shaped reaches that
+    /// refusal: `Engine::open` builds an index for every vocabulary a declared category column
+    /// names, and only a build that failed at open leaves one absent — which is a host condition a
+    /// test cannot produce without either breaking the filesystem or reaching in here.
+    ///
+    /// **It submits to the executor rather than swapping the generation itself**, and that is not
+    /// ceremony. The executor thread is the sole publisher (lifecycle §1.3, #59): it loads the live
+    /// generation, builds a successor and stores it, so a store from any other thread can be
+    /// overwritten by a swap already in flight between those two steps. A hook that lost its swap
+    /// that way would leave the test asserting against an index it had asked to remove — passing or
+    /// failing on timing rather than on the behaviour under test — and `scripts/check-layers.sh`
+    /// refuses the second publisher for exactly that reason. Returns once the executor has
+    /// published, so the caller's next request sees it.
+    ///
+    /// Requires a started write executor; `false` where there is none.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn forget_suggestion_index_for_test(&self, vocabulary: &str) -> bool {
+        self.write.forget_suggestion_index(vocabulary.to_string())
     }
 
     /// Hold the background refresh, leaving it **in flight** — the window rung 3 of
@@ -2780,6 +2871,7 @@ impl Engine {
                 // re-checks write-path §7's base-segment relation against the fold's own output,
                 // and `tessera-server`'s loader checks only an explicitly set one.
                 configured_merge_bytes: self.config.max_merged_segment_bytes,
+                suggest_dir: self.suggest_dir.clone(),
                 compaction: self.config.compaction,
                 coalesce_enabled: Arc::clone(&self.coalesce_enabled),
                 merge_enabled: Arc::clone(&self.merge_enabled),
@@ -2840,6 +2932,7 @@ impl Engine {
                 // re-checks write-path §7's base-segment relation against the fold's own output,
                 // and `tessera-server`'s loader checks only an explicitly set one.
                 configured_merge_bytes: self.config.max_merged_segment_bytes,
+                suggest_dir: self.suggest_dir.clone(),
                 compaction: self.config.compaction,
                 coalesce_enabled: Arc::clone(&self.coalesce_enabled),
                 merge_enabled: Arc::clone(&self.merge_enabled),

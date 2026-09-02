@@ -165,7 +165,7 @@ def _canonical_response(server, token, zoom, bbox) -> Streamed:
     raw = server.viewport(token, VIEW, zoom, bbox, k=K, underlay_offset=UNDERLAY_OFFSET)
 
     tiles, _points = decode_viewport(raw)
-    for tile, visible, _matched, served in tiles:
+    for tile, visible, _matched, served, _highlighted in tiles:
         assert served == visible, (
             f"tile {tile} at zoom {zoom} served {served} of {visible} visible — this comparison "
             f"must be untruncated to mean what §4.2 asks of it; see K's comment and the "
@@ -331,4 +331,4 @@ def test_the_canary_occupies_a_tile_no_state_reports(canary_servers):
     for srv in (free_srv, canary_srv):
         token = srv.authorise([str(t) for t in range(6)])["token"]
         tiles, _points = decode_viewport(srv.viewport(token, VIEW, zoom, bbox, k=K))
-        assert corner not in {t for t, _v, _m, _s in tiles}
+        assert corner not in {t for t, _v, _m, _s, _h in tiles}

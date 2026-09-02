@@ -126,6 +126,7 @@ visibility = "public"
 name       = "archive"
 type       = "category"
 render     = true
+index      = true
 vocabulary = "archive"
 
 [[attribute]]
@@ -375,8 +376,10 @@ fn the_description_names_every_route_on_the_two_planes_and_no_other() {
             "/readyz",
             "/session/authorise",
             "/session/revoke",
+            "/v1/artifacts/browse",
             "/v1/artifacts/{tessera_id}",
             "/v1/categories/{column}",
+            "/v1/categories/{column}/suggest",
             "/v1/items/{tessera_id}",
             "/v1/meta",
             "/v1/viewport",
@@ -702,6 +705,84 @@ async fn categories_match_the_description_in_both_forms_and_both_refusals() {
     let resp = get("/v1/categories/score".to_string()).await.unwrap();
     assert_refusal(&doc, resp, 404, "unknown").await;
     let resp = get("/v1/categories/archive?limit=0".to_string())
+        .await
+        .unwrap();
+    assert_refusal(&doc, resp, 422, "contract").await;
+}
+
+/// The typeahead's own shape: `SuggestResponse` on a real page, `count` present iff asked, and
+/// the refusals `/v1/categories/{column}` does not have — `q` over 256 bytes and an unknown query
+/// parameter, both `422`.
+#[tokio::test]
+async fn suggest_matches_the_description_and_its_own_refusals() {
+    let doc = description();
+    let f = fixture().await;
+    let auth = authorise_checked(&doc, &f.server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap();
+    let get = |path: String| {
+        f.server
+            .client
+            .get(f.server.viewer_url(&path))
+            .bearer_auth(token)
+            .send()
+    };
+
+    // No `count` unless asked.
+    let resp = get("/v1/categories/archive/suggest?q=a".to_string())
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let page: Value = resp.json().await.unwrap();
+    assert_valid(&doc, "SuggestResponse", &page);
+    assert_eq!(page["column"], "archive");
+    assert_eq!(page["q"], "a");
+    for value in page["values"].as_array().unwrap() {
+        assert!(
+            value.get("count").is_none(),
+            "count must be absent without `counts=true`: {value}"
+        );
+    }
+
+    // `counts=true` puts a `count` on every served value.
+    let resp = get("/v1/categories/archive/suggest?q=a&counts=true".to_string())
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let page: Value = resp.json().await.unwrap();
+    assert_valid(&doc, "SuggestResponse", &page);
+    assert!(!page["values"].as_array().unwrap().is_empty());
+    for value in page["values"].as_array().unwrap() {
+        assert!(
+            value["count"].is_u64(),
+            "counts=true must put an exact count on every served value: {value}"
+        );
+    }
+
+    // An empty `q` matches every value, in index order, with no cursor to page through them.
+    let resp = get("/v1/categories/archive/suggest?q=".to_string())
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let page: Value = resp.json().await.unwrap();
+    assert_valid(&doc, "SuggestResponse", &page);
+    assert!(!page["values"].as_array().unwrap().is_empty());
+
+    // Refusals: a column that is not a category is 404; `limit=0`, `q` over 256 bytes, and an
+    // unknown query parameter are all 422.
+    let resp = get("/v1/categories/score/suggest?q=a".to_string())
+        .await
+        .unwrap();
+    assert_refusal(&doc, resp, 404, "unknown").await;
+    let resp = get("/v1/categories/archive/suggest?q=a&limit=0".to_string())
+        .await
+        .unwrap();
+    assert_refusal(&doc, resp, 422, "contract").await;
+    let long_q = "x".repeat(257);
+    let resp = get(format!("/v1/categories/archive/suggest?q={long_q}"))
+        .await
+        .unwrap();
+    assert_refusal(&doc, resp, 422, "contract").await;
+    let resp = get("/v1/categories/archive/suggest?q=a&bogus=1".to_string())
         .await
         .unwrap();
     assert_refusal(&doc, resp, 422, "contract").await;
@@ -1071,6 +1152,7 @@ async fn every_viewer_route_requires_a_session_token() {
             "/v1/viewport" => viewport_body(json!({})),
             "/v1/items/{tessera_id}" => json!({}),
             "/v1/artifacts/{tessera_id}" => json!({ "view": "s0" }),
+            "/v1/artifacts/browse" => json!({ "view": "s0", "layer": "clusters/none" }),
             other => panic!(
                 "{other} is a described POST route and this test has no request body for it; add \
                  one rather than letting a new viewer route go unchecked"
@@ -1158,12 +1240,13 @@ async fn every_viewer_route_requires_a_session_token() {
         }
     }
 
-    // Non-vacuity, both halves: the loop must have found the five gated routes and the two
+    // Non-vacuity, both halves: the loop must have found the seven gated routes and the two
     // probes, or it enumerated nothing and proved nothing.
     assert_eq!(
-        gated, 5,
-        "the viewer plane's gated routes are meta, categories, viewport, items and artifacts; \
-         a change to that set belongs in this test's reasoning, not silently in its count"
+        gated, 7,
+        "the viewer plane's gated routes are meta, categories, suggest, viewport, items, \
+         artifacts and artifacts/browse; a change to that set belongs in this test's reasoning, \
+         not silently in its count"
     );
     assert_eq!(
         probes, 2,

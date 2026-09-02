@@ -155,6 +155,8 @@ fn parse_node(
         // **The reserved word, before any column** (selection-operand §2): the build refuses a
         // column of this name, so the key can mean one thing.
         tessera_engine::filter::REGION_COLUMN => Ok(FilterExpr::Region(parse_region(body, region)?)),
+        // The second reserved word, on the same argument (`highlight-and-hierarchy.md` §3).
+        tessera_engine::filter::MEMBER_OF_COLUMN => Ok(FilterExpr::MemberOf(parse_member_of(body)?)),
         leaf => {
             // **An unknown column is an error; an unknown value is not.** See the module header.
             // A leaf's *spelling* is resolved here too — a group-scoped attribute's pin, and the
@@ -170,6 +172,46 @@ fn parse_node(
             })
         }
     }
+}
+
+/// A `member_of` leaf's body: `{layer: <name>, artifact: <tessera_id>}`
+/// (`highlight-and-hierarchy.md` §3).
+///
+/// **Shape only is checked here.** Whether the layer exists is the engine's — the answer depends
+/// on the principal's own reachable layer set, which this module does not hold — and whether the
+/// artifact resolves is never checked at all: an identifier that names nothing this principal may
+/// see is an empty operand, on the module header's rule, so it travels through unexamined.
+///
+/// The identifier is accepted as a JSON number or a decimal string, exactly as
+/// `region.artifact` is: a `u64` beyond `2^53` cannot ride through a JavaScript number intact.
+fn parse_member_of(body: &Value) -> Result<tessera_engine::filter::MemberOfLeaf, ApiError> {
+    let obj = body
+        .as_object()
+        .ok_or_else(|| bad("`member_of` takes an object with `layer` and `artifact`"))?;
+    for key in obj.keys() {
+        if key != "layer" && key != "artifact" {
+            return Err(bad(format!(
+                "`member_of` takes `layer` and `artifact`, not '{key}'"
+            )));
+        }
+    }
+    let layer = obj
+        .get("layer")
+        .and_then(Value::as_str)
+        .ok_or_else(|| bad("`member_of.layer` is the name of a layer, as a string"))?;
+    let artifact = match obj.get("artifact") {
+        Some(Value::Number(n)) => n.as_u64(),
+        Some(Value::String(s)) => s.parse::<u64>().ok(),
+        _ => None,
+    }
+    .ok_or_else(|| {
+        bad("`member_of.artifact` is a `tessera_id` — a JSON number, or a decimal string where the \
+             caller cannot carry one intact")
+    })?;
+    Ok(tessera_engine::filter::MemberOfLeaf {
+        layer: layer.to_string(),
+        artifact: TesseraId::new(artifact),
+    })
 }
 
 /// A `region` leaf's body: exactly one of `polygon`, `bbox`, `circle`, `ellipse` — with `space`,

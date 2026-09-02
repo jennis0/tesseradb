@@ -526,9 +526,16 @@ async fn mount_server_with_flush(
         // Small enough that the fixtures' vocabularies page rather than arriving whole, so the
         // cursor is exercised by an ordinary request rather than only by a contrived one.
         max_category_values: 4,
+        // Small enough that a suggestion fixture's page and walk-budget behaviour are exercised
+        // by an ordinary request rather than only by a contrived one — the same argument as
+        // `max_category_values` above.
+        max_suggestions: 4,
+        max_suggestion_walk: 1_000,
+        suggest_admission: tessera_server::state::SuggestAdmission::new(),
         max_shape_vertices: tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
         max_region_vertices: 10_000,
         max_region_cells: tessera_engine::DEFAULT_MAX_REGION_CELLS,
+        max_browse_rows: 200,
         compute_gate,
         ingest_admission: IngestAdmission::new(ingest_limits.admission),
         ingest_max_batch_rows: ingest_limits.max_batch_rows,
@@ -673,6 +680,8 @@ pub struct ArtifactRow {
     /// Whether a member this principal may see, inside the requested tiles, matched the request's
     /// filter. `None` where the request carried none.
     pub matched: Option<bool>,
+    /// The same bit for `all_of[filters, highlight]` (`highlight-and-hierarchy.md` §2).
+    pub highlighted: Option<bool>,
 }
 
 /// The identity projection's four columns (`artifact_rows: "identity"`), read back by a test.
@@ -682,6 +691,8 @@ pub struct ArtifactIdentityRow {
     pub tessera_id: u64,
     pub rung: u32,
     pub matched: Option<bool>,
+    /// The same bit for `all_of[filters, highlight]` (`highlight-and-hierarchy.md` §2).
+    pub highlighted: Option<bool>,
 }
 
 fn str_col(batch: &arrow::record_batch::RecordBatch, i: usize) -> arrow::array::StringArray {
@@ -774,10 +785,10 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                     "exactly one artifacts frame"
                 );
                 let reader = StreamReader::try_new(Cursor::new(payload.to_vec()), None).unwrap();
-                // The projection is read off the schema: the identity frame is exactly four
-                // columns, the full frame's fixed prefix is fourteen with the two hull columns
+                // The projection is read off the schema: the identity frame is exactly five
+                // columns, the full frame's fixed prefix is fifteen with the two hull columns
                 // trailing when any served layer declares one.
-                let identity = reader.schema().fields().len() == 4;
+                let identity = reader.schema().fields().len() == 5;
                 for batch in reader {
                     let batch = batch.unwrap();
                     // `layer` is dictionary-encoded in both projections (u16 keys over utf8).
@@ -818,8 +829,8 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                         column.is_valid(i).then(|| column.value(i))
                     };
                     if identity {
-                        // (layer, tessera_id, rung, matched) — positional, the positions being
-                        // contract exactly as the full frame's fixed prefix is.
+                        // (layer, tessera_id, rung, matched, highlighted) — positional, the
+                        // positions being contract exactly as the full frame's fixed prefix is.
                         let rows = artifacts_identity.get_or_insert_with(Vec::new);
                         let rung = u32_col_at(2, "rung");
                         for i in 0..batch.num_rows() {
@@ -828,6 +839,7 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                                 tessera_id: tessera_id.value(i),
                                 rung: rung.value(i),
                                 matched: bool_at(3, i, "matched"),
+                                highlighted: bool_at(4, i, "highlighted"),
                             });
                         }
                         continue;
@@ -854,15 +866,15 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                     // The two shape columns TRAIL the fixed prefix and are present only when a
                     // served layer declares a drawn geometry — an absent column, distinguishable
                     // from a null one, so 0076's null rule gains no third reading.
-                    let shapes = batch.num_columns() > 14;
+                    let shapes = batch.num_columns() > 15;
                     if shapes {
                         assert_eq!(
                             batch.num_columns(),
-                            16,
+                            17,
                             "shape_x and shape_y travel together"
                         );
-                        assert_eq!(batch.schema().field(14).name(), "shape_x");
-                        assert_eq!(batch.schema().field(15).name(), "shape_y");
+                        assert_eq!(batch.schema().field(15).name(), "shape_x");
+                        assert_eq!(batch.schema().field(16).name(), "shape_y");
                     }
                     // One axis of the shape, as **parts of rings**. The three levels are the
                     // schema's, not a convention: a decoder written against the two-level hull
@@ -906,7 +918,7 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                         let shape = if !shapes {
                             None
                         } else {
-                            match (shape_axis(14, i), shape_axis(15, i)) {
+                            match (shape_axis(15, i), shape_axis(16, i)) {
                                 (Some(xs), Some(ys)) => {
                                     assert_eq!(xs.len(), ys.len(), "the axes disagree on parts");
                                     Some(
@@ -956,6 +968,7 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                             // Column 13, last of the fixed prefix — positionally for the same
                             // reason, and nullable: null is *the request carried no filter*.
                             matched: bool_at(13, i, "matched"),
+                            highlighted: bool_at(14, i, "highlighted"),
                         });
                     }
                 }

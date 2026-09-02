@@ -7,13 +7,13 @@
 //! boundary (client-interaction §8.6(2)'s length-prefix-everything item):
 //!
 //! ```text
-//! kind 1  tiles      Arrow IPC stream (tile, visible, matched, served — all uint64); exactly
-//!                    one, first
+//! kind 1  tiles      Arrow IPC stream (tile, visible, matched, served, highlighted — all
+//!                    uint64); exactly one, first
 //! kind 2  sub-cells  Arrow IPC stream (cell: uint64, count: uint64); exactly one, iff the
 //!                    request asked for the §3.3 underlay — schema-only when requested-but-empty,
 //!                    ABSENT ENTIRELY when unrequested
 //! kind 3  points     Arrow IPC stream (tessera_id: uint64, code: uint64, ...scalars,
-//!                    ...membership:<layer>); zero or more, whole tiles per frame, concatenating
+//!                    highlighted?: bool, ...membership:<layer>); zero or more, whole tiles per frame, concatenating
 //!                    to the full points stream
 //! kind 4  trailer    JSON; exactly one, last — its presence is the completeness signal
 //! kind 5  artifacts  Arrow IPC stream, one row per served artifact, in the request's projection
@@ -175,34 +175,48 @@ fn patch_frame_len(out: &mut [u8], len_at: usize) {
     out[len_at..len_at + 4].copy_from_slice(&len.to_le_bytes());
 }
 
-/// The kind-1 tiles frame: one row per non-empty tile, `(tile, visible, matched, served)`.
+/// The kind-1 tiles frame: one row per non-empty tile,
+/// `(tile, visible, matched, served, highlighted)`.
 ///
 /// # Panics
 ///
-/// Panics on a length mismatch between the four columns, or on Arrow construction failure —
+/// Panics on a length mismatch between the five columns, or on Arrow construction failure —
 /// caller bugs, not runtime conditions this crate can recover from.
-pub fn tiles_frame(tile: &[u64], visible: &[u64], matched: &[u64], served: &[u64]) -> Vec<u8> {
+pub fn tiles_frame(
+    tile: &[u64],
+    visible: &[u64],
+    matched: &[u64],
+    served: &[u64],
+    highlighted: &[u64],
+) -> Vec<u8> {
     let tiles = tile.len();
     assert_eq!(tiles, visible.len(), "tile/visible length mismatch");
     assert_eq!(tiles, matched.len(), "tile/matched length mismatch");
     assert_eq!(tiles, served.len(), "tile/served length mismatch");
+    assert_eq!(tiles, highlighted.len(), "tile/highlighted length mismatch");
 
-    // `served` is APPENDED. Decoders that index this batch positionally exist, so inserting it
-    // earlier would silently rebind `visible`/`matched` in them.
+    // `served`, then `highlighted`, are APPENDED. Decoders that index this batch positionally
+    // exist, so inserting either earlier would silently rebind the columns before it.
+    //
+    // **`highlighted` is always present**, at the fifth position, and equals `matched` where the
+    // request carried no highlight (`highlight-and-hierarchy.md` §2): an absent highlight is the
+    // identity for this quantity, so a column that came and went would cost a schema branch to
+    // say what eight bytes a tile already say.
     let schema = Arc::new(Schema::new(vec![
         Field::new("tile", DataType::UInt64, false),
         Field::new("visible", DataType::UInt64, false),
         Field::new("matched", DataType::UInt64, false),
         Field::new("served", DataType::UInt64, false),
+        Field::new("highlighted", DataType::UInt64, false),
     ]));
-    let columns: Vec<ArrayRef> = [tile, visible, matched, served]
+    let columns: Vec<ArrayRef> = [tile, visible, matched, served, highlighted]
         .into_iter()
         .map(|c| Arc::new(UInt64Array::from_iter_values(c.iter().copied())) as ArrayRef)
         .collect();
     let batch =
         RecordBatch::try_new(schema.clone(), columns).expect("tiles frame batch construction");
 
-    let mut out = Vec::with_capacity(FRAME_HEADER_BYTES + tiles * 32 + 1024);
+    let mut out = Vec::with_capacity(FRAME_HEADER_BYTES + tiles * 40 + 1024);
     let len_at = begin_frame(&mut out, FRAME_TILES);
     write_stream_into(&schema, &batch, &mut out);
     patch_frame_len(&mut out, len_at);
@@ -324,6 +338,12 @@ pub struct ArtifactRow<'a> {
     /// describe the whole visible membership, this the part of it in view, that being the extent
     /// every filter-crossing route can answer over.
     pub matched: Option<bool>,
+    /// **The same bit for `all_of[filters, highlight]`** (`highlight-and-hierarchy.md` §2), the
+    /// fifteenth fixed column and immediately after [`Self::matched`]: whether a member this
+    /// principal may see, inside the request's tiles, satisfies both expressions. `None` — a null
+    /// on the wire — where the request carried no `highlight`, which is *there was no question*
+    /// rather than *no matches*.
+    pub highlighted: Option<bool>,
 }
 
 /// The `layer` column, dictionary-encoded — one utf8 value per distinct layer, a `u16` key per
@@ -369,8 +389,9 @@ fn layer_field() -> Field {
 /// column so a client's decoder has one identifier type across the response.
 ///
 /// **Column positions are contract for the fixed prefix; optional columns trail.** Decoders that
-/// index this batch positionally exist, so the fourteen fixed columns — `layer` through `matched`
-/// — sit at fixed positions, and the only columns whose presence varies, `shape_x`/`shape_y`, come
+/// index this batch positionally exist, so the fifteen fixed columns — `layer` through
+/// `highlighted` — sit at fixed positions, and the only columns whose presence varies,
+/// `shape_x`/`shape_y`, come
 /// after all of them (`artifact-fetch-protocol.md` §8; this superseded the earlier
 /// appended-last-per-revision rule when the shape columns moved to the tail). The frame kinds are
 /// unchanged and `api_version` stays at 1 (contracts §3.2: no published deployment exists and
@@ -455,6 +476,10 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
         // request asked no question, and a `false` would answer one. So the column is all-null on
         // every response that carried no `filter`, rather than absent (decision 0104).
         Field::new("matched", DataType::Boolean, true),
+        // Fifteenth, and nullable for exactly `matched`'s reason: a request carrying no
+        // `highlight` asked no question, and a `false` would answer one. So the column is all-null
+        // on every response without one, rather than absent (`highlight-and-hierarchy.md` §2).
+        Field::new("highlighted", DataType::Boolean, true),
     ];
     if shapes {
         fields.push(Field::new("shape_x", DataType::List(part()), true));
@@ -516,6 +541,7 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
         Arc::new(parent_ids.finish()),
         Arc::new(UInt32Array::from_iter_values(rows.iter().map(|r| r.rung))),
         Arc::new(BooleanArray::from_iter(rows.iter().map(|r| r.matched))),
+        Arc::new(BooleanArray::from_iter(rows.iter().map(|r| r.highlighted))),
     ];
     if shapes {
         let builder = || {
@@ -565,10 +591,11 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
 
 /// The kind-5 artifacts frame in the **identity projection** — `artifact_rows: "identity"`,
 /// `artifact-fetch-protocol.md` §5.2: the same rows as [`artifacts_frame`] would carry, in a
-/// fixed four-column schema of `layer` (dictionary-encoded), `tessera_id`, `rung`, `matched`.
+/// fixed five-column schema of `layer` (dictionary-encoded), `tessera_id`, `rung`, `matched`,
+/// `highlighted`.
 ///
-/// **The row set, the `matched` bits and the `rung` values are identical under either
-/// projection; only the columns change.** That sentence is the contract: no parent can dangle
+/// **The row set, the `matched` and `highlighted` bits and the `rung` values are identical under
+/// either projection; only the columns change.** That sentence is the contract: no parent can dangle
 /// and the points frame's membership columns still name identifiers present here, because no row
 /// was dropped — and the response is a column subset of what the same caller's identical request
 /// would have been served, which is why the projection discloses nothing. The payload columns are
@@ -586,6 +613,7 @@ pub fn artifacts_identity_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
         Field::new("tessera_id", DataType::UInt64, false),
         Field::new("rung", DataType::UInt32, false),
         Field::new("matched", DataType::Boolean, true),
+        Field::new("highlighted", DataType::Boolean, true),
     ]));
     let columns: Vec<ArrayRef> = vec![
         layer_dictionary(rows),
@@ -594,12 +622,56 @@ pub fn artifacts_identity_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
         )),
         Arc::new(UInt32Array::from_iter_values(rows.iter().map(|r| r.rung))),
         Arc::new(BooleanArray::from_iter(rows.iter().map(|r| r.matched))),
+        Arc::new(BooleanArray::from_iter(rows.iter().map(|r| r.highlighted))),
     ];
     let batch = RecordBatch::try_new(schema.clone(), columns)
         .expect("identity artifacts frame batch construction");
 
     let mut out = Vec::with_capacity(FRAME_HEADER_BYTES + rows.len() * 16 + 1024);
     let len_at = begin_frame(&mut out, FRAME_ARTIFACTS);
+    write_stream_into(&schema, &batch, &mut out);
+    patch_frame_len(&mut out, len_at);
+    out
+}
+
+/// The kind-3 points frame in the **highlight projection** — `point_rows: "highlight"`
+/// (`highlight-and-hierarchy.md` §2): the same points [`points_frame`] would carry, in a fixed
+/// two-column schema of `tessera_id` and `highlighted`.
+///
+/// **The row set and the per-tile `served` split are identical under either projection; only the
+/// columns change.** That sentence is the contract, and it is what makes the projection disclose
+/// nothing: the served set does not depend on the highlight at all, so this is a column subset of
+/// what the same caller's identical request would have been served. The bits join a client's held
+/// points by `tessera_id`, which is why `code` is absent — a client asking for this holds the
+/// positions already, and one that does not meets identifiers it cannot draw, knows it, and
+/// re-asks with `"full"`.
+///
+/// Nine bytes a point, against the render columns' width.
+///
+/// # Panics
+///
+/// Panics on a length mismatch or Arrow construction failure.
+pub fn points_highlight_frame(tessera_ids: &[u64], highlighted: &[bool]) -> Vec<u8> {
+    assert_eq!(
+        tessera_ids.len(),
+        highlighted.len(),
+        "points/highlighted length mismatch"
+    );
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("tessera_id", DataType::UInt64, false),
+        Field::new("highlighted", DataType::Boolean, false),
+    ]));
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(UInt64Array::from_iter_values(tessera_ids.iter().copied())),
+        Arc::new(BooleanArray::from_iter(
+            highlighted.iter().map(|&b| Some(b)),
+        )),
+    ];
+    let batch = RecordBatch::try_new(schema.clone(), columns)
+        .expect("highlight points frame batch construction");
+
+    let mut out = Vec::with_capacity(FRAME_HEADER_BYTES + tessera_ids.len() * 9 + 1024);
+    let len_at = begin_frame(&mut out, FRAME_POINTS);
     write_stream_into(&schema, &batch, &mut out);
     patch_frame_len(&mut out, len_at);
     out
@@ -626,6 +698,10 @@ pub fn membership_column_name(layer: &str) -> String {
 /// [`estimated_points_bytes`]: at a saturated flush this payload is a megabyte-plus, so the copy
 /// a materialise-then-frame shape would cost is the largest single memmove in the response.
 ///
+/// `highlighted` is `highlight-and-hierarchy.md` §2's bit per served point, present exactly when
+/// the request carried a `highlight`, and positioned after the scalars and before the membership
+/// columns.
+///
 /// `membership` is the per-point membership column of design D12 (`client-components.md`
 /// §5.10): per layer, the `tessera_id` of the **deepest served** artifact the point belongs to
 /// in this response, `null` where no served artifact holds it. Plain `Option<u64>` slices —
@@ -642,6 +718,7 @@ pub fn points_frame(
     tessera_ids: &[u64],
     codes: &[u64],
     scalars: &[(&str, ScalarColumn)],
+    highlighted: Option<&[bool]>,
     membership: &[(&str, &[Option<u64>])],
 ) -> Vec<u8> {
     let points = tessera_ids.len();
@@ -657,6 +734,9 @@ pub fn points_frame(
             "membership column {layer:?} length mismatch"
         );
     }
+    if let Some(col) = highlighted {
+        assert_eq!(points, col.len(), "highlighted column length mismatch");
+    }
 
     let mut fields = vec![
         Field::new("tessera_id", DataType::UInt64, false),
@@ -664,6 +744,14 @@ pub fn points_frame(
     ];
     for (name, col) in scalars {
         fields.push(Field::new(*name, wire_column_type(col), false));
+    }
+    // **After the render scalars and before the membership columns** — the position
+    // `highlight-and-hierarchy.md` §2 fixes, so a decoder indexing scalars positionally is
+    // unaffected and one reading membership by name is too. Present exactly when the request
+    // carried a `highlight`: absent, not all-false, because a `false` would answer a question
+    // nobody asked. Non-nullable — every served point has an answer.
+    if highlighted.is_some() {
+        fields.push(Field::new("highlighted", DataType::Boolean, false));
     }
     // **After the render scalars, one per named layer in request order, and nullable** — the only
     // nullable columns in this frame. `membership:` prefixes the layer name so a declared scalar
@@ -678,7 +766,8 @@ pub fn points_frame(
     }
     let schema = Arc::new(Schema::new(fields));
 
-    let mut columns: Vec<ArrayRef> = Vec::with_capacity(2 + scalars.len() + membership.len());
+    let mut columns: Vec<ArrayRef> =
+        Vec::with_capacity(2 + scalars.len() + usize::from(highlighted.is_some()) + membership.len());
     columns.push(Arc::new(UInt64Array::from_iter_values(
         tessera_ids.iter().copied(),
     )));
@@ -687,6 +776,11 @@ pub fn points_frame(
     )));
     for (_, col) in scalars {
         columns.push(wire_column_array(col));
+    }
+    if let Some(col) = highlighted {
+        columns.push(Arc::new(BooleanArray::from_iter(
+            col.iter().map(|&b| Some(b)),
+        )));
     }
     for (_, col) in membership {
         columns.push(Arc::new(UInt64Array::from_iter(col.iter().copied())));
@@ -876,7 +970,7 @@ mod tests {
 
     #[test]
     fn frames_roundtrip_through_split() {
-        let tiles = tiles_frame(&[5, 9], &[100, 3], &[100, 3], &[10, 3]);
+        let tiles = tiles_frame(&[5, 9], &[100, 3], &[100, 3], &[10, 3], &[100, 3]);
         let subs = sub_cells_frame(&[], &[]);
         let names3 = vec!["a".to_string(), "b".to_string(), "c".to_string()];
         let points = points_frame(
@@ -886,6 +980,7 @@ mod tests {
                 ("w", ScalarColumn::U16(&[7, 8, 9])),
                 ("n", ScalarColumn::Utf8(&names3)),
             ],
+            None,
             &[],
         );
         let trailer = trailer_frame(br#"{"stream_us":1}"#);
@@ -936,7 +1031,7 @@ mod tests {
         let scalars = [("w", ScalarColumn::U16(&[7, 8, 9]))];
 
         // Zero: the schema is exactly the scalars'.
-        let (schema, _) = decode_points(&points_frame(&ids, &codes, &scalars, &[]));
+        let (schema, _) = decode_points(&points_frame(&ids, &codes, &scalars, None, &[]));
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert_eq!(names, vec!["tessera_id", "code", "w"]);
 
@@ -947,6 +1042,7 @@ mod tests {
             &ids,
             &codes,
             &scalars,
+            None,
             &[("clusters/hdbscan", &a), ("regions/admin", &b)],
         );
         let (schema, batches) = decode_points(&frame);
@@ -998,7 +1094,7 @@ mod tests {
         let col: Vec<Option<u64>> = (0..points)
             .map(|i| (i % 3 != 0).then_some(i as u64))
             .collect();
-        let frame = points_frame(&ids, &ids, &scalars, &[("a", &col), ("b", &col)]);
+        let frame = points_frame(&ids, &ids, &scalars, None, &[("a", &col), ("b", &col)]);
         assert!(
             frame.len() <= FRAME_HEADER_BYTES + with_two,
             "estimate {with_two} short of the {} bytes written",
@@ -1008,7 +1104,7 @@ mod tests {
 
     #[test]
     fn split_refuses_truncation_and_unknown_kinds() {
-        let tiles = tiles_frame(&[1], &[1], &[1], &[1]);
+        let tiles = tiles_frame(&[1], &[1], &[1], &[1], &[1]);
         // Truncated payload: cut the last byte.
         let cut = &tiles[..tiles.len() - 1];
         assert!(matches!(

@@ -1,13 +1,16 @@
 # Value suggestion — typeahead over a category vocabulary
 
-**Status:** **Normative (r2, 2026-09-02).** The six questions in §10 are ruled (owner, 2026-09-02)
+**Status:** **Normative (r3, 2026-09-02).** The six questions in §10 are ruled (owner, 2026-09-02)
 and written to decisions 0118–0123.
-**⊘ Nothing in this document is implemented.** No suggestion index is built, no
-`/v1/categories/{column}/suggest` route is served, and the boolean predicate §6.2 names does not
-exist: a viewer typing into a category filter today has `/v1/categories`' key-ordered enumeration
-and nothing else, so a client wanting a typeahead over a large vocabulary must page the whole set.
-**Its §6 figures are measured** at 10⁷ values over 10⁸ entities
-([`probes/2026-09-02-value-suggestion/`](../../probes/2026-09-02-value-suggestion/README.md)).
+**Built (2026-09-02, branch `design/value-suggestion`).** The fold, the boolean membership probe,
+the suggestion index, `Engine::suggest`, the served verb with its two ceilings and one-in-flight
+admission, the client's typeahead and the conformance differential are all in the tree
+(`conformance.md` §4.6 is where coverage stands). ⊘ Still unbuilt: the per-session lever (§6.3), a
+`suggest_word_starts` opt-out, cross-column suggestion (decision 0123), and the vocabulary read side
+at 10⁷ (issue #130).
+**Its §6 figures are measured** at 10⁶ and 10⁷ values over 10⁸ entities — the walk and the build on
+the shipped route by the implementation's bench, the representation and single-probe figures by
+[`probes/2026-09-02-value-suggestion/`](../../probes/2026-09-02-value-suggestion/README.md).
 
 **Reads with:** [`per-point-attributes.md`](per-point-attributes.md) §3.3, §3.8;
 [`contracts.md`](contracts.md) §3.2 (`GET /v1/categories/{column}`);
@@ -49,9 +52,9 @@ Five positions, each argued below:
 - **Per-keystroke work is one boolean posting probe per value walked, and its timing channel is
   accepted.** A suggestion index per vocabulary gives the prefix a contiguous entry range; each
   value in it is tested against the composed candidate, until the page is full or a walk budget of
-  10⁵ is spent — **measured at 10⁷ values: 1.9–10.4 ms median, 21 ms p99 for the sparsest viewer,
-  inside the owner's 10–100 ms; the index is 91–124 MB of mapped file in the repository's own
-  dictionary format** (§6). The probe is the question `/v1/categories` asks, but not by the route it
+  10⁵ is spent — **measured on the shipped route at 10⁷ values: 61–68 ms median, 81–84 ms p99 for
+  the sparsest viewer on a quiet host, inside the owner's 10–100 ms; the index is ~1 GB of mapped
+  file at that scale, its entry dictionary 91–124 MB of it** (§6). The probe is the question `/v1/categories` asks, but not by the route it
   asks it: a boolean `intersects` on the mapped posting is a deliverable of this design and both
   doors move onto it (§6.2). The walk's cost tracks the values under the prefix, hidden ones
   included, which is a timing read on what `derived` withholds; the owner accepted that channel on
@@ -253,7 +256,7 @@ Response, `200`:
 - **`q`** is echoed as received (not folded); the client matches it to the request it has in
   flight. Bounded at 256 bytes; over it, `422`.
 - **`values`** carries at most `limit` values, each once, in §7's order. `code`, `key` and `title`
-  are `/v1/categories`' fields with the same meaning; `title` is absent where no author wrote one.
+  are `/v1/categories`' fields with the same meaning; `title` is `null` where no author wrote one, as the enumeration serves it.
 - **`match`** says which field matched and where, in **characters of the served string**, so a
   client can highlight without re-implementing the fold. `field` is `key` or `title`; a word-start
   match reports the field the word came from and the start of that word.
@@ -354,7 +357,10 @@ client wants it, and its response shape is the per-column one with `column` per 
 The target is **~10⁷ values** (owner, 2026-09-02), keystroke cadence, and thousands of concurrent
 sessions. The owner's trade-off, stated the same day: **memory as low as possible; 10–100 ms per
 keystroke is acceptable** where residency and speed pull against each other. **Every figure below is measured** unless marked
-otherwise, by [`probes/2026-09-02-value-suggestion/`](../../probes/2026-09-02-value-suggestion/README.md):
+otherwise, by two rigs: the walk, the build, the extents sweep and the counts by the
+implementation's own bench (`tessera-bench`'s `suggest_walk`, over the shipped
+`suggest::walk` and `ColumnPostings::intersects`), and the representation and single-probe figures
+by [`probes/2026-09-02-value-suggestion/`](../../probes/2026-09-02-value-suggestion/README.md):
 10,132,181 distinct folded GeoNames names as the vocabulary, 10⁷ values over 10⁸ entities with Zipf
 and uniform membership for the postings, the shipped `SortedDictWriter`, `PostingsSpool` and
 `ColumnPostings` readers, one thread, page cache warm. Device-cold and concurrent figures are **not
@@ -367,24 +373,33 @@ One sorted index of §4's entries over **every** value of the vocabulary, visibl
 It names no principal, so one copy serves every session (decision 0093's cadence argument).
 
 **Shape.** `SortedDict` carries no payload and refuses duplicate keys, and two values can fold to
-one entry string (`cs.LG` and `CS.lg`, or two titles differing only in case), so the index is five
-mapped structures rather than one:
+one entry string (`cs.LG` and `CS.lg`, or two titles differing only in case), so the index is six
+mapped files rather than one:
 
-| Structure | What it holds |
+| File | What it holds |
 |---|---|
-| entry dictionary | the **distinct** folded entry strings, sorted — a `SortedDictWriter` file, turned into a range `[lo, hi)` by two binary searches |
-| run starts | one `u32` per entry string, indexing the payload array; the next entry's start is this run's end |
-| payloads | one record per (entry string, value) pair, sorted within a run by (kind, key): the value's **dense position**, the field the entry came from (`key` or `title`), and the character offset of the word start into the served string |
-| positions → codes | one `u32` per position: the value's code |
-| keys and titles | the served strings in position order, a blob with `u32` offsets |
+| `entries.dict` | the **distinct** folded entry strings, sorted — a `SortedDictWriter` file, turned into a range `[lo, hi)` by two binary searches |
+| `runs.bin` | one `u32` per entry string plus a sentinel, indexing `payloads.bin`; entry `e`'s run is `runs[e]..runs[e + 1]` |
+| `payloads.bin` | **12 bytes** per (entry string, value) pair, ordered within a run by (kind, key): the value's **dense position**, the character offset of the word start into the served string, and the entry kind and field (`key` or `title`) as flags |
+| `codes.bin` | one `u32` per dense position: that value's code |
+| `strings.bin` + `offsets.bin` | the served key and title per value, in position order, with `u32` offsets |
 
 The **dense position** — the value's rank in the vocabulary's key order, `0..V` — rather than the
 code, because codes are scattered at random over the declared width (§3.4); it is also what the
 per-session lever in §6.3 would want should it be built. The run structure is what makes the
 duplicate case ordinary rather than an error: a prefix range is a range of entry strings, and the
-values under it are the concatenation of their runs. The last two structures exist so a served
-value's `key` and `title` come out of the index instead of out of a walk of the minter's map, which
-is §9's residency question. All five are mapped files. ⊘ None of it is built.
+values under it are the concatenation of their runs. The last two files exist so a served value's
+`key` and `title` come out of the index instead of out of a walk of the minter's map, which is §9's
+residency question.
+
+**Where the files live — the engine's cache directory, not the bundle.** r2 said "the bundle's
+runtime directory"; no such directory exists, and `contracts.md` §2.1 fixes what a bundle contains.
+The index sits beside the fragment cache under the engine's local cache directory, which is this
+repository's one precedent for a derived, undigested, rebuildable file the engine writes for
+itself: the manifest does not name the index, no digest covers it, and it is rebuilt from the
+vocabulary at every open. The files carry no format version and need none — `Engine::open` clears
+the whole tree before it builds, and each build writes a fresh numbered subdirectory, so a stale or
+foreign index is unreachable rather than served.
 
 **Representation — measured, and the repository's own dictionary format wins.** At 10⁷ values,
 key-only entries, one process per cell, median of three builds after a shared sort:
@@ -400,12 +415,16 @@ With word-start entries (2.20 entries per value on GeoNames — names average 1.
 titles will pay more) the dictionary is 124 MB of file, the FST 132 + 134 MB, the arena 671 MB of
 heap and the `BTreeMap` 1.6 GB with a 2.46 GB peak.
 
-**The residency claim is the whole index, side arrays included.** The table's file sizes are the
-entry dictionary alone. At 10⁷ values with word starts the four structures beside it add **~90–200
-MB** — 88 MB of payload positions at 22.0M entries, 4 B per distinct entry string of run starts, 40
-MB of codes, and the key/title blob, which is the vocabulary's own bytes and would be resident
-somewhere in any design. So ~215–325 MB of mapped file at 10⁷, against 1.6 GB of heap for the
-`BTreeMap` the minter holds today. On the
+**The residency claim is the whole index, side arrays included — and r2 priced the payload wrong.**
+The table's file sizes are the entry dictionary alone. r2's "~90–200 MB of side arrays" costed a
+payload record at 4 B; the record as built is **12 B**, and the served strings carry 8 B of offsets
+per value on top. The honest figure is dict + 12 B × entries + 12 B × values + the served strings'
+own bytes. **Measured on the bench's fixture**, which derives 4 entries per value: **105 MB at 10⁶
+values** — 48 MB of payloads, ≈ 34 MB of strings, 12 MB of offsets, 4 MB of codes, 4 MB of runs and
+≈ 7 MB of dictionary — and **1.06 GB at 10⁷** on the same shape. At GeoNames' 2.2 entries per value
+the payloads are ≈ 264 MB at 10⁷ rather than 480. So the index at 10⁷ is of the same order as the
+1.6 GB of heap the minter holds today, not a quarter of it; what it keeps is that the bytes are a
+mapped file the kernel may evict rather than anonymous heap. On the
 adversarial arm (32-character random hex, nothing shared) the FST stops winning as the dict-fst probe
 found: 319 MB and 29.6 s against the dictionary's 297 MB and 3.5 s.
 
@@ -422,29 +441,45 @@ but the shape the vocabulary's read side should take: a mapped dictionary over k
 code array beside it, and the mutable map kept only for an `open` vocabulary's mints since the last
 generation. §9 carries it.
 
-**Cadence.** The index is built **at open**, on the pool, into mapped files under the bundle's
-runtime directory, from the vocabulary as `VocabularyMinter` holds it (manifest values and every
-`SEGMENTS-<n>.json` extension). ⊘ It is not a digested build artefact; making it one is the
-vocabulary read-side item §9 carries, and until then a cold start pays the build. **The sort is the build cost at 10⁷**:
-deriving and sorting the entry list measured 4.7–6.7 s for 10⁷ key-only entries and **34–38 s** for
-22M key-plus-word-start entries, single-threaded, against 2.4–4.2 s to write the dictionary itself.
-At 10⁶ it is 0.3–1.5 s. A parallel sort on the pool, or sorting `(hash, index)` pairs, is the
-implementation's first fix-it-now item; it is not a structure question.
+**Cadence.** The index is built **at open**, on the pool, into the engine's cache directory, from
+the vocabulary as `VocabularyMinter` holds it (manifest values and every `SEGMENTS-<n>.json`
+extension). ⊘ It is not a digested build artefact; making it one is the vocabulary read-side item
+§9 carries, and until then a cold start pays the build. **The sort was the build cost at 10⁷ and no
+longer is.** r2 measured 4.7–6.7 s to derive and sort 10⁷ key-only entries and **34–38 s** for 22M
+key-plus-word-start entries single-threaded, and called a parallel sort the implementation's first
+fix-it-now item; that is what shipped — a rayon sort over an arena. Measured end to end, entries
+derived and sorted and all six files written: **1.0 s at 10⁶ values and 10.7 s at 10⁷**.
 
-**It is then held behind an `Arc` and carried across publications.** A flush changes which entities
-carry a value and changes nothing this index holds, so rebuilding per generation would pay a
-34–38-second sort for no change. The index is rebuilt, off the request path, **only when the
-vocabulary's values or titles change**, and the new one is swapped in behind the same `Arc`.
+**It is then held behind an `Arc` and cloned across publications.** A flush changes which entities
+carry a value and changes nothing this index holds, so rebuilding per generation would pay the sort
+for no change. Changed values or titles are the *necessary* condition rather than the whole rule:
+the rebuild is dispatched on the pool when the side map exceeds **4,096 values**
+(`SUGGEST_REBUILD_SIDE_VALUES`), because one mint per ingest batch against a 10⁷-value vocabulary
+would otherwise dispatch a 10-second sort per batch and every result but the last would be
+superseded before it landed. Waiting is free — a value in the side map is suggested exactly as one
+in the base is — so the rebuild is owed to *residency*, and a threshold is the shape residency
+wants. The rebuild keeps, by sequence number, whatever arrived while it sorted, and the superseded
+directory is unlinked after the swap, which a live mapping survives.
 
 Between rebuilds the index is kept complete by a small mutable side map — a `BTreeMap` over the
 same folded entries, ranged the same way and merged into the walk at query time (§6.2 step 3). It
 is fed **at the mint site**, so a value minted by an ingest is suggestible on the next keystroke
 rather than at the next rebuild. A **title amendment** (per-point-attributes §6) puts the new
 entries in the side map, puts the value's old title and word-start entries in a retraction set the
-walk consults, and schedules a rebuild. So **the base index is stale only under amendment**, and
-only in the direction of holding a title an author has replaced, which the retraction set covers
-until the rebuild lands. Values are never removed from a vocabulary (codes are pinned forever,
+walk consults, and asks for a rebuild. A lone amendment therefore never triggers one — the
+threshold above governs — and its retraction persists until a rebuild comes, which is correct
+because the side map is complete: the walk serves the new title and skips the old whether or not
+the base has caught up. So **the base index is stale only under amendment**, and only in the
+direction of holding a title an author has replaced, which the retraction set covers until the
+rebuild lands. Values are never removed from a vocabulary (codes are pinned forever,
 §3.4), so it is otherwise never stale, only incomplete.
+
+**`counts=true` composes a candidate on a `public` column too.** A count is the viewer's own
+`and_cardinality` and needs the mask whatever the visibility says; it only ever narrows a number,
+and never widens the set of values served, which the visibility alone still decides. A column whose
+vocabulary has no postings therefore **refuses** a counted request rather than serving the page
+with the numbers left out: a page whose `count` fields were silently absent reads as asked and
+answered.
 
 **Word-start entries multiply the index by the average word count** — 2.2× on place names, more on
 descriptive titles. It is a linear cost with a
@@ -482,7 +517,7 @@ The size of what it closes is measured on the probe's own two routes at 10⁷ va
 entities, on a *visible* head value under a scattered candidate: **0.1–0.6 ms** median and 7.9 ms
 worst through the materialising `narrow`, against **0.15–16.6 µs** median and 74 µs at p99 through
 `Bitmap::intersect`. Those are the probe's routes, not the shipped one; §6's flatness bound is
-measured on them, and the implementation's first bench measures `intersects` itself.
+measured on them, and the bench below measures `intersects` on the shipped route.
 
 **The walk budget** is the number of values examined per request — a deployment constant,
 `selection.max_suggestion_walk` (**default 10⁵**, measured below), published on `/v1/meta` on the
@@ -491,38 +526,60 @@ bound is the vocabulary itself, which the enumeration walks whole and unbudgeted
 ever narrows what one request examines. A viewer who sees none of the values under a broad prefix
 examines `max_suggestion_walk` values and is told to type more.
 
-**Cost, measured at 10⁷ values over 10⁸ entities.** A probe against a hidden value is
-**0.06–0.13 µs** at the median whatever its member count — 3.4 µs at p99, 103 µs at the very worst
-— because a mapped view intersected with a disjoint candidate touches only the containers whose
-keys coincide. A visible value is **0.15–16.6 µs** at the median through the boolean route, p99 to
-74 µs. The budgeted walk, one-character
-prefix (a median 486k values under it), the sparsest viewer measured (0.01% of entities, seeing
-~0.06% of values):
+**Cost of a single probe, measured at 10⁷ values over 10⁸ entities.** A probe against a hidden
+value is **0.06–0.13 µs** at the median whatever its member count — 3.4 µs at p99, 103 µs at the
+very worst — because a mapped view intersected with a disjoint candidate touches only the
+containers whose keys coincide. A visible value is **0.15–16.6 µs** at the median through the
+boolean route, p99 to 74 µs.
 
-| Budget | Contiguous candidate | Scattered candidate | Page of 20 filled |
-|---|---|---|---|
-| 10³ | 0.06 ms | 0.30 ms | 0 of 100 — under one value found |
-| 10⁴ | 0.60 ms | 2.9 ms | 0 of 100 — six values found |
-| **10⁵** | **1.9 ms** (p99 2.5) | **10.4 ms** (p99 21) | 100 of 100, after a mean 32–37k probes |
+**Cost of the walk, measured on the shipped route** — `suggest::walk` over the built index and
+`ColumnPostings::intersects`, the same function the verb calls, one thread, page cache warm, quiet
+host, budget 10⁵, a one-character prefix, the gate supplied as a closure rather than composed from
+a session:
 
-**Those are the walk's figures alone** — the fold, the two binary searches and the probes.
-Composing the candidate and building the extents sweep (step 2) are per-request work this design
-does not add and did not measure here; they are an addition to every cell above, and the
-implementation's first bench owes them.
+| Viewer | 10⁶ values | 10⁷ values |
+|---|---|---|
+| 0.01%, contiguous | 13.0 ms median, 21.6 p99 | **61.2 ms median, 81.2 p99** |
+| 0.01%, scattered | 16.4 ms median, 23.7 p99 | **68.2 ms median, 83.6 p99** |
+| 1% | — | 1.17 ms median, 2.22 p99 |
+| 10%, scattered | — | 0.08 ms median, 0.67 p99 |
 
-Viewers at 1% and 10% fill the page inside a 10³ budget at 0.01–0.26 ms. The 10⁴ budget r1 first
-proposed **never fills the sparsest viewer's page** on a one- or two-character prefix, so the default
-is 10⁵: every measured page fills, the worst keystroke seen anywhere is 21 ms, and the ceiling for a
-viewer who sees nothing under a broad prefix is 10⁵ probes at the measured constant — 6 ms contiguous,
-30 ms scattered *(modelled from the 10⁴ rows, which scale linearly)*. Both sit inside the owner's
-10–100 ms. Raising the budget costs nothing when the page fills early, since the walk stops.
+**r2's 1.9–10.4 ms was `Bitmap::intersect` alone, with the record already in hand.** The shipped
+walk first has to *find* the record, by a binary search over the keyed base's code array — codes are
+scattered over the `u32` width (§3.4), so there is no arithmetic route from a code to its record —
+and that search is **13–29% of a probe** at 10⁷ (299 ns of 1,037 contiguous, 267 ns of 1,996
+scattered). The rest is the intersection itself, over a 40 MB-plus key array that does not fit in
+cache. A build-time position → record-ordinal array is **not** the fix: a code with no members has
+no record, so rank in code order is not the record ordinal, and a code → record map built at open
+would be 40–80 MB resident per column, which the memory-first ruling declines. The sparsest
+viewer's keystroke is still inside the owner's 10–100 ms at the median *and* at p99.
 
-**Counts add one `and_cardinality` per served value**, on the mapped view without materialising
-the intersection. ⊘ Not measured as such; the nearest measurement is the materialising `narrow`
-probe on a *visible* value, 0.1–0.6 ms median and 7.9 ms worst for a Zipf head value under a
-scattered candidate, which bounds the count above. Twenty of those is ≤ 12 ms at the median on the
-worst shape, inside the budget; the extents half is one pass per request already paid. Measured
-figures are owed by the implementation's first bench.
+The figures are post-fix: the bench found two defects in the implementation before it could measure
+it — an allocating `sources()` per probe, and a read of a value's served strings before the gate —
+and both were fixed before these numbers were taken. **⊘ Concurrency is still not measured**, and
+the host is part of the number: with two other suites running, the same code measured 84 ms at the
+median and **424 ms at p99**. The quiet figure is the one to design against, and the loaded one is
+the reason the concurrent measurement is owed.
+
+Viewers at 1% and 10% fill the page inside a 10³ budget. The 10⁴ budget r1 first proposed **never
+fills the sparsest viewer's page** on a one- or two-character prefix — 0 of 100 pages filled, six
+values found — so the default is 10⁵: every measured page fills, and a viewer who sees nothing
+under a broad prefix pays the full budget, which is the 61–68 ms measured above rather than the
+6–30 ms r2 modelled from the intersection alone. Raising the budget costs nothing when the page
+fills early, since the walk stops.
+
+**Counts add one `and_cardinality` per served value**, on the mapped view without materialising the
+intersection. Measured for a page of twenty: **+1–2 ms** over the walk at the 1% and 10% viewers,
+and lost in the noise at 0.01%, where the page never fills. r2 modelled ≤ 12 ms from the
+materialising `narrow` probe; the boolean-route measurement is well inside it.
+
+**The extents sweep is not small, and it is measured.** Step 2's `category_membership` pass over a
+post-build extent — the codes candidate entities carry, which both listing verbs pay — is **49.7 ms
+median, 74.6 p99 over a 10⁶-row extent** for a 10%-contiguous viewer, 1.7 ms for a scattered one. It
+scales with the extent, not with the prefix or the budget, so at a 10⁷-row extent it would exceed
+the keystroke budget on its own. §9 carries it. **⊘ Composing the candidate is still not measured**:
+it needs a built 10⁸-entity bundle and an authorised principal, which is a campaign rather than a
+bench, and `probes/2026-08-07-category-membership/` is the nearest figure.
 
 **One modelled figure did not reproduce, and the register row must not carry it.** C24's 1.26–2.1 ms
 for a hidden value with many members, measured over 2.4M items, never appeared here at any sparsity
@@ -619,7 +676,8 @@ channel. What bounds it:
   early on the first `limit` values they can see. That is a fact about their own mask, which the
   answer's own length already gives them.
 - **The budget bounds one request's work, not the channel.** A range wider than
-  `max_suggestion_walk` (10⁵) reads as the budget whatever its size — at most ~30 ms — but that is
+  `max_suggestion_walk` (10⁵) reads as the budget whatever its size — a measured 61–68 ms at 10⁷
+  values on a quiet host (§6.2) — but that is
   not a limit on what is carried: the enumeration walks the whole vocabulary unbudgeted and carries
   the same fact more slowly. What bounds the channel is the vocabulary.
 - **It reaches the wire once, as one bit.** `more` on a spent budget says at least
@@ -655,10 +713,10 @@ paging, and no more of it — and, by timing, roughly how many values they were 
 
 ## 9. What a million-value vocabulary costs elsewhere, on this feature's path
 
-The suggestion surface is not the only thing that has to scale for the target Joe named, and three
+The suggestion surface is not the only thing that has to scale for the target Joe named, and four
 of the others are on any implementation's path. None is this design's mechanism. Two are
-**fix-it-now** items in the change that builds it; the middle one is a store format question and is
-**issue #130**.
+**fix-it-now** items in the change that builds it; the second is a store format question and is
+**issue #130**; the last is on the request path and is ⊘ not designed here.
 
 - **`/v1/categories?codes=` walks every binding per request** (`Engine::categories`, the `Codes`
   arm walks `bindings()` and tests `codes.contains`). At 10⁶ values a legend resolve is a
@@ -673,13 +731,19 @@ of the others are on any implementation's path. None is this design's mechanism.
   `SortedDictWriter` file with a `u32` code array beside it, digested like the postings, the mutable
   map kept only for mints since the last generation — and the JSON becomes a build input rather
   than the served store. ⊘ Not designed here, and not on this surface's critical path: the
-  suggestion index builds at open into the bundle's runtime directory and works without it (§6.1).
+  suggestion index builds at open into the engine's cache directory and works without it (§6.1).
   It is **issue #130**, with decision 0048's licence to change the format outright.
 - **`PostingsReader::open` validates every record**, round-tripping each Roaring payload
   (per-point-attributes §3.5). Measured at 10⁷ records: **1.4–1.6 s** mapped where 169k records are
   Roaring (~8.5 µs per Roaring record round-tripped), 50 ms where every record is a small array —
   proportional to the Roaring record count, not to V. Tolerable at open; a number the lifecycle
   design should carry.
+- **The extents sweep is per request, and scales with the extent rather than the prefix.**
+  `FilterColumns::category_membership` walks each post-build extent's value column to find which
+  codes candidate entities carry — **49.7 ms median, 74.6 p99 over a 10⁶-row extent** for a
+  10%-contiguous viewer (§6.2). Both listing verbs pay it, and a 10⁷-row extent would spend the
+  keystroke budget on this pass alone. What takes it off the request path is a per-column reverse
+  index over an extent's values, or counting the codes at flush. ⊘ Not designed here.
 
 The **authorise arm** per-point-attributes §8 owes — vocabulary-filter cost against vocabulary
 size, at cold and cached fingerprints, against principal sparsity — is also this design's
@@ -740,3 +804,14 @@ across publications behind an `Arc` and rebuilt only when values or titles chang
 `spawn_blocking` with one suggest in flight per session; and §8's route bullet splits the
 declaration-fixed route from the early termination on the caller's own mask. The channel is
 registered as **C31**, and the vocabulary's own read side left as issue #130.
+
+**r3 (2026-09-02) — figures corrected against the implementation's bench.** The engine's suggestion
+index and walk were built on branch `vs/engine`, and §6's shipped-route measurements replace r2's,
+which had timed `Bitmap::intersect` with the record in hand and so understated the sparsest
+viewer's keystroke by a factor of six to thirty; the counts and the extents sweep are measured where
+r2 modelled or owed them.
+Four deviations the implementation took are recorded at their claims: the index lives in the
+engine's cache directory rather than a bundle runtime directory that does not exist, its payload
+record is 12 B rather than the 4 B r2 costed, its rebuild is dispatched on a 4,096-value side-map
+threshold rather than on every change, and `counts=true` composes a candidate on a `public` column
+and refuses where it cannot.

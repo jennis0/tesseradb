@@ -26,8 +26,8 @@ const filters = (over: Partial<FiltersProjection> = {}): FiltersProjection => ({
   expr: null,
   highlight: null,
   members: [],
-  values: {},
-  valueErrors: {},
+  suggestions: {},
+  suggestErrors: {},
   ...over
 });
 

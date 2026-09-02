@@ -8,7 +8,7 @@ import {
 import {createDecoder, type Decoder, type HeadFrames} from './decoder.js';
 import {parseRegionVerdict} from './region.js';
 import {FRAME_ARTIFACTS, FRAME_POINTS, FRAME_SUB_CELLS, FRAME_TILES, FRAME_TRAILER, FrameReader} from './frame.js';
-import type {ArrowType, ArtifactDetail, BrowsePage, BrowseRequest, BrowseRow, CategoryValue, FilterOperandSet, ItemDetail, Layer, Meta, ProjectionName, Session, Shape, ShapeKind, TileCounts, TileScheme, ViewMetadataValue, ViewportPart, ViewportRequest, ViewportResponse, ViewportResult} from './types.js';
+import type {ArrowType, ArtifactDetail, BrowsePage, BrowseRequest, BrowseRow, CategoryValue, FilterOperandSet, ItemDetail, Layer, Meta, ProjectionName, Session, Shape, ShapeKind, SuggestResult, TileCounts, TileScheme, ViewMetadataValue, ViewportPart, ViewportRequest, ViewportResponse, ViewportResult} from './types.js';
 
 /** Where a streamed response's points go, one frame's worth at a time. */
 export type PartSink = (part: ViewportPart) => void | Promise<void>;
@@ -640,6 +640,64 @@ export class TesseraClient {
   }
 
   /**
+   * `GET /v1/categories/{column}/suggest`: the typeahead over a category vocabulary
+   * (`value-suggestion.md`, contracts §3.2). At most `limit` values whose folded key, folded
+   * title or a word start of either has `q` as a prefix, gated exactly as `categories` — a
+   * `public` vocabulary as authored, a `derived` one iff a visible member exists — and ordered by
+   * the matched text, never by frequency, recency or the count.
+   *
+   * **Not behind the compute-admission gate, and one in flight per session.** A second call while
+   * one is outstanding is refused `429` before any work is done; this surfaces as `{status:
+   * 'superseded', retryAfterS}` rather than a thrown {@link TesseraError}, because a debounced
+   * caller's answer to it is *retry*, not *render a refusal* — and a store that never debounces
+   * quite fast enough should not have to catch an exception to know that.
+   *
+   * `q` is echoed on the response exactly as sent (never folded), so a caller can match a page to
+   * the request it has in flight rather than trust arrival order.
+   */
+  async suggest(
+    token: string,
+    column: string,
+    q: string,
+    opts: {limit?: number; counts?: boolean; view?: string} = {}
+  ): Promise<SuggestResult> {
+    const params = new URLSearchParams({q});
+    if (opts.limit !== undefined) params.set('limit', String(opts.limit));
+    if (opts.counts) params.set('counts', 'true');
+    if (opts.view !== undefined) params.set('view', opts.view);
+    const url = `${this.opts.viewerUrl}/v1/categories/${encodeURIComponent(column)}/suggest?${params.toString()}`;
+    const response = await fetch(url, {headers: {authorization: `Bearer ${token}`}});
+    if (response.status === 429) {
+      // The body carries `retry_after_s` agreeing with `Retry-After` (contracts §3.1); the header
+      // is read as the fallback for a body that failed to parse, never the other way round, since
+      // the body is what the contract actually requires here.
+      let retryAfterS = Number(response.headers.get('retry-after') ?? '1');
+      try {
+        const body = (await response.json()) as {retry_after_s?: number};
+        if (typeof body.retry_after_s === 'number') retryAfterS = body.retry_after_s;
+      } catch {
+        // A non-JSON 429 (a proxy's) still yields a retryable outcome from the header alone.
+      }
+      return {status: 'superseded', retryAfterS: Number.isFinite(retryAfterS) ? retryAfterS : 1};
+    }
+    if (!response.ok) await fail(response);
+    const body = (await response.json()) as RawSuggest;
+    return {
+      status: 'ok',
+      column: body.column,
+      q: body.q,
+      values: body.values.map((v) => ({
+        code: v.code,
+        key: v.key,
+        title: v.title ?? null,
+        match: {field: v.match.field, start: v.match.start, len: v.match.len},
+        ...(v.count !== undefined ? {count: v.count} : {})
+      })),
+      more: body.more
+    };
+  }
+
+  /**
    * `POST /v1/items/{tessera_id}`: the whole record, by declared column name.
    *
    * **Named, not positional.** The response is an object keyed by column name covering all three
@@ -878,4 +936,18 @@ type RawCategories = {
   column: string;
   values: {code: number; key: string; title?: string | null}[];
   next: string | null;
+};
+
+/** `GET /v1/categories/{column}/suggest`'s wire shape. */
+type RawSuggest = {
+  column: string;
+  q: string;
+  values: {
+    code: number;
+    key: string;
+    title?: string | null;
+    match: {field: 'key' | 'title'; start: number; len: number};
+    count?: number;
+  }[];
+  more: boolean;
 };
