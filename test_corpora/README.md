@@ -65,8 +65,16 @@ named for the projection experiment that rung's two views came out of.
 ```bash
 python3 -m test_corpora.common.projection                        # the transform's own checks
 ~/venvs/ingest/bin/python     -m test_corpora.geonames.prepare    # one geographic rung
-~/venvs/projection/bin/python -m test_corpora.arxiv.prepare       # the embedding rung
+~/venvs/projection/bin/python -m test_corpora.arxiv.prepare       # an embedding rung
+~/venvs/projection/bin/python -m test_corpora.medcpt.stage        # the largest one: stage once,
+~/venvs/projection/bin/python -m test_corpora.medcpt.prepare      # then build from the local copy
 ```
+
+**One rung stages.** `medcpt` reads 163 GB of publisher bytes over SMB, which is forty minutes a
+pass, so `stage.py` makes exactly one and writes what every later run reads —
+`$TESSERA_LADDER/medcpt/staging/`: one parquet per chunk and one flat float16 memmap of
+35,920,666 x 768. It is resumable per chunk and refuses a partial matrix rather than reading the
+zeros of a sparse file.
 
 ## Two directories here are not rungs
 
@@ -81,6 +89,7 @@ They measure nothing about a dataset and are outside the ingest campaign's sizin
 
 | Rung | Points | Bundle | State |
 |---|---|---|---|
+| `medcpt` | 35,920,666 | 11.15 GB | the ladder's largest embedding rung and its first **DAG** layer — MeSH's 30,217 descriptors with members over 41,321 edges, membership closed upward to 1.66×10⁹ entries, 2026-09-02 |
 | `arxiv` | 2,422,486 | 1.4 GB | the corpus the artifact catalogue is exercised against, and the ladder's only **two-view** rung — one embedding laid out twice, every layer drawn in both, 2026-09-01 |
 | `geonames` | 13,463,857 | 1.34 GB | built and verified on a declared `web_mercator` projection, 2026-08-30 |
 | `overture` | 73,631,092 | 12.57 GB | built and verified on the same declared projection, with its division polygons declared in longitude and latitude, 2026-08-30 |
