@@ -282,8 +282,12 @@ def knn(
 ) -> np.ndarray:
     """Every row's position: UMAP over the fit set's own graph, the rest placed against it.
 
-    One CAGRA index serves both halves — it is built for the graph and searched again for the
-    placement — so the fit set's vectors go to the card once.
+    ⊘ **The index is built twice, once for the graph and once for the placement** — 18 s each at
+    2,500,000 rows. It is *not* held across the layout, and that is deliberate rather than an
+    oversight: the index peaked at 5.46 GB and the layout at 2.99 GB, separately, against ~8.2 GB
+    free on this card, so holding one through the other is 8.45 GB and over. Hoisting the build
+    would need a card with more memory, or a fit set small enough that the sum fits — neither of
+    which this rung has.
     """
     import cupy as cp
     from cuvs.neighbors import cagra

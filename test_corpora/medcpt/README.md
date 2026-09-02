@@ -59,10 +59,14 @@ So the route is the brief's third option, taken directly:
    binding constraint is the index (5.46 GB) and not the layout (2.99 GB), and an OOM two thirds of
    the way through a 36M run costs an hour.
 2. **Place** every other row at the **similarity-weighted mean of its 15 fit-set neighbours'
-   positions**, searched against the same index — it is already resident. Every row goes through
-   this path, fit rows included, and the fit rows are then overwritten with their own UMAP
-   positions: it costs 7% more searches and buys contiguous reads off a 55 GB memmap where
-   skipping them would make every batch a gather.
+   positions**, searched against an index over the same fit set. Every row goes through this path,
+   fit rows included, and the fit rows are then overwritten with their own UMAP positions: it costs
+   7% more searches and buys contiguous reads off a 55 GB memmap where skipping them would make
+   every batch a gather.
+
+⊘ **The index is built twice — once for the graph, once for the placement**, 18 s each at 2,500,000
+rows, because it cannot be held across the layout: 5.46 GB for the index and 2.99 GB for the layout
+is 8.45 GB against ~8.2 GB free. Hoisting it would need a larger card or a smaller fit set.
 
 **Sharded CAGRA over all 36M is retained in `knn_graph` and is not used.** It would be fifteen
 indexes × 36M queries where this is one index and one pass. ⊘ Nothing measured it at scale — do not
@@ -102,12 +106,16 @@ NVMe, box otherwise idle, 2026-09-02:
 |---|---|---|---|
 | `points.parquet` | 118.6 MB | 634.6 MB | 4.3 GB → 22.8 GB |
 | prepare's *write points* step | 0.7 s | 115.6 s | — |
-| prepare peak RSS | 16.2 GB | 16.2 GB | — |
+| prepare peak RSS | 15.6 GB | 16.2 GB | — |
 | `tessera build` wall | 19.7 s | 34.3 s | — |
 | **`tessera build` peak RSS** | **716 MB** | **2,246 MB** | 25.7 GB → **80.7 GB** |
 | bundle on disk | 333 MB | 799 MB | 12.0 GB → 28.7 GB |
 
 Abstract coverage is 689,132 of 1,000,000 (68.9%), which is also the whole-corpus figure (68.9%).
+⊘ **The two prepare runs were not equally loaded** — the `off` run shared the box with a demo server
+and a `verify`, which cost its MeSH step 222 s against the `on` run's 45 s — so read the *prepare*
+rows as indicative. The `tessera build` and bundle rows are the ones the ruling turns on and both
+builds ran alone.
 The last column is a **linear extrapolation and not a measurement**: the build's peak is known not
 to be bounded by `--memory-budget` (the campaign's W2), so the 80.7 GB is what to expect to meet
 rather than a prediction of a graceful refusal on a 47 GB box.
@@ -130,10 +138,12 @@ ones below): **60.5 minutes** for all 38 chunks, 15.0 GB peak RSS, writing 67 GB
 
 ### The 1,000,000-row sample
 
-Local NVMe, RTX 3080, box otherwise idle. `prepare.py` **277 s** at **16.2 GB** peak RSS: route
-70 s, staged columns 40 s, the MeSH resolve/closure/member write 45 s over 46,178,538 closed pairs,
-k-means 0.4 s, titles 5 s. 43 k-means cells (18 … 51,243 members, median 27,693), 43 of 43 with a
-distinctive title out of 39,906 candidate terms.
+Local NVMe, RTX 3080. `prepare.py` **349 s** at **15.61 GB** peak RSS: route 73 s, staged columns
+43 s, the MeSH resolve/closure/member write 222 s over 46,178,538 closed pairs, k-means 0.5 s,
+titles 9 s. ⊘ **That MeSH figure is contended** — a demo server and a `verify` were running beside
+it; the same step on an idle box in the `--abstracts` run below was 45 s over the same rows. 43
+k-means cells (18 … 51,243 members, median 27,693), 43 of 43 with a distinctive title out of 39,906
+candidate terms.
 
 `tessera build` **19.7 s** to a **333 MB** bundle at **716 MB** peak RSS; `verify --deep` clean at
 1,000,000 rows and 4,601,362 pairs; **no containment violation** over 29,229 descriptors and 40,075
@@ -193,6 +203,12 @@ built .../bundle (v00000): 35920666 items, 18 terms, 165272740 pairs, 1115061189
 
 Served through `run_demo.sh` on its own deployment, the principals ladder is 4,910 / 4,910 /
 6,024,843 / 25,357,425 / 35,920,666 visible.
+
+⊘ **The bundle's manifest was corrected by hand.** The run wrote
+`umap.graph = "cagra fp16, sharded"` and no fit size — the name of a path `knn_graph` can take and
+this rung does not. `prepare.py` writes the route it ran from `65796880` onward; the
+`$TESSERA_LADDER/medcpt/manifest.json` beside the built bundle was patched rather than regenerated,
+and says so in a `corrected_by_hand` field.
 
 ### The rung's scaling finding
 
