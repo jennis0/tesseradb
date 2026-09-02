@@ -419,6 +419,48 @@ describe('the drops', () => {
     expect(store.get('artifacts').layers).toEqual(['clusters/kmeans']);
   });
 
+  it('browses in the store’s own view, and a caller’s explicit undefined does not clobber it', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const browse = vi.fn(async () => ({artifacts: [], parents: [], next: null}));
+    const {client} = fakeClient(() => response('ck'));
+    (client as unknown as {browse: typeof browse}).browse = browse;
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    await clock.advance(1);
+
+    await store.browse({layer: 'mesh/descriptors'});
+    expect((browse.mock.calls[0] as unknown as [string, {view: string}])[1].view).toBe('s0');
+
+    // A caller passing the field explicitly absent — which a spread of a partial request produces
+    // — must not leave the request without a view: a masked count is per view.
+    await store.browse({layer: 'mesh/descriptors', view: undefined});
+    expect((browse.mock.calls[1] as unknown as [string, {view: string}])[1].view).toBe('s0');
+
+    // And a caller naming another view is answered in it.
+    await store.browse({layer: 'mesh/descriptors', view: 'other'});
+    expect((browse.mock.calls[2] as unknown as [string, {view: string}])[1].view).toBe('other');
+  });
+
+  it('composes the filter every request carries, the drawn region included', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {store} = await warm(() => response('ck'), {clock, scheduler});
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await clock.advance(600);
+    scheduler.flush();
+    expect(store.requestFilters()).toBeNull();
+
+    // `filters.expr` is one of the three sources; a reader taking it for the whole would miss the
+    // other two, which is what the hierarchy panel's staleness check did.
+    store.setMembers([{layer: 'l', artifact: 7n, outside: false, verb: 'filter'}]);
+    await clock.advance(600);
+    scheduler.flush();
+    expect(store.get('filters').expr).toBeNull();
+    expect(store.requestFilters()).toEqual({member_of: {layer: 'l', artifact: '7'}});
+    // JSON-safe by construction: the identifier is a decimal string, so this hashes and logs.
+    expect(() => JSON.stringify(store.requestFilters())).not.toThrow();
+  });
+
   it('clears the frame and the encoding on clear()', async () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();

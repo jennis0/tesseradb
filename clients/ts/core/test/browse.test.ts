@@ -34,12 +34,14 @@ function answering(body: unknown, ok = true) {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('browse', () => {
-  it('sends the roots form as the layer alone, and reads identifiers past 2^53', async () => {
+  it('sends the roots form as the view and the layer, and reads identifiers past 2^53', async () => {
     const fetchMock = answering({artifacts: [row('18064038920082622571', 393_741)], parents: [], next: null});
-    const page = await client().browse('tok', {layer: 'mesh/descriptors'});
+    const page = await client().browse('tok', {view: 's0', layer: 'mesh/descriptors'});
     const [url, init] = fetchMock.mock.calls[0] as unknown as [string, {body: string}];
     expect(url).toBe('http://v/v1/artifacts/browse');
-    expect(JSON.parse(init.body)).toEqual({layer: 'mesh/descriptors'});
+    // **`view` is required**, for the drill-down's reason: a masked count is an intersection in
+    // row space and row space is per view.
+    expect(JSON.parse(init.body)).toEqual({view: 's0', layer: 'mesh/descriptors'});
     // A `u64` that a JSON number would have rounded: the wire spells it, and this keeps it.
     expect(page.artifacts[0]!.tesseraId).toBe(18_064_038_920_082_622_571n);
     expect(page.artifacts[0]!.maskedCount).toBe(393_741n);
@@ -51,8 +53,9 @@ describe('browse', () => {
 
   it('sends the children form with the parent as a decimal string, and reads its parents back', async () => {
     const fetchMock = answering({artifacts: [row('7', 4)], parents: [row('3', 90)], next: 'c2'});
-    const page = await client().browse('tok', {layer: 'l', parent: 3n, limit: 50, cursor: 'c1'});
+    const page = await client().browse('tok', {view: 's0', layer: 'l', parent: 3n, limit: 50, cursor: 'c1'});
     expect(JSON.parse((fetchMock.mock.calls[0] as unknown as [string, {body: string}])[1].body)).toEqual({
+      view: 's0',
       layer: 'l',
       parent: '3',
       limit: 50,
@@ -64,8 +67,9 @@ describe('browse', () => {
 
   it('sends the search form and the viewport’s own filter object, and reads matched_count', async () => {
     const fetchMock = answering({artifacts: [row('9', 100, {matched_count: 0})], parents: [], next: null});
-    const page = await client().browse('tok', {layer: 'l', q: 'lymph', filters: {archive: {in: ['cs']}}});
+    const page = await client().browse('tok', {view: 's0', layer: 'l', q: 'lymph', filters: {archive: {in: ['cs']}}});
     expect(JSON.parse((fetchMock.mock.calls[0] as unknown as [string, {body: string}])[1].body)).toEqual({
+      view: 's0',
       layer: 'l',
       q: 'lymph',
       filters: {archive: {in: ['cs']}}
@@ -78,6 +82,6 @@ describe('browse', () => {
 
   it('throws a TesseraError on a refusal, like every other verb', async () => {
     answering({error: 'unknown_layer', detail: 'no such layer'}, false);
-    await expect(client().browse('tok', {layer: 'nope'})).rejects.toThrow(TesseraError);
+    await expect(client().browse('tok', {view: 's0', layer: 'nope'})).rejects.toThrow(TesseraError);
   });
 });
