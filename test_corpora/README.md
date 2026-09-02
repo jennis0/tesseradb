@@ -89,7 +89,7 @@ They measure nothing about a dataset and are outside the ingest campaign's sizin
 
 | Rung | Points | Bundle | State |
 |---|---|---|---|
-| `medcpt` | 35,920,666 | 11.15 GB | the ladder's largest embedding rung and its first **DAG** layer — MeSH's 30,217 descriptors with members over 41,321 edges, membership closed upward to 1.66×10⁹ entries, 2026-09-02 |
+| `medcpt` | 35,920,666 | 11.15 GB | the ladder's largest embedding rung and its first **`dag`** layer — MeSH's 30,217 descriptors with members over 41,321 edges, membership closed upward to **1.66×10⁹ entries**, 3.27× rung 2's spill. Built in 12 m 10 s at 16.03 GB, verified, served; the only rung with a staging step, and the only one to need a layout fitted on a sample and the rest placed against it, 2026-09-02 |
 | `arxiv` | 2,422,486 | 1.4 GB | the corpus the artifact catalogue is exercised against, and the ladder's only **two-view** rung — one embedding laid out twice, every layer drawn in both, 2026-09-01 |
 | `geonames` | 13,463,857 | 1.34 GB | built and verified on a declared `web_mercator` projection, 2026-08-30 |
 | `overture` | 73,631,092 | 12.57 GB | built and verified on the same declared projection, with its division polygons declared in longitude and latitude, 2026-08-30 |
