@@ -1,329 +1,188 @@
 # Tessera overview
 
-Tessera serves an interactive, pannable, zoomable map over a corpus of billions of documents or
-records, from one machine, to many viewers at once, while the corpus keeps changing underneath it.
-Each viewer sees the map computed over exactly the items they are permitted to see: not only which
-points they can retrieve, but every count, density, cluster, label and sample. A viewer's visible
-set is computed once per session as a Roaring bitmap, and everything served to that viewer is
-computed from that set alone. Items arrive, are deleted or are suppressed while the service runs,
-and the map reflects each within seconds to minutes.
+Tessera serves an interactive, pannable, zoomable map over a corpus of millions to billions of
+documents or records, from one machine, to many viewers at once, while the corpus keeps changing
+underneath it. Each viewer sees the map computed over exactly the items they are permitted to see:
+not only which points they can retrieve, but every count, density, cluster and label they are
+shown. Items arrive, are deleted or are suppressed while the service runs, and the map reflects
+each within seconds to minutes.
 
-## What it is, and its scale
+## What you can do with it
 
-Measured on a synthetic corpus of 10⁹ points (about 130 terms per item) on a single machine with
-47 GiB of memory: the bundle occupies about 47 GB on disk; viewport latency is 135 to 164 ms at the
-50th percentile, of which selecting which points to draw is 83 to 89 percent; the cost that drives
-that latency is the number of rows visible in the requested viewport, not the number of points
-returned; and the build streams with external spill, its memory bounded by a pre-flight plan
-(`README.md`, "Scale and cost"). These are synthetic-corpus figures on one machine; the raw records are in `probes/`. The test-corpus
-ladder in `docs/ingest-campaign.md` is climbing past this size on the same machine, and the figures
-here are replaced as each rung lands.
+- **A map over any records with a 2D layout**: geographic coordinates, or an embedding projection
+  such as UMAP.
+- **Several coordinate systems over one corpus**, called views and view groups, sharing one item
+  identity so a viewer can switch layout without losing their place.
+- **Composable filters** over categories, numbers, dates, keywords and full text.
+- **Typeahead** over category values.
+- **A drawn region as a filter**: a box, circle, ellipse or polygon.
+- **Annotation layers**: clusters, hierarchies including DAGs, regions and hulls, each with a
+  masked count correct for the viewer.
+- **Highlight mode**: light the matches, dull the rest.
+- **Item cards** for a selected point.
+- **Live ingest** into a running service, and deletion and suppression that take effect on the next
+  request.
+- **Every count, sample, label and density shown is correct for the viewer**, computed from what
+  they can see rather than filtered after the fact.
+- **Embeddable clients**: web components, a deck.gl layer, React bindings, and a Python notebook
+  widget.
+- **An HTTP API**, with an OpenAPI description.
 
-Three real corpora, smaller than the design target, have also been built and served on the same
-class of machine: GeoNames (13,463,857 points, a 1.34 GB bundle, built in 2 minutes 59 seconds);
-Overture places and divisions (73,631,092 points, a 12.57 GB bundle, built in 31 minutes 18
-seconds); and MedCPT over PubMed (35,920,666 points, an 11.15 GB bundle, built in 12 minutes 10
-seconds, carrying a hierarchy layer whose membership closes upward to 1.66×10⁹ entries). None of
-these runs measured viewport latency; that figure exists only for the synthetic 10⁹ corpus above
-(`docs/ingest-campaign.md` §1 to §4).
+## What using it looks like
 
-Scale is the headline result, but it is not the starting requirement. The starting requirement is
-that every quantity a viewer sees has to be correct for that viewer's own permissions, not the
-corpus's as a whole. That requirement rules out precomputing anything shared across viewers, which
-is what shapes the architecture the rest of this chapter describes, and it is that same
-architecture that makes the scale figures above possible.
+An operator declares a corpus in one TOML file: which files it reads, one or more coordinate
+systems over it, the categories a point may carry, and how a viewer's access is decided. This is
+trimmed from a working example, `test_corpora/geonames/corpus.toml`, down to the smallest fragment
+that still declares a real corpus:
 
-## Where it sits among other systems
+```toml
+[sources]
+points  = "points.parquet"
+country = "vocab-country.parquet"
 
-Every system surveyed with document-level or row-level security draws its boundary at retrieval: a
-viewer cannot open a record outside their access, but a count, a cluster boundary or a density
-estimate is typically computed over the whole corpus and only the retrieval step is filtered
-(`docs/evidence/prior-art/prior-art-synthesis.md` §1). Tessera moves that boundary to cover every
-derived quantity. Comparators exist on other axes.
+[defaults]
+source = "points"
 
-- **Nanocubes and imMens** are the closest match on scale: an index answering aggregate queries
-  over hundreds of millions to billions of bins in milliseconds. Nanocubes takes up to six hours to
-  build an index over 210 million objects, with memory growing combinatorially with the number of
-  dimensions and the resolution; imMens precomputes three- and four-dimensional tile projections,
-  at a correspondingly costly precomputation step, with brush resolution capped at the bins it
-  precomputed. Both serve one static cube to every viewer: there is no per-viewer view, and no
-  update after the cube is built (`prior-art-2-visual-analytics.md` §4).
-- **deepscatter and Nomic Atlas** are the closest match on interactive point rendering at scale:
-  tiled scatterplots reaching roughly 10⁸ to 10⁹ points. Both precompute one set of tiles and serve
-  it to every viewer; deepscatter's largest published deployment is a static star catalogue with no
-  masking, and Nomic Atlas, the closest product match, offers access control only at the dataset
-  level (`prior-art-2-visual-analytics.md` §4, §9).
-- **Datashader and tippecanoe** (or its single-file archive format, PMTiles) are the closest match
-  on precomputed serving: Datashader rasterises a corpus into images on the server, and tippecanoe
-  builds a static archive of vector tiles once, ahead of any request. Neither computes anything per
-  viewer; a build serves the same tiles, or the same image, to everyone who asks.
-- **Elasticsearch's document-level security and PostgreSQL's row-level security** (the mechanism
-  behind a PostGIS-backed tile server) are the closest match on the access-control axis: both
-  compute a result dynamically, per query, filtered to the requesting principal. Both pay for it,
-  and both leak. Elasticsearch's own documentation states that a principal restricted to specific
-  documents "could still... count how many inaccessible documents contain a given term," and a
-  documented case measured a 30 ms query taking 26 seconds once document-level security filtering
-  was applied (`prior-art-1-search-engines.md` §2, citing elastic/elasticsearch#46817). A measured
-  PostgreSQL row-level-security policy over a spatial predicate abandoned its index entirely (the
-  predicate could not be proven safe to push below the security check) and ran 3,340 times slower
-  than the same query unfiltered, while a fully patched server still disclosed the exact count of
-  policy-excluded rows through `EXPLAIN ANALYZE`, and the density of an invisible cluster, 1,500
-  times above background, through plain `EXPLAIN` (`prior-art-3-databases.md` §4).
+[[view]]
+name             = "world"
+projection       = "web_mercator"
+extent           = { lon = [-180.0, 180.0], lat = [-85.05, 85.05] }
+point_visibility = { field = "country", default = "public" }
 
-On any one of these axes, scale, interactive rendering, precomputed serving, or dynamic per-viewer
-filtering, there is prior art. The combination this design targets: billions of points, a masked
-view computed per viewer, a corpus that keeps ingesting and accepting deletions and suppressions
-while being served, and actual points, not bins, sampled from inside the mask, has no comparator
-found in this survey (`prior-art-synthesis.md` §1, §4).
+[[vocabulary]]
+name       = "country"
+width      = "u16"
+value_set  = "closed"
+visibility = "derived"
+source     = "country"
 
-## How it works, in one page
+[[attribute]]
+name       = "country"
+type       = "category"
+vocabulary = "country"
+index      = true
+```
 
-Two identifier spaces underlie everything else. Permissions are expressed over **entity space**:
-every item has a permanent entity ID, and a viewer's access is a Roaring bitmap of the entity IDs
-they may see. Geometry is expressed over **row space**: within one view, items are ranked
-by a Morton (Z-order) code and assigned a row ID equal to that rank. The two spaces meet at exactly
-one point, an explicit permutation between entity ID and row ID, and nowhere else derives one from
-the other (`architecture.md` §5.1, invariant I4).
+Three commands take it from there: `tessera check` validates the declaration against the Parquet
+schemas in seconds, without reading a row; `tessera build` produces the bundle in one streaming
+pass; `tessera serve` opens it on the HTTP API. A browser or an SDK never sees this file. It holds a
+token issued by a session server, and it asks `/v1/viewport` for what its holder may see.
 
-A viewer's visible set is computed once per session: the caller's auth data resolves to a set of
-terms, the term postings are unioned into a Roaring bitmap over entity space, and the result is
-cached. Every later request in that session composes this mask with the current overlay (denies not
-yet folded into the postings) and projects it once into the current view's row space
-(`architecture.md` §2.6, §11.2).
+Embedding it: `<tessera-explorer>` drops a full map into a page as a custom element; `TesseraLayer`
+adds the same data to a deck.gl scene already running; and in a notebook, `tesseradb`'s `Map`
+widget opens the same view without leaving Python.
 
-Because rows are stored in Morton order, a quadtree tile at any zoom level is a contiguous range of
-row IDs: each successive pair of bits in a Morton code names one quadrant, so a tile's rows always
-sort together. An exact masked count over a tile is therefore bitmap arithmetic over that range, not
-a scan of any data file (`architecture.md` §5.2, §10.4). Sampling, density, cluster labels and every
-other served quantity are defined the same way, computed from the rows the composed mask admits,
-never computed over the whole corpus and filtered afterwards. A definition that samples from a
-precomputed unmasked structure and then discards the unauthorised portion is a disclosure (design
-invariants I2 and I7): the unauthorised portion was still read to produce the sample, and masking
-is meant to stop that.
+## How it scales
+
+Tessera has been built and served against a synthetic 10⁹-point corpus, and against three real
+corpora at smaller scale. All were measured on the same class of single machine: one NVMe-backed
+box with 47 GB of RAM, no cluster.
+
+| Corpus | Points | Build time | Peak RSS | Bundle size | Viewport p50 |
+|---|---|---|---|---|---|
+| Synthetic, low-cardinality categories | 10⁹ | 6 m 46 s | 27.6 GB | ~47 GB | 135–164 ms |
+| Synthetic, 117 million distinct terms (surname-shaped) | 10⁹ | 3 h 12 m | 47.6 GB | to measure | to measure |
+| GeoNames | 13,463,857 | 2 m 59 s | 3.55 GB | 1.34 GB | to measure |
+| Overture places + divisions | 73,631,092 | 31 m 18 s | 26.75 GB | 12.57 GB | to measure |
+| MedCPT / PubMed | 35,920,666 | 12 m 10 s | 16.03 GB | 11.15 GB | to measure |
+
+One streaming pass produces the whole bundle. There is no separate spatial-index build, because the
+row order the geometry is written in (Morton order) is the index, and memory is bounded by a plan
+made before the pass starts rather than by how much of the corpus fits in RAM. Peak RSS above
+tracks that plan and the term policy more than it tracks point count: the surname-shaped build holds
+nearly twice the categories build's peak at the same 10⁹ points, driven by its 117 million distinct
+terms rather than by anything spatial. The test-corpus ladder is climbing past 10⁹ points on the
+same machine.
+
+## Compared with other systems
+
+Every system surveyed with document-level or row-level security draws its access boundary at
+retrieval: a viewer cannot open a record outside their access, but a count, a cluster boundary or a
+density estimate is typically computed over the whole corpus, with only the retrieval step
+filtered. Tessera moves that boundary to cover every derived quantity. The rows below are the
+closest match on each of scale, interactive rendering, precomputed serving and per-query access
+control.
+
+| System | Scale reached | Per-viewer masking | Live ingest and delete | Build at 10⁹ | What leaks or costs |
+|---|---|---|---|---|---|
+| Nanocubes / imMens | up to ~2×10⁸ bins | No: one shared index for every viewer | No | 6 h at 2×10⁸ (Nanocubes); to measure (imMens) | No per-viewer view; nothing updates once the index is built |
+| deepscatter / Nomic Atlas | ~10⁸–10⁹ points | No (deepscatter); dataset-level only (Atlas) | No | to measure | One set of tiles served to every viewer |
+| Datashader / tippecanoe | corpus-scale, rasterised or tiled | No | No | to measure | Nothing computed per viewer; the same image or tiles serve everyone |
+| Elasticsearch document-level security | per-query, corpus-scale | Filters retrieval; aggregates leak | Yes | to measure | Its own documentation states a restricted principal can still count how many inaccessible documents contain a given term; a documented case went from a 30 ms query to 26 seconds once the filtering was applied |
+| PostgreSQL row-level security | per-query, corpus-scale | Filters retrieval; aggregates leak | Yes | to measure | A measured policy over a spatial predicate abandoned its index and ran 3,340× slower; `EXPLAIN` still discloses the exact count of excluded rows, and plain `EXPLAIN` the density of an invisible cluster |
+| Tessera | 10⁹ points measured; the test ladder is climbing past it | Yes: every served quantity | Yes: ingest, deletion and suppression while serving | 6 m 46 s to 3 h 12 m, by term cardinality (above) | A leak register enumerates what is accepted; anything not in it is a bug |
+
+We know of no system that does all of these at once.
+
+## How it works
+
+A viewer's credentials resolve to the set of items they may see, computed once when they connect
+and reused for the rest of the session rather than recomputed on every request. Geometry is
+arranged so that a screen tile at any zoom level is one contiguous range of that set, rather than
+points scattered through storage, so a masked count over a tile is arithmetic over a range, not a
+scan of the tile's contents. Sampling, density and cluster labels are defined the same way:
+computed from the rows the viewer's own visible set admits, never computed over the whole corpus
+and then hidden. A corpus keeps changing while this runs: items arrive, are deleted or are
+suppressed, and each change is reflected within seconds to minutes, because the visible set is
+recomputed from the same postings the change updates.
 
 ```mermaid
 flowchart LR
-  subgraph entity["entity space (permissions)"]
-    direction TB
-    terms["viewer's terms<br/>from the token"]
-    postings["postings<br/>term → entity ids"]
-    mask["M_auth<br/>one Roaring bitmap per session,<br/>minus the overlay's denies"]
-    terms --> postings --> mask
-  end
-
-  perm["permutation<br/>entity id → row id<br/>the only path between the spaces"]
-
-  subgraph row["row space (geometry)"]
-    direction TB
-    rows["rows in Morton order"]
-    tile["a tile = one contiguous row range"]
-    count["count, sample, density, labels<br/>= bitmap arithmetic over the range,<br/>inside the mask only"]
-    rows --> tile --> count
-  end
-
-  mask --> perm --> count
+  cred["a viewer's credentials"] --> vis["the items they may see<br/>computed once per session"]
+  vis --> tile["a screen tile<br/>one contiguous range of that set"]
+  tile --> out["count, sample, label, density<br/>read only from that range"]
+  ingest["ingest, deletion, suppression"] -.-> vis
 ```
-*Permissions and geometry are related by one explicit permutation; nothing else converts between
-the two spaces.*
 
-One request, from a token to a response, follows the steps stated in full in `architecture.md`
-§2.6, condensed here:
+The compressed bitmap format and the row ordering that make this cheap (Roaring bitmaps and
+Morton, or Z-order, codes) are established techniques. What is not established elsewhere is using
+them so that every served quantity, not only which items a viewer can open, is a function of one
+visible set.
 
-1. Resolve the current view's geometry once, for the whole request (I11).
-2. Compose the effective mask from the cached session mask and the overlay of denies not yet folded
-   into the postings.
-3. Apply any filters, by intersection, to get a second, narrower mask; filters never touch the
-   first one (I12).
-4. Project the mask into row space; this is the only point where the two ID spaces meet.
-5. Decompose the requested viewport into a few hundred tiles, each a contiguous row range.
-6. Count each tile by intersecting the mask with its range: no data file is read for this step.
-7. Select which points to draw in each tile, evaluated directly from the mask so that a sparse
-   viewer's own sample is never a filtered slice of someone else's sample (I7).
-8. Gather the selected rows' columns from the mapped files.
-9. Translate row IDs to the wire identifier; entity IDs never appear in anything a client reads
-   (I10).
-10. Serve labels on a separate branch, gated on the unfiltered mask, never the filtered one (I3).
+## What it guarantees
 
-```mermaid
-sequenceDiagram
-  participant C as client
-  participant S as tessera serve
-  participant M as session mask
-  participant B as bundle
+- Every count, density, label and sample a viewer sees is computed from inside their own visible
+  set. Computing a quantity over the whole corpus and then hiding it from the wrong viewer is
+  treated as a defect.
+- Sampling happens after that computation, never before. A sparse viewer's sample is a real sample
+  of what they can see rather than the leftovers of someone else's.
+- The identifier a client receives is not the item's underlying identifier and cannot be used on
+  its own to enumerate or correlate records. It is a blinding permutation, not encryption, and it is
+  no defence against anyone holding the underlying data.
 
-  C->>S: GET /v1/viewport (token, bounds, zoom, filters)
-  S->>M: mask for this token
-  alt first request this session
-    M->>B: postings for the token's terms
-    M->>M: compose M_auth, subtract the overlay, project to row space
-  end
-  S->>S: bounds → Morton tile ranges
-  loop each tile
-    S->>M: rows in range ∩ mask
-    S->>B: geometry for the sampled rows
-  end
-  S->>S: masked counts, sample under the floor, labels gated on M_auth
-  S-->>C: framed Arrow stream: tiles, cells, artifacts, points
-```
-*One viewport request. Everything after mask composition reads geometry only through a masked
-row-ID range.*
-
-Roaring bitmaps (the compressed bitmap format behind CRoaring, in Tessera's dependency tree) and
-Morton, or Z-order, codes are established techniques. What is not established elsewhere is using the
-join between the two ID spaces to make every served quantity, not only the retrieval step, a
-function of the mask.
-
-## The shape of the system
-
-Tessera builds and serves from a single Rust binary, `tessera`, run in different modes:
-
-- `tessera build` runs the same engine in batch mode, producing a bundle from a corpus in one pass.
-  A build is treated as ingest into an empty database (decision 0091): build and a running
-  deployment's own ingest share one engine and are required to behave identically from a client's
-  point of view, though their internals differ (entity IDs are assigned in signature-sorted order
-  at a build and above the high-water mark at ingest, and a build packs in one pass because nothing
-  is being served while it runs).
-- `tessera serve` runs the three HTTP planes described below against one bundle.
-- `tessera check` validates a configuration's declaration against its Parquet schemas alone, in
-  seconds, without reading a row (`configuration.md`).
-- `tessera verify` runs the read protocol plus structural checks against a bundle: digest
-  verification, manifest and plugin-hash agreement, permutation bijectivity, and declared-bounds
-  conformance (`system-architecture.md` §8).
-
-A deployment's data lives in two places: the **bundle**, a directory tree of versioned, immutable
-prefixes plus one mutable `CURRENT` pointer naming the live one; and the **write-ahead log (WAL)**,
-which gives ingest and denies (deletions, suppressions) durability before they are folded into the
-bundle (`system-architecture.md` §1, §4.1).
-
-Three HTTP planes, each scoped to who holds its credential:
-
-- The **viewer plane** takes only a token plus a query, and is the only plane an untrusted client
-  (a browser or an SDK) ever reaches: `GET /v1/meta`, `POST /v1/viewport`, `POST
-  /v1/items/{tessera_id}`, and routes added since for categories, suggestion and artifacts
-  (`docs/openapi/tessera.yaml`).
-- The **session plane** holds `POST /session/authorise` and `POST /session/revoke`, on its own
-  listener and its own credential, held by the integrating application's server rather than the
-  browser.
-- The **control plane**, a Unix socket by default, takes an operator credential and carries ingest
-  (`/control/ingest`), item changes (`/control/changes`: deletion, suppression, unsuppression),
-  layers and views, status, and forced lifecycle actions (`/control/flush`, `/control/compact`).
-
-```mermaid
-flowchart LR
-  viewer["Viewer<br/>a person in a browser, or a program"]
-  session["Session issuer<br/>your identity provider or gateway"]
-  operator["Operator<br/>loads data, applies denies, runs compaction"]
-  source["Corpus<br/>Parquet files, or rows pushed while serving"]
-
-  subgraph tessera["Tessera, one process"]
-    vp["viewer plane<br/>/v1/viewport, /v1/items, /v1/categories, /v1/artifacts"]
-    sp["session plane<br/>mints a per-viewer token"]
-    cp["control plane<br/>/control/ingest, /control/changes, /control/compact, layers"]
-  end
-
-  session -- "session credential" --> sp
-  sp -- "token carrying the viewer's terms" --> viewer
-  viewer -- "token" --> vp
-  operator -- "operator credential" --> cp
-  source -- "tessera build, or ingest" --> cp
-```
-*Who reaches Tessera, on which plane, and with what credential.*
-
-```mermaid
-flowchart TB
-  corpus["corpus.toml + Parquet"]
-  build["tessera build<br/>ingest into an empty database"]
-  bundle["bundle on disk<br/>geometry in Morton order, postings, dictionaries, manifests"]
-  wal["write-ahead log<br/>ingests and denies since the last flush"]
-  serve["tessera serve<br/>masks, tiles, sampling, labels, filters"]
-
-  subgraph clients["clients"]
-    store["@tesseradb/client<br/>headless store"]
-    comps["@tesseradb/components, /deck, /react<br/>map and panels"]
-    py["tesseradb (Python)<br/>notebook widget"]
-  end
-
-  subgraph check["conformance"]
-    suite["conformance suite<br/>drives the served binary"]
-    oracle["Python oracle<br/>independent answer for every masked count"]
-  end
-
-  corpus --> build --> bundle --> serve
-  wal <--> serve
-  serve --> store --> comps
-  serve --> py
-  suite --> serve
-  suite --> oracle
-```
-*Build and serve share one engine over one bundle; the conformance suite drives the server and
-checks its answers against an independently written oracle.*
-
-**Clients.** The TypeScript packages under `clients/ts/` are a live second reader of the wire
-format, which is what makes that format a contract rather than an internal detail: `core` is a
-headless store with no DOM dependency; `deck` is a `deck.gl` composite layer over it; `components`
-is a set of Lit custom elements, including `<tessera-explorer>`; `react` wraps both as hooks and
-wrapped elements; and a demo viewer, three example pages and an acceptance harness sit beside them
-(`clients/ts/README.md`). The Python package `tesseradb` provides `authorise` and `Token` from the
-standard install, and, behind an optional `[widget]` extra, an anywidget-based notebook widget,
-`Map`; it installs today from this checkout rather than from a package index, and a general SDK and
-an in-process instance are planned but not yet started (`clients/py/README.md`).
-
-**The conformance suite** (`conformance/`, pytest) drives the server and compares its answers
-against an independently written Python oracle (`reference/`), so that a bug shared between the
-engine and the check that verifies it is unlikely. That differential pairing is separate from the
-suite's byte-scanner, which sweeps every response and log line from a full run for content that
-must never appear on the wire.
-
-## What it guarantees, in brief
-
-The full guarantee set is thirteen invariants, stated and covered in the guarantees chapter
-(`architecture.md` §4). Three matter most to a reader deciding whether to look further:
-
-- **Every quantity a viewer sees is computed from inside their mask (I2).** A count, a density
-  estimate, a label or a cluster boundary derived from the whole corpus and then gated on a
-  threshold is a disclosure, not a filtered view: the mask is the only entry point to the geometry
-  arrays, so there is no route by which an aggregate over rows outside it can be built.
-- **Sampling happens after masking, never before (I7).** The sample of an authorised set is not the
-  authorised portion of a global sample. The floor that keeps a sparse viewer's map from going empty
-  cannot be set to zero; a zero floor is refused at startup rather than clamped.
-- **Entity IDs never cross to a client (I10).** The identifier a client receives, `tessera_id`, is a
-  keyed blinding permutation of the entity ID. It stops a viewer-plane client from correlating or
-  enumerating entity IDs. It is not encryption, and it is not a defence against anyone holding the
-  bundle: the key that inverts every `tessera_id` sits in the bundle's own manifest.
-
-Residual disclosures accepted rather than closed are enumerated in a leak register (`architecture.md`
-Appendix C), each with a severity, a mitigation and a status; the register currently holds 33 rows
-(`inventory.md`). A disclosure found later that is not already in that table is a bug. That claim
-holds only while the retrieval surface stays narrow, about five request shapes today, so new
-capability is required to enter through the filter contract, an order-independent set producer
-composed by intersection, rather than as an arbitrary new endpoint.
-
-The guarantees chapter states the remaining ten invariants, the two deny-removal rules and the
-identifier's full threat model.
+These are not the whole guarantee. A small number of residual disclosures are accepted rather than
+closed, each recorded with its severity and mitigation in a leak register; a disclosure found later
+that is not already in that register is a bug. The guarantees chapter states the full set and how
+each is checked.
 
 ## What is built and what is not
 
-| Area | Status |
+| Feature | Status |
 |---|---|
-| Core engine: build, serve, check, verify; mask composition; Morton tiling; the WAL | Built and serving. Measured against a synthetic 10⁹-point corpus and against three smaller real corpora (see "What it is, and its scale") |
-| Viewer plane | `/v1/meta`, `/v1/viewport`, `/v1/items/{tessera_id}` are built, along with routes added since for categories, suggestion and artifacts. `/v1/labels` and `/v1/region` are not mounted (`docs/openapi/tessera.yaml`; `system-architecture.md` §4.2) |
-| Control plane | Ingest and item changes (deletion, suppression) are built; the withdrawn `predicate` operation is not. Label submission, the label-invalidation pull queue, unmasked node iteration and entity-ID leasing are not mounted (`system-architecture.md` §4.2) |
-| Compaction, the fold | Built: retires deletions on the rule that a deletion is removed only at the fold that executes it, dispatched on a nightly gated window plus four gauges. A deferred staging list and two page-cache hints named in its design are not built (`compaction.md`) |
-| Filters, views, annotations | The filter surface is built for every shipped field family except lists; views and view-switching are built through their second stage; the annotation and artifact model, including a `dag` hierarchy kind, is built through several delivery stages (`docs/design/README.md`'s document table) |
-| Clients | The TypeScript packages are built through the client-components delivery plan's six steps. The Python package's notebook-widget path is built; a documented proxy path for hosted notebooks and a general SDK are not (see "The shape of the system") |
-| Conformance suite | Largely built; where coverage stands is `conformance.md` §4.6 and nowhere else. Covered as designed: I1, I2, I3, I4, I7, I10. Covered in substance, in Rust rather than in the suite: I8, I9, and I11's cross-request half (I11's within-request half has no test at all). Not covered: I5 (nothing exists yet that can genuinely disagree with the authorisation plugin, so there is nothing to test against), I6, I13b and I13c (`conformance.md` §0, §4.6) |
-| The plugin host | Not built. Only a compiled-in passthrough plugin ships; there is no sandbox, so I5 and I6 cannot be meaningfully tested against anything else (`system-architecture.md` §4.3) |
-| Partitions, I13b and I13c | Not built. There is one hardcoded partition and no router/worker split, so nothing computes a reachable-set gate. This is safe today only because a single partition makes both failure cases unreachable, not because either rule is enforced (`architecture.md` §12; `conformance.md` §4.6) |
-| Label-invalidation notification | Not built. The capability of notifying a caller which labels a deletion or a predicate change has invalidated is specified and unmounted (`architecture.md` §2.5; `system-architecture.md` §4.2) |
-| Replication | Not built. A replica's bundle step-down logic exists, but has no configured time bound, and `/readyz` does not check one. Safe today only because there is no replica: one process opens the bundle it wrote itself (`system-architecture.md` §4.1) |
-| Licence | Not yet determined (`README.md`) |
-| Packaging, publishing | Not yet decided. No wheel is published to a package index and no container image is built; `tessera serve` runs under whatever process supervisor or container an operator provides (`system-architecture.md` §8) |
+| The engine and the map: build, serve, ingest, live delete and suppress | Built and measured |
+| Filters and search: categories, numbers, dates, keywords, text | Built. List-valued fields are not |
+| Views and view groups | Built |
+| Annotation layers: clusters, hierarchies, regions, hulls | Built. The DAG hierarchy kind is built; no shipped corpus declares one yet |
+| Live ingest and denies | Built. A deletion's rows are physically removed at compaction, which is built and runs on a schedule |
+| Clients: web components, a deck.gl layer, React bindings, a Python notebook widget | Built. Not yet published to a package index |
+| Conformance suite (the check that the guarantees hold) | Built and running on every change. Its own record states exactly where its coverage stands |
+| Plugin host for custom authorisation logic | Not built. A passthrough plugin ships in its place |
+| Partitions and replication | Not built |
+| Licence and packaging | Undecided |
 
 ## Where to go next
 
-- An assessor checking the security argument: the guarantees chapter (the full thirteen invariants,
-  the deny-removal rules, the leak register).
-- An engineer evaluating the approach: the data model, access control, queries and write-path
-  chapters.
-- An operator: the guide.
-- A client developer: the clients chapter and the guide.
+- Checking the security argument: the guarantees chapter.
+- Evaluating the approach: the data model, access control, queries and write-path chapters.
+- Operating a deployment: the guide.
+- Building against the client, or against the wire directly: the clients chapter and the guide.
+
+## Sources
+
+`README.md`; `docs/design/architecture.md`; `docs/design/configuration.md`;
+`docs/design/conformance.md`; `docs/guide/README.md`; `docs/ingest-campaign.md`;
+`docs/evidence/prior-art/prior-art-synthesis.md`;
+`docs/evidence/memos/2026-07-30-viewport-hot-path-and-bundle-size-review.md`;
+`test_corpora/geonames/corpus.toml`; `clients/ts/README.md`; `clients/py/README.md`;
+`docs/openapi/tessera.yaml`; `probes/2026-07-31-label-campaign/build-times.txt`;
+`probes/2026-07-30-1e9-rebuild/build-time-rss.txt`.
