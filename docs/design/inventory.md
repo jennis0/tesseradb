@@ -67,7 +67,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | **C28** | A caller's membership requirement on supplied content — require_member_visibility | High if mis-declared | Accepted — caller's control (⊘ not built) |
 | **C29** | An artifact's parent identifiers on the wire | Low | Accepted — bounded to the response's own membership |
 | **C30** | An item's satisfied labels, its reachable views and their positions, and its scoped values, on the drill-down | Low | Accepted — the intersection is the disclosure, and it is the principal's own; the views and values are the principal's own too |
-| **C31** | Listing and suggestion time on a derived category column | Low | Accepted — owner ruling, 2026-09-02 |
+| **C31** | Listing and suggestion time on a derived category column | Low | Accepted — owner ruling 2026-09-02; closed for indexed columns once the per-session set is warm (decision 0124), open on the probe route — the first keystrokes, viewers wider than the constant, blob-resident columns, and the enumeration. ⊘ The set is not built |
 | **C32** | A highlight's counts and bits — highlighted per tile, per served point and per served artifact (highlight-and-hierarchy.md §2) | Low | Accepted — a second filter over the same candidate (⊘ not built) |
 | **C33** | The browse verb — a layer's artifacts by lineage (highlight-and-hierarchy.md §4) | Low | Accepted — bounded to what a viewport already serves (⊘ not built) |
 
@@ -80,7 +80,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `annotation-representation.md` | Normative for the annotation representat | 40 |
 | `annotation-write-cycle.md` | Normative for the annotation write cycle | 18 |
 | `annotations.md` | Normative — r43 | 18 |
-| `architecture.md` | Normative — r59 | 48 |
+| `architecture.md` | Normative — r60 | 50 |
 | `artifact-fetch-protocol.md` | Normative — r3 | 7 |
 | `artifact-serving-at-scale.md` | Ruled, reviewed, amended, and re-measure | 21 |
 | `artifact-shapes.md` | Normative — r7 |  |
@@ -94,8 +94,8 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `compaction.md` | Normative — r12 | 9 |
 | `concurrency-lifecycle.md` | Normative — r11 | 13 |
 | `configuration.md` | Normative for the build-time configurati | 28 |
-| `conformance.md` | Normative — r19 | 19 |
-| `contracts.md` | Normative — r72 | 36 |
+| `conformance.md` | Normative — r21 | 19 |
+| `contracts.md` | Normative — r76 | 39 |
 | `core-access-expressions.md` | Provisional — under review | 1 |
 | `correctness-suite.md` | Provisional — under review | 13 |
 | `dag-hierarchies.md` | Normative — r3 | 4 |
@@ -106,7 +106,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `filter-result-cache.md` | Provisional — under review | 7 |
 | `filter-surface.md` | Provisional — under review | 8 |
 | `geometry-pinning.md` | Normative. Reviewed three times (invaria |  |
-| `highlight-and-hierarchy.md` | Normative — r5 | 7 |
+| `highlight-and-hierarchy.md` | Normative — r6 | 14 |
 | `hot-row-geometry.md` | Normative. The §6 amendments are folded  | 2 |
 | `measurement.md` | Provisional — under review | 5 |
 | `per-point-attributes.md` | Provisional — under review | 7 |
@@ -118,7 +118,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `streamed-serving.md` | Normative — r2 |  |
 | `system-architecture.md` | Normative — r17 | 28 |
 | `tile-addressed-integration.md` | Provisional — under review |  |
-| `value-suggestion.md` | Normative — r3 | 13 |
+| `value-suggestion.md` | Normative — r4 | 18 |
 | `view-switching.md` | Provisional — under review | 4 |
 | `views.md` | Normative — r29 | 21 |
 | `write-path.md` | Normative for the write path. Owner sign | 20 |

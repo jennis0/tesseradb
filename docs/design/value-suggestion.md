@@ -1,13 +1,14 @@
 # Value suggestion — typeahead over a category vocabulary
 
-**Status:** **Normative (r3, 2026-09-02).** The six questions in §10 are ruled (owner, 2026-09-02)
-and written to decisions 0118–0123.
+**Status:** **Normative (r4, 2026-09-02).** The six questions in §10 are ruled (owner, 2026-09-02)
+and written to decisions 0118–0123; decision 0124 narrows D — the suggestion route may follow the
+viewer's own cardinality (§6.3, §8).
 **Built (2026-09-02, branch `design/value-suggestion`).** The fold, the boolean membership probe,
 the suggestion index, `Engine::suggest`, the served verb with its two ceilings and one-in-flight
 admission, the client's typeahead and the conformance differential are all in the tree
-(`conformance.md` §4.6 is where coverage stands). ⊘ Still unbuilt: the per-session lever (§6.3), a
-`suggest_word_starts` opt-out, cross-column suggestion (decision 0123), and the vocabulary read side
-at 10⁷ (issue #130).
+(`conformance.md` §4.6 is where coverage stands). ⊘ Still unbuilt: §6.2's bucket table **(b′)** and
+§6.3's per-session set, both until the track that adds them lands; a `suggest_word_starts` opt-out;
+cross-column suggestion (decision 0123); and the vocabulary read side at 10⁷ (issue #130).
 **Its §6 figures are measured** at 10⁶ and 10⁷ values over 10⁸ entities — the walk and the build on
 the shipped route by the implementation's bench, the representation and single-probe figures by
 [`probes/2026-09-02-value-suggestion/`](../../probes/2026-09-02-value-suggestion/README.md).
@@ -58,8 +59,10 @@ Five positions, each argued below:
   asks it: a boolean `intersects` on the mapped posting is a deliverable of this design and both
   doors move onto it (§6.2). The walk's cost tracks the values under the prefix, hidden ones
   included, which is a timing read on what `derived` withholds; the owner accepted that channel on
-  2026-09-02, and §8 registers it as **C31**. A per-session visible set that would close it is
-  recorded as the lever if the probe route proves too slow (§6.3).
+  2026-09-02, and §8 registers it as **C31**. A per-session visible set **closes** it and is the
+  second route: built on demand where the viewer's own composed cardinality is small enough to
+  sweep, with the probe route answering the first keystrokes on a session-column pair and every
+  wider viewer (§6.3, decision 0124).
 - **Keywords stay refused.** The corpus refuses autocomplete on string columns twice, normatively,
   and this design does not reopen it: the shape that wants suggestion is an **open, `derived`
   category**, which exists. What it needs at a million values is this surface and the scaling
@@ -270,7 +273,10 @@ Response, `200`:
   quantity §8 registers as C31, at one bit of resolution, and it is registered as on the wire and
   not only in time. The alternative — `more: false` on a spent budget, so the flag counts visible
   values alone — was declined: it under-reports, and a broad prefix would hide visible values
-  behind a flag saying there were none.
+  behind a flag saying there were none. **The spent-budget form is the probe route's.** On §6.3's
+  per-session set the flag is exact — that route walks only visible positions, so it never spends a
+  budget and sets `more` only when the page filled — and `more` is the one field on which the two
+  routes may differ. Which route answered is not on the wire.
 - **`limit`** defaults to and is clamped by `selection.max_suggestions` (§5.3), a deployment
   constant published on `/v1/meta`. **`limit=0` is `422`** on its own reason: a zero-length
   suggestion page is a request for no answer. The enumeration refuses it because a zero-length page
@@ -337,6 +343,13 @@ on `max_tiles_per_request`'s argument: a client that receives `more: true` on a 
 fill should be able to read it as the deployment's budget rather than as its own arithmetic being
 wrong. A performance knob, so it defaults, and a deployment constant identical for every principal.
 
+`selection` gains a third field with §6.3's second route: **`max_suggest_set_entities`** (⊘ name
+provisional; recommended default 10⁷), the composed cardinality at or under which a per-session
+visible-value set is built for that viewer instead of probing per value. It is published on the
+same argument as the other two — a deployment constant, identical for every principal, and a client
+that cannot see it cannot tell an exact `more` from a budgeted one. What it discloses to the caller
+is which side of it their own cardinality falls on (§8, decision 0124).
+
 **No capability flag.** A `suggest: true` on each `category` block would be a constant — every
 category column has the surface — and there is no server older than this revision for a client to
 read it defensively against (decision 0048). `api_version` stays at **1** and `bundle_format` does
@@ -364,8 +377,8 @@ by [`probes/2026-09-02-value-suggestion/`](../../probes/2026-09-02-value-suggest
 10,132,181 distinct folded GeoNames names as the vocabulary, 10⁷ values over 10⁸ entities with Zipf
 and uniform membership for the postings, the shipped `SortedDictWriter`, `PostingsSpool` and
 `ColumnPostings` readers, one thread, page cache warm. Device-cold and concurrent figures are **not
-measured**. One structure per vocabulary, no state per session, and a lever held in
-reserve.
+measured**. One structure per vocabulary, no state per session on the probe route, and a
+per-session set built on demand for a viewer narrow enough to sweep (§6.3).
 
 ### 6.1 The suggestion index — per vocabulary, principal-blind
 
@@ -386,7 +399,7 @@ mapped files rather than one:
 
 The **dense position** — the value's rank in the vocabulary's key order, `0..V` — rather than the
 code, because codes are scattered at random over the declared width (§3.4); it is also what the
-per-session lever in §6.3 would want should it be built. The run structure is what makes the
+per-session set in §6.3 is over. The run structure is what makes the
 duplicate case ordinary rather than an error: a prefix range is a range of entry strings, and the
 values under it are the concatenation of their runs. The last two files exist so a served value's
 `key` and `title` come out of the index instead of out of a walk of the minter's map, which is §9's
@@ -546,13 +559,52 @@ a session:
 
 **r2's 1.9–10.4 ms was `Bitmap::intersect` alone, with the record already in hand.** The shipped
 walk first has to *find* the record, by a binary search over the keyed base's code array — codes are
-scattered over the `u32` width (§3.4), so there is no arithmetic route from a code to its record —
-and that search is **13–29% of a probe** at 10⁷ (299 ns of 1,037 contiguous, 267 ns of 1,996
-scattered). The rest is the intersection itself, over a 40 MB-plus key array that does not fit in
-cache. A build-time position → record-ordinal array is **not** the fix: a code with no members has
+scattered over the `u32` width (§3.4), so there is no arithmetic route from a code to its record.
+**Split into the three things one probe does** — measured over the codes a budgeted walk actually
+probes, at 10⁷ values, in nanoseconds, the median of the sparsest viewer's probes:
+
+| Stage | What it does | Cost |
+|---|---|---|
+| `search` | binary search over the keyed base's 10⁷-entry code array | **550** |
+| `view` | `read_posting`: the record slice, and `BitmapView::deserialize` where the record is Roaring | 190 |
+| `test` | `hits`, the existential intersect | 20–70 |
+
+for a whole call of 730–811 ns, of which the **search is 68–72%**. An earlier reading of the same
+search as 13–29% of a probe (299 ns of 1,037) is not contradicted: it timed searches back to back
+with the code array warm in cache, and interleaving the view and the test — which is what the walk
+does — evicts the array between them. The walk *around* the probe is not where the time is: the
+fold, the two binary searches over the index, the payload and code reads per entry and the emitted
+set together cost **9.1–9.5 ns per value examined**, about 1.5% of a keystroke. So essentially all
+of a keystroke is the probe, and two thirds of the probe is finding the record.
+
+A build-time position → record-ordinal array is **not** the fix: a code with no members has
 no record, so rank in code order is not the record ordinal, and a code → record map built at open
 would be 40–80 MB resident per column, which the memory-first ruling declines. The sparsest
 viewer's keystroke is still inside the owner's 10–100 ms at the median *and* at p99.
+
+**(b′) A bucket table over the code's top 20 bits takes most of the search back, for 4.2 MB.** The
+search is slow because two dozen comparisons over a 40 MB sorted `u32` array miss cache on the last
+several of them. A table of 2²⁰ `u32` offsets beside the code array — **4.2 MB per column**, free to
+build because the array is already sorted, and needing no map from a code to a record — leaves ~10
+records per bucket, one or two cache lines, so the search becomes one or two misses rather than
+eight: ~150–250 ns, and the sparsest viewer's spent budget at 10⁷ falls from 62–82 ms to
+**~28–40 ms** *(modelled from the stage table above, not measured)*. ⊘ **Not built** until the track
+that adds it lands; every walk pays the full search meanwhile.
+
+**A per-record container-key sidecar was priced and declined.** It would answer *can this record
+possibly meet the candidate?* from the record's container keys without deserialising the posting
+body — attacking the `view` and `test` stages, 26–32% of a probe, and not the search's 68–72%.
+Reading the sidecar run is itself a random touch, so where it does reject it saves ~90–140 ns:
+12–17%, or 62 ms → ~53–55 ms *(modelled)*. Against a **scattered** candidate it rejects nothing at
+all — a 0.01% scattered viewer's mask touches every one of the entity space's 1,526 containers, so
+every record's keys meet it, the view and the test are paid anyway and the sidecar's own touch is
+pure loss for the slower of the two viewers. At 10⁷ records it is 82 MB per column (measured over
+the fixture's 20.8M container keys): half of a code → record map's bytes for a quarter of its
+saving, on the contiguous shape alone.
+
+**~30 ms is the probe route's floor.** No per-request route pays less than finding the record and
+constructing its view, whatever it saves on either. A keystroke materially under that is reachable
+only by not probing per request at all, which is what §6.3's per-session set does.
 
 The figures are post-fix: the bench found two defects in the implementation before it could measure
 it — an allocating `sources()` per probe, and a read of a value's served strings before the gate —
@@ -588,37 +640,68 @@ the *visible* head value under a scattered candidate through the materialising r
 boolean route removes. Whether the C24 fixture's shape exists at 10⁸ is **not established** either
 way; the walk's constant is the one measured on this fixture.
 
-### 6.3 The lever, held in reserve: a per-session visible-value set
+### 6.3 The second route: a per-session visible-value set, built on demand
 
-⊘ **Not in r1**, and now priced. If the probe route needs closing — the timing channel in §8
-revisited, or a fixture where the walk misses the budget — the construction is a
-per-`(session, resolved column, generation, overlay_version)` Roaring bitmap over the **dense value
-positions** (V bits — the earlier `E ≈ 4V` was the wrong unit; the index range maps entries to values,
-so the bitmap is over values), computed once by a route fixed at schema time, and the request
-iterates the visible bits inside `[lo, hi)` (`reset_at_or_after`, already in the dependency) touching
-nothing hidden.
+⊘ **Specified, not implemented.** Every request takes §6.2's probe route today. What follows is the
+second route and the rule that picks between them, and none of it is in the tree.
+
+Where a viewer's own composed candidate is small enough to sweep, the walk stops probing per value
+and reads a set instead: a per-`(session, resolved column, generation, overlay_version)` Roaring
+bitmap over the **dense value positions** (V bits — the index range maps entries to values, so the
+bitmap is over values and not over entries), computed by one pass over the column's `u32` value
+column under the candidate. A keystroke then iterates the set bits inside `[lo, hi)`
+(`reset_at_or_after`, already in the dependency) and touches nothing hidden.
+
+**It is built on demand, and no keystroke waits for it.** The first suggest on a
+`(session, resolved column)` pair dispatches the build on the pool and is itself answered by the
+probe route, as is every keystroke until the build lands; from then on that session's keystrokes on
+that column walk the set. Nothing is materialised per session in advance, which is decision 0093's
+rule, and nothing blocks on a 46–61 ms pass.
+
+**Both routes answer the same page.** They evaluate the same predicate against the same composed
+candidate, so the values, their order and their match spans are identical, and which route answered
+is not on the wire. The one field on which they may differ is **`more`**: the probe route may set it
+on a spent budget where the set route, walking only visible positions, answers exactly. That
+difference is the C31 bit already accepted (§8) — a thresholded pre-mask count of the values under
+the prefix — and not a new quantity.
+
+Four rules govern the set:
+
+1. **A key that no longer matches the live generation and overlay version is discarded, never
+   served.** Serving it would offer a value whose last visible member has been suppressed since,
+   which is fail-open. The key carries both for that reason.
+2. **One build in flight per key.** The per-session admission of §5.1 already serialises a session's
+   keystrokes, so this needs no second mechanism.
+3. **The route follows the viewer's own cardinality** ([decision 0124](../decisions/0124-the-suggestion-route-may-follow-the-viewers-cardinality.md)).
+   The set is built only where the composed candidate's cardinality is at or under
+   **`selection.max_suggest_set_entities`** (⊘ name provisional; recommended default 10⁷, the
+   46–61 ms build point measured below), a deployment constant published on `/v1/meta`. A wider
+   viewer stays on the probe route, where the walk fills a page in under a millisecond anyway — the
+   1% and 10% rows of §6.2 — so the ceiling costs that viewer nothing. This is the one place in the
+   system where a route is a function of how much the principal can see; §8 argues why it is
+   admissible, and 0124 records the narrowing.
+4. **A column with no entity-space value column never takes the set.** A blob-resident `derived`
+   category has postings but nothing to sweep, and the all-postings alternative is **0.3–6.8 s at
+   every sparsity** — it opens every record whatever the candidate — so it is not a token-cadence
+   route at 10⁷. Such a column stays on the probe route, or it declares `index = true`.
 
 Measured at 10⁷ values over 10⁸ entities:
 
-- **The value-column route is the lever's only route.** One pass over the `u32` column under the
-  candidate is 0.2 ms for a 10⁴-entity viewer and 46–61 ms for a 10⁷-entity one through a plain
-  bitset (the Roaring `add`-per-entity form is 6× slower). Linear extrapolation to a 10⁹-entity
-  full-mask candidate is ~6 s *(modelled)*.
-- **The all-postings route is not a token-cadence route at 10⁷**: 0.3–6.8 s at every sparsity,
-  because it opens every record whatever the candidate. So a blob-resident `derived` category — one
-  with postings but no entity-space value column — **cannot take the lever** at this scale; it keeps
-  the probe route, or it declares `index = true`.
+- **The build is the value-column pass**: 0.2 ms for a 10⁴-entity viewer and 46–61 ms for a
+  10⁷-entity one through a plain bitset (the Roaring `add`-per-entity form is 6× slower). Linear
+  extrapolation to a 10⁹-entity full-mask candidate is ~6 s *(modelled)*, which is rule 3's reason
+  for a ceiling rather than a slower build.
 - **The set is small**: 13 KB of Roaring for a viewer seeing 0.06% of values, saturating at 1.25 MB
-  (= V bits) once a fifth are visible. Ten thousand concurrent sessions is at most 12.5 GB as bitsets
-  and far less as Roaring for sparse viewers — decision 0093's byte budget with eviction still
-  applies.
+  (= V bits) once a fifth are visible. Ten thousand concurrent sessions is at most 12.5 GB as
+  bitsets and far less as Roaring for sparse viewers. **Residency and eviction are decision 0093's
+  byte budget**, unchanged.
 - **Per keystroke it is 0.3–2 µs** at the median; a very sparse set's p99 rises to 60–85 µs where the
   iterator crosses many empty containers, and a plain bitset scan is ≤ 1.3 µs at p99 everywhere.
 
-Its other cost is unchanged: an entry that goes cold on every flush and every deny, since the key
-must carry `overlay_version` for a suppression to retire a value fail-closed (§3.3's argument against
-a maintained set, applied to a cache). A fold-epoch key for the base half is the refinement to reach
-for second.
+Its cost is that an entry goes **cold on every flush and every deny**, since rule 1 puts
+`overlay_version` in the key so that a suppression retires a value fail-closed. A fold-epoch key for
+the base half — which would keep a set across the writes that cannot change it — is the refinement
+to reach for second.
 
 ## 7. Ordering and duplicates
 
@@ -669,9 +752,16 @@ channel. What bounds it:
   which items, and nothing about another principal's `M_auth`. The names stay behind the gate; only
   their count leaks, and only in time, at sub-microsecond resolution per value against a network
   round trip.
-- The **route** is a function of the declaration and of the request's prefix, identical for every
-  principal — never of a statistic, and never of how much the principal can see, which §8.2 forbids
-  because a statistics-driven route makes execution time a function of a viewer's own clearance.
+- The **route** is a function of the declaration, of the request's prefix, and — on this surface
+  alone — of **the viewer's own composed cardinality against a deployment constant**: §6.3's
+  per-session set is built where that cardinality is at or under
+  `selection.max_suggest_set_entities`, and every wider viewer keeps the probe route. §8.2 forbids a
+  statistics-driven route because it makes execution time a function of how much the principal can
+  see; what is consulted here is **the principal's own** cardinality, which `/v1/viewport` at zoom 0
+  already returns exactly as `visible`, against a constant identical for every principal. No corpus
+  statistic enters it, and nothing about another principal's `M_auth` does. Decision 0124 records the
+  narrowing and what it would cost if wrong: a viewer learns which side of a published constant their
+  own cardinality falls on, and nothing about anyone else.
   What *is* a function of the principal's own visible set is where the walk **stops**: it terminates
   early on the first `limit` values they can see. That is a fact about their own mask, which the
   answer's own length already gives them.
@@ -684,8 +774,16 @@ channel. What bounds it:
   `max_suggestion_walk` values sit under the prefix, hidden ones included (§5.1) — the same
   quantity at the coarsest resolution there is, and a walk that spends its budget has already taken
   the budget's time. The register row names it as on the wire and not only in time.
-- **The lever that closes it is designed and priced** (§6.3), so the acceptance is reversible at a
-  known cost rather than structural.
+- **The route that closes it is designed and priced** (§6.3): a walk over a per-session set of
+  visible positions touches nothing hidden, so its time carries no count of hidden values at all.
+  The acceptance is therefore bounded to the probe route rather than structural.
+
+**The disposition is accepted, and the row is closed where the set is warm.** For an indexed column
+whose viewer is inside `selection.max_suggest_set_entities`, C31 is closed once the set has been
+built. It stays open on the probe route: the first keystrokes on a session-column pair before the
+build lands, a viewer wider than the constant, a blob-resident column that can never take the set,
+and the enumeration in every case. ⊘ The set is not built (§6.3), so today the channel is open
+everywhere.
 
 **The enumeration carries a weaker form of the same channel** — `/v1/categories` on a `derived`
 column walks the whole set and probes every value, so its time is a coarse read of the vocabulary's
@@ -763,7 +861,9 @@ match (§5.1).
 **C. Word-start matching — (a).** Key, title and word-start entries in r1 (§4).
 
 **D. Visibility construction — (b).** Per-request posting probes with a walk budget of 10⁵, the
-timing channel accepted and registered (§6.2, §8). The per-session set is the priced lever (§6.3).
+timing channel accepted and registered (§6.2, §8). The per-session set was the priced lever;
+decision 0124 makes it the second route, taken where the viewer's own cardinality is at or under
+`selection.max_suggest_set_entities` (§6.3).
 
 **E. Counts — (b), against the draft's recommendation.** `?counts=true` serves C8's
 `and_cardinality` per suggested value (§3, §5.1). The count never orders the page.
@@ -804,6 +904,20 @@ across publications behind an `Arc` and rebuilt only when values or titles chang
 `spawn_blocking` with one suggest in flight per session; and §8's route bullet splits the
 declaration-fixed route from the early termination on the caller's own mask. The channel is
 registered as **C31**, and the vocabulary's own read side left as issue #130.
+
+**r4 (2026-09-02) — the probe's time is split, and the set becomes the second route.** Arm 4 of the
+probe campaign put **68–72% of a probe in the binary search for the record**, against a 13–29%
+reading taken with the code array warm, and priced two fixes against the stages: a 4.2 MB bucket
+table over the code's top 20 bits, **taken** (§6.2, ⊘ not built, ~28–40 ms modelled for the sparsest
+viewer), and a per-record container-key sidecar, **declined** — 12–17% at best, nothing at all
+against a scattered candidate, and 82 MB per column.
+**§6.3 stops being a lever held in reserve and becomes the second route**, built on demand and keyed
+by session, resolved column, generation and overlay version, with the probe route answering the
+first keystrokes on a pair and the two routes differing only on `more`.
+**The route follows the viewer's own cardinality** (owner ruling; decision 0124): the set is built
+only at or under `selection.max_suggest_set_entities`, which narrows §8.2's rule on this surface
+alone — the quantity consulted is the viewer's own, which `/v1/viewport` already serves — and closes
+C31 for an indexed column once the set is warm.
 
 **r3 (2026-09-02) — figures corrected against the implementation's bench.** The engine's suggestion
 index and walk were built on branch `vs/engine`, and §6's shipped-route measurements replace r2's,

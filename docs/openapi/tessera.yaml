@@ -286,7 +286,7 @@ paths:
       operationId: suggestCategoryValues
       summary: Typeahead over a category vocabulary — the values whose key, title or a word start of either has `q` as a prefix, gated by the vocabulary's `visibility`.
       description: |
-        Specified by `value-suggestion.md` (normative r2) and decisions 0118–0123.
+        Specified by `value-suggestion.md` (normative r4) and decisions 0118–0124.
 
         The matching rule is declared and fixed: Unicode NFKC, then default case folding, then
         whitespace collapsed and trimmed, applied to `q` and to every indexed string alike. Each
@@ -306,7 +306,10 @@ paths:
 
         **There is no cursor.** A typeahead does not page: the user types another character.
         `more` says the walk stopped early — the page filled, or the deployment's
-        `selection.max_suggestion_walk` values were examined.
+        `selection.max_suggestion_walk` values were examined. That spent-budget form is the probe
+        route's; where the server answers from a per-session set of visible values — built for a
+        principal whose composed cardinality is at or under `selection.max_suggest_set_entities` —
+        `more` means the page filled and nothing else. ⊘ The set route is not built.
 
         Not behind the compute-admission gate, and at most one suggest in flight per session: a
         second while one is running is the shared `429 backpressure`, shed whole and refused before
@@ -1069,7 +1072,7 @@ components:
       type: object
       additionalProperties: false
       description: Design §7.2's clause parameters and the request-shape ceilings. All deployment constants, identical for every principal; a client cannot read a mark count as a density without them.
-      required: [k_min, k_max_marks, max_k, theta_target_marks, max_underlay_offset, max_tiles_per_request, max_category_values, max_shape_vertices, max_region_vertices, max_region_cells, max_suggestions, max_suggestion_walk, max_browse_rows]
+      required: [k_min, k_max_marks, max_k, theta_target_marks, max_underlay_offset, max_tiles_per_request, max_category_values, max_shape_vertices, max_region_vertices, max_region_cells, max_suggestions, max_suggestion_walk, max_suggest_set_entities, max_browse_rows]
       properties:
         k_min:
           type: integer
@@ -1120,6 +1123,10 @@ components:
           type: integer
           minimum: 1
           description: "The most values one suggestion request may examine before it stops and answers `more: true`; recommended 10⁵. It bounds latency and not disclosure — the enumeration walks the whole vocabulary unbudgeted — and a client that receives `more` on an unfilled page reads it as this budget rather than as its own arithmetic being wrong."
+        max_suggest_set_entities:
+          type: integer
+          minimum: 1
+          description: "The composed cardinality at or under which a suggestion is answered from a per-session set of the values this principal can see, rather than by probing one posting per value walked (`value-suggestion.md` §6.3, decision 0124); recommended 10⁷. Both routes serve the same page under the same gate and which answered is not on the wire; what differs is `more`, exact from the set route and possibly a spent walk budget from the probe route. A deployment constant, and the one here a caller can locate themselves against — they learn which side of it their own cardinality falls on, which a zoom-0 viewport already returns as `visible`. ⊘ The set route is not built; every request takes the probe route."
 
     Layer:
       type: object
@@ -1278,7 +1285,7 @@ components:
                 description: Present **iff** `counts=true` — the items carrying this value that this principal may see, exact and computed per request. Never `0` or `null` as a stand-in for absence, and never a sort key.
         more:
           type: boolean
-          description: "`true` iff the walk stopped before its range was exhausted — the page filled, or `selection.max_suggestion_walk` values were examined. There is no cursor; the client's response either way is to type more."
+          description: "`true` iff the walk stopped before its range was exhausted — the page filled, or `selection.max_suggestion_walk` values were examined. The budget form is the probe route's: answered from a per-session set of visible values (`value-suggestion.md` §6.3) it means the page filled and nothing else. There is no cursor; the client's response either way is to type more."
 
     Pin:
       type: object
