@@ -108,21 +108,39 @@ def _strip_count(values: list[dict]) -> list[dict]:
 
 def test_the_fixture_separates_narrow_and_wide_by_exactly_omega(suggest_server):
     """Checked before anything rests on it, `oracle.label_fixture`'s own discipline applied here:
-    `NARROW` and `WIDE` must differ in what they can see by exactly the `omega` members, or the
-    hidden-value assertions below are not testing C11 at all."""
+    `NARROW` and `WIDE` must differ in what they can see by exactly the `OMEGA_TERM`-gated range,
+    or the hidden-value assertions below are not testing C11 at all."""
     narrow = sf.visible_sources(sf.NARROW_GRANTS)
     wide = sf.visible_sources(sf.WIDE_GRANTS)
-    assert wide - narrow == sf.omega_visible_source_ids()
+    assert wide - narrow == sf.omega_gated_source_ids()
     assert narrow - wide == set()
 
     planted = sf.planted_topic()
     omega_members = sf.members_of(planted, "omega")
-    assert omega_members and omega_members <= sf.omega_visible_source_ids()
+    assert omega_members and omega_members <= sf.omega_gated_source_ids()
     assert not (omega_members & narrow), "omega has a member NARROW can see — it is not hidden"
     assert omega_members & wide, "omega has no member WIDE can see — the control is broken"
 
     assert "void" not in planted.values(), "void must be planted nowhere — it is the hollow value"
     assert sf.members_of(planted, "solo") == {sf.SOLO_ID}
+
+    # **The masking precondition for `counts=true`.** `ml` is an ordinary value with members both
+    # inside the gated range (invisible to NARROW) and outside it (visible to both) — so its own
+    # masked count must differ between the two principals. Without a value shaped this way, every
+    # *ordinary* value's members sit wholly inside both principals' visible sets, and a server that
+    # counted a value's members pre-mask — ignoring `candidate` entirely — would still pass
+    # `test_counts_equal_the_oracles_masked_cardinality` by accident.
+    ml_members = sf.members_of(planted, "ml")
+    ml_narrow = len(ml_members & narrow)
+    ml_wide = len(ml_members & wide)
+    assert ml_members & sf.omega_gated_source_ids(), (
+        "ml must have members inside the gated range too, or its count cannot distinguish "
+        "narrow from wide"
+    )
+    assert ml_wide > ml_narrow, (
+        f"ml's masked count did not move with the principal (narrow={ml_narrow}, wide={ml_wide}) "
+        "— the counts test below would pass against a server that counts pre-mask"
+    )
 
 
 # ---------------------------------------------------------------------------------------------

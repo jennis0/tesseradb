@@ -64,9 +64,17 @@ def fold_entry(text: str) -> str:
 
 
 def _wordish(c: str) -> bool:
-    """`SuggestionFold::wordish`: `Alphabetic ∪ Number ∪ Mark`, approximated by the Unicode
-    general-category groups `L*` (letter), `N*` (number) and `M*` (mark) — the same union the
-    design names, read off `unicodedata.category` rather than icu4x's property tables."""
+    """`SuggestionFold::wordish` (`crates/tessera-analyse/src/lib.rs`): `Alphabetic ∪ Number ∪
+    Mark`, approximated by the Unicode general-category groups `L*` (letter), `N*` (number) and
+    `M*` (mark), read off `unicodedata.category` rather than icu4x's property tables.
+
+    **`Mark` is the implementation's own addition, not the design's.** `value-suggestion.md` §4
+    says a word boundary is "a transition into a letter or digit"; `wordish`'s own doc explains why
+    the built rule is wider — a combining mark is not `Alphabetic`, so without it a word carrying
+    one (Thai `เป็น`, Devanagari, Arabic or Hebrew with a diacritic) breaks at the mark and reads as
+    two words, putting a spurious word-start entry where a whole-word rule should have none. This
+    oracle mirrors the implementation the differential is testing against, not the design prose.
+    """
     return unicodedata.category(c)[0] in ("L", "N", "M")
 
 
@@ -175,9 +183,16 @@ SEED = 20260902
 
 #: The one entity carrying `solo` — the positive control that finds a single visible member.
 SOLO_ID = 0
-#: The range carrying `omega` — visible only to a principal holding `OMEGA_TERM`, so the value is
-#: hidden to any principal that does not (C11: a hidden value must answer as if absent).
-OMEGA_LO, OMEGA_HI = 200, 210
+#: The range gated on `OMEGA_TERM` — visible only to a principal holding it, so anything planted
+#: inside is hidden to any principal that does not (C11: a hidden value must answer as if absent).
+#: Split in two: the first half still plants the *hollow-to-NARROW* value `omega`, entirely hidden
+#: members; the second half plants the *ordinary* value `ml`, which also has plenty of ordinary
+#: (visible) members outside this range. Every one of `ml`'s members inside `OMEGA_MID..OMEGA_HI`
+#: is invisible to `NARROW` and visible to `WIDE`, so `ml`'s own masked count must differ between
+#: the two principals — without that, a server that counted a value's members pre-mask (ignoring
+#: `candidate` entirely) would still pass `counts=true` against every *ordinary* value, since an
+#: ordinary value's members used to sit wholly inside both principals' visible sets.
+OMEGA_LO, OMEGA_MID, OMEGA_HI = 200, 205, 210
 OMEGA_TERM = 42
 
 #: `topic` — the `derived` vocabulary, planted to exercise every entry kind and every fold rule
@@ -214,7 +229,9 @@ def topic_of(source_id: int) -> str | None:
     was *given*, upstream of anything the build derives from it)."""
     if source_id == SOLO_ID:
         return "solo"
-    if OMEGA_LO <= source_id < OMEGA_HI:
+    if OMEGA_LO <= source_id < OMEGA_MID:
+        return "ml"
+    if OMEGA_MID <= source_id < OMEGA_HI:
         return "omega"
     if source_id % 6 == 0:
         return None
@@ -230,7 +247,9 @@ def archive_of(source_id: int) -> str | None:
     return ["red", "blue"][source_id % 2]
 
 
-def omega_visible_source_ids() -> set[int]:
+def omega_gated_source_ids() -> set[int]:
+    """The whole range gated on `OMEGA_TERM` — hidden to any principal short of it, whichever
+    topic value (`omega` or `ml`) a given source inside it carries."""
     return set(range(OMEGA_LO, OMEGA_HI))
 
 
