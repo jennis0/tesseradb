@@ -254,7 +254,7 @@ class Stage:
 
 
 def _tiles_by_id(tiles) -> dict[int, tuple[int, int, int]]:
-    return {t: (v, m, s) for t, v, m, s in tiles}
+    return {t: (v, m, s) for t, v, m, s, _h in tiles}
 
 
 def _served_fx(raw: bytes) -> frozenset[int]:

@@ -335,6 +335,10 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
         // to every principal alike in `/v1/meta`. Its sibling `FilterRefused` is an unreadable
         // artefact and stays a fail-closed 500 through the catch-all below.
         EngineError::FilterMalformed(detail) => ApiError::Contract(detail),
+        // Every arm of a browse refusal names deployment schema the caller reads off `/v1/meta` —
+        // a layer, a level, a page bound — so refusing discloses nothing they were not already
+        // told, and none of them is ever about an artifact (`highlight-and-hierarchy.md` §4).
+        browse @ EngineError::BrowseRefused(_) => ApiError::Contract(browse.to_string()),
         // Also a request the caller can fix by asking for less, and its Display names only the
         // caller's own numbers and the configured limit.
         too_many @ EngineError::TooManyTiles { .. } => ApiError::Contract(too_many.to_string()),

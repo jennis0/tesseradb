@@ -1,6 +1,10 @@
 # Tessera — Conformance Suite Design
 
-**Status:** Draft r20 — **the suggestion verb gets a differential** (r20, 2026-09-02;
+**Status:** Draft r21 — **the highlight, the `member_of` leaf and the browse verb are driven**
+(r21, 2026-09-02; `highlight-and-hierarchy.md` §2–§4). Seventeen cases in three modules; the
+checked marker moves to **756**. No row of §4.6 is added and none moves position — the evidence
+lands in the existing I2, I3 and I12 cells, all three surfaces being the filter contract's own
+machinery asked a second question. §0 carries what each module holds.  **r20 — the suggestion verb gets a differential** (r20, 2026-09-02;
 `value-suggestion.md` §3, §4, §7): `conformance/tests/test_suggest_differential.py`, against a
 dedicated `suggest_fixture.py` rather than the mask catalogue — whose planted vocabulary values
 carry no titles and so cannot exercise the fold's title or word-start entries — sweeps
@@ -74,8 +78,23 @@ collects, by a step in CI's `conformance` job; a hand-edit that disagrees with t
 there. Edit it when the suite's size changes and the step tells you the number, not to make a
 sentence read better — and read it as a size, never as a coverage claim, which is §4.6's business.
 
-    conformance-cases = 739
+    conformance-cases = 756
 
+
+**r20 (2026-09-02) — the highlight, the `member_of` leaf and the browse verb are driven**
+(`highlight-and-hierarchy.md` §2–§4). Seventeen cases arrive in three new modules and the checked
+marker moves to **724**: `test_member_of.py` (5) holds the leaf to `oracle.filters`' new
+`MemberOfColumn`, written from §3 rather than from the engine, and to the empty-operand rule —
+an unknown id, an id of another layer, a suppressed artifact and one withheld by criterion are one
+response, frame for frame and header for header; `test_highlight.py` (7) holds the served set
+identical with and without a highlight over five viewports and three principals, the per-tile
+`highlighted` count to the `matched` a request carrying `all_of[filters, highlight]` in `filters`
+reports, and the artifacts frame's bit to that request's own; `test_browse.py` (5) holds every
+browse row to the artifacts frame's own identifiers and counts, the gate to running before the
+page, and the cursor to walking the total order exactly. **No row of §4.6 is added and none moves
+position**: the evidence lands in the existing I2, I3 and I12 cells, all three surfaces being the
+filter contract's own machinery asked a second question. Two reserved column names — `member_of`
+and `highlighted` — are refused at the build, checked in the two leaf modules.
 
 The invariant-by-invariant position is §4.6, and it is this document's most important output.
 

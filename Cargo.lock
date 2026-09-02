@@ -2671,6 +2671,7 @@ dependencies = [
  "croaring",
  "libc",
  "memchr",
+ "parquet",
  "rand 0.8.7",
  "rayon",
  "reqwest",

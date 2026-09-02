@@ -415,6 +415,25 @@ pub enum RegionLeaf {
     Artifact(tessera_types::TesseraId),
 }
 
+/// The leaf name a `member_of` leaf answers to in [`FilterExpr::columns`] — reserved at the build
+/// exactly as `region` is (`highlight-and-hierarchy.md` §3).
+pub const MEMBER_OF_COLUMN: &str = "member_of";
+
+/// The `member_of` leaf: one artifact of one layer, resolved to `membership ∩ M_auth` in row space
+/// over the whole view (`highlight-and-hierarchy.md` §3).
+///
+/// **The layer is deployment schema and the artifact is a value**, which is what settles the two
+/// different refusals: a layer this principal does not reach is [`FilterError::UnknownLayer`], a
+/// `422` on `contracts.md` §3.2's unknown-column rule, while an identifier that names nothing —
+/// or an artifact below this principal's own existence criterion, or suppressed, or of another
+/// layer — is the **empty operand**. Answering `422` to the second would make the leaf an
+/// existence oracle over exactly what the criterion withholds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberOfLeaf {
+    pub layer: String,
+    pub artifact: tessera_types::TesseraId,
+}
+
 /// A filter expression: a leaf predicate over one column, or a combinator over sub-expressions.
 ///
 /// **Any boolean combination, evaluated inside the candidate** (decision 0062). Every node returns a
@@ -437,6 +456,11 @@ pub enum FilterExpr {
     /// [`FilterColumns::evaluate_routed`] resolves it through the caller's resolver, which is
     /// where the mask, the segments and the cache live.
     Region(RegionLeaf),
+    /// One artifact's membership, as a set of rows over the whole view
+    /// (`highlight-and-hierarchy.md` §3). Row space only, for [`FilterExpr::Region`]'s reason, and
+    /// resolved through the caller's resolver, which holds the mask, the layer registry and the
+    /// artifact's own existence criterion.
+    MemberOf(MemberOfLeaf),
     /// Every sub-expression must match. Empty matches the whole candidate — the identity, and what
     /// an absent filter means.
     AllOf(Vec<FilterExpr>),
@@ -479,7 +503,7 @@ impl FilterExpr {
     /// Nesting depth, with a leaf at 1.
     pub fn depth(&self) -> usize {
         match self {
-            FilterExpr::Leaf { .. } | FilterExpr::Region(_) => 1,
+            FilterExpr::Leaf { .. } | FilterExpr::Region(_) | FilterExpr::MemberOf(_) => 1,
             FilterExpr::AllOf(kids) | FilterExpr::AnyOf(kids) | FilterExpr::NoneOf(kids) => {
                 1 + kids.iter().map(FilterExpr::depth).max().unwrap_or(0)
             }
@@ -503,6 +527,11 @@ impl FilterExpr {
             FilterExpr::Region(_) => {
                 out.insert(REGION_COLUMN);
             }
+            // The second reserved word, on the same argument: `none_of: [member_of, member_of]`
+            // is one column and needs no special case in the negation rule.
+            FilterExpr::MemberOf(_) => {
+                out.insert(MEMBER_OF_COLUMN);
+            }
             FilterExpr::AllOf(kids) | FilterExpr::AnyOf(kids) | FilterExpr::NoneOf(kids) => {
                 for kid in kids {
                     kid.collect_columns(out);
@@ -521,7 +550,7 @@ impl FilterExpr {
     /// meant.
     fn check_negations(&self) -> Result<(), FilterError> {
         match self {
-            FilterExpr::Leaf { .. } | FilterExpr::Region(_) => Ok(()),
+            FilterExpr::Leaf { .. } | FilterExpr::Region(_) | FilterExpr::MemberOf(_) => Ok(()),
             FilterExpr::AllOf(kids) | FilterExpr::AnyOf(kids) => {
                 kids.iter().try_for_each(FilterExpr::check_negations)
             }
@@ -1184,11 +1213,17 @@ pub enum RowExpr {
     /// under the request's composed mask (`crate::region`). Exact at any range, so a tree made of
     /// these and projected entity verdicts alone is [`crate::compose::FilterRows::Complete`].
     Region(crate::region::RegionRows),
-    /// `none_of` over region leaves: every rowed entity carries a position, so the presence half
-    /// is the whole view — or the request's domain, where a sibling leaf bounds the tree — and the
-    /// answer is the complement of the union within it (selection-operand §5). A buffered entity
-    /// has no row and matches neither the region nor this.
-    NotInRegion(Vec<RowExpr>),
+    /// A `member_of` leaf, already resolved: `membership ∩ M_auth` over the **whole view**
+    /// (`highlight-and-hierarchy.md` §3). Exact at any range, so it composes into
+    /// [`crate::compose::FilterRows::Complete`] as a region does — and unlike a region it has
+    /// already met the mask, so its cardinality is a quantity the principal may already read off
+    /// the artifacts frame.
+    MemberOf(Bitmap),
+    /// `none_of` over region or `member_of` leaves: every rowed entity carries a position and may
+    /// be a member, so the presence half is the whole view — or the request's domain, where a
+    /// sibling leaf bounds the tree — and the answer is the complement of the union within it
+    /// (selection-operand §5). A buffered entity has no row and matches neither the leaf nor this.
+    NotInRows(Vec<RowExpr>),
 }
 
 impl RowExpr {
@@ -1203,8 +1238,8 @@ impl RowExpr {
     fn collect_verdicts<'a>(&'a self, out: &mut Vec<&'a Bitmap>) {
         match self {
             RowExpr::Entity(bitmap) => out.push(bitmap),
-            RowExpr::Leaf { .. } | RowExpr::Region(_) => {}
-            RowExpr::AllOf(kids) | RowExpr::AnyOf(kids) | RowExpr::NotInRegion(kids) => {
+            RowExpr::Leaf { .. } | RowExpr::Region(_) | RowExpr::MemberOf(_) => {}
+            RowExpr::AllOf(kids) | RowExpr::AnyOf(kids) | RowExpr::NotInRows(kids) => {
                 for kid in kids {
                     kid.collect_verdicts(out);
                 }
@@ -1222,9 +1257,9 @@ impl RowExpr {
     /// `FilterRows::Complete`.
     pub fn is_whole_view(&self) -> bool {
         match self {
-            RowExpr::Entity(_) | RowExpr::Region(_) => true,
+            RowExpr::Entity(_) | RowExpr::Region(_) | RowExpr::MemberOf(_) => true,
             RowExpr::Leaf { .. } | RowExpr::NoneOf { .. } => false,
-            RowExpr::AllOf(kids) | RowExpr::AnyOf(kids) | RowExpr::NotInRegion(kids) => {
+            RowExpr::AllOf(kids) | RowExpr::AnyOf(kids) | RowExpr::NotInRows(kids) => {
                 kids.iter().all(RowExpr::is_whole_view)
             }
         }
@@ -1234,8 +1269,12 @@ impl RowExpr {
     /// rows the mask has not yet met, and must not be counted before it does.
     pub fn has_region(&self) -> bool {
         match self {
-            RowExpr::Region(_) | RowExpr::NotInRegion(_) => true,
-            RowExpr::Entity(_) | RowExpr::Leaf { .. } => false,
+            // **A `member_of` leaf is not one**, though it shares the negation node: its set has
+            // already met the mask, so its cardinality is the masked count the artifacts frame
+            // already serves. The negation is, because its presence half is every row in scope
+            // and the mask has not met those.
+            RowExpr::Region(_) | RowExpr::NotInRows(_) => true,
+            RowExpr::Entity(_) | RowExpr::Leaf { .. } | RowExpr::MemberOf(_) => false,
             RowExpr::AllOf(kids) | RowExpr::AnyOf(kids) => kids.iter().any(RowExpr::has_region),
             RowExpr::NoneOf { kids, .. } => kids.iter().any(RowExpr::has_region),
         }
@@ -1246,8 +1285,8 @@ impl RowExpr {
     pub fn region_verdict(&self) -> Option<crate::region::RegionVerdict> {
         match self {
             RowExpr::Region(rows) => Some(rows.verdict),
-            RowExpr::Entity(_) | RowExpr::Leaf { .. } => None,
-            RowExpr::AllOf(kids) | RowExpr::AnyOf(kids) | RowExpr::NotInRegion(kids) => kids
+            RowExpr::Entity(_) | RowExpr::Leaf { .. } | RowExpr::MemberOf(_) => None,
+            RowExpr::AllOf(kids) | RowExpr::AnyOf(kids) | RowExpr::NotInRows(kids) => kids
                 .iter()
                 .filter_map(RowExpr::region_verdict)
                 .reduce(|a, b| a.coarser(b)),
@@ -1265,6 +1304,24 @@ impl RowExpr {
 /// generation is [`FilterError::RegionUnavailable`], never an empty operand.
 pub type RegionResolver<'a> =
     dyn Fn(&RegionLeaf) -> Result<crate::region::RegionRows, FilterError> + 'a;
+
+/// How a routed evaluation answers a `member_of` leaf — the caller's, for
+/// [`RegionResolver`]'s reason and one more: the gate is the artifact's own existence criterion,
+/// which lives in `viewport.rs` beside the one the artifacts frame applies, and two
+/// transcriptions of it is the failure this codebase has written down more than once.
+///
+/// The answer is `membership ∩ M_auth` over the whole view. An artifact this principal would not
+/// be served is the **empty bitmap** and never an error; only a layer name outside their own
+/// (`FilterError::UnknownLayer`) and a generation that cannot answer at all
+/// (`FilterError::MemberOfUnavailable`) refuse.
+pub type MemberResolver<'a> = dyn Fn(&MemberOfLeaf) -> Result<Bitmap, FilterError> + 'a;
+
+/// The two row-space leaves' resolvers, together — one argument rather than two on
+/// [`FilterColumns::evaluate_routed`] and on every frame of [`FilterColumns::route`].
+pub struct RowLeafResolvers<'a> {
+    pub regions: &'a RegionResolver<'a>,
+    pub members: &'a MemberResolver<'a>,
+}
 
 /// The space a sub-tree evaluates in — [`FilterColumns::space_of`]'s answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1316,6 +1373,18 @@ pub enum FilterError {
     /// view whose segments could not be assembled. Fail-closed: an empty operand here would be
     /// indistinguishable from a shape that holds nothing.
     RegionUnavailable(String),
+    /// A `member_of` leaf reached the entity-space evaluator. Row space only, exactly as
+    /// [`FilterError::RegionInEntitySpace`] is.
+    MemberOfInEntitySpace,
+    /// A `member_of` leaf named a layer this principal's `/v1/meta` does not list. **A `422`, and
+    /// the caller's fault**: a layer name is deployment schema, resolved through the same probe
+    /// that answers alike for a gate-failed name and a never-registered one
+    /// (`LayerRegistry::resolve_for`), so refusing by name discloses nothing this principal was
+    /// not already told. The *artifact* is a value and is never refused (§3).
+    UnknownLayer(String),
+    /// The `member_of` resolver could not answer for this generation. Fail-closed, for
+    /// [`FilterError::RegionUnavailable`]'s reason.
+    MemberOfUnavailable(String),
 }
 
 impl std::fmt::Display for FilterError {
@@ -1380,6 +1449,23 @@ impl std::fmt::Display for FilterError {
                 "the 'region' leaf could not be resolved against this generation ({detail}); \
                  refused rather than answered empty"
             ),
+            FilterError::MemberOfInEntitySpace => write!(
+                f,
+                "a 'member_of' leaf is answered in row space over the whole view and cannot be \
+                 evaluated by the entity-space evaluator"
+            ),
+            FilterError::UnknownLayer(layer) => write!(
+                f,
+                "'member_of' names layer '{layer}', which this deployment does not publish to you \
+                 — /v1/meta lists the layers a 'member_of' leaf may name. The *artifact* it names \
+                 is never refused: an identifier that resolves to nothing you may see is an empty \
+                 operand"
+            ),
+            FilterError::MemberOfUnavailable(detail) => write!(
+                f,
+                "the 'member_of' leaf could not be resolved against this generation ({detail}); \
+                 refused rather than answered empty"
+            ),
         }
     }
 }
@@ -1403,12 +1489,15 @@ impl FilterError {
             FilterError::UndeclaredColumn(_)
             | FilterError::TooDeep { .. }
             | FilterError::NegationSpansColumns { .. }
-            | FilterError::NegationWithoutPresence { .. } => true,
+            | FilterError::NegationWithoutPresence { .. }
+            | FilterError::UnknownLayer(_) => true,
             FilterError::PostingsUnreadable { .. }
             | FilterError::DictionaryUnreadable { .. }
             | FilterError::MembershipUnavailable(_)
             | FilterError::RegionInEntitySpace
-            | FilterError::RegionUnavailable(_) => false,
+            | FilterError::RegionUnavailable(_)
+            | FilterError::MemberOfInEntitySpace
+            | FilterError::MemberOfUnavailable(_) => false,
         }
     }
 }
@@ -2647,14 +2736,15 @@ impl FilterColumns {
     /// [`RowExpr`] awaits the one crossing and the row-space leaves, which need the request's
     /// tile ranges and so live in `viewport.rs`.
     ///
-    /// `regions` answers each region leaf (selection-operand §5): always row space, always the
-    /// whole view, so a tree carrying one never returns [`RoutedFilter::Entity`].
+    /// `resolvers` answers each region leaf (selection-operand §5) and each `member_of` leaf
+    /// (`highlight-and-hierarchy.md` §3): both are always row space and always the whole view, so
+    /// a tree carrying either never returns [`RoutedFilter::Entity`].
     pub fn evaluate_routed(
         &self,
         expr: &FilterExpr,
         candidate: &Bitmap,
         prefer_row: bool,
-        regions: &RegionResolver<'_>,
+        resolvers: &RowLeafResolvers<'_>,
     ) -> Result<RoutedFilter, FilterError> {
         let depth = expr.depth();
         if depth > MAX_FILTER_DEPTH {
@@ -2668,7 +2758,7 @@ impl FilterColumns {
             return Ok(RoutedFilter::Entity(self.eval(expr, candidate)?));
         }
         Ok(RoutedFilter::Row(
-            self.route(expr, candidate, prefer_row, regions)?,
+            self.route(expr, candidate, prefer_row, resolvers)?,
         ))
     }
 
@@ -2682,8 +2772,9 @@ impl FilterColumns {
     /// One column's routed space — **the single transcription of the leaf-routing rule**, called
     /// for a leaf and for a `none_of`'s one column alike, so the two cannot drift.
     fn leaf_space(&self, column: &str, prefer_row: bool) -> Result<Space, FilterError> {
-        // The reserved word names no column: a region is row space whatever the request's span.
-        if column == REGION_COLUMN {
+        // The reserved words name no column: a region and a `member_of` are row space whatever
+        // the request's span.
+        if column == REGION_COLUMN || column == MEMBER_OF_COLUMN {
             return Ok(Space::Row);
         }
         let placement = self.placement_of(column)?;
@@ -2710,7 +2801,7 @@ impl FilterColumns {
     fn space_of(&self, expr: &FilterExpr, prefer_row: bool) -> Result<Space, FilterError> {
         match expr {
             FilterExpr::Leaf { column, .. } => self.leaf_space(column, prefer_row),
-            FilterExpr::Region(_) => Ok(Space::Row),
+            FilterExpr::Region(_) | FilterExpr::MemberOf(_) => Ok(Space::Row),
             FilterExpr::AllOf(kids) | FilterExpr::AnyOf(kids) => {
                 let mut all_entity = true;
                 for kid in kids {
@@ -2744,7 +2835,7 @@ impl FilterColumns {
         expr: &FilterExpr,
         candidate: &Bitmap,
         prefer_row: bool,
-        regions: &RegionResolver<'_>,
+        resolvers: &RowLeafResolvers<'_>,
     ) -> Result<RowExpr, FilterError> {
         if self.space_of(expr, prefer_row)? == Space::Entity {
             return Ok(RowExpr::Entity(self.eval(expr, candidate)?));
@@ -2755,15 +2846,16 @@ impl FilterColumns {
                 family: self.placement_of(column)?.family,
                 operand: operand.clone(),
             }),
-            FilterExpr::Region(leaf) => Ok(RowExpr::Region(regions(leaf)?)),
+            FilterExpr::Region(leaf) => Ok(RowExpr::Region((resolvers.regions)(leaf)?)),
+            FilterExpr::MemberOf(leaf) => Ok(RowExpr::MemberOf((resolvers.members)(leaf)?)),
             FilterExpr::AllOf(kids) => Ok(RowExpr::AllOf(
                 kids.iter()
-                    .map(|kid| self.route(kid, candidate, prefer_row, regions))
+                    .map(|kid| self.route(kid, candidate, prefer_row, resolvers))
                     .collect::<Result<Vec<_>, _>>()?,
             )),
             FilterExpr::AnyOf(kids) => Ok(RowExpr::AnyOf(
                 kids.iter()
-                    .map(|kid| self.route(kid, candidate, prefer_row, regions))
+                    .map(|kid| self.route(kid, candidate, prefer_row, resolvers))
                     .collect::<Result<Vec<_>, _>>()?,
             )),
             FilterExpr::NoneOf(kids) => {
@@ -2775,10 +2867,10 @@ impl FilterColumns {
                     .to_string();
                 let routed = kids
                     .iter()
-                    .map(|kid| self.route(kid, candidate, prefer_row, regions))
+                    .map(|kid| self.route(kid, candidate, prefer_row, resolvers))
                     .collect::<Result<Vec<_>, _>>()?;
-                if column == REGION_COLUMN {
-                    return Ok(RowExpr::NotInRegion(routed));
+                if column == REGION_COLUMN || column == MEMBER_OF_COLUMN {
+                    return Ok(RowExpr::NotInRows(routed));
                 }
                 let family = self.placement_of(&column)?.family;
                 Ok(RowExpr::NoneOf {
@@ -2907,6 +2999,7 @@ impl FilterColumns {
         match expr {
             FilterExpr::Leaf { column, operand } => self.resolve(column, operand, candidate),
             FilterExpr::Region(_) => Err(FilterError::RegionInEntitySpace),
+            FilterExpr::MemberOf(_) => Err(FilterError::MemberOfInEntitySpace),
             FilterExpr::AllOf(kids) => {
                 let mut live = candidate.clone();
                 for kid in kids {

@@ -290,6 +290,19 @@ pub struct EffectiveMask {
     /// It is a *row-space* set because that is the space counts are taken in. Its entity-space
     /// origin already met the composed verdict, so intersecting here narrows and cannot widen.
     filter: Option<FilterRows>,
+    /// The rows the request's **highlight** admits, or `None` where it carried none
+    /// (`highlight-and-hierarchy.md` §2).
+    ///
+    /// **A second field beside `filter`, never folded into it**, and that separation is the whole
+    /// of what makes a highlight a highlight: [`Self::rows_in_range`] — which selection draws
+    /// from, and which every `visible`/`matched` count is taken through — never reads this, so the
+    /// served set is identical with and without one. Only the three answers §2 adds read it: the
+    /// per-tile `highlighted` count, the per-point bit and the per-artifact bit.
+    ///
+    /// Its extent is the request's own tiles: a highlight always takes the per-tile crossing, so
+    /// [`FilterRows::Viewport`] is the ordinary shape here and every question asked of it is
+    /// inside the domain by construction.
+    highlight: Option<FilterRows>,
 }
 
 /// The two questions an artifact's membership asks of a viewer's mask.
@@ -488,6 +501,72 @@ impl EffectiveMask {
     pub fn with_filter(mut self, rows: FilterRows) -> Self {
         self.filter = Some(rows);
         self
+    }
+
+    /// Attach the request's highlight — see [`Self::highlight`].
+    ///
+    /// Consumes and returns for [`Self::with_filter`]'s reason, and the order of the two is free:
+    /// they are separate fields and neither is read by the other's answers.
+    pub fn with_highlight(mut self, rows: FilterRows) -> Self {
+        self.highlight = Some(rows);
+        self
+    }
+
+    /// Whether this request carried a highlight — which decides whether the *points* frame has a
+    /// `highlighted` column at all, and whether the artifacts frame's bit is `null`.
+    pub fn has_highlight(&self) -> bool {
+        self.highlight.is_some()
+    }
+
+    /// The rows in `r` that are visible, match the request's filter **and** satisfy its highlight
+    /// — `TileCount::highlighted` (`highlight-and-hierarchy.md` §2).
+    ///
+    /// **Equal to [`Self::count_matched_range`] with no highlight**, which is what makes the
+    /// column always present on the wire rather than optional: an absent highlight is the
+    /// identity, and `highlighted = matched` says the same thing a missing column would, at eight
+    /// bytes a tile and with no schema to branch on.
+    ///
+    /// `highlighted ≤ matched ≤ visible` holds by construction: this is the intersection of the
+    /// set `count_matched_range` counts with one more.
+    pub fn count_highlighted_range(&self, r: Range<u32>) -> u64 {
+        match &self.highlight {
+            None => self.count_matched_range(r),
+            Some(highlight) => {
+                debug_assert!(
+                    highlight.covers(&r),
+                    "a highlighted count over {r:?}, which the per-tile crossing never tested"
+                );
+                self.rows_in_range(r).and_cardinality(highlight.rows())
+            }
+        }
+    }
+
+    /// Whether one **served** row satisfies the highlight — the *points* frame's bit.
+    ///
+    /// The row came out of selection, so it is already inside `M_auth` and inside the filter's
+    /// candidate; what is left to ask is the highlight alone, which is why this is one `contains`
+    /// and not a composition. `false` where the request carried no highlight, which no caller
+    /// reads: the column is absent from the frame then.
+    pub fn is_highlighted(&self, row: u32) -> bool {
+        self.highlight
+            .as_ref()
+            .is_some_and(|highlight| highlight.rows().contains(row))
+    }
+
+    /// The rows of `here` that satisfy **`all_of[filters, highlight]`** — the artifacts frame's
+    /// `highlighted` bit (`highlight-and-hierarchy.md` §2), or `None` where the request carried no
+    /// highlight and there is no question to answer.
+    ///
+    /// [`Self::matched_rows`]'s rules hold unchanged, `here` having to come from
+    /// [`MaskedSet::visible_rows`]: this narrows that answer by one more set and so stays inside
+    /// `M_auth` whatever either expression matched. It is decision 0104's bit computed for the
+    /// conjunction, which is why it is the same shape and not a second kind of answer.
+    pub fn highlighted_rows(&self, here: &Bitmap) -> Option<Bitmap> {
+        let highlight = self.highlight.as_ref()?;
+        Some(match self.matched_rows(here) {
+            Some(matched) => matched.and(highlight.rows()),
+            None => here.and(highlight.rows()),
+        })
     }
 
     /// `base.range_cardinality(r) − |minus ∩ r| + |plus ∩ r|` — see this module's doc for why the
@@ -954,6 +1033,7 @@ pub fn compose(
         // via `with_filter`, which is what keeps this function's structural invariants — and the
         // unfiltered total θ anchors on — properties of composition alone.
         filter: None,
+        highlight: None,
     }
 }
 

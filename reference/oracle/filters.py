@@ -213,6 +213,37 @@ class RegionColumn:
 
 
 @dataclass(frozen=True)
+class MemberOfColumn:
+    """The `member_of` leaf's definition (`highlight-and-hierarchy.md` §3), from the fixture's own
+    member file: one artifact of one layer, resolved to `membership ∩ M_auth`.
+
+    `members` maps `(layer, tessera_id as a decimal string)` → the member entities of the artifact
+    **this principal is served**. A pair absent here is an **empty operand** — an identifier that
+    names nothing, one of another layer, one suppressed, one below this principal's own existence
+    criterion — exactly as the server answers, and never a refusal: a `422` there would make the
+    leaf an existence oracle over what the criterion withholds.
+
+    `rowed` is every entity that has a row in this view; one absent from it matches neither the
+    leaf nor its negation, on `RegionColumn`'s rule and for the same reason.
+
+    **An unknown *layer* is not modelled here.** It is a `422` at the wire and the differential
+    asserts it against the server directly; a column object that could answer it would be a second
+    statement of a refusal rule.
+    """
+
+    members: dict[tuple[str, str], set[int]]
+    rowed: set[int]
+
+    def matches(self, entity: int, operand: dict) -> bool:
+        if entity not in self.rowed:
+            return False
+        if not isinstance(operand, dict) or set(operand) != {"layer", "artifact"}:
+            raise ValueError(f"a member_of leaf is {{layer, artifact}}: {operand!r}")
+        key = (str(operand["layer"]), str(operand["artifact"]))
+        return entity in self.members.get(key, set())
+
+
+@dataclass(frozen=True)
 class NumericColumn:
     """One numeric column as the fixture planted it: per-entity values, absent entities missing.
     `eq`, `in` and `range` — the last a bounds object of `gte`/`gt`/`lte`/`lt`, each side at most
@@ -283,6 +314,8 @@ def _carries_a_value(column, entity: int) -> bool:
     """
     if isinstance(column, RegionColumn):
         return entity in column.positions
+    if isinstance(column, MemberOfColumn):
+        return entity in column.rowed
     return entity in column.values
 
 
@@ -359,6 +392,13 @@ def matches(expr: dict, columns: dict, entity: int) -> bool:
     if name == "region":
         # The reserved word: a shape, or a published artifact, as one leaf (selection-operand §2).
         return _region_matches(columns[name], body, entity)
+    if name == "member_of":
+        # The second reserved word: one artifact of one layer, whose body is the pair naming it
+        # rather than an operator (`highlight-and-hierarchy.md` §3).
+        column = columns[name]
+        if not isinstance(column, MemberOfColumn):
+            raise UnknownColumn("member_of")
+        return column.matches(entity, body)
     if not isinstance(body, dict) or len(body) != 1:
         raise ValueError(f"a leaf maps one column to one operator: {expr!r}")
     (operator, operand), = body.items()

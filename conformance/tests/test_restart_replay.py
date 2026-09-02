@@ -408,7 +408,7 @@ def test_no_acked_operation_is_lost_when_the_unsynced_tail_is_discarded(
 
             token = srv2.authorise([dictionary[base_term].decode("ascii")])["token"]
             tiles, _points = decode_viewport(srv2.viewport(token, VIEW, zoom, bbox, k=200))
-            assert {t: v for t, v, m, _s in tiles} == expected_counts, (
+            assert {t: v for t, v, m, _s, _h in tiles} == expected_counts, (
                 "an acked delete or suppression did not survive the discard of the unsynced tail"
             )
         finally:
@@ -478,7 +478,7 @@ def test_deny_ops_and_ingest_survive_a_sigkill_restart(catalogue_bundle_root: Pa
         zoom = 4
         raw = srv.viewport(token, VIEW, zoom, bbox, k=200)
         tiles, _points = decode_viewport(raw)
-        counts_before = {t: v for t, v, m, _s in tiles}
+        counts_before = {t: v for t, v, m, _s, _h in tiles}
 
         from_oracle_before = _oracle_counts(oracle_bundle, resolved_mask_before, VIEW, zoom, bbox)
         assert counts_before == from_oracle_before
@@ -503,7 +503,7 @@ def test_deny_ops_and_ingest_survive_a_sigkill_restart(catalogue_bundle_root: Pa
             token2 = auth2["token"]
             raw2 = srv2.viewport(token2, VIEW, zoom, bbox, k=200)
             tiles2, _points2 = decode_viewport(raw2)
-            counts_after_restart = {t: v for t, v, m, _s in tiles2}
+            counts_after_restart = {t: v for t, v, m, _s, _h in tiles2}
 
             assert counts_after_restart == from_oracle_before, (
                 "the delete/suppress deny ops must survive a SIGKILL + WAL replay unchanged"

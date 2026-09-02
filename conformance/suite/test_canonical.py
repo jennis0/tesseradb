@@ -22,7 +22,18 @@ import pytest
 from .canonical import Streamed, canonicalise_viewport
 
 U64 = pa.uint64()
-TILES = pa.schema([("tile", U64), ("visible", U64), ("matched", U64), ("served", U64)])
+# `highlighted` is the fifth column and is always present, equal to `matched` where the request
+# carried no highlight (`highlight-and-hierarchy.md` §2) — so a synthetic body must carry it or
+# the decoder is right to refuse it.
+TILES = pa.schema(
+    [
+        ("tile", U64),
+        ("visible", U64),
+        ("matched", U64),
+        ("served", U64),
+        ("highlighted", U64),
+    ]
+)
 POINTS = pa.schema([("tessera_id", U64), ("code", U64)])
 CELLS = pa.schema([("cell", U64), ("count", U64)])
 
@@ -44,7 +55,7 @@ def _frame(kind: int, payload: bytes) -> bytes:
 
 
 def _body(
-    tiles: list[list[tuple[int, int, int, int]]],
+    tiles: list[list[tuple[int, int, int, int, int]]],
     points_chunks: list[list[tuple[int, int]]],
     subcells: list[tuple[int, int]] | None = None,
     stream_us: int = 1,
@@ -69,7 +80,7 @@ def _body(
 
 
 # Two tiles, three points, one underlay cell — the smallest body exercising all four surfaces.
-BASE_TILES = [(0, 5, 5, 2), (3, 7, 7, 1)]
+BASE_TILES = [(0, 5, 5, 2, 5), (3, 7, 7, 1, 7)]
 BASE_POINTS = [(1, 10), (2, 20), (3, 30)]
 BASE_CELLS = [(0, 4)]
 
@@ -109,7 +120,7 @@ def test_each_difference_lands_on_exactly_its_own_surface():
     """
     base = canonicalise_viewport(_base())
     moved_by = {
-        "tiles": _base(tiles=[[(0, 6, 6, 2), (3, 7, 7, 1)]]),
+        "tiles": _base(tiles=[[(0, 6, 6, 2, 6), (3, 7, 7, 1, 7)]]),
         "points": _base(points_chunks=[[(1, 10), (2, 20), (3, 99)]]),
         "underlay": _base(subcells=[(0, 5)]),
         "trailer": _base(flushes=2),

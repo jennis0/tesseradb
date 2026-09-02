@@ -317,6 +317,7 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         max_shape_vertices: config.max_shape_vertices,
         max_region_vertices: config.max_region_vertices,
         max_region_cells: config.max_region_cells,
+        max_browse_rows: config.max_browse_rows,
         // Gates only /v1/viewport, /v1/items and /session/authorise (each handler wraps its own
         // closure); never the control plane, and never /healthz, /readyz, /meta or /revoke — the
         // probes are deliberately off the control plane and outside every gate

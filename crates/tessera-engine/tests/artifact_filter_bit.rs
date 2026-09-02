@@ -113,7 +113,7 @@ fn viewports() -> Vec<(u8, [f64; 4])> {
     ]
 }
 
-/// What one layer serves one principal at one viewport: key against masked count and the bit.
+/// What one layer serves one principal at one viewport: key against masked count and the two bits.
 fn served(
     engine: &Engine,
     grant: &str,
@@ -122,11 +122,29 @@ fn served(
     bbox: [f64; 4],
     filter: Option<FilterExpr>,
 ) -> BTreeMap<String, (u64, Option<bool>)> {
+    lit(engine, grant, layer, zoom, bbox, filter, None)
+        .into_iter()
+        .map(|(key, (count, matched, _))| (key, (count, matched)))
+        .collect()
+}
+
+/// The same, with a `highlight` beside the filter: key against masked count, `matched` and
+/// `highlighted` (`highlight-and-hierarchy.md` §2).
+fn lit(
+    engine: &Engine,
+    grant: &str,
+    layer: &str,
+    zoom: u8,
+    bbox: [f64; 4],
+    filter: Option<FilterExpr>,
+    highlight: Option<FilterExpr>,
+) -> BTreeMap<String, (u64, Option<bool>, Option<bool>)> {
     let session = engine.authorise(&credential(grant)).unwrap();
     let names = [layer];
     let mut request = ViewportRequest::new("s0", zoom, bbox, N as usize);
     request.layers = tessera_engine::LayerSelection::Named(&names);
     request.filter = filter;
+    request.highlight = highlight;
     engine
         .viewport(&session, request)
         .expect("a viewport over the fixture")
@@ -135,7 +153,7 @@ fn served(
         .map(|artifact| {
             (
                 artifact.key.expect("both layers carry the value's key"),
-                (artifact.masked_count, artifact.matched),
+                (artifact.masked_count, artifact.matched, artifact.highlighted),
             )
         })
         .collect()
@@ -388,15 +406,22 @@ fn labels() -> LayerDeclaration {
     }
 }
 
-/// **A label's bit is its cluster's** — D13's rule for the count, applied to the field beside it.
+/// **A label's bits are its cluster's** — D13's rule for the count, applied to the two fields
+/// beside it (decision 0104; `highlight-and-hierarchy.md` §2 for the second).
 ///
 /// The case is a label whose own membership would answer differently: `c-hit` holds members
 /// carrying `BAY` and its label holds only members that do not, so a bit computed over the label's
 /// own membership reads `false` beside a cluster reading `true`. A label describes its cluster, so
 /// *does anything here match* is the cluster's question — the same reason its count is the
 /// cluster's.
+///
+/// **`highlighted` is asserted beside `matched` and against it**, because the two are one answer
+/// under two expressions: the same clause is sent in `filters` and in `highlight`, and the label's
+/// two bits must agree with each other and with its cluster's. That pairing is what fails when
+/// only one of them inherits — which is a defect no assertion about `matched` alone can see, the
+/// label's own answer being a well-formed `false`.
 #[test]
-fn a_label_carries_its_targets_bit() {
+fn a_label_carries_its_targets_bits() {
     let fx = fixture();
     fx.engine.register_layer(clusters()).unwrap();
     fx.engine.register_layer(labels()).unwrap();
@@ -448,12 +473,16 @@ fn a_label_carries_its_targets_bit() {
     // layers in one request**, which is what a layer picker offering the closure sends
     // (decision 0096) and what puts the target in the response for its dependent to read.
     let grant = "0,1,2,3,4,5,6,7,8";
-    let both = |filter: Option<FilterExpr>| -> BTreeMap<(String, String), (u64, Option<bool>)> {
+    type Row = (u64, Option<bool>, Option<bool>);
+    let both = |filter: Option<FilterExpr>,
+                highlight: Option<FilterExpr>|
+     -> BTreeMap<(String, String), Row> {
         let session = fx.engine.authorise(&credential(grant)).unwrap();
         let names = [CLUSTERS, LABELS];
         let mut request = ViewportRequest::new("s0", 0, WHOLE_MAP, N as usize);
         request.layers = tessera_engine::LayerSelection::Named(&names);
         request.filter = filter;
+        request.highlight = highlight;
         fx.engine
             .viewport(&session, request)
             .expect("a viewport over the fixture")
@@ -462,12 +491,14 @@ fn a_label_carries_its_targets_bit() {
             .map(|a| {
                 (
                     (a.layer, a.key.expect("both layers publish keyed artifacts")),
-                    (a.masked_count, a.matched),
+                    (a.masked_count, a.matched, a.highlighted),
                 )
             })
             .collect()
     };
-    let filtered = both(Some(bay_is(BAY)));
+    // **One clause in both fields**, so the two answers about one cluster are comparable: a label
+    // that inherited one bit and kept its own for the other would disagree with itself here.
+    let filtered = both(Some(bay_is(BAY)), Some(bay_is(BAY)));
     let at = |layer: &str, key: &str| filtered[&(layer.to_string(), key.to_string())];
     assert_eq!(at(CLUSTERS, "hit").1, Some(true));
     assert_eq!(at(CLUSTERS, "miss").1, Some(false));
@@ -477,12 +508,35 @@ fn a_label_carries_its_targets_bit() {
         "a label whose own members carry none of the value must still answer for its cluster"
     );
     assert_eq!(at(LABELS, "label-miss").1, Some(false));
-    // The count rule and the bit rule agree about which artifact is being described.
+    for (layer, key) in [
+        (CLUSTERS, "hit"),
+        (CLUSTERS, "miss"),
+        (LABELS, "label-hit"),
+        (LABELS, "label-miss"),
+    ] {
+        let (_, matched, highlighted) = at(layer, key);
+        assert_eq!(
+            highlighted, matched,
+            "{layer}/{key}: one clause in both fields is one answer, and the label's must be its \
+             cluster's in the second field exactly as in the first"
+        );
+    }
+    // The count rule and the bit rules agree about which artifact is being described.
     assert_eq!(at(LABELS, "label-hit").0, at(CLUSTERS, "hit").0);
     assert_eq!(at(LABELS, "label-miss").0, at(CLUSTERS, "miss").0);
 
-    // And with no filter there is still no question, on a label as on anything else.
-    assert!(both(None).values().all(|(_, m)| m.is_none()));
+    // A highlight with **no** filter beside it: the label still answers for its cluster, and
+    // `matched` is null because no filter was asked — the two fields are independent questions.
+    let lit = both(None, Some(bay_is(BAY)));
+    let lit_at = |layer: &str, key: &str| lit[&(layer.to_string(), key.to_string())];
+    assert_eq!(lit_at(LABELS, "label-hit").2, Some(true));
+    assert_eq!(lit_at(LABELS, "label-miss").2, Some(false));
+    assert!(lit.values().all(|(_, matched, _)| matched.is_none()));
+
+    // And with neither there is still no question, on a label as on anything else.
+    assert!(both(None, None)
+        .values()
+        .all(|(_, matched, highlighted)| matched.is_none() && highlighted.is_none()));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -633,4 +687,100 @@ fn a_filter_moves_neither_containment_nor_the_description_it_serves() {
              unchanged"
         );
     }
+}
+
+/// **The `highlighted` bit is this bit under a second expression** — decision 0104's probe with
+/// the highlight's crossed set in place of the filter's (`highlight-and-hierarchy.md` §2).
+///
+/// Three things at once, each of which fails looking like the feature working:
+///
+/// - **It is the conjunction's bit.** A request carrying `filters = A` and `highlight = B` must
+///   report, per artifact, exactly the `matched` a request carrying `all_of[A, B]` in `filters`
+///   reports. That is C32's whole argument — a highlight discloses what one such request would
+///   have disclosed, differently arranged — so an implementation that answered `B` alone would
+///   satisfy every other check here and make the register row wrong.
+/// - **`null` is *there was no question*.** A request with no highlight leaves the column null on
+///   every row, including the rows whose `matched` is `false`; a `false` there would answer a
+///   question that was never asked, and no client could tell it from a highlight matching nothing.
+/// - **It moves nothing else.** The served set, the masked counts and `matched` itself are
+///   identical with and without a highlight (**I3**, **I12**), exactly as they are with and
+///   without a filter.
+#[test]
+fn the_highlighted_bit_is_the_conjunctions_bit_and_moves_nothing_else() {
+    let fx = fixture();
+    // The far-corner viewport serves no artifact to some principals, which makes the checks below
+    // vacuous there rather than wrong; this counts the rows actually compared so a fixture that
+    // stopped serving anything cannot pass silently.
+    let mut compared = 0usize;
+    for grant in grants() {
+        for layer in [BY_LIST, BY_RULE] {
+            for (zoom, bbox) in viewports() {
+                // No highlight: the column is null on every row, whatever `matched` says.
+                let plain = lit(&fx.engine, grant, layer, zoom, bbox, Some(bay_is(BAY)), None);
+                assert!(
+                    plain.values().all(|(_, _, h)| h.is_none()),
+                    "{layer}/{grant}: no highlight, and yet a bit"
+                );
+
+                let a = bay_is(BAY);
+                let b = bay_is("dune");
+                let lit_rows = lit(
+                    &fx.engine,
+                    grant,
+                    layer,
+                    zoom,
+                    bbox,
+                    Some(a.clone()),
+                    Some(b.clone()),
+                );
+                let conjoined = served(
+                    &fx.engine,
+                    grant,
+                    layer,
+                    zoom,
+                    bbox,
+                    Some(FilterExpr::AllOf(vec![a.clone(), b.clone()])),
+                );
+                let what = format!("{layer}/{grant} at zoom {zoom} over {bbox:?}");
+                for (key, (count, matched, highlighted)) in &lit_rows {
+                    assert_eq!(
+                        (*count, *matched),
+                        (plain[key].0, plain[key].1),
+                        "{what}: the highlight moved artifact {key}'s count or its filter bit"
+                    );
+                    assert_eq!(
+                        *highlighted,
+                        conjoined[key].1,
+                        "{what}: artifact {key}'s highlight bit is not the conjunction's"
+                    );
+                }
+                assert_eq!(
+                    lit_rows.len(),
+                    conjoined.len(),
+                    "{what}: the two requests served different artifacts"
+                );
+
+                // A highlight matching nothing is `false` everywhere, and still not `null`: the
+                // question was asked and the answer is no.
+                let empty = lit(
+                    &fx.engine,
+                    grant,
+                    layer,
+                    zoom,
+                    bbox,
+                    None,
+                    Some(tag_is_absent()),
+                );
+                assert!(
+                    empty.values().all(|(_, _, h)| *h == Some(false)),
+                    "{what}: a highlight matching nothing is false, never null"
+                );
+                compared += lit_rows.len();
+            }
+        }
+    }
+    assert!(
+        compared > 100,
+        "only {compared} artifact rows were compared, too few for this to mean anything"
+    );
 }

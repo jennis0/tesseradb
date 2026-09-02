@@ -215,7 +215,7 @@ def _served_entities(raw: bytes, entity_of_fx: dict[int, int]) -> set[int]:
     compartments miss a view's population entirely reaches it.
     """
     tiles, _points = decode_viewport(raw)
-    if not any(served for _t, _v, _m, served in tiles):
+    if not any(served for _t, _v, _m, served, _h in tiles):
         return set()
     table = decode_viewport_points(raw)
     return {entity_of_fx[key] for key in table.column("fx_key").to_pylist()}
@@ -228,7 +228,7 @@ def _served_identities(raw: bytes, entity_of_fx: dict[int, int]) -> dict[int, in
     than a re-join through anything the oracle holds.
     """
     tiles, _points = decode_viewport(raw)
-    if not any(served for _t, _v, _m, served in tiles):
+    if not any(served for _t, _v, _m, served, _h in tiles):
         return {}
     table = decode_viewport_points(raw)
     keys = table.column("fx_key").to_pylist()
@@ -309,12 +309,12 @@ def test_masked_counts_agree_per_view(
             morton.tiles_for_bbox(bbox, zoom, multiview_bundle.extent_of(view_id))
         )
 
-        served_counts = {t: v for t, v, _m, _s in server_tiles}
+        served_counts = {t: v for t, v, _m, _s, _h in server_tiles}
         assert served_counts == expected, (
             f"tile counts disagree for {principal} in view '{view_id}' at zoom {zoom}: "
             f"server={served_counts} oracle={expected}"
         )
-        for _t, visible, matched, _served in server_tiles:
+        for _t, visible, matched, _served, _h in server_tiles:
             assert visible == matched, "an unfiltered request has matched == visible"
         checked += len(expected)
     assert checked > 0, f"no tile carried a visible count for {principal} in '{view_id}'"
@@ -333,7 +333,7 @@ def test_a_views_counts_are_not_another_views(multiview_server, tokens):
     for view_id in mv.VIEW_IDS:
         raw = multiview_server.viewport(token, view_id, ZOOM, _full_bbox(view_id), k=K)
         tiles, _points = decode_viewport(raw)
-        per_view[view_id] = {t: v for t, v, _m, _s in tiles}
+        per_view[view_id] = {t: v for t, v, _m, _s, _h in tiles}
     distinct = {tuple(sorted(counts.items())) for counts in per_view.values()}
     assert len(distinct) == len(per_view), (
         "two views served identical per-tile counts, so this corpus cannot tell a per-view answer "
@@ -833,12 +833,12 @@ def test_a_filter_narrows_the_matched_count_and_never_the_visible_one_in_any_vie
         filtered, _ = decode_viewport(
             multiview_server.viewport(token, view_id, ZOOM, bbox, k=K, filters={leaf: RANGE})
         )
-        visible = {t: v for t, v, _m, _s in plain}
-        assert {t: v for t, v, _m, _s in filtered} == visible, (
+        visible = {t: v for t, v, _m, _s, _h in plain}
+        assert {t: v for t, v, _m, _s, _h in filtered} == visible, (
             f"'{leaf}' moved the visible count in view '{view_id}'"
         )
-        assert all(m <= visible[t] for t, _v, m, _s in filtered)
-        assert any(m < visible[t] for t, _v, m, _s in filtered), (
+        assert all(m <= visible[t] for t, _v, m, _s, _h in filtered)
+        assert any(m < visible[t] for t, _v, m, _s, _h in filtered), (
             f"'{leaf}' matched everything visible in '{view_id}', so nothing was narrowed"
         )
 
@@ -870,7 +870,7 @@ def test_points_are_served_ascending_by_identity_within_each_tile(
     tiles, points = decode_viewport(raw)
     cursor = 0
     tiles_checked = 0
-    for tile, _visible, _matched, served in tiles:
+    for tile, _visible, _matched, served, _highlighted in tiles:
         idents = [ident for ident, _code in points[cursor : cursor + served]]
         cursor += served
         assert idents == sorted(idents), (
@@ -1031,7 +1031,7 @@ def test_a_passed_gate_serves_exactly_what_an_ungated_view_would(
             _full_bbox(view_id), ZOOM, multiview_bundle.extent_of(view_id)
         )
     )
-    assert {t: v for t, v, _m, _s in server_tiles} == expected, (
+    assert {t: v for t, v, _m, _s, _h in server_tiles} == expected, (
         f"a gated view's counts disagree with the oracle's for {principal} in '{view_id}'"
     )
 
