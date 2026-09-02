@@ -52,6 +52,8 @@ a disagreement in this module is the first place a reader would look for it.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 import requests
 
@@ -440,3 +442,128 @@ def test_limit_zero_is_a_422_and_q_over_256_bytes_is_a_422(suggest_server):
     too_long = suggest(suggest_server, token, "topic", q="x" * 257)
     assert too_long.status_code == 422, too_long.text
     assert too_long.json()["error"] == "contract"
+
+
+# ---------------------------------------------------------------------------------------------
+# The two routes (`value-suggestion.md` §6.3, decision 0124)
+# ---------------------------------------------------------------------------------------------
+
+#: Prefixes swept twice per session below — the same set the exact-equality cases use, so what is
+#: being asserted is that the *route* changed nothing rather than that some other prefix agrees.
+ROUTE_PREFIXES = ["", "a", "solo", "multi", "ＭＵＬＴＩ", "zzz-nothing-matches"]
+
+
+def _wait_for_the_set(server, token, column, prefix):
+    """Ask until this session's visible-value set has had time to land, and return the last page.
+
+    The set is built **on demand**: the first suggest on a `(session, column)` pair dispatches the
+    sweep on the engine's pool and is answered by the probe route meanwhile (§6.3). Nothing on the
+    wire says which route answered — deliberately — so this waits by asking repeatedly with a pause
+    between, which is what a client typing would do. The fixture's vocabulary is eight values over
+    a handful of entities, so a sweep that has not finished after this many rounds has not started.
+    """
+    page = None
+    for _ in range(20):
+        resp = suggest(server, token, column, q=prefix, limit=100, counts=True)
+        assert resp.status_code == 200, resp.text
+        page = resp.json()
+        time.sleep(0.05)
+    return page
+
+
+def test_the_page_is_identical_once_the_visible_value_set_is_warm(suggest_server):
+    """**Both routes serve the same page** (§6.3, decision 0124): the same values, in the same
+    order, with the same titles, spans and counts, before and after this session's set of visible
+    values has been built. Which route answered is not on the wire, and this is the assertion that
+    makes that true rather than merely intended.
+
+    The **one** field that may differ is `more`, and only in one direction: the probe route may set
+    it on a spent walk budget where the set route, reading no posting and spending no budget,
+    answers exactly. So `true → false` is admissible and `false → true` is not — a page that
+    reported everything under the prefix and then reported a truncation would mean the set
+    withheld a value the probe route offered, which is the failure this direction is asserted to
+    catch.
+
+    Both routes are also checked against the oracle, so "identical" cannot be satisfied by two
+    equally wrong answers.
+    """
+    for grants in (sf.NARROW_GRANTS, sf.WIDE_GRANTS):
+        token = suggest_server.authorise(grants)["token"]
+        candidate = sf.visible_sources(grants)
+        planted = sf.planted_topic()
+
+        for prefix in ROUTE_PREFIXES:
+            first = suggest(suggest_server, token, "topic", q=prefix, limit=100, counts=True)
+            assert first.status_code == 200, first.text
+            cold = first.json()
+
+            warm = _wait_for_the_set(suggest_server, token, "topic", prefix)
+
+            expected_values, _more = sf.suggest_oracle(
+                sf.TOPIC_VALUES, planted, candidate, prefix, limit=100
+            )
+            assert _strip_count(cold["values"]) == expected_values, prefix
+            assert _strip_count(warm["values"]) == expected_values, prefix
+            assert warm["values"] == cold["values"], (
+                f"the two routes served different pages for {prefix!r}"
+            )
+            if cold["more"] != warm["more"]:
+                assert cold["more"] is True and warm["more"] is False, (
+                    f"`more` moved the wrong way for {prefix!r}: {cold['more']} → {warm['more']}"
+                )
+
+
+@pytest.fixture(scope="session")
+def probe_route_server(tmp_path_factory, suggest_bundle):
+    """A second server that can never build a visible-value set.
+
+    `max_suggest_set_entities = 1` is the schema's floor (`/v1/meta` publishes the constant with
+    `minimum: 1`, so nothing below it is a legal deployment value) and every principal this fixture
+    grants sees more than one entity, so no request here is ever inside the ceiling and every one
+    takes the probe route of §6.2 — which is the state C31 stays open in, and the one an operator
+    who has not raised the constant is running.
+    """
+    server, proc = spawn_server(
+        suggest_bundle,
+        tmp_path_factory.mktemp("suggest-probe-route"),
+        serve_extra="max_suggest_set_entities = 1\n",
+    )
+    yield server
+    stop_server(proc)
+
+
+def test_the_probe_route_alone_still_agrees_with_the_oracle(probe_route_server):
+    """The same prefix sweep against a deployment whose ceiling no principal is inside: every
+    request takes the probe route, however many times the same session asks, and the served page is
+    still the oracle's exactly. A set built where the design says none may be would show here as a
+    page that changed under repetition."""
+    resp = requests.get(
+        f"{probe_route_server.viewer_base}/v1/meta",
+        headers={
+            "Authorization": f"Bearer {probe_route_server.authorise(sf.WIDE_GRANTS)['token']}"
+        },
+        timeout=10,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["selection"]["max_suggest_set_entities"] == 1
+
+    for grants in (sf.NARROW_GRANTS, sf.WIDE_GRANTS):
+        token = probe_route_server.authorise(grants)["token"]
+        candidate = sf.visible_sources(grants)
+        planted = sf.planted_topic()
+        for prefix in ROUTE_PREFIXES:
+            expected_values, _more = sf.suggest_oracle(
+                sf.TOPIC_VALUES, planted, candidate, prefix, limit=100
+            )
+            pages = []
+            for _ in range(6):
+                page = suggest(
+                    probe_route_server, token, "topic", q=prefix, limit=100, counts=True
+                )
+                assert page.status_code == 200, page.text
+                pages.append(page.json())
+                time.sleep(0.05)
+            for page in pages:
+                assert _strip_count(page["values"]) == expected_values, prefix
+                assert page["values"] == pages[0]["values"], prefix
+                assert page["more"] == pages[0]["more"], prefix
