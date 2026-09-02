@@ -11,7 +11,7 @@ this document records what was actually done and why.
 both of which are named there by owner direction. Whether the campaign is tracked here or on issues
 is the owner's to settle.
 
-**Last updated:** 2026-09-01.
+**Last updated:** 2026-09-02.
 
 ---
 
@@ -23,7 +23,7 @@ is the owner's to settle.
 | 0 | Re-run the 5×10⁷ artifact tier | — | **Deferred, deliberately.** It confirms W1 and W2, which bite at rung 2 and not at rung 1, and it costs a ~45 GB build. Take it before rung 2, not before rung 1 |
 | **1** | **GeoNames** | **13,463,857** | **Built, verified and served**, and rebuilt 2026-08-30 on a declared `web_mercator` projection. Not done against §7.1's bar — see §2 |
 | **2** | **Overture places + divisions** | **7.4×10⁷** | **Built and verified**, and rebuilt 2026-08-30 on a declared projection with its boundary polygons in longitude and latitude — see §3 |
-| **3** | **MedCPT / PubMed** | **35,920,666** | **Surveyed, not built** — see §4. Staged, and MeSH now staged too (2.7 MB, not the 51.8 GB the plan expected). Blocked on two surface changes the survey found: multi-membership under a levelled kind, and a DAG hierarchy |
+| **3** | **MedCPT / PubMed** | **35,920,666** | **Built, verified and served** 2026-09-02 — see §4.6. The ladder's largest embedding rung and its first `dag` layer: MeSH's 30,217 descriptors with members over 41,321 edges, membership closed upward to **1.66×10⁹ entries** (3.27× rung 2's spill), an 11.15 GB bundle in 12 m 10 s at 16.03 GB peak, `verify --deep` clean. ⊘ Three non-reproducing host faults over two runs, §4.6 |
 | 4 | PaperSeek + OpenAlex | 1.02×10⁸ | Not started. Staged |
 | 5 | TreeOfLife | 2.33×10⁸ | Not started. Staged |
 | 6 | GBIF | 3.50×10⁹ | Not started. Staged; needs a second local volume |
@@ -346,11 +346,16 @@ registry's count and says the shape is not observed.
 - The **spatial** boundary layer has been built but never served. 386 s of the build goes into
   resolving 73.6M rows against 625,754 polygons, and what that costs a request is unmeasured.
 
-## 4. Rung 3 — MedCPT / PubMed, surveyed and not built
+## 4. Rung 3 — MedCPT / PubMed, built
 
-Surveyed 2026-09-01 over the staged bytes, before anything was written. **Nothing is built**: there
-is no `test_corpora/medcpt/`, no `prepare.py` and no declaration. What is settled is what the rung
-is made of, which of the plan's prerequisites are real, and the shape of its artifact layer.
+**Built, verified and served 2026-09-02** — [`../test_corpora/medcpt/`](../test_corpora/medcpt/README.md),
+which carries every figure with its medium. §4.1–§4.5 below are the survey that preceded it, kept
+because they record what was corrected in the plan and why the layer has the shape it has; **§4.6 is
+the outcome**, and where the two differ the outcome wins.
+
+Surveyed 2026-09-01 over the staged bytes, before anything was written. What the survey settled is
+what the rung is made of, which of the plan's prerequisites are real, and the shape of its artifact
+layer.
 
 **35,920,666 rows**, counted from the 38 `.npy` headers rather than inferred from the chunk list —
 768-dimensional `float32`, 105 GB. The plan's 3.6×10⁷ is right.
@@ -403,8 +408,9 @@ point is the change this rung requires**, and it is required under every option 
 Four routes were put up; the ruling is **key the artifacts by descriptor and let a child name
 several parents**, which makes the layer a **DAG** rather than a tree. So two surface changes are
 needed rather than one: multi-membership under a levelled kind, and a hierarchy that is declared as
-a DAG. ⊘ **Neither is designed and neither is built.** Both are named here at the rung that forces
-them; the rung cannot be built correctly until they exist.
+a DAG. ⊘ **Both were unbuilt when this was written; both now exist** — the levelled-kind change
+turned out not to be a change at all ([`design/dag-hierarchies.md`](design/dag-hierarchies.md) §2,
+and §8 below), and `kind = "dag"` is built and carried a 1.66×10⁹-entry membership at §4.6.
 
 **Why not key by tree number**, which would have cost nothing. Because the duplication cascades. A
 polyhierarchical concept's *descendants* are duplicated with it — `Respiratory Tract Neoplasms` is
@@ -500,6 +506,82 @@ through Vite's `fs.allow`) and its session credential through the environment of
 process; and `VITE_PORT` chooses the viewer's port, which is the one written into every
 `dev_cors_origins` the script generates.
 
+### 4.6 Built — what it cost and what it found
+
+All figures **local NVMe on this box** (WSL2, 12 cores, 47 GB, one RTX 3080 with ~8.2 GB free)
+unless the medium says otherwise. The staging pass is the one **network-source** figure.
+
+**Staging is a step here, and it is the only one on the ladder.** 163 GB of publisher bytes over
+SMB is ~40 minutes a pass, so `stage.py` makes exactly one: **60.5 minutes**, 15.0 GB peak RSS,
+writing 67 GB locally — one parquet per chunk and a flat `(35_920_666, 768)` float16 memmap with a
+sidecar that refuses a partial matrix rather than reading a sparse file's zeros. Measured over all
+38 chunks, which §4.4's table extrapolated from three: MeSH **84.9%**, abstracts **68.9%**, 27,957
+unparseable dates (0.078%, nulled and counted), no zero-norm vectors.
+
+**The route changed, and the change was measured first.** The arXiv `knn` route puts the whole
+matrix on the card; here it is 55 GB. cuML's UMAP over a precomputed graph peaked at 1,417 bytes a
+row at 2×10⁶ and 1,283 at 2.5×10⁶, so the whole corpus is **~46 GB of device memory** for the
+layout alone — six times the card and past the host RAM managed memory would oversubscribe into, so
+no managed run was attempted. Taken instead: fit UMAP on a uniform **2.5×10⁶** rows through one
+CAGRA index, then place every other row at the similarity-weighted mean of its 15 fit-set
+neighbours against a second index over the same set. ⊘ The index is built twice because it cannot
+be held across the layout — 5.46 GB and 2.99 GB against ~8.2 GB free. Sharded CAGRA over all 36M is
+in the code, unused, and unmeasured at scale.
+
+| | |
+|---|---|
+| `prepare.py --sample 0` | **17 m 27 s**, **43.3 GB peak RSS** — route 480 s (CAGRA build 18.1 s, search 22.1 s at 111,872 q/s, UMAP 36.6 s, placement of 35,920,666 rows 361 s), MeSH 421 s, k-means 22 s, titles 25 s |
+| `tessera build` | **12 m 10 s**, **16.03 GB peak RSS**, **11.15 GB bundle**, 165,272,740 pairs, 90.6% of points with a cell of their own, none on the frame's edge |
+| `tessera verify --deep` | clean in **5.1 s** at 1.15 GB — 1 partition, 1 view, 1 segment, 35,920,666 rows |
+| served | `run_demo.sh` on its own deployment; principals 4,910 / 4,910 / 6,024,843 / 25,357,425 / 35,920,666 visible |
+
+**The rung's scaling finding: 1,658,437,807 closed membership entries against rung 2's 5.07×10⁸ —
+3.27×**, where [`design/dag-hierarchies.md`](design/dag-hierarchies.md) §8 extrapolated 3.4× from
+chunk 18 alone. It fits: 2.75 GB of member parquet inside an 11.15 GB bundle. **Neither W1 nor W2
+fired.** No artifact reaches W1's 5×10⁷-member Roaring round trip — a closed MeSH root is bounded by
+the 3.05×10⁷ indexed articles — and W2's OOM did not happen, the build peaking at a third of the
+box. So §8's fallback, explicit assignments with the containment report beside every figure, is not
+needed and was not taken. The DAG's own shape in the built layer: 30,217 descriptors with members,
+41,321 edges, 9,095 with more than one parent, 107 roots, at most 6 parents.
+
+**Both layers draw, so neither is withdrawn.** The measure is the one that withdrew the taxonomies
+of rungs 1 and 2 — the box holding the middle 90% of an artifact's members as a share of the map,
+in the layout the layer is declared over:
+
+| | median | p90 | max | under 5% |
+|---|---|---|---|---|
+| `clusters/kmeans` (all 256) | **0.04%** | 0.15% | 0.83% | 100% |
+| `mesh/descriptors` (150 sampled) | **1.4%** | 5.1% | 7.9% | 88% |
+| *withdrawn for comparison:* arXiv archives · Overture taxonomy | 13.7% · 9.6% | | | |
+
+⊘ **That is not the build's `everywhere` fraction**, which is 0.180 for the clustering and **0.984**
+for the DAG. A box covering 1.4% of the map is still wider than a tile-index node at the depth the
+level is served from, so nearly every descriptor is served as a list rather than bounded by a node,
+at 241.4 contiguous row runs each against the clustering's 7.3. Compactness in the map and
+boundability in row space are different properties and this rung is the first corpus to separate
+them.
+
+**The abstracts ruling stays open, and now has numbers** (§8). The 10⁶-row sample was built both
+ways: `points.parquet` 118.6 → 634.6 MB, `tessera build` 19.7 → 34.3 s, **build peak RSS 716 MB →
+2,246 MB**, bundle 333 → 799 MB. Linearly ×36 that is a 28.7 GB bundle and ~81 GB of build RSS on a
+47 GB box — modelled, not measured, and W2 says the peak is not bounded by `--memory-budget`, so it
+is a wall to meet rather than a refusal to expect.
+
+⊘ **Three distinct, non-reproducing, localised faults in one evening on this host, and none is
+attributed to the code.** The first whole-corpus build's containment report named 56 edges holding
+**45 member rows of 1.66×10⁹** under the wrong article, all inside a 35-wide window of consecutive
+entities, each article losing its highest-id descriptors to the next with totals preserved. A second
+whole-corpus run on the same code and the same staged input has that window **correct** and fails
+elsewhere and differently — one escaping member on an edge the first run had right, where a single
+entity is **missing two ancestor rows** rather than having any shifted, which is also why the two
+runs' membership totals differ by three. That run's build died of `SIGSEGV` after 3 m 12 s
+(`error 6`, a write to a non-present page) and then, relaunched on the same binary and inputs with
+the bundle directory cleared, **built cleanly**: 12 m 42 s, 16.07 GB, 11,152,157,764 bytes,
+`verify --deep` OK, hierarchy identical in shape. Two of the three are in Python/NumPy and one in
+the Rust build; **each run is otherwise bit-consistent with a recompute**; five candidate code paths
+are excluded with numbers in the rung README. Recorded as a **host fault, ⊘ not proven** — the
+action is a memtest (§8), not more detection machinery.
+
 ## 5. The machinery this campaign built
 
 - **[`../test_corpora/`](../test_corpora/README.md)** — one directory per rung, in git: `prepare.py`,
@@ -586,8 +668,11 @@ into `dd195c9`, a commit about the rings track. Content intact, provenance misle
 - The design pass on artifact response volume (§6, and the memo it points at).
 - Whether `parent_edges`' two nulls need separating, and whether that is worth an issue.
 - Whether this tracker is the campaign's status record or the campaign moves to issues.
-- **Whether rung 3 takes its abstracts** (§4.1). They are staged, so including them forces the
-  streaming text column a rung earlier than the plan schedules it.
+- **Whether rung 3 takes its abstracts** (§4.1) — **still open, and now decidable from numbers**
+  (§4.6). The 10⁶-row sample built both ways: `tessera build` peaks at 716 MB against 2,246 MB and
+  the bundle is 333 MB against 799 MB, which extrapolates linearly to ~81 GB of build RSS and a
+  28.7 GB bundle over the whole corpus — modelled, not measured. The built rung takes them off,
+  which is `prepare.py`'s default; `--abstracts` is the other run and needs no code change.
 - ~~Whether rung 3 is worth the 51.8 GB baseline~~ — **ruled 2026-09-01: not needed.** `journal`
   and `publication_type` are not taken; the rung renders what the chunks carry.
 - ~~What to do with the 5.87% of unresolved descriptor mentions~~ — **ruled 2026-09-01: dropped**,
@@ -617,6 +702,38 @@ the commit window's mint. What is *not* in this track: the cut over parent lists
 depth, `parent_ids` on the wire and the client — the engine and client tracks'. Ledger:
 `.superpowers/sdd/2026-09-01-dag-hierarchies/progress-store.md`.
 
+**Found at rung 3, not owned by this campaign**
+
+- ⊘ **The artifact drill-down omits the DAG's edges.** `POST /v1/artifacts/{tessera_id}` answers
+  `layer`, `key`, `masked_count`, `centroid`, `box`, `shape`, `content` and `rung`
+  (`tessera-server/src/viewer.rs`, the `ArtifactResp` construction) — **no `parent_ids`**, where the
+  viewport's artifact frame carries them (`tessera-wire/src/payload.rs`, `ArtifactRow::parent_ids`;
+  `tessera-engine/src/viewport.rs`). A client that drills into a descriptor is told its count and
+  not where it sits, so a DAG cannot be walked from a drill-down. Read from the source 2026-09-02;
+  no test asserts either way.
+- ⊘ **`clients/ts/viewer/smoke-artifacts.mjs` draws no hull ring on this corpus.** Its own report
+  reads `253 clusters, 253 with geometry, 0 rings drawn over 0 artifacts` under the broadest
+  principal, with labels drawn and no console error — the geometry reaches the client and nothing
+  renders it as a ring. The same script's other assertions pass on the substance: counts move with
+  the mask (`mesh/descriptors` `#723223` is 134,030 / 647,908 / 756,640 across three principals).
+  Two of its failures are its own calibration against arXiv — this rung's `narrow` and `sparse`
+  presets resolve to the same single term — and are not defects.
+
+**Host, not Tessera**
+
+- ⊘ **Run a memtest on this box before chasing any further one-off.** Three corruption-class
+  symptoms on 2026-08-22/23, and rung 3 added three more on 2026-09-02 — in three different places,
+  in three different shapes, across two processes, none reproducing (§4.6):
+  45 member rows of 1.66×10⁹ shifted under the wrong article in a structured way no code path
+  accounts for; one entity missing two ancestor rows in the next run, which had the first run's
+  window right; and a `SIGSEGV` in `tessera build` — `signal 11 … error 6`, a write to a
+  non-present page — that did not recur when the same binary was relaunched on the same inputs.
+  Each run is otherwise bit-consistent with a recompute. None is attributed to Tessera and none
+  should be until a reproduction exists. ⊘ **The per-slice check rung 3 added catches the first
+  shape and not the second** — a dropped ancestor row leaves every explicit id in place — and that
+  gap is deliberate: closing it would mean recomputing the closure to compare against itself, and
+  against a hardware fault a second run is not a defence.
+
 **Rung 1 work not done**
 
 - `places/containment` — the third layer, from `hierarchy.txt`, as a `nested` lineage. Needs a DAG
@@ -624,9 +741,11 @@ depth, `parent_ids` on the wire and the client — the engine and client tracks'
   at rung 1 rather than at rung 3.
 - Everything in §2's ❌ rows: the 0091 test, the oracle census, the write cycle, p99 and a screenshot.
 
-**Before rung 3**
+**Before rung 4**
 
-- The DAG design above, reviewed and ruled.
+- ~~The DAG design, reviewed and ruled~~ — **done, and built**: rung 3 is the corpus it was designed
+  for and it carries a `kind = "dag"` layer end to end (§4.6).
 - Rung 0, still not taken. It confirms W1 and W2 reproduce and whether the pre-flight refuses rather
-  than being killed. ⊘ Rung 2 passed without either wall firing (§3), which is a reason to want the
-  controlled run rather than a reason to drop it.
+  than being killed. ⊘ **Rungs 2 and 3 both passed without either wall firing** — rung 3 wrote
+  1.66×10⁹ membership entries and peaked at 16.03 GB — which is a reason to want the controlled run
+  rather than a reason to drop it.

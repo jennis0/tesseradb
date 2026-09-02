@@ -38,10 +38,26 @@ class ArtifactSet:
         self.per_layer = collections.defaultdict(list)
         # layer -> (levels, keys, ranks, entities), the four parallel columns of a member file.
         self.member_rows = collections.defaultdict(lambda: ([], [], [], []))
+        # Layers whose member file is written as it is produced rather than accumulated, and the
+        # rows each has written so far — see the streaming path below.
+        self._streams = {}
+        self.streamed = collections.Counter()
 
     def artifact(self, layer, key, *, level=0, contents=None, attached=None, parent=None):
         """One artifact. `attached` is `(layer, level, key)` — a label on a levelled layer names
-        the level its cluster sits on, and a flat one is level 0."""
+        the level its cluster sits on, and a flat one is level 0.
+
+        `parent` is a key, a list of keys, or `None`. It is **written as a list whatever it was**
+        (decision 0117): a `dag` layer's child names several parents, and the build reads a scalar
+        as a list of one, so one column shape serves every kind and no caller has to know which
+        spelling its layer wants.
+        """
+        if parent is None:
+            parents = None
+        elif isinstance(parent, str):
+            parents = [parent]
+        else:
+            parents = list(parent)
         self.per_layer[layer].append(
             {
                 "level": level,
@@ -50,13 +66,16 @@ class ArtifactSet:
                 "attached_layer": attached[0] if attached else None,
                 "attached_level": attached[1] if attached else None,
                 "attached_key": attached[2] if attached else None,
-                "parent": parent,
+                "parent": parents,
             }
         )
 
     def members(self, layer, key, rows, *, rank=None, level=0):
         """One row per `(artifact, entity)`. A null `rank` is the artifact's own membership;
         `rank = k` is the generating set of `contents[k]`."""
+        assert layer not in self._streams, (
+            f"{layer}: its member file is being streamed; rows added here would be dropped"
+        )
         levels, keys, ranks, entities = self.member_rows[layer]
         for row in rows:
             levels.append(level)
@@ -84,6 +103,72 @@ class ArtifactSet:
         for rank in range(ranks):
             self.members(layer, key, pick[: max(1, len(pick) // 3**rank)], rank=rank, level=level)
         return pick
+
+    # ------------------------------------------------------------------ the streaming member path
+
+    # The accumulating path above holds every member row in Python lists until `write`, which is
+    # right for a clustering — one row per point per layer — and impossible for an ancestor-closed
+    # hierarchy, whose member file is several rows per point per *ancestor*. Rung 3's MeSH layer
+    # is ~1.7e9 rows at full scale (`dag-hierarchies.md` §8), so it is written as it is produced:
+    # one `write_table` per staged chunk, straight through a `ParquetWriter` (which splits a
+    # call at its own default row-group size, so a chunk is several groups), with `key`
+    # dictionary-encoded because a descriptor name recurs once per member.
+    #
+    # A layer written this way declares its artifacts through `artifact` as any other does — there
+    # are tens of thousands of those, not billions — and `write` then skips its member file, which
+    # this path has already produced. The two are mutually exclusive per layer, and mixing them is
+    # an assertion rather than a silently half-written file.
+
+    MEMBER_SCHEMA = pa.schema(
+        [
+            pa.field("level", pa.uint32()),
+            pa.field("key", pa.string()),
+            pa.field("rank", pa.uint32()),
+            pa.field("entity", pa.uint64()),
+        ]
+    )
+
+    def stream_members(self, layer, out: Path, keys, entities, *, level=0) -> int:
+        """Append one row group of `(artifact, entity)` rows to the layer's member file.
+
+        `keys` is an Arrow string array of artifact keys and `entities` a parallel array of source
+        entity ids; both are already the flat, deduplicated shape the file wants. Returns the rows
+        written. The file is opened on the first call and closed by `close_streams`.
+        """
+        assert not self.member_rows[layer][1], (
+            f"{layer}: member rows were accumulated as well as streamed"
+        )
+        writer = self._streams.get(layer)
+        if writer is None:
+            writer = pq.ParquetWriter(
+                out / f"{slug(layer)}-members.parquet",
+                self.MEMBER_SCHEMA,
+                compression="zstd",
+                use_dictionary=["key"],
+            )
+            self._streams[layer] = writer
+        n = len(keys)
+        writer.write_table(
+            pa.table(
+                {
+                    "level": pa.array(np.full(n, level, dtype=np.uint32), pa.uint32()),
+                    "key": keys,
+                    # Null throughout: a rank names the generating set of a ranked content, and
+                    # every row here is the artifact's own membership.
+                    "rank": pa.nulls(n, pa.uint32()),
+                    "entity": pa.array(np.asarray(entities, dtype=np.uint64), pa.uint64()),
+                },
+                schema=self.MEMBER_SCHEMA,
+            )
+        )
+        self.streamed[layer] += n
+        return n
+
+    def close_streams(self) -> None:
+        """Close every streamed member file. Idempotent, and safe to call when none were opened."""
+        for writer in self._streams.values():
+            writer.close()
+        self._streams.clear()
 
     # ------------------------------------------------------------------------------ writing out
 
@@ -114,13 +199,20 @@ class ArtifactSet:
                             [r["attached_level"] for r in rows], pa.uint32()
                         ),
                         "attached_key": pa.array([r["attached_key"] for r in rows], pa.string()),
-                        "parent": pa.array([r["parent"] for r in rows], pa.string()),
+                        "parent": pa.array(
+                            [r["parent"] for r in rows], pa.list_(pa.string())
+                        ),
                     }
                 ),
                 out / f"{slug(layer)}.parquet",
             )
 
         for layer in chosen:
+            # A streamed layer's member file is already on disk; writing an empty one here would
+            # replace it with nothing.
+            if layer in self.streamed:
+                member_rows += self.streamed[layer]
+                continue
             levels, keys, ranks, entities = self.member_rows[layer]
             member_rows += len(keys)
             pq.write_table(
