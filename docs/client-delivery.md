@@ -149,6 +149,23 @@ below has been served by a real server.
 | H5b | the client read against the **server track's own wire** (`server/highlight`, not merged): three disagreements found and taken to the server's spelling — `POST /v1/artifacts/browse` requires `view`, which the client had not sent; the identity projection is **five** columns now that `highlighted` joins `matched`, and the decoder read a five-column frame as a full one and refused it; and an identity row's `highlighted` is a bit the channel must fold into the held payload beside `matched` | `core/test/artifacts-frame.test.ts` (the five-column frame), `core/test/browse.test.ts` | **done**, against the branch's source and **not against a serve** |
 | H6 | the boards: `Highlight.dc.html` in the canvas generator — the filtered map beside the highlighted one, the chip's verb, the panel, the card's clauses and the filter-layer group — and the tokens, the icon and the chip CSS the elements use | `python3 build.py`; `shots/Highlight.png` | **done** |
 
+⚠ **The branch is inoperable against a server without the highlight columns and the browse verb**,
+and lands with or after `server/highlight`. The tiles frame's `highlighted` is **always present**
+by design — equal to `matched` where the request carried no highlight — so the decoder reads it as
+a column and not as an option, and there is no shim under [decision 0048](decisions/0048-no-deployments-exist-so-delete-rather-than-support.md):
+against an older server every viewport request refuses with *viewport payload has no column
+"highlighted"*. The artifacts frame's identity projection is five columns for the same reason, and
+`<tessera-hierarchy>` has no verb to call. The recorded goldens are lifted in test code
+(`liftTilesHighlighted`) precisely because the decoder will not read them otherwise.
+
+⊘ **The core package's tests are not typechecked**, which is how a browse test asserting a request
+body the server refuses reached the branch. Core is the only client package whose `tsconfig.json`
+emits (`outDir: dist`, `rootDir: src`), so `test` cannot simply join `include` as it has in `deck`,
+`components` and `react`; a `noEmit` config over `["src", "test"]` was tried and reports **63
+errors across 16 test files**, nearly all of them `noUncheckedIndexedAccess` on array reads and
+fixtures that predate this work. It is a change worth making and it is its own change, not this
+one — a diff over sixteen unrelated test files is a diff nobody can referee.
+
 ⊘ **Two gaps this leaves, both about a name.** The drill-down route carries an artifact's layer,
 key and count and **not its supplied text**, and a filter layer's artifacts are never in the served
 set — so `<tessera-artifact-card>` draws the neutral placeholder for one of them, where a browse row
