@@ -31,7 +31,7 @@ the other.
 | **I13b** | a partition not consulted fails closed |
 | **I13c** | a partition unreachable through outage is an error, never an empty contribution |
 
-## Leak register (31 rows)
+## Leak register (33 rows)
 
 Exhaustive by construction: a disclosure not in this table is a bug, not an omission.
 
@@ -68,6 +68,8 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | **C29** | An artifact's parent identifiers on the wire | Low | Accepted — bounded to the response's own membership |
 | **C30** | An item's satisfied labels, its reachable views and their positions, and its scoped values, on the drill-down | Low | Accepted — the intersection is the disclosure, and it is the principal's own; the views and values are the principal's own too |
 | **C31** | Listing and suggestion time on a derived category column | Low | Accepted — owner ruling, 2026-09-02 |
+| **C32** | A highlight's counts and bits — highlighted per tile, per served point and per served artifact (highlight-and-hierarchy.md §2) | Low | Accepted — a second filter over the same candidate (⊘ not built) |
+| **C33** | The browse verb — a layer's artifacts by lineage (highlight-and-hierarchy.md §4) | Low | Accepted — bounded to what a viewport already serves (⊘ not built) |
 
 ## Documents
 
@@ -78,7 +80,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `annotation-representation.md` | Normative for the annotation representat | 40 |
 | `annotation-write-cycle.md` | Normative for the annotation write cycle | 18 |
 | `annotations.md` | Normative — r43 | 18 |
-| `architecture.md` | Normative — r58 | 44 |
+| `architecture.md` | Normative — r59 | 49 |
 | `artifact-fetch-protocol.md` | Normative — r3 | 7 |
 | `artifact-serving-at-scale.md` | Ruled, reviewed, amended, and re-measure | 21 |
 | `artifact-shapes.md` | Normative — r7 |  |
@@ -104,7 +106,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `filter-result-cache.md` | Provisional — under review | 7 |
 | `filter-surface.md` | Provisional — under review | 8 |
 | `geometry-pinning.md` | Normative. Reviewed three times (invaria |  |
-| `highlight-and-hierarchy.md` | Provisional — under review | 4 |
+| `highlight-and-hierarchy.md` | Normative — r5 | 7 |
 | `hot-row-geometry.md` | Normative. The §6 amendments are folded  | 2 |
 | `measurement.md` | Provisional — under review | 5 |
 | `per-point-attributes.md` | Provisional — under review | 7 |
@@ -116,7 +118,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `streamed-serving.md` | Normative — r2 |  |
 | `system-architecture.md` | Normative — r17 | 28 |
 | `tile-addressed-integration.md` | Provisional — under review |  |
-| `value-suggestion.md` | Normative — r2 | 11 |
+| `value-suggestion.md` | Normative — r3 | 13 |
 | `view-switching.md` | Provisional — under review | 4 |
 | `views.md` | Normative — r29 | 21 |
 | `write-path.md` | Normative for the write path. Owner sign | 20 |
