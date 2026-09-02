@@ -29,27 +29,27 @@ it, while a deny takes effect at the moment it is acknowledged and is removed by
 two specific events.
 
 ```mermaid
-flowchart TD
-  subgraph Item["An item's life"]
-    I1["accepted: WAL-durable,<br/>entity id allocated"] --> I2["buffered: fully authorised,<br/>no row yet"]
-    I2 --> I3["flushed: has a row,<br/>counted and drawn"]
-    I3 --> I4["merged: fewer segments,<br/>same row"]
-    I4 --> I5["folded into the base<br/>segment at compaction"]
-  end
-  subgraph Deny["A deny's life"]
-    D1["accepted: WAL-durable,<br/>swapped in before the ack"] --> D2{op}
-    D2 -->|suppress| D3["held in 'suppressed'"]
-    D3 -->|unsuppress| D5["removed: Rule S"]
-    D2 -->|delete| D4["held in 'deleted';<br/>row still exists"]
-    D4 -->|a compaction fold<br/>executes it| D6["removed: Rule F;<br/>row and postings gone"]
-  end
+stateDiagram-v2
+  direction LR
+  state "item" as item {
+    [*] --> accepted: /control/ingest
+    accepted --> durable: window fsync, then 200
+    durable --> buffered: applied, has no row yet
+    buffered --> visible: flush (bounded by flush_max_age_secs)
+    visible --> merged: merge (row space only)
+    merged --> compacted: compaction
+  }
+  state "deny" as deny {
+    [*] --> held: /control/changes, fsync, apply, swap, then 200
+    held --> lifted: unsuppress (suppression only)
+    held --> retired: the compaction that removes the rows (deletion only)
+  }
 ```
 
 *An item gains state at each publication; a deny is in force at acceptance and leaves the overlay
 only at its one designated event.*
 
-**What an acknowledgement means differs by kind, and this is the fact everything else follows
-from.**
+What an acknowledgement means differs by kind.
 
 An ingest acknowledgement is a durability receipt, not a visibility promise. An accepted item is
 WAL-durable and its authorisation state is complete, but it has no row in any segment, and every
@@ -131,20 +131,25 @@ nothing at all: every waiter is answered 500, and a caller retries under the sam
 
 ```mermaid
 sequenceDiagram
-    participant C as Caller
-    participant H as Handler
-    participant E as Write executor
-    participant W as WAL
-    C->>H: POST /control/ingest
-    H->>H: admission checks
-    H->>E: submit to the commit window
-    Note over E: gathers submissions until<br/>commit_window_max_items,<br/>or the queue is empty
-    E->>E: signature-sort, allocate entity ids
-    E->>W: append (one record per submission)
-    E->>W: fsync (one, for the whole window)
-    E->>E: apply: new buffer, new generation
-    E->>E: swap the generation pointer
-    E-->>C: 200, tessera_ids (one ack per waiter)
+  participant W as writers
+  participant H as handler
+  participant E as executor
+  participant L as WAL
+  participant G as generation
+
+  W->>H: change (ingest row, or delete / suppress / unsuppress)
+  H->>E: enqueue, keep waiting
+  Note over E: gather up to the window bound, in arrival order
+  E->>L: append every record
+  E->>L: fsync once
+  alt fsync fails after repair
+    E->>G: apply deletes and suppresses anyway; skip unsuppresses
+    E-->>W: 500 to every waiter: retry
+  else
+    E->>G: apply to the overlay / buffer
+    E->>G: swap the generation pointer
+    E-->>W: 200 to every waiter
+  end
 ```
 
 *One fsync serves the whole window; every waiter is acknowledged against the same swap.*
@@ -169,8 +174,7 @@ staleness), never what changed, and never which item.
 
 ## Flush
 
-Flush is the mechanism that makes an ingested item visible; it is not a maintenance convenience.
-It changes no authorisation state, retires no overlay entry, drops no row, and can re-expose
+Flush is the mechanism that makes an ingested item visible. It changes no authorisation state, retires no overlay entry, drops no row, and can re-expose
 nothing.
 
 It runs on one cadence, `flush_max_age_secs` (90 seconds by default), evaluated at the top of the
@@ -225,8 +229,7 @@ exist: an edit is a delete followed by a re-ingest under the same external id, w
 and a deleted holder does not block that re-ingest. The endpoint refuses a request naming the
 withdrawn operation with a 422 that names this flow. The re-ingested item is invisible for at most
 one flush interval and is issued a new `tessera_id`; identity for a client is carried by the
-external id and the `tessera_id` together, never by the entity id underneath them, which is a slot
-(§Compaction) and free to be reassigned once its item is gone.
+external id and the `tessera_id` together, never by the entity id underneath them.
 
 Delete and suppress differ in what they mean and in what removes them, never in how they are
 accepted or applied.
@@ -283,16 +286,19 @@ The entity-space stores stay authoritative for everything else: drill-down, labe
 cluster visibility answer from the overlay directly and never consult the row-space mask.
 
 ```mermaid
-flowchart LR
-  subgraph Overlay["The overlay: entity space"]
-    Del["deleted: Bitmap"]
-    Sup["suppressed: Bitmap"]
-  end
-  Del -->|union| Mask["denied[view]: row space,<br/>derived per view"]
-  Sup -->|union| Mask
-  Unsup["an unsuppress"] -->|removes from| Sup
-  Fold["the compaction fold<br/>that executes it"] -->|removes from| Del
-  Mask -->|subtracted last,<br/>one bitmap op| Result["every composed result"]
+flowchart TB
+  del["delete"] --> deleted["deleted<br/>entity-space bitmap"]
+  sup["suppress"] --> suppressed["suppressed<br/>entity-space bitmap"]
+  unsup["unsuppress"] -. "removes from suppressed only (Rule S)" .-> suppressed
+  compact["compaction that removes the rows"] -. "removes from deleted only (Rule F)" .-> deleted
+
+  deleted --> union["union"]
+  suppressed --> union
+  union -- "derive per view; re-derive on any removal" --> denied["denied[view]<br/>row-space mask"]
+  denied -- "subtracted last in every composition" --> mauth["M_auth for the request"]
+
+  deleted -- "verdict: deleted > suppressed > buffered" --> entityq["entity-space answers:<br/>drill-down, labels, cluster visibility"]
+  suppressed --> entityq
 ```
 
 *Two stores, one derived mask, and two removal events, each acting on one store only.*
@@ -439,14 +445,11 @@ the reverse.
 A suppression is carried forward through a compaction fold untouched. Only an explicit unsuppress
 removes an entry from `suppressed` (Rule S, §Denies).
 
-**Entity ids are slots, and a compaction fold is what returns them to the pool.** An entity whose
-row a fold drops has its numeric entity id freed for reuse by a later ingest. Identity itself does
-not move with the number: a `tessera_id` also carries a discriminator tied to the fold generation
-current when its entity id was allocated, so two entities that happen to occupy the same numeric
-slot at different times are never given the same `tessera_id`. A stale identifier presented for a
-slot that has since been recycled fails the same way a deleted item's identifier always has: the
-entity it now inverts to does not carry that exact stored identifier, so the request is answered
-as unknown, never as the new occupant.
+**Entity ids after a fold.** Not built yet: decision 0072 rules that an entity id is a slot, freed
+by the compaction that drops its row and reusable by a later ingest, with a `tessera_id` carrying a
+discriminator so that two occupants of one slot never share an identifier. Today the allocator is
+append-only and an entity id is never reused, so a dropped row's id stays retired and the question
+of a recycled slot does not arise.
 
 **What a viewer pays.** Ingest, denies, and flush continue while a fold runs; merge and coalesce
 are held back until the fold publishes, because their outputs would be orphaned by the flip that
@@ -535,10 +538,10 @@ whatever stamp that request presents. The stamp carries no authorisation weight 
 
 ## Where this is tested and where it lives
 
-The conformance suite (432 of 432 passing) covers the invariants a masked count and a selected
-mark depend on directly: I1, I2, I7, and I10, including their multi-view forms. The two invariants
-the write path turns on most directly, I9 (an entity id is issued once per allocation and only
-ever returned to the pool by a compaction fold) and I11 (a request resolves one generation and
+The conformance suite covers the invariants a masked count and a selected mark depend on directly:
+I1, I2, I7, and I10, including their multi-view forms; where coverage stands is `conformance.md`
+§4.6. The two invariants the write path turns on most directly, I9 (an entity id is issued once and
+never reused) and I11 (a request resolves one generation and
 uses it throughout), are covered in Rust rather than in the differential suite. Two of the
 differential harness's interleaving scripts for deny retirement are permanently void, because they
 tested the deletion-stamp mechanism Rule S and Rule F replaced; the remaining ones that exercise a
