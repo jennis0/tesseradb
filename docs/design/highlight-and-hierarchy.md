@@ -160,10 +160,12 @@ per page row against a verdict the cache already holds.
 ## 3. The `member_of` leaf
 
 A leaf of its own, spelled like `region` (`selection-operand.md` §2): `member_of` is a reserved
-column name, refused at the build, and takes `{layer: <name>, artifact: <tessera_id>}`.
+column name, refused at the build, and takes `{layer: <name>, artifact: <tessera_id>}` — the
+identifier a **decimal string**, as `region`'s published-artifact spelling already carries it, a
+bare JSON number losing the top of a `u64`.
 
 ```json
-{"all_of": [{"member_of": {"layer": "mesh/descriptors", "artifact": 546790}},
+{"all_of": [{"member_of": {"layer": "mesh/descriptors", "artifact": "546790"}},
             {"published": {"range": ["2015-01-01", "2020-12-31"]}}]}
 ```
 
