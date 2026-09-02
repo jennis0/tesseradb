@@ -103,10 +103,13 @@ const artifactList = async () =>
 const drawn = async () =>
   page.evaluate(() => {
     const p = window.__tesseraProbe;
-    const explorer = /** @type {{store: {get(name: 'artifacts'): {served: {content: string[]; box: unknown; hull: unknown}[]}} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')));
+    const explorer = /** @type {{store: {get(name: 'artifacts'): {served: {content: string[]; box: unknown; shape: unknown}[]}} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')));
     const served = explorer?.store?.get('artifacts').served ?? [];
     const named = served.filter((a) => (a.content[0] ?? '').length > 0).length;
-    const withGeometry = served.filter((a) => a.box !== null || a.hull !== null).length;
+    // `shape`, which is what a served artifact carries — this read `a.hull`, a field no served
+    // row has ever had, so `undefined !== null` counted every served artifact as carrying
+    // geometry and the figure was the served count under another name.
+    const withGeometry = served.filter((a) => a.box !== null || a.shape !== null).length;
     return p ? {outlines: p.timings.outlines, outlinesDrawn: p.timings.outlinesDrawn, labels: p.timings.labels, layersOn: p.cluster.layersOn, served: p.cluster.servedIds.length, named, withGeometry} : null;
   });
 

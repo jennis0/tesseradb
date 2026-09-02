@@ -88,12 +88,24 @@ export type Band = {
    * entries, never the points).
    */
   membership: Record<string, BandMembership>;
+  /**
+   * The per-point highlight bit, one byte a point (`highlight-and-hierarchy.md` §2): `1` where
+   * the point satisfies the request's `highlight`, `0` where it does not.
+   *
+   * **`null` where the response carried no highlight**, which is a different state from every
+   * point reading `0` — nothing is dulled when no question was put. A band held from a request
+   * that carried one and drawn under a request that does not is re-fetched like any other
+   * question change, so this never carries a stale answer into a frame.
+   */
+  highlightBits: Uint8Array | null;
   /** `m(T)` as the server reported it: how many points the definition serves for this tile. */
   served: number;
   /** `min(k, k_max_marks)` in force when this band was fetched — see {@link isComplete}. */
   capUsed: number;
   visible: bigint;
   matched: bigint;
+  /** The tile's own `highlighted` count, exact — equal to `matched` where no highlight is set. */
+  highlighted: bigint;
   /** The declaration: every held identity is strictly below this. `0n` for an empty band. */
   heldBelow: bigint;
   identityKey: string;
@@ -140,7 +152,8 @@ function bandBytes(
   ids: BigUint64Array,
   positions: Float32Array,
   scalars: Record<string, ScalarColumn>,
-  membership: Record<string, BandMembership>
+  membership: Record<string, BandMembership>,
+  highlightBits: Uint8Array | null
 ): number {
   let bytes = ids.byteLength + positions.byteLength;
   for (const column of Object.values(scalars)) {
@@ -148,6 +161,8 @@ function bandBytes(
   }
   // The ordinal column is 4 B a point per layer on (§5.10's table); the ledger counts it.
   for (const m of Object.values(membership)) bytes += m.ordinals.byteLength + m.distinct.byteLength;
+  // One byte a point where a highlight is set, and nothing at all where none is.
+  bytes += highlightBits?.byteLength ?? 0;
   return bytes;
 }
 
@@ -320,6 +335,9 @@ export function bandSplitter(
         // Already in world space — the decoder produced it, which in a browser means a worker did.
         const positions = result.world.slice(offset * 2, end * 2);
         const scalars = sliceScalars(result.scalars, offset, end);
+        // A copy, never a view: a `subarray` would keep the whole response alive and the byte
+        // ledger would be fiction, which is the rule every other array here follows.
+        const highlightBits = result.highlighted ? result.highlighted.slice(offset, end) : null;
         const membership: Record<string, BandMembership> = {};
         if (named) {
           const started = performance.now();
@@ -336,14 +354,16 @@ export function bandSplitter(
           positions,
           scalars,
           membership,
+          highlightBits,
           served,
           capUsed: meta.capUsed,
           visible: tile.visible,
           matched: tile.matched,
+          highlighted: tile.highlighted,
           heldBelow: ids.length === 0 ? 0n : ids[ids.length - 1]! + 1n,
           identityKey: meta.identityKey,
           contentKey: meta.contentKey,
-          bytes: bandBytes(ids, positions, scalars, membership),
+          bytes: bandBytes(ids, positions, scalars, membership, highlightBits),
           touchedAt: meta.now
         });
         offset = end;
@@ -967,12 +987,13 @@ export class BandCache {
       this.table?.release(held.distinct);
       membership[layer] = {ordinals, distinct};
     }
-    const bytes = bandBytes(ids, positions, scalars, membership);
+    const highlightBits = band.highlightBits ? band.highlightBits.slice(0, keep) : null;
+    const bytes = bandBytes(ids, positions, scalars, membership, highlightBits);
     this.held += bytes - band.bytes;
     this.heldPoints += keep - band.ids.length;
     this.changes++;
     const truncated = bandKey(band.depth, band.prefix);
-    const kept: Band = {...band, ids, positions, scalars, membership, heldBelow: ids[keep - 1]! + 1n, bytes};
+    const kept: Band = {...band, ids, positions, scalars, membership, highlightBits, heldBelow: ids[keep - 1]! + 1n, bytes};
     this.bands.set(truncated, kept);
     this.index(kept, truncated);
   }

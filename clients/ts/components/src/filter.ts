@@ -202,17 +202,24 @@ export class TesseraFilter extends TesseraElement {
     else this.removeAttribute('data-on');
   }
 
+  /**
+   * The empty control. **`verb: 'filter'` is the default position**, so a control the user has
+   * not spoken to about the mode narrows the map, which is what one always did; the chip's toggle
+   * moves it (`highlight-and-hierarchy.md` §5.2), and the store's draft keeps the choice, so a
+   * control re-entered under a highlight stays a highlight.
+   */
   private emptyDraft(o: FilterOperandSet): ColumnDraft {
+    const verb = this.resolvedStore?.get('filters').draft[this.column]?.verb ?? 'filter';
     switch (o.family) {
       case 'text':
-        return {family: 'text', query: '', mode: 'all'};
+        return {family: 'text', query: '', mode: 'all', verb};
       case 'string':
       case 'keyword':
-        return {family: o.family, needle: '', op: 'contains'};
+        return {family: o.family, needle: '', op: 'contains', verb};
       case 'category':
-        return {family: 'category', keys: []};
+        return {family: 'category', keys: [], verb};
       case 'numeric':
-        return {family: 'numeric', gte: null, lte: null};
+        return {family: 'numeric', gte: null, lte: null, verb};
     }
   }
 
@@ -259,7 +266,7 @@ export class TesseraFilter extends TesseraElement {
     }
   }
 
-  private text(o: FilterOperandSet, draft: {family: 'text'; query: string; mode: TextMode}) {
+  private text(o: FilterOperandSet, draft: ColumnDraft & {family: 'text'}) {
     const modes: [TextMode, string][] = [['all', 'all words']];
     if (o.operands.includes('phrase')) modes.push(['phrase', 'phrase']);
     else modes.push(['any', 'any word']);
@@ -271,7 +278,7 @@ export class TesseraFilter extends TesseraElement {
       </div>`;
   }
 
-  private string(draft: {family: 'string' | 'keyword'; needle: string; op: 'eq' | 'prefix' | 'contains'}) {
+  private string(draft: ColumnDraft & {family: 'string' | 'keyword'}) {
     return html`<div class="ctl-row">
       <div class="input grow">${icon('search', 14)}<input id="ctl" part="entry" type="search" .value=${draft.needle} autocomplete="off"
         aria-label=${`${this.column} value`}
@@ -304,7 +311,7 @@ export class TesseraFilter extends TesseraElement {
       : html`${this.markedField(v, 'key', v.key)}`;
   }
 
-  private category(draft: {family: 'category'; keys: string[]}) {
+  private category(draft: ColumnDraft & {family: 'category'}) {
     const suggestion = this.resolvedSuggestion;
     const refusal = this.resolvedSuggestRefusal;
     const chosen = new Set(draft.keys);
@@ -384,7 +391,7 @@ export class TesseraFilter extends TesseraElement {
     const bound = (which: 'gte' | 'lte') =>
       html`<input id=${which === 'gte' ? 'ctl' : nothing} part="entry" class="grow mono" type=${date ? 'date' : 'number'}
         .value=${fromValue(draft[which])} aria-label=${`${this.column} ${which === 'gte' ? 'from' : 'to'}`}
-        @change=${(e: Event) => this.change({...draft, [which]: toValue((e.target as HTMLInputElement).value)}, true)} />`;
+        @change=${(e: Event) => this.change({...draft, [which]: toValue((e.target as HTMLInputElement).value)} as ColumnDraft, true)} />`;
     return html`<div class="ctl-row">${bound('gte')}<span class="to">to</span>${bound('lte')}</div>`;
   }
 }

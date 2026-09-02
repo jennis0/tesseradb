@@ -1,5 +1,5 @@
 import {Field, List, Table, Uint64, tableFromIPC, tableToIPC, vectorFromArray, type Vector} from 'apache-arrow';
-import {FRAME_ARTIFACTS, splitFramedStreams} from '../src/frame.js';
+import {FRAME_ARTIFACTS, FRAME_TILES, splitFramedStreams} from '../src/frame.js';
 
 /** `parent_ids: list<uint64>` as contracts §3.2 r71 types it. */
 const PARENTS = new List(new Field('item', new Uint64(), false));
@@ -27,28 +27,53 @@ export function stripOldShapeColumns(body: Uint8Array): Uint8Array {
       );
     } else columns[field.name] = column;
   }
-  return reframe(body, tableToIPC(new Table(columns), 'stream'));
+  return reframe(body, FRAME_ARTIFACTS, tableToIPC(new Table(columns), 'stream'));
 }
 
-/** `body` with its kind-5 payload replaced: `u8 kind, u32 LE length, payload`, frame by frame. */
-function reframe(body: Uint8Array, artifacts: Uint8Array): Uint8Array {
+/**
+ * The same golden's **tiles** frame given its `highlighted` column, fifth after `served`
+ * (`highlight-and-hierarchy.md` §2).
+ *
+ * The value is each tile's `matched`, which is what the server serves for a request carrying no
+ * `highlight` — these captures carried none — so this recreates the body the same capture would
+ * produce against a server that serves the column, and every claim the tests make about the
+ * counts still stands against real bytes. A rewrite of a stale recording, in test code only: the
+ * decoder keeps no shim (decision 0048) and refuses a body without the column.
+ */
+export function liftTilesHighlighted(body: Uint8Array): Uint8Array {
+  const streams = splitFramedStreams(body);
+  const table = tableFromIPC(streams.tiles);
+  if (table.schema.fields.some((f) => f.name === 'highlighted')) return body;
+  const columns: Record<string, Vector> = {};
+  for (const field of table.schema.fields) columns[field.name] = table.getChild(field.name)!;
+  columns['highlighted'] = table.getChild('matched')!;
+  return reframe(body, FRAME_TILES, tableToIPC(new Table(columns), 'stream'));
+}
+
+/** Every lift a recorded golden needs to read as the wire reads today. */
+export function liftGolden(body: Uint8Array): Uint8Array {
+  return liftTilesHighlighted(stripOldShapeColumns(body));
+}
+
+/** `body` with one frame's payload replaced: `u8 kind, u32 LE length, payload`, frame by frame. */
+function reframe(body: Uint8Array, replace: number, payload: Uint8Array): Uint8Array {
   const frames: {kind: number; payload: Uint8Array}[] = [];
   const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
   let at = 0;
   while (at < body.length) {
     const kind = body[at]!;
     const length = view.getUint32(at + 1, true);
-    frames.push({kind, payload: kind === FRAME_ARTIFACTS ? artifacts : body.subarray(at + 5, at + 5 + length)});
+    frames.push({kind, payload: kind === replace ? payload : body.subarray(at + 5, at + 5 + length)});
     at += 5 + length;
   }
   const out = new Uint8Array(frames.reduce((n, f) => n + 5 + f.payload.length, 0));
   const outView = new DataView(out.buffer);
   at = 0;
-  for (const {kind, payload} of frames) {
-    out[at] = kind;
-    outView.setUint32(at + 1, payload.length, true);
-    out.set(payload, at + 5);
-    at += 5 + payload.length;
+  for (const frame of frames) {
+    out[at] = frame.kind;
+    outView.setUint32(at + 1, frame.payload.length, true);
+    out.set(frame.payload, at + 5);
+    at += 5 + frame.payload.length;
   }
   return out;
 }

@@ -34,6 +34,8 @@ function band(depth: number, prefix: bigint, n: number, served = n, cell = {cx: 
     capUsed: 500,
     visible: BigInt(served * 3),
     matched: BigInt(served * 3),
+    highlighted: BigInt(served * 3),
+    highlightBits: null,
     membership: {},
     heldBelow: BigInt(n + 1),
     identityKey: 'ik',
@@ -212,14 +214,16 @@ describe('assemble', () => {
   it('splits a real response into bands and keeps every served mark', () => {
     const result: ViewportResult = {
       tiles: [
-        {tile: 0n, visible: 9n, matched: 9n, served: 3n},
-        {tile: 1n, visible: 4n, matched: 4n, served: 2n}
+        {tile: 0n, visible: 9n, matched: 9n, highlighted: 9n, served: 3n},
+        {tile: 1n, visible: 4n, matched: 4n, highlighted: 4n, served: 2n}
       ],
       ids: BigUint64Array.from([1n, 2n, 3n, 4n, 5n]),
       codes: new BigUint64Array(5),
       positions: Float64Array.from([0, 0, 128, 128, 256, 256, 384, 384, 512, 512]),
       world: Float32Array.from([0, 0, 1, 1, 2, 2, 3, 3, 4, 4]),
       scalars: {w: {arrowType: 'u32', values: Uint32Array.from([10, 11, 12, 13, 14])}},
+      highlighted: null,
+      pointsProjection: 'full',
       subCells: null,
       membership: {},
       artifacts: [],
@@ -252,7 +256,7 @@ describe('assertAssemblyMatchesServed', () => {
 
   it('throws when a provisional tile carries counts', () => {
     const out = assemble(frame(2, [], [band(4, 0n, 2)]));
-    out.tiles[0]!.counts = {visible: 1n, matched: 1n, served: 1};
+    out.tiles[0]!.counts = {visible: 1n, matched: 1n, highlighted: 1n, served: 1};
     expect(() => assertAssemblyMatchesServed(out)).toThrow(/superset of marks must never be read as density/);
   });
 });

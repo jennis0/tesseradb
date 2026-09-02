@@ -25,6 +25,8 @@ function band(tag: number, n: number, identityKey = 'ik', depth = 2): Band {
     capUsed: 500,
     visible: BigInt(n * 3),
     matched: BigInt(n * 3),
+    highlighted: BigInt(n * 3),
+    highlightBits: null,
     membership: {},
     heldBelow: BigInt(tag * 1000 + n),
     identityKey,
@@ -278,5 +280,27 @@ describe('MarkSlab', () => {
     const slab = new MarkSlab();
     const draw = slab.sync([band(1, 1)], 2, UNIFORM_ENCODING, null);
     expect([...draw.colours.subarray(0, 4)]).toEqual([...UNIFORM]);
+  });
+});
+
+describe('the highlight bit', () => {
+  /**
+   * §5.3's dulling rides the slab's dirty-span path beside the ordinal, and the value where a
+   * band carries none is **1** — *matched* — so a map with no highlight draws exactly what it drew
+   * before the attribute existed, with the shader's switch a uniform rather than a per-point test
+   * of whether the question was put.
+   */
+  it('writes ones for a band fetched under no highlight', () => {
+    const slab = new MarkSlab();
+    const draw = slab.sync([band(1, 4)], 2, UNIFORM_ENCODING, null);
+    expect(Array.from(draw.highlights.subarray(0, 4))).toEqual([1, 1, 1, 1]);
+  });
+
+  it('writes the band’s own bits, in the band’s own order, at its slot', () => {
+    const slab = new MarkSlab();
+    const lit = {...band(1, 4), highlightBits: Uint8Array.from([0, 1, 1, 0])};
+    const plain = band(2, 2);
+    const draw = slab.sync([lit, plain], 2, UNIFORM_ENCODING, null);
+    expect(Array.from(draw.highlights.subarray(0, 6))).toEqual([0, 1, 1, 0, 1, 1]);
   });
 });

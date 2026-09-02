@@ -8,15 +8,34 @@ import {resolvePick} from '../src/pick.js';
  * tile they belong to at the drawn depth, and a non-exact tile contributes nothing at all.
  */
 
-const tile = (x: number, y: number, depth: number, exact: boolean, matched: number, visible = matched): ComposedTile => ({
+const tile = (x: number, y: number, depth: number, exact: boolean, matched: number, visible = matched, highlighted?: number): ComposedTile => ({
   prefix: mortonOfTile(x, y, depth),
   depth,
   exact,
   drawn: exact ? 10 : 7,
-  counts: exact ? {visible: BigInt(visible), matched: BigInt(matched), served: 10} : null
+  counts: exact ? {visible: BigInt(visible), matched: BigInt(matched), highlighted: BigInt(highlighted ?? matched), served: 10} : null
 });
 
 describe('binDensity', () => {
+  /**
+   * §5.3's wash: the channel is what the interface chose, and it is what shows the members the cap
+   * clause did not draw — a highlight over 27 million articles draws 66,000 of them. What is
+   * checked is that the channel is *read*, not that the image looks a particular way: two tiles
+   * whose `matched` are equal and whose `highlighted` are not must bin differently under it.
+   */
+  it('washes the channel it is given, so a highlight and a filter are different pictures', () => {
+    const tiles = [tile(0, 0, 1, true, 100, 100, 1), tile(1, 0, 1, true, 100, 100, 100)];
+    const matched = binDensity(tiles, 1, 'matched')!;
+    const highlighted = binDensity(tiles, 1, 'highlighted')!;
+    // Equal `matched` in both bins is one distinct count, so both bins take the same intensity.
+    expect(matched.data[3]).toBe(matched.data[7]);
+    // The highlight tells them apart: the tile matching one is far below the tile matching a
+    // hundred, and neither is empty.
+    expect(highlighted.data[3]!).toBeLessThan(highlighted.data[7]!);
+    expect(highlighted.filled).toBe(2);
+  });
+
+
   it('lands each exact tile’s count in its own bin, over the rectangle the tiles span', () => {
     const image = binDensity([tile(4, 6, 3, true, 100), tile(6, 7, 3, true, 5), tile(5, 6, 3, true, 0)], 3)!;
     expect(image.width).toBe(3);

@@ -48,7 +48,8 @@ function bodyBytes(): Uint8Array {
       tile: u64(SERVED.map((_, i) => BigInt(i))),
       visible: u64(SERVED.map((s) => s + 5n)),
       matched: u64(SERVED.map((s) => s + 5n)),
-      served: u64(SERVED)
+      served: u64(SERVED),
+      highlighted: u64(SERVED.map((s) => s + 5n))
     }),
     'stream'
   );

@@ -21,13 +21,26 @@ layout(std140) uniform tesseraLutUniforms {
   float useLut;
   highp int lutMask;
   highp int lutShift;
+  float dull;
 } tesseraLut;
 uniform sampler2D lutTexture;
 `,
   fs: '',
   source: '',
-  uniformTypes: {useLut: 'f32', lutMask: 'i32', lutShift: 'i32'} as const
+  uniformTypes: {useLut: 'f32', lutMask: 'i32', lutShift: 'i32', dull: 'f32'} as const
 };
+
+/**
+ * What an unmatched mark's alpha is multiplied by while a highlight is set
+ * (`highlight-and-hierarchy.md` §5.3).
+ *
+ * The dulled marks are still drawn — the map does not move and nothing is removed, which is the
+ * whole difference between a highlight and a filter — so they have to stay legible as ground
+ * while the matched ones read as the answer. Alpha alone, and not a desaturation: the colour of a
+ * mark is the palette's answer about which cluster or which value it belongs to, and washing that
+ * out would make the highlight change what the map says as well as what it emphasises.
+ */
+export const DULL_ALPHA = 0.22;
 
 export type MarksLayerProps = ScatterplotLayerProps & {
   /** Whether the fill colour comes from the lookup texture rather than the colour attribute. */
@@ -35,6 +48,13 @@ export type MarksLayerProps = ScatterplotLayerProps & {
   lutTexture?: Texture | null;
   /** The ordinal per mark — bound as a buffer through `data.attributes`, never read per mark. */
   getOrdinal?: number | ((d: unknown) => number);
+  /**
+   * Whether a highlight is set. Off — the ordinary map — every mark draws at its own alpha and
+   * the attribute is not read at all, so a client with no highlight pays nothing for this.
+   */
+  highlighting?: boolean;
+  /** The highlight bit per mark, bound as a buffer the same way the ordinal is. */
+  getHighlight?: number | ((d: unknown) => number);
 };
 
 export class MarksLayer extends ScatterplotLayer<unknown, MarksLayerProps> {
@@ -43,7 +63,9 @@ export class MarksLayer extends ScatterplotLayer<unknown, MarksLayerProps> {
     ...(ScatterplotLayer.defaultProps as DefaultProps<MarksLayerProps>),
     useLut: false,
     lutTexture: null,
-    getOrdinal: {type: 'accessor', value: 0}
+    getOrdinal: {type: 'accessor', value: 0},
+    highlighting: false,
+    getHighlight: {type: 'accessor', value: 1}
   };
 
   override getShaders() {
@@ -52,7 +74,11 @@ export class MarksLayer extends ScatterplotLayer<unknown, MarksLayerProps> {
       ...shaders,
       modules: [...shaders.modules, lutUniforms],
       inject: {
-        'vs:#decl': /* glsl */ `in float instanceOrdinals;`,
+        'vs:#decl': /* glsl */ `in float instanceOrdinals;
+in float instanceHighlights;`,
+        // The colour first, from whichever source is on, then the highlight over it — so a
+        // dulled mark is the same colour it would have been, at a lower alpha, under either
+        // colouring. `dull` is 1.0 with no highlight set, which is the whole of the switch.
         'vs:DECKGL_FILTER_COLOR': /* glsl */ `\
 if (tesseraLut.useLut > 0.5) {
   int o = int(instanceOrdinals + 0.5);
@@ -60,6 +86,7 @@ if (tesseraLut.useLut > 0.5) {
   vec4 lutColour = texelFetch(lutTexture, at, 0);
   color = vec4(lutColour.rgb, lutColour.a * layer.opacity);
 }
+color.a *= mix(tesseraLut.dull, 1.0, step(0.5, instanceHighlights));
 `
       }
     };
@@ -68,7 +95,9 @@ if (tesseraLut.useLut > 0.5) {
   override initializeState(): void {
     super.initializeState();
     this.getAttributeManager()!.addInstanced({
-      instanceOrdinals: {size: 1, type: 'float32', accessor: 'getOrdinal', defaultValue: 0}
+      instanceOrdinals: {size: 1, type: 'float32', accessor: 'getOrdinal', defaultValue: 0},
+      // Defaults to 1 — *matched*, which is what every mark is when no highlight is set.
+      instanceHighlights: {size: 1, type: 'float32', accessor: 'getHighlight', defaultValue: 1}
     });
   }
 
@@ -76,7 +105,14 @@ if (tesseraLut.useLut > 0.5) {
     const model = (this.state as {model?: {shaderInputs: {setProps(p: unknown): void}; setBindings(b: Record<string, unknown>): void}}).model;
     const texture = this.props.lutTexture ?? null;
     if (model) {
-      model.shaderInputs.setProps({tesseraLut: {useLut: this.props.useLut && texture ? 1 : 0, lutMask: LUT_WIDTH - 1, lutShift: LUT_SHIFT}});
+      model.shaderInputs.setProps({
+        tesseraLut: {
+          useLut: this.props.useLut && texture ? 1 : 0,
+          lutMask: LUT_WIDTH - 1,
+          lutShift: LUT_SHIFT,
+          dull: this.props.highlighting ? DULL_ALPHA : 1
+        }
+      });
       if (texture) model.setBindings({lutTexture: texture});
     }
     super.draw(opts);

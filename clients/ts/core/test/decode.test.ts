@@ -3,9 +3,12 @@ import {join} from 'node:path';
 import {describe, expect, it} from 'vitest';
 import {decodeViewport} from '../src/decode.js';
 import {CELL_GRID} from '../src/coords.js';
+import {liftTilesHighlighted} from './old-shape-columns.js';
 
+// The goldens predate the tiles frame's `highlighted` column and are lifted rather than
+// recaptured — see `liftTilesHighlighted`, and the fixture note in `clients/ts/README.md`.
 const fixture = (name: string) =>
-  new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', name)));
+  liftTilesHighlighted(new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', name))));
 const meta = JSON.parse(readFileSync(join(import.meta.dirname, 'fixtures', 'meta.json'), 'utf8'));
 
 describe('decodeViewport', () => {

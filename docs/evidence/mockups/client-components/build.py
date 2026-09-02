@@ -1,4 +1,4 @@
-"""Builds the eleven artboards and canvas.json for the client-components canvas."""
+"""Builds the twelve artboards and canvas.json for the client-components canvas."""
 import json
 import os
 from gen import *  # noqa
@@ -625,6 +625,63 @@ m</div></div>
 
 
 # ============================================================================== canvas.json
+# ============================================================================== Highlight and hierarchy
+MESH_ROWS = [
+    (0, 'Neoplasms', 4_812_004, 21_309, '', True),
+    (1, 'Neoplasms by Site', 1_204_881, 8_142, '', True),
+    (2, 'Breast Neoplasms', 288_412, 3_004, 'Skin and Connective Tissue Diseases', False),
+    (2, 'Lung Neoplasms', 251_770, 2_118, '', False),
+    (2, 'Digestive System Neoplasms', 214_005, 1_442, '', False),
+    (1, 'Neoplasms by Histologic Type', 962_110, 4_508, '', False),
+    (0, 'Anatomy', 9_115_442, 44_002, '', False),
+    (0, 'Chemicals and Drugs', 8_240_119, 39_551, '', False),
+]
+
+
+def board_highlight():
+    W, H = 600, 400
+    lit = {0, 4}
+    map_svg, members, colours = datamap_highlight(W, H, ARXIV_CLUSTERS[:7], lit, seed=7, n=1500, r=1.5)
+    plain, _m, _c = datamap(W, H, ARXIV_CLUSTERS[:7], seed=7, n=1500, r=1.5)
+    frame = lambda inner, strip: (
+        f'<div class="tx-map" style="width:{W}px; height:{H}px; position:relative; overflow:hidden;'
+        f' border:1px solid var(--tessera-line); border-radius:var(--tessera-radius);">{inner}'
+        f'<div class="corner bl">{strip}</div></div>')
+    cap = lambda t: f'<div class="sm muted" style="max-width:{W}px; margin-top:10px; text-wrap:pretty">{t}</div>'
+    filters = filters_panel(applied=(('title', 'quantum entanglement'), ('archive', 'quant-ph')),
+                            verbs={'archive': 'highlight'}, compact=True, show_abstract=False)
+    tree = hierarchy_panel(MESH_ROWS, filtered=True, clause=('Breast Neoplasms', 'highlight'))
+    card = (artifact_card(label='Breast Neoplasms', layer='mesh/descriptors', key='D001943', count=288_412,
+                          children=(('Breast Carcinoma in Situ', 12_004), ('Inflammatory Breast Neoplasms', 3_118)),
+                          content='A MeSH descriptor. Its members are spread over the whole layout, so the layer draws nothing.')
+            .replace('<div class="row" style="margin-top:12px"><button class="btn">' + icon('fit', 14) + 'Fit to cluster</button></div>',
+                     artifact_card_verbs(pressed='highlight', fit=False)))
+    body = f'''
+<div class="tx" style="width:1760px; height:1080px; padding:28px 32px; display:flex; flex-direction:column; gap:20px;">
+  <div class="col" style="gap:4px"><div class="hd">Highlight · member-of · the hierarchy panel</div>
+    <span class="sm muted">A filter narrows the map; a highlight keeps every point and lights the matched ones. They are two fields of one request, and every clause carries both verbs.</span></div>
+  <div class="row" style="gap:28px; align-items:flex-start">
+    <div class="col">{frame(plain, status_strip(shown=4812, matched=12465, visible=181900))}
+      {cap('1 · A filter. The map narrows to the matches and the strip says <b>matched</b>.')}</div>
+    <div class="col">{frame(map_svg, status_strip(shown=4812, matched=12465, visible=181900, highlighted=3204))}
+      {cap('2 · A highlight. The map does not move: matched points are lit, the rest dulled to 0.22 alpha, and the wash under them is the per-tile <b>highlighted</b> count — which is what shows the members the cap clause did not draw. The strip gains <b>the highlight matched N</b>.')}</div>
+    <div class="col" style="width:336px">{filters}
+      {cap('3 · The chip carries the verb. <b>archive</b> is highlighting and <b>title</b> is filtering; clicking the word moves the clause, and the predicate is never re-entered.')}</div>
+  </div>
+  <div class="row" style="gap:28px; align-items:flex-start">
+    <div class="col" style="width:336px">{tree}
+      {cap('4 · <b>tessera-hierarchy</b>, over the browse verb. The roots whatever the zoom, children on expansion, <i>also under</i> for a node served beneath several parents, and — under a filter — the matched count beside the masked one. A click is <b>highlight</b>.')}</div>
+    <div class="col" style="width:336px">{card}
+      {cap('5 · The card. <i>Filter to this</i>, <i>Highlight this</i> and <i>Outside this</i> are <b>member_of</b> clauses; the pressed one says what is on. No <i>fit</i>: this layer draws nothing.')}</div>
+    <div class="col" style="width:336px">{layer_panel(layers=(('clusters/kmeans', True), ('topics/ctfidf', True)))}
+      <div class="panel" style="margin-top:-10px"><div class="xs muted" style="margin:0 0 4px">Filter layers</div>
+        <div class="col"><div class="row" style="height:26px;padding-left:22px"><span class="mono sm faint">mesh/descriptors</span></div></div></div>
+      {cap('6 · A filter layer is still a layer. <b>mesh/descriptors</b> declares no computed content, so it is listed and never presented for viewing — no draw toggle, no place in <i>In view</i>, no label and no shape — and it is never named in a viewport request.')}</div>
+  </div>
+</div>'''
+    write('Highlight.dc.html', dc_file(FONTS_LINK + css_block(), body))
+
+
 def canvas():
     boards = [
         # page 1 — the default explorer
@@ -640,6 +697,7 @@ def canvas():
         dict(file='Article.dc.html', title='Host 4 — editorial drop-in', x=1540, y=1040, w=900, h=1500, page='page-2'),
         dict(file='Notebook.dc.html', title='Host 5 — notebook', x=2540, y=1040, w=1200, h=1000, page='page-2'),
         dict(file='Views.dc.html', title='View switching — the two pickers', x=0, y=2400, w=1160, h=660, page='page-1'),
+        dict(file='Highlight.dc.html', title='Highlight, member-of and the hierarchy panel', x=1260, y=2400, w=1760, h=1080, page='page-1'),
     ]
     notes = [
         dict(id='n-default', x=0, y=-150, w=560, page='page-1',
@@ -665,6 +723,7 @@ def canvas():
 if __name__ == '__main__':
     board_main(); board_overlay(); board_narrow(); board_status(); board_selection()
     board_ops(); board_images(); board_research(); board_article(); board_notebook(); board_views()
+    board_highlight()
     canvas()
     for n in sorted(os.listdir(OUT)):
         if n.endswith('.dc.html') or n == 'canvas.json':

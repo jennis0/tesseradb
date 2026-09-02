@@ -122,6 +122,7 @@ export type FilterExpr =
   | {any_of: FilterExpr[]}
   | {none_of: FilterExpr[]}
   | {region: RegionOperand}
+  | {member_of: MemberOfOperand}
   | {[column: string]: FilterOperator};
 
 /**
@@ -137,6 +138,32 @@ export type RegionOperand =
   | {circle: [number, number, number]; space?: 'view'}
   | {ellipse: [number, number, number, number, number]; space?: 'view'}
   | {artifact: string};
+
+/**
+ * The `member_of` leaf (`highlight-and-hierarchy.md` §3; contracts §3.2 r73): one artifact of one
+ * layer, resolved
+ * inside the trust boundary to that artifact's membership intersected with `M_auth`.
+ *
+ * Spelled like `region` and a reserved column name, refused at the build. It sits in `filters` or
+ * in `highlight` identically, so *narrow to this cluster* and *light this descriptor* are the
+ * same clause in two positions.
+ *
+ * **An artifact this principal was never served is an empty operand, never a refusal.** An
+ * identifier is a *value*, and answering `422` to one would make the leaf an existence oracle
+ * over exactly what the criterion withholds. An unknown *layer* is `422`, being deployment
+ * schema — so a client may spell a layer name wrong and hear about it, and may not learn whether
+ * an artifact exists.
+ */
+export type MemberOfOperand = {
+  layer: string;
+  /**
+   * The artifact's opaque `tessera_id` (I10) as a **decimal string**, which is how the `region`
+   * leaf already spells one (`polygon-membership.md` §8) and for the same reason: a `tessera_id`
+   * is `u64` and JSON has no 64-bit integer, so a number here would lose the top of the range
+   * silently. `memberOf` builds it from the `bigint` a client holds.
+   */
+  artifact: string;
+};
 
 /**
  * `x-tessera-region` (`selection-operand.md` §6): whether every region leaf's answer is exact for
@@ -183,12 +210,14 @@ export type Layer = {
    * request may ask for more detail (`artifactBudget`).
    */
   /**
-   * The four kinds the wire declares (`tessera-types`' `HierarchyKind`): `flat` (no lineage),
-   * `nested` (a tree in the edges, no levels), and the two levelled shapes `stacked` and `tiered`.
-   * `tiered` was missing here until 2026-08-28 — the union is what the fetch model classifies
-   * layers by, so an absent member is a layer silently treated as something it is not.
+   * The five kinds the wire declares (`tessera-types`' `HierarchyKind`): `flat` (no lineage),
+   * `nested` (a tree in the edges, no levels), `dag` (several parents per child, decision 0117),
+   * and the two levelled shapes `stacked` and `tiered`. `tiered` was missing here until
+   * 2026-08-28 and `dag` until 2026-09-02 — the union is what the fetch model classifies layers
+   * by, and what the hierarchy panel walks, so an absent member is a layer silently treated as
+   * something it is not.
    */
-  hierarchy: {kind: 'flat' | 'nested' | 'stacked' | 'tiered'; pruneChildren: boolean};
+  hierarchy: {kind: 'flat' | 'nested' | 'dag' | 'stacked' | 'tiered'; pruneChildren: boolean};
   /**
    * The resolutions the layer declares. **Empty for a treed layer**, which declares none: its
    * lineage is in its edges, and a level number would say nothing about position in it.
@@ -370,6 +399,12 @@ export type Meta = {
      * over it the answer is a cover, said on `x-tessera-region` ({@link RegionVerdict}).
      */
     maxRegionCells: number;
+    /**
+     * `POST /v1/artifacts/browse`' page ceiling and default (`highlight-and-hierarchy.md` §4). A
+     * client that pages needs it for the reason it needs `maxCategoryValues`: to tell a short page
+     * that means *the set ended* from one that means *the deployment truncated*.
+     */
+    maxBrowseRows: number;
   };
   /** `serve.max_tiles_per_request` — the client's own bound when it chooses a request depth. */
   maxTilesPerRequest: number;
@@ -478,6 +513,38 @@ export type ViewportRequest = {
    */
   filters?: FilterExpr | null;
   /**
+   * The highlight expression, in exactly `filters`' grammar, or null for no highlight
+   * (`highlight-and-hierarchy.md` §2; contracts §3.2 r74).
+   *
+   * **It never changes which rows the response holds.** The cap clause, the density sampling and
+   * `served` run over the `filters` candidate exactly as they would without it, so the set of
+   * points a viewer sees is the same with and without a highlight and a point they were looking
+   * at stays where it is with its brightness changed. What it adds is one count per tile
+   * (`highlighted`), one bit per served point and one bit per served artifact, each the answer to
+   * `all_of[filters, highlight]` — the conjunction with the candidate, by construction.
+   *
+   * Two highlights are one expression under `all_of` or `any_of`; there is no list of them, for
+   * the reason `filters` is one expression.
+   */
+  highlight?: FilterExpr | null;
+  /**
+   * Which columns each served point answers with (`highlight-and-hierarchy.md` §2, contracts §3.2
+   * r74), mirroring
+   * `artifactRows`. Omitted or `'full'` is every column; `'highlight'` is the same points as
+   * `(tessera_id, highlighted)`.
+   *
+   * **The row set and the `served` split are identical under either value; only the columns
+   * change** — which is what it is for: the served set does not depend on the highlight, so a
+   * client that changes only the highlight holds every point it needs and wants only the bits,
+   * joined to what it holds by `tessera_id`.
+   *
+   * **Bound to a generation.** The served set is deterministic within one, so a stamp move
+   * (`x-tessera-stale`) means the held set may no longer be what the same request serves and the
+   * client re-asks with `'full'`. A client asking for it while holding nothing meets identifiers
+   * it cannot draw and re-asks the same way.
+   */
+  pointRows?: 'full' | 'highlight';
+  /**
    * Which annotation layers to answer for. **Omitted or `[]` means none**; the string `'all'`
    * means every layer this principal reaches; an array is those layers ∩ the reachable set.
    *
@@ -577,7 +644,22 @@ export type Shape = [number, number][][][];
  * `served` is what was drawn; `visible` is what exists inside the mask. Any surface showing one
  * without the other lets a sample read as a set.
  */
-export type TileCounts = {tile: bigint; visible: bigint; matched: bigint; served: bigint};
+export type TileCounts = {
+  tile: bigint;
+  visible: bigint;
+  matched: bigint;
+  served: bigint;
+  /**
+   * Of this tile's `matched`, how many also satisfy the request's `highlight`
+   * (`highlight-and-hierarchy.md` §2) — **equal to `matched` when the request carried none**, so
+   * a reader never has to ask whether the field means anything. `highlighted ≤ matched ≤ visible`
+   * per tile, by construction.
+   *
+   * This is what shows the members the cap clause did not draw: a highlight over 27 million
+   * articles draws 66,000 of them and washes the rest.
+   */
+  highlighted: bigint;
+};
 
 export type SubCell = {cell: bigint; count: bigint};
 
@@ -694,14 +776,25 @@ export type Artifact = {
    * until the view moves over them.
    */
   matched: boolean | null;
+  /**
+   * Decision 0104's `matched` bit computed for the **conjunction** `all_of[filters, highlight]`
+   * (`highlight-and-hierarchy.md` §2): true where a member this principal may see, inside the
+   * request's tiles, satisfies both.
+   *
+   * `null` where the request carried no `highlight`, for the reason `matched` is null with no
+   * filter — there was no question. Every caution on `matched` holds here unchanged: it is a bit
+   * and not a count, it answers about the members in view, and it must not be derived from the
+   * points in hand, which are a sample.
+   */
+  highlighted: boolean | null;
 };
 
 /**
- * One row of the identity projection (`artifact_rows: "identity"`, contracts §3.2 r44): the same
- * row set a full answer to the identical request would carry, in a fixed four-column schema.
+ * One row of the identity projection (`artifact_rows: "identity"`, contracts §3.2 r74): the same
+ * row set a full answer to the identical request would carry, in a fixed five-column schema.
  *
- * The row set, the `matched` bits and the `rung` values are identical under either value of
- * `artifact_rows`; only the columns change. The payload columns are absent from the schema rather
+ * The row set, the `matched` and `highlighted` bits and the `rung` values are identical under
+ * either value of `artifact_rows`; only the columns change. The payload columns are absent from the schema rather
  * than null, so a caller resolves each row against payloads it already holds by
  * `(layer, tesseraId)` — and one meeting an identifier its store cannot resolve knows it, and
  * re-asks with `"full"`: one round trip, never a wrong map.
@@ -714,6 +807,8 @@ export type ArtifactIdentity = {
   rung: number;
   /** See {@link Artifact.matched} — identical to the full row's value, null with no filter. */
   matched: boolean | null;
+  /** See {@link Artifact.highlighted} — identical to the full row's value, null with no highlight. */
+  highlighted: boolean | null;
 };
 
 export type ViewportResult = {
@@ -764,6 +859,28 @@ export type ViewportResult = {
    * (`bands.ts`); the decoder cannot name it, its lanes sharing no table.
    */
   membership: Record<string, MembershipColumn>;
+  /**
+   * The per-point highlight bit, one byte a point in the response's own point order — `1` where
+   * the served point satisfies the request's `highlight`, `0` where it does not
+   * (`highlight-and-hierarchy.md` §2).
+   *
+   * **`null` when the request carried no `highlight`**, and the column is absent from the frame
+   * then rather than all-`1`: the draw is unchanged by a highlight, so a client with no highlight
+   * set has no bit to read and none is sent.
+   *
+   * A byte rather than a boolean array because it is a per-point attribute the renderer uploads,
+   * and the one thing this column is for is being written into a buffer.
+   */
+  highlighted: Uint8Array | null;
+  /**
+   * Which projection the points frames were in, read off their schema
+   * (`highlight-and-hierarchy.md` §2; contracts §3.2 r74) — `'full'` for every ordinary response.
+   *
+   * `'highlight'` is `(tessera_id, highlighted)` and nothing else: {@link codes},
+   * {@link positions}, {@link world} and {@link scalars} are **empty**, and a caller joins the
+   * bits to points it already holds by `tessera_id`.
+   */
+  pointsProjection: 'full' | 'highlight';
   subCells: SubCell[] | null;
   /**
    * The artifacts this viewport served — empty when none did.
@@ -971,4 +1088,70 @@ export type ArtifactDetail = {
   centroid: [number, number] | null;
   box: [number, number, number, number] | null;
   shape: Shape | null;
+};
+
+
+/**
+ * `POST /v1/artifacts/browse` (`highlight-and-hierarchy.md` §4; contracts §3.2 r75): a layer's
+ * hierarchy **by lineage
+ * rather than by viewport**, in three forms under one gate.
+ *
+ * - **Roots** — neither `parent` nor `q`: the layer's artifacts with no served parent. `level`
+ *   names which level's artifacts are the roots on a `stacked` or `tiered` layer, and is `422` on
+ *   the one-level kinds (`flat`, `nested`, `dag`) — a kind's levels are deployment schema, and a
+ *   parameter accepted and ignored is a wrong answer that looks right.
+ * - **Children** — `parent`: the artifacts naming it among their parents, with the requested
+ *   artifact's own parents beside them. On a `dag` layer a child is served under each served
+ *   parent, as the artifacts frame already does (decision 0117).
+ * - **Search** — `q`: the layer's artifacts whose key, or whose first supplied text, contains `q`
+ *   case-insensitively.
+ *
+ * Every form is paged, ordered by `matchedCount` where `filters` is present and by `maskedCount`
+ * otherwise, then by `tesseraId` ascending — a total order, so a cursor over tied counts neither
+ * duplicates nor drops a row. Independent of the viewport: it opens on the roots whatever the
+ * zoom and does not move when the map does.
+ */
+export type BrowseRequest = {
+  /**
+   * Which view's row space the counts are taken in — required here for the reason it is required
+   * on the drill-down: a masked count is an intersection in row space and row space is per view.
+   */
+  view: string;
+  layer: string;
+  level?: number;
+  parent?: bigint;
+  q?: string;
+  /**
+   * The viewport's own filter object, evaluated by the same routes, so a filtered map and a
+   * filtered tree read the same numbers. **Existence and `maskedCount` never move with it** — the
+   * same anchoring as everywhere else — and a row whose `matchedCount` is zero is still served.
+   */
+  filters?: FilterExpr | null;
+  /** Clamped to `meta.selection.maxBrowseRows`; `0` is a `422`, on `/v1/categories`' argument. */
+  limit?: number;
+  cursor?: string;
+};
+
+/** One row of a browse page: the artifacts frame's identity row, a name, and the counts. */
+export type BrowseRow = {
+  /** Wire identity, u64 — carried as a decimal string in the JSON and never narrowed here. */
+  tesseraId: bigint;
+  key: string | null;
+  /** The first supplied text content, where this principal may read it. */
+  name: string | null;
+  /** `|membership ∩ M_auth|`, per request and never precomputed (C8). */
+  maskedCount: bigint;
+  /** `|membership ∩ M_auth ∩ filter|`; `null` where the request carried no `filters`. */
+  matchedCount: bigint | null;
+  rung: number;
+  /** C29 per entry: a parent this principal may not see is simply absent. */
+  parentIds: bigint[];
+};
+
+export type BrowsePage = {
+  artifacts: BrowseRow[];
+  /** The requested artifact's own parents — the children form only; `[]` on the others. */
+  parents: BrowseRow[];
+  /** The cursor for the next page, or `null` where this was the last. */
+  next: string | null;
 };

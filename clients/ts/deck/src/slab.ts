@@ -86,6 +86,17 @@ export type SlabDraw = {
   colours: Uint8Array;
   /** The membership ordinal per mark, `0` for none, as the shader's `float32`. */
   ordinals: Float32Array;
+  /**
+   * The highlight bit per mark, `1` where the point satisfies the request's `highlight` and `0`
+   * where it does not, as the shader's `float32` (`highlight-and-hierarchy.md` §5.3).
+   *
+   * **Every mark reads `1` where no highlight is set**, so the shader's switch is a uniform and
+   * a map with no highlight draws exactly what it drew before this attribute existed. It rides
+   * the same dirty-span path as the ordinals and is written when a band is, which is every time
+   * it can have changed: the served set does not depend on the highlight, but the *bits* arrive
+   * with the points, so a highlight change is a re-fetch and a re-fetch is a write.
+   */
+  highlights: Float32Array;
   length: number;
   /**
    * The partition's own GPU buffers, when a device is attached — capacity-sized, current to
@@ -96,7 +107,7 @@ export type SlabDraw = {
   gpu: GpuSlab | null;
 };
 
-export type GpuSlab = {positions: GpuBuffer; colours: GpuBuffer; picking: GpuBuffer; ordinals: GpuBuffer};
+export type GpuSlab = {positions: GpuBuffer; colours: GpuBuffer; picking: GpuBuffer; ordinals: GpuBuffer; highlights: GpuBuffer};
 
 /**
  * deck's picking colour for instance `i` is `i + 1` in three little-endian bytes — a pure function
@@ -131,6 +142,7 @@ function emptyDraw(): SlabDraw {
     positions: new Float32Array(0),
     colours: new Uint8Array(0),
     ordinals: new Float32Array(0),
+    highlights: new Float32Array(0),
     length: 0,
     gpu: null
   };
@@ -153,10 +165,12 @@ class Partition {
   private dirtyPos: {from: number; to: number} | null = null;
   private dirtyCol: {from: number; to: number} | null = null;
   private dirtyOrd: {from: number; to: number} | null = null;
+  private dirtyHigh: {from: number; to: number} | null = null;
   private ids = new BigUint64Array(0);
   private positions = new Float32Array(0);
   private colours = new Uint8Array(0);
   private ordinals = new Float32Array(0);
+  private highlights = new Float32Array(0);
   /** The layer whose ordinals the partition carries; `''` for none (every ordinal 0). */
   private membershipLayer = '';
   private capacity = 0;
@@ -263,14 +277,17 @@ class Partition {
     const positions = new Float32Array(capacity * 2);
     const colours = new Uint8Array(capacity * 4);
     const ordinals = new Float32Array(capacity);
+    const highlights = new Float32Array(capacity);
     ids.set(this.ids.subarray(0, this.live));
     positions.set(this.positions.subarray(0, this.live * 2));
     colours.set(this.colours.subarray(0, this.live * 4));
     ordinals.set(this.ordinals.subarray(0, this.live));
+    highlights.set(this.highlights.subarray(0, this.live));
     this.ids = ids;
     this.positions = positions;
     this.colours = colours;
     this.ordinals = ordinals;
+    this.highlights = highlights;
     this.capacity = capacity;
     this.reserveGpu();
   }
@@ -289,7 +306,8 @@ class Partition {
       positions: this.device.createBuffer({byteLength: this.capacity * 8, usage}),
       colours: this.device.createBuffer({byteLength: this.capacity * 4, usage}),
       picking: this.device.createBuffer({byteLength: this.capacity * 4, usage}),
-      ordinals: this.device.createBuffer({byteLength: this.capacity * 4, usage})
+      ordinals: this.device.createBuffer({byteLength: this.capacity * 4, usage}),
+      highlights: this.device.createBuffer({byteLength: this.capacity * 4, usage})
     };
     this.gpu.picking.write(pickingColours(this.capacity), 0);
     // Everything held is now behind the fresh buffers; the next flush rewrites it whole.
@@ -297,6 +315,7 @@ class Partition {
       this.dirtyPos = {from: 0, to: this.live};
       this.dirtyCol = {from: 0, to: this.live};
       this.dirtyOrd = {from: 0, to: this.live};
+      this.dirtyHigh = {from: 0, to: this.live};
     }
   }
 
@@ -313,6 +332,7 @@ class Partition {
     this.gpu?.colours.destroy();
     this.gpu?.picking.destroy();
     this.gpu?.ordinals.destroy();
+    this.gpu?.highlights.destroy();
     this.gpu = null;
   }
 
@@ -342,6 +362,24 @@ class Partition {
       this.gpu.ordinals.write(this.ordinals.subarray(from, to), from * 4);
       this.dirtyOrd = null;
     }
+    if (this.dirtyHigh) {
+      const {from, to} = this.dirtyHigh;
+      this.gpu.highlights.write(this.highlights.subarray(from, to), from * 4);
+      this.dirtyHigh = null;
+    }
+  }
+
+  /**
+   * A band's highlight bits into the slot at `at` — **ones where the band carries none**, which
+   * is a band fetched under no highlight and is what makes the shader's switch a uniform rather
+   * than a per-point test of whether the question was put.
+   */
+  private writeHighlights(band: Band, at: number): void {
+    const n = band.ids.length;
+    if (band.highlightBits) {
+      for (let i = 0; i < n; i++) this.highlights[at + i] = band.highlightBits[i]!;
+    } else this.highlights.fill(1, at, at + n);
+    if (this.gpu) this.dirtyHigh = Partition.widen(this.dirtyHigh, at, at + n);
   }
 
   /** A band's ordinals for the carried layer into the slot at `at` — zeros where it has none. */
@@ -360,6 +398,7 @@ class Partition {
     this.positions.set(band.positions, at * 2);
     writeColours(this.colours, at, band.ids.length, columnOf(band, colourBy), encoding);
     this.writeOrdinals(band, at);
+    this.writeHighlights(band, at);
     if (this.gpu) this.dirtyPos = Partition.widen(this.dirtyPos, at, at + band.ids.length);
     this.uploadColours(at, band.ids.length);
   }
@@ -370,7 +409,9 @@ class Partition {
    * moved. Each array is republished exactly when its own contents changed.
    */
   private publish(ids: boolean, positions: boolean, colours: boolean, ordinals = false): SlabDraw {
-    const changed = ids || positions || colours || ordinals || this.draw.length !== this.live;
+    // The highlight bits are written exactly when a band is, so they republish with the positions.
+    const highlights = positions;
+    const changed = ids || positions || colours || ordinals || highlights || this.draw.length !== this.live;
     if (!changed) return this.draw;
     this.draw = {
       ids: ids || this.draw.ids.length !== this.live ? this.ids.subarray(0, this.live) : this.draw.ids,
@@ -384,6 +425,10 @@ class Partition {
           : this.draw.colours,
       ordinals:
         ordinals || this.draw.ordinals.length !== this.live ? this.ordinals.subarray(0, this.live) : this.draw.ordinals,
+      highlights:
+        highlights || this.draw.highlights.length !== this.live
+          ? this.highlights.subarray(0, this.live)
+          : this.draw.highlights,
       length: this.live,
       gpu: this.gpu
     };

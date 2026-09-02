@@ -102,8 +102,21 @@ export type TesseraLayerProps = CompositeLayerProps & {
   regionPolygon?: [number, number][] | null;
   drag?: [number, number, number, number] | null;
   dragPolygon?: [number, number][] | null;
+  /**
+   * Whether a highlight is set — the marks that satisfy it draw lit and the rest dulled
+   * (`highlight-and-hierarchy.md` §5.3). Off, the map draws exactly what it drew before, and the
+   * per-point bit is not read.
+   */
+  highlighting?: boolean;
   /** Whether the density wash is drawn under the points. */
   wash?: boolean;
+  /**
+   * Which count the wash reads (`highlight-and-hierarchy.md` §5.3). The host chooses it from what
+   * it sent: `highlighted` where a highlight is set, `matched` where a filter is and no highlight
+   * is, `visible` otherwise — and it labels the wash as the count it chose, which is why the
+   * choice is the host's rather than derived here from three columns that legitimately agree.
+   */
+  washChannel?: 'visible' | 'matched' | 'highlighted';
   /** A fixed mark radius in pixels; null sizes the marks by their count and the zoom (`markStyle`). */
   radius?: number | null;
   /** How many marks a paint ended up drawing, for the host's probe. */
@@ -275,7 +288,8 @@ function gpuAttributes(gpu: GpuSlab): AttributeMap {
       instancePositions: {buffer: gpu.positions, size: 2, type: 'float32', stride: 8, offset: 0},
       instanceFillColors: {buffer: gpu.colours, size: 4, type: 'unorm8', stride: 4, offset: 0},
       instancePickingColors: {buffer: gpu.picking, size: 4, type: 'uint8', stride: 4, offset: 0},
-      instanceOrdinals: {buffer: gpu.ordinals, size: 1, type: 'float32', stride: 4, offset: 0}
+      instanceOrdinals: {buffer: gpu.ordinals, size: 1, type: 'float32', stride: 4, offset: 0},
+      instanceHighlights: {buffer: gpu.highlights, size: 1, type: 'float32', stride: 4, offset: 0}
     };
     gpuDescriptors.set(gpu, held);
   }
@@ -289,7 +303,7 @@ const heldStandInColours = new WeakMap<object, {key: string; colours: Uint8Array
 /** Frames whose slab-residency check has run — once per `marks` object, not once per paint. */
 const checkedMarks = new WeakSet<object>();
 /** The wash image, once per `tiles` object; `pending` while it is being built off the paint path. */
-type HeldWash = {depth: number; image: ImageData | null; bounds: [number, number, number, number]; pending: boolean};
+type HeldWash = {depth: number; channel: string; image: ImageData | null; bounds: [number, number, number, number]; pending: boolean};
 const heldWash = new WeakMap<object, HeldWash>();
 /** The last wash built, drawn while the next is being built. */
 let lastWash: HeldWash | null = null;
@@ -536,12 +550,32 @@ export function focusOutlines(a: ArtifactsProjection, o: OutlineOptions): Outlin
 }
 
 /**
- * How many labels a viewport of `width` × `height` pixels is given: the top N by masked count
- * are placed and the rest wait for a zoom (§5.10). One per 36,000 px² — twenty-eight on a
- * 1280 × 800 viewport — and never fewer than eight.
+ * The work ceiling on the candidate list. Placement is O(K) against a spatial hash and the
+ * candidates are built once per served set, so this is high enough that no view a client draws
+ * reaches it and low enough that a whole level of a large hierarchy — GeoNames' 23,821 `admin3`
+ * artifacts — cannot turn a settle into a pass over every one of them.
  */
-export function labelBudget(width: number, height: number): number {
-  return Math.max(8, Math.floor((width * height) / 36_000));
+export const LABEL_CANDIDATE_CEILING = 4_096;
+
+/**
+ * How many artifacts are offered to the placement: **the drawn set, not the window**.
+ *
+ * This was one label per 36,000 px² of viewport — twenty-eight on a 1280 × 800 screen — which
+ * made the window decide *which* artifacts got to try for the ground rather than how many
+ * survived the trying. The two are not the same bound, and on a compact layout the difference is
+ * the whole of what is drawn: rung 3's 253 k-means clusters sit inside a ball 464 world units
+ * across, so at zoom 0 the top twenty-eight by count all want the same few hundred pixels and
+ * **three** of them are placed. Offered all 253 the same placement fits **sixteen** — the
+ * thirteen extra are small clusters that sit in gaps the largest ones never occupied, and no
+ * screen-derived number could have reached them, because they were never candidates.
+ *
+ * The spatial hash is what bounds the drawing and it is exact: a label is placed where it does
+ * not overlap one already placed, within `MAX_DISPLACEMENT` of its own centroid, or it
+ * waits for a zoom. A second bound over the window only ever discarded candidates the hash would
+ * have judged. What remains here is the work bound, {@link LABEL_CANDIDATE_CEILING}.
+ */
+export function labelBudget(drawn: number): number {
+  return Math.min(Math.max(0, drawn), LABEL_CANDIDATE_CEILING);
 }
 
 export type LabelText = {
@@ -954,6 +988,8 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     // choosing cluster colour later is the uniform flip and not a rewrite of the attribute.
     const membershipLayer = clusterLayer ?? r.artifacts?.layers[0] ?? '';
     const useLut = clusterLayer !== null && lut.gpu !== null;
+    // One uniform for the whole draw: with no highlight set the attribute is not read at all.
+    const highlighting = this.props.highlighting ?? false;
     const slabStarted = performance.now();
     slab.sync(r.marks.bands, r.depth, encoding, column.colourBy, membershipLayer);
     timings.slabMs = performance.now() - slabStarted;
@@ -1003,10 +1039,16 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
               length: held.draw.length,
               attributes: held.draw.gpu
                 ? gpuAttributes(held.draw.gpu)
-                : {getPosition: binary(held.draw.positions, 2), getFillColor: binary(held.draw.colours, 4, true), getOrdinal: binary(held.draw.ordinals, 1)}
+                : {
+                    getPosition: binary(held.draw.positions, 2),
+                    getFillColor: binary(held.draw.colours, 4, true),
+                    getOrdinal: binary(held.draw.ordinals, 1),
+                    getHighlight: binary(held.draw.highlights, 1)
+                  }
             },
             tesseraIds: held.draw.ids,
             useLut,
+            highlighting,
             lutTexture: lut.gpu,
             radiusUnits: 'pixels' as const,
             getRadius: style.radius,
@@ -1045,11 +1087,13 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
             attributes: {
               getPosition: binary(standIn.positions, 2),
               getFillColor: binary(colours, 4, true),
-              getOrdinal: binary(standIn.ordinals, 1)
+              getOrdinal: binary(standIn.ordinals, 1),
+              getHighlight: binary(standIn.highlights, 1)
             }
           },
           tesseraIds: standIn.ids,
           useLut,
+          highlighting,
           lutTexture: lut.gpu,
           radiusUnits: 'pixels' as const,
           getRadius: style.radius,
@@ -1148,18 +1192,23 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     let image: ImageData | null = null;
     let bounds: [number, number, number, number] = [0, 0, 1, 1];
     if (tiles) {
+      // The channel is in the key beside the depth: a highlight change hands the layer the same
+      // `tiles` object with a different question to wash, and a memo on the object alone would
+      // draw the old answer.
+      const channel = this.props.washChannel ?? 'matched';
       let held = heldWash.get(tiles);
-      if (!held || held.depth !== depth) {
+      if (!held || held.depth !== depth || held.channel !== channel) {
         if (!held || !held.pending) {
           // Keep the last wash drawn while this one is built: no flash to nothing at a settle.
-          held = {depth, image: lastWash?.image ?? null, bounds: lastWash?.bounds ?? [0, 0, 1, 1], pending: true};
+          held = {depth, channel, image: lastWash?.image ?? null, bounds: lastWash?.bounds ?? [0, 0, 1, 1], pending: true};
           heldWash.set(tiles, held);
           const build = () => {
             washTimer = null;
-            const binned = binDensity(tiles.tiles, depth);
+            const binned = binDensity(tiles.tiles, depth, channel);
             const built = binned && binned.filled > 0 ? filterDensity(binned, depth) : null;
             const entry = {
               depth,
+              channel,
               image: built && typeof ImageData !== 'undefined' ? new ImageData(built.data, built.width, built.height) : null,
               bounds: built ? built.bounds : ([0, 0, 1, 1] as [number, number, number, number]),
               pending: false
@@ -1274,7 +1323,9 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     const started = performance.now();
     const zoom = viewport?.zoom ?? 0;
     const bucket = Math.round(zoom * LABEL_ZOOM_STEP);
-    const budget = viewport ? labelBudget(viewport.width, viewport.height) : 0;
+    // The drawn set is the candidate list (`labelBudget`); the window bounds nothing here, the
+    // spatial hash does.
+    const budget = a ? labelBudget(a.served.length) : 0;
     const key = a ? `${a.version}|${a.palette}|${bucket}|${budget}|${this.props.clusterLevel ?? ''}` : '';
     let held = a ? heldLabels.get(a.served) : undefined;
     if (a && viewport && (!held || held.key !== key)) {

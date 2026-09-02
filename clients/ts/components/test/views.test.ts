@@ -58,7 +58,7 @@ function meta(over: Partial<Meta> = {}): Meta {
     ],
     declaredScalars: [{name: 'title', arrowType: 'utf8', category: null, render: false, index: true}],
     layers: [],
-    selection: {kMin: 1, kMaxMarks: 500, maxK: 5000, thetaTargetMarks: 10, maxUnderlayOffset: 0, maxCategoryValues: 1000, maxRegionVertices: 10_000, maxRegionCells: 262_144},
+    selection: {kMin: 1, kMaxMarks: 500, maxK: 5000, thetaTargetMarks: 10, maxUnderlayOffset: 0, maxCategoryValues: 1000, maxRegionVertices: 10_000, maxRegionCells: 262_144, maxBrowseRows: 200},
     maxTilesPerRequest: 4096,
     filterOperands: [],
     ...over

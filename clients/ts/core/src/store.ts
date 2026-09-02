@@ -8,10 +8,11 @@ import {rectContainsTile} from './rects.js';
 import {worldBbox} from './prefetch.js';
 import type {Clock, DriverOptions, ViewState as DriverViewState} from './driver.js';
 import {countCodesCached, countCodesInPiece, extendRanks, widenDomain, widenDomainOver, type Domain, type Ranks} from './encoding.js';
-import {composeFilters, emptyDraft, type FilterDraft} from './filters.js';
+import {composeFilters, emptyDraft, type ClauseVerb, type FilterDraft} from './filters.js';
+import {withMember, withMembers, withoutMember, type MemberClause} from './members.js';
 import {Presenter, defaultFrameScheduler, type FrameScheduler, type PresentedStatus, type Refusal} from './presented.js';
 import {insideBox, insidePolygon, regionOperand, withRegion, type WorldPolygon} from './region.js';
-import {layerClosure} from './layers.js';
+import {isFilterLayer, layerClosure} from './layers.js';
 import {requestLevels} from './artifactChannel.js';
 import {artifactBudgetFor} from './artifactBudget.js';
 import {artifactColours, positionalEntry, type PaletteKind, type PaletteScheme, type Rgba} from './palette.js';
@@ -24,6 +25,8 @@ import type {Presented} from './presented.js';
 import type {
   Artifact,
   ArtifactDetail,
+  BrowsePage,
+  BrowseRequest,
   CategoryValue,
   FilterExpr,
   ItemDetail,
@@ -155,6 +158,18 @@ export type ViewProjection = {
   depth: number;
   visible: Masked;
   matched: Masked;
+  /**
+   * The sum of the frame's per-tile `highlighted` — *the highlight matched N points*
+   * (`highlight-and-hierarchy.md` §2, §5.2).
+   *
+   * **Equal to `matched` where no highlight is set**, because the wire's column is: a client
+   * reading it never has to ask whether the question was put. Which is why the strip's third line
+   * is drawn from {@link ViewProjection.highlighting} and not from this being different — the two
+   * are legitimately equal when a highlight matches everything the filter did.
+   */
+  highlighted: Masked;
+  /** Whether the request behind this frame carried a `highlight` at all. */
+  highlighting: boolean;
   served: Count;
   /** Provisional marks — a screen fact, a plain mark count, never a masked quantity. */
   provisional: number;
@@ -250,7 +265,22 @@ export type RegionProjection = {
 
 export type FiltersProjection = {
   draft: FilterDraft;
+  /**
+   * The controls in the `filter` position, composed — what rides the request's `filters` beside
+   * the drawn region's leaf. Null for the unfiltered request.
+   */
   expr: FilterExpr | null;
+  /**
+   * The controls and `member_of` clauses in the `highlight` position, composed — what rides the
+   * request's `highlight` (`highlight-and-hierarchy.md` §5.2). Null where nothing is highlighted.
+   *
+   * **A filter never moves the mask and a highlight never moves the draw**: these are two fields
+   * of one request and the store keeps them apart from composition onwards, so a clause's
+   * position is the only thing that decides which of the two it reaches.
+   */
+  highlight: FilterExpr | null;
+  /** The `member_of` clauses held, in either position (§3, §5.5). */
+  members: MemberClause[];
   /**
    * The typeahead's last landed page per column (`value-suggestion.md` §5.1) — `q` is the query
    * it answers, so a control can tell a page that answers what is in the box from one that
@@ -293,6 +323,41 @@ export interface Store {
 
   setView(input: ViewInput): void;
   setFilters(draft: FilterDraft): void;
+  /**
+   * Replace the `member_of` clauses (`highlight-and-hierarchy.md` §3, §5.5): the card's *filter to
+   * this* and *outside this*, and a hierarchy panel's nodes.
+   *
+   * Like `setFilters`, this is the whole set rather than an edit, so a caller composes with
+   * `withMember`/`withoutMember` and the store never has to reconcile two half-states. It requeries
+   * for the same reason `setFilters` does — the question changed — and a clause in the `highlight`
+   * position moves no mask, which is asserted where it is composed.
+   */
+  setMembers(clauses: readonly MemberClause[]): void;
+  /**
+   * One page of a layer's hierarchy by lineage (`highlight-and-hierarchy.md` §4) — roots, an
+   * artifact's children and parents, or a name search.
+   *
+   * **Not a projection.** The panel walks a tree, opening and paging nodes at its own pace, and
+   * what is expanded is the panel's state rather than the store's; a projection would have to hold
+   * the walk and would be rebuilt on every store tick. What the store owns is the token and the
+   * question: `filters` is supplied from the store's own composition where the caller does not
+   * name one, so a filtered map and a filtered tree read the same numbers.
+   */
+  browse(req: Omit<BrowseRequest, 'filters' | 'view'> & {filters?: FilterExpr | null; view?: string}): Promise<BrowsePage>;
+  /**
+   * The expression every request carries as `filters`, composed: the draft's filter-position
+   * leaves, the `member_of` clauses in that position, and the drawn region's leaf. Null for the
+   * unfiltered request.
+   *
+   * **Read it rather than recomposing it.** A caller that needs to know *what question is being
+   * asked* — a panel deciding whether its counts are stale, a host labelling a number — has three
+   * projections to look in and no way to be told about a fourth. `filters.expr` is one of the
+   * three, and a reader that took it for the whole would miss a drawn region entirely.
+   *
+   * It is JSON-safe: a `member_of` leaf carries its artifact as a decimal string and a region
+   * leaf carries numbers, so this composes, hashes and logs without a replacer.
+   */
+  requestFilters(): FilterExpr | null;
   /**
    * Ask a category's typeahead for `q`, debounced per column (`value-suggestion.md` §5.1) — lands
    * in `filters.suggestions[column]`, or `filters.suggestErrors[column]` on a refusal. Fire and
@@ -493,13 +558,13 @@ export function createStore(options: StoreOptions): Store {
   const projections: Projections = {
     meta: null,
     status: NO_STATUS,
-    view: {id: '', composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, served: NO_COUNT, provisional: 0},
+    view: {id: '', composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, highlighted: NO_MASKED, highlighting: false, served: NO_COUNT, provisional: 0},
     marks: {bands: [], standIn: [], count: NO_COUNT},
     tiles: {tiles: []},
     artifacts: {layer: null, layers: [], served: [], lineage: servedLineage([]), status: 'idle', refusal: null, version: 0, held: 0, table, servedOrdinals: new Set(), shapes: new Map(), colours: new Map(), palette, coverage: {current: 0, stale: 0}},
     selection: {item: null, itemRefusal: null, artifact: null, artifactRefusal: null},
     region: null,
-    filters: {draft: {}, expr: null, suggestions: {}, suggestErrors: {}},
+    filters: {draft: {}, expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {}},
     legend: {ranks: {}, domains: {}, categories: {}, categoryErrors: {}, colourBy: null},
     replica: {bytes: 0, points: 0, bands: 0, views: 0, lastPlan: null}
   };
@@ -647,6 +712,9 @@ export function createStore(options: StoreOptions): Store {
             ...req,
             view: id,
             filters: requestFilters(),
+            // Beside it and never instead of it: the draw is unchanged by a highlight, so this
+            // costs the response three columns and nothing else (`highlight-and-hierarchy.md` §2).
+            highlight: requestHighlight(),
             layers: req.k === 0 ? [] : layersOn,
             ...(req.k === 0 || layersOn.length === 0 ? {} : {artifactBudget: artifactBudgetFor(zoom)}),
             // The levels from the camera zoom, so the membership column names the same cut the
@@ -764,10 +832,10 @@ export function createStore(options: StoreOptions): Store {
     // operand set, all empty. A bundle without an `abstract` simply has no abstract control.
     if (Object.keys(projections.filters.draft).length === 0) {
       const draft = emptyDraft(meta.filterOperands);
-      replaceProjection('filters', {...projections.filters, draft, expr: composeFilters(draft)});
+      replaceProjection('filters', {...projections.filters, draft, expr: composeFilters(draft, 'filter'), highlight: composeFilters(draft, 'highlight')});
     }
 
-    layersOn = layerClosure(meta.layers, layersOn);
+    layersOn = drawnOnly(layerClosure(meta.layers, layersOn));
     bind(machineryFor(viewId));
 
     if (queuedView) {
@@ -849,11 +917,15 @@ export function createStore(options: StoreOptions): Store {
 
     let visible = 0n;
     let matched = 0n;
+    let highlighted = 0n;
     let served = 0;
     for (const tile of frame.tiles) {
       if (!tile.counts) continue;
       visible += tile.counts.visible;
       matched += tile.counts.matched;
+      // Exact, and the whole point of the third line: it counts the members the cap clause did
+      // not draw as well as the ones it did.
+      highlighted += tile.counts.highlighted;
       served += tile.counts.served;
     }
 
@@ -872,6 +944,11 @@ export function createStore(options: StoreOptions): Store {
       depth: frame.depth,
       visible: {value: Number(visible), exact: true},
       matched: {value: Number(matched), exact: true},
+      highlighted: {value: Number(highlighted), exact: true},
+      // Read off the composition rather than off the counts: `highlighted` equals `matched`
+      // legitimately, and *there is no highlight* is a different state from *the highlight
+      // matched everything the filter did*.
+      highlighting: requestHighlight() !== null,
       served: {shown: served, total: Number(visible), exact: true},
       provisional: frame.provisional
     });
@@ -1263,7 +1340,7 @@ export function createStore(options: StoreOptions): Store {
     // The `view` projection, immediately, with the new id and no marks: view A's marks must never
     // be drawn under view B's frame, and the presenter of the view being entered was cancelled
     // when it was left, so it holds nothing to publish yet.
-    replaceProjection('view', {id, composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, served: NO_COUNT, provisional: 0});
+    replaceProjection('view', {id, composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, highlighted: NO_MASKED, highlighting: false, served: NO_COUNT, provisional: 0});
     replaceProjection('marks', {...projections.marks, bands: [], standIn: [], count: NO_COUNT});
     replaceProjection('tiles', {tiles: []});
     // The artifacts of the view being entered — its own channel's state, which is empty for a
@@ -1315,8 +1392,40 @@ export function createStore(options: StoreOptions): Store {
    * `region` leaf (`selection-operand.md` §5). One composition site, so the point path, the
    * artifact channel and the region's own count are answers to one question.
    */
+  /**
+   * The layers a viewport request may name: every one that is not a **filter layer**
+   * (`highlight-and-hierarchy.md` §5.4, owner ruling 2026-09-02).
+   *
+   * A layer declaring `computed = []` is listed in the client's roster and never presented for
+   * viewing, so naming it here would pay an artifact pass for rows nothing draws — and would put
+   * its artifacts in the *In view* list and its names on the map, which is the whole of what the
+   * ruling forbids. It is reached through the hierarchy panel and applied as a `member_of` clause.
+   * Filtered here rather than in the picker, so a host driving `setLayers` directly cannot get it
+   * wrong either.
+   */
+  function drawnOnly(names: readonly string[]): string[] {
+    if (!meta) return [...names];
+    const filterLayers = new Set(meta.layers.filter(isFilterLayer).map((l) => l.name));
+    return names.filter((n) => !filterLayers.has(n));
+  }
+
   function requestFilters(): FilterExpr | null {
-    return withRegion(composeFilters(projections.filters.draft), selection ? regionOperand(selection) : null, selection?.outside ?? false);
+    const expr = withMembers(composeFilters(projections.filters.draft, 'filter'), projections.filters.members, 'filter');
+    return withRegion(expr, selection ? regionOperand(selection) : null, selection?.outside ?? false);
+  }
+
+  /**
+   * The highlight every request carries: the controls and the `member_of` clauses in the
+   * `highlight` position (`highlight-and-hierarchy.md` §5.2), composed the same way and at the
+   * same one site.
+   *
+   * **The drawn region is never here.** A drawn region is a shape the viewer put on the map and
+   * the region panel's own numbers are read off the filtered frame's `matched`; moving it would
+   * make those numbers answer a different question with nothing on screen saying so. Every other
+   * clause carries both verbs.
+   */
+  function requestHighlight(): FilterExpr | null {
+    return withMembers(composeFilters(projections.filters.draft, 'highlight'), projections.filters.members, 'highlight');
   }
 
   /**
@@ -1341,9 +1450,28 @@ export function createStore(options: StoreOptions): Store {
     if (lastView) setView(lastView.input);
   }
 
+  async function browse(req: Omit<BrowseRequest, 'filters' | 'view'> & {filters?: FilterExpr | null; view?: string}): Promise<BrowsePage> {
+    const t = await ensureToken();
+    // The map's own filter unless the caller named one — including `null`, which asks for the
+    // unfiltered counts explicitly. The view is the store's own current one: a masked count is an
+    // intersection in row space and row space is per view, so a panel that named none would be
+    // asking about whichever view the server chose.
+    const filters = 'filters' in req ? (req.filters ?? null) : requestFilters();
+    // `req.view ?? viewId`, never a spread: an explicit `view: undefined` in the caller's object
+    // would clobber the store's own with a spread and the request would go out without one.
+    return client.browse(t, {...req, view: req.view ?? viewId, filters});
+  }
+
+  function setMembers(clauses: readonly MemberClause[]): void {
+    const members = [...clauses];
+    replaceProjection('filters', {...projections.filters, members});
+    if (selection) projectRegionLoading(selection);
+    requery();
+  }
+
   function setFilters(draft: FilterDraft): void {
-    const expr = composeFilters(draft);
-    replaceProjection('filters', {...projections.filters, draft, expr});
+    const expr = composeFilters(draft, 'filter');
+    replaceProjection('filters', {...projections.filters, draft, expr, highlight: composeFilters(draft, 'highlight')});
     // A region's `matched` is under the filters, so its numbers are to a question just changed.
     if (selection) projectRegionLoading(selection);
     requery();
@@ -1450,7 +1578,7 @@ export function createStore(options: StoreOptions): Store {
 
   function setLayers(names: string[]): void {
     // Usually one, with its closure (decision 0096) — the request names every layer in it.
-    layersOn = meta ? layerClosure(meta.layers, names) : names;
+    layersOn = meta ? drawnOnly(layerClosure(meta.layers, names)) : names;
     if (!channel) {
       // Before meta: record the intent where a reader sees it; the channel adopts it at meta.
       replaceProjection('artifacts', {...projections.artifacts, layer: layersOn[0] ?? null, layers: layersOn});
@@ -1626,10 +1754,36 @@ export function createStore(options: StoreOptions): Store {
     })();
   }
 
+  /**
+   * Take the shape an answer already carried into the held shapes, so the map draws it.
+   *
+   * The drill-down route answers `centroid`, `box` **and** the shape in one body, and
+   * {@link openArtifact} was reading the first two and discarding the third: the shape landed in
+   * `selection.artifact.detail` — where the card reads it and draws nothing with it — and never
+   * in `artifacts.shapes`, which is what `focusOutlines` looks in. So an artifact opened from
+   * `<tessera-artifact-list>` drew no outline at all on a layer that declares a hull, because the
+   * box the served row carries is refused for a layer whose declared shape is a hull; a layer
+   * declaring none drew its box and hid the fault. The map's own click and hover call
+   * {@link needShape} beside this, which is why a pick drew and a list row did not.
+   *
+   * Recorded as asked, so `needShape` never issues a second request for a shape already in hand.
+   */
+  function holdShape(id: bigint, shape: Shape | null): void {
+    if (!shape) return;
+    askedShapes.add(id);
+    heldShapes = new Map(heldShapes).set(id, shape);
+    heldKinds = new Map(heldKinds).set(id, shapeKindOf(id) ?? 'derived');
+    replaceProjection('artifacts', {...projections.artifacts, shapes: heldShapes});
+  }
+
   async function openArtifact(id: bigint): Promise<void> {
     if (!token) return;
+    const asked = token;
     try {
       const detail = await client.artifact(token, id, {view: viewId});
+      // The principal may have changed under the request, in which case this shape describes a
+      // mask that is no longer the one being drawn — the same guard `needShape` takes.
+      if (token === asked) holdShape(id, detail.shape);
       replaceProjection('selection', {...projections.selection, artifact: {id, detail}, artifactRefusal: null, item: null, itemRefusal: null});
     } catch (error) {
       const e = error as {code?: string; detail?: string; message?: string};
@@ -1842,7 +1996,7 @@ export function createStore(options: StoreOptions): Store {
     forgetShapes('all');
     described.clear();
     contentKeyAtFrame = '';
-    replaceProjection('view', {id: viewId, composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, served: NO_COUNT, provisional: 0});
+    replaceProjection('view', {id: viewId, composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, highlighted: NO_MASKED, highlighting: false, served: NO_COUNT, provisional: 0});
     replaceProjection('marks', {...projections.marks, bands: [], count: NO_COUNT});
     replaceProjection('legend', {ranks: {}, domains: {}, categories: {}, categoryErrors: {}, colourBy});
     replaceProjection('status', {...NO_STATUS});
@@ -1896,7 +2050,10 @@ export function createStore(options: StoreOptions): Store {
       return () => set.delete(wrapped);
     },
     setView,
+    browse,
+    requestFilters,
     setFilters,
+    setMembers,
     suggest,
     setLayers,
     setColourBy,

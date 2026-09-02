@@ -32,7 +32,7 @@ const META: Meta = {
   groups: [],
   declaredScalars: [{name: 'archive', arrowType: 'u16', category: {vocabulary: 'a', kind: 'declared', visibility: 'public'}, render: true, index: true}],
   layers: [layer('clusters'), layer('labels', ['clusters']), layer('districts')],
-  selection: {kMin: 1, kMaxMarks: 500, maxK: 5000, thetaTargetMarks: 10, maxUnderlayOffset: 0, maxCategoryValues: 1000, maxRegionVertices: 10_000, maxRegionCells: 262_144},
+  selection: {kMin: 1, kMaxMarks: 500, maxK: 5000, thetaTargetMarks: 10, maxUnderlayOffset: 0, maxCategoryValues: 1000, maxRegionVertices: 10_000, maxRegionCells: 262_144, maxBrowseRows: 200},
   maxTilesPerRequest: 4096,
   filterOperands: []
 };
@@ -48,7 +48,8 @@ const artifact = (id: bigint, count: bigint, parent: bigint | null = null, conte
   content,
   parentIds: parent === null ? [] : [parent],
   rung: 0,
-  matched: null
+  matched: null,
+  highlighted: null
 });
 
 function artifactsProjection(served: Artifact[], layers = ['clusters', 'labels']): ArtifactsProjection {

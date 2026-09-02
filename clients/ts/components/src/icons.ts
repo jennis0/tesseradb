@@ -23,7 +23,9 @@ const PATHS = {
   list: svg`<path d="M5 4h9M5 8h9M5 12h9M2 4h.5M2 8h.5M2 12h.5"/>`,
   clock: svg`<circle cx="8" cy="8" r="6"/><path d="M8 4.5V8l2.5 1.5"/>`,
   lock: svg`<rect x="3" y="7" width="10" height="7" rx="1"/><path d="M5 7V5a3 3 0 0 1 6 0v2"/>`,
-  menu: svg`<path d="M2 4h12M2 8h12M2 12h12"/>`
+  menu: svg`<path d="M2 4h12M2 8h12M2 12h12"/>`,
+  /** A marker pen over a ruled line — the highlight verb, beside `filter`'s funnel. */
+  highlight: svg`<path d="M4.5 10.5l5.5-5.5 2.5 2.5-5.5 5.5H4.5v-2.5z"/><path d="M2.5 14.5h11"/>`
 };
 
 export type IconName = keyof typeof PATHS;

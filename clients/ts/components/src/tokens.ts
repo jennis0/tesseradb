@@ -25,6 +25,12 @@ export const tokens = css`
     --tessera-accent: light-dark(#2457a3, #86b0f0);
     --tessera-accent-ink: light-dark(#ffffff, #0d1a2e);
     --tessera-accent-soft: light-dark(#e4ecf8, #1f2d42);
+    /* The highlight's own accent, distinct from the filter's blue and from warn's amber: the two
+       verbs sit side by side on one chip and a viewer has to read which is on at a glance
+       (highlight-and-hierarchy §5.2). */
+    --tessera-highlight: light-dark(#6b3fa0, #c3a6ee);
+    --tessera-highlight-ink: light-dark(#ffffff, #1b1430);
+    --tessera-highlight-soft: light-dark(#efe6fa, #2c2340);
     --tessera-warn: light-dark(#7a5600, #e6b84a);
     --tessera-warn-soft: light-dark(#fff1cf, #3a2e0e);
     --tessera-refuse: light-dark(#a12b2b, #f29a9a);
@@ -285,6 +291,26 @@ export const chrome = css`
     color: var(--tessera-accent);
     font-size: 12px;
     font-weight: 500;
+  }
+  /* A chip whose clause is in the highlight position — the same chip in the other colour, so the
+     position reads before the words do. */
+  .chip[data-verb='highlight'] {
+    background: var(--tessera-highlight-soft);
+    color: var(--tessera-highlight);
+  }
+  /* The verb toggle on a chip: the word for where the clause is, clicked to move it. */
+  .chip .verb {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    height: 18px;
+    padding: 0 5px;
+    margin-left: -3px;
+    border-radius: 2px;
+    background: color-mix(in srgb, currentColor 14%, transparent);
+    font-size: 11px;
+    letter-spacing: 0.02em;
+    text-transform: lowercase;
   }
   .chip button {
     display: inline-flex;

@@ -12,7 +12,10 @@ import './count.js';
  * `<tessera-status>` — the state and the three counts, as one line (design §5.3, decision 0098),
  * drawn as the boards draw it (`StatusStates.png`): a dot and a word, then three cells —
  * *4,812 shown · 12,465 matched · 181,900 visible* — in that order because their relationship is
- * the content; skeleton bars in the cells while loading or retrying; *Starting session…* on the
+ * the content, with a fourth cell — *the highlight matched N* — where the request carried a
+ * `highlight` (`highlight-and-hierarchy.md` §5.2, the owner's words); it is absent where none is
+ * set, because `highlighted` equals `matched` then and a cell repeating a number says there is
+ * a second answer where there is not; skeleton bars in the cells while loading or retrying; *Starting session…* on the
  * first request; *Corpus updated* with the counts dimmed and *Refresh* when stale; *Session
  * expired · Sign in again*. The detail behind the numbers is a hover; `expanded` renders it as
  * a card.
@@ -182,6 +185,9 @@ export class TesseraStatus extends TesseraElement {
     const cells = content
       ? html`<div class="cell"><tessera-count part="count-shown" .count=${v.served} .stale=${stale} figure="shown" label="shown"></tessera-count></div>
           <div class="cell"><tessera-count part="count-matched" .masked=${v.matched} .stale=${stale} label="matched"></tessera-count></div>
+          ${v.highlighting
+            ? html`<div class="cell"><tessera-count part="count-highlighted" .masked=${v.highlighted} .stale=${stale} label="the highlight matched"></tessera-count></div>`
+            : nothing}
           <div class="cell"><tessera-count part="count-visible" .masked=${v.visible} .stale=${stale} label="visible"></tessera-count></div>`
       : skeleton
         ? html`${cell('shown', html`<span class="skel" aria-hidden="true"></span>`, stale)}${cell('matched', html`<span class="skel" aria-hidden="true"></span>`, stale)}${cell('visible', html`<span class="skel" aria-hidden="true"></span>`, stale)}`
@@ -205,6 +211,7 @@ export class TesseraStatus extends TesseraElement {
     return html`<div part="card"><div class="kv">
       ${row('Shown', html`<tessera-count .count=${v.served ?? NO_COUNT} .stale=${stale}></tessera-count>`)}
       ${row('Matched by filters', html`<tessera-count .masked=${v.matched ?? NO_MASKED} .stale=${stale}></tessera-count>`)}
+      ${v.highlighting ? row('The highlight matched', html`<tessera-count .masked=${v.highlighted ?? NO_MASKED} .stale=${stale}></tessera-count>`) : nothing}
       ${row('Visible to you here', html`<tessera-count .masked=${v.visible ?? NO_MASKED} .stale=${stale}></tessera-count>`)}
       ${row('Region', `depth ${v.depth}`)}
       ${row('Provisional marks', v.provisional.toLocaleString('en-GB'))}

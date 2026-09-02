@@ -45,11 +45,16 @@ export const WASH_HUE: [number, number, number] = [96, 132, 190];
  *
  * `channel` chooses which count is washed; `matched` is the default because it is the filtered
  * answer — the wash narrows with a filter as the counts do, while `visible` would hold.
+ *
+ * **`highlighted` is the channel a highlight washes** (`highlight-and-hierarchy.md` §5.3), and it
+ * is the only picture a spread artifact has: a highlight over 27 million articles draws 66,000 of
+ * them, so the marks say almost nothing about where the rest are and the count says it exactly.
+ * The caller labels the wash as the count it is; this function only bins what it is handed.
  */
 export function binDensity(
   tiles: readonly ComposedTile[],
   depth: number,
-  channel: 'visible' | 'matched' = 'matched',
+  channel: 'visible' | 'matched' | 'highlighted' = 'matched',
   hue: [number, number, number] = WASH_HUE
 ): DensityImage | null {
   const cells: {x: number; y: number; count: number}[] = [];

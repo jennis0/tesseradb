@@ -46,7 +46,7 @@ type Parts = number[][][] | null;
  * why the decoder must not assume it.
  */
 function body(rows: {x: Parts; y: Parts}[], type: {x: unknown; y: unknown} = {x: PARTS, y: PARTS}): Uint8Array {
-  const tiles = tableToIPC(new Table({tile: u64([0n]), visible: u64([1n]), matched: u64([1n]), served: u64([0n])}), 'stream');
+  const tiles = tableToIPC(new Table({tile: u64([0n]), visible: u64([1n]), matched: u64([1n]), served: u64([0n]), highlighted: u64([1n])}), 'stream');
   const artifacts = tableToIPC(
     new Table({
       layer: vectorFromArray(rows.map(() => 'clusters/x'), new Dictionary(new Utf8(), new Uint16())),
