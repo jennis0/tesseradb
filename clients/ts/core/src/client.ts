@@ -8,7 +8,7 @@ import {
 import {createDecoder, type Decoder, type HeadFrames} from './decoder.js';
 import {parseRegionVerdict} from './region.js';
 import {FRAME_ARTIFACTS, FRAME_POINTS, FRAME_SUB_CELLS, FRAME_TILES, FRAME_TRAILER, FrameReader} from './frame.js';
-import type {ArrowType, ArtifactDetail, CategoryValue, FilterOperandSet, ItemDetail, Layer, Meta, ProjectionName, Session, Shape, ShapeKind, TileCounts, TileScheme, ViewMetadataValue, ViewportPart, ViewportRequest, ViewportResponse, ViewportResult} from './types.js';
+import type {ArrowType, ArtifactDetail, BrowsePage, BrowseRequest, BrowseRow, CategoryValue, FilterOperandSet, ItemDetail, Layer, Meta, ProjectionName, Session, Shape, ShapeKind, TileCounts, TileScheme, ViewMetadataValue, ViewportPart, ViewportRequest, ViewportResponse, ViewportResult} from './types.js';
 
 /** Where a streamed response's points go, one frame's worth at a time. */
 export type PartSink = (part: ViewportPart) => void | Promise<void>;
@@ -36,7 +36,10 @@ function emptyPoints() {
     positions: new Float64Array(0),
     world: new Float32Array(0),
     scalars: {} as Record<string, never>,
-    membership: {} as Record<string, never>
+    membership: {} as Record<string, never>,
+    // No points, so no bits — and `null` is the honest value, being *no highlight column here*
+    // rather than *nothing highlighted*.
+    highlighted: null
   };
 }
 
@@ -227,7 +230,8 @@ export class TesseraClient {
         maxUnderlayOffset: m.selection.max_underlay_offset,
         maxCategoryValues: m.selection.max_category_values ?? 1_000,
         maxRegionVertices: m.selection.max_region_vertices ?? 10_000,
-        maxRegionCells: m.selection.max_region_cells ?? 262_144
+        maxRegionCells: m.selection.max_region_cells ?? 262_144,
+        maxBrowseRows: m.selection.max_browse_rows ?? 200
       },
       // Older servers do not publish it; fall back to the documented default rather than
       // refusing to run against them.
@@ -296,6 +300,14 @@ export class TesseraClient {
     // from the one a caller who never mentioned filters sends — and a cache keyed on the body would
     // then hold two entries for one question.
     if (req.filters) body.filters = req.filters;
+    // The second expression, beside the first and never a second endpoint
+    // (`highlight-and-hierarchy.md` §2). Omitted when null for the reason `filters` is: a request
+    // with an empty highlight and one that never mentioned a highlight are the same question.
+    if (req.highlight) body.highlight = req.highlight;
+    // Sent only when named, so the default stays the server's own (`"full"`) and a caller who
+    // never mentions it sends the request shape it always sent — the same arrangement
+    // `artifact_rows` takes, for the same reason.
+    if (req.pointRows !== undefined) body.point_rows = req.pointRows;
     // Sent exactly as given, `[]` included: the wire is `string[] | 'all'`, where `[]` (or absent)
     // is "no layers, charge me nothing", `'all'` is "every layer I reach", and an array is those ∩
     // the reachable set. The server's old convention that absent meant *all* is gone; this sends
@@ -727,6 +739,78 @@ export class TesseraClient {
       maskedCount: BigInt(served.masked_count)
     };
   }
+
+  /**
+   * `POST /v1/artifacts/browse`: a layer's hierarchy by lineage — roots, one artifact's children
+   * and parents, or a name search — each row carrying the masked count and, under a filter, the
+   * matched one (`highlight-and-hierarchy.md` §4).
+   *
+   * **JSON rather than Arrow**, and deliberately: a page is at most `max_browse_rows` small rows,
+   * and the verb is read by the panel and by a notebook alike.
+   *
+   * **Independent of the viewport.** It carries no bbox, no tiles and no zoom, and the answer does
+   * not move when the map does. It carries no `highlight` either: a highlighted view of a
+   * hierarchy is the filtered one, since a count under the highlight's expression is what
+   * `matchedCount` is when that expression is sent as `filters`.
+   *
+   * Identifiers travel as **decimal strings**, as they do in the `region` and `member_of` leaves
+   * and for the same reason: a `tessera_id` is `u64` and JSON has no 64-bit integer.
+   *
+   * A refusal throws {@link TesseraError} like every other. An unknown *layer* is a `422`, being
+   * deployment schema; an artifact this principal was never served is an empty page and never a
+   * refusal, so nothing here is an existence oracle.
+   */
+  async browse(token: string, req: BrowseRequest): Promise<BrowsePage> {
+    const body: Record<string, unknown> = {layer: req.layer};
+    if (req.level !== undefined) body.level = req.level;
+    if (req.parent !== undefined) body.parent = req.parent.toString();
+    if (req.q !== undefined) body.q = req.q;
+    if (req.filters) body.filters = req.filters;
+    if (req.limit !== undefined) body.limit = req.limit;
+    if (req.cursor !== undefined) body.cursor = req.cursor;
+    const response = await fetch(`${this.opts.viewerUrl}/v1/artifacts/browse`, {
+      method: 'POST',
+      headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
+      body: JSON.stringify(body)
+    });
+    if (!response.ok) await fail(response);
+    const page = (await response.json()) as RawBrowsePage;
+    return {
+      artifacts: (page.artifacts ?? []).map(browseRow),
+      // Present on the children form only and `[]` on the others — the server's own rule, read
+      // as given rather than inferred from which form was sent.
+      parents: (page.parents ?? []).map(browseRow),
+      next: page.next ?? null
+    };
+  }
+}
+
+/** One row of `POST /v1/artifacts/browse`, as the JSON carries it. */
+type RawBrowseRow = {
+  tessera_id: string;
+  key?: string | null;
+  name?: string | null;
+  masked_count: number | string;
+  matched_count?: number | string | null;
+  rung: number;
+  parent_ids?: string[];
+};
+
+type RawBrowsePage = {artifacts?: RawBrowseRow[]; parents?: RawBrowseRow[]; next?: string | null};
+
+function browseRow(r: RawBrowseRow): BrowseRow {
+  return {
+    tesseraId: BigInt(r.tessera_id),
+    // Absent rather than null where the publisher supplied none, and where this principal may not
+    // read the text — the two are one state, as they are on the artifacts frame.
+    key: r.key ?? null,
+    name: r.name ?? null,
+    maskedCount: BigInt(r.masked_count),
+    matchedCount: r.matched_count === undefined || r.matched_count === null ? null : BigInt(r.matched_count),
+    rung: r.rung,
+    // A null cell is the empty list, which is the fail-closed direction: no parent is invented.
+    parentIds: (r.parent_ids ?? []).map((v) => BigInt(v))
+  };
 }
 
 /** `GET /v1/meta`'s snake_case wire shape, mapped to {@link Meta} above. */
@@ -785,6 +869,7 @@ type RawMeta = {
     max_category_values?: number;
     max_region_vertices?: number;
     max_region_cells?: number;
+    max_browse_rows?: number;
   };
 };
 

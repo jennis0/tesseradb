@@ -37,7 +37,7 @@ const LAYER = new Dictionary(new Utf8(), new Uint16());
 
 type Row = {layer: string; id: bigint; rung: number; matched: boolean | null; parentIds?: bigint[]; shape?: number[][][] | null};
 
-const TILES = tableToIPC(new Table({tile: u64([0n]), visible: u64([1n]), matched: u64([1n]), served: u64([0n])}), 'stream');
+const TILES = tableToIPC(new Table({tile: u64([0n]), visible: u64([1n]), matched: u64([1n]), served: u64([0n]), highlighted: u64([1n])}), 'stream');
 const TRAILER = new TextEncoder().encode(JSON.stringify({arrow_serialise_ns: 0, flushes: 0, points: 0, stream_us: 0}));
 
 /** The fixed fourteen columns, `layer` through `matched`, in contract order. */

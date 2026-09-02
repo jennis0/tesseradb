@@ -16,7 +16,8 @@ const artifact = (id: bigint, parent: bigint | null, count = 10n): Artifact => (
   content: [],
   parentIds: parent === null ? [] : [parent],
   rung: 0,
-  matched: null
+  matched: null,
+  highlighted: null
 });
 
 /**

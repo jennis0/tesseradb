@@ -26,7 +26,20 @@ export type TextMode =
   /** `phrase`: the tokens adjacent and in order. */
   | 'phrase';
 
-export type ColumnDraft =
+/**
+ * The two verbs every clause carries (`highlight-and-hierarchy.md` §5.2), and the whole of what
+ * moving a clause between them costs: a control's predicate is unchanged and only this field
+ * moves, so a clause changes position **without being re-entered**.
+ *
+ * - `filter` — the clause joins `filters`; the map narrows to the matches and the counts say
+ *   *matched N*.
+ * - `highlight` — the clause joins `highlight`; the map stays, the matches are lit and the rest
+ *   dulled, and the counts say *the highlight matched N*.
+ */
+export type ClauseVerb = 'filter' | 'highlight';
+
+/** What a control asks — the predicate alone, with no word about where the clause is sent. */
+export type ColumnPredicate =
   | {family: 'text'; query: string; mode: TextMode}
   | {family: 'string' | 'keyword'; needle: string; op: 'eq' | 'prefix' | 'contains'}
   /** Selected category **keys**, not codes — the wire takes keys and resolves them server-side. */
@@ -34,10 +47,13 @@ export type ColumnDraft =
   /** Inclusive bounds, as the column's own units; `null` for an open side. */
   | {family: 'numeric'; gte: number | null; lte: number | null};
 
+/** One control: what it asks, and which of the request's two expressions it joins. */
+export type ColumnDraft = ColumnPredicate & {verb: ClauseVerb};
+
 export type FilterDraft = Record<string, ColumnDraft>;
 
 /** Whether a control carries a predicate, as against merely existing. */
-export function isPopulated(draft: ColumnDraft): boolean {
+export function isPopulated(draft: ColumnPredicate): boolean {
   switch (draft.family) {
     case 'text':
       return draft.query.trim().length > 0;
@@ -58,7 +74,7 @@ export function isPopulated(draft: ColumnDraft): boolean {
  * question and `in` keeps the control's own arity — one code path, one thing to be wrong about — and
  * a server that answered them differently would be a bug rather than an optimisation.
  */
-function operatorOf(draft: ColumnDraft): FilterOperator {
+function operatorOf(draft: ColumnPredicate): FilterOperator {
   switch (draft.family) {
     case 'text': {
       const query = draft.query.trim();
@@ -95,13 +111,14 @@ function operatorOf(draft: ColumnDraft): FilterOperator {
  * the shorter form is what a reader of a captured request expects to see, and the server treats
  * them identically.
  */
-export function composeFilters(draft: FilterDraft): FilterExpr | null {
+export function composeFilters(draft: FilterDraft, verb: ClauseVerb = 'filter'): FilterExpr | null {
   const leaves: FilterExpr[] = [];
   // Object key order is insertion order, and the draft is seeded in `/v1/meta`'s declaration order,
   // so the composed expression's leaves read in schema order rather than in the order a user
   // happened to fill the boxes in. That makes two sessions filtering the same way produce the same
   // request body, which is what a request log has to be able to assume.
   for (const [column, control] of Object.entries(draft)) {
+    if (control.verb !== verb) continue;
     if (!isPopulated(control)) continue;
     leaves.push({[column]: operatorOf(control)} as FilterExpr);
   }
@@ -110,9 +127,22 @@ export function composeFilters(draft: FilterDraft): FilterExpr | null {
   return {all_of: leaves};
 }
 
-/** How many controls carry a predicate — the count a panel heading shows. */
-export function activeCount(draft: FilterDraft): number {
-  return Object.values(draft).filter(isPopulated).length;
+/**
+ * How many controls carry a predicate — the count a panel heading shows. With a `verb`, how many
+ * carry one *in that position*, which is what the panel's two headings say.
+ */
+export function activeCount(draft: FilterDraft, verb?: ClauseVerb): number {
+  return Object.values(draft).filter((d) => isPopulated(d) && (verb === undefined || d.verb === verb)).length;
+}
+
+/**
+ * Move one column's clause to the other position, leaving its predicate alone. The whole of
+ * §5.2's *without being re-entered*.
+ */
+export function withVerb(draft: FilterDraft, column: string, verb: ClauseVerb): FilterDraft {
+  const control = draft[column];
+  if (!control || control.verb === verb) return draft;
+  return {...draft, [column]: {...control, verb}};
 }
 
 /**
@@ -140,19 +170,19 @@ export function emptyDraft(operands: FilterOperandSet[]): FilterDraft {
       case 'text':
         // `match` is the operand every text column has; `phrase` rides the same index and is
         // offered only when published, so a column indexed without positions keeps its box.
-        if (ops.includes('match')) draft[column] = {family: 'text', query: '', mode: 'all'};
+        if (ops.includes('match')) draft[column] = {family: 'text', query: '', mode: 'all', verb: 'filter'};
         break;
       case 'string':
       case 'keyword':
-        if (ops.includes('contains')) draft[column] = {family, needle: '', op: 'contains'};
-        else if (ops.includes('prefix')) draft[column] = {family, needle: '', op: 'prefix'};
-        else if (ops.includes('eq')) draft[column] = {family, needle: '', op: 'eq'};
+        if (ops.includes('contains')) draft[column] = {family, needle: '', op: 'contains', verb: 'filter'};
+        else if (ops.includes('prefix')) draft[column] = {family, needle: '', op: 'prefix', verb: 'filter'};
+        else if (ops.includes('eq')) draft[column] = {family, needle: '', op: 'eq', verb: 'filter'};
         break;
       case 'category':
-        if (ops.includes('in')) draft[column] = {family: 'category', keys: []};
+        if (ops.includes('in')) draft[column] = {family: 'category', keys: [], verb: 'filter'};
         break;
       case 'numeric':
-        if (ops.includes('range')) draft[column] = {family: 'numeric', gte: null, lte: null};
+        if (ops.includes('range')) draft[column] = {family: 'numeric', gte: null, lte: null, verb: 'filter'};
         break;
     }
   }

@@ -3,7 +3,7 @@ import {join} from 'node:path';
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import {TesseraClient, TesseraError} from '../src/client.js';
 import {decodeViewport} from '../src/decode.js';
-import {stripOldShapeColumns} from './old-shape-columns.js';
+import {liftGolden, liftTilesHighlighted} from './old-shape-columns.js';
 import type {ViewportResult} from '../src/types.js';
 
 /** `body` with its kind-5 payload replaced: `u8 kind, u32 LE length, payload`, frame by frame. */
@@ -208,12 +208,14 @@ describe('the artifacts frame, decoded from a captured response', () => {
   it('refuses a body captured before the shape columns, whichever nesting its hull carried', () => {
     // Two real bodies, not hand-assembled ones: the pre-r40 flat hull and the r44 list of rings.
     // Neither is read as shapeless — the old column names are the refusal.
-    expect(() => decodeViewport(fixture('viewport-artifacts-pre-r40.bin'))).toThrow(/hull_x.*shape_x/s);
-    expect(() => decodeViewport(fixture('viewport-artifacts.bin'))).toThrow(/hull_x.*shape_x/s);
+    // Lifted for the tiles frame's `highlighted` column first, so what is being refused is the
+    // shape columns' old names and not the newer column these captures also predate.
+    expect(() => decodeViewport(liftTilesHighlighted(fixture('viewport-artifacts-pre-r40.bin')))).toThrow(/hull_x.*shape_x/s);
+    expect(() => decodeViewport(liftTilesHighlighted(fixture('viewport-artifacts.bin')))).toThrow(/hull_x.*shape_x/s);
   });
 
   it('carries one row per served artifact, and no points beside them', () => {
-    const result = decodeViewport(stripOldShapeColumns(fixture('viewport-artifacts.bin')));
+    const result = decodeViewport(liftGolden(fixture('viewport-artifacts.bin')));
     expect(result.artifacts.length).toBeGreaterThan(0);
     // Captured at `k = 0` — the annotation channel's own request shape. A body with an artifacts
     // frame and no points frame at all is the case a decoder is most likely to get wrong.
@@ -236,13 +238,13 @@ describe('the artifacts frame, decoded from a captured response', () => {
   });
 
   it('reads a response with no artifacts frame as no artifacts, not as a failure', () => {
-    expect(decodeViewport(fixture('viewport-plain.bin')).artifacts).toEqual([]);
+    expect(decodeViewport(liftTilesHighlighted(fixture('viewport-plain.bin'))).artifacts).toEqual([]);
   });
 
   it('carries the derived geometry in the same grid units as the points', () => {
-    const result = decodeViewport(stripOldShapeColumns(fixture('viewport-artifacts.bin')));
+    const result = decodeViewport(liftGolden(fixture('viewport-artifacts.bin')));
     // The captured layer declares all three; the centroid and the box are read here, and the
-    // shape — under its r44 name in this capture — is what `stripOldShapeColumns` took out. A null
+    // shape — under its r44 name in this capture — is what `liftGolden` took out. A null
     // centroid or box would be *the layer declares none* and never *withheld* — content is never
     // withheld from a served artifact — so a null on a layer that declares the property is a
     // decoder or a server bug.

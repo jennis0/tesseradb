@@ -21,7 +21,8 @@ const artifact = (id: bigint, count: bigint, content: string[] = [], layer = 'cl
   content,
   parentIds: parent === null ? [] : [parent],
   rung: 0,
-  matched: null
+  matched: null,
+  highlighted: null
 });
 
 /**

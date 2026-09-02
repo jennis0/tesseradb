@@ -1,7 +1,7 @@
 import {describe, expect, it} from 'vitest';
 import {makeData, makeVector, tableToIPC, Table, Uint64, vectorFromArray} from 'apache-arrow';
 import {decodeViewport} from '../src/decode.js';
-import {stripOldShapeColumns} from './old-shape-columns.js';
+import {liftGolden} from './old-shape-columns.js';
 import {bandsOfResult, BandCache, distinctOrdinals} from '../src/bands.js';
 import {NO_ORDINAL, SessionArtifactTable} from '../src/artifactTable.js';
 import {GRID32_CENTRE, artifactColours} from '../src/palette.js';
@@ -45,7 +45,8 @@ function body(points: Table[], tilesServed: bigint[]): Uint8Array {
       tile: u64(tilesServed.map((_, i) => BigInt(i))),
       visible: u64(tilesServed.map((s) => s + 5n)),
       matched: u64(tilesServed.map((s) => s + 5n)),
-      served: u64(tilesServed)
+      served: u64(tilesServed),
+      highlighted: u64(tilesServed.map((s) => s + 5n))
     }),
     'stream'
   );
@@ -130,13 +131,14 @@ const artifact = (id: bigint, parent: bigint | null = null, layer = 'l', rung = 
 function result(tiles: number[], local: number[], ids: bigint[], artifacts: Artifact[]): ViewportResult {
   const n = tiles.reduce((a, b) => a + b, 0);
   return {
-    tiles: tiles.map((served, i) => ({tile: BigInt(i), visible: BigInt(served), matched: BigInt(served), served: BigInt(served)})),
+    tiles: tiles.map((served, i) => ({tile: BigInt(i), visible: BigInt(served), matched: BigInt(served), highlighted: BigInt(served), served: BigInt(served)})),
     ids: BigUint64Array.from({length: n}, (_, i) => BigInt(i + 1)),
     codes: new BigUint64Array(n),
     positions: new Float64Array(n * 2),
     world: new Float32Array(n * 2),
     scalars: {},
     membership: {l: {index: Uint16Array.from(local), ids: BigUint64Array.from(ids)}},
+    highlighted: null,
     subCells: null,
     artifacts,
     artifactsIdentity: null
@@ -229,7 +231,7 @@ describe('the membership golden (captured against the notebook layer, the layer 
     const {join} = require('node:path') as typeof import('node:path');
     // The capture carries the shape under its r44 names, which the decoder refuses outright; the
     // column and the frame agreeing is what this checks, and that is read with those stripped.
-    const r = decodeViewport(stripOldShapeColumns(new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', 'viewport-membership.bin')))));
+    const r = decodeViewport(liftGolden(new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', 'viewport-membership.bin')))));
     expect(r.artifacts.length).toBeGreaterThanOrEqual(3);
     const centroids = new Set(r.artifacts.map((a) => a.centroid?.join(',')));
     expect(centroids.size).toBe(r.artifacts.length);

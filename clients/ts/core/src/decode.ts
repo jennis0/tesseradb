@@ -175,6 +175,17 @@ function concatScalarColumns(pieces: ScalarColumn[], total: number): ScalarColum
 export const MEMBERSHIP_PREFIX = 'membership:';
 
 /**
+ * The per-point highlight column (`highlight-and-hierarchy.md` §2), after the render scalars and
+ * before the `membership:<layer>` columns, present only where the request carried a `highlight`.
+ *
+ * A **reserved column name, refused at the build**, beside `region` and `member_of`: a corpus
+ * declaring a render column of this name would put two columns of one name on the points frame
+ * and a by-name reader would take the wrong one. So it is skipped by name below rather than
+ * decoded as a declared scalar.
+ */
+export const HIGHLIGHTED_COLUMN = 'highlighted';
+
+/**
  * The per-point membership column, hashed to a **response-local index** (design §5.10).
  *
  * The decoder runs in a worker lane that shares nothing with the other lanes, so it cannot name
@@ -284,6 +295,8 @@ export type PointsPart = {
   world: Float32Array;
   scalars: Record<string, ScalarColumn>;
   membership: Record<string, MembershipColumn>;
+  /** See {@link ViewportResult.highlighted} — null where the frames carried no such column. */
+  highlighted: Uint8Array | null;
 };
 
 /**
@@ -351,6 +364,10 @@ export function decodePoints(payloads: readonly Uint8Array[]): PointsPart {
   if (pointTables.length > 0) {
     for (const field of pointTables[0]!.schema.fields) {
       if (field.name === 'tessera_id' || field.name === 'code') continue;
+      // The highlight bit is not a declared scalar either — it is the request's second
+      // expression answered per served point, and decoding it as one would put it on the palette
+      // and in the tooltip's field list.
+      if (field.name === HIGHLIGHTED_COLUMN) continue;
       // **The per-point membership column is not a declared scalar** — it is the deepest served
       // artifact per named layer (D12, §5.10), a nullable `u64` named `membership:<layer>` after
       // the render scalars. It is hashed below into a response-local index; here it is skipped by
@@ -368,7 +385,19 @@ export function decodePoints(payloads: readonly Uint8Array[]): PointsPart {
       );
     }
   }
-  return {ids, codes, positions, world, scalars, membership};
+  // One byte a point, concatenated across the frames in the order they arrived — the same order
+  // `ids` is in, which is what makes the join to a band a slice.
+  let highlighted: Uint8Array | null = null;
+  if (pointTables.length > 0 && pointTables[0]!.schema.fields.some((f) => f.name === HIGHLIGHTED_COLUMN)) {
+    highlighted = new Uint8Array(totalPoints);
+    let offset = 0;
+    for (const t of pointTables) {
+      const column = t.getChild(HIGHLIGHTED_COLUMN)!;
+      for (let i = 0; i < t.numRows; i++) highlighted[offset + i] = column.get(i) ? 1 : 0;
+      offset += t.numRows;
+    }
+  }
+  return {ids, codes, positions, world, scalars, membership, highlighted};
 }
 
 /** Decode the kind-1 frame: every tile's counts, in the response's own tile order. */
@@ -378,13 +407,18 @@ export function decodeTiles(payload: Uint8Array): TileCounts[] {
   const visible = u64Column(tileTable, 'visible');
   const matched = u64Column(tileTable, 'matched');
   const served = u64Column(tileTable, 'served');
+  // Fifth, after `served`, and **always present** — equal to `matched` where the request carried
+  // no highlight (`highlight-and-hierarchy.md` §2), so this is read as a column and never as an
+  // option.
+  const highlighted = u64Column(tileTable, 'highlighted');
   const tiles: TileCounts[] = [];
   for (let i = 0; i < tile.length; i++) {
     tiles.push({
       tile: tile[i]!,
       visible: visible[i]!,
       matched: matched[i]!,
-      served: served[i]!
+      served: served[i]!,
+      highlighted: highlighted[i]!
     });
   }
   return tiles;
@@ -495,6 +529,11 @@ export function decodeArtifactsFrame(payload: Uint8Array): {
   // asked for no filter has no use for it, and one that did draws every artifact undimmed, which
   // is what it drew before the column existed.
   const matched = t.getChild('matched');
+  // The highlight bit, fifteenth and after `matched` (`highlight-and-hierarchy.md` §2): decision
+  // 0104's bit under `all_of[filters, highlight]`, all-null where the request carried no
+  // highlight. Read the same way and for the same reason — an absent column and an all-null one
+  // are one state, *there was no question*.
+  const highlighted = t.getChild('highlighted');
   // **A loud refusal rather than a guessed zero.** There is no compatibility to keep here
   // (decision 0048) and the rung is what a client draws every layer's resolution from, so a
   // body without the column — an r41-or-earlier server's `level` included — is a server this
@@ -575,7 +614,8 @@ export function decodeArtifactsFrame(payload: Uint8Array): {
       // the fail-closed direction — no parent is invented.
       parentIds: Array.from(parentIds.get(i) ?? [], (v) => BigInt(v as bigint)),
       rung: Number(rung.get(i)),
-      matched: matched == null || matched.get(i) === null ? null : Boolean(matched.get(i))
+      matched: matched == null || matched.get(i) === null ? null : Boolean(matched.get(i)),
+      highlighted: highlighted == null || highlighted.get(i) === null ? null : Boolean(highlighted.get(i))
     });
   }
   return {artifacts, artifactsIdentity: null};
@@ -668,7 +708,7 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
   const parts = splitFramedStreams(body);
   const trailer = parseTrailer(parts.trailer);
   const tiles = decodeTiles(parts.tiles);
-  const {ids, codes, positions, world, scalars, membership} = decodePoints(parts.points);
+  const {ids, codes, positions, world, scalars, membership, highlighted} = decodePoints(parts.points);
   checkTrailerCounts(trailer, parts.points.length, ids.length);
   const subCells = parts.subCells ? decodeSubCells(parts.subCells) : null;
   // Empty when the response carried no artifacts frame, which is the ordinary state of a
@@ -678,5 +718,5 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
     ? decodeArtifactsFrame(parts.artifacts)
     : {artifacts: [] as Artifact[], artifactsIdentity: null};
 
-  return {tiles, ids, codes, positions, world, scalars, membership, subCells, artifacts, artifactsIdentity};
+  return {tiles, ids, codes, positions, world, scalars, membership, highlighted, subCells, artifacts, artifactsIdentity};
 }

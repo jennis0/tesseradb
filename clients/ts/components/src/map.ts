@@ -658,6 +658,13 @@ export class TesseraMap extends TesseraElement {
           drag: this.drag,
           dragPolygon: this.dragPolygon,
           wash: this.wash,
+          // The two halves of the draw under a highlight (`highlight-and-hierarchy.md` §5.3): the
+          // marks that satisfy it lit and the rest dulled, and the wash reading the count the
+          // question actually put — `highlighted` under a highlight, `matched` under a filter with
+          // no highlight, `visible` under neither. The legend beneath the map says which
+          // (`<tessera-status>`), because the three columns legitimately agree.
+          highlighting: s.get('view').highlighting,
+          washChannel: s.get('view').highlighting ? 'highlighted' : s.get('filters').expr || s.get('selection') ? 'matched' : 'visible',
           radius: this.radius,
           scheme: this.scheme(),
           onDrawn: (drawn, provisional) => {

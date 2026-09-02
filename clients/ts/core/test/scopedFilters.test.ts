@@ -17,8 +17,8 @@ describe('a group-scoped operand', () => {
     // that ignored the field entirely would still draw the right box — the field is what tells it
     // when the bare leaf will be refused.
     expect(emptyDraft(operands)).toEqual({
-      author_count: {family: 'numeric', gte: null, lte: null},
-      sentiment: {family: 'numeric', gte: null, lte: null}
+      author_count: {family: 'numeric', gte: null, lte: null, verb: 'filter'},
+      sentiment: {family: 'numeric', gte: null, lte: null, verb: 'filter'}
     });
   });
 
@@ -28,11 +28,11 @@ describe('a group-scoped operand', () => {
     const draft = emptyDraft(operands);
     delete draft.author_count;
     delete draft.sentiment;
-    draft['sentiment@2026-Q3'] = {family: 'numeric', gte: 0.5, lte: null};
+    draft['sentiment@2026-Q3'] = {family: 'numeric', gte: 0.5, lte: null, verb: 'filter'};
     expect(composeFilters(draft)).toEqual({'sentiment@2026-Q3': {range: {gte: 0.5}}});
 
     // And by ordinal, which is the same alias `views` publishes beside each key.
-    const byOrdinal = {'sentiment@#3': {family: 'numeric', gte: 0.5, lte: null} as const};
+    const byOrdinal = {'sentiment@#3': {family: 'numeric', gte: 0.5, lte: null, verb: 'filter'} as const};
     expect(composeFilters(byOrdinal)).toEqual({'sentiment@#3': {range: {gte: 0.5}}});
   });
 });

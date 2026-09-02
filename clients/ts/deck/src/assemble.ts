@@ -50,6 +50,12 @@ export type Assembled = {
      * the client was holding.
      */
     ordinals: Float32Array;
+    /**
+     * The highlight bit per stand-in mark, `1` where the band carried none — the same attribute
+     * the slab writes for an exact band, so a stand-in dulls with the rest of the map rather
+     * than sitting over it as a patch of undimmed ground.
+     */
+    highlights: Float32Array;
   };
   tiles: AssembledTile[];
   exactDrawn: number;
@@ -142,15 +148,20 @@ function concatenatePieces(
   const positions = new Float32Array(total * 2);
   // Zeros where the layer names none: ordinal 0 is *no artifact*, which the texture draws neutral.
   const ordinals = new Float32Array(total);
+  // Ones where the band carried no highlight column — *matched*, which is what every mark is when
+  // no highlight was asked (`marks-layer.ts`).
+  const highlights = new Float32Array(total).fill(1);
   let o = 0;
   for (const piece of pieces) {
     const membership = layer ? piece.band.membership[layer] : undefined;
+    const bits = piece.band.highlightBits;
     if (piece.indices) {
       for (const i of piece.indices) {
         ids[o] = piece.band.ids[i]!;
         positions[o * 2] = piece.band.positions[i * 2]!;
         positions[o * 2 + 1] = piece.band.positions[i * 2 + 1]!;
         if (membership) ordinals[o] = membership.ordinals[i]!;
+        if (bits) highlights[o] = bits[i]!;
         o++;
       }
     } else {
@@ -159,6 +170,7 @@ function concatenatePieces(
       ids.set(piece.band.ids.subarray(0, len), o);
       positions.set(piece.band.positions.subarray(0, len * 2), o * 2);
       if (membership) ordinals.set(membership.ordinals.subarray(0, len), o);
+      if (bits) highlights.set(bits.subarray(0, len), o);
       o += len;
     }
   }
@@ -167,7 +179,7 @@ function concatenatePieces(
     const column = assembleScalar(name, pieces, total);
     if (column) scalars[name] = column;
   }
-  return {ids, positions, scalars, ordinals};
+  return {ids, positions, scalars, ordinals, highlights};
 }
 
 function fromComposition(c: Composition, standIn: Assembled['standIn']): Assembled {

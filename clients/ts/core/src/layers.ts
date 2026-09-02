@@ -43,3 +43,31 @@ export function layerEntries(layers: readonly Layer[]): LayerEntry[] {
     .filter((l) => l.depsOn.every((d) => !reachable.has(d)))
     .map((root) => ({root, closure: layerClosure(layers, [root.name])}));
 }
+
+/**
+ * Whether a layer is a **filter layer** — `computed = []` on its declaration
+ * (`artifact-shapes.md` §8 C; `highlight-and-hierarchy.md` §5.4, the owner's ruling of
+ * 2026-09-02).
+ *
+ * *Counts with no geometry* is what the declaration already meant on the wire. What the client
+ * reads it as is: **a filter layer is still a layer**. It stays in `/v1/meta`'s roster and in the
+ * client's, listed as a filter layer rather than presented for viewing — no draw toggle, no place
+ * in the *In view* list, no label, no shape, and no *fit* on its card — and it is **never named in
+ * `layers` on a viewport request**, so no artifact pass runs for it and no artifacts frame rows
+ * arrive. It is reached through the hierarchy panel and applied as a `member_of` clause.
+ *
+ * `mesh/descriptors` is declared so from 2026-09-02: a MeSH descriptor's members are spread over
+ * the whole layout, so its hull is the map's outline and its cut deepens uniformly until the
+ * leaves arrive at a zoom nobody reaches. The rung's clustering keeps its shapes, because its
+ * artifacts are compact — the rule is per layer and the declaration states it.
+ *
+ * The server changes nothing for it. This is a reading of a declaration, not a new field.
+ */
+export function isFilterLayer(layer: Layer): boolean {
+  return layer.computedContent.length === 0;
+}
+
+/** The layers a client may draw — every layer that is not a filter layer. */
+export function drawableLayers(layers: readonly Layer[]): Layer[] {
+  return layers.filter((l) => !isFilterLayer(l));
+}

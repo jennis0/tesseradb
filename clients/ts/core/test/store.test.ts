@@ -3,6 +3,7 @@ import {TesseraClient} from '../src/client.js';
 import type {Clock} from '../src/driver.js';
 import type {FrameScheduler} from '../src/presented.js';
 import {createStore, type Store} from '../src/store.js';
+import {withVerb, type FilterDraft} from '../src/filters.js';
 import type {Meta, ViewportResponse, ViewportResult} from '../src/types.js';
 import {dataToWorldXY, mortonOfTile} from '../src/coords.js';
 import {tileRectOfBbox} from '../src/budget.js';
@@ -25,7 +26,7 @@ const META: Meta = {
 };
 
 /** What the fake sees of a request: enough to answer for every tile it asked about. */
-type FakeRequest = {zoom: number; bbox?: [number, number, number, number]; tiles?: bigint[]; filters?: unknown; k?: number};
+type FakeRequest = {zoom: number; bbox?: [number, number, number, number]; tiles?: bigint[]; filters?: unknown; k?: number; layers?: string[] | 'all'};
 
 /**
  * A response that answers **every** tile the request spans — one tile of 1,000 items each, the
@@ -45,13 +46,13 @@ function responseCovering(req: FakeRequest, contentKey: string, served = 3): Vie
     prefixes = [];
     for (let y = rect.y0; y <= rect.y1; y++) for (let x = rect.x0; x <= rect.x1; x++) prefixes.push(mortonOfTile(x, y, req.zoom));
   }
-  const tiles = prefixes.map((tile, i) => ({tile, visible: 1000n, matched: 1000n, served: i === 0 ? BigInt(served) : 0n}));
+  const tiles = prefixes.map((tile, i) => ({tile, visible: 1000n, matched: 1000n, highlighted: 1000n, served: i === 0 ? BigInt(served) : 0n}));
   return {...base, result: {...base.result, tiles}};
 }
 
 function response(contentKey: string, identityKey = 'ik', served = 3): ViewportResponse {
   const result: ViewportResult = {
-    tiles: [{tile: 0n, visible: 10_000_000n, matched: 10_000_000n, served: BigInt(served)}],
+    tiles: [{tile: 0n, visible: 10_000_000n, matched: 10_000_000n, highlighted: 10_000_000n, served: BigInt(served)}],
     ids: BigUint64Array.from({length: served}, (_, i) => BigInt(i + 1)),
     codes: BigUint64Array.from({length: served}, () => 0n),
     positions: Float64Array.from({length: served * 2}, () => 1),
@@ -150,10 +151,10 @@ function regionOf(expr: unknown): boolean {
  * request carrying a `region` leaf is answered with the wire's `exact` verdict, as the server
  * would say on `x-tessera-region`.
  */
-function fakeClient(reply: (req: FakeRequest) => ViewportResponse) {
+function fakeClient(reply: (req: FakeRequest) => ViewportResponse, meta: Meta = META) {
   const viewport = vi.fn(async (_token: string, req: FakeRequest) => ({...reply(req), region: regionOf(req.filters) ? {exact: true as const, depth: null} : null}));
   const client = {
-    meta: async () => META,
+    meta: async () => meta,
     viewport,
     item: async () => ({fields: {archive: 'cs'}, externalId: null}),
     artifact: async () => ({layer: 'l', key: 'k', maskedCount: 42n, centroid: null, box: null, shape: null}),
@@ -164,8 +165,8 @@ function fakeClient(reply: (req: FakeRequest) => ViewportResponse) {
 }
 
 /** Build a store and drive it to its first shown frame. */
-async function warm(reply: (req: FakeRequest) => ViewportResponse, opts: {clock: ReturnType<typeof fakeClock>; scheduler: ReturnType<typeof fakeScheduler>}) {
-  const {client, viewport} = fakeClient(reply);
+async function warm(reply: (req: FakeRequest) => ViewportResponse, opts: {clock: ReturnType<typeof fakeClock>; scheduler: ReturnType<typeof fakeScheduler>; meta?: Meta}) {
+  const {client, viewport} = fakeClient(reply, opts.meta);
   const store = createStore({
     viewerUrl: 'http://viewer',
     token: 'tok',
@@ -293,7 +294,7 @@ describe('the drops', () => {
 
     // A filter narrows what is served without changing the identity key, so held bands would be
     // served as if they belonged. The store must drop them itself and re-ask.
-    store.setFilters({archive: {family: 'category', keys: ['cs']}});
+    store.setFilters({archive: {family: 'category', keys: ['cs'], verb: 'filter'}});
     await clock.advance(600);
     scheduler.flush();
     expect(store.get('filters').expr).toEqual({archive: {in: ['cs']}});
@@ -301,6 +302,121 @@ describe('the drops', () => {
     // The filter reached the wire.
     const last = viewport.mock.calls.at(-1)!;
     expect((last[1] as {filters?: unknown}).filters).toEqual({archive: {in: ['cs']}});
+  });
+
+  /**
+   * §5.2's two verbs, and the two claims the design turns on: **a filter never moves the mask and
+   * a highlight never moves the draw.** The first is the older one — a filter narrows what is
+   * served, never `visible` — and the second is what makes a highlight a highlight: the request's
+   * `filters` is the same expression whether a clause is in the highlight position or absent, so
+   * the cap clause, the sampling and `served` cannot see it.
+   */
+  it('sends a clause in the highlight position as `highlight`, leaving `filters` untouched', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {store, viewport} = await warm(() => response('ck'), {clock, scheduler});
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await clock.advance(600);
+    scheduler.flush();
+
+    store.setFilters({archive: {family: 'category', keys: ['cs'], verb: 'highlight'}});
+    await clock.advance(600);
+    scheduler.flush();
+    const body = viewport.mock.calls.at(-1)![1] as {filters?: unknown; highlight?: unknown};
+    expect(body.highlight).toEqual({archive: {in: ['cs']}});
+    // Not merely different from the highlight — *nothing at all*, which is the request an
+    // unhighlighted client sends and the one the draw is defined against.
+    expect(body.filters ?? null).toBeNull();
+    expect(store.get('filters').highlight).toEqual({archive: {in: ['cs']}});
+    expect(store.get('filters').expr).toBeNull();
+  });
+
+  it('moves a clause between the two positions without it being re-entered', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {store, viewport} = await warm(() => response('ck'), {clock, scheduler});
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await clock.advance(600);
+    scheduler.flush();
+
+    const filtered: FilterDraft = {archive: {family: 'category', keys: ['cs'], verb: 'filter'}};
+    store.setFilters(filtered);
+    await clock.advance(600);
+    scheduler.flush();
+    expect((viewport.mock.calls.at(-1)![1] as {filters?: unknown}).filters).toEqual({archive: {in: ['cs']}});
+
+    // The predicate is untouched; only the verb moves — which is the whole of §5.2's claim.
+    store.setFilters(withVerb(filtered, 'archive', 'highlight'));
+    await clock.advance(600);
+    scheduler.flush();
+    const moved = viewport.mock.calls.at(-1)![1] as {filters?: unknown; highlight?: unknown};
+    expect(moved.filters ?? null).toBeNull();
+    expect(moved.highlight).toEqual({archive: {in: ['cs']}});
+    expect(store.get('filters').draft['archive']).toEqual({family: 'category', keys: ['cs'], verb: 'highlight'});
+  });
+
+  it('sends a member_of clause in whichever position it carries, the artifact as a decimal string', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {store, viewport} = await warm(() => response('ck'), {clock, scheduler});
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await clock.advance(600);
+    scheduler.flush();
+
+    // An id past 2^53, which is why the leaf spells it as a string: a number would round it.
+    const id = 18_064_038_920_082_622_571n;
+    store.setMembers([{layer: 'mesh/descriptors', artifact: id, outside: false, verb: 'highlight'}]);
+    await clock.advance(600);
+    scheduler.flush();
+    const lit = viewport.mock.calls.at(-1)![1] as {filters?: unknown; highlight?: unknown};
+    expect(lit.highlight).toEqual({member_of: {layer: 'mesh/descriptors', artifact: '18064038920082622571'}});
+    expect(lit.filters ?? null).toBeNull();
+
+    store.setMembers([{layer: 'mesh/descriptors', artifact: id, outside: true, verb: 'filter'}]);
+    await clock.advance(600);
+    scheduler.flush();
+    const narrowed = viewport.mock.calls.at(-1)![1] as {filters?: unknown; highlight?: unknown};
+    expect(narrowed.filters).toEqual({none_of: [{member_of: {layer: 'mesh/descriptors', artifact: '18064038920082622571'}}]});
+    expect(narrowed.highlight ?? null).toBeNull();
+  });
+
+  it('sums the tiles’ highlighted into the strip’s third line, and says whether a highlight was asked', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {store} = await warm(() => response('ck'), {clock, scheduler});
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await clock.advance(600);
+    scheduler.flush();
+    // The fixture's tiles carry `highlighted` equal to `matched`, which is what the wire carries
+    // for a request with no highlight — so the figure is right and `highlighting` is what says
+    // there was no question.
+    expect(store.get('view').highlighted.value).toBe(store.get('view').matched.value);
+    expect(store.get('view').highlighting).toBe(false);
+
+    store.setFilters({archive: {family: 'category', keys: ['cs'], verb: 'highlight'}});
+    await clock.advance(600);
+    scheduler.flush();
+    expect(store.get('view').highlighting).toBe(true);
+  });
+
+  it('never names a filter layer in a viewport request, however it is asked for', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const layers = [
+      {name: 'clusters/kmeans', title: 'k-means', views: ['s0'], hierarchy: {kind: 'flat', pruneChildren: false}, levels: [], computedContent: ['centroid', 'box', 'hull'], shape: 'derived', suppliedContent: ['topic'], depsOn: [], version: 1},
+      {name: 'mesh/descriptors', title: 'MeSH', views: ['s0'], hierarchy: {kind: 'dag', pruneChildren: false}, levels: [], computedContent: [], shape: null, suppliedContent: ['name'], depsOn: [], version: 1}
+    ];
+    const {store, viewport} = await warm(() => response('ck'), {clock, scheduler, meta: {...META, layers} as Meta});
+    // Asked for by name, which is what a host driving `setLayers` directly would do.
+    store.setLayers(['clusters/kmeans', 'mesh/descriptors']);
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await clock.advance(600);
+    scheduler.flush();
+    const asked = viewport.mock.calls.map((c) => (c[1] as {layers?: string[]}).layers ?? []);
+    expect(asked.every((l) => !l.includes('mesh/descriptors'))).toBe(true);
+    // It is still a layer: the roster keeps it, and the client's own list does too.
+    expect(store.get('meta')!.layers.map((l) => l.name)).toContain('mesh/descriptors');
+    expect(store.get('artifacts').layers).toEqual(['clusters/kmeans']);
   });
 
   it('clears the frame and the encoding on clear()', async () => {
@@ -541,7 +657,7 @@ describe('select — the selection is the region leaf on every request (§5.11)'
     scheduler.flush();
     expect(store.get('region')?.status).toBe('shown');
     const asked = viewport.mock.calls.length;
-    store.setFilters({archive: {family: 'category', keys: ['cs']}});
+    store.setFilters({archive: {family: 'category', keys: ['cs'], verb: 'filter'}});
     expect(store.get('region')?.status).toBe('loading');
     await clock.advance(600);
     scheduler.flush();

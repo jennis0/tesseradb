@@ -64,10 +64,22 @@ export {
   composeFilters,
   emptyDraft,
   isPopulated,
+  withVerb,
+  type ClauseVerb,
   type ColumnDraft,
+  type ColumnPredicate,
   type FilterDraft,
   type TextMode
 } from './filters.js';
+export {
+  memberKey,
+  memberLeaf,
+  memberOf,
+  withMember,
+  withMembers,
+  withoutMember,
+  type MemberClause
+} from './members.js';
 export {requestLevels, 
   ArtifactChannel,
   artifactInView,
@@ -97,7 +109,7 @@ export {
 } from './counts.js';
 export {createStore, CLUSTER_PREFIX, REGION_HELD_LIMIT, type Store} from './store.js';
 export {insideBox, insidePolygon, parseRegionVerdict, quantise, regionOperand, withRegion, type WorldPolygon} from './region.js';
-export {layerClosure, layerEntries, type LayerEntry} from './layers.js';
+export {drawableLayers, isFilterLayer, layerClosure, layerEntries, type LayerEntry} from './layers.js';
 export {enterGroup, hasOneLayout, stepView, viewLabel, viewPickerEntries, viewsOfGroup, type ViewPickerEntry} from './views.js';
 export {artifactBudgetFor, levelForBudget, BASE_ARTIFACT_BUDGET, MAX_ARTIFACT_BUDGET} from './artifactBudget.js';
 export {artifactColours, hslToRgb, polarOf, positionalColour, positionalEntry, GRID32_CENTRE, NEUTRAL, type PaletteKind, type PaletteScheme, type Placed, type Rgba} from './palette.js';

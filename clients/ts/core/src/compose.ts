@@ -39,7 +39,7 @@ export type ComposedTile = {
   /** Marks this entry puts on screen — for an exact tile, exactly `served`. */
   drawn: number;
   /** The server's own counts, present only for an exact tile. */
-  counts: {visible: bigint; matched: bigint; served: number} | null;
+  counts: {visible: bigint; matched: bigint; highlighted: bigint; served: number} | null;
 };
 
 /** A stand-in contribution: a band, drawn as `indices` (ancestors) or a `limit` prefix. */
@@ -103,7 +103,7 @@ export function compose(frame: ReplicaFrame): Composition {
       depth: band.depth,
       exact: true,
       drawn: band.ids.length,
-      counts: {visible: band.visible, matched: band.matched, served: band.served}
+      counts: {visible: band.visible, matched: band.matched, highlighted: band.highlighted, served: band.served}
     });
   }
 
@@ -219,7 +219,7 @@ export function fold(held: Composition, exact: Band[], version: number): Composi
       depth: band.depth,
       exact: true,
       drawn: band.ids.length,
-      counts: {visible: band.visible, matched: band.matched, served: band.served}
+      counts: {visible: band.visible, matched: band.matched, highlighted: band.highlighted, served: band.served}
     });
   }
   const exactTiles = exactTileSet(live, dim);

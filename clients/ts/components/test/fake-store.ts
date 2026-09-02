@@ -18,13 +18,13 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
   const projections: Projections = {
     meta: null,
     status: {status: 'idle', sessionWarm: false, refusal: null, stale: false, expired: false, retrying: false},
-    view: {id: '', composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, served: NO_COUNT, provisional: 0},
+    view: {id: '', composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, highlighted: NO_MASKED, highlighting: false, served: NO_COUNT, provisional: 0},
     marks: {bands: [], standIn: [], count: NO_COUNT},
     tiles: {tiles: []},
     artifacts: {layer: null, layers: [], served: [], lineage: servedLineage([]), status: 'idle', refusal: null, version: 0, held: 0, table: new SessionArtifactTable(), servedOrdinals: new Set(), shapes: new Map(), colours: new Map(), palette: 'positional', coverage: {current: 0, stale: 0}},
     selection: {item: null, itemRefusal: null, artifact: null, artifactRefusal: null},
     region: null,
-    filters: {draft: {}, expr: null, values: {}, valueErrors: {}},
+    filters: {draft: {}, expr: null, highlight: null, members: [], values: {}, valueErrors: {}},
     legend: {ranks: {}, domains: {}, categories: {}, categoryErrors: {}, colourBy: null},
     replica: {bytes: 0, points: 0, bands: 0, views: 0, lastPlan: null},
     ...overrides
@@ -61,6 +61,7 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
     },
     setView: spy('setView'),
     setFilters: spy('setFilters'),
+    setMembers: spy('setMembers'),
     loadFilterValues: async (...args: unknown[]) => {
       calls.push({name: 'loadFilterValues', args});
     },

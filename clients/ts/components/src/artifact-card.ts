@@ -1,6 +1,6 @@
 import {css, html, nothing} from 'lit';
 import {property} from 'lit/decorators.js';
-import type {Artifact, ArtifactDetail, Masked, Refusal} from '@tesseradb/client';
+import {isFilterLayer, withMember, withoutMember, type Artifact, type ArtifactDetail, type ClauseVerb, type Masked, type Refusal} from '@tesseradb/client';
 import {attachedTopics, displayName} from '@tesseradb/deck';
 import {TesseraElement, UNNAMED, emit, idString} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
@@ -12,9 +12,13 @@ import './count.js';
 /**
  * `<tessera-artifact-card>` — the selected artifact (design §5.3 tier 2, §6), as the boards draw
  * it: the name, its `Masked` count as *members visible to you*, its supplied description, layer
- * and key, the kind of shape its layer draws, *Children in this view* from the served set, *Fit to
- * cluster*, *Filter to this* and *Outside this* — the region leaf by artifact, inside and its
- * complement (`polygon-membership.md` §8). **Steady during a
+ * and key, the kind of shape its layer draws, its **parents** and *Children in this view* from the
+ * served set, *Fit to cluster*, and the two verbs on each of *this artifact* and *outside this
+ * artifact* — **`member_of` clauses** (`highlight-and-hierarchy.md` §3, §5.5), which replace the
+ * `region`-by-published-artifact spelling this card used to send. The drawn-region spelling stays
+ * for a region drawn by hand; `region` asks about a shape and `member_of` about a membership, and
+ * for an artifact whose members are spread across the map the two are not the same question — the
+ * shape is the map's own outline. *Fit* is absent on a layer that draws nothing (§5.4). **Steady during a
  * pan by construction**: the count is the drill-down's, over the whole membership as this
  * principal sees it, and moves with the mask and never with the viewport. The children are a live
  * read of the served set — whatever the channel has answered for the view now.
@@ -83,10 +87,32 @@ export class TesseraArtifactCard extends TesseraElement {
       [part='fit'] {
         margin-top: 12px;
       }
-      [part='filter'] {
+      [part='verbs'] {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
         margin-top: 8px;
-        opacity: 0.45;
-        cursor: not-allowed;
+      }
+      [part='verbs'] .btn[aria-pressed='true'] {
+        border-color: currentColor;
+      }
+      [part='verbs'] [data-verb='highlight'][aria-pressed='true'] {
+        background: var(--tessera-highlight-soft);
+        color: var(--tessera-highlight);
+      }
+      .parents-label {
+        margin: 12px 0 4px;
+      }
+      [part='parents'] {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+      }
+      [part='parent'] tessera-count::part(count) {
+        margin-left: auto;
+        color: var(--tessera-ink-2);
+        font-size: 12px;
+        font-weight: 400;
       }
       [part='close'] {
         display: inline-flex;
@@ -103,6 +129,45 @@ export class TesseraArtifactCard extends TesseraElement {
     if (this.artifact || this.refusal) return {artifact: this.artifact, refusal: this.refusal};
     const sel = this.resolvedStore?.get('selection');
     return {artifact: sel?.artifact ?? null, refusal: sel?.artifactRefusal ?? null};
+  }
+
+  /**
+   * One of the card's clause buttons: a `member_of` clause on this artifact, in one position and
+   * one sense (`highlight-and-hierarchy.md` §3, §5.5).
+   *
+   * **Pressed is a state, and clicking a pressed button withdraws the clause** — so the card says
+   * what is on rather than adding a second clause each time it is used, and a viewer moves the
+   * clause between the two positions by pressing the other button, which is the same *without
+   * being re-entered* the chips give.
+   */
+  private verb(layer: string, artifact: bigint, outside: boolean, verb: ClauseVerb, label: string) {
+    const s = this.resolvedStore;
+    const held = s?.get('filters').members ?? [];
+    const on = held.some((c) => c.layer === layer && c.artifact === artifact && c.outside === outside && c.verb === verb);
+    const title =
+      verb === 'filter'
+        ? outside
+          ? 'Narrow the map and every count to what is not in this artifact'
+          : "Narrow the map and every count to this artifact's members"
+        : "Keep the map and light this artifact's members";
+    return html`<button
+      part=${outside ? 'outside' : verb === 'filter' ? 'filter' : 'highlight'}
+      class="btn"
+      type="button"
+      data-verb=${verb}
+      aria-pressed=${on ? 'true' : 'false'}
+      title=${title}
+      @click=${() => {
+        if (!s) return;
+        const members = on
+          ? withoutMember(s.get('filters').members, layer, artifact)
+          : withMember(s.get('filters').members, {layer, artifact, outside, verb});
+        s.setMembers(members);
+        emit(this, 'tessera-clausechange', {id: idString(artifact), layer, outside, verb, on: !on});
+      }}
+    >
+      ${icon(verb === 'filter' ? 'filter' : 'highlight', 14)}${label}
+    </button>`;
   }
 
   override render() {
@@ -131,6 +196,10 @@ export class TesseraArtifactCard extends TesseraElement {
     // The children are the served artifacts naming this one among their parents — on a `dag`
     // layer a child appears on the card of each served parent (decision 0117).
     const children = served.filter((a) => a.parentIds.includes(artifact.id)).sort((a, b) => (a.maskedCount < b.maskedCount ? 1 : a.maskedCount > b.maskedCount ? -1 : 0));
+    // **The parents above the children** (§5.5). Read off the served set for now, which names a
+    // parent only where the response carried it — C29 per entry — and is every parent the map is
+    // drawing. `POST /v1/artifacts/browse` answers the rest, and the hierarchy panel asks it.
+    const parents = here ? served.filter((a) => here.parentIds.includes(a.tesseraId)).sort((a, b) => (a.maskedCount < b.maskedCount ? 1 : a.maskedCount > b.maskedCount ? -1 : 0)) : [];
     const stale = s?.get('status').stale ?? false;
     const count: Masked = {value: Number(artifact.detail.maskedCount), exact: true};
     const id = idString(artifact.id);
@@ -148,6 +217,17 @@ export class TesseraArtifactCard extends TesseraElement {
         ${artifact.detail.key ? html`<div class="k">key</div><div part="value" class="v">${artifact.detail.key}</div>` : nothing}
         ${shape ? html`<div class="k">shape</div><div part="shape" class="v" data-kind=${shape.kind}>${shape.text}</div>` : nothing}
       </div>
+      ${parents.length > 0
+        ? html`<div part="label" class="xs muted parents-label">Parents</div>
+            <ul part="parents" class="list">
+              ${parents.map(
+                (pnt: Artifact) => html`<li part="parent" class="item child" role="button" tabindex="0" data-id=${idString(pnt.tesseraId)} @click=${() => void s?.openArtifact(pnt.tesseraId)}>
+                  <span part="name" class="name">${displayName(pnt, topics) ?? UNNAMED}</span>
+                  <tessera-count .masked=${{value: Number(pnt.maskedCount), exact: true} as Masked} .stale=${stale}></tessera-count>
+                </li>`
+              )}
+            </ul>`
+        : nothing}
       ${children.length > 0
         ? html`<div part="label" class="xs muted children-label">Children in this view</div>
             <ul part="children" class="list">
@@ -159,15 +239,18 @@ export class TesseraArtifactCard extends TesseraElement {
               )}
             </ul>`
         : nothing}
-      <button part="fit" class="btn" type="button" @click=${() => emit(this, 'tessera-artifactfit', {id})}>${icon('fit', 14)}Fit to cluster</button>
-      <button part="filter" class="btn" type="button" title="Narrow the map and every count to this artifact's members" @click=${() => {
-        s?.select({kind: 'artifact', id: artifact.id});
-        emit(this, 'tessera-selectchange', {shape: {kind: 'artifact', id: artifact.id}, status: 'loading'});
-      }}>${icon('filter', 14)}Filter to this</button>
-      <button part="outside" class="btn" type="button" title="Narrow the map and every count to what is not in this artifact" @click=${() => {
-        s?.select({kind: 'artifact', id: artifact.id, outside: true});
-        emit(this, 'tessera-selectchange', {shape: {kind: 'artifact', id: artifact.id, outside: true}, status: 'loading'});
-      }}>${icon('filter', 14)}Outside this</button>
+      ${
+        // **No *fit* on a filter layer** (§5.4): its artifacts are spread across the frame and
+        // there is nothing to fit to. The declaration says so — a layer with no computed content.
+        decl && isFilterLayer(decl)
+          ? nothing
+          : html`<button part="fit" class="btn" type="button" @click=${() => emit(this, 'tessera-artifactfit', {id})}>${icon('fit', 14)}Fit to cluster</button>`
+      }
+      <div part="verbs" role="group" aria-label="This artifact">
+        ${this.verb(artifact.detail.layer, artifact.id, false, 'filter', 'Filter to this')}
+        ${this.verb(artifact.detail.layer, artifact.id, false, 'highlight', 'Highlight this')}
+        ${this.verb(artifact.detail.layer, artifact.id, true, 'filter', 'Outside this')}
+      </div>
     </div>`;
   }
 }

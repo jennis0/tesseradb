@@ -95,7 +95,7 @@ function responseCovering(req: FakeRequest, served = 3): ViewportResponse {
     for (let y = rect.y0; y <= rect.y1; y++) for (let x = rect.x0; x <= rect.x1; x++) prefixes.push(mortonOfTile(x, y, req.zoom));
   }
   return {
-    result: {...result, tiles: prefixes.map((tile, i) => ({tile, visible: 1000n, matched: 1000n, served: i === 0 ? BigInt(served) : 0n}))},
+    result: {...result, tiles: prefixes.map((tile, i) => ({tile, visible: 1000n, matched: 1000n, highlighted: 1000n, served: i === 0 ? BigInt(served) : 0n}))},
     timings: {serverUs: 0, admissionUs: 0, stageNs: null},
     identityKey: 'ik',
     contentKey: 'ck',

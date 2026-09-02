@@ -31,7 +31,8 @@ const artifact = (id: bigint, parent: bigint | null, rung: number, box: [number,
   content: [],
   parentIds: parent === null ? [] : [parent],
   rung,
-  matched: null
+  matched: null,
+  highlighted: null
 });
 
 function artifactsProjection(served: Artifact[]): ArtifactsProjection {

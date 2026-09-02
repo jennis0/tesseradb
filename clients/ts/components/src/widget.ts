@@ -168,7 +168,13 @@ export function draftOf(expr: FilterExpr | null, operands: FilterOperandSet[]): 
   return draft;
 }
 
+/**
+ * One leaf back into a control. **The control's own `verb` is kept** — the widget sets the
+ * `filters` expression, and a column already in the highlight position is not moved by it being
+ * named; the notebook moves a clause by setting the draft, as the panel does.
+ */
 function controlOf(column: string, control: ColumnDraft, op: Record<string, unknown>): ColumnDraft {
+  const {verb} = control;
   const names = Object.keys(op);
   if (names.length !== 1) throw new Error(`${column}: an operator has exactly one key; got ${names.join(', ')}`);
   const name = names[0]!;
@@ -176,31 +182,31 @@ function controlOf(column: string, control: ColumnDraft, op: Record<string, unkn
   const bad = () => new Error(`${column}: a ${control.family} column cannot hold ${name}`);
   switch (control.family) {
     case 'text': {
-      if (name === 'phrase' && typeof value === 'string') return {family: 'text', query: value, mode: 'phrase'};
-      if (name === 'match' && typeof value === 'string') return {family: 'text', query: value, mode: 'all'};
+      if (name === 'phrase' && typeof value === 'string') return {family: 'text', query: value, mode: 'phrase', verb};
+      if (name === 'match' && typeof value === 'string') return {family: 'text', query: value, mode: 'all', verb};
       if (name === 'match' && value && typeof value === 'object') {
         const m = value as {query: string; minimum_should_match?: number};
-        return {family: 'text', query: m.query, mode: m.minimum_should_match === 1 ? 'any' : 'all'};
+        return {family: 'text', query: m.query, mode: m.minimum_should_match === 1 ? 'any' : 'all', verb};
       }
       throw bad();
     }
     case 'string':
     case 'keyword': {
       if ((name === 'eq' || name === 'prefix' || name === 'contains') && typeof value === 'string') {
-        return {family: control.family, needle: value, op: name};
+        return {family: control.family, needle: value, op: name, verb};
       }
       throw bad();
     }
     case 'category': {
-      if (name === 'in' && Array.isArray(value)) return {family: 'category', keys: value.map(String)};
-      if (name === 'eq') return {family: 'category', keys: [String(value)]};
+      if (name === 'in' && Array.isArray(value)) return {family: 'category', keys: value.map(String), verb};
+      if (name === 'eq') return {family: 'category', keys: [String(value)], verb};
       throw bad();
     }
     case 'numeric': {
       if (name === 'range' && value && typeof value === 'object') {
         const r = value as {gte?: number; lte?: number; gt?: number; lt?: number};
         if (r.gt !== undefined || r.lt !== undefined) throw new Error(`${column}: the widget's range is inclusive (gte, lte)`);
-        return {family: 'numeric', gte: r.gte ?? null, lte: r.lte ?? null};
+        return {family: 'numeric', gte: r.gte ?? null, lte: r.lte ?? null, verb};
       }
       throw bad();
     }

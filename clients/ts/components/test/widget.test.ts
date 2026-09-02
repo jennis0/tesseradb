@@ -266,7 +266,7 @@ describe('the down-sync', () => {
     model.set('filters', {year: {range: {gte: 2000}}});
     const applied = store.calls.filter((c) => c.name === 'setFilters');
     expect(applied).toHaveLength(1);
-    expect(applied[0]!.args[0]).toEqual({year: {family: 'numeric', gte: 2000, lte: null}});
+    expect(applied[0]!.args[0]).toEqual({year: {family: 'numeric', gte: 2000, lte: null, verb: 'filter'}});
     // An expression the draft cannot hold is refused to the kernel, and applies nothing.
     model.set('filters', {any_of: [{year: {range: {gte: 1}}}]});
     expect(store.calls.filter((c) => c.name === 'setFilters')).toHaveLength(1);

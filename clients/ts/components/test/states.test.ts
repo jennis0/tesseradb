@@ -22,6 +22,8 @@ const view = {
   depth: 5,
   visible: {value: 12_040, exact: true},
   matched: {value: 3_210, exact: true},
+  highlighted: {value: 3_210, exact: true},
+  highlighting: false,
   served: {shown: 500, total: 12_040, exact: true},
   provisional: 0
 };
@@ -77,6 +79,24 @@ describe('<tessera-status> renders every state through part="state"', () => {
     expect(counts.map((c) => c.textContent)).toEqual(['500', '3,210', '12,040']);
     // The sample's total is the visible cell beside it, and the cell carries it: both figures.
     expect(counts[0]!.getAttribute('data-total')).toBe('12,040');
+  });
+
+  /**
+   * §5.2's third line, and why it is conditional: `highlighted` equals `matched` where no
+   * highlight was asked, so a cell drawn always would repeat a number and read as a second
+   * answer to a question nobody put. `highlighting` is what says the question was put.
+   */
+  it('adds the highlight’s own count only where a highlight was asked', async () => {
+    const host = await mount('<tessera-status></tessera-status>');
+    const el = host.querySelector('tessera-status') as TesseraStatus;
+    el.store = fakeStore({status: status({}), view});
+    await settle(host);
+    expect(deep(host, '[part="count-highlighted"]')).toBeNull();
+
+    el.store = fakeStore({status: status({}), view: {...view, highlighted: {value: 812, exact: true}, highlighting: true}});
+    await settle(host);
+    expect(deepAll(host, '[part="count"]').map((c) => c.textContent)).toEqual(['500', '3,210', '812', '12,040']);
+    expect(deep(host, '[part="count-highlighted"]')?.getAttribute('label')).toBe('the highlight matched');
   });
 
   it('fires tessera-expired once, composed, on the expired transition', async () => {
