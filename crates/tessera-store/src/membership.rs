@@ -1454,6 +1454,65 @@ impl ListColumnPack {
         (lo..hi).map(move |i| self.value(i))
     }
 
+    /// **Every entry of rows `[from, to)`, walked linearly** — the values region read straight
+    /// through, with the width resolved once rather than per value and the row not carried at
+    /// all.
+    ///
+    /// For a **counting** pass, which is what a transposition of this column starts with
+    /// (`tessera-engine`'s `RowColumn::transpose`): how many rows carry each ordinal is a
+    /// question about the values alone, so the offset table is read twice for the range and never
+    /// per row. At rung 3's `mesh/descriptors` that is 1.66×10⁹ entries, and resolving the width
+    /// per value is the difference between one pass and several seconds of them.
+    pub fn for_each_value(&self, from: usize, to: usize, mut visit: impl FnMut(u32)) {
+        let rows = self.rows as usize;
+        let (from, to) = (from.min(rows), to.min(rows));
+        if from >= to {
+            return;
+        }
+        let (lo, hi) = (self.at(from) as usize, self.at(to) as usize);
+        let raw = self.bytes.as_slice();
+        let width = usize::from(self.width);
+        let values = &raw[self.values_at + lo * width..self.values_at + hi * width];
+        match self.width {
+            1 => values.iter().for_each(|byte| visit(u32::from(*byte))),
+            2 => values
+                .chunks_exact(2)
+                .for_each(|v| visit(u32::from(u16::from_le_bytes([v[0], v[1]])))),
+            _ => values
+                .chunks_exact(4)
+                .for_each(|v| visit(u32::from_le_bytes([v[0], v[1], v[2], v[3]]))),
+        }
+    }
+
+    /// [`Self::for_each_value`] with the **row** beside each ordinal — the placing pass of the
+    /// same transposition, which needs both and so walks the offset table row by row.
+    pub fn for_each_row_value(&self, from: usize, to: usize, mut visit: impl FnMut(u32, u32)) {
+        let rows = self.rows as usize;
+        let (from, to) = (from.min(rows), to.min(rows));
+        if from >= to {
+            return;
+        }
+        let raw = self.bytes.as_slice();
+        let width = usize::from(self.width);
+        let mut at = self.at(from) as usize;
+        for row in from..to {
+            let end = self.at(row + 1) as usize;
+            let values = &raw[self.values_at + at * width..self.values_at + end * width];
+            match self.width {
+                1 => values
+                    .iter()
+                    .for_each(|byte| visit(row as u32, u32::from(*byte))),
+                2 => values
+                    .chunks_exact(2)
+                    .for_each(|v| visit(row as u32, u32::from(u16::from_le_bytes([v[0], v[1]])))),
+                _ => values.chunks_exact(4).for_each(|v| {
+                    visit(row as u32, u32::from_le_bytes([v[0], v[1], v[2], v[3]]))
+                }),
+            }
+            at = end;
+        }
+    }
+
     /// This column's bytes, exactly as they would be written.
     pub fn as_bytes(&self) -> &[u8] {
         self.bytes.as_slice()

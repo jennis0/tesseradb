@@ -490,6 +490,18 @@ label column beside it is **400 MB**, 4 B per row, at 13.4 s and 3.6 s to build 
 **~8 GB at 10⁹ rows for the list form and ~4 GB for the label form** *(derived from the measured
 per-row constant)*, and a residency line quoted for a layer is a figure about its `k`.
 
+**And at open the derivation runs the other way.** A level recorded row-major arrives with the
+column the build or the fold wrote, and that column *is* its membership — addressed by row. The
+artifact-major form the residency half above has not yet removed is therefore **transposed out of
+the column** rather than projected a second time from the level's memberships: one sequential pass
+over bytes already on disk, against a decode and a permutation of every artifact's members. ⊘
+Measured at rung 3 only (`mesh/descriptors`, 30,217 artifacts over 1.66×10⁹ membership entries,
+warm cache, single-threaded, `probes/2026-09-02-cold-start/`): **23.6–25.1 s to project and
+18.9–19.4 s to transpose**, so a fifth off and not more — what is left is croaring's insert cost,
+which is one per member whichever address they arrive in. What the column does
+not hold still projects — each content's generating set, a level whose column this prefix does not
+hold, an attribute predicate's labels — and each of those is the route that existed before.
+
 **Not a new mechanism.** `artifacts-from-points` already *reads* this layout — an integer key column,
 or a list column naming the artifacts a point belongs to — and converts it into artifact-major
 bitmaps on the way in. The proposal is to keep what the build was handed, **row-addressed** rather

@@ -27,12 +27,30 @@
 //! from: both are per-artifact row-space questions with no row-addressed form, and both go on being
 //! answered from [`crate::artifacts::MembershipRows`] exactly as they were.
 //!
-//! ⊘ **So the residency half of §5.1 is not taken here.** The artifact-major row form is still built
+//! ⊘ **So the residency half of §5.1 is not taken here.** The artifact-major row form is still held
 //! for a row-major level, which is what the layout exists to avoid at 10⁹ rows (4 GB against 78.5).
-//! Not building it needs containment's projection-loss test and the computed properties to reach the
+//! Not holding it needs containment's projection-loss test and the computed properties to reach the
 //! membership another way, and neither is designed; what this stage delivers is the mechanism, the
 //! record, the files and the route — with every answer asserted identical to the artifact-major
 //! one's, which is what a later change removing the row form would be checked against.
+//!
+//! **What has moved is which of the two is derived from the other.** Where the prefix holds this
+//! level's column, the artifact-major form is now **transposed out of it** rather than projected a
+//! second time from the level's memberships ([`RowColumn::transpose`], and
+//! [`crate::artifacts::ArtifactRows::build_from_column`] is the caller): the column already holds
+//! the membership, addressed by row, so reaching the other address is one sequential pass instead
+//! of a decode and a permutation of every artifact's members. At rung 3's `mesh/descriptors` —
+//! 30,217 artifacts over 1.66×10⁹ membership entries — that is **19 s at open against 24 s**, and
+//! the open as a whole 18.5 s against 23.5 (`probes/2026-09-02-cold-start/`).
+//!
+//! **Three things are not in the column and still project**: each content's **generating set**,
+//! which containment is tested against and which is a different set from the membership; a level
+//! whose column this prefix does not hold, which projects and then composes its column as before;
+//! and an attribute predicate's column, whose labels come from the value column rather than from
+//! any stored membership. The transposition also refuses a column with a live **tail** — the base
+//! alone is what a projection produces, and a form stopping short of the flushed rows would be
+//! narrow. Every one of those is a fallback to the route that existed before, so the worst case is
+//! the old cost and never a wrong answer.
 //!
 //! # The declared sizes are derived, never stored
 //!
@@ -393,6 +411,113 @@ impl RowColumn {
         }
     }
 
+
+    /// **The artifact-major bitmaps, derived by transposing this column** — the level's membership
+    /// in row space, read off the row form instead of projected a second time.
+    ///
+    /// A level recorded row-major has both forms at open: the column the fold wrote, and the
+    /// row form every artifact-major answer is still computed from (see the module doc). Building
+    /// the second by projecting every membership through the permutation costs a decode and a
+    /// projection of the whole level, whose entries are already sitting in this column.
+    /// Transposing them is the same information at one sequential read, and the two are asserted
+    /// equal artifact for artifact.
+    ///
+    /// **Measured at rung 3's `mesh/descriptors`** — 30,217 artifacts, 36M rows, 1.66×10⁹ entries,
+    /// warm cache, single-threaded (`probes/2026-09-02-cold-start/`): the projection takes
+    /// **23.6–25.1 s** and this takes **18.9–19.4 s**. A fifth off, and not more: what remains is
+    /// croaring's own insert cost, which is 1.66×10⁹ of them whichever address the members arrive
+    /// in.
+    ///
+    /// **The base alone**, which is exactly what [`RowSpace::project_base`] produces and therefore
+    /// what a projected form holds: `None` where a tail is attached, so a caller can never be
+    /// handed a form that stops short of the rows the live half labels.
+    ///
+    /// One [`Bitmap`] per ordinal this column covers, holes included — a hole transposes to an
+    /// empty bitmap, and telling an empty artifact from a hole is the caller's job, from the
+    /// records, exactly as it is on the projecting route.
+    ///
+    /// # Why it is blocked and counting-sorted rather than added row by row
+    ///
+    /// Appending each row to its ordinals' bitmaps as the walk reaches it touches a different
+    /// container on every value — 30,217 of them interleaved at rung 3 — and that measured
+    /// **68 s**, three times the projection it was meant to replace. The walk is instead cut into
+    /// blocks of rows, each block counting-sorted by ordinal so that every ordinal's rows arrive
+    /// **contiguous and ascending**, which is one container touched per ordinal per block and the
+    /// fast path `add_many` was written for: 19 s for the same answer, of which the counting pass
+    /// is 0.9 s, the placing pass 5.9 s and the inserts 11.6 s. **Bigger blocks were measured and
+    /// are not better** — 2¹⁸, 2²⁰ and 2²² rows all cost slightly more, the scatter of the placing
+    /// pass losing what the inserts gain. The block is at least 2¹⁶ rows — a Roaring block, so a short
+    /// ordinal's run lands inside one container — and grows with the ordinal count so that the
+    /// per-block sweep over the offset table stays bounded by the row count rather than
+    /// multiplying by it.
+    pub fn transpose(&self) -> Option<Vec<Bitmap>> {
+        if self.tail.is_some() {
+            return None;
+        }
+        let ordinals = self.len();
+        let mut out = vec![Bitmap::new(); ordinals];
+        if ordinals == 0 {
+            return Some(out);
+        }
+        let base_rows = self.base_rows();
+        let block = u32::try_from((1u64 << 16).max((ordinals as u64).next_power_of_two()))
+            .unwrap_or(u32::MAX);
+        // `starts` is the block's offset table — one entry per ordinal plus the total — and
+        // `cursor` the filling half of it. Both are allocated once for the whole walk.
+        let mut starts = vec![0usize; ordinals + 1];
+        let mut cursor = vec![0usize; ordinals];
+        let mut values: Vec<u32> = Vec::new();
+        let mut lo = 0u32;
+        while lo < base_rows {
+            let hi = lo.saturating_add(block).min(base_rows);
+            starts.iter_mut().for_each(|slot| *slot = 0);
+            match &*self.pack {
+                // **The values alone**, read straight through: counting needs the ordinal and not
+                // the row, so the offset table is touched twice for the whole block.
+                Pack::List(pack) => pack.for_each_value(lo as usize, hi as usize, |ordinal| {
+                    starts[ordinal as usize] += 1
+                }),
+                Pack::Label(_) => {
+                    for row in lo..hi {
+                        self.for_each_label(row, |ordinal| starts[ordinal as usize] += 1);
+                    }
+                }
+            }
+            let mut total = 0usize;
+            for slot in starts.iter_mut() {
+                let count = *slot;
+                *slot = total;
+                total += count;
+            }
+            values.clear();
+            values.resize(total, 0);
+            cursor.copy_from_slice(&starts[..ordinals]);
+            let mut place = |ordinal: u32, row: u32| {
+                let at = ordinal as usize;
+                values[cursor[at]] = row;
+                cursor[at] += 1;
+            };
+            match &*self.pack {
+                Pack::List(pack) => pack.for_each_row_value(lo as usize, hi as usize, |row, ordinal| {
+                    place(ordinal, row)
+                }),
+                Pack::Label(_) => {
+                    for row in lo..hi {
+                        self.for_each_label(row, |ordinal| place(ordinal, row));
+                    }
+                }
+            }
+            for (ordinal, rows) in out.iter_mut().enumerate() {
+                let (from, to) = (starts[ordinal], starts[ordinal + 1]);
+                if from < to {
+                    rows.add_many(&values[from..to]);
+                }
+            }
+            lo = hi;
+        }
+        Some(out)
+    }
+
     /// **The masked count for every artifact of this level, in one walk of the mask** — decision
     /// 0093's one named exception, and the only route a row-major level has to the quantity the
     /// disclosure rule requires.
@@ -677,6 +802,84 @@ mod tests {
             assert!(RowColumn::open(&path, other).is_err());
             assert!(RowColumn::open(&path, ServingLayout::ArtifactMajor).is_err());
         }
+    }
+
+    /// **The transposed form is the membership the column was composed from**, ordinal for
+    /// ordinal — the property `ArtifactRows::build_from_column` rests on, and the reason a level
+    /// recorded row-major need not project its memberships a second time at open. Both forms, and
+    /// the fixtures carry the two states a transposition could lose: a hole and an artifact whose
+    /// projection is empty, which transpose to the same empty bitmap and are told apart by the
+    /// records rather than here.
+    #[test]
+    fn a_transposed_column_is_the_membership_it_was_composed_from() {
+        // Ordinal 2 is a hole and ordinal 3 is live with an empty projection; rows 4 and 9 belong
+        // to nobody. Disjoint, so both forms compose.
+        let partitioned = rows_of(&[Some(&[0, 1, 2]), Some(&[5, 6]), None, Some(&[])]);
+        // The same three questions where rows are claimed several times over, which is the state
+        // the label form refuses and the list form is for.
+        let overlapping = rows_of(&[Some(&[0, 1, 7]), Some(&[1, 2, 7]), None, Some(&[7])]);
+        for (membership, layout) in [
+            (&partitioned, ServingLayout::RowMajorLabel),
+            (&partitioned, ServingLayout::RowMajorList),
+            (&overlapping, ServingLayout::RowMajorList),
+        ] {
+            let column = RowColumn::compose(membership, 10, layout).expect("composes");
+            let transposed = column.transpose().expect("a column with no tail transposes");
+            assert_eq!(transposed.len(), column.len());
+            for ordinal in 0..transposed.len() as u32 {
+                let projected = membership.get(ordinal).cloned().unwrap_or_default();
+                let rows = &transposed[ordinal as usize];
+                assert_eq!(
+                    rows.to_vec(),
+                    projected.to_vec(),
+                    "transposed rows disagreed at ordinal {ordinal} under {layout:?}"
+                );
+                assert_eq!(
+                    column.declared_size(ordinal),
+                    rows.cardinality(),
+                    "the declared size disagreed with the transposition at ordinal {ordinal}"
+                );
+            }
+        }
+    }
+
+    /// **Over a row space wide enough to cross the transposition\'s blocks**, which is where a
+    /// per-block offset table that did not reset, or a block boundary that dropped a row, would
+    /// show — 2¹⁶ rows is one block, so the fixture spans several and gives each artifact rows in
+    /// every one of them.
+    #[test]
+    fn a_transposition_crosses_its_own_block_boundary() {
+        const ROWS: u32 = 5 << 16;
+        const ORDINALS: u32 = 7;
+        let sets: Vec<Vec<u32>> = (0..ORDINALS)
+            .map(|ordinal| (0..ROWS).filter(|row| row % ORDINALS == ordinal).collect())
+            .collect();
+        let refs: Vec<Option<&[u32]>> = sets.iter().map(|s| Some(s.as_slice())).collect();
+        let membership = rows_of(&refs);
+        for layout in [ServingLayout::RowMajorLabel, ServingLayout::RowMajorList] {
+            let column = RowColumn::compose(&membership, ROWS, layout).expect("partitions");
+            let transposed = column.transpose().expect("no tail");
+            for ordinal in 0..ORDINALS {
+                assert_eq!(
+                    transposed[ordinal as usize].to_vec(),
+                    membership.get(ordinal).unwrap().to_vec(),
+                    "block-crossing transposition disagreed at ordinal {ordinal} under {layout:?}"
+                );
+            }
+        }
+    }
+
+    /// **A column with a live tail refuses to transpose**, rather than handing back a form that
+    /// stops at the base: the rows a flush appended are labelled by the tail and by nothing in the
+    /// packed bytes, so a form built from the base alone would be narrow — the direction a row
+    /// form must never be wrong in.
+    #[test]
+    fn a_tailed_column_does_not_transpose() {
+        let membership = rows_of(&[Some(&[0, 1]), Some(&[2])]);
+        let base = RowColumn::compose(&membership, 4, ServingLayout::RowMajorLabel).expect("builds");
+        assert!(base.transpose().is_some());
+        let tailed = base.with_tail(TailLabels::new(4, vec![1, ROW_COLUMN_HOLE]));
+        assert!(tailed.transpose().is_none());
     }
 
     /// The column and the row form agree about every artifact's size and every artifact's masked

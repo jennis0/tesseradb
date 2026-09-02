@@ -359,6 +359,47 @@ impl MembershipRows {
             .collect();
     }
 
+    /// One artifact's **generating sets alone**, with an empty membership standing in for rows a
+    /// transposed column supplies afterwards ([`Self::absorb_transposed`]).
+    ///
+    /// **The generating sets still project, and they must.** A row column holds membership and
+    /// nothing else: containment is tested against each content's generating set in row space,
+    /// which is a different set from the membership and is nowhere in the column. It is also
+    /// small — `Σ|G|` over a level's contents, a sample per content rather than a corpus —  so
+    /// projecting it costs a fraction of the membership this route is avoiding.
+    fn put_generating(&mut self, idx: usize, record: &ArtifactRecord, space: &RowSpace) {
+        if self.rows.len() <= idx {
+            self.rows.resize_with(idx + 1, || None);
+            self.generating.resize_with(idx + 1, Vec::new);
+        }
+        self.rows[idx] = Some(Bitmap::new());
+        self.generating[idx] = record
+            .contents
+            .iter()
+            .map(|v| space.project_base(&v.generated_from))
+            .collect();
+    }
+
+    /// Take a transposed column's per-ordinal rows into the slots [`Self::put_generating`] left
+    /// empty — every live ordinal, and no hole.
+    ///
+    /// `false` where `transposed` does not reach every ordinal this level has records for, which
+    /// is a column narrower than the level it was adopted for: the caller projects instead. A
+    /// slot no record occupies stays `None` — a hole is not an artifact with no members, and the
+    /// column cannot tell the two apart because a hole and an empty membership label the same
+    /// rows, which is none.
+    fn absorb_transposed(&mut self, mut transposed: Vec<Bitmap>) -> bool {
+        if transposed.len() < self.rows.len() {
+            return false;
+        }
+        for (idx, slot) in self.rows.iter_mut().enumerate() {
+            if slot.is_some() {
+                *slot = Some(std::mem::take(&mut transposed[idx]));
+            }
+        }
+        true
+    }
+
     /// One artifact whose membership rows were resolved elsewhere — a shape's — with the
     /// generating sets projected exactly as [`Self::put`] projects them.
     fn put_resolved(
@@ -395,7 +436,12 @@ impl MembershipRows {
     }
 
     /// The projected generating sets, per rank. Parallel to [`ArtifactRecords::declared`].
-    fn generating(&self, ordinal: u32) -> &[Bitmap] {
+    ///
+    /// **Public for the differential**, which is the one caller outside this module: a row form
+    /// transposed out of a column takes these from the same projection the artifact-major route
+    /// takes them from, and `tests/artifact_tile_index.rs` asserts that set by set rather than on
+    /// the argument that both call the same line.
+    pub fn generating(&self, ordinal: u32) -> &[Bitmap] {
         self.generating
             .get(ordinal as usize)
             .map(Vec::as_slice)
@@ -517,6 +563,74 @@ impl ArtifactRows {
             layout: ServingLayout::ArtifactMajor,
             column: None,
         }
+    }
+
+    /// **The same family, with the row form transposed out of an adopted row column** instead of
+    /// projected from the level's memberships (`artifact-serving-at-scale.md` §5.1).
+    ///
+    /// A level recorded row-major arrives at open with the column the fold or the build wrote, and
+    /// that column *is* the level's membership — addressed by row. Projecting every membership a
+    /// second time to reach the artifact-major half costs a decode and a permutation of the whole
+    /// level — 23.6–25.1 s at rung 3's `mesh/descriptors`, 1.66×10⁹ entries — and transposing the
+    /// column is the same set at one sequential read, **18.9–19.4 s** on the same host. [`RowColumn::transpose`] is the pass, and
+    /// `row_column.rs`'s tests assert the two forms are equal artifact for artifact, holes and
+    /// generating sets included.
+    ///
+    /// **The generating sets still project**: they are not in the column, they are a different set
+    /// from the membership, and they are small — see [`MembershipRows::put_generating`].
+    ///
+    /// **`adopted` is taken only on success**, so a caller whose column turns out not to cover
+    /// the level still has the fold-written index to hand to [`Self::build_over`].
+    ///
+    /// `None` where the column cannot stand in for the projection — a tail attached, a base row
+    /// count that is not this view's, or fewer ordinals than the level has records for. Each would
+    /// leave the form **narrow**, which is the direction a wrong row form must never be, so the
+    /// caller projects instead and is no worse off than before this route existed.
+    pub fn build_from_column<'a>(
+        artifacts: impl Iterator<Item = (u32, &'a ArtifactRecord)>,
+        space: &RowSpace,
+        column: &RowColumn,
+        adopted: &mut Option<TileIndex>,
+    ) -> Option<Self> {
+        if column.base_rows() != space.base_rows() {
+            return None;
+        }
+        let mut records = ArtifactRecords::default();
+        let mut membership = MembershipRows::default();
+        for (ordinal, record) in artifacts {
+            let idx = ordinal as usize;
+            records.put(idx, record);
+            membership.put_generating(idx, record, space);
+        }
+        if column.len() < membership.len() {
+            return None;
+        }
+        if !membership.absorb_transposed(column.transpose()?) {
+            return None;
+        }
+        // [`Self::build_over`]'s rule for an offered index, and its reason: a shorter one leaves
+        // every ordinal past its end out of every walk.
+        let index = match adopted.take() {
+            Some(index) if index.len() == membership.len() => index,
+            Some(index) => {
+                tracing::warn!(
+                    adopted_ordinals = index.len(),
+                    level_ordinals = membership.len(),
+                    "a fold-written tile index covers a different ordinal range from the level it \
+                     was offered for; it is dropped and the level's index is derived"
+                );
+                TileIndex::build(&membership, space.base_rows())
+            }
+            None => TileIndex::build(&membership, space.base_rows()),
+        };
+        Some(ArtifactRows {
+            records,
+            membership,
+            index,
+            partition: None,
+            layout: ServingLayout::ArtifactMajor,
+            column: None,
+        })
     }
 
     /// The same family over a membership **resolved elsewhere** — a spatial level's, joined from
@@ -1644,9 +1758,48 @@ impl ArtifactProjections {
                 .insert(map_key, (key, Arc::clone(&rows)));
             return rows;
         }
-        let adopted = self.claim_index(prefix, view, layer, level, key.level_version);
+        let mut adopted = self.claim_index(prefix, view, layer, level, key.level_version);
         let from_prefix = adopted.is_some();
-        let built = ArtifactRows::build_over(store.level(layer, level), space, adopted)
+        // **A level recorded row-major whose column this prefix holds is transposed, not projected
+        // twice** (§5.1). The column *is* the level's membership addressed by row, so the
+        // artifact-major half every other answer is computed from can be read off it in one
+        // sequential pass instead of decoding and permuting every membership again — 24 s at rung
+        // 3's `mesh/descriptors` before this, and the two forms are equal artifact for artifact.
+        //
+        // **Claimed here rather than in `column_for`**, because the form is built from it: an
+        // attribute predicate's column is not a stored membership and is not a candidate for this,
+        // and a column that turns out not to cover the level leaves `built` on the projecting
+        // route with nothing lost but the walk of the records.
+        let claimed = match predicate {
+            Some(PredicateSource::Attribute(_)) => None,
+            _ if !layout.is_row_major() => None,
+            _ => self
+                .claim_column(prefix, view, layer, level, key.level_version)
+                .filter(|claimed| claimed.layout() == layout)
+                .map(Arc::new),
+        };
+        let transposed = claimed.as_ref().and_then(|column| {
+            ArtifactRows::build_from_column(
+                store.level(layer, level),
+                space,
+                column,
+                &mut adopted,
+            )
+        });
+        let from_transpose = transposed.is_some();
+        if claimed.is_some() && !from_transpose {
+            tracing::warn!(
+                layer = %layer,
+                level,
+                view = %view,
+                "an adopted row-major column does not cover this level's row space or its \
+                 ordinals, so the level's row form is projected; every answer is unchanged"
+            );
+        }
+        let built = transposed
+            .unwrap_or_else(|| {
+                ArtifactRows::build_over(store.level(layer, level), space, adopted.take())
+            })
             .with_partition(partition);
         // **The column, claimed from the prefix or composed from the form just built** — and the
         // one place the recorded layout and the served one may differ. A level recorded row-major
@@ -1666,15 +1819,24 @@ impl ArtifactProjections {
                 space,
                 attribute,
             ),
-            _ => self.column_for(
-                prefix,
-                view,
-                layer,
-                level,
-                key.level_version,
-                layout,
-                &built,
-            ),
+            // The claim above already took it, where the prefix held one: `column_for` would
+            // find nothing there and recompose what is in hand.
+            _ => match claimed {
+                Some(claimed) => {
+                    self.columns_adopted
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Some(claimed)
+                }
+                None => self.column_for(
+                    prefix,
+                    view,
+                    layer,
+                    level,
+                    key.level_version,
+                    layout,
+                    &built,
+                ),
+            },
         };
         let from_column = column.is_some();
         let rows = Arc::new(built.with_column(column));
@@ -1707,6 +1869,7 @@ impl ArtifactProjections {
             ordinals = rows.index().len(),
             everywhere = rows.index().everywhere(),
             adopted = from_prefix,
+            transposed = from_transpose,
             layout = ?rows.layout(),
             blocks_per_artifact = rows.membership().blocks_per_artifact(),
             "a level's row form and tile index are built"

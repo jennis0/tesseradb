@@ -41,9 +41,10 @@ use tessera_lifecycle::wal::ParentRef;
 use tessera_lifecycle::{ChangeOp, IngestBuffer, Overlay};
 use tessera_store::write::write_permutation;
 use tessera_store::{Permutation, RowSpace};
+use tessera_engine::row_column::RowColumn;
 use tessera_types::layer::{
     ArtifactVisibility, ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration,
-    MembershipSource,
+    MembershipSource, ServingLayout,
 };
 use tessera_types::{EntityId, TermId};
 
@@ -74,6 +75,10 @@ enum Shape {
     /// Scattered: members everywhere, so every artifact is too wide for any node and lands in
     /// `everywhere` — the set that makes such a layer cost the population at every zoom.
     Scattered,
+    /// [`Shape::Runs`] with the jitter taken out, so the memberships **partition** the row space:
+    /// the one shape a label column composes over, and therefore the only way the label form's
+    /// half of a row-major differential gets exercised at all.
+    Partitioned,
 }
 
 struct Fixture {
@@ -232,6 +237,16 @@ fn spans_for(shape: Shape, rng: &mut StdRng) -> Vec<(Vec<u32>, Option<ParentRef>
                 rows.sort_unstable();
                 rows.dedup();
                 (rows, None)
+            })
+            .collect(),
+        // Contiguous and disjoint, tiling the row space: no row is claimed twice, which is what a
+        // label column requires.
+        Shape::Partitioned => (0..600u32)
+            .map(|i| {
+                let span = UNIVERSE / 600;
+                let lo = i * span;
+                let hi = if i == 599 { UNIVERSE - 1 } else { lo + span - 1 };
+                ((lo..=hi).collect(), None)
             })
             .collect(),
     }
@@ -497,6 +512,10 @@ fn assert_shapes_are_what_they_claim(shape: Shape, rows: &ArtifactRows) {
         Shape::Scattered => assert_eq!(
             wide, live,
             "every artifact of a scattered layer is too wide for any node"
+        ),
+        Shape::Partitioned => assert!(
+            wide * 20 < live,
+            "a partitioned layer is run-shaped: {wide} wide of {live}"
         ),
     }
 }
@@ -844,6 +863,103 @@ fn the_folds_projection_and_the_derived_index_are_the_same_column() {
         for ordinal in 0..derived.len() as u32 {
             assert_eq!(projected.extent(ordinal), derived.extent(ordinal));
         }
+    }
+}
+
+/// **The row form transposed out of a column is the row form projected from the memberships** —
+/// membership, generating sets, declared sizes and the tile index over them, artifact for
+/// artifact.
+///
+/// This is what lets a level recorded row-major skip the projection at open: the column the fold
+/// wrote already holds the membership, addressed by row, and reading it back costs one sequential
+/// pass instead of decoding and permuting 1.6×10⁹ entries. If the two ever disagreed the failure
+/// would be silent in the usual two directions — an artifact short a member is one that stops
+/// being a candidate where it should be, and a masked count that comes back low.
+///
+/// **Both forms and all three shapes.** `Nested` is the overlapping case (a parent owns every
+/// row its children do), where only the list form composes; `Runs` and `Scattered` compose as
+/// label columns too where their memberships happen to partition. The hole and the artifact whose
+/// projection is empty are in every fixture, and they are the two states a transposition could
+/// confuse — it cannot tell them apart, and must not have to: the records do.
+#[test]
+fn a_transposed_row_form_is_the_projected_one() {
+    for shape in [
+        Shape::Runs,
+        Shape::Nested,
+        Shape::Scattered,
+        Shape::Partitioned,
+    ] {
+        let fx = build_fixture(shape);
+        let projected = fx.rows();
+        let mut composed = 0;
+        for layout in [ServingLayout::RowMajorLabel, ServingLayout::RowMajorList] {
+            let Some(column) = RowColumn::compose(
+                projected.membership(),
+                fx.row_space.base_rows(),
+                layout,
+            ) else {
+                continue;
+            };
+            composed += 1;
+            let transposed = ArtifactRows::build_from_column(
+                fx.store.level(LAYER, 0),
+                &fx.row_space,
+                &column,
+                &mut None,
+            )
+            .expect("a column composed from this very level covers it");
+
+            assert_eq!(transposed.membership().len(), projected.membership().len());
+            for ordinal in 0..projected.membership().len() as u32 {
+                let here = transposed.membership().get(ordinal);
+                let there = projected.membership().get(ordinal);
+                assert_eq!(
+                    here.is_some(),
+                    there.is_some(),
+                    "{shape:?}/{layout:?}: a hole and a live artifact were confused at {ordinal}"
+                );
+                assert_eq!(
+                    here.map(Bitmap::to_vec),
+                    there.map(Bitmap::to_vec),
+                    "{shape:?}/{layout:?}: the membership disagreed at ordinal {ordinal}"
+                );
+                assert_eq!(
+                    transposed
+                        .membership()
+                        .generating(ordinal)
+                        .iter()
+                        .map(Bitmap::to_vec)
+                        .collect::<Vec<_>>(),
+                    projected
+                        .membership()
+                        .generating(ordinal)
+                        .iter()
+                        .map(Bitmap::to_vec)
+                        .collect::<Vec<_>>(),
+                    "{shape:?}/{layout:?}: a generating set disagreed at ordinal {ordinal}"
+                );
+                assert_eq!(
+                    transposed.index().extent(ordinal),
+                    projected.index().extent(ordinal),
+                    "{shape:?}/{layout:?}: the extent disagreed at ordinal {ordinal}"
+                );
+            }
+            assert_eq!(
+                transposed.index().as_bytes(),
+                projected.index().as_bytes(),
+                "{shape:?}/{layout:?}: the tile index over the two forms differs"
+            );
+            // The column composed from the transposed form is the column it was transposed from,
+            // which is the round trip the serving path takes: the level is served from the very
+            // bytes this membership was read out of.
+            let again = RowColumn::compose(transposed.membership(), fx.row_space.base_rows(), layout)
+                .expect("the same memberships compose the same form");
+            assert_eq!(again.as_bytes(), column.as_bytes());
+            for ordinal in 0..column.len() as u32 {
+                assert_eq!(again.declared_size(ordinal), column.declared_size(ordinal));
+            }
+        }
+        assert!(composed > 0, "{shape:?}: neither row-major form composed");
     }
 }
 
