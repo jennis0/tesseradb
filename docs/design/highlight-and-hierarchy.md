@@ -1,8 +1,9 @@
 # Highlight, member-of, and browsing a hierarchy — design
 
 **Date:** 2026-09-02
-**Status:** Provisional r2 — under review. What remains before it is normative: one adversarial
-review; the three rulings of §9; the two leak-register rows of §6 accepted into `architecture.md`
+**Status:** Provisional r3 — under review. **The three rulings of §9 were taken 2026-09-02, each as
+recommended, (c) with a clarification.** What remains before it is normative: one adversarial
+review; the two leak-register rows of §6 accepted into `architecture.md`
 Appendix C; `contracts.md` §3.2 amended with §2–§4's wire. ⊘ **Nothing here is built.** Owner
 direction 2026-09-02, recorded because the design turns on it: **a filter has a mode — `filter`
 narrows the draw, `highlight` keeps every point and lights the matched ones — and the same
@@ -267,10 +268,12 @@ count it is.
 ### 5.4 A layer with no computed content
 
 `computed = []` on a layer's declaration already means *counts with no geometry* on the wire
-(`artifact-shapes.md` §8 C). A client reads it as **a filter layer**: it is never named in
-`layers` on a viewport request, so no artifact pass runs for it and no kind-5 rows arrive; it is
-absent from the map's layer toggles and the "In view" list; it draws no label and no shape; it is
-reached through the panel and applied through §3. The card for one of its artifacts offers filter
+(`artifact-shapes.md` §8 C). A client reads it as **a filter layer, and a filter layer is still a
+layer** (owner ruling, 2026-09-02): it is in `/v1/meta`'s layer list and in the client's, listed
+as a filter layer rather than presented for viewing — no draw toggle, no place in the "In view"
+list, no label and no shape. It is never named in `layers` on a viewport request, so no artifact
+pass runs for it and no kind-5 rows arrive; it is reached through the panel and applied through
+§3. The server changes nothing for it: the declaration says what it is, and the client reads it. The card for one of its artifacts offers filter
 and highlight and no *fit*. The rung's clustering keeps its shapes because its artifacts are
 compact; the rule is per layer and the declaration states it.
 
@@ -321,13 +324,14 @@ and the label budget names three of 253 compact clusters at zoom 0. Both are on
 
 ## 9. Owner rulings sought
 
-- **(a) One verb or two.** `browse` as one verb with three forms (§4, recommended: one gate, one
-  row shape, one page rule), or roots-and-children separate from search.
-- **(b) Search in this design or deferred.** Recommended: in, because a 30,000-node tree without
-  it is browsable only by patience; the register residual is stated in C32.
-- **(c) A filter layer's place on the wire.** Recommended: the client simply never names it in
-  `layers` (§5.4) and the declaration changes nothing on the server. The alternative — the server
-  refusing a `computed = []` layer in `layers` — adds a refusal outside the disclosure surface.
+All three taken 2026-09-02.
+
+- **(a) One verb or two.** `browse` as one verb with three forms (§4) — **ruled: one verb.**
+- **(b) Search in this design or deferred.** — **Ruled: in**; the register residual is C32's.
+- **(c) A filter layer's place.** — **Ruled: a filter layer is still a layer.** It stays in the
+  meta's and the client's layer lists as a layer that lists no visible elements; it is not
+  presented for viewing and the client never names it in a viewport's `layers`. The server
+  changes nothing for it (§5.4).
 
 ## 10. Order of build
 
@@ -354,3 +358,5 @@ schema with the frame columns.
   the viewport; §2.1 written to say how a highlight is served on the filter path and why it
   scales with the screen and not the match; `point_rows = "highlight"` added so a highlight change
   re-sends bits rather than points.
+- **r3 (2026-09-02).** The three rulings taken: one verb, search in, and a filter layer is still
+  a layer — listed, not presented for viewing (§5.4 reworded). Sent for its adversarial review.
