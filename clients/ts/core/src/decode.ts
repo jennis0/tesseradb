@@ -297,7 +297,20 @@ export type PointsPart = {
   membership: Record<string, MembershipColumn>;
   /** See {@link ViewportResult.highlighted} — null where the frames carried no such column. */
   highlighted: Uint8Array | null;
+  /**
+   * Which projection the frames were in, read off their schema
+   * (`highlight-and-hierarchy.md` §2; contracts §3.2 r74).
+   *
+   * `'highlight'` means `(tessera_id, highlighted)` and nothing else: `codes`, `positions`,
+   * `world` and `scalars` are **empty**, and the caller joins the bits to points it already holds
+   * by `tessera_id`. A caller holding nothing meets identifiers it cannot draw, knows it from
+   * this, and re-asks with `'full'`.
+   */
+  projection: PointsProjection;
 };
+
+/** The two shapes a points frame comes in (`point_rows`). */
+export type PointsProjection = 'full' | 'highlight';
 
 /**
  * Decode kind-3 frames into one point block.
@@ -318,12 +331,18 @@ export function decodePoints(payloads: readonly Uint8Array[]): PointsPart {
   const pointTables = payloads.map((frame) => tableFromIPC(frame));
   const totalPoints = pointTables.reduce((n, t) => n + t.numRows, 0);
   const ids = new BigUint64Array(totalPoints);
-  const codes = new BigUint64Array(totalPoints);
+  // **The projection is read off the frame's own schema, never off the request** — the rule
+  // `decodeArtifactsFrame` already follows. `point_rows = "highlight"` answers
+  // `(tessera_id, highlighted)` and carries **no `code`** (contracts §3.2 r74), so a decoder that
+  // demanded one refused the projection this client can already ask for; the field was on the
+  // request surface and unusable, which a live serve found and no fixture could have.
+  const projection: PointsProjection = pointTables.length > 0 && pointTables[0]!.getChild('code') == null ? 'highlight' : 'full';
+  const codes = new BigUint64Array(projection === 'full' ? totalPoints : 0);
   {
     let offset = 0;
     for (const t of pointTables) {
       ids.set(u64Column(t, 'tessera_id'), offset);
-      codes.set(u64Column(t, 'code'), offset);
+      if (projection === 'full') codes.set(u64Column(t, 'code'), offset);
       offset += t.numRows;
     }
   }
@@ -332,15 +351,15 @@ export function decodePoints(payloads: readonly Uint8Array[]): PointsPart {
   // sub-cell part. `decode.test.ts` re-interleaves these back into the server's `code` and would
   // catch it. The narrowing to the renderer's `f32` world space happens later, per band, where the
   // precision is no longer needed.
-  const positions = new Float64Array(ids.length * 2);
-  const world = new Float32Array(ids.length * 2);
+  const positions = new Float64Array(projection === 'full' ? ids.length * 2 : 0);
+  const world = new Float32Array(projection === 'full' ? ids.length * 2 : 0);
   // **The halves are read as `u32`s over the same bytes, never as `BigInt`s.** Arrow's `u64` column
   // is little-endian, so each code is already two 32-bit words in the order this loop wants them,
   // and a `Uint32Array` view costs nothing. Taking them off the `BigUint64Array` instead — one read
   // plus a shift plus a mask — is three `BigInt` allocations per point, which at 2.5 × 10^6 points
   // measured 2.5 s of decode on the main thread and was the largest single cost in the client.
   const halves = new Uint32Array(codes.buffer, codes.byteOffset, codes.length * 2);
-  for (let i = 0; i < ids.length; i++) {
+  for (let i = 0; i < positions.length / 2; i++) {
     // JS bitwise operators are int32, so the spread/compact arithmetic happens 32 bits at a time.
     // The halves recombine by multiplication rather than by shifting, which would overflow int32
     // at the top of the axis.
@@ -397,7 +416,7 @@ export function decodePoints(payloads: readonly Uint8Array[]): PointsPart {
       offset += t.numRows;
     }
   }
-  return {ids, codes, positions, world, scalars, membership, highlighted};
+  return {ids, codes, positions, world, scalars, membership, highlighted, projection};
 }
 
 /** Decode the kind-1 frame: every tile's counts, in the response's own tile order. */
@@ -714,7 +733,7 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
   const parts = splitFramedStreams(body);
   const trailer = parseTrailer(parts.trailer);
   const tiles = decodeTiles(parts.tiles);
-  const {ids, codes, positions, world, scalars, membership, highlighted} = decodePoints(parts.points);
+  const {ids, codes, positions, world, scalars, membership, highlighted, projection} = decodePoints(parts.points);
   checkTrailerCounts(trailer, parts.points.length, ids.length);
   const subCells = parts.subCells ? decodeSubCells(parts.subCells) : null;
   // Empty when the response carried no artifacts frame, which is the ordinary state of a
@@ -724,5 +743,5 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
     ? decodeArtifactsFrame(parts.artifacts)
     : {artifacts: [] as Artifact[], artifactsIdentity: null};
 
-  return {tiles, ids, codes, positions, world, scalars, membership, highlighted, subCells, artifacts, artifactsIdentity};
+  return {tiles, ids, codes, positions, world, scalars, membership, highlighted, pointsProjection: projection, subCells, artifacts, artifactsIdentity};
 }

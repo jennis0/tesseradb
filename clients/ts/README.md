@@ -232,6 +232,15 @@ several (the demo's *medium* preset). Clusters cut from runs of consecutive ids 
 synthetic corpus whose positions are a modular sequence — every such run samples the whole extent,
 so every centroid lands in the middle and a decoder reading row 0 for every row would pass.
 
+**`viewport-highlight.bin`, `viewport-point-rows-highlight.bin`, `viewport-no-highlight.bin` and
+the three `browse-*.json` pages are recorded, not lifted** — one `tessera serve` over
+`data/ladder/arxiv/` on 2026-09-02, the day the highlight columns and the browse verb landed. The
+three viewport bodies are one request in three shapes: with `filters` and `highlight` together (so
+`highlighted < matched < visible`, all non-zero, which is the only arrangement in which reading the
+wrong column is caught), the same under `point_rows = "highlight"`, and the same with no highlight
+at all. Recapture them with a server serving contracts §3.2 r74–r75 and the same request; there is
+no script, because the request is three curls and the point is the shape rather than the corpus.
+
 **Every golden also predates the tiles frame's `highlighted` column** (`highlight-and-hierarchy.md`
 §2, fifth after `served` and always present), so `liftTilesHighlighted` in the same module gives
 each one that column with each tile's `matched` in it — which is exactly what the server serves for

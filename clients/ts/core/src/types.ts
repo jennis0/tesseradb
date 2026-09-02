@@ -872,6 +872,15 @@ export type ViewportResult = {
    * and the one thing this column is for is being written into a buffer.
    */
   highlighted: Uint8Array | null;
+  /**
+   * Which projection the points frames were in, read off their schema
+   * (`highlight-and-hierarchy.md` §2; contracts §3.2 r74) — `'full'` for every ordinary response.
+   *
+   * `'highlight'` is `(tessera_id, highlighted)` and nothing else: {@link codes},
+   * {@link positions}, {@link world} and {@link scalars} are **empty**, and a caller joins the
+   * bits to points it already holds by `tessera_id`.
+   */
+  pointsProjection: 'full' | 'highlight';
   subCells: SubCell[] | null;
   /**
    * The artifacts this viewport served — empty when none did.

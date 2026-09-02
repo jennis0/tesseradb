@@ -39,7 +39,8 @@ function emptyPoints() {
     membership: {} as Record<string, never>,
     // No points, so no bits — and `null` is the honest value, being *no highlight column here*
     // rather than *nothing highlighted*.
-    highlighted: null
+    highlighted: null,
+    pointsProjection: 'full' as const
   };
 }
 
@@ -486,7 +487,10 @@ export class TesseraClient {
         await onPart({
           result: {
             tiles: run.tiles,
+            // `part` carries `projection`; the result names it `pointsProjection`, the frames'
+            // own answer either way.
             ...part,
+            pointsProjection: part.projection,
             subCells: null,
             // Every part carries the response's artifacts, because that is what a point's
             // membership column is named through (`bands.ts`) and the frame precedes them all.

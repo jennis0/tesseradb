@@ -1,0 +1,16 @@
+{
+    "artifacts": [
+        {
+            "tessera_id": "10276570234479289109",
+            "key": "hdb-2422552",
+            "name": "a cluster of papers",
+            "masked_count": 17417,
+            "matched_count": 0,
+            "rung": 1,
+            "parent_ids": [
+                "7718166018496935461"
+            ]
+        }
+    ],
+    "parents": []
+}

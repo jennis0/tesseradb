@@ -223,6 +223,7 @@ describe('assemble', () => {
       world: Float32Array.from([0, 0, 1, 1, 2, 2, 3, 3, 4, 4]),
       scalars: {w: {arrowType: 'u32', values: Uint32Array.from([10, 11, 12, 13, 14])}},
       highlighted: null,
+      pointsProjection: 'full',
       subCells: null,
       membership: {},
       artifacts: [],
