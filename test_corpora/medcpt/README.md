@@ -120,6 +120,40 @@ The last column is a **linear extrapolation and not a measurement**: the build's
 to be bounded by `--memory-budget` (the campaign's W2), so the 80.7 GB is what to expect to meet
 rather than a prediction of a graceful refusal on a 47 GB box.
 
+### The 80.7 GB is the wrong number, and the ruling should not turn on it
+
+**`peak RSS` above is `VmHWM`, which counts file-backed pages the kernel may evict alongside heap it
+must keep** — and since 2026-08-30 the entity-order columns are mapped files, the text index spills
+sorted runs under a budget, and the record blob streams, so on a corpus of prose most of that peak is
+page cache. `probes/2026-09-02-text-peak-split/` split the two by polling `RssAnon` and `RssFile`
+every 100 ms against the build's own stage boundaries, at 10⁶ and at 10⁷, with a control that is the
+same 10⁷ corpus built with the `abstract` column simply not declared:
+
+| | 10⁶ off | 10⁶ on | 10⁷ off (control) | 10⁷ on | 10⁷ on, `--memory-budget 6g` |
+|---|---|---|---|---|---|
+| **anonymous** high-water | 629 MiB | 1,145 MiB | 4,366 MiB | **4,928 MiB** | **4,574 MiB** |
+| file-backed high-water | 279 MiB | 1,505 MiB | 1,975 MiB | 11,955 MiB | 11,839 MiB |
+| `VmHWM` (the row above) | 728 MiB | 2,141 MiB | 4,692 MiB | 14,286 MiB | 13,904 MiB |
+| build wall | 19.8 s | 34.1 s | 199.3 s | 346.0 s | 345.2 s |
+| bundle on disk | 332.7 MB | 798.4 MB | 3,163.5 MB | 7,705.5 MB | 7,705.5 MB |
+
+At 10⁷ the abstracts cost **+9,594 MiB of `VmHWM` and +562 MiB of anonymous memory** — 94% of the
+apparent peak is evictable — and under a 6 GB budget the anonymous cost is **+208 MiB**, the text
+pass spilling 298 runs against 96 and cascading them in one pass to 3. The anonymous high-water is
+the `manifests` stage in *every* arm, which is the artifact layout over this corpus's 471,778,374
+MeSH member rows and not the prose at all.
+
+Extrapolating **anonymous memory only**, linearly per row from 10⁷ — **modelled, not measured**:
+16.4 GB at 36M without abstracts, **18.6 GB with them** (17.2 GB at a 6 GB budget), against the
+80.7 GB of `VmHWM` above. The no-abstracts figure has a check: the real whole-corpus build measured
+16.03 GB (`docs/ingest-campaign.md` §4.6), 2% away.
+
+**So the abstracts are a run, not a build.** The streaming text column the ruling was waiting on
+already exists — mapped columns, a budgeted spilling text index with a cascade, a streaming blob —
+and what abstracts actually cost at whole-corpus scale is ~2 GB of memory the build must hold, a
+27.7 GB bundle (of which 13.3 GB is the record blob's prose and 4.9 GB the index), and roughly twice
+the wall time. The probe's README carries the per-stage tables and the raw samples.
+
 ## Measured
 
 ### Staging — one pass off the share

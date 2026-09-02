@@ -668,11 +668,22 @@ into `dd195c9`, a commit about the rings track. Content intact, provenance misle
 - The design pass on artifact response volume (§6, and the memo it points at).
 - Whether `parent_edges`' two nulls need separating, and whether that is worth an issue.
 - Whether this tracker is the campaign's status record or the campaign moves to issues.
-- **Whether rung 3 takes its abstracts** (§4.1) — **still open, and now decidable from numbers**
-  (§4.6). The 10⁶-row sample built both ways: `tessera build` peaks at 716 MB against 2,246 MB and
-  the bundle is 333 MB against 799 MB, which extrapolates linearly to ~81 GB of build RSS and a
-  28.7 GB bundle over the whole corpus — modelled, not measured. The built rung takes them off,
-  which is `prepare.py`'s default; `--abstracts` is the other run and needs no code change.
+- **Whether rung 3 takes its abstracts** (§4.1) — **still open, and the memory objection is
+  answered**. The 10⁶ figures behind it (`tessera build` 716 MB against 2,246 MB, extrapolating to
+  ~81 GB) were `VmHWM`, which counts file-backed pages the kernel may evict alongside heap it must
+  keep — and since 2026-08-30 the columns are mapped, the text index spills under a budget and the
+  blob streams, so on prose most of that is page cache.
+  [`probes/2026-09-02-text-peak-split/`](../probes/2026-09-02-text-peak-split/README.md) split the
+  two at 10⁶ and 10⁷ against a control that is the same 10⁷ corpus with the column undeclared: the
+  abstracts cost **+9,594 MiB of `VmHWM` and +562 MiB of anonymous memory** at 10⁷, and **+208 MiB**
+  under `--memory-budget 6g`, where the text pass spills 298 runs against 96 and the cascade fires.
+  Anonymous memory alone extrapolates to **18.6 GB at 36M with abstracts against 16.4 GB without** —
+  modelled, and the without-figure is 2% from the real whole-corpus build's 16.03 GB (§4.6). The
+  anonymous high-water is the `manifests` stage in every arm, which is the MeSH DAG's layout and not
+  the prose. So the ruling turns on a 27.7 GB bundle and roughly double the wall time, not on a
+  memory wall, and the "streaming text column" the plan called for is machinery that already exists.
+  The built rung takes them off, which is `prepare.py`'s default; `--abstracts` is the other run and
+  needs no code change.
 - ~~Whether rung 3 is worth the 51.8 GB baseline~~ — **ruled 2026-09-01: not needed.** `journal`
   and `publication_type` are not taken; the rung renders what the chunks carry.
 - ~~What to do with the 5.87% of unresolved descriptor mentions~~ — **ruled 2026-09-01: dropped**,
