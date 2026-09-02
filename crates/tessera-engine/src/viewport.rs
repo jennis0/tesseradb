@@ -6258,25 +6258,32 @@ impl Engine {
                     .and_then(|target| count_at.get(target).copied())
             })
             .collect();
-        // **And its target's filter bit, on D13's own argument** (decision 0104). A label describes
-        // its cluster, so *does anything here match* is a question about the cluster; the label's
-        // own membership is often empty, and a bit over it would read `false` for every label under
-        // every filter — the same defect the count rule exists to prevent, in the field beside it.
-        // Derivable from the target's own row in this response, which the drop above guarantees is
-        // present, so it discloses nothing new (decision 0023).
-        let matched_at: std::collections::BTreeMap<&(String, u32, u32), Option<bool>> = placed
-            .iter()
-            .zip(&out)
-            .map(|(place, artifact)| (&place.at, artifact.matched))
-            .collect();
-        let target_matched: Vec<Option<Option<bool>>> = placed
+        // **And its target's two filter bits, on D13's own argument** (decision 0104;
+        // `highlight-and-hierarchy.md` §2 for the second). A label describes its cluster, so *does
+        // anything here match* is a question about the cluster; the label's own membership is often
+        // empty, and a bit over it would read `false` for every label under every filter — the same
+        // defect the count rule exists to prevent, in the fields beside it. Derivable from the
+        // target's own row in this response, which the drop above guarantees is present, so it
+        // discloses nothing new (decision 0023).
+        //
+        // **The two travel as one pair, deliberately.** `highlighted` is `matched` under a second
+        // expression and not a second kind of answer, so a shape that let one inherit and the
+        // other keep the label's own would serve two answers to one question about one cluster —
+        // which is what happened when this carried `matched` alone.
+        let bits_at: std::collections::BTreeMap<&(String, u32, u32), (Option<bool>, Option<bool>)> =
+            placed
+                .iter()
+                .zip(&out)
+                .map(|(place, artifact)| (&place.at, (artifact.matched, artifact.highlighted)))
+                .collect();
+        let target_bits: Vec<Option<(Option<bool>, Option<bool>)>> = placed
             .iter()
             .map(|place| {
                 place
                     .attached_to
                     .as_ref()
                     .filter(|target| in_request.contains(&target.0))
-                    .and_then(|target| matched_at.get(target).copied())
+                    .and_then(|target| bits_at.get(target).copied())
             })
             .collect();
 
@@ -6294,7 +6301,7 @@ impl Engine {
             .zip(&placed)
             .zip(dropped)
             .zip(target_counts)
-            .zip(target_matched)
+            .zip(target_bits)
         {
             if dropped {
                 continue;
@@ -6302,8 +6309,9 @@ impl Engine {
             if let Some(count) = target_count {
                 artifact.masked_count = count;
             }
-            if let Some(bit) = target_bit {
-                artifact.matched = bit;
+            if let Some((matched, highlighted)) = target_bit {
+                artifact.matched = matched;
+                artifact.highlighted = highlighted;
             }
             artifact.parent_ids = place
                 .parents

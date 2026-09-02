@@ -256,3 +256,109 @@ def test_highlighted_is_a_reserved_column_name(tmp_path):
     assert result.returncode != 0
     assert "highlighted" in (result.stderr + result.stdout)
     assert "reserved" in (result.stderr + result.stdout).lower()
+
+
+#: A clustering and the labels attached to it — registered at runtime through the control plane,
+#: because no built fixture in this suite declares a dependent layer and the rule under test is
+#: about one layer hanging from another (decision 0089; `artifact-fetch-protocol.md` D13).
+#:
+#: **Named without a slash**, unlike the path-shaped layers a corpus declares:
+#: `PUT /control/layers/{name}/artifacts` matches one path segment, so a name carrying one is a
+#: 404 at the router rather than a refusal from the handler. That is a fact about the control
+#: plane's addressing and not about this case, so it is worked around here and reported.
+CLUSTERS = "case-clusters"
+LABELS = "case-labels"
+
+
+def _layer(name: str, *, depends_on: list[str], supplied: bool) -> dict:
+    layer = {
+        "name": name,
+        "title": name,
+        "views": [VIEW_ID],
+        "membership": "enumerated",
+        "visibility": None,
+        "artifact_visibility": {"field": None, "default": "inherited"},
+        "require_member_visibility": None,
+        "hierarchy": {"kind": "flat", "prune_children": False},
+        "content": {
+            "computed": [],
+            # `inherited`: the content is true whether or not a document exists, so containment is
+            # vacuous and no generating set travels with it (C28).
+            "supplied": (
+                [{"name": "label", "type": "text", "require_member_visibility": "inherited"}]
+                if supplied
+                else []
+            ),
+            "withdraw_on_member_deletion": True,
+        },
+        "depends_on": depends_on,
+        "levels": [],
+        "layout": None,
+        "shape": None,
+    }
+    return layer
+
+
+def test_a_dependent_artifact_carries_its_targets_highlight_bit(highlight_server):
+    """**A label's `highlighted` is its cluster's**, exactly as its `matched` and its
+    `masked_count` are (contracts §3.2 r73; D13's argument).
+
+    The case is a label whose own membership would answer differently: the cluster holds the points
+    whose `fx_key` is below the bound and the label holds ten that are not, so a bit computed over
+    the label's own membership reads `false` beside a cluster reading `true`. **The same clause is
+    sent in `filters` and in `highlight`**, so the two answers about one cluster are comparable: a
+    label that inherited one bit and kept its own for the other disagrees with itself here, and no
+    assertion about `matched` alone can see that — the label's own answer is a well-formed `false`.
+    """
+    server, _points = highlight_server
+    token = server.authorise(["1", "2"])["token"]
+    idset = server.meta(token)["idset"]
+    table = decode_viewport_points(body(server, token, 0, WHOLE_MAP))
+    ids = table.column("tessera_id").to_pylist()
+    keys = table.column("fx_key").to_pylist()
+    inside = [str(i) for i, k in zip(ids, keys) if k < 2000]
+    outside = [str(i) for i, k in zip(ids, keys) if k >= 2000]
+    assert len(inside) > 10 and len(outside) > 10, "the fixture must plant both cases"
+
+    for name, depends_on, supplied in ((CLUSTERS, [], False), (LABELS, [CLUSTERS], True)):
+        resp = server.register_layer(_layer(name, depends_on=depends_on, supplied=supplied))
+        assert resp.status_code == 201, resp.text
+    resp = server.publish_artifacts(
+        CLUSTERS,
+        addressing="tessera",
+        idset=idset,
+        artifacts=[{"key": "c-hit", "members": inside}],
+    )
+    assert resp.status_code in (200, 201, 202), resp.text
+    resp = server.publish_artifacts(
+        LABELS,
+        addressing="tessera",
+        idset=idset,
+        artifacts=[
+            {
+                "key": "label-hit",
+                "members": outside[:10],
+                "content": [{"values": ["hit"]}],
+                "attached_to": {"layer": CLUSTERS, "level": 0, "key": "c-hit"},
+            }
+        ],
+    )
+    assert resp.status_code in (200, 201, 202), resp.text
+
+    clause = below(2000)
+    served = {
+        (a.layer, a.key): a
+        for a in decode_viewport_artifacts(
+            body(server, token, 0, WHOLE_MAP, layers=[CLUSTERS, LABELS], filters=clause, highlight=clause)
+        )
+        if a.layer in (CLUSTERS, LABELS)
+    }
+    cluster = served[(CLUSTERS, "c-hit")]
+    label = served[(LABELS, "label-hit")]
+    assert cluster.matched is True and cluster.highlighted is True, cluster
+    assert label.matched == cluster.matched, "the label answers for its cluster (D13)"
+    assert label.highlighted == cluster.highlighted, (
+        "and in the second field exactly as in the first — a label whose own members carry none "
+        "of the value must still answer for its cluster"
+    )
+    assert label.masked_count == cluster.masked_count, "the count rule agrees about which artifact"

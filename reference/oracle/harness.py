@@ -621,6 +621,25 @@ class Server:
             timeout=30,
         )
 
+    def register_layer(self, declaration: dict) -> requests.Response:
+        """`PUT /control/layers` — register one annotation layer. The body is the declaration
+        exactly as `tessera_types::layer::LayerDeclaration` serialises it."""
+        return requests.put(
+            f"{self.control_base}/control/layers",
+            headers={"Authorization": f"Bearer {self.operator_credential}"},
+            json=declaration,
+            timeout=30,
+        )
+
+    def publish_artifacts(self, layer: str, **body) -> requests.Response:
+        """`PUT /control/layers/{name}/artifacts` — one publication into one level."""
+        return requests.put(
+            f"{self.control_base}/control/layers/{layer}/artifacts",
+            headers={"Authorization": f"Bearer {self.operator_credential}"},
+            json=body,
+            timeout=60,
+        )
+
     def changes(self, items: list[dict]) -> requests.Response:
         return requests.post(
             f"{self.control_base}/control/changes",
