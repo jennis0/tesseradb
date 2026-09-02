@@ -10,7 +10,7 @@ cd "$(dirname "$0")/.."
 
 # docs/agents/writing.md is the source of the list and quotes it, so it is checked by neither set.
 # docs/decisions/README.md repeats the decisions' titles and is counted with them.
-STRICT=(CLAUDE.md docs/README.md docs/agents/README.md docs/guide docs/developer docs/reference)
+STRICT=(CLAUDE.md docs/README.md docs/agents/README.md docs/system docs/guide docs/developer docs/reference)
 LOOSE=(README.md docs/design docs/decisions docs/evidence docs/roadmap.md docs/ingest-campaign.md docs/guides
        docs/agents/design-process.md docs/agents/epic-lifecycle.md docs/agents/parallel-work.md)
 

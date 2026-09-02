@@ -11,7 +11,7 @@ Four sets, each for a different reader. Pages marked *skeleton* have headings an
 
 ## Target shape
 
-The design set is being rewritten from the current documents in `design/`, which are the specification until each chapter replaces them. The chapters, and what each replaces:
+The design set is being written into `system/`, chapter by chapter, from the current documents in `design/`, which remain the specification until the set is complete and they are deleted in one change. The chapters, and what each replaces:
 
 | Chapter | Replaces |
 |---|---|
