@@ -6,7 +6,13 @@
 paths = [
   "crates/tessera-plugin/*",
   "docs/decisions/*",
-  "docs/design/*",
+  "docs/design/[!c]*",
+  "docs/design/c[!o]*",
+  "docs/design/co[!n]*",
+  "docs/design/con[!f]*",
+  "docs/design/concurrency-lifecycle.md",
+  "docs/design/configuration.md",
+  "docs/design/contracts.md",
   "scripts/*",
 ]
 
