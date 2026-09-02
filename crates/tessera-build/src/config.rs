@@ -4542,19 +4542,22 @@ fn compile_attributes(
         if matches!(decl.name.as_str(), "all_of" | "any_of" | "none_of") {
             return Err(declaration_error(format!(
                 "attribute '{}': that name is a filter combinator (decision 0062), and a filter \
-                 expression names columns directly, so a column may not take one. Reserved: \
-                 all_of, any_of, none_of, region",
-                decl.name
+                 expression names columns directly, so a column may not take one. Reserved: {}",
+                decl.name,
+                RESERVED_COLUMN_NAMES.join(", ")
             )));
         }
-        // The fourth reserved word, on the same argument: `region` is the spatial leaf
-        // (selection-operand §2), and a column of that name would make a request mean two things.
-        if decl.name == "region" {
+        // The two reserved *leaves*, on the same argument: `region` is the spatial one
+        // (selection-operand §2) and `member_of` names one artifact's membership
+        // (`highlight-and-hierarchy.md` §3). A column of either name would make a request mean two
+        // things.
+        if matches!(decl.name.as_str(), "region" | "member_of") {
             return Err(declaration_error(format!(
-                "attribute '{}': that name is the filter surface's spatial leaf \
-                 (`selection-operand.md` §2), and a filter expression names columns directly, so \
-                 a column may not take it. Reserved: all_of, any_of, none_of, region",
-                decl.name
+                "attribute '{}': that name is a filter leaf of the request surface \
+                 (`selection-operand.md` §2, `highlight-and-hierarchy.md` §3), and a filter \
+                 expression names columns directly, so a column may not take it. Reserved: {}",
+                decl.name,
+                RESERVED_COLUMN_NAMES.join(", ")
             )));
         }
         // The attribute's own one-field map: `field` locates the column when it differs from the
@@ -4897,6 +4900,16 @@ fn declared_names(vocabularies: &HashMap<String, Vocabulary>) -> String {
 /// The reserved set is transcribed rather than imported: `tessera-server`'s `RESERVED_COLUMNS`
 /// belongs to a crate this one must not depend on, and the two are checked against each other in
 /// this module's tests instead.
+/// The names an attribute may not take, in the order the refusals list them.
+///
+/// **One list, read by the three refusals above**, so a name added to the request surface is added
+/// here and every message says the same set. `all_of`/`any_of`/`none_of` are the combinators
+/// (decision 0062); `region` is the spatial leaf (`selection-operand.md` §2); `member_of` names
+/// one artifact's membership (`highlight-and-hierarchy.md` §3). A filter expression names columns
+/// directly — there is no wrapper object — so a column of any of these names would make a request
+/// mean two things.
+pub const RESERVED_COLUMN_NAMES: [&str; 5] = ["all_of", "any_of", "none_of", "region", "member_of"];
+
 fn check_column_name(name: &str) -> Result<()> {
     const FIXED: [&str; 2] = ["tessera_id", "residual"];
     const INGEST_RESERVED: [&str; 5] = ["external_id", "x", "y", "access", "node_id"];

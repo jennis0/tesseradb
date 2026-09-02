@@ -3094,9 +3094,29 @@ impl Engine {
                         &cancel,
                     )
                 };
+                // The `member_of` leaves' resolver, closed over the same mask for the same
+                // reason: the answer is `membership ∩ M_auth`, and a resolver that could be
+                // called without one would be a route to the unmasked membership.
+                let members = |leaf: &crate::filter::MemberOfLeaf| {
+                    self.resolve_member_of(
+                        leaf,
+                        session,
+                        &generation,
+                        view,
+                        view_data,
+                        &segments,
+                        &mask,
+                        denied,
+                        mask_identity,
+                    )
+                };
+                let resolvers = crate::filter::RowLeafResolvers {
+                    regions: &regions,
+                    members: &members,
+                };
                 let routed = generation
                     .filter_columns
-                    .evaluate_routed(expr, &candidate, rows_in_ranges <= v_total, &regions)
+                    .evaluate_routed(expr, &candidate, rows_in_ranges <= v_total, &resolvers)
                     .map_err(|e| {
                         // Caller's fault or the deployment's — `FilterError` decides, at the
                         // variants, because that is where the argument for each one lives.
@@ -3624,11 +3644,14 @@ fn eval_row_expr(
             scan_rows(segments, domain, column, values.predicate())
         }
         RowExpr::Region(region) => Ok(scope.clamp(&region.rows)),
-        RowExpr::NotInRegion(kids) => {
-            // The complement within the scope: every rowed entity carries a position, so the
-            // presence half of this negation is every row (selection-operand §5). No early exit
-            // on an empty difference — the image cursor's positional rule is simpler kept whole
-            // here than skipped, and a region leaf's kids are already resolved.
+        // Already `membership ∩ M_auth` over the whole view, clamped where a sibling leaf bounds
+        // the tree to the request's rows (`highlight-and-hierarchy.md` §3).
+        RowExpr::MemberOf(rows) => Ok(scope.clamp(rows)),
+        RowExpr::NotInRows(kids) => {
+            // The complement within the scope: every rowed entity carries a position and may be a
+            // member, so the presence half of this negation is every row (selection-operand §5).
+            // No early exit on an empty difference — the image cursor's positional rule is simpler
+            // kept whole here than skipped, and these leaves' kids are already resolved.
             let mut out = scope.all_rows();
             for kid in kids {
                 out.andnot_inplace(&eval_row_expr(
@@ -4832,6 +4855,86 @@ impl Engine {
                 })
             }
         }
+    }
+
+    /// Answer one `member_of` leaf for one request (`highlight-and-hierarchy.md` §3;
+    /// [`crate::filter::MemberResolver`]).
+    ///
+    /// **The gate, then the membership, in that order and never the other.** The layer must be one
+    /// this principal reaches — a name outside their own `/v1/meta` list is
+    /// [`FilterError::UnknownLayer`], deployment schema, and the registry's probe answers alike for
+    /// a gate-failed name and a never-registered one. Then the artifact must pass its **own**
+    /// existence criterion for this principal, through the same
+    /// [`Engine::gated_artifact`] the drill-down and the published-region leaf call, so that one
+    /// rule has one transcription. An artifact that does not pass — one that names nothing, one of
+    /// another layer, one suppressed, one below the criterion — is the **empty operand**, one
+    /// answer for every reason, because a `422` there would make the leaf an existence oracle over
+    /// exactly what the criterion withholds.
+    ///
+    /// **The membership is read two ways, decided by the level's layout and by nothing about the
+    /// request** (decision 0093). Artifact-major: the held row bitmap, intersected with the
+    /// composed mask — one `and`, no postings, no crossing, whatever the artifact's size. Row-
+    /// major: one scan of the principal's visible rows comparing labels, which is the only route a
+    /// label column has to the same set. Either way the answer is `membership ∩ M_auth`, whose
+    /// cardinality is the masked count the artifacts frame already serves.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_member_of(
+        &self,
+        leaf: &crate::filter::MemberOfLeaf,
+        session: &Session,
+        generation: &crate::Generation,
+        view: &str,
+        view_data: &tessera_store::read::ViewData,
+        segments: &[(&SegmentData, u32)],
+        mask: &EffectiveMask,
+        denied: &croaring::Bitmap,
+        mask_identity: crate::histogram::MaskIdentity,
+    ) -> std::result::Result<croaring::Bitmap, crate::filter::FilterError> {
+        use crate::compose::WholeMask;
+        use crate::filter::FilterError;
+        let reachable = self.write.resolve_layers(
+            |term| session.satisfied.contains(&term),
+            |label| generation.dict.lookup(label.as_bytes()),
+        );
+        if !reachable.contains(&leaf.layer) {
+            return Err(FilterError::UnknownLayer(leaf.layer.clone()));
+        }
+        let gated = self
+            .gated_artifact(
+                session,
+                generation,
+                view,
+                view_data,
+                segments,
+                mask,
+                denied,
+                mask_identity,
+                leaf.artifact,
+            )
+            .map_err(|e| FilterError::MemberOfUnavailable(e.to_string()))?;
+        // An identifier of *another* layer is a value that does not resolve within the one named,
+        // and is answered exactly as one that resolves to nothing at all.
+        let Some(gated) = gated.filter(|g| g.name == leaf.layer) else {
+            return Ok(croaring::Bitmap::new());
+        };
+        Ok(match gated.rows.column() {
+            None => match gated.rows.get(gated.ordinal) {
+                Some(rows) => mask.visible_rows(rows),
+                None => croaring::Bitmap::new(),
+            },
+            Some(column) => {
+                let visible = mask.visible_all();
+                let mut out = croaring::Bitmap::new();
+                for row in visible.iter() {
+                    column.for_each_label(row, |ordinal| {
+                        if ordinal == gated.ordinal {
+                            out.add(row);
+                        }
+                    });
+                }
+                out
+            }
+        })
     }
 
     /// Drill down on one artifact by the identifier a response handed out.

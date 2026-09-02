@@ -1224,6 +1224,13 @@ components:
         whole view, composable with every other leaf, negatable with `none_of` — every rowed item
         carries a position, so the complement is well defined — and cached per generation across
         principals. The answer's exactness rides on `x-tessera-region`.
+
+        **`member_of` is a second leaf of its own** (`highlight-and-hierarchy.md` §3; the name is
+        reserved at the build): `{"layer", "artifact"}`, resolving to that artifact's membership
+        inside `M_auth` as a set of rows over the whole view, composable and negatable exactly as
+        `region` is. A layer this principal's `/v1/meta` does not list is a `422`; an artifact that
+        names nothing, belongs to another layer, is suppressed or is below this principal's
+        criterion is an **empty operand**, one answer for every reason.
       type: object
       minProperties: 1
       maxProperties: 1
@@ -1239,8 +1246,37 @@ components:
           items: { $ref: "#/components/schemas/FilterExpr" }
         region:
           $ref: "#/components/schemas/RegionLeaf"
+        member_of:
+          $ref: "#/components/schemas/MemberOfLeaf"
       additionalProperties:
         $ref: "#/components/schemas/FilterLeafOperator"
+
+    MemberOfLeaf:
+      type: object
+      description: |
+        One artifact of one layer, as a set of rows over the whole view: that artifact's
+        membership intersected with what this principal may see
+        (`highlight-and-hierarchy.md` §3).
+
+        **The two halves take opposite refusals.** `layer` is deployment schema — a name outside
+        the layer list `/v1/meta` publishes to this principal is a `422`, and the registry answers
+        alike for a gate-failed name and a never-registered one. `artifact` is a value and is never
+        refused: an identifier that names nothing, one of another layer, one suppressed, one whose
+        layer this principal does not reach, and one below their own existence criterion are all
+        the empty operand, one answer for every reason. The artifact's gate — its layer's
+        `visibility`, its own label, and `require_member_visibility` against `M_auth` — is the same
+        conjunction the artifacts frame applies, and it runs before any membership is read.
+      additionalProperties: false
+      required: [layer, artifact]
+      properties:
+        layer:
+          type: string
+        artifact:
+          oneOf:
+            - type: integer
+              minimum: 0
+            - type: string
+              pattern: "^[0-9]+$"
 
     RegionLeaf:
       type: object
