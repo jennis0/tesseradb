@@ -2,10 +2,12 @@
 
 **Status:** **Normative (r3, 2026-09-02).** The six questions in §10 are ruled (owner, 2026-09-02)
 and written to decisions 0118–0123.
-**⊘ Nothing in this document is implemented.** No suggestion index is built, no
-`/v1/categories/{column}/suggest` route is served, and the boolean predicate §6.2 names does not
-exist: a viewer typing into a category filter today has `/v1/categories`' key-ordered enumeration
-and nothing else, so a client wanting a typeahead over a large vocabulary must page the whole set.
+**Built (2026-09-02, branch `design/value-suggestion`).** The fold, the boolean membership probe,
+the suggestion index, `Engine::suggest`, the served verb with its two ceilings and one-in-flight
+admission, the client's typeahead and the conformance differential are all in the tree
+(`conformance.md` §4.6 is where coverage stands). ⊘ Still unbuilt: the per-session lever (§6.3), a
+`suggest_word_starts` opt-out, cross-column suggestion (decision 0123), and the vocabulary read side
+at 10⁷ (issue #130).
 **Its §6 figures are measured** at 10⁶ and 10⁷ values over 10⁸ entities — the walk and the build on
 the shipped route by the implementation's bench, the representation and single-probe figures by
 [`probes/2026-09-02-value-suggestion/`](../../probes/2026-09-02-value-suggestion/README.md).
