@@ -363,14 +363,20 @@ def licence_sample(n_parts: int) -> dict:
     works = multi = with_any = 0
     pairs: dict[str, int] = {}
     for path in chosen:
+        # `locations.license` is silently dropped by pyarrow — a leaf under a list needs its
+        # full parquet path, and asking for the short form returns the *other* column with no
+        # error at all. Measured here rather than assumed: the short spelling read a table with
+        # one column in it.
         table = pq.ParquetFile(path).read(
-            columns=["locations.license", "best_oa_location.license"], use_threads=True
+            columns=["locations.list.element.license", "best_oa_location.license"],
+            use_threads=True,
         )
-        lst = pc.struct_field(table["locations"].combine_chunks(), ["license"])
         best = pc.struct_field(table["best_oa_location"].combine_chunks(), ["license"])
-        for row, chosen_licence in zip(lst.to_pylist(), best.to_pylist()):
+        for row, chosen_licence in zip(
+            table["locations"].combine_chunks().to_pylist(), best.to_pylist()
+        ):
             works += 1
-            seen = {v for v in (row or []) if v}
+            seen = {entry["license"] for entry in (row or []) if entry["license"]}
             if seen:
                 with_any += 1
             if len(seen) > 1:

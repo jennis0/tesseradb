@@ -77,20 +77,22 @@ LAYER = "topics/openalex"
 LEVELS = ("domain", "field", "subfield", "topic")
 
 #: The closed licence vocabulary, in a fixed order: the ten values `best_oa_location.license`
-#: takes across the matched corpus, most common first (`README-openalex.md` §3). Order is fixed
-#: because it is the term order of a `u8` vocabulary in the declaration, and a reordering would
-#: renumber every point's label without changing a single row.
+#: takes across the 98,925,699 matched works, **most common first** and measured, not guessed
+#: (`README-openalex.md` §3). Order is fixed because it is the term order of a `u8` vocabulary in
+#: the declaration, and reordering it would renumber every point's label without changing a row.
+#: `mit` is real and carries 62 works — a closed vocabulary that omitted it would refuse the
+#: build over those 62, which is exactly what closed is for.
 LICENCES = [
     "cc-by",
     "cc-by-nc-nd",
-    "other-oa",
     "cc-by-nc",
+    "other-oa",
+    "cc-by-sa",
     "cc-by-nc-sa",
     "public-domain",
-    "cc-by-sa",
-    "publisher-specific-oa",
     "cc-by-nd",
-    "cc0",
+    "publisher-specific-oa",
+    "mit",
 ]
 
 #: Members written per `stream_members` call, per level. Four levels x this is the peak row count
