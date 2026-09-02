@@ -1,20 +1,49 @@
 # The write path
 
-This chapter covers what happens to a write between arrival at `/control/ingest` or
-`/control/changes` and the moment it changes what a viewer's map shows. It covers admission, the
-commit window, the write-ahead log (WAL), flush, the deny queue and its overlay, merge,
-compaction, and restart.
+The write path is how data enters a running Tessera and becomes part of the map. Rows arrive at
+the control plane, are written to a log, and are published to viewers in stages. A viewer's
+request reads from a published snapshot and never sees a write in progress.
 
-## The executor and the two lanes
+There are two kinds of write. An **ingest** adds rows. A **deny** hides rows a viewer could
+otherwise see: a **deletion** removes an item for good, and a **suppression** hides it until an
+unsuppress lifts it. Both kinds pass through the same log and the same publication step. This
+chapter follows an ingested item from arrival to its final form on disc, then follows a deny.
 
-| Kind | Effect | Refused for load | Why |
-|---|---|---|---|
-| Ingest | Adds an item | Yes, past a limit | Writing segment files takes unbounded time, and the server protects itself from unbounded queued work |
-| Delete, suppress, unsuppress (a deny) | Changes what a viewer may see | No, never | Refusing a security operation for load would leave an item visible when it should already be hidden |
+## An item's life
 
-One thread per partition, the write executor, performs every mutation. Ingest and denies queue
-separately, so a deny never waits behind an ingest request of unbounded duration. Both are applied
-by the same executor, always in this order:
+```mermaid
+stateDiagram-v2
+  direction LR
+  state "item" as item {
+    [*] --> accepted: /control/ingest
+    accepted --> durable: window fsync, then 200
+    durable --> buffered: applied, has no row yet
+    buffered --> visible: flush (bounded by flush_max_age_secs)
+    visible --> merged: merge (row space only)
+    merged --> compacted: compaction
+  }
+  state "deny" as deny {
+    [*] --> held: /control/changes, fsync, apply, swap, then 200
+    held --> lifted: unsuppress (suppression only)
+    held --> retired: the compaction that removes the rows (deletion only)
+  }
+```
+
+*The stages an item and a deny pass through. Each arrow is one event.*
+
+| Stage | What it means |
+|---|---|
+| accepted | The rows are in the write-ahead log (WAL) and have entity ids. Nothing is visible yet |
+| buffered | The rows wait in memory for the next flush |
+| flushed | A flush has written them into a segment, a file on disc, and they are now visible to viewers |
+| merged | A merge has combined small segments into larger ones. Nothing visible changes |
+| compacted | A compaction has rewritten the whole partition into one segment, dropping the rows of items deleted since the last compaction |
+
+A deny is in force from the moment it is acknowledged. It is recorded in the **overlay**, the
+in-memory record of what is hidden, and leaves the overlay on exactly one event: an unsuppress
+for a suppression, or the compaction that drops the rows for a deletion.
+
+Every write passes through one thread per partition, the write executor, in the same order:
 
 1. append the record to the WAL;
 2. fsync it;
@@ -22,21 +51,9 @@ by the same executor, always in this order:
 4. swap the pointer to the new generation;
 5. acknowledge the caller.
 
-```mermaid
-flowchart TD
-  I["/control/ingest: admission"] --> W["commit window"]
-  W --> X["executor: append, fsync,\napply, swap, acknowledge"]
-  C["/control/changes: validate\nand resolve the batch"] --> D["deny window"]
-  D --> X
-  T["flush tick"] --> P["flush: plan, then write\nsegment files off-thread"]
-  P --> X
-  X --> G["new generation"]
-  G -.-> M["merge, on its own tick"]
-  G -.-> F["compaction fold, when a\ntrigger crosses its threshold"]
-```
-
-*Ingest and denies queue separately but share one executor and one swap. Flush, merge and
-compaction run on their own cadences against whatever generation is current.*
+Ingest and denies queue separately. An ingest may be refused when the server is under load. A deny
+never is, because refusing a security operation for load would leave an item visible when it
+should be hidden (Denies, below).
 
 ## Generations
 
@@ -170,110 +187,6 @@ term from making an item visible before the server has committed to it. A sessio
 when a promotion happens does not see the newly satisfiable item until it re-authorises. The
 staleness signal below is what prompts it to.
 
-## Denies
-
-`/control/changes` accepts three operations against an already-ingested item: delete, suppress,
-and unsuppress. Editing an item's access label directly does not exist as an operation. Changing
-what an item is labelled is a delete followed by a re-ingest under the same external id, with the
-new label. A deleted item's binding does not block that re-ingest (Admission, step 7, above).
-
-### Accepting a deny
-
-A change names its item by an external id, resolved against the current map of live items, or by
-a `tessera_id` presented together with the id set it was minted under. The id set is checked
-first, before the `tessera_id` is inverted, because the inversion is keyed. A list gathered before
-a key rotation would invert to different, live items under the new key. A stale id set is refused
-outright.
-
-The whole batch is validated and every address resolved before anything is accepted. If any one
-address fails to resolve, the whole batch is refused and nothing is queued. An address that
-resolves to an item already deleted or suppressed is accepted anyway. Applying a deny a second
-time has no further effect, so a retried batch is safe to resend.
-
-Only the entity id is written to the WAL, never a `tessera_id`. The address is resolved once, when
-the request is accepted, into the entity it names, and that entity id is stable for the item's
-life. A `tessera_id` is a keyed permutation of it: writing it to the WAL instead would mean a
-replay after a key rotation could resolve it to a different item.
-
-Denies are gathered into a window before any of them is written to the WAL, the same shape ingest
-uses: append every record, then one fsync for the whole window. That change took a 1,000-item
-request from about 3.3 seconds to about 32 milliseconds. Every waiter in the window is then
-acknowledged against the same swap.
-
-A deny is queued separately from ingest and is never refused for load. There is no route from this
-queue to a 429. A partition that has stepped down still accepts a deny while it refuses ingest,
-because a deny does not touch the segments a step-down protects.
-
-### The overlay: two stores
-
-The overlay holds two separate records of what is hidden, one for deletions and one for
-suppressions, each a bitmap over entity ids. They are not one map with a status field. A single
-map would let the most recent write decide an item's status. The sequence delete, suppress,
-unsuppress would then leave the unsuppress as the last word and bring a deleted item back. Two
-separate stores rule that out. The unsuppress can only change the suppression record, which the
-deletion never touched.
-
-| Rule | Applies to | Removed by | Why only one route |
-|---|---|---|---|
-| Rule S | Suppression | An explicit unsuppress, and nothing else | No rebuild or timer excludes a suppressed item on its own, so its invisibility depends entirely on this record for as long as the suppression stands. Any other removal route would let the item become visible again with no unsuppress ever issued |
-| Rule F | Deletion | The compaction fold that removes the item's row and its postings, and nothing else | The row still exists in a segment until that fold runs. Removing the record any earlier would leave a segment reachable that still contains the item |
-
-The row-space mask a request subtracts from its answer, `denied[view]`, is derived from the union
-of the two stores. It is derived again in full at every geometry publication (a flush, a merge, or
-a compaction fold), never patched by removing one row. Subtracting a single row could remove one
-that a still-standing deletion also covers. How a request composes an answer against this mask
-belongs to the access-control chapter.
-
-### If the write-ahead log fails
-
-If the fsync for a deny window fails, the executor first tries to repair it. It rewinds to the
-last durable position and rewrites the affected records, because a second fsync on its own is not
-enough to confirm the true state on every filesystem.
-
-If the repair does not succeed, the window is applied unevenly, by operation rather than by
-position in the batch. Every delete and every suppress is applied to the overlay anyway, because
-those items must stay hidden even without a durability guarantee, and every waiter in the batch is
-refused. Every unsuppress in the window is applied to nothing, because applying one without
-durability could let an item back into view that a restart would still hide.
-
-A caller that is refused must retry. Retrying is always safe, because applying a deny twice has no
-further effect. A caller that never retries leaves the record past the WAL's last confirmed
-position, so a restart discards it and the item becomes visible again. That is the only risk this
-failure carries.
-
-### Publication and recovery
-
-An accepted deny marks the overlay as changed. The executor writes a side record of the whole
-overlay at the close of a batch of deny windows, off the path that acknowledges the caller. A
-floor on how long a busy queue can go without one means a queue that never fully empties still
-publishes eventually.
-
-This write takes the deletion and suppression bitmaps from the live overlay directly, never from
-an earlier published record. Copying one forward could republish an unsuppress the live overlay
-has already reversed.
-
-On restart, the overlay is seeded from the newest side record that verifies, and then the WAL's
-confirmed prefix is replayed over it, in that order. Where the two disagree, the later WAL record
-wins. This order protects an unsuppress. Seeding after replay instead would let a crash between an
-accepted unsuppress and the next published record put the suppression back. That would undo an
-operation the caller was already told had succeeded.
-
-### What the writer and the viewer observe
-
-| Outcome | Meaning | Retry |
-|---|---|---|
-| 200 | The disposition is durable, and every request from now on, including the caller's own next one, already reflects it | Not needed |
-| 404 | The address did not resolve to a live item. Nothing in the batch took effect. An item whose ingest is still in an open commit window also reads as unknown | After confirming the item exists |
-| 409 | A stale id set | After re-resolving by external id |
-| 422 | The batch failed validation. Nothing took effect | After fixing the request |
-| 500 | Durability could not be confirmed. A delete or suppress in the failed window is already in force on this node despite the error. An unsuppress in it was not applied | Always safe |
-| 503 | The executor is not running. Nothing was taken | Later |
-
-The next request from any session after a deny is accepted excludes the item immediately. A
-row-space answer subtracts it through the mask. Drill-down and label checks consult the overlay
-directly. Nothing cached stands in the way, because the mask and the overlay are applied after any
-cached result is composed.
-
 ## Merge
 
 A merge bounds how many segments, posting tiers, external-id runs and dictionary entries a flush
@@ -353,6 +266,109 @@ flowchart TD
 
 *A fold plans, runs and publishes without holding the executor except at the plan and the swap.
 Retirement and the cache miss both happen at the swap.*
+
+## Denies
+
+`/control/changes` accepts three operations against an already-ingested item: delete, suppress,
+and unsuppress. Editing an item's access label directly does not exist as an operation. Changing
+what an item is labelled is a delete followed by a re-ingest under the same external id, with the
+new label. A deleted item's binding does not block that re-ingest (Admission, step 7, above).
+
+### Accepting a deny
+
+A change names its item by an external id, resolved against the current map of live items, or by
+a `tessera_id` presented together with the id set it was minted under. The id set is checked
+first, before the `tessera_id` is inverted, because the inversion is keyed. A list gathered before
+a key rotation would invert to different, live items under the new key. A stale id set is refused
+outright.
+
+The whole batch is validated and every address resolved before anything is accepted. If any one
+address fails to resolve, the whole batch is refused and nothing is queued. An address that
+resolves to an item already deleted or suppressed is accepted anyway. Applying a deny a second
+time has no further effect, so a retried batch is safe to resend.
+
+Only the entity id is written to the WAL, never a `tessera_id`. The address is resolved once, when
+the request is accepted, into the entity it names, and that entity id is stable for the item's
+life. A `tessera_id` is a keyed permutation of it: writing it to the WAL instead would mean a
+replay after a key rotation could resolve it to a different item.
+
+Denies are gathered into a window before any of them is written to the WAL, the same shape ingest
+uses: append every record, then one fsync for the whole window, then one swap, then every waiter
+in the window is acknowledged.
+
+A deny is queued separately from ingest and is never refused for load. There is no route from this
+queue to a 429. A partition that has stepped down still accepts a deny while it refuses ingest,
+because a deny does not touch the segments a step-down protects.
+
+### The overlay: two stores
+
+The overlay holds two separate records of what is hidden, one for deletions and one for
+suppressions, each a bitmap over entity ids. They are not one map with a status field. A single
+map would let the most recent write decide an item's status. The sequence delete, suppress,
+unsuppress would then leave the unsuppress as the last word and bring a deleted item back. Two
+separate stores rule that out. The unsuppress can only change the suppression record, which the
+deletion never touched.
+
+| Rule | Applies to | Removed by | Why only one route |
+|---|---|---|---|
+| Rule S | Suppression | An explicit unsuppress, and nothing else | No rebuild or timer excludes a suppressed item on its own, so its invisibility depends entirely on this record for as long as the suppression stands. Any other removal route would let the item become visible again with no unsuppress ever issued |
+| Rule F | Deletion | The compaction fold that removes the item's row and its postings, and nothing else | The row still exists in a segment until that fold runs. Removing the record any earlier would leave a segment reachable that still contains the item |
+
+The row-space mask a request subtracts from its answer, `denied[view]`, is derived from the union
+of the two stores. It is derived again in full at every geometry publication (a flush, a merge, or
+a compaction fold), never patched by removing one row. Subtracting a single row could remove one
+that a still-standing deletion also covers. How a request composes an answer against this mask
+belongs to the access-control chapter.
+
+### If the write-ahead log fails
+
+If the fsync for a deny window fails, the executor first tries to repair it. It rewinds to the
+last durable position and rewrites the affected records, because a second fsync on its own is not
+enough to confirm the true state on every filesystem.
+
+If the repair does not succeed, the window is applied unevenly, by operation rather than by
+position in the batch. Every delete and every suppress is applied to the overlay anyway, because
+those items must stay hidden even without a durability guarantee, and every waiter in the batch is
+refused. Every unsuppress in the window is applied to nothing, because applying one without
+durability could let an item back into view that a restart would still hide.
+
+A caller that is refused must retry. Retrying is always safe, because applying a deny twice has no
+further effect. A caller that never retries leaves the record past the WAL's last confirmed
+position, so a restart discards it and the item becomes visible again. That is the only risk this
+failure carries.
+
+### Publication and recovery
+
+An accepted deny marks the overlay as changed. The executor writes a side record of the whole
+overlay at the close of a batch of deny windows, off the path that acknowledges the caller. A
+floor on how long a busy queue can go without one means a queue that never fully empties still
+publishes eventually.
+
+This write takes the deletion and suppression bitmaps from the live overlay directly, never from
+an earlier published record. Copying one forward could republish an unsuppress the live overlay
+has already reversed.
+
+On restart, the overlay is seeded from the newest side record that verifies, and then the WAL's
+confirmed prefix is replayed over it, in that order. Where the two disagree, the later WAL record
+wins. This order protects an unsuppress. Seeding after replay instead would let a crash between an
+accepted unsuppress and the next published record put the suppression back. That would undo an
+operation the caller was already told had succeeded.
+
+### What the writer and the viewer observe
+
+| Outcome | Meaning | Retry |
+|---|---|---|
+| 200 | The disposition is durable, and every request from now on, including the caller's own next one, already reflects it | Not needed |
+| 404 | The address did not resolve to a live item. Nothing in the batch took effect. An item whose ingest is still in an open commit window also reads as unknown | After confirming the item exists |
+| 409 | A stale id set | After re-resolving by external id |
+| 422 | The batch failed validation. Nothing took effect | After fixing the request |
+| 500 | Durability could not be confirmed. A delete or suppress in the failed window is already in force on this node despite the error. An unsuppress in it was not applied | Always safe |
+| 503 | The executor is not running. Nothing was taken | Later |
+
+The next request from any session after a deny is accepted excludes the item immediately. A
+row-space answer subtracts it through the mask. Drill-down and label checks consult the overlay
+directly. Nothing cached stands in the way, because the mask and the overlay are applied after any
+cached result is composed.
 
 ## Restart and recovery
 
