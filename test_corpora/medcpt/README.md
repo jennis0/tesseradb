@@ -237,25 +237,57 @@ which is 0.984 for the DAG: a box covering 1.4% of the map is still wider than t
 at the depth the level is served from, so 98.4% of the descriptors are served as a list rather than
 bounded by a node. The two numbers measure different things and both are above.
 
-### ⊘ 66 member rows carry a wrong entity id, and the build reported every one
+### ⊘ 45 member rows landed under the wrong article, and the build named every one
 
-`containment.json` names **56 edges with one escaping member each — 66 rows of 1,658,437,807**
-(4×10⁻⁸). Chased rather than waved through:
+`containment.json` on the first whole-corpus build names **56 edges whose child holds a member its
+parent does not — 45 rows of 1,658,437,807**, which is 3×10⁻⁸. Chased rather than waved through,
+and what it is *not* is as measured as what it is.
 
-- The closure is right. For each of the 56 edges, the parent *is* in the child's ancestor set.
-- The counts are right. `weather` holds exactly the 18,845 members the recomputed closure gives.
-- One *value* is wrong. Entity 18,662,791 was written as 18,662,757, and **every one of the 66 bad
-  entities lies in the 35-wide window 18,662,757 … 18,662,791**.
-- It does not reproduce. Recomputing that slice's resolve and closure gives the correct membership,
-  so the file does not hold what the code computes.
+**The shape.** Every affected row lies in the 35-wide window of **consecutive** entities
+18,662,757 … 18,662,791, and the error is structured: each of those articles lost its
+**highest-id — alphabetically last — descriptors to the next article along**, with the row totals
+preserved. It is a set of row boundaries displaced by a few positions, not values overwritten at
+random.
 
-A localised, count-preserving corruption of a few values in one memory region, in a run that peaked
-at 43.3 GB on a 47 GB box, on a machine with a standing memory suspicion — not a logic error, which
-would move counts or shift a whole run. ⊘ It has not been reproduced or ruled out by a second run.
-**What the rung demonstrates here is the containment report**: 66 wrong rows in 1.66×10⁹ were named
-individually, by parent and child, without being asked.
+**What is sound.** The closure carries the parent for all 56 edges. `weather` holds exactly the
+18,845 members a recomputation gives. The `branches` column is correct over the same rows — it is
+computed from the explicit descriptors and not from the closure, which localises the fault to
+`closure` → `_list` → `write_layer` and nothing before it. The window sits on no chunk, `MESH_SLICE`
+or `BATCH` boundary.
 
+**No code path accounts for it.** Five candidates, each excluded:
 
+| | |
+|---|---|
+| the composite key's bit width | `_clo_flat` holds ids 0 … 30,953 against a 15-bit field's 32,767, so the id cannot carry into the row field |
+| an int32 key | the key is int64; a truncation would first bite at within-batch row 65,536, and the affected rows are 62,757 … 62,791 — a near miss, and a miss |
+| an unstable or partial sort | the sort is over the composite key, which is injective on `(row, id)`, so there are no ties to reorder |
+| an off-by-one at a row boundary | the right shape, and recomputing the slice agrees exactly with an independent set-union reference over the window and 150 rows of margin, twice, bit for bit |
+| an int32 in the offsets | real, and 37× away: the largest slice expanded to 5.8×10⁷ entries and the offset at the affected row was 3.3×10⁷ against 2.147×10⁹ |
+
+**A second whole-corpus run does not reproduce it.** Same code, same staged input: the second run
+differs from the first in exactly those 45 rows, and its window matches an independent recompute
+(49,279 rows, none wrong, none missing). The two runs also disagree by **three rows** in the total
+MeSH membership they wrote — 1,658,437,807 against 1,658,437,804 — over an input and a code path
+that are deterministic in process, which is a second symptom of the same kind rather than a
+consequence of the first.
+
+⊘ **Attributed to a memory fault on this host, and that is not proven.** It is the shape of one — a
+run of an int32 offsets buffer displaced while the values beside it are untouched, in a run peaking
+at 43.3 GB on a 47 GB box — and this machine has a standing memory-fault suspicion from three
+corruption-class symptoms on 2026-08-22/23. What rules the alternative *in* is that a logic error
+would move counts or shift a whole slice, and would recur. What has not been done is a memtest, so
+the attribution stands as the best fit and not as a finding. ⊘ The second run's own `tessera build`
+then **died of `SIGSEGV`** after 3 m 12 s at 5.3 GB (kernel: `error 6`, a write to a non-present
+page) where the first completed in 12 m 10 s at 16.03 GB — a third symptom, and the reason the
+memtest is now the thing to do before any of this is called a bug.
+
+**Two things caught it, and one of them is new.** `tessera build`'s containment report named all 45
+rows individually, by parent and child, without being asked — after 1.66×10⁹ rows had been written.
+`prepare.py` now refuses per slice, before a single member row reaches the file, on the property
+that cannot fail on sound data: a row's closure contains the descriptors it was closed over. That
+check costs 19 s over the whole corpus against the MeSH step's 421 s. ⊘ Neither whole-corpus run
+above was produced with it — it was written after both.
 
 ## Two things the scale broke, and what they cost
 
