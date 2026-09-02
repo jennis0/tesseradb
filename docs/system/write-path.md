@@ -210,7 +210,7 @@ merged span may now name a different entity.
 Compaction is the one operation that may drop a row and its postings. It runs as a single pass
 called a compaction fold, and it does three things nothing else in the write path can do:
 
-- it is the only way a deletion's overlay record is ever removed (Rule F, above);
+- it is the only way a deletion's overlay record is ever removed (Rule F, in Denies below);
 - it is the only way disc space a merge or a coalesce has orphaned is reclaimed;
 - it is the only way a partition returns to one segment, one base posting tier, one external-id
   run and one locator. Flush and merge only ever add to those counts.
