@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use sha2::{Digest, Sha256};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -524,6 +524,62 @@ impl IngestAdmission {
     }
 }
 
+/// At most one `/v1/categories/{column}/suggest` walk in flight per session
+/// (`value-suggestion.md` §5.1). Not a queue and not the compute-admission gate: a per-keystroke
+/// surface queued behind viewport renders would be unusable, so a second request for a session
+/// already walking is shed with `429` before any work runs, rather than waiting its turn.
+///
+/// One process-wide set of in-flight `token_id`s, guarded by [`SuggestGuard`] so that a dropped
+/// request — a disconnected client, same as [`GatePermits`]' own argument — still frees its slot:
+/// the guard's removal runs on `Drop`, not on a success path a cancelled future never reaches.
+pub struct SuggestAdmission {
+    in_flight: Arc<Mutex<FxHashSet<u64>>>,
+}
+
+impl SuggestAdmission {
+    pub fn new() -> Self {
+        SuggestAdmission {
+            in_flight: Arc::new(Mutex::new(FxHashSet::default())),
+        }
+    }
+
+    /// Try to start a walk for this session. `None` means one is already in flight for this
+    /// `token_id`, which the caller answers with `429` before touching the engine.
+    pub fn try_begin(&self, token_id: u64) -> Option<SuggestGuard> {
+        let mut in_flight = self.in_flight.lock();
+        if in_flight.insert(token_id) {
+            Some(SuggestGuard {
+                in_flight: Arc::clone(&self.in_flight),
+                token_id,
+            })
+        } else {
+            None
+        }
+    }
+}
+
+impl Default for SuggestAdmission {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Held for the life of one suggest walk; releases the session's slot on drop, whether the walk
+/// finished, errored, or the handler future was dropped out from under it (the same "a permit
+/// tracks compute completion, never caller interest" rule [`GatePermits`] states for the compute
+/// gate). Owns a cloned `Arc` rather than borrowing `SuggestAdmission`, so it can move into a
+/// `spawn_blocking` closure with a `'static` bound.
+pub struct SuggestGuard {
+    in_flight: Arc<Mutex<FxHashSet<u64>>>,
+    token_id: u64,
+}
+
+impl Drop for SuggestGuard {
+    fn drop(&mut self) {
+        self.in_flight.lock().remove(&self.token_id);
+    }
+}
+
 /// Process-wide server state, shared (behind `Arc`) across every axum handler on every plane.
 pub struct AppState {
     pub engine: Engine,
@@ -531,6 +587,14 @@ pub struct AppState {
     pub max_k: usize,
     /// `/v1/categories`' page-size ceiling and its default. See `Config::max_category_values`.
     pub max_category_values: usize,
+    /// `/v1/categories/{column}/suggest`'s page ceiling and `limit`'s default. See
+    /// `Config::max_suggestions`.
+    pub max_suggestions: usize,
+    /// The suggestion walk's budget. See `Config::max_suggestion_walk`.
+    pub max_suggestion_walk: u64,
+    /// At most one `/v1/categories/{column}/suggest` in flight per session
+    /// (`value-suggestion.md` §5.1). Never touched by any other route.
+    pub suggest_admission: SuggestAdmission,
     /// The publication vertex cap a shape is held to. See `Config::max_shape_vertices`.
     pub max_shape_vertices: u64,
     /// A `region` leaf's vertex cap. See `Config::max_region_vertices`.
