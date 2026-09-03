@@ -169,13 +169,108 @@ def state_extent(corpus_toml: Path, bundle: Path, view: str | None = None) -> di
     return {"view": chosen["id"], "quantisation": q, "from_version": version}
 
 
+def strip_all_members_content(out: Path) -> list[dict]:
+    """Drop the supplied content kinds an **empty** base cannot carry, from the base declaration
+    and from the rosters that supply them.
+
+    A supplied kind declaring `require_member_visibility = "all"` is served only to a viewer who
+    can see every document it was generated from, so an artifact carrying it must name that
+    generating set — an empty one is satisfied by everyone, and the registry refuses it at both
+    entry points alike (`tessera_lifecycle::registry`). A generating set is named by the member
+    rows carrying a `rank`, so a base with **no rows at all** has no generating set for any
+    artifact, and the kind cannot exist there.
+
+    That is not a defect and it is not patched around: an empty deployment genuinely has no
+    description that was generated from its corpus, because it has no corpus. The kind is removed
+    from the base's declaration, the roster's `contents` column is nulled where nothing else is
+    declared to fill it, and what was removed is recorded — so the layer census below reports the
+    difference rather than hiding it. Only the *measurement's* copy is edited, never the rung's.
+
+    Returns one record per kind removed, empty when the declaration has none.
+    """
+    corpus_toml = out / "corpus.toml"
+    lines = corpus_toml.read_text().splitlines(keepends=True)
+    sources: dict[str, str] = tomllib.loads(corpus_toml.read_text()).get("sources", {})
+
+    removed: list[dict] = []
+    keep: list[str] = []
+    layer = {"name": None, "source": None}
+    remaining_supplied: dict[str, int] = {}
+    i = 0
+    while i < len(lines):
+        head = lines[i].strip()
+        if head == "[[layer]]":
+            layer = {"name": None, "source": None}
+        if head.startswith("[[layer.content.supplied]]"):
+            # The block runs to the next table header at any indent, or to the end of the file.
+            j = i + 1
+            while j < len(lines) and not lines[j].strip().startswith("["):
+                j += 1
+            block = "".join(lines[i:j])
+            if '"all"' in block and "require_member_visibility" in block:
+                removed.append(
+                    {
+                        "layer": layer["name"],
+                        "source": layer["source"],
+                        "kind": next(
+                            (
+                                line.split("=", 1)[1].strip().strip('"')
+                                for line in block.splitlines()
+                                if line.strip().startswith("name")
+                            ),
+                            None,
+                        ),
+                    }
+                )
+            else:
+                remaining_supplied[layer["name"]] = remaining_supplied.get(layer["name"], 0) + 1
+                keep.extend(lines[i:j])
+            i = j
+            continue
+        if layer["name"] is None and head.startswith("name") and "=" in head:
+            layer["name"] = head.split("=", 1)[1].strip().strip('"')
+        if layer["source"] is None and head.startswith("source") and "=" in head:
+            layer["source"] = head.split("=", 1)[1].strip().strip('"')
+        keep.append(lines[i])
+        i += 1
+
+    if not removed:
+        return []
+    corpus_toml.write_text("".join(keep))
+    for entry in removed:
+        if remaining_supplied.get(entry["layer"]):
+            # Something else still fills the column, so the roster keeps it; the values of the
+            # removed kind stay where they sit and the build reads one fewer of them.
+            continue
+        roster = sources.get(entry["source"] or "")
+        path = out / roster if roster else None
+        if path is None or not path.exists():
+            entry["roster"] = None
+            continue
+        table = pq.read_table(path)
+        column = table.schema.field("contents")
+        table = table.set_column(
+            table.schema.get_field_index("contents"),
+            column,
+            pa.nulls(table.num_rows, column.type),
+        )
+        pq.write_table(table, path)
+        entry["roster"] = roster
+    return removed
+
+
 def write_base_inputs(rung: Path, out: Path, base_ids: np.ndarray) -> dict:
     """The complement's inputs: the points file filtered, the member tables filtered, the rest copied.
 
     **The artifact rosters are copied whole**, not filtered: a cluster or a descriptor exists
     because the layer declares it, and dropping the ones whose members all fell into the hold-out
     would make the two deployments differ in their *roster* as well as in their membership, which
-    is a second variable in a test that has one.
+    is a second variable in a test that has one. It is also what makes the *f* = 100% cell
+    possible at all on a rung whose layers are `value_set = "closed"`: an arriving point may only
+    join an artifact that already exists, so the roster is what the empty bundle is for.
+
+    The one thing an empty base cannot carry is a supplied content kind requiring every member
+    visible — see [`strip_all_members_content`], which the caller applies there.
     """
     out.mkdir(parents=True, exist_ok=True)
     kept = {"points": filter_parquet(rung / "points.parquet", out / "points.parquet", "entity_id", base_ids)}
@@ -565,6 +660,13 @@ class Cycle:
             shutil.rmtree(base_dir)
         self.log(f"splitting: base {len(base_ids):,} rows, hold-out {len(held):,} rows")
         write_base_inputs(self.rung, base_dir, base_ids)
+        if len(base_ids) == 0:
+            # **The empty base.** A description generated from every member of an artifact that has
+            # no members is satisfied by everyone, which the registry refuses at either entry point;
+            # the kind comes out of the measurement's own declaration and the removal is recorded.
+            self.result["content_removed"] = strip_all_members_content(base_dir)
+            if self.result["content_removed"]:
+                self.log(f"empty base: removed {self.result['content_removed']}")
         if self.args.state_extent:
             self.result["stated_extent"] = state_extent(
                 base_dir / "corpus.toml", self.rung / "bundle"
