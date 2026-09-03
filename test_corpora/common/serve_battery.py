@@ -419,9 +419,11 @@ def cell_figures(samples: Sequence[dict]) -> dict:
     (`probes/2026-09-02-serve-under-memory-cap`), so one pooled figure is two measurements
     averaged into neither.
     """
+    ok = [s for s in samples if not s.get("failed")]
     return {
-        "server_ms": percentiles([s["server_ms"] for s in samples]),
-        "wall_ms": percentiles([s["wall_ms"] for s in samples]),
+        "server_ms": percentiles([s["server_ms"] for s in ok]),
+        "wall_ms": percentiles([s["wall_ms"] for s in ok]),
+        "failed": len(samples) - len(ok),
     }
 
 
@@ -442,7 +444,12 @@ def condition_figures(samples: Sequence[dict], cold: bool) -> dict:
     top level and real ones in `all`, which is the honest shape for "nothing here was proven
     cold" — never a fast cold read.
     """
-    proven = [s for s in samples if s.get("majflt_delta") not in (None, 0)] if cold else list(samples)
+    samples = [s for s in samples]
+    proven = (
+        [s for s in samples if s.get("majflt_delta") not in (None, 0) and not s.get("failed")]
+        if cold
+        else [s for s in samples if not s.get("failed")]
+    )
     out = cell_figures(proven)
     out["all"] = cell_figures(samples)
     out["n_samples"] = len(samples)
@@ -450,8 +457,9 @@ def condition_figures(samples: Sequence[dict], cold: bool) -> dict:
     out["eviction_failed"] = (
         sum(1 for s in samples if s.get("eviction_failed")) if cold else 0
     )
-    out["visible"] = samples[0]["counts"]["visible"] if samples else None
-    out["matched"] = samples[0]["counts"]["matched"] if samples else None
+    first = next((s for s in samples if s.get("counts")), None)
+    out["visible"] = first["counts"]["visible"] if first else None
+    out["matched"] = first["counts"]["matched"] if first else None
     return out
 
 
@@ -478,6 +486,7 @@ class Battery:
         )
         self.rng = random.Random(args.seed)
         self.oom_seen = False
+        self.failures = 0
 
     def _fresh_token(self, terms: Sequence[str]) -> str:
         token, _ = authorise(self.args.session, self.args.session_cred, terms)
@@ -489,9 +498,28 @@ class Battery:
             self.oom_seen = True
 
     def _sample(self, token, view_id, zoom, box, cold: bool, **kw) -> dict:
-        """One request, with the cold proof around it when the condition asks for one."""
+        """One request, with the cold proof around it when the condition asks for one.
+
+        **A request that fails is a sample with a `failed` field, not the end of the run.** Under a
+        cap the server sheds a stream mid-body and the client sees a truncated response; that is a
+        result about the cap, and a battery that died on it would throw away every cell it had
+        already measured. The failure is recorded with its wall time and excluded from the
+        percentiles.
+        """
         before = self.evictor.majflt() if cold else None
-        s = viewport(self.args.viewer, token, view_id, zoom, box, k=self.args.k, **kw)
+        t0 = time.perf_counter()
+        try:
+            s = viewport(self.args.viewer, token, view_id, zoom, box, k=self.args.k, **kw)
+        except Exception as e:  # noqa: BLE001 — the failure is the measurement
+            self.failures += 1
+            return {
+                "failed": f"{type(e).__name__}: {e}"[:300],
+                "wall_ms": (time.perf_counter() - t0) * 1000.0,
+                "server_ms": None,
+                "counts": None,
+                "majflt_delta": None,
+                "eviction_failed": False,
+            }
         after = self.evictor.majflt() if cold else None
         if cold:
             delta = None if before is None or after is None else after - before
@@ -571,9 +599,9 @@ class Battery:
             # `(view, principal)` fragment build, which is not a per-request cost and must not be
             # averaged into one.
             t0 = time.perf_counter()
-            first = viewport(args.viewer, token, view_id, 0, full_extent, k=args.k)
+            first = self._sample(token, view_id, 0, full_extent, cold=False)
             first_s = time.perf_counter() - t0
-            measured = int(first["counts"]["visible"] or 0)
+            measured = int((first.get("counts") or {}).get("visible") or 0)
             self.log(
                 f"    authorise {authorise_s*1000:.0f} ms, first viewport {first_s:.2f} s, "
                 f"measured coverage {measured/max(total_rows,1):.4%}"
@@ -644,6 +672,7 @@ class Battery:
                 "terms_n": len(terms),
                 "rule": rung.get("rule"),
                 "measured": round(measured / max(total_rows, 1), 6),
+                "first_viewport_failed": first.get("failed"),
                 "measured_visible": measured,
                 "authorise_s": round(authorise_s, 4),
                 "first_viewport_s": round(first_s, 4),
@@ -670,6 +699,7 @@ class Battery:
             "evictions": self.evictor.evictions,
             "cgroup_at_end": self.evictor.cgroup_events(),
             "oom_kill_seen": self.oom_seen,
+            "request_failures": self.failures,
             "ladder": ladder_out,
             "text_and_drilldown": text,
         }
