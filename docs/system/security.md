@@ -5,16 +5,13 @@ requesting viewer's own authorised set, not filtered into that shape afterward.
 
 ## The adversary and the boundary
 
-Three parties reach the system, and the design treats them differently.
-
 A viewer holds a session token: whatever credentials it presented at authorisation, and as many
 requests as it likes against the resulting access. This is the adversary the properties below are
 built against: someone who can hold any grant, ask anything, and read every response, but cannot
 forge a credential or bypass the authorisation step itself.
 
 A bundle holder holds the built artifact on disk: the manifest, the per-deployment key, the full
-term index and the geometry. Nothing here defends against this party: the bundle contains the masks, the term index and the
-coordinates.
+term index and the geometry. Nothing here defends against this party.
 
 An operator drives the control plane: ingest, deletion, suppression and compaction. The design
 treats this party as trusted.
