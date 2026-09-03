@@ -43,12 +43,16 @@ entity_id_field = "entity_id"
 # on the branch letters of an indexing vocabulary; a work's licence is a rights fact about the work
 # itself, and the population it cuts is the one it actually cuts.
 #
-# **The `default` fires, and it fires for most of the corpus.** A work with no licence carries no
-# access term and takes `public`; a work with one carries exactly that key. So the principal ladder
-# runs the other way from rung 3's — a principal holding no term at all already sees the unlicensed
-# majority, and each licence key adds a compartment to it. That is the honest shape of the source
-# and it is not corrected: an `unlicensed` sentinel term would make the majority a compartment
-# nobody can see without being granted it, which is a policy this corpus does not carry.
+# **The `default` never fires**, and that is an owner ruling (2026-09-03) rather than a property of
+# the data. A work with no licence — an unmatched id included — carries `unlicensed`, an eleventh
+# key of the closed vocabulary below, so the column is never empty and a principal holding no term
+# **sees nothing**. Written this way because the campaign's principal ladder starts at 1% of the
+# corpus and cannot be composed under a 77% floor every principal would hold for free: a `public`
+# default would make three quarters of the map visible to a viewer with no grant at all, and every
+# masked count taken against it would be measuring that floor rather than the compartment.
+#
+# The `default` is declared because the field requires one, not because it is expected to be
+# reached — the same shape rung 3's `unindexed` gives its `branches` column.
 # ---------------------------------------------------------------------------------------------
 
 [[view]]
@@ -60,10 +64,11 @@ source           = "points"
 visibility       = "public"
 # <point-visibility>
 
-# The licence keys are Creative Commons' and OpenAlex's own published names, so the value set
+# Ten of the eleven keys are Creative Commons' and OpenAlex's own published names, so the value set
 # discloses nothing about this corpus's contents — the same reasoning that makes rung 3's MeSH
-# branch letters `public`. Closed: a licence neither set names is a refusal rather than a quietly
-# minted compartment, which is the one thing an access vocabulary must never do.
+# branch letters `public`. The eleventh, `unlicensed`, is this rung's own and is in the set for the
+# same reason. Closed: a licence neither set names is a refusal rather than a quietly minted
+# compartment, which is the one thing an access vocabulary must never do.
 # <licence-vocabulary>
 
 # Work type — `article`, `book-chapter`, `dataset` and a dozen more. `open`: OpenAlex adds types,

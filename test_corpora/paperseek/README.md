@@ -52,7 +52,10 @@ this file are the **vectors** track. `openalex.py`, `extract.py` and `smoke.py` 
 track's: the one full scan of `works`, the topic tree, the per-work resolve and the tiered layer.
 `prepare.py` imports `openalex.py` guarded, exactly as rung 3 imports `mesh.py` — a run without it
 writes a corpus with no topic layer, no licence vocabulary and a `point_visibility` naming no
-field, and the declaration beside the data says so in place of each of the three blocks.
+field, and the declaration beside the data says so in place of each of the three blocks. The
+eleventh licence key is the one part of the compartment this track owns: `unlicensed` is a property
+of the scheme rather than of OpenAlex's list, so it is appended here and not asked of
+`OpenAlex.licences()`.
 
 ## One view
 
@@ -61,7 +64,7 @@ unlike rung 3's retrieval-trained MedCPT the geometry is a reasonable stand-in f
 about. The view is `knn`, titled **Scholarly map**. `projection = "none"` and `extent = "auto"`: an
 embedding layout is not a map and there is no transform between these coordinates and any ground.
 
-## The compartment is real, and it runs the other way
+## The compartment is real, and every work carries a term
 
 `licence` — the OpenAlex licence of a work's best open-access location. **This is the ladder's
 first compartment that is a property of the row rather than a synthetic stand-in**: GeoNames and
@@ -69,14 +72,16 @@ Overture compartment on a country of convenience and MedCPT on the branch letter
 vocabulary, and each of those is a policy invented for the fixture. A licence is a rights fact
 about the work.
 
-**A work with no licence carries no access term and takes the view's declared `public` default**,
-which is the opposite of rung 3's shape, where every article carried a term and the default could
-never fire. So the principal ladder runs the other way: a principal holding no term at all already
-sees the unlicensed majority, and each licence key adds a compartment to it.
+**A work with no licence — an unmatched id included — carries `unlicensed`**, an eleventh key of
+the same closed vocabulary, so the access column is never empty and `point_visibility`'s `default`
+never fires. Rung 3's `unindexed` has exactly this shape and exists for the same reason.
 
-⊘ **That is the honest shape of the source and it is not corrected.** An `unlicensed` sentinel term
-would make the majority a compartment nobody sees without being granted it — a policy this corpus
-does not carry, and one that would make every masked count on the map a statement about a fiction.
+⊘ **That is an owner ruling (2026-09-03), not a property of the data.** The corpus was first
+written the other way — no term, and the view's `public` default — which is the more literal
+reading of a work that names no licence. It was ruled out because **the campaign's principal ladder
+starts at 1% of the corpus and cannot be composed under a 77% floor every principal holds for
+free**: a `public` default puts three quarters of the map in front of a viewer with no grant at
+all, and every masked count taken against it measures that floor rather than the compartment.
 
 ## The route — fit on what the card holds, place the rest
 

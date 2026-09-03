@@ -15,9 +15,10 @@ Four decisions this stage makes:
 
 - **`licence` is the access column**, and it is the ladder's first compartment that is a property
   of the work rather than a synthetic stand-in: a work's label is its OpenAlex licence key, and a
-  work with no licence carries **no label** and is public. So `point_visibility`'s `default` is the
-  ordinary case here rather than the unreachable one it is at rung 3, and the principal ladder runs
-  the other way — no terms already sees the unlicensed majority, and each licence key adds to it.
+  work with no licence — an unmatched id included — carries `unlicensed`, an eleventh key of the
+  same closed vocabulary (owner ruling, 2026-09-03). So the column is never empty and
+  `point_visibility`'s `default` never fires, exactly as at rung 3, and a principal holding no term
+  sees nothing.
 - **Abstracts are on** (owner ruling, 2026-09-02), and they are the reason the rung exists. 102M
   works carry 118.9 GB of abstract text uncompressed, which is what puts the bundle past the box.
 - **Nothing holds a text column whole.** Rung 3 read its abstracts into Arrow and wrote
@@ -88,6 +89,14 @@ using use new two one based approach method methods model models data system sys
 """.split())
 
 FALLBACK = "a cluster of works"
+
+#: The access term a work with no licence carries, and the eleventh key of the closed `licence`
+#: vocabulary (owner ruling, 2026-09-03). It exists so that the access column is never empty:
+#: **a principal holding no term must see nothing.** Written as a real key rather than left to the
+#: view's `default` because the campaign's principal ladder starts at 1% of the corpus and cannot
+#: be composed under a 77% floor that every principal holds for free. So the declaration's
+#: `default` is here for the same reason rung 3's is — the field requires one — and never fires.
+UNLICENSED = "unlicensed"
 
 #: Rows per row group in `points.parquet`. 262,144 rows of abstract is ~330 MB of characters, well
 #: inside a 32-bit offset, and a row group is the granularity the build's own reader batches at.
@@ -373,7 +382,7 @@ def write_declaration(out: Path, *, licences: list[str], types: int, topics_toml
                 "# ⊘ `topics/openalex` is not declared: `openalex.py` was not present when this run\n"
                 "# wrote the corpus, so no work carries a topic.")
     text = fill(text, "# <point-visibility>",
-                'point_visibility = { field = "licence", default = "public" }' if have else
+                'point_visibility = { field = "licence", default = "unlicensed" }' if have else
                 "# ⊘ `point_visibility` names no field: `openalex.py` was not present when this run\n"
                 "# wrote the corpus, so no work carries a licence and there is no compartment. Every\n"
                 "# point takes the declared default and the whole corpus is public.\n"
@@ -550,7 +559,10 @@ def main() -> None:
                 got = oa.resolve(urls)
                 del urls
                 assert got.num_rows == m, f"resolve returned {got.num_rows} rows against {m}"
-                licence = got.column("licence").combine_chunks()
+                # **Every work carries a term.** An unmatched id and a work OpenAlex carries with
+                # no open-access location are the same thing here: `unlicensed`, which is a key of
+                # the closed vocabulary and not the absence of one.
+                licence = pc.fill_null(got.column("licence").combine_chunks(), UNLICENSED)
                 year = got.column("publication_year").combine_chunks()
                 kind = got.column("type").combine_chunks()
                 is_oa = got.column("is_oa").combine_chunks()
@@ -604,8 +616,8 @@ def main() -> None:
 
     licence_counts.pop(None, None)
     type_counts.pop(None, None)
-    with_licence = sum(licence_counts.values())
-    print(f"licence: {with_licence:,} of {n:,} ({with_licence / n:.1%}) carry one, over "
+    with_licence = sum(licence_counts.values()) - licence_counts.get(UNLICENSED, 0)
+    print(f"licence: {with_licence:,} of {n:,} ({with_licence / n:.1%}) carry a real one, over "
           f"{len(licence_counts)} keys; {years:,} ({years / n:.1%}) carry a year; "
           f"{oa_true:,} ({oa_true / n:.1%}) are open access; "
           f"{int((topic_all >= 0).sum()):,} carry a topic", flush=True)
@@ -634,7 +646,9 @@ def main() -> None:
 
     artifacts.check(n)
     artifact_rows, member_rows = artifacts.write(out)
-    licences = oa.licences() if oa is not None else []
+    # The eleventh key is this rung's own and is appended rather than asked of `openalex.py`: it
+    # is a property of the compartment scheme, not of OpenAlex's licence list.
+    licences = (oa.licences() + [UNLICENSED]) if oa is not None else []
     # **A closed vocabulary and the column that fills it must agree.** A licence key `resolve`
     # produced and `licences()` does not name would refuse the build far downstream, with the
     # message naming a value rather than the disagreement between the two halves of one module.
@@ -680,6 +694,7 @@ def main() -> None:
         "openalex": oa_stats,
         "coverage": {
             "with_licence": with_licence,
+            "unlicensed": licence_counts.get(UNLICENSED, 0),
             "with_year": years,
             "is_oa": oa_true,
             "with_topic": int((topic_all >= 0).sum()),
