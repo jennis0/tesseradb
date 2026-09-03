@@ -214,6 +214,46 @@ def render() -> str:
     return "\n".join(lines)
 
 
+def ingest_cell(cell: dict) -> dict:
+    """One `ingest_cycle.py` output on the schema's §3 shape.
+
+    A function rather than an inline literal in [`assemble`] because a rung measured before a
+    schema change is re-collated from its driver output by the same mapping, and two copies of it
+    would be two schemas.
+    """
+    return {
+        "fraction": cell["fraction"],
+        "concurrency": cell["concurrency"],
+        "seed": cell.get("seed"),
+        "base_rows": cell.get("base_rows"),
+        "holdout_rows": cell.get("holdout_rows"),
+        "blocked": cell.get("blocked"),
+        "base_build": {
+            k: v for k, v in (cell.get("build") or {}).items() if k != "stages"
+        },
+        "base_build_stages": (cell.get("build") or {}).get("stages"),
+        # What publication cost: per layer, the artifacts, members and parent edges that
+        # landed, and artifacts/s and members/s. A declined layer is named here with its
+        # reason, so a layer census difference below is attributable.
+        "publish": cell.get("publish"),
+        "items_per_s": (cell.get("ingest") or {}).get("items_per_s"),
+        "accepted": (cell.get("ingest") or {}).get("accepted"),
+        "ack_p50": ((cell.get("ingest") or {}).get("ack_ms") or {}).get("p50"),
+        "ack_p99": ((cell.get("ingest") or {}).get("ack_ms") or {}).get("p99"),
+        "statuses": (cell.get("ingest") or {}).get("statuses"),
+        "flush_s": (cell.get("flush") or {}).get("publish_s"),
+        "visibility_s": (cell.get("flush") or {}).get("visibility_s"),
+        "fold_s": (cell.get("fold") or {}).get("fold_s"),
+        "fold_peak_rss": (cell.get("fold") or {}).get("fold_peak_rss_bytes"),
+        "equivalence": {
+            k: v
+            for k, v in (cell.get("equivalence") or {}).items()
+            if k not in ("folded", "all_in")
+        },
+        "write_cycle": cell.get("write_cycle"),
+    }
+
+
 def assemble(args) -> int:
     """Collate a rung's driver outputs into one `measurements.json` on the schema.
 
@@ -239,43 +279,7 @@ def assemble(args) -> int:
         run = json.loads(Path(path).read_text())
         serve.append(run)
 
-    ingest = []
-    for path in args.ingest or []:
-        cell = json.loads(Path(path).read_text())
-        ingest.append(
-            {
-                "fraction": cell["fraction"],
-                "concurrency": cell["concurrency"],
-                "seed": cell.get("seed"),
-                "base_rows": cell.get("base_rows"),
-                "holdout_rows": cell.get("holdout_rows"),
-                "blocked": cell.get("blocked"),
-                "base_build": {
-                    k: v for k, v in (cell.get("build") or {}).items() if k != "stages"
-                },
-                "base_build_stages": (cell.get("build") or {}).get("stages"),
-                # What publication cost and what it could not say: per layer, the artifacts and
-                # members that landed, artifacts/s and members/s, and the parent edges the route
-                # has no field for. A declined layer is named here with its reason, so a layer
-                # census difference below is attributable.
-                "publish": cell.get("publish"),
-                "items_per_s": (cell.get("ingest") or {}).get("items_per_s"),
-                "accepted": (cell.get("ingest") or {}).get("accepted"),
-                "ack_p50": ((cell.get("ingest") or {}).get("ack_ms") or {}).get("p50"),
-                "ack_p99": ((cell.get("ingest") or {}).get("ack_ms") or {}).get("p99"),
-                "statuses": (cell.get("ingest") or {}).get("statuses"),
-                "flush_s": (cell.get("flush") or {}).get("publish_s"),
-                "visibility_s": (cell.get("flush") or {}).get("visibility_s"),
-                "fold_s": (cell.get("fold") or {}).get("fold_s"),
-                "fold_peak_rss": (cell.get("fold") or {}).get("fold_peak_rss_bytes"),
-                "equivalence": {
-                    k: v
-                    for k, v in (cell.get("equivalence") or {}).items()
-                    if k not in ("folded", "all_in")
-                },
-                "write_cycle": cell.get("write_cycle"),
-            }
-        )
+    ingest = [ingest_cell(json.loads(Path(path).read_text())) for path in args.ingest or []]
 
     out = {
         "schema_version": SCHEMA_VERSION,

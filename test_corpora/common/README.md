@@ -138,9 +138,10 @@ artifacts, memberships and supplied content are published through
 | `layers.<name>.requests` | count | publications sent. A batch is split between artifacts to stay under `--publish-max-bytes`; one artifact over it is sent alone, the batch being the commit unit |
 | `layers.<name>.prepared_s` | seconds | reading the roster and inverting the member table, in the driver. **Not** part of the throughput below: it measures pyarrow, not the service |
 | `layers.<name>.wall_s`, `.artifacts_per_s`, `.members_per_s` | — | the publication itself, one caller, serial |
-| `layers.<name>.edges_declared`, `.artifacts_with_several_parents` | count | the roster's lineage |
-| `layers.<name>.edges_published` | count | **0 at every layer**: `IncomingArtifactBody` — the JSON the route takes — carries `key`, `members`, `content`, `attached_to` and the shape fields, and has no field for a parent. A `dag` layer therefore publishes as a flat one, and `edges_not_expressible` totals what was dropped (`docs/evidence/memos/2026-09-03-dag-membership-at-ingest.md`) |
+| `layers.<name>.edges_declared`, `.artifacts_with_several_parents` | count | the roster's `parent` lists, which under `dag` are where a layer's edges are spelled and the only place they are (decision 0125) |
+| `layers.<name>.edges_published` | count | edges on artifacts the route answered 201 for. The route had no `parent` field until 2026-09-03 and a published `dag` layer came out flat; parents are published parent-before-child, which is why the roster is reordered by depth first |
 | `declined` | object | a layer whose member table exceeds `--max-member-rows`, with the count. **Not patched around**: it is declared and empty on the folded deployment, so every count on it differs from the all-in build's by design, and `equivalence.layers` says so |
+| `edges_declared`, `edges_published` | count | the two summed over the layers |
 
 **`equivalence` is split into three surfaces because they are not equally comparable.**
 
