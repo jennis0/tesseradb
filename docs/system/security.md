@@ -60,117 +60,71 @@ operator's writes are trusted; a bundle holder already has everything the server
 
 A served quantity MUST be computed from inside the requesting viewer's authorised set alone. A
 count, a density cell, a cluster's shape or a label taken over the whole corpus and then checked
-against that set before display would be a defect here, not a filtered view.
+against that set before display is a defect, not a filtered view.
 
-Access is expressed as a set of terms an item carries and a set of terms a token satisfies; an item
-is visible to a token if the two sets intersect. Effective visibility is composed once per request,
-from the token's own set, the overlay (deletions and suppressions not yet compacted), and
-everything ingested since the token's own baseline, before anything downstream reads it. Every consumer of that composition,
-whether it counts a tile, draws marks or walks a cluster's membership tree, reads the same composed
-set; nothing computes a quantity first and masks it afterward.
-
-Filtering sits after this. A filter narrows which of the authorised items are drawn or counted; it
-can never widen the authorised set. Filters are order-independent and are composed only by
-intersecting with the authorised set already computed, so a new filter form cannot introduce an
-access-control defect on its own.
-
-Two facts about the data layout make this checkable rather than only argued. Access data is
-expressed over a permanent identity for each item, and the map's layout (screen position,
-ordering) is expressed over a separate identity assigned per view; the two meet at exactly one
-lookup table, and nothing else in the code converts between them. That separation is proved by a
-build check (`check-layers.sh`) and by tests that require a shortcut between the two spaces to fail
-to compile. A request also resolves which generation of the data it is answering against exactly
-once, at its start, and uses that generation throughout: answering part of a request against one
-generation and part against another would not merely be stale, it would name the wrong rows once
-anything has reordered them, so this resolution point is fixed rather than read again mid-request.
+An item carries a set of terms and a token satisfies a set of terms; an item is visible to a token
+when the two sets intersect. The viewer's set is composed once per request, before anything reads
+it, and everything that counts, draws or labels reads that one set. A filter narrows which of the
+authorised items are drawn or counted and can never widen the set, so adding a filter cannot
+introduce an access defect. The viewer's set is the only path to the geometry, and a build check
+fails if any other path is added.
 
 ## A label is served only when its whole basis is visible
 
-A label MUST be served only if every item in the set it was built from is inside the requesting
-principal's authorised set. If even one member of that set is outside it, the label is withheld in
-full; there is no partial or hedged version. The check runs on the authorised set, never on a
-filtered one, so narrowing a query cannot make an otherwise-withheld label appear, and it runs
-fresh on every request rather than being decided once and cached.
-
-The set a label is checked against is fixed once the label is supplied and does not grow with later
-arrivals; an item added to the corpus afterward is not treated as part of that label's basis. That
-rule keeps the containment check meaningful over time, and belongs to how labels are built rather
-than to what a viewer can learn, so it is stated in full in the data model chapter rather than here.
+A label MUST be served only if every item it was built from is inside the requesting viewer's
+authorised set. If one member is outside it, the label is withheld in full. The check runs on the
+authorised set, never on a filtered one, so narrowing a query cannot make a withheld label appear,
+and it runs on every request.
 
 ## Samples are taken after masking
 
-Where the number of items in view exceeds what a response carries, the sample shown MUST be drawn
-from the viewer's own authorised set, evaluated directly, rather than taken as the visible slice of
-a sample computed over the whole corpus. A principal with a narrow grant sees a sample of what they
-can see, never a filtered-down sample built for someone wider. Anywhere a precomputed structure
-exists as a shortcut for this, an exact fallback computed the same way as the direct evaluation is
-required, so the shortcut can change how quickly an answer arrives and never what is served.
+Where more items are in view than a response carries, the sample MUST be drawn from the viewer's
+own authorised set. A viewer with a narrow grant sees a sample of what they can see, never the
+visible remainder of a sample taken over the whole corpus.
 
 ## A client never sees an entity id
 
-Inside the server every item is addressed by an entity id: a dense integer assigned when the item
-is ingested, and the key under which its access terms, its cluster membership and its labels are
-stored. The entity id is an implementation detail of the index, not a property of the data. It is
-assigned in order of the item's access terms, so that items with the same terms sit in one run of
-ids, and it has no meaning outside the deployment that assigned it. An item's identity, as far as
-anyone outside the server is concerned, is the external id the operator supplied and the
+Inside the server every item is addressed by an entity id: a dense integer assigned at ingest, in
+order of the item's access terms, and the key under which its terms, memberships and labels are
+stored. It is an implementation detail of the index, not a property of the data, and the index may
+renumber it. An item's identity outside the server is the external id the operator supplied and the
 `tessera_id` the client is given.
 
-The entity id MUST NOT appear in any response, log or on-wire structure a client can read. The
-number itself carries a little information: because ids are dense and ordered by access terms, a
-viewer holding a few of them could estimate a lower bound on how many items exist that they cannot
-see, and how the items they can see group by access. That is the whole of what this property
-protects. No content is at stake in it; content is protected by the first property, and an entity
-id gives a viewer no way to ask the server about an item, since no request accepts one. The other
-reason to keep it internal is that it is not stable: the index may renumber it, and a client that
-depended on it would break.
-
-What a client receives instead is a keyed permutation of the entity id, computed by an eight-round
-Feistel construction over a per-deployment key, so that two `tessera_id`s reveal nothing about
-whether their items are adjacent and a client cannot enumerate them. The construction is not
-cryptographic, and does not need to be, given what it hides. Two facts about the layout hold
-regardless of its strength. No structure on the request path stores the entity id at all, so
-nothing on that path could hand one out even by mistake; and once an entity id is assigned it is
-never reused, so a deleted item's slot cannot later grant a new item the access the old one held.
+The entity id MUST NOT appear in anything a client can read. What it would disclose is small:
+because ids are dense and ordered by access terms, a viewer holding a few could estimate a lower
+bound on how many items they cannot see and how the visible ones group by access. No content is at
+stake; content is protected by the first property, and no request accepts an entity id. The
+`tessera_id` a client receives is a keyed permutation of the entity id, so that two of them reveal
+nothing about whether their items are adjacent and a client cannot enumerate them. The permutation
+is not cryptographic and, given what it hides, does not need to be.
 
 ## An incomplete answer is refused
 
-A response that was not actually computed in full MUST be refused. It MUST NOT be returned as
-though it were complete, and MUST NOT be returned as an empty result standing in for "not
-answered." Where two requests share work in progress, such as a row projection being built for a
-session, a failure or a cancelled build on one request never leaves a waiting second request reading
-a half-built result: that request either receives a typed refusal or finds no cached work and builds
-its own. This half is built and exercised in tests.
+A response that was not computed in full MUST be refused. It MUST NOT be returned as though it were
+complete, and MUST NOT be returned as an empty result standing in for "not answered".
 
-**Not built yet:** the design also states two further rules for a compartment (a further store
-holding data that must be kept physically apart, not merely masked). A compartment a token cannot
-reach must count as contributing nothing satisfied, never as though it had been checked and passed.
-A compartment unreachable because the system cannot reach it, rather than because the token is not
-authorised for it, must be reported as an error rather than as an empty contribution. Neither rule
-has anything to test it today, because a deployment has exactly one compartment: every token reaches
-the only store there is, and neither case can arise until a second compartment exists. What that
-means for compartmented isolation as a whole is stated below.
+**Not built yet:** the design also states this rule for compartments, stores whose data must be
+kept physically apart rather than masked: a compartment a token cannot reach contributes nothing,
+and one the system cannot reach is an error rather than an empty contribution. A deployment has one
+compartment today, so neither case can arise and neither rule has anything to test it.
 
 ## What this does not claim
 
 | Not claimed | Why not |
 |---|---|
-| Cryptographic protection of the identifier a client receives | Not needed. What the permutation hides is a lower bound on the number of hidden items and their grouping by access, a low-severity channel; content is protected by the mask, not by the identifier. The construction is an eight-round non-cryptographic mixer, and an adversary holding matched pairs of entity id and `tessera_id` could recover the key, which would return them to that low-severity channel and nothing more. |
-| A defence against a bundle holder | Anyone holding the built artifact already has the key, the term index and the coordinates; the identifier scheme adds nothing against them, and none of the properties above are claimed for that party. |
-| Isolation of compartmented partitions | **Not built yet.** The design specifies a second, physical separation for data that must be held apart, gated by a required-term check on every token. None of it exists: a deployment today has one store, so no isolation beyond masking is available, and a requirement for physical separation cannot be met by deploying the system as it stands. |
-| Agreement between the two authorisation functions | See the paragraph below this table. |
-| Closure of the timing and activity family | The register below states this family as accepted, and for its core timing question, open and unquantified rather than closed. |
-| Protection of data at rest | This chapter covers what a viewer can learn from responses it is entitled to read. A persisted authorisation result (a cached mask fragment kept on disk between sessions) is a different asset with a different attacker, filesystem access rather than a viewer holding a token, and its own integrity argument, described where that mechanism lives. |
-| The client as a trust boundary | The client is never responsible for disclosure; every value it holds has already passed through the server's own mask. Its rules concern truthful display, and are covered in the clients chapter. |
-| Availability and denial of service | Out of scope for this chapter. The serving chapter covers admission control and load shedding. |
+| Cryptographic strength of the client-facing identifier | Not needed. The permutation hides a lower bound on the number of hidden items and their grouping by access, a low-severity channel. An adversary who recovered the key would be back at that channel and nothing more. |
+| A defence against a bundle holder | Anyone holding the bundle has the key, the term index and the coordinates. None of the properties above are claimed against them. |
+| Isolation of compartmented partitions | **Not built yet.** The design specifies physical separation for data that must be held apart. A deployment today has one store, so no isolation beyond masking is available. |
+| Agreement between the two authorisation functions | See below. |
+| Closure of the timing channel | Accepted and unquantified; see the register. |
+| Protection of data at rest | This chapter covers what a viewer can learn from responses. Data on disc has a different adversary and is covered where the storage is described. |
+| The client as a trust boundary | The client never decides what is visible; every value it holds has already passed the server's mask. Its rules concern truthful display and are in the clients chapter. |
+| Availability and denial of service | Outside this chapter. The serving chapter covers admission and load shedding. |
 
-The two authorisation functions a caller supplies, one deriving terms from an item's access label
-and one deriving terms from a principal's credentials, must agree about what each term means: if
-the first indexes an item under a term, every principal for whom the second yields that term must
-be authorised for that item. Every property above rests on that agreement holding, and nothing
-checks it. The only authorisation logic that exists today passes an item's or a principal's own
-strings straight through, so its two functions cannot disagree, and there is nothing yet for a check
-to run against. It cannot be checked until a plugin exists whose two functions could disagree.
+The caller supplies two functions: one derives terms from an item's access label, the other from a
+viewer's credentials. Every property above rests on the two agreeing about what a term means, and
+nothing checks that they do. The only plugin that exists passes strings through unchanged, so its
+two functions cannot disagree; the check cannot exist until a plugin does whose functions could.
 
 ## Residual disclosure
 
