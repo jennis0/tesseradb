@@ -734,15 +734,27 @@ class Cycle:
             self.result["layers"] = layers
             self.log(f"  {self.result['ingest']['items_per_s']} items/s")
 
-            self.result["flush"] = self.do_flush(control, served, session_cred, view, quant, all_terms)
-            self.result["fold"] = self.do_fold(control)
-            self.result["equivalence"] = self.do_equivalence(
-                served, session_cred, view, quant, ranks
-            )
+            # **Each phase's failure is recorded and the run continues.** A cell that died at the
+            # flush used to lose its ingest figures too, which are the expensive half; and a
+            # failure here is as often a *result* — a shed stream, a refusal — as it is a bug in
+            # the driver.
+            def phase(name, fn):
+                try:
+                    self.result[name] = fn()
+                except Exception as e:  # noqa: BLE001 — a driver failure is a recorded outcome
+                    self.result[name] = {"failed": f"{type(e).__name__}: {e}"[:2000]}
+                    self.log(f"  {name} FAILED: {type(e).__name__}: {e}")
+
+            phase("flush", lambda: self.do_flush(control, served, session_cred, view, quant, all_terms))
+            phase("layers_after_ingest", lambda: self.probe_layers_after_ingest(
+                served, session_cred, view, quant, all_terms
+            ))
+            phase("fold", lambda: self.do_fold(control))
+            phase("equivalence", lambda: self.do_equivalence(served, session_cred, view, quant, ranks))
             if args.write_cycle:
-                self.result["write_cycle"] = self.do_write_cycle(
+                phase("write_cycle", lambda: self.do_write_cycle(
                     control, served, session_cred, view, quant, all_terms, hold
-                )
+                ))
         finally:
             self.result["status_at_end"] = safe(lambda: Control(served.control, served.credential("operator")).status())
             served.stop()
@@ -804,9 +816,16 @@ class Cycle:
                     # is the parent of entry k+1, every artifact at level 0
                     # (`tessera_types::layer::ListMeaning`). This rung's articles are in a mean of
                     # 10.6 unrelated MeSH descriptors, and a list of ten unrelated keys read as a
-                    # lineage declares nine parent edges the NLM's DAG does not have — under
-                    # `dag`, a second lineage naming another parent for a child *adds* the edge, so
-                    # the hierarchy would be silently extended by the ingest rather than refused.
+                    # lineage declares nine parent edges the NLM's DAG does not have.
+                    #
+                    # **Measured, 2026-09-03: the server does not absorb them.** A probe batch of
+                    # three keys produced `an ingest batch's list column names parent edges these
+                    # layers do not hold; the memberships are applied and the edges are not` —
+                    # so the hierarchy is *not* silently extended, and the memberships do land.
+                    # The layer is still declined by default because the cell would be saying
+                    # something the data does not mean and the warning count would scale with the
+                    # corpus; `--carry-lineage-layers` runs it deliberately, and on medcpt-1m
+                    # that run cost 31k items/s against 157k with the column absent.
                     #
                     # Stated, not patched around: the ingested rows carry no membership on this
                     # layer, so every later count on it differs by design, and the equivalence
@@ -827,6 +846,35 @@ class Cycle:
             out["probed"][layer] = entry
         return out
 
+    def probe_layers_after_ingest(self, served, session_cred, view, quant, all_terms) -> dict:
+        """One zoom-0 viewport **with `layers: "all"`** after the flush, timed and allowed to fail.
+
+        Its own measurement because it is the request that broke the first 3.6×10⁷ cell: the
+        segment a flush publishes carries no adopted artifact structures, so a level whose
+        derived form the prefix does not hold is rebuilt on the request path, and the server sheds
+        the stream mid-body when that outruns `serve.stream_deadline_ms`. Recorded rather than
+        routed around.
+        """
+        full = [quant["x_min"], quant["y_min"], quant["x_max"], quant["y_max"]]
+        token, _ = serve_battery.authorise(served.session, session_cred, all_terms)
+        t0 = time.perf_counter()
+        try:
+            s = serve_battery.viewport(
+                served.viewer, token, view, 0, full, k=1, layers="all", timeout=600
+            )
+            return {
+                "served": True,
+                "wall_s": round(time.perf_counter() - t0, 2),
+                "server_ms": s["server_ms"],
+                "visible": s["counts"]["visible"],
+            }
+        except Exception as e:  # noqa: BLE001 — the shed is the finding
+            return {
+                "served": False,
+                "wall_s": round(time.perf_counter() - t0, 2),
+                "error": f"{type(e).__name__}: {e}"[:600],
+            }
+
     # -- flush, fold, equivalence, write cycle ---------------------------------------------
 
     def do_flush(self, control, served, session_cred, view, quant, all_terms) -> dict:
@@ -841,9 +889,18 @@ class Cycle:
         )
         full = [quant["x_min"], quant["y_min"], quant["x_max"], quant["y_max"]]
 
+        # **`layers=None`, and that is not a detail.** A zoom-0 whole-extent viewport asking for
+        # `layers: "all"` on a freshly-ingested 3.6×10⁷-row deployment was **shed mid-body** at
+        # 113 s against a 60 s stream deadline: the new segment carries no adopted artifact
+        # structures, so the mesh level is served the slow way and the response never completes.
+        # That is a result about the read path after ingest (recorded in `layers_after_ingest`),
+        # not something a visibility poll should be measuring — what this needs is the masked
+        # count, which the tiles frame carries on its own.
         def visible_now() -> int:
             token, _ = serve_battery.authorise(served.session, session_cred, all_terms)
-            return serve_battery.viewport(served.viewer, token, view, 0, full, k=1)["counts"]["visible"]
+            return serve_battery.viewport(
+                served.viewer, token, view, 0, full, k=1, layers=None
+            )["counts"]["visible"]
 
         reached, visibility_s = wait_for(
             lambda: visible_now() >= expected, timeout=self.args.flush_timeout, interval=0.25
@@ -955,7 +1012,7 @@ class Cycle:
         def visible() -> int:
             token, _ = serve_battery.authorise(served.session, session_cred, all_terms)
             return serve_battery.viewport(
-                served.viewer, token, view, 0, full, k=1
+                served.viewer, token, view, 0, full, k=1, layers=None
             )["counts"]["visible"]
 
         start_visible = visible()
