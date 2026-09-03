@@ -93,7 +93,8 @@ flush, not the flush's own wall; `fold` is the server's own `compaction.last_sec
 
 | rung | f | C | items/s | ack p50 | ack p99 | visibility | fold | 0091 equivalence |
 |---|---|---|---|---|---|---|---|---|
-| medcpt | 10% | 8 | 12,054.2 | 2.01 s | 5.19 s | 0.3 s | 1:50 | zoom-0 exact, layers 6 |
+| medcpt | 100% | 8 | 11,267.0 | 3.07 s | 16.62 s | 1.2 s | 1:43 | zoom-0 exact, layers 6 |
+| medcpt | 50% | 8 | 10,746.0 | 2.58 s | 19.20 s | 0.8 s | 1:56 | zoom-0 exact, layers 6 |
 
 <!-- /campaign-table -->
 
@@ -789,6 +790,15 @@ full scale.
   cell expressible: with the frame given there is nothing to fit, so `tessera build` writes a bundle
   with no points and the whole corpus arrives through `/control/ingest` (decision 0091). `auto` over
   no rows stays a refusal, and it names the remedy.
+- **Everything is ingested after the build** (owner ruling, 2026-09-03). A cell's base bundle
+  carries the built fraction's points and every layer's *declaration* — kind, levels, visibility
+  rules, content kinds — and no roster, member table or content; each layer's artifacts, their
+  memberships, their ranked content with its generating set and their `parent` lists are published
+  through `PUT /control/layers/{name}/artifacts` once every point they depend on has been ingested.
+  That ordering is the only constraint and it holds at every fraction, so at *f* = 10% the base is
+  90% of the points and none of the artifacts. It is also why no membership travels on a column
+  here: a column names artifacts that do not exist yet, and a layer declaring supplied content
+  refuses to mint one from a key alone.
 
 ## 6. Cross-cutting findings
 

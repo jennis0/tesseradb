@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "rung": "medcpt-1m",
   "rows": 1000000,
   "binary_commit": "703cfaa7",
@@ -26617,742 +26617,231 @@
       "holdout_rows": 100000,
       "blocked": null,
       "base_build": {
-        "wall_s": 20.58,
+        "wall_s": 7.07,
         "returncode": 0,
-        "stdout": "built /home/joe/code/tessera/data/ladder/.measure/m1/base-0.1/bundle (v00000): 900000 items, 18 terms, 4141437 pairs, 299883284 bytes on disk, 0 artifact(s) minted, 0 unclustered member row(s)\n  view knn: 900000 row(s)\n",
-        "stderr_tail": "view 'knn': quantising against x [-12.541571340560914, 17.449042043685914], y [-13.982567033767701, 16.008046350479127]\n        the data spans x [-12.146526336669922, 17.053997039794922], y [-13.688370704650879, 15.714020729064941] \u2014 63810 x 64252 of the 65536 x 65536 cells\n        900000 point(s) placed, none on the frame's edge\nschema: 4 column(s), 8.00 B/row against the 12 B fixed row (+67%)\n        7.44 GiB per 10^9 items \u2014 unalterable without rewriting the corpus\n        every column materialises in EVERY view \u2014 including ones whose items carry no value for it (\u00a73.9). Per-view columns need contracts \u00a72.6's per-view enumeration\nstage       source_ids      0.04s  rows=900000       peak=    29 MiB\nstage       dictionary      0.69s  rows=18           peak=   115 MiB\nstage    geometry_read      0.57s  rows=900000       peak=   213 MiB\nstage       pairs_pack      0.00s  rows=4141437      peak=   213 MiB\nstage   signature_sort      0.15s  rows=900000       peak=   213 MiB\nstage       assignment      0.25s  rows=900000       peak=   213 MiB\nstage       assignment      0.03s  rows=900000       peak=   213 MiB\nstage   postings_write      0.11s  rows=4141437      peak=   213 MiB\nstage     external_ids      0.00s  rows=0            peak=   213 MiB\nattribute 'published': 899,312 of 900,000 entities have a value\nattribute 'title': 899,188 of 900,000 entities have a value\nattribute 'mesh_major': 760,256 of 900,000 entities have a value\nattribute 'pmid': 900,000 of 900,000 entities have a value\n        0 source row(s) named entities this build did not load\nstage   attribute_tail      0.69s  rows=900000       peak=   363 MiB\nstage           layers     11.40s  rows=2            peak=   582 MiB\nstage       text_index      1.37s  rows=256767       peak=   633 MiB\nstage  filter_postings      0.80s  rows=900000       peak=   633 MiB\nstage      record_blob      0.90s  rows=900000       peak=   633 MiB\nstage   column_release      0.02s  rows=900000       peak=   633 MiB\nstage       tiler_sort      0.02s  rows=900000       peak=   633 MiB\nstage    segment_write      0.07s  rows=900000       peak=   633 MiB\nartifact layouts, chosen from the bundle's own row space (3323 ms):\n  clusters/kmeans level 0 [knn]: 43 artifact(s) with rows, 0.744 everywhere, 2.5 blocks/artifact, disjoint \u2014 served rows\n  mesh/descriptors level 0 [knn]: 29139 artifact(s) with rows, 0.928 everywhere, 7.4 blocks/artifact, overlapping \u2014 served list\n  wrote 1 tile index(es), 1 row-major column(s), 2 containment partition(s), 0 shape row form(s), 0 decomposition file(s)\nstage        manifests      3.38s  rows=299883284    peak=   633 MiB\nview 'knn': 900000 point(s) landed in 898398 distinct cell(s) \u2014 99.8% of them have a position of their own\n",
-        "bundle_bytes": 299918810
+        "stdout": "built /tmp/aotw-1m/base-0.1/bundle (v00000): 900000 items, 18 terms, 4141437 pairs, 173775082 bytes on disk, 0 artifact(s) minted, 0 unclustered member row(s)\n  view knn: 900000 row(s)\n",
+        "stderr_tail": "view 'knn': quantising against x [-12.541571340560914, 17.449042043685914], y [-13.982567033767701, 16.008046350479127]\n        the data spans x [-12.146526336669922, 17.053997039794922], y [-13.688370704650879, 15.714020729064941] \u2014 63810 x 64252 of the 65536 x 65536 cells\n        900000 point(s) placed, none on the frame's edge\nschema: 4 column(s), 8.00 B/row against the 12 B fixed row (+67%)\n        7.44 GiB per 10^9 items \u2014 unalterable without rewriting the corpus\n        every column materialises in EVERY view \u2014 including ones whose items carry no value for it (\u00a73.9). Per-view columns need contracts \u00a72.6's per-view enumeration\nstage       source_ids      0.03s  rows=900000       peak=    29 MiB\nstage       dictionary      0.68s  rows=18           peak=   115 MiB\nstage    geometry_read      0.48s  rows=900000       peak=   213 MiB\nstage       pairs_pack      0.00s  rows=4141437      peak=   213 MiB\nstage   signature_sort      0.15s  rows=900000       peak=   213 MiB\nstage       assignment      0.31s  rows=900000       peak=   213 MiB\nstage       assignment      0.03s  rows=900000       peak=   213 MiB\nstage   postings_write      0.14s  rows=4141437      peak=   213 MiB\nstage     external_ids      0.06s  rows=900000       peak=   213 MiB\nattribute 'published': 899,312 of 900,000 entities have a value\nattribute 'title': 899,188 of 900,000 entities have a value\nattribute 'mesh_major': 760,256 of 900,000 entities have a value\nattribute 'pmid': 900,000 of 900,000 entities have a value\n        0 source row(s) named entities this build did not load\nstage   attribute_tail      0.50s  rows=900000       peak=   371 MiB\nstage           layers      0.00s  rows=2            peak=   371 MiB\nstage       text_index      1.61s  rows=256767       peak=   421 MiB\nstage  filter_postings      1.32s  rows=900000       peak=   421 MiB\nstage      record_blob      1.38s  rows=900000       peak=   421 MiB\nstage   column_release      0.03s  rows=900000       peak=   421 MiB\nstage       tiler_sort      0.02s  rows=900000       peak=   421 MiB\nstage    segment_write      0.18s  rows=900000       peak=   421 MiB\nstage        manifests      0.04s  rows=173775082    peak=   421 MiB\nview 'knn': 900000 point(s) landed in 898398 distinct cell(s) \u2014 99.8% of them have a position of their own\n",
+        "bundle_bytes": 173788624
       },
       "base_build_stages": [
         {
           "stage": "source_ids",
-          "wall_s": 0.039703668,
+          "wall_s": 0.034792864,
           "rows": 900000,
-          "peak_rss_kib": 30168,
-          "started_at": 1788397111.0676286,
-          "ended_at": 1788397111.1073322
+          "peak_rss_kib": 29932,
+          "started_at": 1788424784.6746826,
+          "ended_at": 1788424784.7094755
         },
         {
           "stage": "dictionary",
-          "wall_s": 0.686583236,
+          "wall_s": 0.680744119,
           "rows": 18,
-          "peak_rss_kib": 118744,
-          "started_at": 1788397111.1074107,
-          "ended_at": 1788397111.793994
+          "peak_rss_kib": 118692,
+          "started_at": 1788424784.709587,
+          "ended_at": 1788424785.3903313
         },
         {
           "stage": "geometry_read",
-          "wall_s": 0.567807198,
+          "wall_s": 0.481936083,
           "rows": 900000,
-          "peak_rss_kib": 218596,
-          "started_at": 1788397111.7940876,
-          "ended_at": 1788397112.3618948
+          "peak_rss_kib": 218292,
+          "started_at": 1788424786.8287332,
+          "ended_at": 1788424787.3106692
         },
         {
           "stage": "pairs_pack",
-          "wall_s": 1.056e-06,
+          "wall_s": 1.822e-06,
           "rows": 4141437,
-          "peak_rss_kib": 218596,
-          "started_at": 1788397112.3619375,
-          "ended_at": 1788397112.3619385
+          "peak_rss_kib": 218292,
+          "started_at": 1788424787.3107128,
+          "ended_at": 1788424787.3107147
         },
         {
           "stage": "signature_sort",
-          "wall_s": 0.148992829,
+          "wall_s": 0.153533701,
           "rows": 900000,
-          "peak_rss_kib": 218596,
-          "started_at": 1788397112.3620467,
-          "ended_at": 1788397112.5110395
+          "peak_rss_kib": 218292,
+          "started_at": 1788424787.310804,
+          "ended_at": 1788424787.4643376
         },
         {
           "stage": "assignment",
-          "wall_s": 0.253576923,
+          "wall_s": 0.314752505,
           "rows": 900000,
-          "peak_rss_kib": 218596,
-          "started_at": 1788397112.511128,
-          "ended_at": 1788397112.764705
+          "peak_rss_kib": 218292,
+          "started_at": 1788424787.4644268,
+          "ended_at": 1788424787.7791793
         },
         {
           "stage": "assignment",
-          "wall_s": 0.025151384,
+          "wall_s": 0.03446555,
           "rows": 900000,
-          "peak_rss_kib": 218596,
-          "started_at": 1788397112.7647989,
-          "ended_at": 1788397112.7899504
+          "peak_rss_kib": 218292,
+          "started_at": 1788424787.7792509,
+          "ended_at": 1788424787.8137164
         },
         {
           "stage": "postings_write",
-          "wall_s": 0.10941613,
+          "wall_s": 0.144664709,
           "rows": 4141437,
-          "peak_rss_kib": 218596,
-          "started_at": 1788397112.7900841,
-          "ended_at": 1788397112.8995004
+          "peak_rss_kib": 218292,
+          "started_at": 1788424787.8141403,
+          "ended_at": 1788424787.958805
         },
         {
           "stage": "external_ids",
-          "wall_s": 1.71e-07,
-          "rows": 0,
-          "peak_rss_kib": 218596,
-          "started_at": 1788397112.8995807,
-          "ended_at": 1788397112.899581
+          "wall_s": 0.064911784,
+          "rows": 900000,
+          "peak_rss_kib": 218292,
+          "started_at": 1788424787.9592905,
+          "ended_at": 1788424788.0242023
         },
         {
           "stage": "attribute_tail",
-          "wall_s": 0.69461932,
+          "wall_s": 0.495966148,
           "rows": 900000,
-          "peak_rss_kib": 371928,
-          "started_at": 1788397112.89964,
-          "ended_at": 1788397113.5942595
+          "peak_rss_kib": 380924,
+          "started_at": 1788424788.0242863,
+          "ended_at": 1788424788.5202525
         },
         {
           "stage": "layers",
-          "wall_s": 11.397719636,
+          "wall_s": 0.002398,
           "rows": 2,
-          "peak_rss_kib": 596736,
-          "started_at": 1788397113.594449,
-          "ended_at": 1788397124.9921687
+          "peak_rss_kib": 380924,
+          "started_at": 1788424788.520333,
+          "ended_at": 1788424788.522731
         },
         {
           "stage": "text_index",
-          "wall_s": 1.3687026549999999,
+          "wall_s": 1.6131454349999998,
           "rows": 256767,
-          "peak_rss_kib": 648240,
-          "started_at": 1788397125.7925057,
-          "ended_at": 1788397127.1612084
+          "peak_rss_kib": 431856,
+          "started_at": 1788424789.8450844,
+          "ended_at": 1788424791.4582298
         },
         {
           "stage": "filter_postings",
-          "wall_s": 0.800337495,
+          "wall_s": 1.322353634,
           "rows": 900000,
-          "peak_rss_kib": 648240,
-          "started_at": 1788397126.360924,
-          "ended_at": 1788397127.1612616
+          "peak_rss_kib": 431856,
+          "started_at": 1788424790.135918,
+          "ended_at": 1788424791.4582715
         },
         {
           "stage": "record_blob",
-          "wall_s": 0.900007211,
+          "wall_s": 1.384570878,
           "rows": 900000,
-          "peak_rss_kib": 648240,
-          "started_at": 1788397127.1614063,
-          "ended_at": 1788397128.0614135
+          "peak_rss_kib": 431856,
+          "started_at": 1788424791.4583576,
+          "ended_at": 1788424792.8429284
         },
         {
           "stage": "column_release",
-          "wall_s": 0.016928325,
+          "wall_s": 0.02542928,
           "rows": 900000,
-          "peak_rss_kib": 648240,
-          "started_at": 1788397128.0614989,
-          "ended_at": 1788397128.0784273
+          "peak_rss_kib": 431856,
+          "started_at": 1788424792.8430164,
+          "ended_at": 1788424792.8684456
         },
         {
           "stage": "tiler_sort",
-          "wall_s": 0.022818985,
+          "wall_s": 0.024557641,
           "rows": 900000,
-          "peak_rss_kib": 648240,
-          "started_at": 1788397128.078536,
-          "ended_at": 1788397128.101355
+          "peak_rss_kib": 431856,
+          "started_at": 1788424792.8685536,
+          "ended_at": 1788424792.8931112
         },
         {
           "stage": "segment_write",
-          "wall_s": 0.072618951,
+          "wall_s": 0.177202639,
           "rows": 900000,
-          "peak_rss_kib": 648240,
-          "started_at": 1788397128.1014795,
-          "ended_at": 1788397128.1740985
+          "peak_rss_kib": 431856,
+          "started_at": 1788424792.8932397,
+          "ended_at": 1788424793.0704424
         },
         {
           "stage": "manifests",
-          "wall_s": 3.37512614,
-          "rows": 299883284,
-          "peak_rss_kib": 648240,
-          "started_at": 1788397128.1742585,
-          "ended_at": 1788397131.5493846
+          "wall_s": 0.035285389,
+          "rows": 173775082,
+          "peak_rss_kib": 431856,
+          "started_at": 1788424793.0705292,
+          "ended_at": 1788424793.1058147
         }
       ],
-      "layers": {
-        "probed": {
+      "publish": {
+        "layers": {
           "clusters/kmeans": {
-            "status": 200,
-            "keys_offered": 3,
-            "body": "{\"accepted\":1,\"over_bound\":0,\"over_bound_ids\":[],\"clipped\":0,\"tessera_ids\":[11345286899746314923],\"minted\":0}",
-            "withdrawn": 200,
-            "member_rows": 1009832
+            "artifacts": 43,
+            "members": 1000000,
+            "generating_set_entries": 9832,
+            "edges_declared": 0,
+            "edges_in_roster_and_layer": 0,
+            "artifacts_with_several_parents": 0,
+            "requests": 1,
+            "prepared_s": 0.12,
+            "wall_s": 0.66,
+            "published_artifacts": 43,
+            "published_members": 1000000,
+            "edges_published": 0,
+            "artifacts_per_s": 65.4,
+            "members_per_s": 1521041.5,
+            "statuses": {
+              "201": 1
+            },
+            "first_refusal": null
           },
           "mesh/descriptors": {
-            "status": 200,
-            "keys_offered": 3,
-            "body": "{\"accepted\":1,\"over_bound\":0,\"over_bound_ids\":[],\"clipped\":0,\"tessera_ids\":[13440812833481179860],\"minted\":0}",
-            "withdrawn": 200,
-            "member_rows": 46178538
+            "artifacts": 29229,
+            "members": 46178538,
+            "generating_set_entries": 0,
+            "edges_declared": 40075,
+            "edges_in_roster_and_layer": 40075,
+            "artifacts_with_several_parents": 8881,
+            "requests": 22,
+            "prepared_s": 12.91,
+            "wall_s": 51.71,
+            "published_artifacts": 29229,
+            "published_members": 46178538,
+            "edges_published": 40075,
+            "artifacts_per_s": 565.2,
+            "members_per_s": 892960.0,
+            "statuses": {
+              "201": 22
+            },
+            "first_refusal": null
           }
         },
-        "carried": [
-          "clusters/kmeans"
-        ],
-        "declined": {
-          "mesh/descriptors": "declared `kind = \"dag\"`, whose membership cell is a lineage; this rung's points are in several unrelated artifacts each, which a lineage cannot express and which a `dag` would absorb as new parent edges"
-        },
-        "hierarchy_kinds": {
-          "clusters/kmeans": "flat",
-          "mesh/descriptors": "dag"
-        }
-      },
-      "items_per_s": 157338.4,
-      "accepted": 100000,
-      "ack_p50": 155.7587,
-      "ack_p99": 303.1,
-      "statuses": {
-        "200": 10
-      },
-      "flush_s": 1.507,
-      "visibility_s": 4.719,
-      "fold_s": 1,
-      "fold_peak_rss": 823304192,
-      "equivalence": {
-        "equal": false,
-        "zoom0_equal": true,
-        "boxes_equal": true,
-        "layers_equal": false,
-        "differences_by_surface": {
-          "layers": 6
-        },
-        "differences": [
-          {
-            "principal": "0.0100",
-            "where": "layers",
-            "folded": {
-              "5": [
-                {
-                  "rows": 1792
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
-            },
-            "all_in": {
-              "5": [
-                {
-                  "rows": 1926
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
-            }
-          },
-          {
-            "principal": "0.0500",
-            "where": "layers",
-            "folded": {
-              "5": [
-                {
-                  "rows": 1792
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
-            },
-            "all_in": {
-              "5": [
-                {
-                  "rows": 1926
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
-            }
-          },
-          {
-            "principal": "0.1000",
-            "where": "layers",
-            "folded": {
-              "5": [
-                {
-                  "rows": 5159
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
-            },
-            "all_in": {
-              "5": [
-                {
-                  "rows": 5445
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
-            }
-          },
-          {
-            "principal": "0.2500",
-            "where": "layers",
-            "folded": {
-              "5": [
-                {
-                  "rows": 5160
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
-            },
-            "all_in": {
-              "5": [
-                {
-                  "rows": 5445
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
-            }
-          },
-          {
-            "principal": "0.5000",
-            "where": "layers",
-            "folded": {
-              "5": [
-                {
-                  "rows": 12157
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
-            },
-            "all_in": {
-              "5": [
-                {
-                  "rows": 12657
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
-            }
-          },
-          {
-            "principal": "1.0000",
-            "where": "layers",
-            "folded": {
-              "5": [
-                {
-                  "rows": 15534
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
-            },
-            "all_in": {
-              "5": [
-                {
-                  "rows": 16102
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
-            }
-          }
-        ],
-        "frames": {
-          "folded": {
-            "x_max": 17.449042043685914,
-            "x_min": -12.541571340560914,
-            "y_max": 16.008046350479127,
-            "y_min": -13.9825670337677
-          },
-          "all_in": {
-            "x_max": 17.449042043685914,
-            "x_min": -12.541571340560914,
-            "y_max": 16.008046350479127,
-            "y_min": -13.9825670337677
-          }
-        },
-        "frames_equal": true,
-        "ladder": [
-          {
-            "target": 0.01,
-            "terms": [
-              "K",
-              "V"
-            ]
-          },
-          {
-            "target": 0.05,
-            "terms": [
-              "K",
-              "V"
-            ]
-          },
-          {
-            "target": 0.1,
-            "terms": [
-              "L",
-              "V"
-            ]
-          },
-          {
-            "target": 0.25,
-            "terms": [
-              "L",
-              "V",
-              "unindexed"
-            ]
-          },
-          {
-            "target": 0.5,
-            "terms": [
-              "C",
-              "K",
-              "V"
-            ]
-          },
-          {
-            "target": 1.0,
-            "terms": [
-              "A",
-              "B",
-              "C",
-              "D",
-              "E",
-              "F",
-              "G",
-              "H",
-              "I",
-              "J",
-              "K",
-              "L",
-              "M",
-              "N",
-              "V",
-              "Z",
-              "unindexed"
-            ]
-          }
-        ]
-      },
-      "write_cycle": {
-        "n": 1000,
-        "visible_before": 1000000,
-        "delete": {
-          "status": 200,
-          "body": null,
-          "wall_s": 0.023,
-          "visibility_s": 2.9,
-          "visibility_reached": true,
-          "visible_after": 999000
-        },
-        "suppress": {
-          "status": 200,
-          "body": null,
-          "wall_s": 0.023,
-          "visibility_s": 2.943,
-          "visibility_reached": true,
-          "visible_after": 998000
-        },
-        "reingest": {
-          "batches": 1,
-          "rows_offered": 1000,
-          "accepted": 1000,
-          "minted": 0,
-          "wall_s": 0.05,
-          "items_per_s": 18292.3,
-          "ack_ms": {
-            "p25": 23.2248,
-            "p50": 23.2248,
-            "p75": 23.2248,
-            "p95": 23.2248,
-            "p99": 23.2248,
-            "max": 23.2248,
-            "mean": 23.2248,
-            "n": 1
-          },
-          "statuses": {
-            "200": 1
-          }
-        },
-        "fold": {
-          "completed": true,
-          "observed_s": 11.05,
-          "fold_s": 1,
-          "fold_peak_rss_bytes": 978206720
-        },
-        "visible_after_cycle": 999000,
-        "overlay": {
-          "depth": 1000,
-          "retirable": 0,
-          "soft_limit_alarms": 0
-        }
-      }
-    },
-    {
-      "fraction": 0.1,
-      "concurrency": 8,
-      "seed": 0,
-      "base_rows": 900000,
-      "holdout_rows": 100000,
-      "blocked": null,
-      "base_build": {
-        "wall_s": 23.15,
-        "returncode": 0,
-        "stdout": "built /home/joe/code/tessera/data/ladder/.measure/m1/base-0.1/bundle (v00000): 900000 items, 18 terms, 4141437 pairs, 299883284 bytes on disk, 0 artifact(s) minted, 0 unclustered member row(s)\n  view knn: 900000 row(s)\n",
-        "stderr_tail": "view 'knn': quantising against x [-12.541571340560914, 17.449042043685914], y [-13.982567033767701, 16.008046350479127]\n        the data spans x [-12.146526336669922, 17.053997039794922], y [-13.688370704650879, 15.714020729064941] \u2014 63810 x 64252 of the 65536 x 65536 cells\n        900000 point(s) placed, none on the frame's edge\nschema: 4 column(s), 8.00 B/row against the 12 B fixed row (+67%)\n        7.44 GiB per 10^9 items \u2014 unalterable without rewriting the corpus\n        every column materialises in EVERY view \u2014 including ones whose items carry no value for it (\u00a73.9). Per-view columns need contracts \u00a72.6's per-view enumeration\nstage       source_ids      0.03s  rows=900000       peak=    30 MiB\nstage       dictionary      0.61s  rows=18           peak=   117 MiB\nstage    geometry_read      0.51s  rows=900000       peak=   214 MiB\nstage       pairs_pack      0.00s  rows=4141437      peak=   214 MiB\nstage   signature_sort      0.12s  rows=900000       peak=   214 MiB\nstage       assignment      0.27s  rows=900000       peak=   214 MiB\nstage       assignment      0.04s  rows=900000       peak=   214 MiB\nstage   postings_write      0.12s  rows=4141437      peak=   214 MiB\nstage     external_ids      0.00s  rows=0            peak=   214 MiB\nattribute 'published': 899,312 of 900,000 entities have a value\nattribute 'title': 899,188 of 900,000 entities have a value\nattribute 'mesh_major': 760,256 of 900,000 entities have a value\nattribute 'pmid': 900,000 of 900,000 entities have a value\n        0 source row(s) named entities this build did not load\nstage   attribute_tail      0.45s  rows=900000       peak=   353 MiB\nstage           layers     13.38s  rows=2            peak=   572 MiB\nstage       text_index      1.71s  rows=256767       peak=   713 MiB\nstage  filter_postings      0.93s  rows=900000       peak=   713 MiB\nstage      record_blob      1.05s  rows=900000       peak=   713 MiB\nstage   column_release      0.02s  rows=900000       peak=   713 MiB\nstage       tiler_sort      0.03s  rows=900000       peak=   713 MiB\nstage    segment_write      0.08s  rows=900000       peak=   713 MiB\nartifact layouts, chosen from the bundle's own row space (3644 ms):\n  clusters/kmeans level 0 [knn]: 43 artifact(s) with rows, 0.744 everywhere, 2.5 blocks/artifact, disjoint \u2014 served rows\n  mesh/descriptors level 0 [knn]: 29139 artifact(s) with rows, 0.928 everywhere, 7.4 blocks/artifact, overlapping \u2014 served list\n  wrote 1 tile index(es), 1 row-major column(s), 2 containment partition(s), 0 shape row form(s), 0 decomposition file(s)\nstage        manifests      3.70s  rows=299883284    peak=   713 MiB\nview 'knn': 900000 point(s) landed in 898398 distinct cell(s) \u2014 99.8% of them have a position of their own\n",
-        "bundle_bytes": 299918810
-      },
-      "base_build_stages": [
-        {
-          "stage": "source_ids",
-          "wall_s": 0.030491531,
-          "rows": 900000,
-          "peak_rss_kib": 31252,
-          "started_at": 1788397233.5501895,
-          "ended_at": 1788397233.580681
-        },
-        {
-          "stage": "dictionary",
-          "wall_s": 0.605827581,
-          "rows": 18,
-          "peak_rss_kib": 119904,
-          "started_at": 1788397233.58078,
-          "ended_at": 1788397234.1866076
-        },
-        {
-          "stage": "geometry_read",
-          "wall_s": 0.513950825,
-          "rows": 900000,
-          "peak_rss_kib": 220012,
-          "started_at": 1788397234.1867166,
-          "ended_at": 1788397234.7006674
-        },
-        {
-          "stage": "pairs_pack",
-          "wall_s": 1.364e-06,
-          "rows": 4141437,
-          "peak_rss_kib": 220012,
-          "started_at": 1788397234.7007458,
-          "ended_at": 1788397234.7007473
-        },
-        {
-          "stage": "signature_sort",
-          "wall_s": 0.121086677,
-          "rows": 900000,
-          "peak_rss_kib": 220012,
-          "started_at": 1788397234.7008328,
-          "ended_at": 1788397234.8219194
-        },
-        {
-          "stage": "assignment",
-          "wall_s": 0.273036774,
-          "rows": 900000,
-          "peak_rss_kib": 220012,
-          "started_at": 1788397234.8220081,
-          "ended_at": 1788397235.0950449
-        },
-        {
-          "stage": "assignment",
-          "wall_s": 0.035936055,
-          "rows": 900000,
-          "peak_rss_kib": 220012,
-          "started_at": 1788397235.095149,
-          "ended_at": 1788397235.1310852
-        },
-        {
-          "stage": "postings_write",
-          "wall_s": 0.120891336,
-          "rows": 4141437,
-          "peak_rss_kib": 220012,
-          "started_at": 1788397235.1312096,
-          "ended_at": 1788397235.252101
-        },
-        {
-          "stage": "external_ids",
-          "wall_s": 6.35e-07,
-          "rows": 0,
-          "peak_rss_kib": 220012,
-          "started_at": 1788397235.2521813,
-          "ended_at": 1788397235.252182
-        },
-        {
-          "stage": "attribute_tail",
-          "wall_s": 0.453254571,
-          "rows": 900000,
-          "peak_rss_kib": 362432,
-          "started_at": 1788397235.2522407,
-          "ended_at": 1788397235.705495
-        },
-        {
-          "stage": "layers",
-          "wall_s": 13.379574464,
-          "rows": 2,
-          "peak_rss_kib": 586480,
-          "started_at": 1788397237.5346568,
-          "ended_at": 1788397250.9142313
-        },
-        {
-          "stage": "text_index",
-          "wall_s": 1.708922904,
-          "rows": 256767,
-          "peak_rss_kib": 730700,
-          "started_at": 1788397251.8449209,
-          "ended_at": 1788397253.5538437
-        },
-        {
-          "stage": "filter_postings",
-          "wall_s": 0.930689543,
-          "rows": 900000,
-          "peak_rss_kib": 730700,
-          "started_at": 1788397252.6232255,
-          "ended_at": 1788397253.553915
-        },
-        {
-          "stage": "record_blob",
-          "wall_s": 1.05474605,
-          "rows": 900000,
-          "peak_rss_kib": 730700,
-          "started_at": 1788397253.5540805,
-          "ended_at": 1788397254.6088266
-        },
-        {
-          "stage": "column_release",
-          "wall_s": 0.020555969,
-          "rows": 900000,
-          "peak_rss_kib": 730700,
-          "started_at": 1788397254.6089087,
-          "ended_at": 1788397254.6294646
-        },
-        {
-          "stage": "tiler_sort",
-          "wall_s": 0.025330324,
-          "rows": 900000,
-          "peak_rss_kib": 730700,
-          "started_at": 1788397254.6296248,
-          "ended_at": 1788397254.6549551
-        },
-        {
-          "stage": "segment_write",
-          "wall_s": 0.078631545,
-          "rows": 900000,
-          "peak_rss_kib": 730700,
-          "started_at": 1788397254.6550841,
-          "ended_at": 1788397254.7337158
-        },
-        {
-          "stage": "manifests",
-          "wall_s": 3.696201325,
-          "rows": 299883284,
-          "peak_rss_kib": 730700,
-          "started_at": 1788397254.733814,
-          "ended_at": 1788397258.4300153
-        }
-      ],
-      "layers": {
-        "probed": {
-          "clusters/kmeans": {
-            "status": 200,
-            "keys_offered": 3,
-            "body": "{\"accepted\":1,\"over_bound\":0,\"over_bound_ids\":[],\"clipped\":0,\"tessera_ids\":[11345286899746314923],\"minted\":0}",
-            "withdrawn": 200,
-            "member_rows": 1009832
-          },
-          "mesh/descriptors": {
-            "status": 200,
-            "keys_offered": 3,
-            "body": "{\"accepted\":1,\"over_bound\":0,\"over_bound_ids\":[],\"clipped\":0,\"tessera_ids\":[13440812833481179860],\"minted\":0}",
-            "withdrawn": 200,
-            "member_rows": 46178538
-          }
-        },
-        "carried": [
-          "clusters/kmeans",
-          "mesh/descriptors"
-        ],
         "declined": {},
-        "hierarchy_kinds": {
-          "clusters/kmeans": "flat",
-          "mesh/descriptors": "dag"
-        }
+        "totals": {
+          "artifacts": 29272,
+          "members": 47178538,
+          "wall_s": 52.37,
+          "requests": 23,
+          "artifacts_per_s": 558.9,
+          "members_per_s": 900869.5
+        },
+        "edges_declared": 40075,
+        "edges_published": 40075
       },
-      "items_per_s": 31444.9,
+      "items_per_s": 173958.1,
       "accepted": 100000,
-      "ack_p50": 1299.6887,
-      "ack_p99": 2097.7826,
+      "ack_p50": 127.426,
+      "ack_p99": 285.1415,
       "statuses": {
         "200": 10
       },
-      "flush_s": 2.009,
-      "visibility_s": 4.787,
-      "fold_s": 1,
-      "fold_peak_rss": 1107095552,
+      "flush_s": 5.112,
+      "visibility_s": 0.014,
+      "fold_s": 11,
+      "fold_peak_rss": 2297307136,
       "equivalence": {
-        "equal": false,
+        "equal": true,
         "zoom0_equal": true,
         "boxes_equal": true,
-        "layers_equal": false,
-        "differences_by_surface": {
-          "layers": 1
-        },
-        "differences": [
-          {
-            "principal": "0.2500",
-            "where": "layers",
-            "folded": {
-              "5": [
-                {
-                  "rows": 5446
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
-            },
-            "all_in": {
-              "5": [
-                {
-                  "rows": 5445
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
-            }
-          }
-        ],
+        "layers_equal": true,
+        "differences_by_surface": {},
+        "differences": [],
         "frames": {
           "folded": {
             "x_max": 17.449042043685914,
@@ -27430,354 +26919,22 @@
           }
         ]
       },
-      "write_cycle": null
-    },
-    {
-      "fraction": 0.1,
-      "concurrency": 8,
-      "seed": 0,
-      "base_rows": 900000,
-      "holdout_rows": 100000,
-      "blocked": null,
-      "base_build": {
-        "wall_s": 19.52,
-        "returncode": 0,
-        "stdout": "built /home/joe/code/tessera/data/ladder/.measure/m1/base-0.1/bundle (v00000): 900000 items, 18 terms, 4141437 pairs, 299883028 bytes on disk, 0 artifact(s) minted, 0 unclustered member row(s)\n  view knn: 900000 row(s)\n",
-        "stderr_tail": "view 'knn': quantising against x [-12.541484279632568, 17.44895498275757], y [-13.982394618988037, 16.0080446434021]\n        the data spans x [-12.146526336669922, 17.053997039794922], y [-13.688370704650879, 15.714020729064941] \u2014 63810 x 64252 of the 65536 x 65536 cells\n        900000 point(s) placed, none on the frame's edge\nschema: 4 column(s), 8.00 B/row against the 12 B fixed row (+67%)\n        7.44 GiB per 10^9 items \u2014 unalterable without rewriting the corpus\n        every column materialises in EVERY view \u2014 including ones whose items carry no value for it (\u00a73.9). Per-view columns need contracts \u00a72.6's per-view enumeration\nstage       source_ids      0.03s  rows=900000       peak=    29 MiB\nstage       dictionary      0.71s  rows=18           peak=   115 MiB\nstage    geometry_read      0.47s  rows=900000       peak=   213 MiB\nstage       pairs_pack      0.00s  rows=4141437      peak=   213 MiB\nstage   signature_sort      0.12s  rows=900000       peak=   213 MiB\nstage       assignment      0.24s  rows=900000       peak=   213 MiB\nstage       assignment      0.02s  rows=900000       peak=   213 MiB\nstage   postings_write      0.11s  rows=4141437      peak=   213 MiB\nstage     external_ids      0.00s  rows=0            peak=   213 MiB\nattribute 'published': 899,312 of 900,000 entities have a value\nattribute 'title': 899,188 of 900,000 entities have a value\nattribute 'mesh_major': 760,256 of 900,000 entities have a value\nattribute 'pmid': 900,000 of 900,000 entities have a value\n        0 source row(s) named entities this build did not load\nstage   attribute_tail      0.43s  rows=900000       peak=   370 MiB\nstage           layers     10.86s  rows=2            peak=   589 MiB\nstage       text_index      1.56s  rows=256767       peak=   650 MiB\nstage  filter_postings      0.67s  rows=900000       peak=   650 MiB\nstage      record_blob      0.91s  rows=900000       peak=   650 MiB\nstage   column_release      0.02s  rows=900000       peak=   650 MiB\nstage       tiler_sort      0.02s  rows=900000       peak=   650 MiB\nstage    segment_write      0.06s  rows=900000       peak=   650 MiB\nartifact layouts, chosen from the bundle's own row space (3116 ms):\n  clusters/kmeans level 0 [knn]: 43 artifact(s) with rows, 0.744 everywhere, 2.5 blocks/artifact, disjoint \u2014 served rows\n  mesh/descriptors level 0 [knn]: 29139 artifact(s) with rows, 0.928 everywhere, 7.4 blocks/artifact, overlapping \u2014 served list\n  wrote 1 tile index(es), 1 row-major column(s), 2 containment partition(s), 0 shape row form(s), 0 decomposition file(s)\nstage        manifests      3.18s  rows=299883028    peak=   650 MiB\nview 'knn': 900000 point(s) landed in 898432 distinct cell(s) \u2014 99.8% of them have a position of their own\n",
-        "bundle_bytes": 299918551
-      },
-      "base_build_stages": [
-        {
-          "stage": "source_ids",
-          "wall_s": 0.031236958,
-          "rows": 900000,
-          "peak_rss_kib": 30464,
-          "started_at": 1788396474.7455115,
-          "ended_at": 1788396474.7767484
-        },
-        {
-          "stage": "dictionary",
-          "wall_s": 0.713427454,
-          "rows": 18,
-          "peak_rss_kib": 118636,
-          "started_at": 1788396474.776847,
-          "ended_at": 1788396475.4902744
-        },
-        {
-          "stage": "geometry_read",
-          "wall_s": 0.469471732,
-          "rows": 900000,
-          "peak_rss_kib": 218452,
-          "started_at": 1788396475.4903758,
-          "ended_at": 1788396475.9598475
-        },
-        {
-          "stage": "pairs_pack",
-          "wall_s": 1.014e-06,
-          "rows": 4141437,
-          "peak_rss_kib": 218452,
-          "started_at": 1788396475.9598901,
-          "ended_at": 1788396475.959891
-        },
-        {
-          "stage": "signature_sort",
-          "wall_s": 0.115559715,
-          "rows": 900000,
-          "peak_rss_kib": 218452,
-          "started_at": 1788396475.9599848,
-          "ended_at": 1788396476.0755446
-        },
-        {
-          "stage": "assignment",
-          "wall_s": 0.240248868,
-          "rows": 900000,
-          "peak_rss_kib": 218452,
-          "started_at": 1788396476.0756335,
-          "ended_at": 1788396476.3158824
-        },
-        {
-          "stage": "assignment",
-          "wall_s": 0.023998059,
-          "rows": 900000,
-          "peak_rss_kib": 218452,
-          "started_at": 1788396476.3159535,
-          "ended_at": 1788396476.3399515
-        },
-        {
-          "stage": "postings_write",
-          "wall_s": 0.106132607,
-          "rows": 4141437,
-          "peak_rss_kib": 218452,
-          "started_at": 1788396476.3400247,
-          "ended_at": 1788396476.4461572
-        },
-        {
-          "stage": "external_ids",
-          "wall_s": 3.51e-07,
-          "rows": 0,
-          "peak_rss_kib": 218452,
-          "started_at": 1788396476.4462059,
-          "ended_at": 1788396476.446206
-        },
-        {
-          "stage": "attribute_tail",
-          "wall_s": 0.434915774,
-          "rows": 900000,
-          "peak_rss_kib": 379556,
-          "started_at": 1788396476.4462652,
-          "ended_at": 1788396476.881181
-        },
-        {
-          "stage": "layers",
-          "wall_s": 10.863241166,
-          "rows": 2,
-          "peak_rss_kib": 604108,
-          "started_at": 1788396476.8813498,
-          "ended_at": 1788396487.744591
-        },
-        {
-          "stage": "text_index",
-          "wall_s": 1.562399823,
-          "rows": 256767,
-          "peak_rss_kib": 665976,
-          "started_at": 1788396488.4118893,
-          "ended_at": 1788396489.9742892
-        },
-        {
-          "stage": "filter_postings",
-          "wall_s": 0.667298712,
-          "rows": 900000,
-          "peak_rss_kib": 665976,
-          "started_at": 1788396489.3070304,
-          "ended_at": 1788396489.9743292
-        },
-        {
-          "stage": "record_blob",
-          "wall_s": 0.905346429,
-          "rows": 900000,
-          "peak_rss_kib": 665976,
-          "started_at": 1788396489.9744515,
-          "ended_at": 1788396490.879798
-        },
-        {
-          "stage": "column_release",
-          "wall_s": 0.022004949,
-          "rows": 900000,
-          "peak_rss_kib": 665976,
-          "started_at": 1788396490.879873,
-          "ended_at": 1788396490.9018779
-        },
-        {
-          "stage": "tiler_sort",
-          "wall_s": 0.021347209,
-          "rows": 900000,
-          "peak_rss_kib": 665976,
-          "started_at": 1788396490.9020438,
-          "ended_at": 1788396490.923391
-        },
-        {
-          "stage": "segment_write",
-          "wall_s": 0.062757325,
-          "rows": 900000,
-          "peak_rss_kib": 665976,
-          "started_at": 1788396490.9234884,
-          "ended_at": 1788396490.9862456
-        },
-        {
-          "stage": "manifests",
-          "wall_s": 3.175091558,
-          "rows": 299883028,
-          "peak_rss_kib": 665976,
-          "started_at": 1788396490.9863634,
-          "ended_at": 1788396494.161455
-        }
-      ],
-      "layers": {
-        "probed": {
-          "clusters/kmeans": {
-            "status": 200,
-            "keys_offered": 3,
-            "body": "{\"accepted\":1,\"over_bound\":0,\"over_bound_ids\":[],\"clipped\":0,\"tessera_ids\":[11345286899746314923],\"minted\":0}",
-            "withdrawn": 200,
-            "member_rows": 1009832
-          },
-          "mesh/descriptors": {
-            "status": 200,
-            "keys_offered": 3,
-            "body": "{\"accepted\":1,\"over_bound\":0,\"over_bound_ids\":[],\"clipped\":0,\"tessera_ids\":[13440812833481179860],\"minted\":0}",
-            "withdrawn": 200,
-            "member_rows": 46178538
-          }
-        },
-        "carried": [
-          "clusters/kmeans",
-          "mesh/descriptors"
-        ],
-        "declined": {}
-      },
-      "items_per_s": 39899.0,
-      "accepted": 100000,
-      "ack_p50": 1174.6911,
-      "ack_p99": 1517.0985,
-      "statuses": {
-        "200": 10
-      },
-      "flush_s": 1.506,
-      "visibility_s": 4.405,
-      "fold_s": 1,
-      "fold_peak_rss": 1153789952,
-      "equivalence": {
-        "equal": false,
-        "differences": [
-          {
-            "principal": "0.1000",
-            "where": "box 1 zoom 3",
-            "folded": 31271,
-            "all_in": 31269
-          },
-          {
-            "principal": "0.2500",
-            "where": "box 1 zoom 3",
-            "folded": 74310,
-            "all_in": 74307
-          },
-          {
-            "principal": "0.2500",
-            "where": "box 2 zoom 3",
-            "folded": 98367,
-            "all_in": 98370
-          },
-          {
-            "principal": "0.2500",
-            "where": "layers",
-            "folded": {
-              "5": [
-                {
-                  "rows": 5446
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
-            },
-            "all_in": {
-              "5": [
-                {
-                  "rows": 5445
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
-            }
-          },
-          {
-            "principal": "0.5000",
-            "where": "box 1 zoom 3",
-            "folded": 48730,
-            "all_in": 48723
-          },
-          {
-            "principal": "0.5000",
-            "where": "box 2 zoom 3",
-            "folded": 118498,
-            "all_in": 118496
-          },
-          {
-            "principal": "1.0000",
-            "where": "box 1 zoom 3",
-            "folded": 223739,
-            "all_in": 223729
-          },
-          {
-            "principal": "1.0000",
-            "where": "box 2 zoom 3",
-            "folded": 375358,
-            "all_in": 375363
-          }
-        ],
-        "ladder": [
-          {
-            "target": 0.01,
-            "terms": [
-              "K",
-              "V"
-            ]
-          },
-          {
-            "target": 0.05,
-            "terms": [
-              "K",
-              "V"
-            ]
-          },
-          {
-            "target": 0.1,
-            "terms": [
-              "L",
-              "V"
-            ]
-          },
-          {
-            "target": 0.25,
-            "terms": [
-              "L",
-              "V",
-              "unindexed"
-            ]
-          },
-          {
-            "target": 0.5,
-            "terms": [
-              "C",
-              "K",
-              "V"
-            ]
-          },
-          {
-            "target": 1.0,
-            "terms": [
-              "A",
-              "B",
-              "C",
-              "D",
-              "E",
-              "F",
-              "G",
-              "H",
-              "I",
-              "J",
-              "K",
-              "L",
-              "M",
-              "N",
-              "V",
-              "Z",
-              "unindexed"
-            ]
-          }
-        ]
-      },
       "write_cycle": {
         "n": 1000,
         "visible_before": 1000000,
         "delete": {
           "status": 200,
           "body": null,
-          "wall_s": 0.025,
-          "visibility_s": 2.963,
+          "wall_s": 0.016,
+          "visibility_s": 0.008,
           "visibility_reached": true,
           "visible_after": 999000
         },
         "suppress": {
           "status": 200,
           "body": null,
-          "wall_s": 0.017,
-          "visibility_s": 3.012,
+          "wall_s": 0.014,
+          "visibility_s": 0.006,
           "visibility_reached": true,
           "visible_after": 998000
         },
@@ -27786,16 +26943,16 @@
           "rows_offered": 1000,
           "accepted": 1000,
           "minted": 0,
-          "wall_s": 0.09,
-          "items_per_s": 10802.2,
+          "wall_s": 0.01,
+          "items_per_s": 76026.6,
           "ack_ms": {
-            "p25": 81.9561,
-            "p50": 81.9561,
-            "p75": 81.9561,
-            "p95": 81.9561,
-            "p99": 81.9561,
-            "max": 81.9561,
-            "mean": 81.9561,
+            "p25": 11.4432,
+            "p50": 11.4432,
+            "p75": 11.4432,
+            "p95": 11.4432,
+            "p99": 11.4432,
+            "max": 11.4432,
+            "mean": 11.4432,
             "n": 1
           },
           "statuses": {
@@ -27806,7 +26963,7 @@
           "completed": true,
           "observed_s": 6.02,
           "fold_s": 1,
-          "fold_peak_rss_bytes": 1279430656
+          "fold_peak_rss_bytes": 2488844288
         },
         "visible_after_cycle": 999000,
         "overlay": {
@@ -27823,368 +26980,216 @@
       "base_rows": 0,
       "holdout_rows": 1000000,
       "blocked": null,
-      "content_removed": [
-        {
-          "layer": "clusters/kmeans",
-          "source": "kmeans",
-          "kind": "topic",
-          "roster": "clusters-kmeans.parquet"
-        }
-      ],
       "base_build": {
-        "wall_s": 0.68,
+        "wall_s": 0.13,
         "returncode": 0,
-        "stdout": "built /home/joe/code/tessera/data/ladder/.measure/empty-bundle/base-1/bundle (v00000): 0 items, 1 terms, 0 pairs, 2858636 bytes on disk, 0 artifact(s) minted, 0 unclustered member row(s)\n  view knn: 0 row(s)\n",
-        "stderr_tail": "view 'knn': quantising against x [-12.541571340560914, 17.449042043685914], y [-13.982567033767701, 16.008046350479127]\n        the source selects no rows, so nothing was placed\nschema: 4 column(s), 8.00 B/row against the 12 B fixed row (+67%)\n        7.44 GiB per 10^9 items \u2014 unalterable without rewriting the corpus\n        every column materialises in EVERY view \u2014 including ones whose items carry no value for it (\u00a73.9). Per-view columns need contracts \u00a72.6's per-view enumeration\nstage       source_ids      0.00s  rows=0            peak=    12 MiB\nstage       dictionary      0.00s  rows=1            peak=    13 MiB\nstage    geometry_read      0.00s  rows=0            peak=    13 MiB\nstage       pairs_pack      0.00s  rows=0            peak=    13 MiB\nstage       assignment      0.01s  rows=0            peak=    13 MiB\nstage   postings_write      0.00s  rows=0            peak=    14 MiB\nstage     external_ids      0.00s  rows=0            peak=    14 MiB\nattribute 'published': 0 of 0 entities have a value\nattribute 'title': 0 of 0 entities have a value\nattribute 'mesh_major': 0 of 0 entities have a value\nattribute 'pmid': 0 of 0 entities have a value\n        0 source row(s) named entities this build did not load\nstage   attribute_tail      0.00s  rows=0            peak=    14 MiB\nstage           layers      0.30s  rows=2            peak=    87 MiB\nstage       text_index      0.01s  rows=0            peak=    87 MiB\nstage  filter_postings      0.01s  rows=0            peak=    87 MiB\nstage      record_blob      0.00s  rows=0            peak=    87 MiB\nstage   column_release      0.00s  rows=0            peak=    87 MiB\nstage       tiler_sort      0.00s  rows=0            peak=    87 MiB\nstage    segment_write      0.00s  rows=0            peak=    87 MiB\nartifact layouts, chosen from the bundle's own row space (300 ms):\n  clusters/kmeans level 0 [knn]: 0 artifact(s) with rows, 0.000 everywhere, 0.0 blocks/artifact, disjoint \u2014 served rows\n  mesh/descriptors level 0 [knn]: 0 artifact(s) with rows, 0.000 everywhere, 0.0 blocks/artifact, disjoint \u2014 served rows\n  wrote 2 tile index(es), 0 row-major column(s), 2 containment partition(s), 0 shape row form(s), 0 decomposition file(s)\nstage        manifests      0.31s  rows=2858636      peak=    87 MiB\nview 'knn': 0 point(s) landed in 0 distinct cell(s) \u2014 100.0% of them have a position of their own\n",
-        "bundle_bytes": 2892661
+        "stdout": "built /tmp/aotw-1m/base-1/bundle (v00000): 0 items, 1 terms, 0 pairs, 10971 bytes on disk, 0 artifact(s) minted, 0 unclustered member row(s)\n  view knn: 0 row(s)\n",
+        "stderr_tail": "view 'knn': quantising against x [-12.541571340560914, 17.449042043685914], y [-13.982567033767701, 16.008046350479127]\n        the source selects no rows, so nothing was placed\nschema: 4 column(s), 8.00 B/row against the 12 B fixed row (+67%)\n        7.44 GiB per 10^9 items \u2014 unalterable without rewriting the corpus\n        every column materialises in EVERY view \u2014 including ones whose items carry no value for it (\u00a73.9). Per-view columns need contracts \u00a72.6's per-view enumeration\nstage       source_ids      0.00s  rows=0            peak=    12 MiB\nstage       dictionary      0.01s  rows=1            peak=    12 MiB\nstage    geometry_read      0.00s  rows=0            peak=    12 MiB\nstage       pairs_pack      0.00s  rows=0            peak=    12 MiB\nstage       assignment      0.01s  rows=0            peak=    13 MiB\nstage   postings_write      0.01s  rows=0            peak=    14 MiB\nstage     external_ids      0.01s  rows=0            peak=    14 MiB\nattribute 'published': 0 of 0 entities have a value\nattribute 'title': 0 of 0 entities have a value\nattribute 'mesh_major': 0 of 0 entities have a value\nattribute 'pmid': 0 of 0 entities have a value\n        0 source row(s) named entities this build did not load\nstage   attribute_tail      0.00s  rows=0            peak=    14 MiB\nstage           layers      0.00s  rows=2            peak=    14 MiB\nstage       text_index      0.02s  rows=0            peak=    14 MiB\nstage  filter_postings      0.02s  rows=0            peak=    14 MiB\nstage      record_blob      0.01s  rows=0            peak=    15 MiB\nstage   column_release      0.00s  rows=0            peak=    15 MiB\nstage       tiler_sort      0.00s  rows=0            peak=    15 MiB\nstage    segment_write      0.01s  rows=0            peak=    15 MiB\nstage        manifests      0.01s  rows=10971        peak=    23 MiB\nview 'knn': 0 point(s) landed in 0 distinct cell(s) \u2014 100.0% of them have a position of their own\n",
+        "bundle_bytes": 24031
       },
       "base_build_stages": [
         {
           "stage": "source_ids",
-          "wall_s": 0.000126595,
+          "wall_s": 0.000148764,
           "rows": 0,
-          "peak_rss_kib": 13256,
-          "started_at": 1788420477.6557598,
-          "ended_at": 1788420477.6558864
+          "peak_rss_kib": 13096,
+          "started_at": 1788424941.764737,
+          "ended_at": 1788424941.7648857
         },
         {
           "stage": "dictionary",
-          "wall_s": 0.003909475,
+          "wall_s": 0.006111396,
           "rows": 1,
-          "peak_rss_kib": 13384,
-          "started_at": 1788420477.6559606,
-          "ended_at": 1788420477.6598701
+          "peak_rss_kib": 13160,
+          "started_at": 1788424941.7650363,
+          "ended_at": 1788424941.7711477
         },
         {
           "stage": "geometry_read",
-          "wall_s": 0.000754867,
+          "wall_s": 0.00070119,
           "rows": 0,
-          "peak_rss_kib": 13384,
-          "started_at": 1788420477.659949,
-          "ended_at": 1788420477.660704
+          "peak_rss_kib": 13160,
+          "started_at": 1788424941.7712266,
+          "ended_at": 1788424941.7719278
         },
         {
           "stage": "pairs_pack",
-          "wall_s": 1.116e-06,
+          "wall_s": 1.46e-06,
           "rows": 0,
-          "peak_rss_kib": 13384,
-          "started_at": 1788420477.6607792,
-          "ended_at": 1788420477.6607804
+          "peak_rss_kib": 13160,
+          "started_at": 1788424941.772007,
+          "ended_at": 1788424941.7720084
         },
         {
           "stage": "assignment",
-          "wall_s": 0.005707991,
+          "wall_s": 0.012030452,
           "rows": 0,
-          "peak_rss_kib": 13644,
-          "started_at": 1788420477.6608636,
-          "ended_at": 1788420477.6665716
+          "peak_rss_kib": 13416,
+          "started_at": 1788424941.772132,
+          "ended_at": 1788424941.7841623
         },
         {
           "stage": "postings_write",
-          "wall_s": 0.004565682,
+          "wall_s": 0.012330394,
           "rows": 0,
-          "peak_rss_kib": 14780,
-          "started_at": 1788420477.6666594,
-          "ended_at": 1788420477.671225
+          "peak_rss_kib": 14556,
+          "started_at": 1788424941.784475,
+          "ended_at": 1788424941.7968054
         },
         {
           "stage": "external_ids",
-          "wall_s": 1.44e-07,
+          "wall_s": 0.009982298,
           "rows": 0,
-          "peak_rss_kib": 14784,
-          "started_at": 1788420477.6712894,
-          "ended_at": 1788420477.6712897
+          "peak_rss_kib": 14624,
+          "started_at": 1788424941.7969081,
+          "ended_at": 1788424941.8068905
         },
         {
           "stage": "attribute_tail",
-          "wall_s": 0.001785502,
+          "wall_s": 0.001891433,
           "rows": 0,
-          "peak_rss_kib": 14800,
-          "started_at": 1788420477.6713474,
-          "ended_at": 1788420477.673133
+          "peak_rss_kib": 14696,
+          "started_at": 1788424941.806965,
+          "ended_at": 1788424941.8088565
         },
         {
           "stage": "layers",
-          "wall_s": 0.303693468,
+          "wall_s": 0.003907284,
           "rows": 2,
-          "peak_rss_kib": 89932,
-          "started_at": 1788420477.673245,
-          "ended_at": 1788420477.9769385
+          "peak_rss_kib": 15080,
+          "started_at": 1788424941.8089635,
+          "ended_at": 1788424941.8128707
         },
         {
           "stage": "text_index",
-          "wall_s": 0.00618716,
+          "wall_s": 0.021941803,
           "rows": 0,
-          "peak_rss_kib": 89932,
-          "started_at": 1788420477.9838934,
-          "ended_at": 1788420477.9900806
+          "peak_rss_kib": 15300,
+          "started_at": 1788424941.8282144,
+          "ended_at": 1788424941.8501563
         },
         {
           "stage": "filter_postings",
-          "wall_s": 0.006954716,
+          "wall_s": 0.015343699,
           "rows": 0,
-          "peak_rss_kib": 89932,
-          "started_at": 1788420477.9831848,
-          "ended_at": 1788420477.9901395
+          "peak_rss_kib": 15300,
+          "started_at": 1788424941.8348784,
+          "ended_at": 1788424941.850222
         },
         {
           "stage": "record_blob",
-          "wall_s": 0.004781741,
+          "wall_s": 0.013577568,
           "rows": 0,
-          "peak_rss_kib": 89932,
-          "started_at": 1788420477.990239,
-          "ended_at": 1788420477.9950206
+          "peak_rss_kib": 15556,
+          "started_at": 1788424941.8503141,
+          "ended_at": 1788424941.8638916
         },
         {
           "stage": "column_release",
-          "wall_s": 9.3571e-05,
+          "wall_s": 5.7017e-05,
           "rows": 0,
-          "peak_rss_kib": 89932,
-          "started_at": 1788420477.995093,
-          "ended_at": 1788420477.9951866
+          "peak_rss_kib": 15556,
+          "started_at": 1788424941.863964,
+          "ended_at": 1788424941.864021
         },
         {
           "stage": "tiler_sort",
-          "wall_s": 0.001535602,
+          "wall_s": 0.001355314,
           "rows": 0,
-          "peak_rss_kib": 89932,
-          "started_at": 1788420477.9952636,
-          "ended_at": 1788420477.9967992
+          "peak_rss_kib": 15556,
+          "started_at": 1788424941.8641124,
+          "ended_at": 1788424941.8654678
         },
         {
           "stage": "segment_write",
-          "wall_s": 0.004721974,
+          "wall_s": 0.006175392,
           "rows": 0,
-          "peak_rss_kib": 89932,
-          "started_at": 1788420477.9968798,
-          "ended_at": 1788420478.0016017
+          "peak_rss_kib": 15620,
+          "started_at": 1788424941.8655682,
+          "ended_at": 1788424941.8717434
         },
         {
           "stage": "manifests",
-          "wall_s": 0.308166465,
-          "rows": 2858636,
-          "peak_rss_kib": 89932,
-          "started_at": 1788420478.0016904,
-          "ended_at": 1788420478.309857
+          "wall_s": 0.009803073,
+          "rows": 10971,
+          "peak_rss_kib": 23732,
+          "started_at": 1788424941.8718388,
+          "ended_at": 1788424941.8816419
         }
       ],
-      "layers": {
-        "probed": {
+      "publish": {
+        "layers": {
           "clusters/kmeans": {
-            "status": 200,
-            "keys_offered": 3,
-            "body": "{\"accepted\":1,\"over_bound\":0,\"over_bound_ids\":[],\"clipped\":0,\"tessera_ids\":[13900308031199380834],\"minted\":0}",
-            "withdrawn": 200,
-            "member_rows": 1009832
+            "artifacts": 43,
+            "members": 1000000,
+            "generating_set_entries": 9832,
+            "edges_declared": 0,
+            "edges_in_roster_and_layer": 0,
+            "artifacts_with_several_parents": 0,
+            "requests": 1,
+            "prepared_s": 0.12,
+            "wall_s": 0.76,
+            "published_artifacts": 43,
+            "published_members": 1000000,
+            "edges_published": 0,
+            "artifacts_per_s": 56.2,
+            "members_per_s": 1307737.3,
+            "statuses": {
+              "201": 1
+            },
+            "first_refusal": null
           },
           "mesh/descriptors": {
-            "status": 200,
-            "keys_offered": 3,
-            "body": "{\"accepted\":1,\"over_bound\":0,\"over_bound_ids\":[],\"clipped\":0,\"tessera_ids\":[83581130202747291],\"minted\":0}",
-            "withdrawn": 200,
-            "member_rows": 46178538
+            "artifacts": 29229,
+            "members": 46178538,
+            "generating_set_entries": 0,
+            "edges_declared": 40075,
+            "edges_in_roster_and_layer": 40075,
+            "artifacts_with_several_parents": 8881,
+            "requests": 22,
+            "prepared_s": 15.1,
+            "wall_s": 26.02,
+            "published_artifacts": 29229,
+            "published_members": 46178538,
+            "edges_published": 40075,
+            "artifacts_per_s": 1123.1,
+            "members_per_s": 1774440.8,
+            "statuses": {
+              "201": 22
+            },
+            "first_refusal": null
           }
         },
-        "carried": [
-          "clusters/kmeans"
-        ],
-        "declined": {
-          "mesh/descriptors": "declared `kind = \"dag\"`, whose membership cell is a lineage; this rung's points are in several unrelated artifacts each, which a lineage cannot express and which a `dag` would absorb as new parent edges"
+        "declined": {},
+        "totals": {
+          "artifacts": 29272,
+          "members": 47178538,
+          "wall_s": 26.79,
+          "requests": 23,
+          "artifacts_per_s": 1092.6,
+          "members_per_s": 1761050.3
         },
-        "hierarchy_kinds": {
-          "clusters/kmeans": "flat",
-          "mesh/descriptors": "dag"
-        }
+        "edges_declared": 40075,
+        "edges_published": 40075
       },
-      "items_per_s": 53498.9,
+      "items_per_s": 50465.6,
       "accepted": 1000000,
-      "ack_p50": 1381.3738,
-      "ack_p99": 3662.3413,
+      "ack_p50": 1451.9983,
+      "ack_p99": 3535.7304,
       "statuses": {
         "200": 100
       },
-      "flush_s": 19.079,
-      "visibility_s": 0.031,
+      "flush_s": 109.485,
+      "visibility_s": 0.024,
       "fold_s": 1,
-      "fold_peak_rss": 1853607936,
+      "fold_peak_rss": 2720534528,
       "equivalence": {
-        "equal": false,
+        "equal": true,
         "zoom0_equal": true,
         "boxes_equal": true,
-        "layers_equal": false,
-        "differences_by_surface": {
-          "layers": 6
-        },
-        "differences": [
-          {
-            "principal": "0.0100",
-            "where": "layers",
-            "folded": {
-              "5": [
-                {
-                  "rows": 32
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
-            },
-            "all_in": {
-              "5": [
-                {
-                  "rows": 1926
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
-            }
-          },
-          {
-            "principal": "0.0500",
-            "where": "layers",
-            "folded": {
-              "5": [
-                {
-                  "rows": 32
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
-            },
-            "all_in": {
-              "5": [
-                {
-                  "rows": 1926
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
-            }
-          },
-          {
-            "principal": "0.1000",
-            "where": "layers",
-            "folded": {
-              "5": [
-                {
-                  "rows": 32
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
-            },
-            "all_in": {
-              "5": [
-                {
-                  "rows": 5445
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
-            }
-          },
-          {
-            "principal": "0.2500",
-            "where": "layers",
-            "folded": {
-              "5": [
-                {
-                  "rows": 37
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
-            },
-            "all_in": {
-              "5": [
-                {
-                  "rows": 5445
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
-            }
-          },
-          {
-            "principal": "0.5000",
-            "where": "layers",
-            "folded": {
-              "5": [
-                {
-                  "rows": 35
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
-            },
-            "all_in": {
-              "5": [
-                {
-                  "rows": 12657
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
-            }
-          },
-          {
-            "principal": "1.0000",
-            "where": "layers",
-            "folded": {
-              "5": [
-                {
-                  "rows": 39
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
-            },
-            "all_in": {
-              "5": [
-                {
-                  "rows": 16102
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
-            }
-          }
-        ],
+        "layers_equal": true,
+        "differences_by_surface": {},
+        "differences": [],
         "frames": {
           "folded": {
             "x_max": 17.449042043685914,
@@ -28262,15 +27267,67 @@
           }
         ]
       },
-      "write_cycle": null
+      "write_cycle": {
+        "n": 1000,
+        "visible_before": 1000000,
+        "delete": {
+          "status": 200,
+          "body": null,
+          "wall_s": 0.014,
+          "visibility_s": 0.019,
+          "visibility_reached": true,
+          "visible_after": 999000
+        },
+        "suppress": {
+          "status": 200,
+          "body": null,
+          "wall_s": 0.024,
+          "visibility_s": 0.012,
+          "visibility_reached": true,
+          "visible_after": 998000
+        },
+        "reingest": {
+          "batches": 1,
+          "rows_offered": 1000,
+          "accepted": 1000,
+          "minted": 0,
+          "wall_s": 0.03,
+          "items_per_s": 29822.0,
+          "ack_ms": {
+            "p25": 25.806,
+            "p50": 25.806,
+            "p75": 25.806,
+            "p95": 25.806,
+            "p99": 25.806,
+            "max": 25.806,
+            "mean": 25.806,
+            "n": 1
+          },
+          "statuses": {
+            "200": 1
+          }
+        },
+        "fold": {
+          "completed": true,
+          "observed_s": 7.02,
+          "fold_s": 2,
+          "fold_peak_rss_bytes": 2826506240
+        },
+        "visible_after_cycle": 999000,
+        "overlay": {
+          "depth": 1000,
+          "retirable": 0,
+          "soft_limit_alarms": 0
+        }
+      }
     }
   ],
   "notes": [
     "The proving rung for the measurement drivers, not a ladder rung: a 10^6-row sample of MedCPT (test_corpora/medcpt/prepare.py --sample 1000000). Committed as measurements-medcpt-1m.json rather than as a rung's own measurements.json, so the campaign table does not list it.",
     "The capped run is 512 MiB, not half the bundle: half of 318 MB is below the engine's own per-process floor and no run would start. It was OOM-killed at the 25% principal; the three principals below it are complete and 'died' carries the cgroup's own oom_kill count.",
-    "Four ingest cells: three at f=10% under three declarations (auto extent with the DAG layer carried, the all-in frame stated with it carried, the all-in frame stated with it declined), and f=100% - the whole corpus ingested into a bundle with no points, which the build's zero-item refusal blocked until 2026-09-03 (decision 0091). That cell's base_build figures are a build over nothing; its 'content_removed' says which supplied content kind an empty base cannot carry, and its layers difference is the declined mesh/descriptors layer plus that kind, not the write path.",
     "The uncapped battery overlapped the 3.6e7 base build of the ingest spectrum from 03:43; its cold figures are upper bounds.",
-    "The f=100% cell was taken with the build/empty-bundle binary; every other figure in this file is from 703cfaa7.",
-    "Superseded for the DAG layer (2026-09-03): the 'declined' entries under `layers` predate decision 0125, under which a `dag` list is plain multi-membership; `mesh/descriptors` is now carried at ingest from a column of the same name on points.parquet, and a rerun would carry it by default."
+    "Two ingest cells, both re-measured on 2026-09-03 under the ruling that everything is ingested after the build: the base bundle carries the built fraction's points and every layer's declaration, and both layers' artifacts, memberships, ranked content, generating sets and parent lists are published through /control/layers/{name}/artifacts after the hold-out is in. Equivalence is exact at both fractions on every surface, the per-layer artifact and masked-count census included.",
+    "The cells before this one are not in the file: they measured a driver that built the base with the rung's artifact roster and grew memberships from an ingest batch's column, which is a different experiment. Their figures are in git history and in the DAG handover memo.",
+    "Every figure in this file's ingest cells is from 2af9cc8b, which is also the first binary whose publication route carries an artifact's `parent` list (decision 0125) and whose body cap on that route is stated rather than inherited. The build and serve blocks are unchanged from the earlier collation and were taken with 703cfaa7."
   ]
 }

@@ -266,7 +266,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route(
             "/control/layers/{name}/artifacts",
-            axum::routing::put(publish_artifacts),
+            // **Not the inherited 2 MiB default** — see [`PUBLISH_MAX_BODY_BYTES`]. A membership is
+            // as large as the artifact is, and the batch is the commit unit, so a single artifact
+            // over the cap has no smaller spelling.
+            axum::routing::put(publish_artifacts)
+                .layer(axum::extract::DefaultBodyLimit::max(PUBLISH_MAX_BODY_BYTES)),
         );
     // The faults build's arming surface (decision 0071) — absent from a default build rather
     // than mounted and refusing, and above the credential layer below like every other route.
@@ -462,6 +466,21 @@ pub const CONTROL_PLANE_ROUTES: &[(&str, &str)] = &[
 const INGEST_BUFFER_FULL_RETRY_AFTER_S: u64 = 90;
 
 const CHANGES_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+
+/// The publication route's own body cap.
+///
+/// **A publication is corpus-sized where a declaration and a change list are not**, which is why it
+/// does not inherit axum's 2 MiB default the way `PUT /control/layers` does. One artifact's
+/// `members` is its whole membership and the batch is the commit unit, so an artifact larger than
+/// the cap cannot be split across two requests — it is published entire or not at all. Measured on
+/// the campaign's MedCPT rung: the largest MeSH descriptor over 10⁶ articles holds 756,640 members,
+/// ~11 MB of base64 external ids, and under the inherited default it was unpublishable at any batch
+/// size. 64 MiB carries that with room and is still a bounded buffer.
+///
+/// Stated here rather than inherited so the refusal can name a number that is true, and mapped to
+/// 422 for [`ingest`]'s reason: axum's own rejection is a **413**, which is outside contracts
+/// §3.1's closed code list.
+const PUBLISH_MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     headers
@@ -2765,6 +2784,20 @@ struct IncomingArtifactBody {
     /// stop serving on every route, the ones that traverse no edge included.
     #[serde(default)]
     attached_to: Option<AttachmentBody>,
+    /// This artifact's parents in its layer's hierarchy, **each named by the parent's own key** —
+    /// the artifact row's `parent` column, which is where a `dag` layer's edges are spelled and the
+    /// only place they are ([decision 0125](../../../docs/decisions/0125-a-dag-list-column-is-membership-not-lineage.md)).
+    ///
+    /// Empty at a root. At most one on a `nested` or `tiered` layer, which refuse a second; as many
+    /// as the child sits beneath on a `dag` layer, where a key named twice is one edge
+    /// (`dag-hierarchies.md` §4). By key rather than by ordinal for [`AttachmentBody`]'s reason: a
+    /// publication answers with a `tessera_id` and never a position in a level (C8), so a key is
+    /// the only address a caller holds. The parent must already exist or be **earlier in this same
+    /// batch** — `LayerRegistry::prepare_publish` resolves a sibling's ordinal — which is the
+    /// parent-before-child ordering an edge has always carried
+    /// (`annotation-representation.md` §5.0.4).
+    #[serde(default)]
+    parent: Vec<String>,
     /// The artifact's shape, in its layer's kind's field and no other — the same row shape the
     /// build reads (decision 0091; `polygon-membership.md` §6.1, §6.4): `bbox = [min_x, min_y,
     /// max_x, max_y]`, `circle = [cx, cy, r]`, `ellipse = [cx, cy, a, b, angle]`, or `wkt`.
@@ -3021,8 +3054,28 @@ struct IncomingContentBody {
 async fn publish_artifacts(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
-    body: Json<PublishBody>,
+    body: Result<Json<PublishBody>, axum::extract::rejection::JsonRejection>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    // Contracts §3.1's 422 row is "malformed request, **bounds exceeded**", and a `JsonRejection`
+    // is one or the other. Branched on the rejection's own status rather than collapsed, on
+    // [`ingest`]'s argument: a caller whose 4 KB body was truncated mid-upload must not be told to
+    // publish fewer artifacts. The rejection's `Display` is not forwarded (this module's rule).
+    let body = body.map_err(|rejection| {
+        if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            ApiError::Contract(format!(
+                "the publication body exceeds the {PUBLISH_MAX_BODY_BYTES}-byte per-request cap; \
+                 refused before decoding, so it allocated no ordinal and appended nothing. Send \
+                 fewer artifacts per request — but a single artifact's membership has no smaller \
+                 spelling, the batch being the commit unit"
+            ))
+        } else {
+            ApiError::Contract(
+                "the publication body is not the JSON this route takes, or the connection failed \
+                 mid-upload. Nothing was decoded, allocated or appended"
+                    .to_string(),
+            )
+        }
+    })?;
     let PublishBody {
         level,
         addressing,
@@ -3231,6 +3284,7 @@ async fn publish_artifacts(
                 ),
             };
             incoming.shape = shape;
+            incoming.parent_keys = artifact.parent;
             incoming
         })
         .collect();
