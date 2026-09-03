@@ -586,7 +586,9 @@ action is a memtest (§8), not more detection machinery.
 
 All figures **local NVMe on this box** (WSL2, 12 cores, 47 GB, one RTX 3080) unless the medium says
 otherwise. The rung is [`../test_corpora/paperseek/`](../test_corpora/paperseek/README.md), which
-carries the per-step tables; this section is what the campaign takes from it.
+carries the per-step tables, and the raw output is
+[`../probes/2026-09-03-rung-4-build-stall/`](../probes/2026-09-03-rung-4-build-stall/README.md);
+this section is what the campaign takes from them.
 
 **The rung was chosen to put a bundle past the box's memory**, and nothing in the declaration was
 trimmed to make it fit — the abstracts are 118.9 GB of characters uncompressed and are indexed as

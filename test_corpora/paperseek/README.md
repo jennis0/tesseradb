@@ -127,6 +127,10 @@ one has 10⁸ membership rows and a few hundred ranked generating-set rows in th
 
 ## Measured
 
+**The raw output is [`../../probes/2026-09-03-rung-4-build-stall/`](../../probes/2026-09-03-rung-4-build-stall/README.md)**
+— every log, every RSS and fault sample, and the four drive results — because the headline here is a
+negative one, and a negative result that cannot be re-read is an assertion.
+
 All figures **local NVMe on this box** (WSL2, 12 cores, 47 GB, one RTX 3080) unless the medium says
 otherwise. The staging pass is the one **network-source** figure.
 
