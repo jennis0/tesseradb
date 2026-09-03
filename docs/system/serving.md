@@ -9,7 +9,7 @@ how quickly a change to the corpus becomes visible.
 ## How a response is delivered
 
 A viewport response arrives as a sequence of frames rather than as one block: counts first, then
-points as they are found, then a trailer. A client can start drawing from the counts and the first
+artifacts and points as they are found, then a trailer. A client can start drawing from the counts and the first
 points before the rest of the answer has been computed, rather than waiting for the whole response
 to finish.
 
@@ -29,6 +29,7 @@ client reads them; only a response that reaches its trailer is complete.*
 |---|---|---|
 | counts | a count for every tile the request named | exactly one, sent first |
 | density | a count for each of a tile's [finer cells](queries.md#the-viewport), where a request asked for them | one, only when asked for |
+| artifacts | one row per served artifact of the layers the request named | one, only when layers are named |
 | points | a chunk of the matched points from one or more tiles | zero or more |
 | trailer | how many points were served in total, marking the response complete | exactly one, sent last |
 
@@ -135,9 +136,6 @@ request may echo that name back. The name never decides what the server answers 
 or a suppression applies to every request from the moment it is accepted, whatever generation a
 request names.
 
-What that means for a session's own kept copies follows the rule above: an ordinary change reaches
-them on the next background pass without a session doing anything, and a merge or a rewrite of the
-corpus empties them, so the next request from that session starts again from nothing.
 
 ## Serving other map stacks
 
@@ -173,12 +171,8 @@ operations that hide items regardless, because a hidden item cannot wait for a r
 
 ## What is not built
 
-Three things named above are designed but not built: caching a filter's own result apart from the
-viewport that used it, letting a client declare anything finer than a tile being absent from its
-request, and turning a tile address into a shared evaluation for tools that address the map that
-way. No replica of any kind exists either: everything in this chapter, including what a session
-already has cached and how fresh an answer is, is a property of the one process holding the
-corpus, not of a deployment.
+No replica of any kind exists. What a session has cached and how fresh an answer is are properties
+of the one process holding the corpus.
 
 ## Where this is tested and where it lives
 
