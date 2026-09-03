@@ -53,6 +53,11 @@ import pyarrow.parquet as pq
 import requests
 from pyarrow import ipc
 
+try:  # 3.11+
+    import tomllib
+except ModuleNotFoundError:  # 3.10 on this box
+    import tomli as tomllib
+
 from . import serve_battery
 from .deployment import Deployment
 
@@ -88,6 +93,10 @@ def in_sorted(values: np.ndarray, sorted_ids: np.ndarray) -> np.ndarray:
     rows and the other 3.6×10⁷, so the pass is done a row group at a time against a sorted array
     instead.
     """
+    if len(sorted_ids) == 0:
+        # The f = 1.0 cell: nothing is kept for the base at all. An empty `keep` is a real case
+        # and the whole point of that cell — a build over a zero-row points file.
+        return np.zeros(len(values), dtype=bool)
     idx = np.searchsorted(sorted_ids, values)
     idx[idx >= len(sorted_ids)] = 0
     return sorted_ids[idx] == values
@@ -118,6 +127,46 @@ def filter_parquet(source: Path, out: Path, column: str, keep: np.ndarray) -> in
     if writer is None:  # an empty source still needs a file with the right schema
         pq.write_table(reader.schema_arrow.empty_table(), out)
     return kept
+
+
+def state_extent(corpus_toml: Path, bundle: Path, view: str | None = None) -> dict | None:
+    """Rewrite the declaration's `extent = "auto"` as the all-in bundle's own frame.
+
+    Two things follow from `auto`, and both are properties of the *frame* rather than of ingest:
+
+    * **A zero-row build is refused.** `auto` fits a box around the data, and there is no box
+      around no rows — the refusal says so and names this remedy. So the *f* = 100% cell cannot
+      run at all under `auto`, and a deployment starting empty must state its frame.
+    * **A complement build quantises onto a different grid.** The frame is fitted to the rows the
+      build saw, so a base built from 90% of the corpus has a slightly smaller box, and the two
+      deployments' cells do not line up. Every box-level count then differs at the margins for a
+      reason that has nothing to do with the write path.
+
+    Stating the all-in frame removes both. It is a change to the *declaration the measurement
+    builds from*, never to the rung's committed one, and the run records that it was made.
+    """
+    manifest = json.loads((bundle / "CURRENT").read_text()) if (bundle / "CURRENT").is_file() else None
+    version = manifest if isinstance(manifest, str) else None
+    candidates = sorted(bundle.glob("v*/MANIFEST.json"))
+    if not candidates:
+        return None
+    meta = json.loads(candidates[-1].read_text())
+    views = meta["views"]
+    chosen = next((v for v in views if v["id"] == view), views[0])
+    q = chosen["quantisation"]
+    text = corpus_toml.read_text()
+    stated = (
+        f'extent           = {{ x = [{q["x_min"]!r}, {q["x_max"]!r}], '
+        f'y = [{q["y_min"]!r}, {q["y_max"]!r}] }}'
+    )
+    if 'extent           = "auto"' in text:
+        text = text.replace('extent           = "auto"', stated)
+    elif 'extent = "auto"' in text:
+        text = text.replace('extent = "auto"', stated.replace("extent           =", "extent ="))
+    else:
+        return None
+    corpus_toml.write_text(text)
+    return {"view": chosen["id"], "quantisation": q, "from_version": version}
 
 
 def write_base_inputs(rung: Path, out: Path, base_ids: np.ndarray) -> dict:
@@ -516,6 +565,11 @@ class Cycle:
             shutil.rmtree(base_dir)
         self.log(f"splitting: base {len(base_ids):,} rows, hold-out {len(held):,} rows")
         write_base_inputs(self.rung, base_dir, base_ids)
+        if self.args.state_extent:
+            self.result["stated_extent"] = state_extent(
+                base_dir / "corpus.toml", self.rung / "bundle"
+            )
+            self.log(f"stated the all-in frame in the base declaration: {self.result['stated_extent']}")
         stages = base_dir / "stage-timings.json"
         t0 = time.perf_counter()
         # **A zero-row base is a real case and it is the point of the f = 1.0 cell**: nothing is
@@ -714,6 +768,11 @@ class Cycle:
         report the difference rather than have it hidden by a driver that quietly filled it in.
         """
         out: dict = {"probed": {}, "carried": [], "declined": {}}
+        declared = {
+            layer["name"]: layer.get("hierarchy", {}).get("kind", "flat")
+            for layer in tomllib.loads((self.rung / "corpus.toml").read_text()).get("layer", [])
+        }
+        out["hierarchy_kinds"] = declared
         points = pq.read_table(self.rung / "points.parquet").slice(0, 1)
         rosters = {
             "clusters/kmeans": "clusters-kmeans.parquet",
@@ -738,7 +797,26 @@ class Cycle:
                 entry["withdrawn"] = withdraw.status_code
                 rows = pq.ParquetFile(self.rung / members[layer]).metadata.num_rows
                 entry["member_rows"] = rows
-                if rows > self.args.max_member_rows:
+                kind = declared.get(layer, "flat")
+                if kind in ("dag", "nested") and not self.args.carry_lineage_layers:
+                    # **The path exists — the probe above was a 200 — and the semantics do not
+                    # match.** Under `dag` and `nested` a membership cell is a *lineage*: entry k
+                    # is the parent of entry k+1, every artifact at level 0
+                    # (`tessera_types::layer::ListMeaning`). This rung's articles are in a mean of
+                    # 10.6 unrelated MeSH descriptors, and a list of ten unrelated keys read as a
+                    # lineage declares nine parent edges the NLM's DAG does not have — under
+                    # `dag`, a second lineage naming another parent for a child *adds* the edge, so
+                    # the hierarchy would be silently extended by the ingest rather than refused.
+                    #
+                    # Stated, not patched around: the ingested rows carry no membership on this
+                    # layer, so every later count on it differs by design, and the equivalence
+                    # block reports the difference.
+                    out["declined"][layer] = (
+                        f"declared `kind = \"{kind}\"`, whose membership cell is a lineage; this "
+                        f"rung's points are in several unrelated artifacts each, which a lineage "
+                        f"cannot express and which a `dag` would absorb as new parent edges"
+                    )
+                elif rows > self.args.max_member_rows:
                     out["declined"][layer] = (
                         f"{rows:,} member rows exceeds --max-member-rows "
                         f"{self.args.max_member_rows:,}; the driver would have to hold the whole "
@@ -954,6 +1032,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--write-cycle", action="store_true")
     ap.add_argument("--write-cycle-n", type=int, default=1000)
     ap.add_argument("--reuse-base", action="store_true")
+    ap.add_argument(
+        "--carry-lineage-layers",
+        action="store_true",
+        help="send a membership column for a `dag`/`nested` layer anyway. The cell is a lineage "
+        "there, so a multi-membership rung's keys become parent edges: measure it deliberately, "
+        "never by default",
+    )
+    ap.add_argument(
+        "--state-extent",
+        action="store_true",
+        help="rewrite the base declaration's `extent = \"auto\"` as the all-in bundle's own "
+        "frame — required for f = 1.0, which auto refuses, and what makes a box-level "
+        "equivalence census compare like with like",
+    )
     ap.add_argument(
         "--max-member-rows",
         type=int,
