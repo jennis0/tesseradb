@@ -14,7 +14,16 @@ module doc is the account of what is maintained and how:
   (`ArtifactProjections::extend_flushed`), so a form covers the whole row space rather than the
   base alone and an ingested member counts from its flush rather than from the next fold;
 - a form is checked against the row space at every cache hit (`ArtifactRows::covers`), which is
-  what a *merge* — the one publication that renumbers extent rows — is caught by.
+  what a *merge* — the one publication that renumbers extent rows — is caught by;
+- the **row-major column takes the delta too** (`RowColumn::with_added`) rather than being composed
+  again over the amended form. Composing it again cost ~100 s for one entity joining three
+  artifacts at rung 3's `mesh/descriptors`, on the executor thread, where it blocks every ingest
+  and every deny.
+
+⊘ **(b), the warm at publication, is not built**, and every drop path that remains still puts the
+whole-level projection on the next request: a **merge** (which renumbers the extent rows a form now
+holds), a form at a level version its delta does not follow, and a form under another prefix. Each
+is said at `warn` where it happens.
 
 ⊘ **Not re-measured at rung 3.** The change is covered by
 `crates/tessera-engine/tests/artifact_bring_forward.rs`, including a differential asserting the

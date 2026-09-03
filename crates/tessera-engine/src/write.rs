@@ -4790,6 +4790,18 @@ fn views_of(generation: &Generation) -> Vec<String> {
     views
 }
 
+/// Whether this layer's memberships are a **stored** set — the one kind a record's delta describes.
+///
+/// A `spatial` layer's membership is the rows inside its shapes and an `attribute` layer's is the
+/// rows carrying a value; both are evaluated against the geometry, so neither has anything to take
+/// from a publication's or a growth's record.
+fn stored_membership(declaration: &tessera_types::layer::LayerDeclaration) -> bool {
+    matches!(
+        declaration.membership,
+        tessera_types::layer::MembershipSource::Enumerated
+    ) && declaration.shape.is_none()
+}
+
 /// The `(layer, level)` a record changes the artifacts of, and `None` for every other record —
 /// what a caller needs to read that level's version before the record moves it.
 fn artifact_level_of(record: &WalRecord) -> Option<(&str, u32)> {
@@ -10680,6 +10692,17 @@ impl Executor {
         delta: &crate::artifacts::LevelDelta<'_>,
         before: u64,
     ) {
+        // **Only a level whose membership is *stored* has a delta to take.** A shape's members and
+        // an attribute predicate's are evaluated against the geometry, so a record's delta says
+        // nothing about them — see `ArtifactProjections::bring_forward`, which will not touch such
+        // a form. An unregistered layer is not one either; there is nothing to read.
+        let stored = self
+            .live
+            .registered_layer(layer)
+            .is_some_and(|held| stored_membership(&held.declaration));
+        if !stored {
+            return;
+        }
         let generation = self.generation.load_full();
         let mut views: std::collections::BTreeMap<&str, Option<&tessera_store::read::ViewData>> =
             std::collections::BTreeMap::new();
@@ -10703,6 +10726,7 @@ impl Executor {
                     &data.row_space,
                     delta,
                     before,
+                    stored,
                 );
             }
         });
@@ -10819,9 +10843,11 @@ impl Executor {
         let published = Published::registry_applied(&record);
         // **A shape layer's held structures are rebuilt at publication, and every segment the
         // generation serves is resolved against them before the ack** (`polygon-membership.md`
-        // §6.3: built at publication and at open, never on a request). The level version moved,
-        // so the cached row form is stale by its own key and the next request joins the pieces
-        // installed here.
+        // §6.3: built at publication and at open, never on a request). The level version moved and
+        // the bring-forward above declined the level — a shape's membership is not in the record
+        // it would have applied — so the cached row form is stale by its own key and the next
+        // request joins the pieces installed here. That decline is load-bearing: a form brought
+        // forward would *hit* on the next request and these pieces would never be read.
         let generation = self.generation.load_full();
         let warmed = self.live.with_artifacts(|store| {
             let (layers, _, _) = self.live.registry_for_publication();
@@ -13292,12 +13318,21 @@ impl Executor {
             .and_then(|p| p.views.get(&completed.view))
             .map(|v| &v.row_space)
         {
+            // The same rule the delta path takes, asked per layer because this reaches every level
+            // the view holds a form for: a rule-derived level is fresh by its own version move and
+            // has nothing here to gain.
+            let stored = |layer: &str| {
+                self.live
+                    .registered_layer(layer)
+                    .is_some_and(|held| stored_membership(&held.declaration))
+            };
             self.live.with_artifacts(|store| {
                 self.artifact_projections.extend_flushed(
                     &live.prefix,
                     &completed.view,
                     store,
                     space,
+                    &stored,
                 )
             });
         }

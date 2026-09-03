@@ -745,16 +745,18 @@ fn a_flush_disturbs_no_artifacts_count() {
     );
 }
 
-/// **The arm a reader leaves out, and why leaving it out cannot bite here.** A merge permutes row
-/// space *inside the span it merges*, so a row id in that span names a different entity afterwards
-/// — and a membership form holding those ids would go on counting them, naming whichever documents
-/// landed there. That is the fail-open the design warns about, and it is fail-**open** rather than
-/// closed because the count can only be wrong upward: a stranger's row inside the span counts as a
-/// member, and one extra member can lift an artifact over its existence criterion.
+/// **The one publication that renumbers rows a form holds.** A merge permutes row space *inside
+/// the span it merges*, so a row id in that span names a different entity afterwards — and a form
+/// holding those ids would go on counting them, naming whichever documents landed there. That is
+/// fail-**open** rather than closed: a stranger's row inside the span counts as a member, and one
+/// extra member can lift an artifact over its existence criterion.
 ///
-/// The base-row rule removes the state it needs. The form references no extent row, and a merge
-/// renumbers nothing else, so there is no arm to build and nothing to rebase — which is what this
-/// pins: an artifact's count survives a merge that genuinely permuted the rows beneath it.
+/// A form covers extent rows (2026-09-03), so the state is reachable and what removes it is the
+/// check rather than the absence: `ArtifactRows::covers` compares the segments a form's rows came
+/// from against the row space at every cache hit, `seg_id`s are never reused, and a form whose
+/// segments were permuted rather than appended to is discarded and projected again. What this pins
+/// is the outcome either way — an artifact's count survives a merge that genuinely permuted the
+/// rows beneath it.
 #[test]
 fn a_merge_that_renumbers_extent_rows_disturbs_no_artifacts_count() {
     let fx = fixture();

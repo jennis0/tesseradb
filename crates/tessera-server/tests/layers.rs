@@ -1249,6 +1249,62 @@ async fn a_predicate_shape_is_served_when_asked_and_is_the_same_for_every_princi
     ]));
 }
 
+/// **A shape published into a level whose form is already warm is served.**
+///
+/// A shape layer's membership is not in the record a publication writes — it is the rows inside the
+/// box, resolved by `ShapeStore::warm` after the publication and joined at the next request. So the
+/// held row form must **not** be brought forward over such a publication: a form amended with an
+/// empty `members` set and stamped at the new level version would *hit* on the next request, ahead
+/// of the pieces the warm installed, and the shape would be absent from every viewport until the
+/// version or the prefix moved again.
+///
+/// The first publication and the request after it are what make the form warm; the second is the
+/// one under test. Deliberately on a bundle nothing has flushed, where the segments version is `0`
+/// and so cannot itself tell a rule-derived level from a stored one.
+#[tokio::test]
+async fn a_shape_published_into_a_warm_level_is_served() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    assert_eq!(register(&server, spatial_declaration("boundaries/b")).await.0, 201);
+
+    let (status, body) = publish(
+        &server,
+        "boundaries/b",
+        json!({ "addressing": "external", "artifacts": [{ "key": "sw", "members": [], "wkt": SQUARE }] }),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+
+    // Warm: this request builds the level's row form and the next one is entitled to reuse it.
+    let first = viewport_artifacts(&server, &["0"], json!({})).await.expect("served");
+    assert_eq!(first.len(), 1, "the first shape is served: {first:?}");
+    assert!(first[0].masked_count > 0, "over the rows inside it");
+
+    let (status, body) = publish(
+        &server,
+        "boundaries/b",
+        json!({ "addressing": "external", "artifacts": [{ "key": "ne", "members": [], "wkt": NE_SQUARE }] }),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+
+    let after = viewport_artifacts(&server, &["0"], json!({})).await.expect("served");
+    let mut keys: Vec<(String, bool)> = after
+        .iter()
+        .map(|a| (a.key.clone().unwrap_or_default(), a.masked_count > 0))
+        .collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec![("ne".to_string(), true), ("sw".to_string(), true)],
+        "both shapes are served over the rows inside them: {after:?}"
+    );
+}
+
+/// A second square, over the north-east quarter — disjoint from [`SQUARE`], so the two shapes
+/// answer for different rows and one standing in for the other would be visible as a count.
+const NE_SQUARE: &str = "POLYGON ((600 600, 900 600, 900 900, 600 900, 600 600))";
+
 /// **`hull` is not an ask word**: the vocabulary is `centroid`, `box`, `shape`, and a name outside
 /// it is the 422 the vocabulary has always been.
 #[tokio::test]

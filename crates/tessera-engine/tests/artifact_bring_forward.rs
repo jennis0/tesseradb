@@ -59,6 +59,14 @@ fn declaration(name: &str, layout: Option<ServingLayout>) -> LayerDeclaration {
     }
 }
 
+/// The same layer with an **open** value set, so a batch naming a key no artifact holds mints one.
+fn open_declaration(name: &str, layout: Option<ServingLayout>) -> LayerDeclaration {
+    LayerDeclaration {
+        value_set: tessera_types::layer::ValueSet::Open,
+        ..declaration(name, layout)
+    }
+}
+
 struct Fixture {
     _tmp: tempfile::TempDir,
     root: std::path::PathBuf,
@@ -166,6 +174,53 @@ fn ingest(engine: &Engine, external_id: &[u8]) -> EntityId {
         .expect("the ingest is accepted")[0]
 }
 
+/// One ingest batch of `names.len()` points, each naming one artifact of `LAYER` by key — a
+/// **single commit window**, which is what puts a mint and a growth into one apply.
+fn ingest_naming(engine: &Engine, batch: &str, names: &[&str]) -> u64 {
+    let descriptors = vec![b"0".to_vec()];
+    let mut hash = [0u8; 32];
+    for (slot, byte) in hash.iter_mut().zip(batch.as_bytes()) {
+        *slot = *byte;
+    }
+    let rows: Vec<_> = names
+        .iter()
+        .enumerate()
+        .map(|(i, _)| tessera_lifecycle::command::UnallocatedRow {
+            external_id: Some(format!("{batch}-{i}").into_bytes()),
+            view: "s0".to_string(),
+            join: None,
+            descriptors: descriptors.clone(),
+            x: 5.0,
+            y: 5.0,
+            scalars: Vec::new(),
+            terms: engine.resolve_terms(&descriptors),
+            scoped: Vec::new(),
+        })
+        .collect();
+    let memberships = names
+        .iter()
+        .enumerate()
+        .map(|(i, key)| tessera_lifecycle::BatchMembership {
+            layer: LAYER.to_string(),
+            level: 0,
+            key: (*key).to_string(),
+            rows: vec![i as u32],
+        })
+        .collect();
+    let (_, minted) = engine
+        .accept_ingest_joining(
+            rows,
+            batch.to_string(),
+            hash,
+            tessera_lifecycle::BatchArtifacts {
+                memberships,
+                edges: Vec::new(),
+            },
+        )
+        .expect("points naming artifacts of an open layer are an ordinary write");
+    minted
+}
+
 fn flush(engine: &Engine) {
     let before = engine.write_executor_stats().flushes;
     engine.request_flush();
@@ -195,6 +250,32 @@ fn fold(engine: &Engine) {
         assert!(
             std::time::Instant::now() < deadline,
             "the fold never published"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// Flush enough times to fill the merge policy's tier, then let one merge publish — the one
+/// operation that renumbers rows a form now holds.
+fn merge(engine: &Engine) {
+    engine.set_merge_for_test(false);
+    for batch in [
+        b"merge-a".as_slice(),
+        b"merge-b".as_slice(),
+        b"merge-c".as_slice(),
+        b"merge-d".as_slice(),
+    ] {
+        ingest(engine, batch);
+        flush(engine);
+    }
+    engine.set_merge_for_test(true);
+    ingest(engine, b"merge-e");
+    flush(engine);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while engine.write_executor_stats().merges == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the merge never published"
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
@@ -260,6 +341,158 @@ fn a_publication_is_applied_to_the_warm_form_rather_than_rebuilding_it() {
         engine.artifact_cache_builds().0,
         warm,
         "the new ordinal was placed in the form that was held, not projected beside a new one"
+    );
+}
+
+/// Every row's label list, read off the level's held column — the observable a column *is*.
+fn labels(engine: &Engine, layer: &str) -> Vec<Vec<u32>> {
+    let rows = engine
+        .held_artifact_form_for_test("s0", layer, 0)
+        .expect("the level's form is held");
+    let column = rows.column().expect("this level is served row-major");
+    (0..column.row_count())
+        .map(|row| {
+            let mut at = Vec::new();
+            column.for_each_label(row, |ordinal| at.push(ordinal));
+            at.sort_unstable();
+            at
+        })
+        .collect()
+}
+
+/// The bytes of the level's packed column — the durable half, which an amendment may not touch.
+fn column_bytes(engine: &Engine, layer: &str) -> Vec<u8> {
+    engine
+        .held_artifact_form_for_test("s0", layer, 0)
+        .expect("the level's form is held")
+        .column()
+        .expect("this level is served row-major")
+        .as_bytes()
+        .to_vec()
+}
+
+/// **A growth amends the column at the rows that joined and nowhere else.**
+///
+/// The pack is not rewritten — its bytes are the same bytes — and the labels differ from the
+/// pre-growth ones at exactly the joined rows. Composing the column again would answer the same
+/// and cost one entry per membership entry: ~100 s at rung 3's `mesh/descriptors`, on the executor
+/// thread, for one entity joining three artifacts.
+#[test]
+fn a_growth_amends_the_column_at_the_joined_rows_and_composes_nothing() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(declaration(LAYER, Some(ServingLayout::RowMajorList)))
+        .unwrap();
+    publish(&engine, "a0", fx.members(0..100));
+    publish(&engine, "a1", fx.members(500..600));
+    assert_eq!(
+        served(&engine),
+        vec![("a0".to_string(), 100), ("a1".to_string(), 100)]
+    );
+
+    let before_labels = labels(&engine, LAYER);
+    let before_bytes = column_bytes(&engine, LAYER);
+    let composed = engine.columns_composed();
+
+    // The joiners are members of `a1` already, so the rows they hold are rows the column labels —
+    // an amendment in the middle of the pack, not an append above it.
+    grow(&engine, "a0", fx.members(500..520));
+
+    assert_eq!(
+        served(&engine),
+        vec![("a0".to_string(), 120), ("a1".to_string(), 100)],
+        "the growth is in the very next request"
+    );
+    assert_eq!(
+        engine.columns_composed(),
+        composed,
+        "no column was composed: the amendment is the delta, not a second walk of the level"
+    );
+    assert_eq!(
+        column_bytes(&engine, LAYER),
+        before_bytes,
+        "the packed column is shared, not rewritten"
+    );
+
+    let after_labels = labels(&engine, LAYER);
+    assert_eq!(
+        after_labels.len(),
+        before_labels.len(),
+        "the amendment named no row above the column's own"
+    );
+    let joined: std::collections::BTreeSet<usize> = after_labels
+        .iter()
+        .zip(&before_labels)
+        .enumerate()
+        .filter(|(_, (after, before))| after != before)
+        .map(|(row, _)| row)
+        .collect();
+    assert_eq!(
+        joined.len(),
+        20,
+        "exactly the twenty rows that joined moved: {joined:?}"
+    );
+    for row in &joined {
+        let mut gained: Vec<u32> = after_labels[*row].clone();
+        gained.retain(|ordinal| !before_labels[*row].contains(ordinal));
+        assert_eq!(
+            gained,
+            vec![0],
+            "row {row} gained the growing artifact's ordinal and nothing else"
+        );
+    }
+}
+
+/// **One window that mints an artifact and grows another on the same level rebuilds nothing.**
+///
+/// Both records move that level's version, and both are applied to the store before either reaches
+/// a row form — so a form stamped at the store's *current* version would be filed at the version of
+/// two deltas while holding one, and the second delta would then find a mismatch and discard the
+/// form it was about to complete. Each record bumps its level exactly once, so each amendment
+/// stamps the version it followed plus one.
+#[test]
+fn a_window_that_mints_and_grows_one_level_rebuilds_nothing() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(open_declaration(LAYER, None))
+        .unwrap();
+    publish(&engine, "a0", fx.members(0..100));
+    assert_eq!(served(&engine), vec![("a0".to_string(), 100)]);
+    let warm = engine.artifact_cache_builds().0;
+
+    // One batch, two rows: the first names the artifact that exists (a growth), the second a key
+    // no artifact holds (a mint, which publishes). One window, two records, one level.
+    assert_eq!(
+        ingest_naming(&engine, "mixed", &["a0", "made-by-a-point"]),
+        1,
+        "one key named no artifact, so exactly one was minted"
+    );
+
+    assert_eq!(
+        served(&engine),
+        vec![("a0".to_string(), 100)],
+        "both rows are still buffered, so neither is in a count and the minted artifact — whose          only member is one of them — is in no viewport"
+    );
+    assert_eq!(
+        engine.artifact_cache_builds().0,
+        warm,
+        "neither record's delta discarded the other's form"
+    );
+
+    // And the rows the window ingested reach both artifacts at their flush, still without a
+    // rebuild: the mint's delta and the growth's are both in the form the flush then extends.
+    flush(&engine);
+    assert_eq!(
+        served(&engine),
+        vec![("a0".to_string(), 101), ("made-by-a-point".to_string(), 1)],
+        "the grown artifact gained its row and the minted one is served on its own"
+    );
+    assert_eq!(
+        engine.artifact_cache_builds().0,
+        warm,
+        "and the flush extended the form rather than replacing it"
     );
 }
 
@@ -397,6 +630,12 @@ fn an_amended_form_equals_one_built_from_scratch() {
         let fresh = ingest(&engine, b"differential");
         flush(&engine);
         grow(&engine, "a1", vec![fresh]);
+        // **A publication *after* the flush**, so the ordinal it places is placed into a form whose
+        // row space carries an extent — the case `publish_at` takes and a pre-flush publication
+        // does not reach.
+        let later = ingest(&engine, b"differential-later");
+        flush(&engine);
+        publish(&engine, "a2", vec![later]);
 
         let maintained_answers = served(&engine);
         let maintained = form_of(&engine, LAYER);
@@ -411,7 +650,11 @@ fn an_amended_form_equals_one_built_from_scratch() {
         );
         assert_eq!(
             maintained_answers,
-            vec![("a0".to_string(), 150), ("a1".to_string(), 101)],
+            vec![
+                ("a0".to_string(), 150),
+                ("a1".to_string(), 101),
+                ("a2".to_string(), 1)
+            ],
             "{layout:?}: the maintained form's counts are the memberships' own sizes"
         );
 
@@ -436,5 +679,29 @@ fn an_amended_form_equals_one_built_from_scratch() {
                 "{layout:?}: the amended form and the built one describe different levels"
             );
         }
+
+        // **And the one publication a form cannot be brought forward over.** A merge permutes rows
+        // inside the span it collapses, so a form holding extent rows is discarded by
+        // `ArtifactRows::covers` and rebuilt — which is the expensive answer and must still be the
+        // *right* one. Nothing here asserts a build did not happen; what it asserts is that the
+        // counts are the memberships' own sizes on the other side of the renumbering.
+        merge(&engine);
+        assert_eq!(
+            served(&engine),
+            maintained_answers,
+            "{layout:?}: the merge renumbered rows this form holds and changed no count"
+        );
+        let after_merge = form_of(&engine, LAYER);
+        engine.forget_artifact_forms_for_test(LAYER);
+        assert_eq!(
+            served(&engine),
+            maintained_answers,
+            "{layout:?}: and the form built from scratch over the merged row space agrees"
+        );
+        assert_eq!(
+            after_merge,
+            form_of(&engine, LAYER),
+            "{layout:?}: ordinal for ordinal, on the other side of a merge too"
+        );
     }
 }

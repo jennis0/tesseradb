@@ -863,9 +863,14 @@ impl ArtifactRows {
     /// at its flush, through [`Self::extend_by`].
     ///
     /// A hole takes nothing, on [`MembershipRows::or_rows`]' rule.
-    fn grow_rows(&mut self, ordinal: u32, joining: &Bitmap, space: &RowSpace) {
+    fn grow_rows(&mut self, ordinal: u32, joining: &Bitmap, space: &RowSpace) -> Bitmap {
         let rows = space.project(joining);
+        let held = self.membership.get(ordinal).cloned().unwrap_or_default();
+        // **What this row form did not already hold** — the rows the column has to gain, and no
+        // others. A member joining an artifact it is already in adds nothing anywhere.
+        let fresh = rows.andnot(&held);
         self.membership.or_rows(ordinal as usize, &rows);
+        fresh
     }
 
     /// **One newly published artifact placed at its ordinal** — records, membership and generating
@@ -873,10 +878,11 @@ impl ArtifactRows {
     ///
     /// A publication only ever appends ordinals (`LayerRegistry::prepare_artifacts` claims from a
     /// dense cursor), so this widens the form and rewrites nothing already in it.
-    fn publish_at(&mut self, ordinal: u32, record: &ArtifactRecord, space: &RowSpace) {
+    fn publish_at(&mut self, ordinal: u32, record: &ArtifactRecord, space: &RowSpace) -> Bitmap {
         let idx = ordinal as usize;
         self.records.put(idx, record);
         self.membership.put(idx, record, space);
+        self.membership.get(ordinal).cloned().unwrap_or_default()
     }
 
     /// **Every artifact's membership extended by the extents this form does not yet cover** — what
@@ -896,43 +902,56 @@ impl ArtifactRows {
         &mut self,
         artifacts: impl Iterator<Item = (u32, &'a ArtifactRecord)>,
         space: &RowSpace,
-    ) {
+    ) -> Vec<(u32, u32)> {
         let from = self.covered.len();
+        let mut added = Vec::new();
         for (ordinal, record) in artifacts {
             let rows = space.project_extents_from(&record.members, from);
             if rows.is_empty() {
                 continue;
             }
-            self.membership.or_rows(ordinal as usize, &rows);
+            if self.membership.or_rows(ordinal as usize, &rows) && self.layout.is_row_major() {
+                added.extend(rows.iter().map(|row| (row, ordinal)));
+            }
         }
+        added
     }
 
-    /// **Re-derive what is a pure function of the membership** — the tile index, and the row-major
-    /// column where the level has one — after an amendment moved it.
+    /// **Carry the two derived structures over the amendment** — the tile index, re-derived, and
+    /// the row-major column, amended at `added` and nowhere else.
     ///
-    /// Both are derived rather than adopted here, and **I11** is why: the fold's files describe the
+    /// **The index is re-derived and the column is not**, and the asymmetry is what each costs. An
+    /// extent is `minimum` and `maximum` per artifact, which is O(1) a bitmap and the walk
+    /// `blocks_per_artifact` already makes at every build; a column is one entry per membership
+    /// entry, which at rung 3's `mesh/descriptors` is 1.66×10⁹ of them and ~100 s **on the
+    /// executor thread**, where it blocks every ingest and every deny. So the column takes the
+    /// delta — `added` is `(row, ordinal)` for the rows this amendment gave that artifact and no
+    /// others, and [`RowColumn::with_added`] shares the pack rather than reading it.
+    ///
+    /// Neither is re-adopted from the prefix, and **I11** is why: the fold's files describe the
     /// level as it was before the amendment, and a *narrow* extent settles an artifact whose
-    /// members reach outside the viewport. Deriving them is the walk `blocks_per_artifact` already
-    /// makes at every build — `Bitmap::minimum`/`maximum` per artifact — and one pass for the
-    /// column.
+    /// members reach outside the viewport.
     ///
-    /// `true` where a level that *was* served row-major no longer composes a column: a growth can
-    /// make two memberships overlap, which a label column cannot express. The level then serves
+    /// `true` where a level that *was* served row-major no longer has a column: a growth can make
+    /// two memberships overlap, which a label column cannot express. The level then serves
     /// artifact-major, which answers identically, and the caller says so — the one place the
     /// recorded layout and the served one may differ, reached by [`Self::with_column`]'s route.
-    fn rederive(&mut self, row_count: u32) -> bool {
+    fn amend_derived(&mut self, added: &[(u32, u32)], row_count: u32) -> bool {
         self.index = TileIndex::build(&self.membership, row_count);
-        if !self.layout.is_row_major() {
+        let Some(column) = &self.column else {
             return false;
+        };
+        match column.with_added(added, row_count) {
+            Some(amended) => {
+                self.column = Some(Arc::new(amended));
+                false
+            }
+            None => {
+                self.layout = ServingLayout::ArtifactMajor;
+                self.column = None;
+                true
+            }
         }
-        let composed = RowColumn::compose(&self.membership, row_count, self.layout).map(Arc::new);
-        let lost = composed.is_none();
-        self.layout = composed
-            .as_ref()
-            .map(|column| column.layout())
-            .unwrap_or(ServingLayout::ArtifactMajor);
-        self.column = composed;
-        lost
     }
 
     /// This level's row-addressed column, where it has one.
@@ -1890,7 +1909,21 @@ impl ArtifactProjections {
         space: &RowSpace,
         delta: &LevelDelta<'_>,
         before: u64,
+        stored: bool,
     ) {
+        // **A level whose membership is a *rule* has no delta to take.** A shape's members are the
+        // rows inside it and an attribute predicate's are the rows carrying a value; neither is in
+        // the record this delta came from, so applying one would add nothing and — because it also
+        // moves the key — would make the form *hit* on the next request, ahead of the shape pieces
+        // `ShapeStore::warm` installs after the publication. Such a level is left alone and rebuilt
+        // by its own version move, which is what it has always been.
+        //
+        // **Asked of the declaration and not of [`ProjectionKey::live`]**, which is the segments
+        // version and is `0` on a bundle nothing has flushed — indistinguishable there from the `0`
+        // a stored level is filed under.
+        if !stored {
+            return;
+        }
         let map_key = (view.to_string(), layer.to_string(), level);
         let held = {
             let cached = self.cached.lock().unwrap_or_else(|e| e.into_inner());
@@ -1900,14 +1933,21 @@ impl ArtifactProjections {
             }
         };
         let (key, mut rows) = held;
-        let now = store.level_version(layer, level);
+        // **`before + 1`, never the store's current version.** Every route that changes a level's
+        // records bumps it exactly once (`ArtifactStore::bump`'s four callers), so the version this
+        // delta produces is the one it followed plus one — and reading the store instead is wrong
+        // wherever more than one record has already been applied. A window carrying a mint *and* a
+        // growth on one level applies both before either is brought forward, so the store is at
+        // `before + 2` when the first delta arrives: stamping that would file a form holding one
+        // delta under the version of two, and the second delta would then find a mismatch and drop
+        // the form it was about to complete.
+        let now = before + 1;
         // **Every term that would make the amendment describe something other than what is held.**
-        // A predicate level (`live != 0`) is keyed on the geometry and rebuilds on its own; a form
-        // from another prefix or another version has missed a write; a form whose rows are not rows
-        // of this row space is the merge case [`ArtifactRows::covers`] argues.
-        let reason = if key.live != 0 {
-            Some("the level's membership is a rule rather than a stored set")
-        } else if key.prefix != prefix {
+        // A form from another prefix or another version has missed a write; a form whose rows are
+        // not rows of this row space is the merge case [`ArtifactRows::covers`] argues. Each is a
+        // form that *should* have been brought forward and was not, which is why each is said at
+        // `warn`: it is the whole-level projection returning to the request path.
+        let reason = if key.prefix != prefix {
             Some("the form was projected under another prefix")
         } else if key.level_version != before {
             Some("the form is at a level version this delta does not follow")
@@ -1940,23 +1980,43 @@ impl ArtifactProjections {
         // rebuild it replaces would have paid: `get_or_build` builds a second form beside the one
         // still cached. Where nothing else holds the `Arc` — the case between requests — this is
         // free.
+        let shared = Arc::strong_count(&rows) > 1;
         let amended = Arc::make_mut(&mut rows);
+        // **The rows this delta gave each artifact**, gathered as the membership takes them, so the
+        // column is amended at exactly those and the pack is never rewritten. Empty on an
+        // artifact-major level, which has no column to amend.
+        let row_major = amended.layout.is_row_major();
+        let mut added: Vec<(u32, u32)> = Vec::new();
         match delta {
             LevelDelta::Grown(joins) => {
                 for (ordinal, joining) in *joins {
-                    amended.grow_rows(*ordinal, joining, space);
+                    let fresh = amended.grow_rows(*ordinal, joining, space);
+                    if row_major {
+                        added.extend(fresh.iter().map(|row| (row, *ordinal)));
+                    }
                 }
             }
             LevelDelta::Published(ordinals) => {
                 for ordinal in *ordinals {
                     if let Some(record) = store.get(layer, level, *ordinal) {
-                        amended.publish_at(*ordinal, record, space);
+                        let fresh = amended.publish_at(*ordinal, record, space);
+                        if row_major {
+                            added.extend(fresh.iter().map(|row| (row, *ordinal)));
+                        }
                     }
                 }
             }
         }
-        let lost = amended.rederive(total_rows(space));
+        let lost = amended.amend_derived(&added, total_rows(space));
         amended.covering(space);
+        tracing::debug!(
+            layer = %layer,
+            level,
+            view = %view,
+            rows_added = added.len(),
+            cloned = shared,
+            "a level's held row form took a write's delta"
+        );
         if lost {
             self.fallbacks
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1990,18 +2050,27 @@ impl ArtifactProjections {
     /// artifact would count for nobody until the next fold. This is where the segment reaches them
     /// — one `project_extents_from` per artifact, over the entities inside that extent's own range.
     ///
-    /// **Stored levels only.** A predicate level's form is keyed on the geometry and is rebuilt by
-    /// the flush's own version move, which is what makes its answer fresh by construction.
+    /// **Stored levels only**, which `stored` answers from the layer's declaration and not from
+    /// [`ProjectionKey::live`] — see [`Self::bring_forward`] on why the key cannot say. A rule-
+    /// derived level's form is keyed on the geometry and is rebuilt by the flush's own move of it,
+    /// which is what makes its answer fresh by construction.
     ///
     /// A form that does not extend — a merge, or a form left behind by an earlier drop — is dropped
     /// and rebuilt by the next request, said at `warn` for [`Self::bring_forward`]'s reason.
-    pub fn extend_flushed(&self, prefix: &str, view: &str, store: &ArtifactStore, space: &RowSpace) {
+    pub fn extend_flushed(
+        &self,
+        prefix: &str,
+        view: &str,
+        store: &ArtifactStore,
+        space: &RowSpace,
+        stored: &dyn Fn(&str) -> bool,
+    ) {
         let held: Vec<(LevelAddress, ProjectionKey, Arc<ArtifactRows>)> = {
             let cached = self.cached.lock().unwrap_or_else(|e| e.into_inner());
             cached
                 .iter()
-                .filter(|((held_view, _, _), _)| held_view == view)
-                .filter(|(_, (key, _))| key.live == 0 && key.prefix == prefix)
+                .filter(|((held_view, layer, _), _)| held_view == view && stored(layer))
+                .filter(|(_, (key, _))| key.prefix == prefix)
                 .map(|(address, (key, rows))| (address.clone(), key.clone(), Arc::clone(rows)))
                 .collect()
         };
@@ -2026,8 +2095,8 @@ impl ArtifactProjections {
                 continue;
             }
             let amended = Arc::make_mut(&mut rows);
-            amended.extend_by(store.level(layer, *level), space);
-            let lost = amended.rederive(total_rows(space));
+            let added = amended.extend_by(store.level(layer, *level), space);
+            let lost = amended.amend_derived(&added, total_rows(space));
             amended.covering(space);
             if lost {
                 self.fallbacks
