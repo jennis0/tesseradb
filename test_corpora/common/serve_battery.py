@@ -460,8 +460,15 @@ def condition_figures(samples: Sequence[dict], cold: bool) -> dict:
 # ---------------------------------------------------------------------------------------------
 
 
+def _log(message: str) -> None:
+    """Line-buffered by hand: a long run is watched through its redirected log, and Python
+    block-buffers stdout when it is not a terminal — a battery that had run for forty minutes
+    looked, from the file, like one that had not started."""
+    print(message, flush=True)
+
+
 class Battery:
-    def __init__(self, args, log: Callable[[str], None] = print):
+    def __init__(self, args, log: Callable[[str], None] = _log):
         self.args = args
         self.log = log
         self.evictor = Evictor(
