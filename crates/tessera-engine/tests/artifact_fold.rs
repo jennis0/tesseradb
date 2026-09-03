@@ -667,17 +667,20 @@ fn flush(engine: &Engine) {
     }
 }
 
-/// **The boundary condition the write cycle sets, and the cost it names.** An artifact's row form
-/// covers members holding **base** rows; a member whose row is still in a flush extent contributes
-/// nothing until the fold folds it in.
+/// **A member counts from its flush**, which is the first moment it has a row at all.
 ///
-/// That is what keeps the form untouched by a flush — an append moves no bit it holds — and it is
-/// fail-closed in the only direction available: the masked count **understates** for members
-/// ingested since the last fold, exactly as a buffered point is invisible until its flush. The
-/// alternative, rebuilding every level whenever a flush appends, is tens of seconds per level at
-/// the scale this design is for, paid by whichever request arrives next.
+/// The two boundaries are different and only one of them moved. A **buffered** member has no row
+/// anywhere and is in nobody's count, exactly as it is in no viewport; a **flushed** one has an
+/// extent row, and the level's held form gains that segment's rows at the publication that adds it
+/// (`ArtifactProjections::extend_flushed`) rather than at the next fold. Until 2026-09-03 the form
+/// covered base rows alone and this second case understated for as long as the gate between folds
+/// — hours — which was fail-closed and is now simply not the case.
+///
+/// The fold changes no count here, and that is the assertion the third case makes: it renumbers the
+/// row the member holds and the form is rebuilt over the new prefix, so the same member is counted
+/// by a different row.
 #[test]
-fn a_member_ingested_since_the_last_fold_counts_from_the_fold_and_not_before() {
+fn a_member_ingested_since_the_last_fold_counts_from_its_flush() {
     let fx = fixture();
     let engine = fx.open();
     engine.register_layer(declaration("clusters/a")).unwrap();
@@ -705,16 +708,17 @@ fn a_member_ingested_since_the_last_fold_counts_from_the_fold_and_not_before() {
     flush(&engine);
     assert_eq!(
         count(&engine),
-        300,
-        "flushed: it has a row, but an extent row — the form covers base rows, so the count \
-         understates rather than the form being rebuilt"
+        301,
+        "flushed: it holds an extent row, and the flush extended every held form by the segment \
+         it published rather than leaving the count short until a fold"
     );
 
     fold(&engine);
     assert_eq!(
         count(&engine),
         301,
-        "folded: its row is a base row now, and the pass rebuilt the form over it"
+        "folded: the same member, on a base row now — the fold renumbers what it counts and not \
+         how many"
     );
 }
 
@@ -741,16 +745,18 @@ fn a_flush_disturbs_no_artifacts_count() {
     );
 }
 
-/// **The arm a reader leaves out, and why leaving it out cannot bite here.** A merge permutes row
-/// space *inside the span it merges*, so a row id in that span names a different entity afterwards
-/// — and a membership form holding those ids would go on counting them, naming whichever documents
-/// landed there. That is the fail-open the design warns about, and it is fail-**open** rather than
-/// closed because the count can only be wrong upward: a stranger's row inside the span counts as a
-/// member, and one extra member can lift an artifact over its existence criterion.
+/// **The one publication that renumbers rows a form holds.** A merge permutes row space *inside
+/// the span it merges*, so a row id in that span names a different entity afterwards — and a form
+/// holding those ids would go on counting them, naming whichever documents landed there. That is
+/// fail-**open** rather than closed: a stranger's row inside the span counts as a member, and one
+/// extra member can lift an artifact over its existence criterion.
 ///
-/// The base-row rule removes the state it needs. The form references no extent row, and a merge
-/// renumbers nothing else, so there is no arm to build and nothing to rebase — which is what this
-/// pins: an artifact's count survives a merge that genuinely permuted the rows beneath it.
+/// A form covers extent rows (2026-09-03), so the state is reachable and what removes it is the
+/// check rather than the absence: `ArtifactRows::covers` compares the segments a form's rows came
+/// from against the row space at every cache hit, `seg_id`s are never reused, and a form whose
+/// segments were permuted rather than appended to is discarded and projected again. What this pins
+/// is the outcome either way — an artifact's count survives a merge that genuinely permuted the
+/// rows beneath it.
 #[test]
 fn a_merge_that_renumbers_extent_rows_disturbs_no_artifacts_count() {
     let fx = fixture();

@@ -100,6 +100,43 @@ pub struct RowColumn {
     base_declared: Arc<Vec<u32>>,
     /// **The rows above the base a fold has not yet absorbed**, where this column has any.
     tail: Option<TailLabels>,
+    /// **The labels a write added to a column that was already built**, where any were added.
+    ///
+    /// [`TailLabels`] one step further: that one answers for rows *above* the base, this one adds
+    /// to rows anywhere. A growth joins entities to an artifact that already exists, and the rows
+    /// those entities hold are ordinary base rows the pack already addresses — so the label cannot
+    /// go in the tail and, for a list column, cannot go in the pack either without rewriting the
+    /// offset table and every value above the insertion. Held beside the pack, the write costs the
+    /// rows it touched and the pack's bytes are not read, copied or rewritten
+    /// (`2026-09-03-post-flush-artifact-frames.md`).
+    ///
+    /// ⊘ **Bounded by what has accumulated since the last fold**, on [`TailLabels`]' own note and
+    /// with the same reset: the fold rewrites the level's column whole, and a deployment that
+    /// never folds accumulates one entry per `(row, artifact)` every write adds whatever this
+    /// structure does.
+    added: Option<Arc<Added>>,
+}
+
+/// Labels added to rows a column already addresses — see [`RowColumn::added`].
+#[derive(Debug, Default)]
+struct Added {
+    /// `(row, ordinal)`, ascending and deduplicated, and never a pair the column already carries.
+    pairs: Vec<(u32, u32)>,
+    /// The rows [`Self::pairs`] names — so a scan asks *is any of this in view* in
+    /// O(containers touched) rather than walking the pairs.
+    rows: Bitmap,
+    /// One past the highest row named, which may be above the pack's own row count: a flush
+    /// publishes rows the pack never covered, and this is what carries them.
+    row_end: u32,
+}
+
+impl Added {
+    /// Every ordinal added at `row`, ascending. Empty for a row this adds nothing at.
+    fn at(&self, row: u32) -> &[(u32, u32)] {
+        let lo = self.pairs.partition_point(|(r, _)| *r < row);
+        let hi = self.pairs.partition_point(|(r, _)| *r <= row);
+        &self.pairs[lo..hi]
+    }
 }
 
 /// The labels of the rows **above** a column's base — the flushed tail.
@@ -113,6 +150,7 @@ pub struct RowColumn {
 /// ⊘ **Bounded by the flushed tail**, which the merge ladder bounds and the fold resets. Nothing
 /// here bounds it independently: a deployment that never folds accumulates rows above its base
 /// whatever this structure does, and the tail is one `u32` per such row.
+#[derive(Clone)]
 pub struct TailLabels {
     /// The first row this covers — the base's row count.
     row_base: u32,
@@ -273,6 +311,117 @@ impl RowColumn {
             declared,
             base_declared: Arc::clone(&self.base_declared),
             tail: Some(tail),
+            added: self.added.clone(),
+        }
+    }
+
+    /// **This column with `pairs` added at the rows they name** — what a growth, a publication or a
+    /// flush writes into a level whose column is already built.
+    ///
+    /// `pairs` is `(row, ordinal)` in any order. A pair the column already carries is dropped
+    /// rather than counted twice. The cost is the pairs, and the pack is neither read whole,
+    /// copied nor rewritten: it is shared, exactly as [`Self::with_tail`] shares it.
+    ///
+    /// **`None` where the form cannot express the result** — the label column, and a row that
+    /// would come to carry two artifacts. That is the double claim the module doc forbids: the
+    /// memberships have stopped partitioning, so the layout has stopped being true, and the
+    /// caller's answer is the artifact-major route, which answers identically and says so. A list
+    /// column has no such case.
+    ///
+    /// **Recomposing instead is what this replaces.** At rung 3's `mesh/descriptors` — 30,217
+    /// artifacts over 1.66×10⁹ entries — composing the list column again cost ~100 s on the
+    /// executor thread, where it blocks every ingest and every deny, for one entity joining three
+    /// artifacts (`2026-09-03-post-flush-artifact-frames.md`).
+    pub fn with_added(&self, pairs: &[(u32, u32)], row_count: u32) -> Option<Self> {
+        let label_form = matches!(*self.pack, Pack::Label(_));
+        let mut merged: Vec<(u32, u32)> = self
+            .added
+            .as_ref()
+            .map(|added| added.pairs.clone())
+            .unwrap_or_default();
+        // The rows already spoken for, for the label form's refusal — O(containers) to ask,
+        // against a scan of `merged` per pair.
+        let mut claimed = self
+            .added
+            .as_ref()
+            .map(|added| added.rows.clone())
+            .unwrap_or_default();
+        for (row, ordinal) in pairs {
+            let mut carried = false;
+            let mut occupied = false;
+            self.for_each_label(*row, |held| {
+                occupied = true;
+                carried |= held == *ordinal;
+            });
+            if carried {
+                continue;
+            }
+            if label_form && (occupied || claimed.contains(*row)) {
+                return None;
+            }
+            claimed.add(*row);
+            merged.push((*row, *ordinal));
+        }
+        merged.sort_unstable();
+        merged.dedup();
+        let mut rows = Bitmap::new();
+        let mut row_end = row_count;
+        for (row, _) in &merged {
+            rows.add(*row);
+            row_end = row_end.max(row.saturating_add(1));
+        }
+        rows.run_optimize();
+        Some(self.over_added(Some(Arc::new(Added {
+            pairs: merged,
+            rows,
+            row_end,
+        }))))
+    }
+
+    /// This column over the same pack and tail, with `added` in place of whatever it held.
+    ///
+    /// **The one place [`Self::declared`] is re-folded**, because a per-artifact count is the
+    /// base's plus the tail's plus the amendment's and no two of those are held together. The walk
+    /// is over the tail and the amendment, never over the pack — that is what `base_declared`
+    /// exists for.
+    fn over_added(&self, added: Option<Arc<Added>>) -> Self {
+        let mut declared = self.base_declared.as_ref().clone();
+        // **A publication adds ordinals the pack never had**, and `declared` is what
+        // [`Self::len`] answers from — so the column has to grow to cover them or every reader
+        // sized by that length would index past its own count.
+        if let Some(added) = &added {
+            let highest = added
+                .pairs
+                .iter()
+                .map(|(_, ordinal)| *ordinal as usize + 1)
+                .max()
+                .unwrap_or(0);
+            if declared.len() < highest {
+                declared.resize(highest, 0);
+            }
+        }
+        if let Some(tail) = &self.tail {
+            for label in &tail.labels {
+                if *label != ROW_COLUMN_HOLE {
+                    if let Some(count) = declared.get_mut(*label as usize) {
+                        *count += 1;
+                    }
+                }
+            }
+        }
+        if let Some(added) = &added {
+            for (_, ordinal) in &added.pairs {
+                if let Some(count) = declared.get_mut(*ordinal as usize) {
+                    *count += 1;
+                }
+            }
+        }
+        RowColumn {
+            pack: Arc::clone(&self.pack),
+            declared,
+            base_declared: Arc::clone(&self.base_declared),
+            tail: self.tail.clone(),
+            added,
         }
     }
 
@@ -299,9 +448,15 @@ impl RowColumn {
             Pack::Label(pack) => pack.rows(),
             Pack::List(pack) => pack.rows(),
         };
-        match &self.tail {
+        let with_tail = match &self.tail {
             Some(tail) => tail.row_end().max(base),
             None => base,
+        };
+        // **And the amendment**, which may name rows above both: a flush publishes rows the pack
+        // never covered and there is no tail on a list column to hold them.
+        match &self.added {
+            Some(added) => added.row_end.max(with_tail),
+            None => with_tail,
         }
     }
 
@@ -374,6 +529,18 @@ impl RowColumn {
                 }
             }
         }
+        // **The amendment, as a second pass over the rows it names that are in view** — never per
+        // row of `here`, which is the scan this layout exists to keep at one pass. `and` is
+        // O(containers touched), so a column nothing has amended pays one empty intersection.
+        if let Some(added) = &self.added {
+            for row in added.rows.and(here).iter() {
+                for (_, ordinal) in added.at(row) {
+                    if let Some(hit) = seen.get_mut(*ordinal as usize) {
+                        *hit = true;
+                    }
+                }
+            }
+        }
         let mut out = Bitmap::new();
         for (ordinal, hit) in seen.iter().enumerate() {
             if *hit {
@@ -407,6 +574,16 @@ impl RowColumn {
                     for ordinal in pack.list(row as usize) {
                         visit(ordinal);
                     }
+                }
+            }
+        }
+        // **And whatever a write added at this row** ([`Self::added`]). Asked of a bitmap first, so
+        // a column nothing has amended pays one `contains` and a column that has pays a binary
+        // search only at the rows it names — this is on the histogram's per-row walk.
+        if let Some(added) = &self.added {
+            if added.rows.contains(row) {
+                for (_, ordinal) in added.at(row) {
+                    visit(*ordinal);
                 }
             }
         }
@@ -456,7 +633,9 @@ impl RowColumn {
     /// per-block sweep over the offset table stays bounded by the row count rather than
     /// multiplying by it.
     pub fn transpose(&self) -> Option<Vec<Bitmap>> {
-        if self.tail.is_some() {
+        // **And an amended column is refused for the tail's reason**: what a transposition must
+        // produce is the base alone, and an amendment names rows the base does not carry.
+        if self.tail.is_some() || self.added.is_some() {
             return None;
         }
         let ordinals = self.len();
@@ -706,6 +885,7 @@ impl RowColumn {
             base_declared: Arc::new(declared.clone()),
             declared,
             tail: None,
+            added: None,
         }
     }
 

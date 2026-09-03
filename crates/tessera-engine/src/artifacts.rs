@@ -63,6 +63,35 @@
 //! **A below-criterion artifact is absent, not refused.** It does not appear, and the response
 //! carries nothing that distinguishes it from an artifact that was never published — which is the
 //! same indistinguishability the layer registry gives a gate-failed name.
+//!
+//! ## The row form is maintained, not invalidated
+//!
+//! A level's [`ArtifactRows`] covers the **whole** of its view's row space — base rows and every
+//! flushed extent — and it is brought forward by the operations that change it rather than rebuilt
+//! by them:
+//!
+//! - a **growth** or a **publication** applies its own delta to every held form of that level
+//!   ([`ArtifactProjections::bring_forward`]) and moves the form's key with it, so the next request
+//!   hits;
+//! - a **flush** extends every held form of the view by the segment it published
+//!   ([`ArtifactProjections::extend_flushed`]), which is what makes an ingested member count from
+//!   its flush rather than from the next fold.
+//!
+//! Both re-derive the tile index and the row-major column from the amended form, because both are
+//! pure functions of it and the fold's own files describe the level as it was (**I11**: nothing
+//! persisted is amended, and nothing persisted is reused past what it describes). Both are
+//! per `(view, layer, level)` and derived from the level's records and the row space, which is what
+//! keeps them the same shared structure a built form is (**I2**).
+//!
+//! **What stays base-only is the generating sets**, deliberately — see [`MembershipRows::put`].
+//!
+//! **And what a merge does is what [`ArtifactRows::covers`] is for.** Extent rows are the rows a
+//! merge renumbers, so a form holding them is checked against the row space at every cache hit and
+//! rebuilt where the segments were permuted rather than appended to. Before 2026-09-03 the form
+//! held base rows alone and needed no such check; it also understated every count by the members
+//! ingested since the last fold, and rebuilt the level whole — 94 to 177 s at rung 3, inside a
+//! request — at every write that moved the level's version
+//! (`docs/evidence/memos/2026-09-03-post-flush-artifact-frames.md`).
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -143,7 +172,14 @@ pub struct ArtifactRecords {
 #[derive(Debug, Clone, Default)]
 pub struct MembershipRows {
     /// Parallel to a level's ordinals; `None` is a hole, not an empty membership.
-    rows: Vec<Option<Bitmap>>,
+    ///
+    /// **One `Arc` per artifact, so cloning the level is the ordinals and not the members.** A
+    /// write amends the form in place, and the form is shared with whichever requests are reading
+    /// it — so `Arc::make_mut` on the family copies it, and at rung 3's `mesh/descriptors` a copy
+    /// of 1.66×10⁹ entries was a *measured* 2 576 ms of the 2 581 ms the whole amendment took, on
+    /// the executor thread. Behind an `Arc` each the copy is 30,217 pointers and the one artifact
+    /// that grew is the one bitmap made mutable.
+    rows: Vec<Option<Arc<Bitmap>>>,
     /// Per ordinal, per rank: that content's **generating set** in row space. Pushed in lockstep
     /// with [`ArtifactRecords::declared`], which is the size the same set had in entity space.
     generating: Vec<Vec<Bitmap>>,
@@ -183,6 +219,26 @@ pub struct ArtifactRows {
     /// present.
     layout: ServingLayout,
     column: Option<Arc<RowColumn>>,
+    /// **Which row space this form's memberships were projected through** — the base row count, and
+    /// the `seg_id` of every extent whose rows are in them, in order.
+    ///
+    /// The two exist because the form now covers extent rows (see [`MembershipRows::put`]) and a
+    /// flush brings it forward in place rather than rebuilding it ([`Self::extend_by`]). Extent
+    /// rows are the rows a **merge** renumbers, so a form that held them and could not say which
+    /// segments they came from would serve one segment's rows as another's after a merge — a
+    /// masked count over other people's documents, which is the one direction this may never fail
+    /// in.
+    ///
+    /// **The whole list rather than a count and a boundary id**, which is what
+    /// [`crate::compose::RowProjection`] carries. That one is a session's and is only ever
+    /// extended; this one is shared, and is asked about by requests at **two** live generations at
+    /// once — a session may be served one geometry behind the newest (decision 0044). A form that
+    /// had to be at exactly the asker's extent count would then be rebuilt by each of the two in
+    /// turn, for ever, which is a thrash and not a wrong answer. Comparing the shared prefix
+    /// answers both directions and is exact for `RowProjection`'s own reason: `seg_id`s are never
+    /// reused (contracts §2.1).
+    base_rows: u32,
+    covered: Vec<String>,
 }
 
 /// What one viewport's narrowing produced, on whichever route the level's layout takes.
@@ -345,16 +401,25 @@ impl MembershipRows {
             self.rows.resize_with(idx + 1, || None);
             self.generating.resize_with(idx + 1, Vec::new);
         }
-        self.rows[idx] = Some(space.project_base(&record.members));
+        // **The whole row space — base and every extent** — and the extents are what a flush then
+        // adds to in place ([`ArtifactRows::extend_by`]) rather than what a rebuild recovers. The
+        // form was base-only until 2026-09-03, which made a member ingested since the last fold
+        // contribute nothing to its artifact's count until that fold: fail-closed, and hours wide
+        // under the nightly gate. What made base-only necessary was that a form covering extents
+        // had no way to *stay* covering them; it has one now, and the merge that renumbers extent
+        // rows is caught by [`ArtifactRows::covers`] before a stale form is ever served.
+        self.rows[idx] = Some(Arc::new(space.project(&record.members)));
         self.generating[idx] = record
             .contents
             .iter()
-            // Base rows here too, and here the consequence is sharper than a low count: a
-            // generating set that lost members in projection can never be contained, so a label
-            // whose sample includes documents ingested since the last fold is withheld from
-            // **everyone** until that fold. Fail-closed, and the direction this must fail in — the
-            // alternative is serving content on a set that no longer names what the text was
-            // derived from.
+            // **Base rows, unlike the membership above**, and the consequence is sharper than a
+            // low count: a generating set that lost members in projection can never be contained,
+            // so a label whose sample includes documents ingested since the last fold is withheld
+            // from **everyone** until that fold. Fail-closed, and the direction this must fail in —
+            // the alternative is serving content on a set that no longer names what the text was
+            // derived from. Left base-only when the membership stopped being so (2026-09-03),
+            // because the containment partition beside it is composed at a level version and knows
+            // nothing of the geometry: widening one half alone is how the two come apart.
             .map(|v| space.project_base(&v.generated_from))
             .collect();
     }
@@ -372,7 +437,7 @@ impl MembershipRows {
             self.rows.resize_with(idx + 1, || None);
             self.generating.resize_with(idx + 1, Vec::new);
         }
-        self.rows[idx] = Some(Bitmap::new());
+        self.rows[idx] = Some(Arc::new(Bitmap::new()));
         self.generating[idx] = record
             .contents
             .iter()
@@ -394,7 +459,7 @@ impl MembershipRows {
         }
         for (idx, slot) in self.rows.iter_mut().enumerate() {
             if slot.is_some() {
-                *slot = Some(std::mem::take(&mut transposed[idx]));
+                *slot = Some(Arc::new(std::mem::take(&mut transposed[idx])));
             }
         }
         true
@@ -413,7 +478,7 @@ impl MembershipRows {
             self.rows.resize_with(idx + 1, || None);
             self.generating.resize_with(idx + 1, Vec::new);
         }
-        self.rows[idx] = Some(rows);
+        self.rows[idx] = Some(Arc::new(rows));
         self.generating[idx] = record
             .contents
             .iter()
@@ -421,8 +486,28 @@ impl MembershipRows {
             .collect();
     }
 
+    /// Union `rows` into the slot at `idx` — **the only way a held form's membership grows**.
+    ///
+    /// A slot holding `None` is a **hole** and stays one: an ordinal no record occupies is an
+    /// artifact a fold retired, and giving it rows here would resurrect it under an identity a
+    /// caller's `tessera_id` still names — [`tessera_lifecycle::membership::ArtifactStore::grow`]'s
+    /// rule, one structure along. `false` says nothing was done.
+    fn or_rows(&mut self, idx: usize, rows: &Bitmap) -> bool {
+        match self.rows.get_mut(idx).and_then(Option::as_mut) {
+            Some(held) => {
+                // One artifact's bitmap copied where a reader holds it, never the level's.
+                Arc::make_mut(held).or_inplace(rows);
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn get(&self, ordinal: u32) -> Option<&Bitmap> {
-        self.rows.get(ordinal as usize).and_then(Option::as_ref)
+        self.rows
+            .get(ordinal as usize)
+            .and_then(Option::as_ref)
+            .map(Arc::as_ref)
     }
 
     /// A row form given directly — a spatial level's resolved rows at the fold, and the tests
@@ -431,7 +516,7 @@ impl MembershipRows {
     pub(crate) fn of_rows(rows: Vec<Option<Bitmap>>) -> Self {
         MembershipRows {
             generating: vec![Vec::new(); rows.len()],
-            rows,
+            rows: rows.into_iter().map(|set| set.map(Arc::new)).collect(),
         }
     }
 
@@ -512,6 +597,20 @@ impl MembershipRows {
     }
 }
 
+/// The whole of a view's row space — base and every extent — as a row count.
+fn total_rows(space: &RowSpace) -> u32 {
+    u32::try_from(space.total_rows()).unwrap_or(u32::MAX)
+}
+
+/// The `seg_id` of every extent a row space carries, in order — see [`ArtifactRows::covered`].
+fn covered_by(space: &RowSpace) -> Vec<String> {
+    space
+        .extents()
+        .iter()
+        .map(|extent| extent.seg_id.clone())
+        .collect()
+}
+
 impl ArtifactRows {
     /// Build every half from one walk of one level, at one level version — deriving the index over
     /// the projection this walk just produced.
@@ -542,6 +641,12 @@ impl ArtifactRows {
             records.put(idx, record);
             membership.put(idx, record, space);
         }
+        // **An offered index is refused outright where the row space has extents**, and that is
+        // the same rule as the ordinal check one line down rather than a new one: the fold wrote
+        // it over the base rows, a flushed segment's rows lie above them, and an artifact whose
+        // extent stops short of its own members is *settled* inside a node it reaches outside of —
+        // the collapse the settled probe rests on, no longer true (`tile_index` module doc).
+        let adopted = adopted.filter(|_| space.extent_count() == 0);
         let index = match adopted {
             Some(index) if index.len() == membership.len() => index,
             Some(index) => {
@@ -551,9 +656,9 @@ impl ArtifactRows {
                     "a fold-written tile index covers a different ordinal range from the level it \
                      was offered for; it is dropped and the level's index is derived"
                 );
-                TileIndex::build(&membership, space.base_rows())
+                TileIndex::build(&membership, total_rows(space))
             }
-            None => TileIndex::build(&membership, space.base_rows()),
+            None => TileIndex::build(&membership, total_rows(space)),
         };
         ArtifactRows {
             records,
@@ -562,6 +667,8 @@ impl ArtifactRows {
             partition: None,
             layout: ServingLayout::ArtifactMajor,
             column: None,
+            base_rows: space.base_rows(),
+            covered: covered_by(space),
         }
     }
 
@@ -597,10 +704,20 @@ impl ArtifactRows {
         }
         let mut records = ArtifactRecords::default();
         let mut membership = MembershipRows::default();
+        // **The extent rows are projected here and the base rows come off the column**, which is
+        // the whole of what a fold-written column can and cannot supply: it is addressed by row
+        // over the rows the fold folded, and a flush has appended rows since. Projecting the
+        // extents costs the members inside one extent's entity range per artifact — a reset and a
+        // walk of that range (`SegmentExtent::project`) — against the whole-level decode the
+        // transpose is avoiding.
+        let mut above = Vec::new();
         for (ordinal, record) in artifacts {
             let idx = ordinal as usize;
             records.put(idx, record);
             membership.put_generating(idx, record, space);
+            if space.extent_count() > 0 {
+                above.push((idx, space.project_extents_from(&record.members, 0)));
+            }
         }
         if column.len() < membership.len() {
             return None;
@@ -608,9 +725,13 @@ impl ArtifactRows {
         if !membership.absorb_transposed(column.transpose()?) {
             return None;
         }
+        for (idx, rows) in above {
+            membership.or_rows(idx, &rows);
+        }
         // [`Self::build_over`]'s rule for an offered index, and its reason: a shorter one leaves
         // every ordinal past its end out of every walk.
-        let index = match adopted.take() {
+        // [`Self::build_over`]'s rule again: an index the fold wrote is over the base rows.
+        let index = match adopted.take().filter(|_| space.extent_count() == 0) {
             Some(index) if index.len() == membership.len() => index,
             Some(index) => {
                 tracing::warn!(
@@ -619,9 +740,9 @@ impl ArtifactRows {
                     "a fold-written tile index covers a different ordinal range from the level it \
                      was offered for; it is dropped and the level's index is derived"
                 );
-                TileIndex::build(&membership, space.base_rows())
+                TileIndex::build(&membership, total_rows(space))
             }
-            None => TileIndex::build(&membership, space.base_rows()),
+            None => TileIndex::build(&membership, total_rows(space)),
         };
         Some(ArtifactRows {
             records,
@@ -630,6 +751,8 @@ impl ArtifactRows {
             partition: None,
             layout: ServingLayout::ArtifactMajor,
             column: None,
+            base_rows: space.base_rows(),
+            covered: covered_by(space),
         })
     }
 
@@ -665,6 +788,8 @@ impl ArtifactRows {
             partition: None,
             layout: ServingLayout::ArtifactMajor,
             column: None,
+            base_rows: space.base_rows(),
+            covered: covered_by(space),
         }
     }
 
@@ -688,6 +813,156 @@ impl ArtifactRows {
     /// always the form the manifest records.
     pub fn layout(&self) -> ServingLayout {
         self.layout
+    }
+
+    /// Whether this form's segments and `space`'s agree as far as the shorter of the two goes —
+    /// the base row count equal, and one extent list a prefix of the other.
+    ///
+    /// **The base row count** because a different `permutation.bin` is a different corpus; a fold
+    /// publishes a new prefix and [`ProjectionKey`] discriminates on that, so this is belt to that
+    /// brace. **The prefix of ids** because a *merge* collapses a run of extents into one with a
+    /// new id at the same `row_base` and re-sorts the rows inside it: `seg_id`s are never reused
+    /// (contracts §2.1), so ids standing where they stood are the same segments and the rows in
+    /// them are the same rows. That makes the comparison exact rather than a heuristic, exactly as
+    /// it is for [`crate::compose::RowProjection::extends_to`].
+    fn agrees_with(&self, space: &RowSpace) -> bool {
+        if self.base_rows != space.base_rows() {
+            return false;
+        }
+        let shared = self.covered.len().min(space.extent_count());
+        self.covered[..shared]
+            .iter()
+            .zip(&space.extents()[..shared])
+            .all(|(held, extent)| held == &extent.seg_id)
+    }
+
+    /// **Whether this form may answer for `space`** — the check read beside [`ProjectionKey`] at
+    /// every cache hit, because nothing in that key moves when the geometry does.
+    ///
+    /// The form must hold **at least** every extent `space` carries, on the agreeing prefix. Short
+    /// of that it would understate every artifact with a member in the segments it is missing.
+    ///
+    /// **Longer is served, and that is not laxity.** A form covering extents `space` does not have
+    /// holds those extra rows *above* `space`'s whole row count — a flush appends, so nothing it
+    /// added can collide with a row `space` addresses — and every set a request intersects it with
+    /// is over `space`. The counts are identical; what the extra bits buy is that a session one
+    /// geometry behind the newest (decision 0044) reads the same form rather than rebuilding it
+    /// against the newest reader for ever.
+    pub fn covers(&self, space: &RowSpace) -> bool {
+        self.covered.len() >= space.extent_count() && self.agrees_with(space)
+    }
+
+    /// Whether [`Self::extend_by`] over `space` would be exact — i.e. whether `space` **appends**
+    /// to the row space this form holds rather than permuting it. [`Self::covers`] read the other
+    /// way round, which is what a flush does and a merge does not.
+    fn extends_to(&self, space: &RowSpace) -> bool {
+        self.covered.len() <= space.extent_count() && self.agrees_with(space)
+    }
+
+    fn covering(&mut self, space: &RowSpace) {
+        self.base_rows = space.base_rows();
+        self.covered = covered_by(space);
+    }
+
+    /// **The rows an accepted growth adds, unioned into the ordinal that grew** — the delta that
+    /// keeps this form the form of the level the store now holds instead of a form the next
+    /// request has to build again.
+    ///
+    /// `joining` is entity space and is projected through the whole of `space`, base and extents
+    /// alike, because that is what this form's memberships are (see [`MembershipRows::put`]). An
+    /// entity still in the commit buffer has no row and projects to nothing; it reaches the form
+    /// at its flush, through [`Self::extend_by`].
+    ///
+    /// A hole takes nothing, on [`MembershipRows::or_rows`]' rule.
+    fn grow_rows(&mut self, ordinal: u32, joining: &Bitmap, space: &RowSpace) -> Bitmap {
+        let rows = space.project(joining);
+        let held = self.membership.get(ordinal).cloned().unwrap_or_default();
+        // **What this row form did not already hold** — the rows the column has to gain, and no
+        // others. A member joining an artifact it is already in adds nothing anywhere.
+        let fresh = rows.andnot(&held);
+        self.membership.or_rows(ordinal as usize, &rows);
+        fresh
+    }
+
+    /// **One newly published artifact placed at its ordinal** — records, membership and generating
+    /// sets, exactly as [`Self::build_over`]'s walk would have placed it.
+    ///
+    /// A publication only ever appends ordinals (`LayerRegistry::prepare_artifacts` claims from a
+    /// dense cursor), so this widens the form and rewrites nothing already in it.
+    fn publish_at(&mut self, ordinal: u32, record: &ArtifactRecord, space: &RowSpace) -> Bitmap {
+        let idx = ordinal as usize;
+        self.records.put(idx, record);
+        self.membership.put(idx, record, space);
+        self.membership.get(ordinal).cloned().unwrap_or_default()
+    }
+
+    /// **Every artifact's membership extended by the extents this form does not yet cover** — what
+    /// a flush does to a stored level's held form.
+    ///
+    /// The rows a segment publishes are the rows that segment's entities occupy, so the extension
+    /// is `project_extents_from(members, covered)` per artifact: disjoint from everything
+    /// already held, because an extent's rows begin exactly where row space ended, which is what
+    /// makes the union exact rather than a superset — [`RowSpace::project`]'s own argument, read
+    /// one segment at a time.
+    ///
+    /// **Callers check [`Self::extends_to`] first.** This does not, for
+    /// [`crate::compose::RowProjection::extend`]'s reason: the answer decides whether the caller
+    /// brings the form forward at all, and re-deriving it here would be a second place to get it
+    /// wrong.
+    fn extend_by<'a>(
+        &mut self,
+        artifacts: impl Iterator<Item = (u32, &'a ArtifactRecord)>,
+        space: &RowSpace,
+    ) -> Vec<(u32, u32)> {
+        let from = self.covered.len();
+        let mut added = Vec::new();
+        for (ordinal, record) in artifacts {
+            let rows = space.project_extents_from(&record.members, from);
+            if rows.is_empty() {
+                continue;
+            }
+            if self.membership.or_rows(ordinal as usize, &rows) && self.layout.is_row_major() {
+                added.extend(rows.iter().map(|row| (row, ordinal)));
+            }
+        }
+        added
+    }
+
+    /// **Carry the two derived structures over the amendment** — the tile index, re-derived, and
+    /// the row-major column, amended at `added` and nowhere else.
+    ///
+    /// **The index is re-derived and the column is not**, and the asymmetry is what each costs. An
+    /// extent is `minimum` and `maximum` per artifact, which is O(1) a bitmap and the walk
+    /// `blocks_per_artifact` already makes at every build; a column is one entry per membership
+    /// entry, which at rung 3's `mesh/descriptors` is 1.66×10⁹ of them and ~100 s **on the
+    /// executor thread**, where it blocks every ingest and every deny. So the column takes the
+    /// delta — `added` is `(row, ordinal)` for the rows this amendment gave that artifact and no
+    /// others, and [`RowColumn::with_added`] shares the pack rather than reading it.
+    ///
+    /// Neither is re-adopted from the prefix, and **I11** is why: the fold's files describe the
+    /// level as it was before the amendment, and a *narrow* extent settles an artifact whose
+    /// members reach outside the viewport.
+    ///
+    /// `true` where a level that *was* served row-major no longer has a column: a growth can make
+    /// two memberships overlap, which a label column cannot express. The level then serves
+    /// artifact-major, which answers identically, and the caller says so — the one place the
+    /// recorded layout and the served one may differ, reached by [`Self::with_column`]'s route.
+    fn amend_derived(&mut self, added: &[(u32, u32)], row_count: u32) -> bool {
+        self.index = TileIndex::build(&self.membership, row_count);
+        let Some(column) = &self.column else {
+            return false;
+        };
+        match column.with_added(added, row_count) {
+            Some(amended) => {
+                self.column = Some(Arc::new(amended));
+                false
+            }
+            None => {
+                self.layout = ServingLayout::ArtifactMajor;
+                self.column = None;
+                true
+            }
+        }
     }
 
     /// This level's row-addressed column, where it has one.
@@ -791,7 +1066,7 @@ impl ArtifactRows {
     #[cfg(test)]
     pub(crate) fn synthetic(sets: &[Option<&[u32]>], column: Option<Arc<RowColumn>>) -> Self {
         let membership = MembershipRows {
-            rows: sets.iter().map(|s| s.map(Bitmap::of)).collect(),
+            rows: sets.iter().map(|s| s.map(|s| Arc::new(Bitmap::of(s)))).collect(),
             generating: vec![Vec::new(); sets.len()],
         };
         let index = TileIndex::build(&membership, 0);
@@ -806,6 +1081,8 @@ impl ArtifactRows {
             partition: None,
             layout: ServingLayout::ArtifactMajor,
             column: None,
+            base_rows: 0,
+            covered: Vec::new(),
         }
         .with_column(column)
     }
@@ -1028,56 +1305,6 @@ impl ArtifactRows {
     }
 }
 
-/// What a cached [`ArtifactRows`] was built from. **Every term is a reason the projection would be
-/// wrong**, and a mismatch on any of them rebuilds:
-///
-/// - the **prefix**, because a fold renumbers the base row space wholesale, so a projection built
-///   over the old one names other people's documents;
-/// - the **view**, because row space is per view;
-/// - the **level's version**, because a publication adds memberships the projection has never
-///   seen — and a cached projection that silently omitted them would serve a level with its
-///   newest clusters absent, indistinguishable from clusters that failed their criterion.
-///
-/// **The level's version and not the store's**, which is what this carried until the scale
-/// campaign measured the difference (`design/artifact-serving-at-scale.md` §8.1): a store-wide
-/// counter makes one suppression, one growth or one publication *anywhere* invalidate every
-/// level's form in every view — 138 s of rebuild at 10⁷ artifacts over 10⁹ rows, so under any
-/// read-write load the cache never survives to be used. The narrower key is sound because the
-/// build reads exactly two things: the records of one `(layer, level)`, which is what that level's
-/// version counts, and the view's row space, which is fixed by the two terms above it.
-///
-/// **The segments version is deliberately not a term, and that is what the base-row rule buys.**
-/// A flush and a merge both move it, and both leave every bit of this projection correct: the form
-/// holds base rows only ([`RowSpace::project_base`]), an append adds none of them and a merge
-/// renumbers only the extent rows above them. Keying on it instead would rebuild every level on
-/// every flush — tens of seconds per level at 10⁷ artifacts, paid by whichever request arrived
-/// next, for a set of bits that did not move. The one operation that *does* renumber the base is
-/// the fold, and a fold publishes a new prefix.
-/// What a cached [`ArtifactRows`] was built from. **Every term is a reason the projection would be
-/// wrong**, and a mismatch on any of them rebuilds:
-///
-/// - the **prefix**, because a fold renumbers the base row space wholesale, so a projection built
-///   over the old one names other people's documents;
-/// - the **view**, because row space is per view;
-/// - the **level's version**, because a publication adds memberships the projection has never
-///   seen — and a cached projection that silently omitted them would serve a level with its
-///   newest clusters absent, indistinguishable from clusters that failed their criterion.
-///
-/// **The level's version and not the store's**, which is what this carried until the scale
-/// campaign measured the difference (`design/artifact-serving-at-scale.md` §8.1): a store-wide
-/// counter makes one suppression, one growth or one publication *anywhere* invalidate every
-/// level's form in every view — 138 s of rebuild at 10⁷ artifacts over 10⁹ rows, so under any
-/// read-write load the cache never survives to be used. The narrower key is sound because the
-/// build reads exactly two things: the records of one `(layer, level)`, which is what that level's
-/// version counts, and the view's row space, which is fixed by the two terms above it.
-///
-/// **The segments version is deliberately not a term, and that is what the base-row rule buys.**
-/// A flush and a merge both move it, and both leave every bit of this projection correct: the form
-/// holds base rows only ([`RowSpace::project_base`]), an append adds none of them and a merge
-/// renumbers only the extent rows above them. Keying on it instead would rebuild every level on
-/// every flush — tens of seconds per level at 10⁷ artifacts, paid by whichever request arrived
-/// next, for a set of bits that did not move. The one operation that *does* renumber the base is
-/// the fold, and a fold publishes a new prefix.
 /// **Where a predicate level's membership comes from**, resolved against this generation — the
 /// pieces [`ArtifactProjections::get_or_build`] needs and cannot reach itself.
 ///
@@ -1119,6 +1346,31 @@ pub struct SpatialSource<'a> {
     pub total_rows: u32,
 }
 
+/// What a cached [`ArtifactRows`] was built from. **Every term is a reason the projection would be
+/// wrong**, and a mismatch on any of them rebuilds:
+///
+/// - the **prefix**, because a fold renumbers the base row space wholesale, so a projection built
+///   over the old one names other people's documents;
+/// - the **view**, because row space is per view;
+/// - the **level's version**, because a publication adds memberships the projection has never
+///   seen — and a cached projection that silently omitted them would serve a level with its
+///   newest clusters absent, indistinguishable from clusters that failed their criterion.
+///
+/// **The level's version and not the store's**, which is what this carried until the scale
+/// campaign measured the difference (`design/artifact-serving-at-scale.md` §8.1): a store-wide
+/// counter makes one suppression, one growth or one publication *anywhere* invalidate every
+/// level's form in every view — 138 s of rebuild at 10⁷ artifacts over 10⁹ rows, so under any
+/// read-write load the cache never survives to be used. The narrower key is sound because the
+/// build reads exactly two things: the records of one `(layer, level)`, which is what that level's
+/// version counts, and the view's row space, which is fixed by the two terms above it.
+///
+/// **The segments version is deliberately not a term, and it is not the row space's only guard.**
+/// A stored level's form covers extent rows, so a flush and a merge both matter to it — but
+/// neither is answered by rebuilding at a version. A flush **extends** the form
+/// ([`ArtifactProjections::extend_flushed`]), which keying on the segments version would turn into
+/// a whole-level projection per flush for a set of bits that mostly did not move; a merge permutes
+/// rows the form holds and is caught by [`ArtifactRows::covers`], read beside this key at every
+/// hit. The one operation that renumbers the base is the fold, and a fold publishes a new prefix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ProjectionKey {
     prefix: String,
@@ -1127,17 +1379,17 @@ struct ProjectionKey {
     /// **The geometry a *predicate* level's membership was evaluated against, and `0` for every
     /// other level.**
     ///
-    /// A stored membership is base-row-addressed and survives a flush, which is what
-    /// [`RowSpace::project_base`] buys and why `segments_version` is deliberately not a term above.
-    /// A predicate's membership is not stored: an attribute layer's live tail covers the rows a
-    /// flush appended, and a shape's ranges are resolved against the segment list itself. Both move
-    /// when the geometry does, so both are rebuilt then — which is the whole of *never stale*, and
-    /// the cost of it is that a predicate level's form is derived once per flush rather than once
-    /// per fold.
+    /// A stored membership is a set the form can be **extended** by the segment a flush publishes
+    /// ([`ArtifactProjections::extend_flushed`]), which is why `segments_version` is not a term
+    /// above. A predicate's membership is not stored and there is no delta to extend by: an
+    /// attribute layer's live tail covers the rows a flush appended, and a shape's ranges are
+    /// resolved against the segment list itself. Both move when the geometry does, so both are
+    /// rebuilt then — which is the whole of *never stale*, and the cost of it is that a predicate
+    /// level's form is derived once per flush rather than once per fold.
     ///
     /// **Zero rather than an `Option`**, because a level either has a rule to evaluate or it does
-    /// not: an enumerated level filed under a geometry would rebuild on every flush for a set of
-    /// bits that did not move.
+    /// not: an enumerated level filed under a geometry would rebuild on every flush what a walk of
+    /// one extent brings forward.
     live: u64,
 }
 
@@ -1189,6 +1441,20 @@ type IndexAddress = (String, String, u32);
 struct IndexKey {
     prefix: String,
     level_version: u64,
+}
+
+/// **What one accepted write did to a level**, in the form [`ArtifactProjections::bring_forward`]
+/// applies to the row forms already held for it.
+///
+/// Entity space and a delta, exactly as the log record carries it — a row-space set would be a
+/// frozen projection, and this is applied once per view over that view's own row space.
+pub enum LevelDelta<'a> {
+    /// `(ordinal, the entities joining)` — a `WalRecord::ArtifactGrow` decoded, which is the same
+    /// delta `ArtifactStore::grow` applied to the records.
+    Grown(&'a [(u32, Bitmap)]),
+    /// The ordinals a publication claimed. The records themselves are read back from the store,
+    /// which has already applied them.
+    Published(&'a [u32]),
 }
 
 #[derive(Debug, Default)]
@@ -1532,6 +1798,16 @@ impl ArtifactProjections {
         }
     }
 
+    /// The form held for one `(view, layer, level)`, or `None` where none is — see
+    /// [`crate::Engine::held_artifact_form_for_test`], its only caller.
+    pub fn held_form(&self, view: &str, layer: &str, level: u32) -> Option<Arc<ArtifactRows>> {
+        self.cached
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(view.to_string(), layer.to_string(), level))
+            .map(|(_, rows)| Arc::clone(rows))
+    }
+
     /// How many forms are held. Operator plane only, beside [`Self::builds`] — a count of
     /// structures, naming no artifact and no principal.
     pub fn held(&self) -> usize {
@@ -1611,6 +1887,254 @@ impl ArtifactProjections {
             .retain(|(_, held, held_level), _| held != layer || *held_level != level);
     }
 
+    /// **Apply an accepted write to the row form already held for one `(view, layer, level)`**,
+    /// instead of leaving the next request to build the level again.
+    ///
+    /// A growth or a publication moves the level's version, so the held form misses on its key and
+    /// the whole level is projected on whichever request arrives next — 94 to 177 s at rung 3,
+    /// inside a request, against a 60 s stream deadline
+    /// (`2026-09-03-post-flush-artifact-frames.md`). The delta that produced the miss is small and
+    /// this is where it is known, so it is applied here and the key is moved with it.
+    ///
+    /// **Derived from the level's own records and the view's row space, both authoritative, and
+    /// held per `(view, layer, level)`** — nothing per principal, exactly as a built form is
+    /// (**I2**). **I11** is kept by what this does *not* touch: no persisted structure is amended,
+    /// and the tile index and column derived here are derived rather than re-adopted, because the
+    /// fold's files describe the level as it was.
+    ///
+    /// **`before` is the level's version as it stood when the delta was prepared.** A held form at
+    /// any other version has missed a write this cannot reconstruct, so it is dropped and the next
+    /// request builds — the state this exists to avoid, said at `warn` because it is the expensive
+    /// path returning rather than a fault.
+    ///
+    /// Nothing is held for most `(view, layer, level)` triples and this then does nothing, which is
+    /// the ordinary case for a layer no request has reached.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bring_forward(
+        &self,
+        prefix: &str,
+        view: &str,
+        layer: &str,
+        level: u32,
+        store: &ArtifactStore,
+        space: &RowSpace,
+        delta: &LevelDelta<'_>,
+        before: u64,
+        stored: bool,
+    ) {
+        // **A level whose membership is a *rule* has no delta to take.** A shape's members are the
+        // rows inside it and an attribute predicate's are the rows carrying a value; neither is in
+        // the record this delta came from, so applying one would add nothing and — because it also
+        // moves the key — would make the form *hit* on the next request, ahead of the shape pieces
+        // `ShapeStore::warm` installs after the publication. Such a level is left alone and rebuilt
+        // by its own version move, which is what it has always been.
+        //
+        // **Asked of the declaration and not of [`ProjectionKey::live`]**, which is the segments
+        // version and is `0` on a bundle nothing has flushed — indistinguishable there from the `0`
+        // a stored level is filed under.
+        if !stored {
+            return;
+        }
+        let map_key = (view.to_string(), layer.to_string(), level);
+        let held = {
+            let cached = self.cached.lock().unwrap_or_else(|e| e.into_inner());
+            match cached.get(&map_key) {
+                Some((key, rows)) => (key.clone(), Arc::clone(rows)),
+                None => return,
+            }
+        };
+        let (key, mut rows) = held;
+        // **`before + 1`, never the store's current version.** Every route that changes a level's
+        // records bumps it exactly once (`ArtifactStore::bump`'s four callers), so the version this
+        // delta produces is the one it followed plus one — and reading the store instead is wrong
+        // wherever more than one record has already been applied. A window carrying a mint *and* a
+        // growth on one level applies both before either is brought forward, so the store is at
+        // `before + 2` when the first delta arrives: stamping that would file a form holding one
+        // delta under the version of two, and the second delta would then find a mismatch and drop
+        // the form it was about to complete.
+        let now = before + 1;
+        // **Every term that would make the amendment describe something other than what is held.**
+        // A form from another prefix or another version has missed a write; a form whose rows are
+        // not rows of this row space is the merge case [`ArtifactRows::covers`] argues. Each is a
+        // form that *should* have been brought forward and was not, which is why each is said at
+        // `warn`: it is the whole-level projection returning to the request path.
+        let reason = if key.prefix != prefix {
+            Some("the form was projected under another prefix")
+        } else if key.level_version != before {
+            Some("the form is at a level version this delta does not follow")
+        } else if !(rows.covers(space) && rows.extends_to(space)) {
+            // **Exactly this row space, not merely one it can answer for.** The amendment sizes
+            // the tile index and the column to `space`, so a form holding rows above what `space`
+            // addresses would have them dropped rather than kept — and the executor never sees one
+            // (it holds the newest generation), which makes this the unreachable-state arm.
+            Some("the form's rows are not rows of this view's row space")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            self.cached
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&map_key);
+            tracing::warn!(
+                layer = %layer,
+                level,
+                view = %view,
+                reason,
+                "a level's held row form could not be brought forward and is dropped; the next \
+                 request naming this level projects it whole"
+            );
+            return;
+        }
+
+        // **A clone only where a request is reading this form**, and it is the same peak the
+        // rebuild it replaces would have paid: `get_or_build` builds a second form beside the one
+        // still cached. Where nothing else holds the `Arc` — the case between requests — this is
+        // free.
+        let started = std::time::Instant::now();
+        let shared = Arc::strong_count(&rows) > 1;
+        let amended = Arc::make_mut(&mut rows);
+        let cloned_ms = started.elapsed().as_millis() as u64;
+        // **The rows this delta gave each artifact**, gathered as the membership takes them, so the
+        // column is amended at exactly those and the pack is never rewritten. Empty on an
+        // artifact-major level, which has no column to amend.
+        let row_major = amended.layout.is_row_major();
+        let mut added: Vec<(u32, u32)> = Vec::new();
+        match delta {
+            LevelDelta::Grown(joins) => {
+                for (ordinal, joining) in *joins {
+                    let fresh = amended.grow_rows(*ordinal, joining, space);
+                    if row_major {
+                        added.extend(fresh.iter().map(|row| (row, *ordinal)));
+                    }
+                }
+            }
+            LevelDelta::Published(ordinals) => {
+                for ordinal in *ordinals {
+                    if let Some(record) = store.get(layer, level, *ordinal) {
+                        let fresh = amended.publish_at(*ordinal, record, space);
+                        if row_major {
+                            added.extend(fresh.iter().map(|row| (row, *ordinal)));
+                        }
+                    }
+                }
+            }
+        }
+        let lost = amended.amend_derived(&added, total_rows(space));
+        amended.covering(space);
+        // **What the write cost the executor thread**, which is the whole point of applying a delta
+        // rather than projecting the level: `cloned_ms` is the copy a concurrent reader forces (see
+        // above), `elapsed_ms` the amendment and the tile index beside it. Operator plane only —
+        // counts and durations, naming no artifact and no principal.
+        tracing::info!(
+            layer = %layer,
+            level,
+            view = %view,
+            rows_added = added.len(),
+            cloned = shared,
+            cloned_ms,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "a level's held row form took a write's delta"
+        );
+        if lost {
+            self.fallbacks
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::warn!(
+                layer = %layer,
+                level,
+                view = %view,
+                "this level's amended memberships no longer partition, so it is served \
+                 artifact-major. Every answer is unchanged; the layout is not"
+            );
+        }
+        // **The containment partition is carried over untouched, and that is exact.** It is
+        // composed from the level's records at a version and answers per `(ordinal, rank)`; a
+        // growth changes no content's generating set, and a publication only appends ordinals,
+        // which `ContainmentAnswers::covers` reports as uncovered and sends to the masked-count
+        // route — the route that asks `M_auth` itself.
+        let key = ProjectionKey {
+            level_version: now,
+            ..key
+        };
+        self.cached
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(map_key, (key, rows));
+    }
+
+    /// **Extend every stored level's held form in one view by the segment a flush has published.**
+    ///
+    /// A form's memberships cover the whole row space (`MembershipRows::put`), so a flush that
+    /// appends an extent leaves every one of them one segment short: an ingested row that joined an
+    /// artifact would count for nobody until the next fold. This is where the segment reaches them
+    /// — one `project_extents_from` per artifact, over the entities inside that extent's own range.
+    ///
+    /// **Stored levels only**, which `stored` answers from the layer's declaration and not from
+    /// [`ProjectionKey::live`] — see [`Self::bring_forward`] on why the key cannot say. A rule-
+    /// derived level's form is keyed on the geometry and is rebuilt by the flush's own move of it,
+    /// which is what makes its answer fresh by construction.
+    ///
+    /// A form that does not extend — a merge, or a form left behind by an earlier drop — is dropped
+    /// and rebuilt by the next request, said at `warn` for [`Self::bring_forward`]'s reason.
+    pub fn extend_flushed(
+        &self,
+        prefix: &str,
+        view: &str,
+        store: &ArtifactStore,
+        space: &RowSpace,
+        stored: &dyn Fn(&str) -> bool,
+    ) {
+        let held: Vec<(LevelAddress, ProjectionKey, Arc<ArtifactRows>)> = {
+            let cached = self.cached.lock().unwrap_or_else(|e| e.into_inner());
+            cached
+                .iter()
+                .filter(|((held_view, layer, _), _)| held_view == view && stored(layer))
+                .filter(|(_, (key, _))| key.prefix == prefix)
+                .map(|(address, (key, rows))| (address.clone(), key.clone(), Arc::clone(rows)))
+                .collect()
+        };
+        for (address, key, mut rows) in held {
+            let (_, layer, level) = &address;
+            if rows.covers(space) {
+                continue;
+            }
+            if !rows.extends_to(space) {
+                self.cached
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&address);
+                tracing::warn!(
+                    layer = %layer,
+                    level,
+                    view = %view,
+                    "a level's held row form does not extend to this view's row space — its \
+                     segments were permuted rather than appended to — so it is dropped and the \
+                     next request naming this level projects it whole"
+                );
+                continue;
+            }
+            let amended = Arc::make_mut(&mut rows);
+            let added = amended.extend_by(store.level(layer, *level), space);
+            let lost = amended.amend_derived(&added, total_rows(space));
+            amended.covering(space);
+            if lost {
+                self.fallbacks
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tracing::warn!(
+                    layer = %layer,
+                    level,
+                    view = %view,
+                    "this level's extended memberships no longer partition, so it is served \
+                     artifact-major. Every answer is unchanged; the layout is not"
+                );
+            }
+            self.cached
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(address, (key, rows));
+        }
+    }
+
     /// This level's row form for the generation `store` is in, building it if what is held is
     /// stale.
     ///
@@ -1662,7 +2186,13 @@ impl ArtifactProjections {
             .unwrap_or_else(|e| e.into_inner())
             .get(&map_key)
         {
-            if *held == key {
+            // **The key and the row space both**, and neither implies the other. The key says the
+            // form describes this level's records; [`ArtifactRows::covers`] says its rows are rows
+            // of this row space — which the key cannot, because a flush and a merge move no term
+            // of it. See that method for why the row space is not simply a fourth term here: a
+            // flush *brings the form forward* rather than invalidating it, so a form whose rows
+            // are one segment short is a form to extend and not one to rebuild.
+            if *held == key && rows.covers(space) {
                 return Arc::clone(rows);
             }
         }
@@ -1821,13 +2351,19 @@ impl ArtifactProjections {
             ),
             // The claim above already took it, where the prefix held one: `column_for` would
             // find nothing there and recompose what is in hand.
+            // **A fold-written column is served only while row space has no extents.** It is
+            // addressed by row over the rows the fold folded; a flushed segment's rows lie above
+            // them, and a column that does not label them would count every point ingested since
+            // the fold as in no artifact — the staleness the form's own extension exists against.
+            // With extents the column is composed over the form the transpose just produced, which
+            // is the same choice the spatial branch above makes and for the same reason.
             _ => match claimed {
-                Some(claimed) => {
+                Some(claimed) if space.extent_count() == 0 => {
                     self.columns_adopted
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     Some(claimed)
                 }
-                None => self.column_for(
+                _ => self.column_for(
                     prefix,
                     view,
                     layer,
@@ -2466,7 +3002,7 @@ mod tests {
                 declared: vec![Vec::new(); sets.len()],
             },
             MembershipRows {
-                rows: sets.iter().map(|s| Some(Bitmap::of(s))).collect(),
+                rows: sets.iter().map(|s| Some(Arc::new(Bitmap::of(s)))).collect(),
                 generating: vec![Vec::new(); sets.len()],
             },
         )
@@ -2483,6 +3019,8 @@ mod tests {
             partition: None,
             layout: ServingLayout::ArtifactMajor,
             column: None,
+            base_rows: 0,
+            covered: Vec::new(),
         }
     }
 
@@ -2510,7 +3048,7 @@ mod tests {
                 declared: vec![contents.iter().map(|(_, declared)| *declared).collect()],
             },
             MembershipRows {
-                rows: vec![Some(Bitmap::of(members))],
+                rows: vec![Some(Arc::new(Bitmap::of(members)))],
                 generating: vec![contents.iter().map(|(set, _)| Bitmap::of(set)).collect()],
             },
         )
@@ -2884,7 +3422,7 @@ mod tests {
                 declared: vec![Vec::new()],
             },
             MembershipRows {
-                rows: vec![Some(Bitmap::of(members))],
+                rows: vec![Some(Arc::new(Bitmap::of(members)))],
                 generating: vec![Vec::new()],
             },
         )

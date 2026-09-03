@@ -234,8 +234,9 @@ fn a_write_to_one_layer_leaves_another_layers_row_form_alone() {
     );
     assert_eq!(
         engine.artifact_cache_builds().0,
-        warm + 1,
-        "exactly one form was rebuilt: the level that was written to, and no other layer's"
+        warm,
+        "no form was rebuilt at all: the write applied its own delta to the form it moved, so \
+         neither the level that was written to nor any other layer's was projected again"
     );
     assert_eq!(
         served(&engine, "clusters/b"),

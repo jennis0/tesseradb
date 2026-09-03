@@ -1,0 +1,4 @@
+2026-09-03T10:00:09.647548Z  INFO tessera_engine::session: the engine adopted the prefix's derived artifact structures containment_named=2 containment_adopted=2 tile_indexes_named=1 row_columns_named=1 prefix=v00000
+2026-09-03T10:00:09.977378Z  INFO tessera_engine::artifacts: a level's row form and tile index are built layer=clusters/kmeans level=0 view=knn ordinals=256 everywhere=46 adopted=true transposed=false layout=ArtifactMajor blocks_per_artifact=7.3359375
+2026-09-03T10:00:24.147254Z  INFO tessera_engine::artifacts: a level's row form and tile index are built layer=mesh/descriptors level=0 view=knn ordinals=30217 everywhere=29723 adopted=false transposed=true layout=RowMajorList blocks_per_artifact=241.36744216831585
+2026-09-03T10:00:46.869080Z  INFO tessera_engine::artifacts: a level's held row form took a write's delta layer=mesh/descriptors level=0 view=knn rows_added=0 cloned=true cloned_ms=2576 elapsed_ms=2581

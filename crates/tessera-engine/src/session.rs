@@ -3062,6 +3062,29 @@ impl Engine {
         (self.artifact_projections.builds(), self.lineages.builds())
     }
 
+    /// The row form this engine is **holding** for one `(view, layer, level)`, without building
+    /// one — the maintained form itself, for the differential that asserts it equals a form built
+    /// from scratch (`tests/artifact_bring_forward.rs`).
+    ///
+    /// **Test-only, and the reason is what it would otherwise be**: a caller that took the held
+    /// form on a request path would be taking whatever was last written to the cache rather than
+    /// the form of the generation it is serving — the freshness argument `get_or_build` makes by
+    /// reading the level's version from the store it builds from.
+    pub fn held_artifact_form_for_test(
+        &self,
+        view: &str,
+        layer: &str,
+        level: u32,
+    ) -> Option<std::sync::Arc<crate::artifacts::ArtifactRows>> {
+        self.artifact_projections.held_form(view, layer, level)
+    }
+
+    /// Drop every derived form this engine holds for one layer, so the next request builds them —
+    /// the *from scratch* half of the same differential.
+    pub fn forget_artifact_forms_for_test(&self, layer: &str) {
+        self.artifact_projections.forget(layer);
+    }
+
     /// How many artifact row forms, and how many lineages, are held right now.
     ///
     /// The gauge beside [`Engine::artifact_cache_builds`]'s counter, and the one that moves in
