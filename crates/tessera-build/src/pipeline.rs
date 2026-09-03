@@ -2754,6 +2754,17 @@ fn write_filter_postings_banded(
 /// The field tag is the column's position among `declared_scalars` — the same positional identity
 /// the hot column's tail and the ingest row vector already rely on — so drill-down resolves it
 /// against the manifest without any name table in the artefact.
+///
+/// ⊘ **This walk reaches a string arena at a random offset per row, and that is not fixed.** It is
+/// the defect the text index no longer has: entity order and the arena's arrival order are
+/// unrelated (`column.rs`), so a blob row's characters are a page fault into a file that may be far
+/// larger than the machine. The text index answered it by walking the arena instead; this stage
+/// cannot, because the blob's rows must be *written* in ascending entity order and the directory
+/// beside them is built from that. Invisible while the arena fits — 74 s either way at 10⁷ — and
+/// **> 285 s against 74 s under a 4 GB cap** at ~120 major faults a second
+/// (`probes/2026-09-03-text-arena-streaming/`). What would answer it is an entity-ordered arena,
+/// built at the join from a second pass over the source's text column, which is a decision about
+/// the join rather than about this stage.
 pub(crate) fn write_record_blob(
     partition_dir: &Path,
     schema: &crate::config::Schema,
