@@ -93,7 +93,7 @@ flush, not the flush's own wall; `fold` is the server's own `compaction.last_sec
 
 | rung | f | C | items/s | ack p50 | ack p99 | visibility | fold | 0091 equivalence |
 |---|---|---|---|---|---|---|---|---|
-| — | — | — | — | — | — | — | — | _no rung has an ingest cell; see each rung's `notes`_ |
+| medcpt | 10% | 8 | 12,054.2 | 2.01 s | 5.19 s | 0.3 s | 1:50 | zoom-0 exact, layers 6 |
 
 <!-- /campaign-table -->
 

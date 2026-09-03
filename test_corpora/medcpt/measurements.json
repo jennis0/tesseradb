@@ -2,7 +2,7 @@
   "schema_version": 1,
   "rung": "medcpt",
   "rows": 35920666,
-  "binary_commit": "5c8962cc",
+  "binary_commit": "c47d2ade",
   "built_at": "2026-09-03",
   "host": "WSL2, 12 cores, 47 GB, local NVMe",
   "build": {
@@ -8516,11 +8516,521 @@
       "ran_s": 1381.0
     }
   ],
-  "ingest": [],
+  "ingest": [
+    {
+      "fraction": 0.1,
+      "concurrency": 8,
+      "seed": 0,
+      "base_rows": 32328599,
+      "holdout_rows": 3592067,
+      "blocked": null,
+      "base_build": {
+        "wall_s": 9584.12,
+        "returncode": 0,
+        "stdout": "built /home/joe/code/tessera/data/ladder/.measure/medcpt36/cycle/base-0.1/bundle (v00000): 32328599 items, 18 terms, 148749743 pairs, 10048479702 bytes on disk, 0 artifact(s) minted, 0 unclustered member row(s)\n  view knn: 32328599 row(s)\n",
+        "stderr_tail": "view 'knn': quantising against x [-17.894932670593263, 20.183564109802248], y [-20.086218280792238, 17.992278499603273]\n        the data spans x [-17.52161407470703, 19.810245513916016], y [-17.711769104003906, 15.617829322814941] \u2014 64252 x 57364 of the 65536 x 65536 cells\n        32328599 point(s) placed, none on the frame's edge\nschema: 4 column(s), 8.00 B/row against the 12 B fixed row (+67%)\n        7.44 GiB per 10^9 items \u2014 unalterable without rewriting the corpus\n        every column materialises in EVERY view \u2014 including ones whose items carry no value for it (\u00a73.9). Per-view columns need contracts \u00a72.6's per-view enumeration\nstage       source_ids      2.24s  rows=32328599     peak=   512 MiB\nstage       dictionary     29.89s  rows=18           peak=  1321 MiB\nstage    geometry_read     22.25s  rows=32328599     peak=  3595 MiB\nstage       pairs_pack      0.00s  rows=148749743    peak=  3595 MiB\nstage   signature_sort      9.62s  rows=32328599     peak=  3595 MiB\nstage       assignment     30.00s  rows=32328599     peak=  3595 MiB\nstage       assignment      1.35s  rows=32328599     peak=  3595 MiB\nstage   postings_write      5.26s  rows=148749743    peak=  3595 MiB\nstage     external_ids      0.00s  rows=0            peak=  3595 MiB\nattribute 'published': 32,303,432 of 32,328,599 entities have a value\nattribute 'title': 32,299,079 of 32,328,599 entities have a value\nattribute 'mesh_major': 27,316,171 of 32,328,599 entities have a value\nattribute 'pmid': 32,328,599 of 32,328,599 entities have a value\n        0 source row(s) named entities this build did not load\nstage   attribute_tail     47.09s  rows=32328599     peak=  3595 MiB\nstage           layers   1259.57s  rows=2            peak=  5439 MiB\nstage       text_index    104.00s  rows=1695820      peak=  8564 MiB\nstage  filter_postings    353.87s  rows=32328599     peak=  8564 MiB\nstage      record_blob   7461.72s  rows=32328599     peak=  8564 MiB\nstage   column_release      0.85s  rows=32328599     peak=  8564 MiB\nstage       tiler_sort     17.89s  rows=32328599     peak=  8564 MiB\nstage    segment_write     10.10s  rows=32328599     peak=  8564 MiB\nartifact layouts, chosen from the bundle's own row space (218839 ms):\n  clusters/kmeans level 0 [knn]: 256 artifact(s) with rows, 0.121 everywhere, 6.9 blocks/artifact, disjoint \u2014 served rows\n  mesh/descriptors level 0 [knn]: 30214 artifact(s) with rows, 0.967 everywhere, 217.6 blocks/artifact, overlapping \u2014 served list\n  wrote 1 tile index(es), 1 row-major column(s), 2 containment partition(s), 0 shape row form(s), 0 decomposition file(s)\nstage        manifests    221.07s  rows=10048479702  peak=  8564 MiB\nview 'knn': 32328599 point(s) landed in 29536654 distinct cell(s) \u2014 91.4% of them have a position of their own\n",
+        "bundle_bytes": 10048523588
+      },
+      "base_build_stages": [
+        {
+          "stage": "source_ids",
+          "wall_s": 2.238913466,
+          "rows": 32328599,
+          "peak_rss_kib": 524364,
+          "started_at": 1788403733.8366437,
+          "ended_at": 1788403736.0755572
+        },
+        {
+          "stage": "dictionary",
+          "wall_s": 29.885376209,
+          "rows": 18,
+          "peak_rss_kib": 1353444,
+          "started_at": 1788403736.0756915,
+          "ended_at": 1788403765.9610677
+        },
+        {
+          "stage": "geometry_read",
+          "wall_s": 22.252868854,
+          "rows": 32328599,
+          "peak_rss_kib": 3682152,
+          "started_at": 1788403765.9611928,
+          "ended_at": 1788403788.2140617
+        },
+        {
+          "stage": "pairs_pack",
+          "wall_s": 1.633e-06,
+          "rows": 148749743,
+          "peak_rss_kib": 3682152,
+          "started_at": 1788403788.2141056,
+          "ended_at": 1788403788.2141073
+        },
+        {
+          "stage": "signature_sort",
+          "wall_s": 9.621722891,
+          "rows": 32328599,
+          "peak_rss_kib": 3682152,
+          "started_at": 1788403788.2409708,
+          "ended_at": 1788403797.8626938
+        },
+        {
+          "stage": "assignment",
+          "wall_s": 29.997871165,
+          "rows": 32328599,
+          "peak_rss_kib": 3682152,
+          "started_at": 1788403797.8793354,
+          "ended_at": 1788403827.8772066
+        },
+        {
+          "stage": "assignment",
+          "wall_s": 1.347853487,
+          "rows": 32328599,
+          "peak_rss_kib": 3682152,
+          "started_at": 1788403827.8773077,
+          "ended_at": 1788403829.225161
+        },
+        {
+          "stage": "postings_write",
+          "wall_s": 5.264561806,
+          "rows": 148749743,
+          "peak_rss_kib": 3682152,
+          "started_at": 1788403829.225336,
+          "ended_at": 1788403834.489898
+        },
+        {
+          "stage": "external_ids",
+          "wall_s": 3.77e-07,
+          "rows": 0,
+          "peak_rss_kib": 3682152,
+          "started_at": 1788403834.4899704,
+          "ended_at": 1788403834.489971
+        },
+        {
+          "stage": "attribute_tail",
+          "wall_s": 47.089363026,
+          "rows": 32328599,
+          "peak_rss_kib": 3682152,
+          "started_at": 1788403834.490142,
+          "ended_at": 1788403881.5795052
+        },
+        {
+          "stage": "layers",
+          "wall_s": 1259.569165944,
+          "rows": 2,
+          "peak_rss_kib": 5569880,
+          "started_at": 1788403881.6221497,
+          "ended_at": 1788405141.1913157
+        },
+        {
+          "stage": "text_index",
+          "wall_s": 103.995968007,
+          "rows": 1695820,
+          "peak_rss_kib": 8770316,
+          "started_at": 1788405495.0602484,
+          "ended_at": 1788405599.0562165
+        },
+        {
+          "stage": "filter_postings",
+          "wall_s": 353.870449533,
+          "rows": 32328599,
+          "peak_rss_kib": 8770316,
+          "started_at": 1788405245.1874783,
+          "ended_at": 1788405599.0579278
+        },
+        {
+          "stage": "record_blob",
+          "wall_s": 7461.718863719,
+          "rows": 32328599,
+          "peak_rss_kib": 8770316,
+          "started_at": 1788405711.7837563,
+          "ended_at": 1788413173.50262
+        },
+        {
+          "stage": "column_release",
+          "wall_s": 0.849614476,
+          "rows": 32328599,
+          "peak_rss_kib": 8770316,
+          "started_at": 1788413173.50292,
+          "ended_at": 1788413174.3525343
+        },
+        {
+          "stage": "tiler_sort",
+          "wall_s": 17.885962489,
+          "rows": 32328599,
+          "peak_rss_kib": 8770316,
+          "started_at": 1788413175.262025,
+          "ended_at": 1788413193.1479876
+        },
+        {
+          "stage": "segment_write",
+          "wall_s": 10.103939242,
+          "rows": 32328599,
+          "peak_rss_kib": 8770316,
+          "started_at": 1788413193.1480892,
+          "ended_at": 1788413203.2520285
+        },
+        {
+          "stage": "manifests",
+          "wall_s": 221.073603274,
+          "rows": 10048479702,
+          "peak_rss_kib": 8770316,
+          "started_at": 1788413209.2944431,
+          "ended_at": 1788413430.3680465
+        }
+      ],
+      "layers": {
+        "probed": {
+          "clusters/kmeans": {
+            "status": 200,
+            "keys_offered": 3,
+            "body": "{\"accepted\":1,\"over_bound\":0,\"over_bound_ids\":[],\"clipped\":0,\"tessera_ids\":[17196262984240797091],\"minted\":0}",
+            "withdrawn": 200,
+            "member_rows": 35987669
+          },
+          "mesh/descriptors": {
+            "status": 200,
+            "keys_offered": 3,
+            "body": "{\"accepted\":1,\"over_bound\":0,\"over_bound_ids\":[],\"clipped\":0,\"tessera_ids\":[9765698294934699723],\"minted\":0}",
+            "withdrawn": 200,
+            "member_rows": 1658437807
+          }
+        },
+        "carried": [
+          "clusters/kmeans"
+        ],
+        "declined": {
+          "mesh/descriptors": "declared `kind = \"dag\"`, whose membership cell is a lineage; this rung's points are in several unrelated artifacts each, which a lineage cannot express and which a `dag` would absorb as new parent edges"
+        },
+        "hierarchy_kinds": {
+          "clusters/kmeans": "flat",
+          "mesh/descriptors": "dag"
+        }
+      },
+      "items_per_s": 12054.2,
+      "accepted": 3592067,
+      "ack_p50": 2014.6564,
+      "ack_p99": 5192.108,
+      "statuses": {
+        "200": 360,
+        "429": 316
+      },
+      "flush_s": 8.036,
+      "visibility_s": 0.321,
+      "fold_s": 110,
+      "fold_peak_rss": 13549883392,
+      "equivalence": {
+        "equal": false,
+        "zoom0_equal": true,
+        "boxes_equal": true,
+        "layers_equal": false,
+        "differences_by_surface": {
+          "layers": 6
+        },
+        "differences": [
+          {
+            "principal": "0.0100",
+            "where": "layers",
+            "folded": {
+              "5": [
+                {
+                  "rows": 10328
+                }
+              ],
+              "3": [
+                {
+                  "rows": 1
+                }
+              ]
+            },
+            "all_in": {
+              "5": [
+                {
+                  "rows": 10685
+                }
+              ],
+              "3": [
+                {
+                  "rows": 1
+                }
+              ]
+            }
+          },
+          {
+            "principal": "0.0500",
+            "where": "layers",
+            "folded": {
+              "5": [
+                {
+                  "rows": 10328
+                }
+              ],
+              "3": [
+                {
+                  "rows": 1
+                }
+              ]
+            },
+            "all_in": {
+              "5": [
+                {
+                  "rows": 10685
+                }
+              ],
+              "3": [
+                {
+                  "rows": 1
+                }
+              ]
+            }
+          },
+          {
+            "principal": "0.1000",
+            "where": "layers",
+            "folded": {
+              "5": [
+                {
+                  "rows": 20757
+                }
+              ],
+              "3": [
+                {
+                  "rows": 1
+                }
+              ]
+            },
+            "all_in": {
+              "5": [
+                {
+                  "rows": 21262
+                }
+              ],
+              "3": [
+                {
+                  "rows": 1
+                }
+              ]
+            }
+          },
+          {
+            "principal": "0.2500",
+            "where": "layers",
+            "folded": {
+              "5": [
+                {
+                  "rows": 20760
+                }
+              ],
+              "3": [
+                {
+                  "rows": 1
+                }
+              ]
+            },
+            "all_in": {
+              "5": [
+                {
+                  "rows": 21264
+                }
+              ],
+              "3": [
+                {
+                  "rows": 1
+                }
+              ]
+            }
+          },
+          {
+            "principal": "0.5000",
+            "where": "layers",
+            "folded": {
+              "5": [
+                {
+                  "rows": 26303
+                }
+              ],
+              "3": [
+                {
+                  "rows": 1
+                }
+              ]
+            },
+            "all_in": {
+              "5": [
+                {
+                  "rows": 26540
+                }
+              ],
+              "3": [
+                {
+                  "rows": 1
+                }
+              ]
+            }
+          },
+          {
+            "principal": "1.0000",
+            "where": "layers",
+            "folded": {
+              "5": [
+                {
+                  "rows": 28907
+                }
+              ],
+              "3": [
+                {
+                  "rows": 1
+                }
+              ]
+            },
+            "all_in": {
+              "5": [
+                {
+                  "rows": 29042
+                }
+              ],
+              "3": [
+                {
+                  "rows": 1
+                }
+              ]
+            }
+          }
+        ],
+        "frames": {
+          "folded": {
+            "x_max": 20.183564109802248,
+            "x_min": -17.894932670593263,
+            "y_max": 17.992278499603273,
+            "y_min": -20.08621828079224
+          },
+          "all_in": {
+            "x_max": 20.183564109802248,
+            "x_min": -17.894932670593263,
+            "y_max": 17.992278499603273,
+            "y_min": -20.08621828079224
+          }
+        },
+        "frames_equal": true,
+        "ladder": [
+          {
+            "target": 0.01,
+            "terms": [
+              "K",
+              "V"
+            ]
+          },
+          {
+            "target": 0.05,
+            "terms": [
+              "K",
+              "V"
+            ]
+          },
+          {
+            "target": 0.1,
+            "terms": [
+              "L",
+              "V"
+            ]
+          },
+          {
+            "target": 0.25,
+            "terms": [
+              "L",
+              "V",
+              "unindexed"
+            ]
+          },
+          {
+            "target": 0.5,
+            "terms": [
+              "C",
+              "K"
+            ]
+          },
+          {
+            "target": 1.0,
+            "terms": [
+              "A",
+              "B",
+              "C",
+              "D",
+              "E",
+              "F",
+              "G",
+              "H",
+              "I",
+              "J",
+              "K",
+              "L",
+              "M",
+              "N",
+              "V",
+              "Z",
+              "unindexed"
+            ]
+          }
+        ]
+      },
+      "write_cycle": {
+        "n": 1000,
+        "visible_before": 35920666,
+        "delete": {
+          "status": 200,
+          "body": null,
+          "wall_s": 0.021,
+          "visibility_s": 0.14,
+          "visibility_reached": true,
+          "visible_after": 35919666
+        },
+        "suppress": {
+          "status": 200,
+          "body": null,
+          "wall_s": 0.018,
+          "visibility_s": 0.141,
+          "visibility_reached": true,
+          "visible_after": 35918666
+        },
+        "reingest": {
+          "batches": 1,
+          "rows_offered": 1000,
+          "accepted": 1000,
+          "minted": 0,
+          "wall_s": 0.04,
+          "items_per_s": 22223.8,
+          "ack_ms": {
+            "p25": 16.9966,
+            "p50": 16.9966,
+            "p75": 16.9966,
+            "p95": 16.9966,
+            "p99": 16.9966,
+            "max": 16.9966,
+            "mean": 16.9966,
+            "n": 1
+          },
+          "statuses": {
+            "200": 1
+          }
+        },
+        "fold": {
+          "completed": true,
+          "observed_s": 451.9,
+          "fold_s": 135,
+          "fold_peak_rss_bytes": 15391354880
+        },
+        "visible_after_cycle": 35919666,
+        "overlay": {
+          "depth": 1000,
+          "retirable": 0,
+          "soft_limit_alarms": 0
+        }
+      }
+    }
+  ],
   "notes": [
     "Both batteries are reduced runs and the parameters are in each: zooms 0/6/12, decile 9 only, one cell per decile, 40 hot samples and 8 cold. A cold sample at 3.6e7 rows under the widest principal is a fresh fragment build plus a re-fault of an 11.15 GB bundle, so cold and hot are two budgets rather than one.",
-    "The uncapped run was taken on an idle box; the 6 GiB run overlapped nothing of ours either. The build's own wall (913.9 s) is 15:14 against the 12:10 the rung README records for the 2026-09-02 build on a different branch \u2014 not a controlled comparison.",
+    "The uncapped run was taken on an idle box. The build's own wall (913.9 s) is 15:14 against the 12:10 the rung README records for the 2026-09-02 build on a different branch - not a controlled comparison.",
     "The 6 GiB cap is half the 11.15 GB bundle. It served the whole ladder with zero oom_kill; memory.peak sat exactly at the cap and memory.events counted 3,203,663 reclaim-at-max events. Hot latency is unchanged by the cap (14.03 -> 14.32 ms at the 100% principal); cold is 7% slower (1376.9 -> 1472.2 ms).",
-    "The ingest spectrum did not run on this box: the 10% cell's base build (32.3e6 rows, 15 min uncontended) was still running at 2h26 alongside another session's 1.02e8 build. The driver, its output path and its findings at 10^6 rows are in measurements-medcpt-1m.json; the 100% cell is blocked outright by tessera build's refusal of a zero-row corpus, which needs no scale to reproduce."
+    "ONE ingest cell, f = 10% at C = 8. The 25% and 50% cells were not run for time; f = 100% is blocked outright by tessera build's refusal of a zero-row corpus, which needs no scale to reproduce and is recorded in measurements-medcpt-1m.json.",
+    "The f = 10% cell's base build ran for 9,584 s against the 914 s the all-in build took on an idle box: another session's 1.02e8 build held the machine throughout. Its 12,054 items/s, its 2.01 s ack p50 and its 316 x 429 are therefore LOWER bounds on throughput and upper bounds on latency; the flush, fold, equivalence and write-cycle figures were taken after that build had finished and the box was ours."
   ]
 }
