@@ -142,4 +142,5 @@ prevent.
 | [0122](0122-a-count-is-served-beside-a-suggestion-on-request.md) | 2026-09-02 | A count is served beside a suggestion on request, and never orders the page |
 | [0123](0123-cross-column-suggestion-is-deferred.md) | 2026-09-02 | Cross-column suggestion is deferred; it is composable from the per-column verb |
 | [0124](0124-the-suggestion-route-may-follow-the-viewers-cardinality.md) | 2026-09-02 | The suggestion route may follow the viewer's **own** cardinality: a per-session visible-value set at or under `max_suggest_set_entities`, the probe route above it — §8.2's one exception, and it closes C31 where the set is warm |
+| [0125](0125-a-dag-list-column-is-membership-not-lineage.md) | 2026-09-03 | Under `dag` a list of member keys is plain multi-membership, not a lineage; edges are spelled on the artifact row's `parent` list only — withdraws one sentence of 0117 |
 

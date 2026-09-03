@@ -1084,9 +1084,10 @@ fn plan_inline(
 /// **A list key column is one row per `(artifact, entity)` as well** — several of them
 /// (`artifacts-from-points.md` §4). A hierarchical clusterer emits a list per point, and what the
 /// list means is the hierarchy kind the layer already declares: one entry per level for `stacked`
-/// and `tiered`, a lineage for `nested`. The entries name the artifacts the point belongs to,
-/// exactly as a scalar names the one, and `tiered` and `nested` read their **edges** from the
-/// adjacency the list itself carries.
+/// and `tiered`, a lineage for `nested`, and a set in no order for `flat` and `dag`. The entries
+/// name the artifacts the point belongs to, exactly as a scalar names the one, and `tiered` and
+/// `nested` read their **edges** from the adjacency the list itself carries. A `dag` layer's edges
+/// are spelled on its artifact rows' `parent` list and never here (decision 0125).
 ///
 /// Returns the rows that named no artifact, and the rows read — the numerator and the denominator
 /// the caller prints.
@@ -1105,9 +1106,9 @@ fn read_members(
     // The edges a list column declared, child address → parents. **One entry per child, not one
     // per row**: a cluster of a hundred thousand points states its parent a hundred thousand times,
     // and the second statement onward is a comparison rather than an insertion. Applied once the
-    // whole source has been read, so a conflict is found wherever in the file it sits — and on a
-    // `dag` layer a second parent is an insertion rather than a conflict (`dag-hierarchies.md` §4).
-    let several = declaration.hierarchy.kind == tessera_types::layer::HierarchyKind::Dag;
+    // whole source has been read, so a conflict is found wherever in the file it sits. Only a
+    // `nested` or `tiered` list declares edges; a `dag` list is memberships and never reaches
+    // this map (`ListMeaning`, decision 0125).
     let mut lineage: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     // Reused across rows rather than allocated per point: one slot per position in the row's list,
     // `None` where the entry named no artifact.
@@ -1203,13 +1204,13 @@ fn read_members(
                         attach_member(plan, *member, path, source, rank)?;
                     }
                     if listed.meaning.declares_edges() {
-                        record_lineage(&entries, plan, &mut lineage, path, several)?;
+                        record_lineage(&entries, plan, &mut lineage, path)?;
                     }
                 }
             }
         }
     }
-    apply_lineage(plan, lineage, path, several)?;
+    apply_lineage(plan, lineage, path)?;
     Ok((unclustered, read))
 }
 
@@ -1343,21 +1344,19 @@ fn null_entity(path: &Path, what: &str) -> BuildError {
 /// The adjacency itself is [`parent_edges`]'s — the wire reads the same rule off the same function
 /// — and what is added here is the conflict: **one entry per child, not one per row**, so a cluster
 /// of a hundred thousand points states its parent a hundred thousand times and the second statement
-/// onward is a comparison rather than an insertion. Under `several` — a `dag` layer — a second
-/// parent is inserted instead, once (`dag-hierarchies.md` §4, decision 0117).
+/// onward is a comparison rather than an insertion.
 fn record_lineage(
     entries: &[Option<usize>],
     plan: &LayerPlan,
     lineage: &mut BTreeMap<usize, Vec<usize>>,
     path: &Path,
-    several: bool,
 ) -> Result<()> {
     for (parent, child) in parent_edges(entries) {
         let named = lineage.entry(*child).or_default();
         if named.contains(parent) {
             continue;
         }
-        if !named.is_empty() && !several {
+        if !named.is_empty() {
             return Err(two_parents(
                 path,
                 plan.address_of(*child),
@@ -1374,13 +1373,12 @@ fn record_lineage(
 ///
 /// **A parent already on the artifact row must be the same one**: a `parent` column and a lineage
 /// column are two spellings of one edge, and an artifact holding a different parent in each is the
-/// same conflict as two points disagreeing. Under `several` the two spellings are unioned, each
-/// edge once — a duplicate edge is one edge whichever spelling stated it (`dag-hierarchies.md` §4).
+/// same conflict as two points disagreeing. A duplicate edge is one edge whichever spelling stated
+/// it.
 fn apply_lineage(
     plan: &mut LayerPlan,
     lineage: BTreeMap<usize, Vec<usize>>,
     path: &Path,
-    several: bool,
 ) -> Result<()> {
     // **Applied in address order, not arena order.** The conflict below is a refusal, and which of
     // several a corpus carries is reported must not depend on the order keys happened to be met —
@@ -1396,7 +1394,7 @@ fn apply_lineage(
             if artifact.parent_keys.contains(&parent_key) {
                 continue;
             }
-            if let Some(declared) = artifact.parent_keys.first().filter(|_| !several) {
+            if let Some(declared) = artifact.parent_keys.first() {
                 return Err(two_parents(path, &address, declared, &parent_key));
             }
             artifact.parent_keys.push(parent_key);
@@ -1414,15 +1412,16 @@ fn dedup_keys(keys: &mut Vec<String>) {
 
 /// **A child naming two different parents is refused** (`artifacts-from-points.md` §4). The data is
 /// not the tree the layer declared: there is no correct output, and choosing a parent would publish
-/// a hierarchy the caller did not write. A `dag` layer declares a graph and never reaches this
-/// (`dag-hierarchies.md` §4).
+/// a hierarchy the caller did not write. A `dag` layer never reaches this: its list column is
+/// memberships and declares no edges, and its several parents are spelled on the artifact row
+/// (`dag-hierarchies.md` §4, decision 0125).
 fn two_parents(path: &Path, child: &Address, first: &str, second: &str) -> BuildError {
     BuildError::Invalid(format!(
         "{}: {} in level {} of {} is named as a child of both {first} and {second}. A list key \
          column declares the edges, so two rows naming different parents for one artifact are two \
          hierarchies — and which of them was published would be the file's row order rather than \
-         anything the caller wrote. Declare `kind = \"dag\"` if a child may sit under several \
-         parents",
+         anything the caller wrote. A child under several parents is a `dag` layer, whose edges \
+         are spelled on the artifact row's `parent` list",
         path.display(),
         child.2,
         child.1,

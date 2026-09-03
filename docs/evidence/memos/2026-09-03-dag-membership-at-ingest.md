@@ -1,8 +1,6 @@
 # DAG membership cannot be ingested — handover
 
-**Status:** problem statement, 2026-09-03. Found by the measurement campaign's ingest cycle on
-rung 3 (MedCPT). No solution is proposed here; the wire form for multi-membership at ingest is an
-owner design question.
+**Status:** resolved 2026-09-03 by [decision 0125](../../decisions/0125-a-dag-list-column-is-membership-not-lineage.md) — a `dag` list column is plain multi-membership at both entry points. Problem statement kept as written, found by the measurement campaign's ingest cycle on rung 3 (MedCPT).
 
 ## The problem
 

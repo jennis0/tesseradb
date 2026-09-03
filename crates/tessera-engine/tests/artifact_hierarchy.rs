@@ -1679,8 +1679,8 @@ fn a_dependent_goes_when_its_targets_level_is_not_asked_for() {
 // The dag shape: a child under several parents (`dag-hierarchies.md`, decision 0117)
 // ---------------------------------------------------------------------------------------------
 
-/// A `dag` layer: `treed_whole` at the kind that records a second parent rather than refusing it.
-/// Open, so an ingest batch's keys mint.
+/// A `dag` layer: `treed_whole` at the kind that records a second parent, named on the artifact
+/// row, rather than refusing it. Open, so an ingest batch's keys mint.
 fn dag(name: &str) -> LayerDeclaration {
     let mut d = declaration(name, None, false);
     d.hierarchy.kind = HierarchyKind::Dag;
@@ -1887,7 +1887,9 @@ fn a_dag_child_under_two_parents_is_published_served_and_folded_whole() {
 }
 
 /// One ingest batch of one point naming `keys` on `layer`, with the edges its list column would
-/// have declared — what `/control/ingest` decodes to, taken at the engine boundary.
+/// have declared — what `/control/ingest` decodes to, taken at the engine boundary. Only a
+/// `nested` or `tiered` column declares edges; a `dag` column's keys are memberships alone
+/// (decision 0125), so a dag batch here carries none.
 fn ingest_edges(
     engine: &Engine,
     batch: &str,
@@ -1941,28 +1943,72 @@ fn ingest_edges(
         .map_err(|e| e.to_string())
 }
 
-/// **An ingest batch minting a child under two new parents mints all three, the child holding
-/// both** (`dag-hierarchies.md` §4): every parent exists before the edge into it, resolved among
-/// the batch's own siblings, and the record the fold writes carries the pair.
+/// The masked count served under `key`, for full coverage — retried past the bounded
+/// `FragmentBuilding` a fresh publication answers an authorisation with.
+fn count_of(engine: &Engine, key: &str) -> u64 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let served = loop {
+        match engine.authorise(&full_coverage_credential()).and_then(|session| {
+            engine.viewport(
+                &session,
+                ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
+            )
+        }) {
+            Ok(out) => break out.artifacts,
+            Err(e) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out retrying a viewport: {e}"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+    };
+    served
+        .iter()
+        .find(|a| a.key.as_deref() == Some(key))
+        .unwrap_or_else(|| panic!("{key} is served"))
+        .masked_count
+}
+
+/// **A child published under two parents takes an ingested point into all three and folds whole**
+/// (`dag-hierarchies.md` §4, decision 0125): the edges are spelled on the artifact rows at the
+/// publication, both parents resolved among the batch's own siblings before the edge into them;
+/// the ingest batch's dag column names the three keys as memberships and no edge, so it mints
+/// nothing and grows each; and the record the fold writes carries the pair.
 #[test]
-fn an_ingest_batch_minting_a_child_under_two_new_parents_mints_all_three() {
+fn a_dag_child_published_under_two_parents_grows_by_a_batch_naming_all_three() {
     let fx = fixture();
     let engine = fx.open();
     engine.register_layer(dag("mesh/d")).unwrap();
-    assert_eq!(
-        ingest_edges(
-            &engine,
-            "b1",
-            "mesh/d",
-            &["c", "p0", "p1"],
-            &[("c", "p0"), ("c", "p1")]
+    engine
+        .publish_artifacts(
+            "mesh/d".into(),
+            0,
+            vec![
+                node_under(&fx, "c", &["p0", "p1"], 0..10),
+                node_under(&fx, "p0", &[], 0..20),
+                node_under(&fx, "p1", &[], 0..30),
+            ],
         )
-        .expect("a child under two new parents is one batch on a dag layer"),
-        3,
-        "the child and both parents are minted"
+        .expect("a child under two parents, named before either, is one publication");
+    let before: Vec<u64> = ["c", "p0", "p1"]
+        .iter()
+        .map(|k| count_of(&engine, k))
+        .collect();
+    assert_eq!(
+        ingest_edges(&engine, "b1", "mesh/d", &["c", "p0", "p1"], &[])
+            .expect("three memberships on a dag layer"),
+        0,
+        "every key exists, so nothing mints"
     );
+    // A membership is projected through base rows, so the counts are readable once the fold has
+    // given the ingested point one.
     flush(&engine);
     fold(&engine);
+    for (key, was) in ["c", "p0", "p1"].iter().zip(before) {
+        assert_eq!(count_of(&engine, key), was + 1, "{key} grew by the point");
+    }
     let parents = parents_in_bundle(&fx, &engine, "c");
     assert_eq!(parents.len(), 2, "both edges, each resolved: {parents:?}");
     for key in ["p0", "p1"] {
@@ -1973,87 +2019,101 @@ fn an_ingest_batch_minting_a_child_under_two_new_parents_mints_all_three() {
     }
 }
 
-/// **A cycle refuses an ingest batch, at every kind, naming the cycle** (`dag-hierarchies.md`
-/// §4): the check is over the window's minted edges, where the artifacts are created. A self-edge
-/// is the cycle of length one. Nothing is published.
+/// **A cycle refuses at ingest, at every kind, naming the cycle** (`dag-hierarchies.md` §4). On a
+/// `nested` layer the edges arrive by the list column and the check is over the window's minted
+/// edges, where the artifacts are created; on a `dag` layer they arrive by the publish route,
+/// whose `prepare_publish` is the same check. A self-edge is the cycle of length one. Nothing is
+/// published.
 #[test]
 fn a_cycle_refuses_an_ingest_batch_at_every_kind() {
     let fx = fixture();
     let engine = fx.open();
     engine.register_layer(dag("mesh/d")).unwrap();
     engine.register_layer(tree_open("clusters/t")).unwrap();
-    for layer in ["mesh/d", "clusters/t"] {
-        let refused = ingest_edges(
-            &engine,
-            &format!("three-{layer}"),
-            layer,
-            &["a", "b", "c"],
-            &[("a", "b"), ("b", "c"), ("c", "a")],
+
+    let refused = ingest_edges(
+        &engine,
+        "three-tree",
+        "clusters/t",
+        &["a", "b", "c"],
+        &[("a", "b"), ("b", "c"), ("c", "a")],
+    )
+    .expect_err("a 3-cycle has no root");
+    assert!(
+        refused.contains("cycle — a → b → c → a"),
+        "the cycle is named, child → parent: {refused}"
+    );
+    let refused = ingest_edges(&engine, "self-tree", "clusters/t", &["s"], &[("s", "s")])
+        .expect_err("a self-edge is a cycle of length one");
+    assert!(refused.contains("s → s"), "{refused}");
+
+    let refused = engine
+        .publish_artifacts(
+            "mesh/d".into(),
+            0,
+            vec![
+                node_under(&fx, "a", &["b"], 0..10),
+                node_under(&fx, "b", &["c"], 0..10),
+                node_under(&fx, "c", &["a"], 0..10),
+            ],
         )
         .expect_err("a 3-cycle has no root");
-        assert!(
-            refused.contains("cycle — a → b → c → a"),
-            "the cycle is named, child → parent: {refused}"
-        );
-        let refused = ingest_edges(
-            &engine,
-            &format!("self-{layer}"),
-            layer,
-            &["s"],
-            &[("s", "s")],
-        )
+    assert!(
+        refused.to_string().contains("cycle — a → b → c → a"),
+        "the cycle is named, child → parent: {refused}"
+    );
+    let refused = engine
+        .publish_artifacts("mesh/d".into(), 0, vec![node_under(&fx, "s", &["s"], 0..10)])
         .expect_err("a self-edge is a cycle of length one");
-        assert!(refused.contains("s → s"), "{refused}");
-    }
+    assert!(refused.to_string().contains("s → s"), "{refused}");
     assert_eq!(
         engine.published_artifacts(),
         0,
         "a refusal publishes nothing"
     );
 
-    // A diamond minted in one batch is not a cycle.
-    assert_eq!(
-        ingest_edges(
-            &engine,
-            "diamond",
-            "mesh/d",
-            &["r", "l", "m", "c"],
-            &[("l", "r"), ("m", "r"), ("c", "l"), ("c", "m")]
+    // A diamond published in one batch is not a cycle.
+    engine
+        .publish_artifacts(
+            "mesh/d".into(),
+            0,
+            vec![
+                node_under(&fx, "r", &[], 0..40),
+                node_under(&fx, "l", &["r"], 0..20),
+                node_under(&fx, "m", &["r"], 20..40),
+                node_under(&fx, "c", &["l", "m"], 10..30),
+            ],
         )
-        .expect("two paths to one root, every edge descending"),
-        4
-    );
+        .expect("two paths to one root, every edge descending");
+    assert_eq!(engine.published_artifacts(), 4);
 }
 
 /// **A `nested` layer still refuses a child named under two parents, in the words it always
-/// used**, where the same batch on a `dag` layer mints the three.
+/// used**, and so does a `dag` layer's *list* column now that it declares no edges at all
+/// (decision 0125): two edges for one child can only reach the engine from a list column, and
+/// no kind's list column may name two parents. A dag child's several parents are the publish
+/// route's, above.
 #[test]
-fn a_nested_ingest_batch_naming_two_parents_still_refuses() {
+fn a_list_column_naming_two_parents_refuses_at_every_kind() {
     let fx = fixture();
     let engine = fx.open();
     engine.register_layer(dag("mesh/d")).unwrap();
     engine.register_layer(tree_open("clusters/t")).unwrap();
-    let refused = ingest_edges(
-        &engine,
-        "tree",
-        "clusters/t",
-        &["c", "p0", "p1"],
-        &[("c", "p0"), ("c", "p1")],
-    )
-    .expect_err("a tree's child has one parent");
-    assert!(
-        refused.contains("c in level 0 of clusters/t is named as a child of both p0 and p1"),
-        "{refused}"
-    );
-    assert_eq!(
-        ingest_edges(
+    for layer in ["clusters/t", "mesh/d"] {
+        let refused = ingest_edges(
             &engine,
-            "graph",
-            "mesh/d",
+            &format!("two-{layer}"),
+            layer,
             &["c", "p0", "p1"],
-            &[("c", "p0"), ("c", "p1")]
+            &[("c", "p0"), ("c", "p1")],
         )
-        .unwrap(),
-        3
-    );
+        .expect_err("a list column's child has one parent");
+        assert!(
+            refused.contains(&format!(
+                "c in level 0 of {layer} is named as a child of both p0 and p1"
+            )),
+            "{refused}"
+        );
+    }
+    assert_eq!(engine.published_artifacts(), 0);
 }

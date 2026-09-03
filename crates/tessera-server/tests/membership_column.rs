@@ -999,6 +999,38 @@ async fn a_lineage_column_mints_the_chain_and_the_edges_it_declares() {
     .await;
 }
 
+/// **A `dag` layer's list column is memberships and declares no edges**, at ingest exactly as at a
+/// build (decision 0125): the same lists a `nested` layer reads as a lineage are, on a DAG, the
+/// artifacts each point is a member of and nothing more — every artifact minted a root, and no
+/// edge named for `check_edge` to report as unrecorded. A DAG's edges are spelled on the artifact
+/// row's `parent` list, by publication; the case above is the `nested` column still minting and
+/// linking its chain.
+#[tokio::test]
+async fn a_dag_list_column_ingests_memberships_and_no_edges() {
+    let layer = layer_toml("dag", "lineage");
+    let all: Vec<u64> = (0..N).collect();
+    let built = build_side(&all, &layer);
+    let ingested = build_side(&(0..MINT_SEED).collect::<Vec<_>>(), &layer);
+
+    let built = serve(&built).await;
+    let ingested = serve(&ingested).await;
+    let minted = ingest_tail(&ingested, LAYER, lineage_keys, MINT_SEED).await;
+    assert!(minted > 0, "the seed does not hold every key");
+
+    let view = client_view(&ingested, &["0", "1"]).await;
+    assert!(
+        view.artifacts.len() >= 3,
+        "the keys the lists named are served: {:?}",
+        view.artifacts
+    );
+    assert!(
+        view.artifacts.iter().all(|a| a.parent_keys.is_empty()),
+        "a dag list column declares no edge, so every artifact is a root: {:?}",
+        view.artifacts
+    );
+    assert_same_database(&built, &ingested, lineage_keys_of, "a dag list column").await;
+}
+
 /// **A tiered chain mints a level at a time, coarse first** — the ordering constraint edges carry
 /// (`annotation-representation.md` §5.0.4) applied to one batch. A tiered layer's parent sits in a
 /// *coarser* level than its child, so the level below has to have claimed its ordinals before the

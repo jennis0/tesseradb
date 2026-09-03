@@ -117,6 +117,7 @@ the one; what the kind supplies is what the *positions* mean:
 | `stacked` | fixed-length list, one entry per level | none — independent analyses |
 | `tiered` | fixed-length list, one entry per level | containment, between consecutive entries |
 | `nested` | variable-length list | the lineage: entry *k* is the parent of entry *k+1* |
+| `dag` | scalar, or a list read as plain multi-membership, as `flat` | none from the column — the artifact row's `parent` list is the only spelling ([decision 0125](../decisions/0125-a-dag-list-column-is-membership-not-lineage.md)) |
 
 Fixed-length entries are nullable: a point may be noise at a fine resolution and clustered at a
 coarse one. A variable-length list against `tiered`, or a fixed-length one against `nested`, is a
@@ -125,11 +126,13 @@ refusal rather than a guess.
 **A child naming two different parents is refused — on a tree.** The map is built during the pass
 that already walks the column, and a conflict means the data is not the tree the layer declared —
 there is no correct output, and choosing a parent would publish a hierarchy the caller did not
-write. **Under `kind = "dag"` the second parent is recorded** (2026-09-01, [decision 0117](../decisions/0117-a-child-may-name-several-parents.md); [`dag-hierarchies.md`](dag-hierarchies.md) §4): the layer
-declared a graph, each lineage row is one path from a root, and the union of the paths is the
-graph. A self-edge and a cycle still refuse, at both entry points. A `parent`
-column on an artifact row and a lineage column disagreeing about one artifact is the same conflict
-and refuses with the same words: they are two spellings of one edge.
+write. A `dag` layer never meets the refusal: its list column declares no edge, since a DAG node's
+ancestor closure is a set with no order for a list to carry, and its several parents are spelled on
+the artifact row's `parent` list ([`dag-hierarchies.md`](dag-hierarchies.md) §4;
+[decision 0125](../decisions/0125-a-dag-list-column-is-membership-not-lineage.md)). A self-edge and
+a cycle refuse at every kind, at both entry points. A `parent` column on an artifact row and a
+lineage column disagreeing about one artifact is the same conflict and refuses with the same words:
+they are two spellings of one edge.
 
 Three things the table does not settle, decided in the building:
 
@@ -399,6 +402,12 @@ a predicate over a `derived` vocabulary is answered by a masked scan, which a vi
 clusters would pay 263 times.
 
 ## Appendix R — review trail
+
+**2026-09-03 — a `dag` list column is multi-membership.** §4's table gains the `dag` row, reading a
+list as `flat` does, and the 2026-09-01 case below is withdrawn: a lineage row on a DAG is not one
+path from a root, because a DAG node's closure has no linear order, and reading it as one asserted
+edges the graph does not hold. Edges under `dag` are the artifact row's `parent` list only
+([decision 0125](../decisions/0125-a-dag-list-column-is-membership-not-lineage.md)).
 
 **2026-09-01 — the two-parents refusal is scoped to the tree kinds.** §4 gains the `dag` case, in
 which a second parent is an edge rather than a contradiction. Nothing else in this document moves:
