@@ -44,6 +44,22 @@ reads. The derived files are not, because they are regenerable and large. Both r
 environment variables ([`common/paths.py`](common/paths.py)): the ladder's top two rungs do not fit
 on this machine's root volume, and when a second one appears it is one value that moves.
 
+## Every deployment of a rung shares the frame its first all-in build recorded
+
+**Owner ruling, 2026-09-03.** A rung's `extent = "auto"` is fitted to the rows the build saw, so a
+deployment built from part of the corpus quantises onto a slightly different grid and its cells do
+not line up with the whole corpus's. Every later deployment of a rung therefore states the frame
+the rung's first all-in build recorded — `MANIFEST.views[].quantisation`, which
+[`common/ingest_cycle.py`](common/ingest_cycle.py)'s `state_extent` copies out of that manifest and
+writes into the measurement's own copy of the declaration. The rung's committed `corpus.toml` is
+never edited; what changes is the copy the measurement builds from, and the run records the frame it
+stated.
+
+The same ruling is what makes **100% online ingest** possible: a deployment may start from a bundle
+with no points at all, with its frame stated, and take the whole corpus in through
+`/control/ingest` (decision 0091 — the build's zero-item refusal is gone). `auto` still cannot be
+fitted to no rows, and that refusal names the remedy.
+
 ## Two rules inherited from the staging tier
 
 1. **Never build or serve a bundle from the share.** SMB at ~67 MB/s measured 2026-08-27 — a page

@@ -1044,6 +1044,15 @@ fn typed_column<T: ArrowNativeType>(
             ),
         ));
     }
+    // **No rows, no elements to align.** A zero-row column's values buffer legitimately has no
+    // allocation behind it — an empty `Buffer`, or a mapping of a file with nothing in it — and its
+    // pointer is then dangling rather than aligned. There is nothing to address, so the buffer is
+    // replaced with an empty one of the right type: the array is the same array either way, and the
+    // record batch it goes into is byte-identical to the one `write_columns` writes for an empty
+    // `Vec`. A build over no points (decision 0091) writes every declared column this way.
+    if rows == 0 {
+        return Ok(ScalarBuffer::from(Vec::<T>::new()));
+    }
     let align = std::mem::align_of::<T>();
     if buffer.as_ptr().align_offset(align) != 0 {
         return Err(io::Error::new(

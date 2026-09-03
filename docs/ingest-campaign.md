@@ -773,6 +773,16 @@ full scale.
   [`../test_corpora/common/README.md`](../test_corpora/common/README.md) is that schema, field by
   field with each one's unit and how it was measured. The table in §1.1 is rendered from the
   committed `measurements.json` files and must not be hand-edited.
+- **Every deployment of a rung shares the frame its first all-in build recorded**, and a deployment
+  may start with no points in it at all (owner ruling, 2026-09-03). A rung declaring
+  `extent = "auto"` fits its frame to the rows the build saw, so a base built from part of the
+  corpus quantises onto a different grid and every box-level count differs at the margins for a
+  reason that has nothing to do with the write path; `ingest_cycle.py --state-extent` copies
+  `MANIFEST.views[].quantisation` out of the all-in bundle into the measurement's own copy of the
+  declaration, never the rung's committed one. Stating the frame is also what makes the *f* = 100%
+  cell expressible: with the frame given there is nothing to fit, so `tessera build` writes a bundle
+  with no points and the whole corpus arrives through `/control/ingest` (decision 0091). `auto` over
+  no rows stays a refusal, and it names the remedy.
 
 ## 6. Cross-cutting findings
 

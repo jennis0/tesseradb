@@ -9,13 +9,18 @@
 //! memberships, same masked counts, same computed content, same gates. Not the same bytes, because
 //! ids are assigned differently at the two entry points and nothing a client holds exposes that.
 //!
-//! **The corpus is split rather than wholly ingested, and that is the build's own rule speaking**:
-//! `tessera build` refuses a bundle with no items ("no points selected — a bundle with no items has
-//! no expressible entity range"), so *ingest into an empty database* is not a state this system can
-//! be put in through its own tools. The honest form of 0091's test is therefore one corpus arriving
-//! two ways: every point built on one side, a seed built and the rest ingested on the other. It
-//! asserts what the rule is about — that the route a point took leaves no trace a client can see —
-//! and it exercises the mixed state a real deployment is always in.
+//! **The corpus arrives two ways, and one of them is wholly**: every point built on one side, and
+//! on the other a bundle with *no* points at all, into which the whole corpus is ingested. That
+//! arm is 0091's own headline —
+//! [`a_wholly_ingested_corpus_is_the_database_a_build_produces`] — and until 2026-09-03 it could
+//! not be written, because both builds refused a bundle with no items and so *ingest into an empty
+//! database* was not a state this system could be put in through its own tools. The refusal is
+//! gone (`tessera-build/tests/empty_bundle.rs`); what remains build-only is fitting an `auto`
+//! extent to no rows, which is about acquisition rather than meaning.
+//!
+//! The split arms stay beside it. They are not a weaker substitute: a seed built and the rest
+//! ingested is the mixed state a real deployment is always in, and it is where a growth path and a
+//! minting path can disagree with each other.
 //!
 //! **The list column is here because the lineage inference is the half most likely to drift.** A
 //! scalar key is one lookup; a list's positions carry levels and its adjacency carries edges, and
@@ -846,6 +851,52 @@ async fn a_scalar_membership_column_ingests_the_database_a_member_table_builds()
     );
 
     assert_same_database(&built, &ingested, scalar_key_of, "a cluster column").await;
+}
+
+/// **0091's headline: the whole corpus ingested into a bundle with no points in it.** One side
+/// builds every point from a member table; the other builds *nothing* — a bundle with the frame
+/// stated, an empty segment, an empty dictionary and a registered layer holding no artifact — and
+/// then takes all 240 points through `/control/ingest`, minting the clustering as it goes.
+///
+/// This is the arm the build's own zero-item refusal used to block, and it is the strongest form
+/// of the rule: not *the route a point took leaves no trace*, but *the route the whole corpus took
+/// leaves no trace*. Every artifact here is minted on the wire, so the built side's roster and the
+/// ingested side's are two independent constructions of one clustering.
+#[tokio::test]
+async fn a_wholly_ingested_corpus_is_the_database_a_build_produces() {
+    let layer = layer_toml("flat", "cluster");
+    let all: Vec<u64> = (0..N).collect();
+    let built = build_side(&all, &layer);
+    // No points at all: the frame is stated, so there is nothing to fit and nothing to hold.
+    let ingested = build_side(&[], &layer);
+
+    let built = serve(&built).await;
+    let ingested = serve(&ingested).await;
+
+    // The empty bundle serves before a byte is written to it: ready, well-formed metadata, and
+    // zero everywhere under every principal — rather than a refusal or an error.
+    let ready = reqwest::get(ingested.viewer_url("/readyz")).await.unwrap();
+    assert_eq!(ready.status().as_u16(), 200, "an empty bundle is ready");
+    // A term the dictionary has never seen mints an extension id, exactly as at any ingest — the
+    // empty dictionary is not a smaller vocabulary, it is the same one before anything is in it.
+    let unseen = common::authorise(&ingested, &["0", "1", "never-seen-before"]).await;
+    assert!(unseen["token"].as_str().is_some_and(|t| !t.is_empty()));
+    let before = client_view(&ingested, &["0", "1"]).await;
+    assert!(
+        before.tiles.iter().all(|(_, visible, _)| *visible == 0),
+        "a bundle with no points must serve zero everywhere, not fail"
+    );
+    assert!(before.artifacts.is_empty());
+
+    let minted = ingest_tail(&ingested, LAYER, scalar_keys, 0).await;
+    assert_eq!(
+        minted,
+        expected_memberships(scalar_key_of).len() as u64,
+        "every artifact of this clustering has to be minted on the wire — the empty bundle held \
+         none of them"
+    );
+
+    assert_same_database(&built, &ingested, scalar_key_of, "a wholly ingested corpus").await;
 }
 
 /// **The same, at a list key — and the lineage is the half that would drift.** Every entry is a

@@ -1062,11 +1062,9 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         args.limit,
         view.select.as_ref(),
     )?;
-    if points.is_empty() {
-        return Err(BuildError::Invalid(
-            "no points selected — a bundle with no items has no expressible entity range".into(),
-        ));
-    }
+    // **No refusal for an empty points file** (decision 0091): the oracle writes the same
+    // zero-item bundle the streaming pipeline does, which is what keeps `build_equivalence`'s
+    // byte-identity claim true for `n = 0` as for any other n.
     // Sort by source ID before anything else: term IDs are assigned in first-appearance order,
     // so a stable, file-order-independent iteration is what makes the dictionary (and hence the
     // signature ordering, and hence the permanent entity IDs) reproducible from the same input
