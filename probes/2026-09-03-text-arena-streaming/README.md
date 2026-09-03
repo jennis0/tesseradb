@@ -1,14 +1,15 @@
 # The text index over an arena larger than memory
 
 **Date** 2026-09-03. **Branch** `build/text-arena-streaming`. **Box** WSL2, 12 cores, 47 GB, local
-NVMe-backed VHDX. **Corpus** `$TESSERA_LADDER/medcpt-10m-abs` — 10,000,000 articles, 6,893,387 of
-them with an abstract, a 6.24 GB `points.parquet` and a **13.2 GB** `abstract` arena. Every run is
+NVMe-backed VHDX. **Corpora** `$TESSERA_LADDER/medcpt-10m-abs` for §§1–4 — 10,000,000 articles, 6,893,387 of them
+with an abstract, a 6.24 GB `points.parquet` and a **13.2 GB** `abstract` arena — and the whole
+1.02×10⁸-row rung 4, `$TESSERA_LADDER/paperseek`, for §5. Every run is
 `tessera build --stage-timings` under `sample_rss.py`, which polls `RssAnon`, `RssFile`, the
 process's major-fault count and `read_bytes`, and the box's PSI, every 100 ms.
 
 ⊘ **The box was not empty.** Rung 5's GBIF scan ran on the SMB share throughout — network I/O, not
-this disk. No other `tessera build` and no serve battery ran during any measured run, which is what
-separates these figures from the rung 4 stall they explain.
+this disk. No other `tessera build` and no serve battery ran during any of §§1–4's measured runs,
+which is what separates those figures from the rung 4 stall they explain; §5 carries its own caveat.
 
 ## The finding
 
@@ -26,8 +27,13 @@ The capped stage is **154.58 s** against **116.39 s** uncapped, at **271 major f
 whole stage and **15.7 GiB read** — 1.2× the arena, which is what reading it once looks like. The
 bundles are byte-identical.
 
-⊘ **The next stage has the same defect and this change does not fix it.** `record_blob` reads the
-same arena by entity and cannot be reordered, because the blob is written in entity order. See §4.
+**At rung 4 itself the stage now finishes.** The whole 1.02×10⁸-row corpus — the same declaration,
+the same 128 GiB arena — indexes its abstracts in **2,371.9 s** at **1.74 major faults a second**
+and 153.3 GiB read, against *over four hours without finishing*. §5.
+
+⊘ **The build still does not complete, and the reason is the same defect one stage later.**
+`record_blob` reads the same arena by entity and cannot be reordered, because the blob is written in
+entity order: at rung 4 it writes 52 MB in thirteen minutes at 144 major faults a second. §4 and §5.
 
 ## 1. The reproduction
 
@@ -177,7 +183,60 @@ text index no longer meets. Fixing it needs the other half of the arena question
 arena, built at the join with a second pass over the source's text column — which is out of this
 change's scope and is the thing to decide next.
 
-## 5. Two things a later reader should not repeat
+## 5. Rung 4, whole: the text index finishes and the record blob does not
+
+`$TESSERA_LADDER/paperseek/`, **102,117,343 rows**, the same declaration that stalled — abstracts
+indexed, nothing trimmed. One run, `tessera build --stage-timings` under `sample_rss.py`, on the
+same box.
+
+| stage | before (`docs/ingest-campaign.md` §4a) | after |
+|---|---|---|
+| `source_ids` … `external_ids` | 47 s | **83 s** |
+| `attribute_tail` | 759.6 s | **704.7 s** |
+| `layers` | 84.5 s | **93.4 s** |
+| **`text_index`** | **> 4 h, did not finish** | **2,371.9 s (39.5 min)**, 57,637,877 terms |
+| `filter_postings` | — | **702.6 s** |
+| `record_blob` | — | ⊘ **stalls**, below |
+
+**The arena is the same 137,438,953,472 bytes — 128 GiB exactly — and the text pass walked it once.**
+Over the whole stage: **4,131 major faults, 1.74 a second**, and **153.3 GiB read** against a 128 GiB
+arena plus its spilled runs read back — 1.2×, which is what reading a file once looks like. PSI io
+`full` peaked at 16.9% and `RssAnon` at 5.27 GiB. The stalled build's figures for the same stage
+were ~480 major faults a second and PSI io `full` at 60.8%.
+
+It produced what it was asked for: `abstract` **349.9 MB of dictionary and 17.26 GB of postings**,
+`title` **55.4 MB and 2.45 GB**. The chunk pass spilled **656 runs**, the cascade folded them to
+**6** in one pass, and the merge wrote both files from those.
+
+### ⊘ `record_blob` then stalls, in the way the text index used to
+
+The stage that follows reads the same arena by entity, and it is the one that cannot take this fix.
+Thirteen minutes in, on a quiet disk:
+
+| | |
+|---|---|
+| written | **52 MB** of `blocks.bin`, growing at **56 KB/s** |
+| major faults | **120,790 in 838 s — 144 a second** |
+| `read_bytes` | **1,173.6 GiB** — **9× the arena and climbing**, at 1,434 MiB/s |
+| PSI io `full` | up to **37.5%** |
+| `RssAnon` | 2.79 GiB — nowhere near the machine |
+
+That is the original signature, one stage later. The build was stopped there rather than left to
+occupy the box: at 56 KB/s the blob for 10⁸ rows of prose does not finish.
+
+**So the rung 4 answer is: the text index is fixed and the build still does not complete.** What
+would finish it is the change this one declined to make — an **entity-ordered arena**, built at the
+join from a second pass over the source's text column (`docs/ingest-campaign.md` §4a's option (b)
+taken the other way). It would subsume this fix rather than sit beside it: with the arena in entity
+order the text index could go back to walking entity space, and `record_blob`, which must write its
+rows in entity order, would become sequential too. Its price is a second decode of 119 GB of prose
+at the join, against ~700 s the join costs today.
+
+⊘ **Two caveats on the walls above.** Another session's `cargo` build and test suite took five to
+seven cores for parts of the text stage, and a third session's worktree filled 233 GB of disk
+during the run — the *rates* here include that, the *fault counts* do not depend on it.
+
+## 6. Two things a later reader should not repeat
 
 **The uncapped wall is not a stable number on this box, and the confound is the resident arena.**
 The first baseline run measured `text_index` at **77.06 s** with a `VmHWM` of **14,755 MiB** — the
@@ -192,7 +251,7 @@ readahead into a random walk: the window arrives, one 1.2 kB document is read ou
 evicted before anything else wants it. The measurement that settles it is the offset trace in §2 —
 forward and backward steps within 1% of even.
 
-## 6. What is here
+## 7. What is here
 
 | | |
 |---|---|
@@ -200,3 +259,4 @@ forward and backward steps within 1% of even.
 | `compare_bundles.py` | two bundle trees file by file, excusing `MANIFEST.json`'s `created_at` and the `CURRENT` digest that follows it |
 | `*.rss.csv`, `*.stages.csv` | the four measured runs — `base`/`new` × `uncapped`/`cap4g` |
 | `base-timed.stages.txt`, `new-timed.stages.txt` | the back-to-back pair of §4's uncapped row, each with a temporary timer splitting the chunk pass from the cascade-and-merge. The timer is not in the shipped code |
+| `rung4-full.{rss,stages}.csv` | §5's whole-corpus run at 1.02×10⁸ |
