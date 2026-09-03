@@ -7,22 +7,24 @@ it.
 
 ```mermaid
 sequenceDiagram
-  participant Client
-  participant Session as Session plane
-  participant Plugin
-  participant Terms as Term index
-  participant Engine
+  participant A as your application
+  participant S as session plane
+  participant P as plugin
+  participant E as engine
+  participant C as client
 
-  Client->>Session: credential
-  Session->>Plugin: resolve credential to terms
-  Plugin-->>Session: terms satisfied
-  Session->>Terms: union the items carrying each term
-  Terms-->>Session: fragment
-  Session-->>Client: token
-  Client->>Engine: token, viewport query
-  Engine->>Engine: compose fragment against the current overlay
-  Engine->>Engine: project into row order, apply filters
-  Engine-->>Client: counts, points, labels from the composed set
+  A->>S: POST /session/authorise (credential)
+  S->>P: terms of this credential
+  P-->>S: the viewer's terms
+  S->>E: build the viewer's set: union of the term index over those terms
+  E-->>S: cached for the session
+  S-->>A: token
+  A-->>C: token
+  C->>E: POST /v1/viewport (token, bounds, filters)
+  E->>E: load one generation
+  E->>E: viewer's set minus the overlay, then filters intersected
+  E->>E: project to row space, tile ranges, count and sample
+  E-->>C: counts, points, artifacts, labels
 ```
 
 *A session from credential to first answer. Authorising happens once; every later request
@@ -56,8 +58,7 @@ knows when a grant has changed, and the service does not look one up or refresh 
 
 An operator declares an access label on each item. An access label resolves to a set of terms, the
 unit of access the term index is built from. A credential resolves to the terms it satisfies. An
-item is visible to a token when the two sets intersect. Terms and access labels are defined more
-fully in the write path and security chapters.
+item is visible to a token when the two sets intersect.
 
 **Not built yet:** a label that requires more than one term to hold at once. A label resolves to a
 flat set of terms today, and a token satisfies it by holding any single one of them.
@@ -143,9 +144,7 @@ the token's configured lifetime.
 ## Key rotation
 
 The identifier a client holds for an item is a keyed transformation of that item's underlying
-identity (described below). Rotating the key changes what every identifier in the corpus resolves
-to. A rotation also happens whenever a store is repartitioned or resharded, since the
-transformation's input encodes where an item sits. The service tracks which key produced the
+identity. Rotating the key changes what every identifier in the corpus resolves to. The service tracks which key produced the
 identifiers currently live as a single counter, the idset, published on the metadata a client can
 read. A client that presents an identifier alongside the idset it was minted under gets a clear
 refusal if the two no longer match, rather than an identifier that has come to name a different
@@ -162,9 +161,7 @@ underlying identity by a keyed, reversible transformation: several rounds of mix
 deployment's own key, so that two identifiers reveal nothing about whether their items sit near
 each other in the corpus. The service inverts it the same way it was built, using the same key,
 whenever it needs the underlying identity back: drilling into a point, or addressing an item for a
-delete or a suppress. What the transformation defends is described in the security chapter. Here
-it is the mechanism that makes an opaque, stable, invertible identifier possible without a lookup
-table between the two.
+delete or a suppress. No lookup table is needed in either direction.
 
 ## Where this is tested and where it lives
 
