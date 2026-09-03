@@ -43,6 +43,8 @@ PATTERNS=$(cat <<'EOF'
 \bcaught in review\b
 \bdo not rediscover\b
 \bis the deliverable\b
+\bpostings?\b
+\bdescriptors?\b
 EOF
 )
 
