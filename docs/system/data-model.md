@@ -16,13 +16,12 @@ Four identifiers name an item or a view, one for each party that needs to addres
 | Identifier | Assigned by | Held by | What changes it |
 |---|---|---|---|
 | entity id | the server, once, at ingest | never leaves the server | nothing, never reissued |
-| `tessera_id` | derived from the entity id by a keyed permutation, at the same time | the client | nothing, for the item's life |
+| `tessera_id` | derived from the entity id by a keyed permutation, at the same time | the client | a rotation of the deployment's key |
 | external id | the operator, before ingest | the operator, and any record of a write naming it | nothing, for the item's life |
 | view key | the operator, when a view of a group is created | any request naming that view | a drop frees the key; a later create under it starts a new, empty view |
 
-The entity id is the server's own internal key, a dense integer assigned once. Within one
-allocation window ids are assigned in an order chosen to keep each item's access label close to
-others like it on disc; how that window works belongs to the write path.
+The entity id is the server's own internal key, a dense integer assigned once, in an order that
+keeps items with the same access label together on disc.
 
 The `tessera_id` is what a client receives and holds instead of the entity id, stable for the
 item's life.
@@ -45,18 +44,26 @@ alone. One mapping, from an item's identity to its row, joins the two for each v
 no entry in a view's mapping simply has no position there.
 
 ```mermaid
-flowchart LR
-  subgraph shared["entity space (shared by every view)"]
-    id["identity, access label,<br/>declared field values"]
+flowchart TB
+  subgraph entity["entity space: one per corpus, shared by every view"]
+    direction LR
+    ids["item identities<br/>entity id, external id, tessera_id"]
+    terms["access labels and the term index"]
+    fields["fields, vocabularies,<br/>the filter index"]
+    members["artifact membership"]
   end
-  subgraph rowA["view: world"]
-    posA["position, row order,<br/>segments, tiles"]
+
+  subgraph v1["view: world (web_mercator)"]
+    direction TB
+    p1["a position per item"] --> m1["rows in Morton order"] --> t1["tiles as row ranges"]
   end
-  subgraph rowB["view: embedding"]
-    posB["position, row order,<br/>segments, tiles"]
+  subgraph v2["view: topics (embedding, none)"]
+    direction TB
+    p2["a position per item"] --> m2["rows in Morton order"] --> t2["tiles as row ranges"]
   end
-  id -- "one mapping" --> posA
-  id -- "one mapping" --> posB
+
+  entity -- "one permutation<br/>entity id → row id" --> v1
+  entity -- "one permutation<br/>entity id → row id" --> v2
 ```
 *One identity, several positions: a view owns everything downstream of its own mapping and nothing
 above it.*
@@ -104,7 +111,7 @@ never negotiates: there is no caller-supplied projection, datum shift or nationa
 | Projection | Reaches the poles | Shape |
 |---|---|---|
 | `web_mercator` | No, cuts off past about 85° north and south | Preserves small shapes near the equator; every standard map tile server uses it |
-| `equirectangular` | Yes | Distorts shape away from the equator; needs no trigonometry, so it reproduces exactly on every machine |
+| `equirectangular` | Yes | Distorts shape away from the equator; a plain scaling of longitude and latitude |
 
 A coordinate is always supplied as longitude and latitude, in degrees, on the initial build and on
 every later ingest (the service does the projecting, never the caller), and is carried at full
@@ -160,13 +167,14 @@ render = false   # draws on the map (default false)
 ```
 
 ```mermaid
-flowchart TD
-  decl["a field's declaration"] --> render{"draws on<br/>the map?"}
-  decl --> index{"can be<br/>searched?"}
-  render -- "yes" --> hot["a fixed-width column,<br/>read every time a tile is drawn"]
-  index -- "yes" --> struct["a structure indexed by item,<br/>read once per query"]
-  render -- "no" --> blob
-  index -- "no" --> blob["a compact per-item record,<br/>read when that item is looked up"]
+flowchart LR
+  decl["field declaration<br/>type, render, index, multi"]
+  decl -- "render = true" --> hot["hot column<br/>read when a point is drawn"]
+  decl -- "index = true" --> idx["filter index<br/>read when a filter or a<br/>category listing runs"]
+  decl -- "always" --> blob["record<br/>read when an item is opened"]
+  hot --> mark["a mark on the map"]
+  idx --> filter["a filter, a count, a typeahead"]
+  blob --> card["an item card"]
 ```
 *A field with neither flag still has a home: the compact record, read at drill-down.*
 
@@ -198,9 +206,9 @@ A vocabulary answers two independent questions:
   worked out from inside the viewer's own visible set each time it is asked, never stored or
   maintained.
 
-A value's underlying code, the small integer actually stored in the row, is assigned at random from
-the field's declared width rather than in the order values were first seen, and is never reused or
-reassigned once given out. The value's readable key never appears in the row itself.
+A value's underlying code, the small integer actually stored in the row, is scattered across the
+field's declared width rather than assigned in the order values were first seen, and is never
+reused or reassigned once given out. The value's readable key never appears in the row itself.
 
 ## What is not built
 
