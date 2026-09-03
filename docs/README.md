@@ -11,7 +11,7 @@ Four sets, each for a different reader. Pages marked *skeleton* have headings an
 
 ## Target shape
 
-The design set is being written into `system/`, chapter by chapter, from the current documents in `design/`, which remain the specification until the set is complete and they are deleted in one change. The chapters, and what each replaces:
+The design set is written, in `system/`, in this reading order: [overview](system/overview.md), [security](system/security.md), [data model](system/data-model.md), [access control](system/access-control.md), [queries](system/queries.md), [annotations](system/annotations.md), [write path](system/write-path.md), [serving](system/serving.md), [clients](system/clients.md). The documents in `design/` remain the specification until they are deleted in one change and the code's citations are swept to the chapters. What each chapter replaced:
 
 | Chapter | Replaces |
 |---|---|
