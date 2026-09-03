@@ -116,6 +116,7 @@ compartment today, so neither case can arise and neither rule has anything to te
 | A defence against a bundle holder | Anyone holding the bundle has the key, the term index and the coordinates. None of the properties above are claimed against them. |
 | Isolation of compartmented partitions | **Not built yet.** The design specifies physical separation for data that must be held apart. A deployment today has one store, so no isolation beyond masking is available. |
 | Agreement between the two authorisation functions | See below. |
+| Verification of what an operator declares | A vocabulary value, a layer's label or supplied artifact content that the operator declares visible is served as declared. The service cannot check provenance. |
 | Closure of the timing channel | Accepted and unquantified; see the register. |
 | Protection of data at rest | This chapter covers what a viewer can learn from responses. Data on disc has a different adversary and is covered where the storage is described. |
 | The client as a trust boundary | The client never decides what is visible; every value it holds has already passed the server's mask. Its rules concern truthful display and are in the clients chapter. |
@@ -128,29 +129,22 @@ two functions cannot disagree; the check cannot exist until a plugin does whose 
 
 ## Residual disclosure
 
-Every quantity above is stated as a rule with no exception. The channels below are the accepted
-exceptions: things a viewer can learn beyond a single item's own visibility, each judged worth
-carrying rather than worth closing. The specification enumerates thirty-three such channels
-individually; the table groups ones that share a shape and states each group's full severity range
-and status. The rightmost column names every specification row a group absorbs, so a reader working
-from the specification or the conformance suite can trace a code to its place here; that column is
-the only place one of those codes appears in this chapter.
+Three channels let a viewer learn something beyond the items they are entitled to see. Each is
+accepted rather than closed, for the reason given. The last column names the specification's
+register rows each one covers, for a reader tracing a code from the specification or the
+conformance suite.
 
-| Channel | What a viewer can infer | Severity | Status and why | Specification rows |
+| What a viewer can learn | How | Severity | Why it is accepted | Specification rows |
 |---|---|---|---|---|
-| Density and coarse counts restate an already-served quantity | That a viewer's own visible items cluster together in a region, and how many visible marks a tile holds, at a finer grain than a bare count | Low | Accepted, no new channel: the exact masked count is already served for any region or zoom level; these are coarser or cached views of the same figure | C1, C18 |
-| Response time and corpus activity track work outside the viewer's own set | How much data outside their own set a request walked, from timing; and that the corpus is being written to, from a staleness signal, in both cases without any content reaching them | Low | Open for the core timing question: unmitigated and unquantified. Accepted elsewhere in the family, on the ground that a principal already knows how much of the corpus is its own | C4, C14, C15, C19, C21, C24, C25, C26, C31 |
-| A stable identifier admits existence-probing and linkage | Whether a held identifier still resolves, which timestamps a delete, a suppression or a grant change; that two principals or two sessions are looking at the same item; a caller's own external identifiers can leak structure if the caller chooses to keep them | Medium | Accepted as the intended trade of a bookmarkable identifier. Probing how identifiers moved across a key rotation is closed specifically: no parameter exists to vary | C6, C17, C20 |
-| Caller declarations the service cannot verify | Content or a vocabulary value the caller asserted rather than derived from membership, served exactly as declared | Medium, high if mis-declared | Accepted, the caller's control: provenance is not something the service can check. All five are built: a vocabulary's visibility, a layer's label and its membership requirement are declared in the corpus file, and supplied content arrives through the control plane with its declaration or is refused. The specification's rows still carry stale not-built markers for three of them | C7, C12, C23, C27, C28 |
-| A vocabulary's values, and a densely pinned ordinal | A value's existence, gated the same way a label is; where an author pins codes densely, the largest visible code coarsely bounds how many values exist | Low to medium | Closed for existence, gated on a visible member carrying the value. Accepted for the ordinal, an owner ruling that set-size leakage from a caller's own chosen numbering is not a threat this system defends against | C11, C22 |
-| Node metadata and a routing registry, once compartments exist | That a grouping or a label draws on a given compartment | Low to medium | Node metadata is closed. The registry is accepted, and meaningful only once compartmented partitions exist. **Not built yet:** with one store today there is nothing to separate | C13, C16 |
-| A drill-down names relations already served in full | An artifact's served parents; an item's own satisfied labels, reachable views and scoped values | Low | Accepted, bounded to what the requesting principal already sees in full | C29, C30 |
-| The highlight and browse verbs answer a second question over an existing candidate set | Nothing beyond what two ordinary filtered requests would already disclose | Low | Accepted. Built; the specification's row still carries a stale not-built marker | C32, C33 |
-| Extractive-tier background frequencies | Corpus-wide term distributions, if drawn from the live corpus | Low | Closed: a fixed public reference corpus is used instead of the live one | C5 |
-| Pre-intersection filter cardinality | A raw match count taken over unauthorised records | High if exposed | Closed structurally: no route serves a match count before it has been intersected with the viewer's own set | C8 |
-| Text relevance scores and ranks | Corpus-wide statistics that would let unreadable content be inferred | High if ranking were added | Closed by scope: filtering is boolean only, and no ranking exists | C9 |
-| Vector similarity results and thresholds | Neighbours that vary observably with items outside the viewer's own set | High if post-filtered | Closed structurally: threshold filters push the viewer's own set down before any comparison runs | C10 |
-| Checked and found not to leak | Nothing; recorded because each was checked | None | A node's bounding box and hull shape are recomputed from masked members only; label existence omits every unsatisfied candidate from the response | C2, C3 |
+| Roughly how much of the corpus lies outside their own set, and that the corpus is being written to | Response time grows with the work a request does over rows the viewer cannot see, and a staleness flag on a response says something has changed since their last request | Low | Unquantified and open. No content reaches the viewer, and a viewer already knows how much of the corpus is theirs | C4, C14, C15, C19, C21, C24, C25, C26, C31 |
+| When an item they once saw was deleted or suppressed, or when their own grant changed; and that another viewer is looking at the same item | A `tessera_id` is stable for the item's life, so a held one stops resolving at the moment of the change, and two viewers who compare identifiers can match them. An operator's external ids carry whatever structure the operator put in them | Medium | The price of an identifier a client can bookmark and share. Probing across a key rotation is closed: nothing lets a client vary the key | C6, C17, C20 |
+| An upper bound on how many values a category has | Where an operator numbers a vocabulary's values densely, the largest code a viewer can see bounds the count | Low | The operator's own numbering; an owner ruling that set-size inference from it is not defended against | C22 |
+
+The specification's register lists thirty-three channels. The others were considered and are
+either closed (a filter's match count before intersection, relevance ranking,
+vector neighbours, background term frequencies, node bounds and hull shapes, label existence) or
+restate a quantity the viewer is already served (coarse density, drill-down relations, highlight
+counts). They are not disclosures and are not repeated here.
 
 ## Evidence
 
