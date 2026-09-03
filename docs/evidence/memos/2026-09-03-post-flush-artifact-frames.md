@@ -25,10 +25,34 @@ whole-level projection on the next request: a **merge** (which renumbers the ext
 holds), a form at a level version its delta does not follow, and a form under another prefix. Each
 is said at `warn` where it happens.
 
-⊘ **Not re-measured at rung 3.** The change is covered by
-`crates/tessera-engine/tests/artifact_bring_forward.rs`, including a differential asserting the
-maintained form equals one built from scratch; the 94–177 s figures above stand as the last
-measurement of the path this replaces, and nothing here restates them as an after.
+**Measured at rung 3** — `probes/2026-09-03-growth-trigger/after-the-fix/`, which carries the runs,
+the log lines and the reason the bundle a run touches cannot be run against twice. Both binaries on
+the same host over the same hour, each against its own copy of the all-in bundle:
+
+| | before (882e46cb) | after |
+|---|---|---|
+| open | 28.1 s, 27.1 s | 24.6 s |
+| growth returns | 0.01 s, 0.23 s | 0.04 s |
+| the request after the growth | **shed at 134.3 s, 100.7 s** | served, **125 ms** |
+
+The growth is the number to watch rather than the request: the work has moved onto the executor
+thread, where it blocks every ingest and every deny, so what matters is that it stayed small. The
+server says what it cost — `a level's held row form took a write's delta`, at `elapsed_ms=15`
+against the level's 14 s projection.
+
+⊘ **A copy of the level is still possible and is what that line's `cloned_ms` reports.** A write
+amends a form requests are reading, so `Arc::make_mut` copies it; the memberships are behind one
+`Arc` each, which made that copy 30,217 pointers (**9 ms** measured) rather than 1.66×10⁹ entries
+(**2 576 ms** measured, before the change). The records, the generating sets and the tile index are
+still copied whole, and nothing bounds that beyond their being small at this rung.
+
+⊘ **The bundle a probe run leaves behind cannot adopt its own row column again**, on either binary:
+a growth moves the level's version, the side manifest the next tick writes carries forward only the
+derived extents whose version still matches (`Executor::artifact_coordinates`), and the fold-written
+column is not one of them. A second run against the same bundle therefore opens with
+`row_columns_named=0` and projects `mesh/descriptors` whole instead of transposing it — ~147 s. That
+is **I11** doing its job rather than a regression, and it is what a bundle looks like after any
+growth, not only after a probe.
 
 ## The problem
 

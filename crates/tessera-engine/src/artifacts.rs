@@ -172,7 +172,14 @@ pub struct ArtifactRecords {
 #[derive(Debug, Clone, Default)]
 pub struct MembershipRows {
     /// Parallel to a level's ordinals; `None` is a hole, not an empty membership.
-    rows: Vec<Option<Bitmap>>,
+    ///
+    /// **One `Arc` per artifact, so cloning the level is the ordinals and not the members.** A
+    /// write amends the form in place, and the form is shared with whichever requests are reading
+    /// it — so `Arc::make_mut` on the family copies it, and at rung 3's `mesh/descriptors` a copy
+    /// of 1.66×10⁹ entries was a *measured* 2 576 ms of the 2 581 ms the whole amendment took, on
+    /// the executor thread. Behind an `Arc` each the copy is 30,217 pointers and the one artifact
+    /// that grew is the one bitmap made mutable.
+    rows: Vec<Option<Arc<Bitmap>>>,
     /// Per ordinal, per rank: that content's **generating set** in row space. Pushed in lockstep
     /// with [`ArtifactRecords::declared`], which is the size the same set had in entity space.
     generating: Vec<Vec<Bitmap>>,
@@ -401,7 +408,7 @@ impl MembershipRows {
         // under the nightly gate. What made base-only necessary was that a form covering extents
         // had no way to *stay* covering them; it has one now, and the merge that renumbers extent
         // rows is caught by [`ArtifactRows::covers`] before a stale form is ever served.
-        self.rows[idx] = Some(space.project(&record.members));
+        self.rows[idx] = Some(Arc::new(space.project(&record.members)));
         self.generating[idx] = record
             .contents
             .iter()
@@ -430,7 +437,7 @@ impl MembershipRows {
             self.rows.resize_with(idx + 1, || None);
             self.generating.resize_with(idx + 1, Vec::new);
         }
-        self.rows[idx] = Some(Bitmap::new());
+        self.rows[idx] = Some(Arc::new(Bitmap::new()));
         self.generating[idx] = record
             .contents
             .iter()
@@ -452,7 +459,7 @@ impl MembershipRows {
         }
         for (idx, slot) in self.rows.iter_mut().enumerate() {
             if slot.is_some() {
-                *slot = Some(std::mem::take(&mut transposed[idx]));
+                *slot = Some(Arc::new(std::mem::take(&mut transposed[idx])));
             }
         }
         true
@@ -471,7 +478,7 @@ impl MembershipRows {
             self.rows.resize_with(idx + 1, || None);
             self.generating.resize_with(idx + 1, Vec::new);
         }
-        self.rows[idx] = Some(rows);
+        self.rows[idx] = Some(Arc::new(rows));
         self.generating[idx] = record
             .contents
             .iter()
@@ -488,7 +495,8 @@ impl MembershipRows {
     fn or_rows(&mut self, idx: usize, rows: &Bitmap) -> bool {
         match self.rows.get_mut(idx).and_then(Option::as_mut) {
             Some(held) => {
-                held.or_inplace(rows);
+                // One artifact's bitmap copied where a reader holds it, never the level's.
+                Arc::make_mut(held).or_inplace(rows);
                 true
             }
             None => false,
@@ -496,7 +504,10 @@ impl MembershipRows {
     }
 
     pub fn get(&self, ordinal: u32) -> Option<&Bitmap> {
-        self.rows.get(ordinal as usize).and_then(Option::as_ref)
+        self.rows
+            .get(ordinal as usize)
+            .and_then(Option::as_ref)
+            .map(Arc::as_ref)
     }
 
     /// A row form given directly — a spatial level's resolved rows at the fold, and the tests
@@ -505,7 +516,7 @@ impl MembershipRows {
     pub(crate) fn of_rows(rows: Vec<Option<Bitmap>>) -> Self {
         MembershipRows {
             generating: vec![Vec::new(); rows.len()],
-            rows,
+            rows: rows.into_iter().map(|set| set.map(Arc::new)).collect(),
         }
     }
 
@@ -1055,7 +1066,7 @@ impl ArtifactRows {
     #[cfg(test)]
     pub(crate) fn synthetic(sets: &[Option<&[u32]>], column: Option<Arc<RowColumn>>) -> Self {
         let membership = MembershipRows {
-            rows: sets.iter().map(|s| s.map(Bitmap::of)).collect(),
+            rows: sets.iter().map(|s| s.map(|s| Arc::new(Bitmap::of(s)))).collect(),
             generating: vec![Vec::new(); sets.len()],
         };
         let index = TileIndex::build(&membership, 0);
@@ -1980,8 +1991,10 @@ impl ArtifactProjections {
         // rebuild it replaces would have paid: `get_or_build` builds a second form beside the one
         // still cached. Where nothing else holds the `Arc` — the case between requests — this is
         // free.
+        let started = std::time::Instant::now();
         let shared = Arc::strong_count(&rows) > 1;
         let amended = Arc::make_mut(&mut rows);
+        let cloned_ms = started.elapsed().as_millis() as u64;
         // **The rows this delta gave each artifact**, gathered as the membership takes them, so the
         // column is amended at exactly those and the pack is never rewritten. Empty on an
         // artifact-major level, which has no column to amend.
@@ -2009,12 +2022,18 @@ impl ArtifactProjections {
         }
         let lost = amended.amend_derived(&added, total_rows(space));
         amended.covering(space);
-        tracing::debug!(
+        // **What the write cost the executor thread**, which is the whole point of applying a delta
+        // rather than projecting the level: `cloned_ms` is the copy a concurrent reader forces (see
+        // above), `elapsed_ms` the amendment and the tile index beside it. Operator plane only —
+        // counts and durations, naming no artifact and no principal.
+        tracing::info!(
             layer = %layer,
             level,
             view = %view,
             rows_added = added.len(),
             cloned = shared,
+            cloned_ms,
+            elapsed_ms = started.elapsed().as_millis() as u64,
             "a level's held row form took a write's delta"
         );
         if lost {
@@ -2983,7 +3002,7 @@ mod tests {
                 declared: vec![Vec::new(); sets.len()],
             },
             MembershipRows {
-                rows: sets.iter().map(|s| Some(Bitmap::of(s))).collect(),
+                rows: sets.iter().map(|s| Some(Arc::new(Bitmap::of(s)))).collect(),
                 generating: vec![Vec::new(); sets.len()],
             },
         )
@@ -3029,7 +3048,7 @@ mod tests {
                 declared: vec![contents.iter().map(|(_, declared)| *declared).collect()],
             },
             MembershipRows {
-                rows: vec![Some(Bitmap::of(members))],
+                rows: vec![Some(Arc::new(Bitmap::of(members)))],
                 generating: vec![contents.iter().map(|(set, _)| Bitmap::of(set)).collect()],
             },
         )
@@ -3403,7 +3422,7 @@ mod tests {
                 declared: vec![Vec::new()],
             },
             MembershipRows {
-                rows: vec![Some(Bitmap::of(members))],
+                rows: vec![Some(Arc::new(Bitmap::of(members)))],
                 generating: vec![Vec::new()],
             },
         )
