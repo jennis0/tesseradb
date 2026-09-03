@@ -241,15 +241,24 @@ def placement_plan(files) -> tuple[list[tuple[int, int, int, int]], int]:
     return plan, at
 
 
-def read_group(files, job, retries: int = RETRIES) -> tuple[int, int, int, np.ndarray, int]:
-    """One row group's `emb`, normalised — **retried, because this share returns corrupt bytes.**
+def read_group(files, job, retries: int = RETRIES) -> tuple[int, int, int, np.ndarray | None, int]:
+    """One row group's `emb`, normalised — retried, and **`None` where the source cannot be read**.
 
-    A 2026-09-03 placement pass died 25 minutes in on
-    `ZSTD decompression failed: Src size is incorrect` from one row group of one file, and the same
-    file had been read cleanly by the fit pass. It is the box's known SMB fault class
-    (`docs/ingest-campaign.md` §7 and the memo behind it), not a property of the data: the retry
-    reopens the file, and the run records how many it needed. A group that fails every attempt is
-    the pass's refusal, with the file and group named.
+    ⊘ **One row group of TreeOfLife-200M is corrupt at the source.** `train-00035-of-00666.parquet`
+    row group 4 answers `ZSTD decompression failed: Src size is incorrect` on its `emb` column at
+    every attempt, from the share and from a byte copy of the file on local disk, while the same
+    group's `uuid` and rank columns read cleanly — so it is the publisher's bytes rather than this
+    box's SMB (measured 2026-09-03, three reads off the share and one off a local copy).
+
+    50,000 vectors of 233,055,986 is 0.021% of the corpus, and the campaign's rule for an input is
+    to **ignore and report rather than refuse** (`CLAUDE.md`, *How strict to be*). So the read
+    returns `None`, the caller places those rows at the layout's centroid, and the count, the file
+    and the group travel in the manifest and in the rung's README. Refusing would cost the rung for
+    a fifth of a tenth of a per cent, and a silent zero vector would put them at a position the
+    index chose for the origin.
+
+    The retry stays for the transient case: this box does drop an SMB read in a multi-hour pass,
+    and the run records how many attempts it needed.
     """
     import pyarrow.parquet as pq
 
@@ -264,10 +273,10 @@ def read_group(files, job, retries: int = RETRIES) -> tuple[int, int, int, np.nd
             return i, g, offset, normalise(block), attempt
         except Exception as exc:  # noqa: BLE001 — any read fault is retried, then refused
             if attempt == retries - 1:
-                raise RuntimeError(
-                    f"{files[i].name} row group {g} failed {retries} times off the share: "
-                    f"{type(exc).__name__}: {exc}"
-                ) from exc
+                print(f"    ⊘ {files[i].name} group {g} is unreadable after {retries} attempts "
+                      f"({type(exc).__name__}: {exc}); its {rows:,} rows take the layout's "
+                      f"centroid", flush=True)
+                return i, g, offset, None, attempt
             print(f"    ⊘ {files[i].name} group {g}: {type(exc).__name__}: {exc} — "
                   f"retry {attempt + 1}/{retries - 1}", flush=True)
             time.sleep(2.0 * (attempt + 1))
@@ -330,6 +339,10 @@ def place_from_share(fit_block, fit_xy, fit_rows, n: int, t: dict, files, checkp
 
     k = UMAP_PARAMS["n_neighbors"]
     placed, retries, last_report = 0, 0, 0
+    unreadable: list[dict] = []
+    # Where a row whose vector cannot be read goes. The middle of the layout, so the defect is one
+    # visible pile at one place rather than 50,000 points smeared invisibly through real structure.
+    centroid = fit_xy.mean(axis=0).astype(np.float32)
     t0 = time.time()
     with _step("place", t):
         resident = cp.asarray(fit_block)
@@ -343,6 +356,15 @@ def place_from_share(fit_block, fit_xy, fit_rows, n: int, t: dict, files, checkp
         with open(ledger_path, "a") as ledger:
             for i, g, offset, block, tries in share_batches(files, plan):
                 retries += tries
+                if block is None:
+                    rows = next(r for f, gg, _, r in full if (f, gg) == (i, g))
+                    xy[offset : offset + rows] = centroid
+                    unreadable.append({"file": files[i].name, "group": g, "rows": rows})
+                    placed += rows
+                    ledger.write(json.dumps(
+                        {"file": i, "group": g, "rows": rows, "unreadable": True}) + "\n")
+                    ledger.flush()
+                    continue
                 for lo in range(0, len(block), BATCH_ROWS):
                     part = block[lo : lo + BATCH_ROWS]
                     m = len(part)
@@ -375,6 +397,12 @@ def place_from_share(fit_block, fit_xy, fit_rows, n: int, t: dict, files, checkp
         cp.get_default_memory_pool().free_all_blocks()
     xy.flush()
     t["placed"], t["read_retries"] = placed + placed_before, retries
+    t["unreadable_groups"] = unreadable
+    t["unreadable_rows"] = sum(u["rows"] for u in unreadable)
+    if unreadable:
+        print(f"    ⊘ {t['unreadable_rows']:,} row(s) in {len(unreadable)} unreadable source row "
+              f"group(s) carry the layout's centroid and not a position of their own: "
+              + ", ".join(f"{u['file']} group {u['group']}" for u in unreadable), flush=True)
     assert placed + placed_before == n, f"placed {placed + placed_before:,} against {n:,}"
 
     out = np.array(xy, dtype=np.float32)
