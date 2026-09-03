@@ -10,7 +10,7 @@ a size.
 flowchart LR
   cred["a credential"] --> session["session plane<br/>mints a token"]
   session -- "token" --> client["client<br/>store"]
-  client -- "token and request" --> viewer["viewer plane<br/>answers inside the mask"]
+  client -- "token and request" --> viewer["viewer plane<br/>answers from the visible set"]
   viewer -- "counts, marks, artifacts:<br/>already masked" --> client
   client --> display["display:<br/>formats a figure, never computes one"]
 ```
@@ -19,7 +19,7 @@ flowchart LR
 
 ## Deployment
 
-A deployment exposes two planes. The session plane turns a credential into a token and must never
+Of the three planes a deployment exposes, two concern a client. The session plane turns a credential into a token and must never
 be reached from a browser: it is gated by the deployment's own credential, which only the
 integrator's own server should hold. The viewer plane is what a client actually calls with a
 token, and it can be reached directly by a browser or a notebook page from an origin the
@@ -60,7 +60,7 @@ cosmetic.
 
 | What changed | What it means for a held view |
 |---|---|
-| A different viewer authorises (a new token for a different principal) | The replica, held artifacts, the selection and per-column state drop. Every `tessera_id` the client already holds stays valid, because the permutation is keyed per deployment, not per viewer. |
+| A different viewer authorises (a new token for a different viewer) | The replica, held artifacts, the selection and per-column state drop. Every `tessera_id` the client already holds stays valid, because the permutation is keyed per deployment, not per viewer. |
 | The deployment is rebuilt (a key rotation, or the id space advancing) | Every `tessera_id` the client holds is meaningless. Start over. |
 | The content behind the current identity (an item added, denied, or unsuppressed) | The client's counts and marks may be older than the corpus. Mark the view stale and offer refresh. |
 
@@ -173,7 +173,7 @@ it, one replica and one presented frame per view it has visited.
 
 ```mermaid
 flowchart TB
-  shared["shared: session, mask, filters,<br/>colour, layer choice, point budget"]
+  shared["shared: session, visible set, filters,<br/>colour, layer choice, point budget"]
   subgraph store["the store"]
     cur{{"current view"}}
     A["view A: replica, frame, channel"]

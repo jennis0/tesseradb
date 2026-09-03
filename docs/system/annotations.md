@@ -264,10 +264,10 @@ every drawn shape is computed: an artifact's members expressed as positions in w
 row order is current.
 
 A flush publishes newly ingested points as rows; a merge combines segments and renumbers rows
-within its own span; compaction, called the fold, retires deletions and suppressions and rebuilds
+within its own span; compaction retires deletions and suppressions and rebuilds
 the structures the other two leave alone. Row space is one of those structures. A flush appends
 rows it does not yet hold and a merge renumbers rows it does not reference, so neither changes it,
-and the fold is the only operation that rebuilds it, translating the current entity-space
+and the compaction is the only operation that rebuilds it, translating the current entity-space
 membership into the row positions a merge produced. Until the next fold, a member whose row a
 flush created contributes nothing to its artifact's row-space count. An enumerated artifact's count
 can therefore understate its true membership between one fold and the next, and never overstate
@@ -279,7 +279,7 @@ flowchart LR
   subgraph entity["entity space: on disc, permanent"]
     mem["an artifact's membership"]
   end
-  subgraph row["row space: per view, rebuilt only at the fold"]
+  subgraph row["row space: per view, rebuilt only at compaction"]
     rowmem["the same membership, as row ranges"]
     viewerset["the authorised set, as row ranges"]
   end
@@ -305,7 +305,7 @@ rather than evaluated per request.
 | Flush | A newly published point joins any attribute-predicate or shape artifact it matches. An enumerated artifact gains no new members until its layer is refreshed, and even a member the refreshed layer already names does not count until the next fold folds its row into the row form | A predicate or shape artifact's count, and its hull where one is declared, grow on the next request; an enumerated artifact's do not change until its layer is refreshed and the following fold has run |
 | Merge | Segments are combined and rows renumbered within the merged span. No membership or content changes | Nothing |
 | Deletion of a member | At accept, the member leaves every masked count, for every membership source alike. Content generated from it stops serving at the same moment: its generating set no longer matches every member a viewer can see, so containment fails for everyone | The count falls, and any content generated from the deleted point disappears, on the next request after the deletion is accepted |
-| Compaction (the fold) | The deleted member's bit is dropped from the row form. What happens to content generated from it follows the layer's own declaration (below) | For content that was already withdrawn at the deletion, nothing changes; content declared permissive, and generated from more than the one deleted point, resumes serving |
+| Compaction | The deleted member's bit is dropped from the row form. What happens to content generated from it follows the layer's own declaration (below) | For content that was already withdrawn at the deletion, nothing changes; content declared permissive, and generated from more than the one deleted point, resumes serving |
 | A point deleted and re-ingested (the only way to edit one) | The old point's membership and generating-set participation lapse exactly as an ordinary deletion's do. The re-ingested point has a new identity and only rejoins an artifact if the new batch names it as a member | The count falls when the deletion is accepted, and rises again only if the re-ingested point is named as a member and flushed |
 | Suppression of the artifact itself | The artifact stops being served immediately. Nothing about it is stored differently; it resumes only on an explicit unsuppress | The artifact disappears the moment the suppression is accepted, and stays gone until an explicit unsuppress |
 | Deletion of the artifact itself | The artifact stops being served immediately. Its record, and every edge naming it, are removed at the next fold. Deleting it does not lift a suppression already on it: only an [explicit unsuppress](write-path.md#denies) does | The artifact disappears the moment the deletion is accepted, and never returns |
@@ -313,8 +313,8 @@ rather than evaluated per request.
 A layer's supplied content declares, once, how it behaves when a point behind it is deleted.
 Either way the content stops serving the moment the deletion is accepted, because a generating set
 that no longer matches every visible member fails containment for every viewer, whatever the
-declaration says. The declaration decides what happens next, at the fold. Under **strict**, the
-default, the fold drops the content and its generating set for good. Under **permissive**, the fold
+declaration says. The declaration decides what happens next, at the compaction. Under **strict**, the
+default, the compaction drops the content and its generating set for good. Under **permissive**, the compaction
 removes the deleted point from the generating set, and the content resumes serving to viewers who
 can see every point that remains, unless the deletion took the last of them, in which case it is
 dropped exactly as under strict.

@@ -135,7 +135,7 @@ difference rather than rebuilding either from scratch.
 | Change | Effect on an open session | How |
 |---|---|---|
 | An item is deleted, suppressed, or unsuppressed | Applies on the session's very next request | The overlay is read fresh at composition, every time |
-| A flush publishes new rows for a term the session already holds | The session sees them on its next request, with no re-authorisation needed | A background pass rebuilds the cached projection for every resident session at each geometry publication; a session with no resident entry rebuilds on its next request instead |
+| A flush publishes new rows for a term the session already holds | The session sees them once the background refresh has reached it, usually by its next request; until then it is served the previous generation's answer, which is still correct | A background pass rebuilds the cached projection for every resident session at each geometry publication; a session with no resident entry rebuilds on its next request instead |
 | The credential's own grant changes | Not reflected until the session re-authorises | There is no partial update to the authorised set. A new token is the only way to pick up a changed credential |
 
 **Not built yet:** a signal to the client when the corpus has grown a term the credential named
