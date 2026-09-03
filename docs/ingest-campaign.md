@@ -705,7 +705,13 @@ neither of the two it separated. §8's abstracts entry should be read with that 
 **Not patched.** No `--memory-budget` arm was tried, the declaration was not trimmed and the
 abstracts were not dropped: each answers a different question from the one the rung was built to
 ask. What to do about it is the owner's, and the options are visibly (a) a budget arm, (b) an arena
-the text pass streams rather than maps, (c) a smaller corpus, (d) more RAM.
+the text pass streams rather than maps, (c) a smaller corpus, (d) more RAM. **(b) was then built and
+measured**: [`../probes/2026-09-03-text-arena-streaming/`](../probes/2026-09-03-text-arena-streaming/README.md)
+reproduces the stall in isolation at 10⁷ under a 4 GB cap, attributes it to an arena walk that is
+uniformly random rather than sequential, and takes this rung's own `text_index` from *over four
+hours without finishing* to **2,371.9 s** at 1.74 major faults a second and byte-identical output —
+**and the build still does not complete**, because `record_blob` reads the same arena by entity, has
+the same defect and cannot take the same fix. It is the next thing to decide.
 
 ### The bracket at 10⁷, and everything the rung could still prove
 

@@ -244,8 +244,19 @@ impl<T: Zeroable> Drop for MappedArray<T> {
 ///
 /// **Arrival order, not entity order**, which is what makes it a single pass: the attribute join
 /// discovers values in the source file's order and scatters them by entity, so an entity-ordered
-/// arena would need a prefix-sum pass over lengths and a second scan of the source. Nothing reads
-/// the arena sequentially — every read is `offset` → slice — so its order carries no meaning.
+/// arena would need a prefix-sum pass over lengths and a second scan of the source.
+///
+/// **Its order carries no meaning, so the readers that walk all of it walk it in *arena* order.**
+/// That is not what the shape started as: the text index walked entity ranges and reached the
+/// arena by `offset` → slice, and entity order is signature-then-Morton order
+/// (`pipeline.rs` §assignment), which bears no relation to the source's. On a corpus whose arena
+/// fits in memory that costs nothing; on one larger than the box it is one major fault per
+/// document over a file two orders of magnitude larger than RAM — measured at
+/// `probes/2026-09-03-text-arena-streaming/`. So the arena marks a record boundary every
+/// [`ARENA_MARK_STRIDE`] ([`Self::windows`]) and hands out [`ArenaWindow`]s that read a contiguous
+/// range front to back through the file descriptor, releasing each window's page cache behind
+/// them. A caller that needs to know *whose* record it is reads the entity out of the record's own
+/// header (`column.rs`), which is the four bytes that buys the walk.
 ///
 /// **Growth remaps rather than copies.** The file is extended in doublings and mapped afresh; the
 /// bytes already written stay where they are (they are page cache belonging to the file, and a
@@ -262,10 +273,38 @@ pub(crate) struct MappedArena {
     used: u64,
     /// Bytes the file and the mapping currently cover.
     capacity: u64,
+    /// Ascending record-start offsets, one taken each time an append crosses a stride boundary,
+    /// and always starting at 0. **This is the only thing that makes the arena divisible**: a
+    /// record is `header ‖ bytes` with no separator a scan could resynchronise on, so a reader
+    /// that did not start where a record starts would decode a length out of a document's prose.
+    marks: Vec<u64>,
+    /// The offset the next mark is taken at or after.
+    next_mark: u64,
+    /// Records appended since the last mark.
+    since_mark: u32,
 }
 
 /// The arena's first mapping, and the floor its doubling starts from.
 const ARENA_MIN_BYTES: u64 = 1 << 20;
+
+/// How often a record boundary is remembered for [`MappedArena::windows`].
+///
+/// 32 MiB, which is 3,800 offsets over the 119 GB arena rung 4's abstracts produce — 30 KB of
+/// `Vec`, against a window granularity fine enough that twelve workers over eight windows each
+/// still divide an arena a hundredth of that size.
+const ARENA_MARK_STRIDE: u64 = 32 << 20;
+
+/// A mark is also taken every this many records, whatever the stride says.
+///
+/// **Both rules are needed.** The stride bounds the mark list on a corpus of prose — 3,800 offsets
+/// at rung 4 — and the record count bounds the *window size* on a corpus of short values, where
+/// 32 MiB is millions of records and a whole build would be one window. Sixty-four records is
+/// 12.5 MB of `Vec` at 10⁸ values, which is noise beside the arena those values fill, and it is
+/// what lets a test corpus of a few thousand names be divided at all.
+const ARENA_MARK_RECORDS: u32 = 64;
+
+/// The buffer one [`ArenaWindow`] reads through, and the granularity it releases behind itself.
+const ARENA_WINDOW_BUF: usize = 4 << 20;
 
 impl MappedArena {
     pub(crate) fn create(dir: &Path, name: &str) -> Result<Self> {
@@ -283,6 +322,9 @@ impl MappedArena {
             map: None,
             used: 0,
             capacity: 0,
+            marks: Vec::new(),
+            next_mark: 0,
+            since_mark: 0,
         })
     }
 
@@ -294,12 +336,24 @@ impl MappedArena {
             map: None,
             used: 0,
             capacity: 0,
+            marks: Vec::new(),
+            next_mark: 0,
+            since_mark: 0,
         }
     }
 
     /// Append `bytes` and return the offset they landed at.
+    ///
+    /// One call is one **record**: the mark taken here is a record start, and a caller that split
+    /// a value across two appends would hand [`Self::windows`] a boundary inside one.
     pub(crate) fn append(&mut self, bytes: &[u8]) -> Result<u64> {
         let offset = self.used;
+        if offset >= self.next_mark || self.since_mark >= ARENA_MARK_RECORDS {
+            self.marks.push(offset);
+            self.next_mark = offset + ARENA_MARK_STRIDE;
+            self.since_mark = 0;
+        }
+        self.since_mark += 1;
         let end = offset + bytes.len() as u64;
         if end > self.capacity {
             self.grow(end)?;
@@ -327,6 +381,77 @@ impl MappedArena {
     /// whole source's payload rather than one chunk's.
     pub(crate) fn reset(&mut self) {
         self.used = 0;
+        self.marks.clear();
+        self.next_mark = 0;
+        self.since_mark = 0;
+    }
+
+    /// Split the arena into at most `target` contiguous byte ranges, each starting at a record.
+    ///
+    /// Fewer than `target` where the arena holds fewer marks than that, and empty where nothing
+    /// was appended. The ranges partition `[0, used)` in ascending order, which is what lets a
+    /// caller treat "every record" and "every window's records" as the same set.
+    pub(crate) fn windows(&self, target: usize) -> Vec<(u64, u64)> {
+        if self.used == 0 || self.marks.is_empty() {
+            return Vec::new();
+        }
+        let count = target.clamp(1, self.marks.len());
+        let mut out = Vec::with_capacity(count);
+        for i in 0..count {
+            let lo = self.marks[i * self.marks.len() / count];
+            let hi = if i + 1 == count {
+                self.used
+            } else {
+                self.marks[(i + 1) * self.marks.len() / count]
+            };
+            if lo < hi {
+                out.push((lo, hi));
+            }
+        }
+        out
+    }
+
+    /// A sequential reader over `[lo, hi)`, which must be a range [`Self::windows`] handed out.
+    pub(crate) fn window(&self, lo: u64, hi: u64) -> Result<ArenaWindow> {
+        let (Some(file), Some(path)) = (&self.file, &self.path) else {
+            return Err(BuildError::Invalid(
+                "an arena with no file cannot be read".into(),
+            ));
+        };
+        let file = file.try_clone().map_err(|e| BuildError::io(path, e))?;
+        advise(&file, lo, hi - lo, libc::POSIX_FADV_SEQUENTIAL);
+        Ok(ArenaWindow {
+            file,
+            path: path.clone(),
+            buf: vec![0u8; ARENA_WINDOW_BUF],
+            base: lo,
+            filled: 0,
+            at: 0,
+            end: hi,
+            released: lo,
+        })
+    }
+
+    /// Drop the mapping's page-table entries, keeping the file and its page cache.
+    ///
+    /// **The window readers cannot release a page this process still has mapped.** The join wrote
+    /// every byte of the arena through the mapping, so on reaching the text pass the whole arena
+    /// is in this process's page tables; `posix_fadvise(DONTNEED)` declines to evict a page that
+    /// is mapped, and the streaming walk would fill memory it could not give back. Zapping the
+    /// entries costs the later random readers — the record blob — one minor fault each, against a
+    /// walk that would otherwise be bounded by the box rather than by its window.
+    pub(crate) fn unmap_pages(&self) {
+        let Some(map) = &self.map else { return };
+        // SAFETY: the range is this arena's own mapping, and `MADV_DONTNEED` on a `MAP_SHARED`
+        // file mapping discards page-table entries only — the next access re-reads the file, whose
+        // contents are unchanged.
+        unsafe {
+            libc::madvise(
+                map.as_ptr() as *mut libc::c_void,
+                map.len(),
+                libc::MADV_DONTNEED,
+            );
+        }
     }
 
     fn grow(&mut self, need: u64) -> Result<()> {
@@ -351,6 +476,124 @@ impl MappedArena {
             Some(unsafe { memmap2::MmapMut::map_mut(file) }.map_err(|e| BuildError::io(path, e))?);
         self.capacity = capacity;
         Ok(())
+    }
+}
+
+/// `posix_fadvise`, best effort: every call this module makes is a hint, and a filesystem that
+/// declines one leaves the walk correct and slower.
+fn advise(file: &File, offset: u64, len: u64, advice: libc::c_int) {
+    use std::os::unix::io::AsRawFd;
+    // SAFETY: the descriptor is the caller's own open file and `posix_fadvise` changes nothing
+    // but the kernel's readahead and page-cache bookkeeping for it.
+    unsafe {
+        libc::posix_fadvise(
+            file.as_raw_fd(),
+            offset as libc::off_t,
+            len as libc::off_t,
+            advice,
+        );
+    }
+}
+
+/// One contiguous byte range of a [`MappedArena`], read **front to back through the descriptor**
+/// rather than through the mapping.
+///
+/// **Through the descriptor, because that is what can be given back.** A mapped read leaves the
+/// page in this process's page tables, where `posix_fadvise(DONTNEED)` will not touch it; a
+/// `read_at` into a fixed buffer leaves the page cache holding pages nothing has mapped, so the
+/// window releases them behind its own cursor and a 119 GB arena costs the buffer rather than the
+/// box. The kernel's readahead does the rest: the range is declared `POSIX_FADV_SEQUENTIAL` when
+/// the window opens.
+///
+/// The window yields records, not bytes: a record is `header ‖ bytes` and may straddle the
+/// buffer, so the buffer compacts and refills around it and grows where one value is larger than
+/// it is.
+pub(crate) struct ArenaWindow {
+    file: File,
+    path: PathBuf,
+    buf: Vec<u8>,
+    /// File offset `buf[0]` holds.
+    base: u64,
+    /// Bytes of `buf` that hold file content.
+    filled: usize,
+    /// Read cursor within `buf`.
+    at: usize,
+    /// One past the last byte of the window.
+    end: u64,
+    /// Everything below this offset has been released from the page cache.
+    released: u64,
+}
+
+impl ArenaWindow {
+    /// The file offset the next unread byte sits at.
+    pub(crate) fn offset(&self) -> u64 {
+        self.base + self.at as u64
+    }
+
+    /// Whether any byte of the window is still unread.
+    pub(crate) fn has_more(&self) -> bool {
+        self.offset() < self.end
+    }
+
+    /// At least `want` bytes at the cursor, or fewer at the window's end.
+    ///
+    /// Compacts what is unread to the front of the buffer and refills behind it, growing the
+    /// buffer where one record is larger than it. The refill is capped at the window's end, so a
+    /// window never reads a neighbour's bytes.
+    pub(crate) fn peek(&mut self, want: usize) -> Result<&[u8]> {
+        if self.filled - self.at >= want {
+            return Ok(&self.buf[self.at..self.filled]);
+        }
+        self.buf.copy_within(self.at..self.filled, 0);
+        self.base += self.at as u64;
+        self.filled -= self.at;
+        self.at = 0;
+        if want > self.buf.len() {
+            self.buf.resize(want, 0);
+        }
+        while self.filled < want {
+            let from = self.base + self.filled as u64;
+            let room = (self.buf.len() - self.filled).min(self.end.saturating_sub(from) as usize);
+            if room == 0 {
+                break;
+            }
+            let got = std::os::unix::fs::FileExt::read_at(
+                &self.file,
+                &mut self.buf[self.filled..self.filled + room],
+                from,
+            )
+            .map_err(|e| BuildError::io(&self.path, e))?;
+            if got == 0 {
+                break;
+            }
+            self.filled += got;
+        }
+        Ok(&self.buf[self.at..self.filled])
+    }
+
+    /// Advance past `n` bytes already read, releasing whole buffers behind the cursor.
+    pub(crate) fn consume(&mut self, n: usize) {
+        self.at += n;
+        let reached = self.offset();
+        if reached - self.released >= ARENA_WINDOW_BUF as u64 {
+            let len = reached - self.released;
+            advise(&self.file, self.released, len, libc::POSIX_FADV_DONTNEED);
+            self.released = reached;
+        }
+    }
+}
+
+impl Drop for ArenaWindow {
+    fn drop(&mut self) {
+        let reached = self.offset();
+        if reached > self.released {
+            advise(
+                &self.file,
+                self.released,
+                reached - self.released,
+                libc::POSIX_FADV_DONTNEED,
+            );
+        }
     }
 }
 
@@ -1132,7 +1375,7 @@ impl TextRunReader {
         // Whatever the caller did not take: decoded and anchored, never skipped by seeking, so a
         // malformation inside a record the merge had no use for is still caught.
         while self.pending > 0 {
-            self.next_entity()?;
+            self.decode_entity()?;
         }
         let first = match next_byte(&mut self.reader).map_err(|e| BuildError::io(&self.path, e))? {
             None => {
@@ -1198,16 +1441,20 @@ impl TextRunReader {
         self.pending
     }
 
-    /// Decode the head's remaining entities into `sink`, ascending.
-    pub(crate) fn take_entities(&mut self, sink: &mut impl FnMut(u32) -> Result<()>) -> Result<()> {
-        while self.pending > 0 {
-            let entity = self.next_entity()?;
-            sink(entity)?;
+    /// The head's next entity, or `None` once it is drained.
+    ///
+    /// **One at a time, because the merge is now a merge.** A run's entities ascend within its own
+    /// record, but the runs no longer partition entity space — the chunk pass divides the arena,
+    /// not entity space (`column.rs`) — so a term's merged list is produced by comparing the runs'
+    /// heads rather than by concatenating their records. That needs a head to look at.
+    pub(crate) fn next_entity(&mut self) -> Result<Option<u32>> {
+        if self.pending == 0 {
+            return Ok(None);
         }
-        Ok(())
+        self.decode_entity().map(Some)
     }
 
-    fn next_entity(&mut self) -> Result<u32> {
+    fn decode_entity(&mut self) -> Result<u32> {
         let byte = self.require_byte()?;
         let delta = self.decode_varint(byte)?;
         let entity = if self.taken == 0 {
@@ -2413,10 +2660,9 @@ mod tests {
             let term = String::from_utf8(reader.term().to_vec()).unwrap();
             let expected = reader.pending();
             let mut entities = Vec::new();
-            reader.take_entities(&mut |entity| {
+            while let Some(entity) = reader.next_entity()? {
                 entities.push(entity);
-                Ok(())
-            })?;
+            }
             assert_eq!(
                 entities.len() as u32,
                 expected,
@@ -2555,12 +2801,9 @@ mod tests {
             while reader.advance().unwrap() {
                 let term = reader.term().to_vec();
                 let mut entities = Vec::new();
-                reader
-                    .take_entities(&mut |entity| {
-                        entities.push(entity);
-                        Ok(())
-                    })
-                    .unwrap();
+                while let Some(entity) = reader.next_entity().unwrap() {
+                    entities.push(entity);
+                }
                 read.push((term, entities));
             }
             prop_assert_eq!(read, records);

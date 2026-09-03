@@ -29,11 +29,27 @@
 //! another one. That is the whole of it.
 //!
 //! A **string** column — `utf8`, `keyword` and `text` alike — is an entity-indexed
-//! [`MappedArray<u64>`] of offsets into a [`MappedArena`], each offset naming a `u32` length
-//! followed by the bytes. The arena is appended in *arrival* order, which is what keeps the fill to
-//! one pass: values are discovered in the source file's order and scattered by entity, so an
-//! entity-ordered arena would need a prefix-sum pass over the lengths and a second scan of the
-//! source. Nothing reads the arena in order, so its order means nothing.
+//! [`MappedArray<u64>`] of offsets into a [`MappedArena`], each offset naming a record: the
+//! entity, a `u32` length, then the bytes. The arena is appended in *arrival* order, which is what
+//! keeps the fill to one pass: values are discovered in the source file's order and scattered by
+//! entity, so an entity-ordered arena would need a prefix-sum pass over the lengths and a second
+//! scan of the source.
+//!
+//! **The record names its own entity, so a reader that wants every value can walk the arena
+//! instead of the column.** Entity order is signature-then-Morton order and arrival order is the
+//! source file's, so the two are unrelated: a pass that walked entities and reached the arena by
+//! offset made one random access per document. That is free while the arena fits in memory and
+//! ruinous when it does not — the text index over 1.02×10⁸ abstracts (a 119 GB arena on a 47 GB
+//! box) ran for over four hours at ~480 major faults a second and did not finish
+//! (`probes/2026-09-03-text-arena-streaming/`). [`EntityColumn::for_each_record_in`] is the walk
+//! that replaced it, over the contiguous byte ranges [`EntityColumn::arena_windows`] hands out,
+//! and the entity in the header is the four bytes an entity per record that buys it.
+//!
+//! A record is authoritative only while `at[entity]` still names it: a value written twice for one
+//! entity leaves the first record in the arena with nothing pointing at it, so the walk checks
+//! the offset back against the column before it yields a record. That check is a random read of
+//! eight bytes an entity — the `at` array, three orders of magnitude smaller than the arena — and
+//! it is what makes the walk yield exactly [`EntityColumn::str_at`]'s values and no others.
 //!
 //! # Absence
 //!
@@ -147,18 +163,22 @@ enum ColumnData {
 
 /// A string column: where each entity's bytes are, and the arena they are in.
 ///
-/// The offset names a `u32` little-endian length immediately followed by that many bytes — one
-/// entity-indexed array rather than an offset array and a length array, because both would be
-/// written at the same random entity index and the second would double the page faults the scatter
-/// takes to save four bytes an entity it does not need to.
+/// The offset names a record — a `u32` little-endian entity, a `u32` little-endian length, then
+/// that many bytes — one entity-indexed array rather than an offset array and a length array,
+/// because both would be written at the same random entity index and the second would double the
+/// page faults the scatter takes to save four bytes an entity it does not need to.
 #[derive(Debug)]
 struct StringColumn {
     at: MappedArray<u64>,
     arena: MappedArena,
 }
 
-/// The width prefix the arena stores before each value's bytes.
-const LENGTH_PREFIX: usize = std::mem::size_of::<u32>();
+/// The header the arena stores before each value's bytes: the entity, then the length.
+///
+/// **The entity is in the record and not only in `at`**, because that is what makes the arena
+/// readable in its own order — see the module docs. Four bytes an entity, against a walk that
+/// otherwise costs a major fault per document on any corpus larger than the box.
+const RECORD_HEADER: usize = 2 * std::mem::size_of::<u32>();
 
 /// The refusal every setter shares: a value whose tag is not the column's.
 ///
@@ -324,51 +344,6 @@ impl EntityColumn {
         })
     }
 
-    /// [`Self::present_entities`] over one contiguous entity range `[lo, hi)`, skipping an absent
-    /// run 64 at a time exactly as that does.
-    ///
-    /// **This is what makes a column-wide pass divisible.** The text index splits entity space
-    /// into chunks and indexes them in parallel, and every consumer of a chunk's output relies on
-    /// the yielded order being ascending *and* on the chunks partitioning the column — so the
-    /// range is masked into the boundary words rather than filtered out of the whole-column
-    /// iterator, which would make each chunk cost a scan of every other chunk's presence bits.
-    pub(crate) fn present_entities_in(
-        &self,
-        lo: usize,
-        hi: usize,
-    ) -> impl Iterator<Item = usize> + '_ {
-        let words = self.present.as_slice();
-        let lo = lo.min(self.len());
-        let hi = hi.min(self.len());
-        let first_word = lo / 64;
-        let end_word = hi.div_ceil(64);
-        let mut next_word = first_word;
-        let mut residual = 0u64;
-        std::iter::from_fn(move || loop {
-            if residual != 0 {
-                let bit = residual.trailing_zeros() as usize;
-                residual &= residual - 1;
-                return Some((next_word - 1) * 64 + bit);
-            }
-            if next_word >= end_word {
-                return None;
-            }
-            let mut word = words[next_word];
-            // The two boundary words are the whole of the range logic: a chunk starts and ends
-            // mid-word in general, and a bit outside `[lo, hi)` left set here would be indexed
-            // twice — once by this chunk and once by its neighbour — which the merge would see as
-            // a repeated entity in one term's postings.
-            if next_word == first_word {
-                word &= u64::MAX << (lo % 64);
-            }
-            if next_word == end_word - 1 && !hi.is_multiple_of(64) {
-                word &= !(u64::MAX << (hi % 64));
-            }
-            residual = word;
-            next_word += 1;
-        })
-    }
-
     /// Borrow a string value, or `None` where the entity has none. For the readers that only scan
     /// the column — the keyword dictionary and the text index — where [`Self::iter`]'s copy would
     /// be a second copy of every string in the corpus.
@@ -376,6 +351,79 @@ impl EntityColumn {
         self.is_present(entity)
             .then(|| self.data.str_at(entity))
             .flatten()
+    }
+
+    /// At most `target` contiguous arena byte ranges, together covering every record this column
+    /// wrote. Empty on a non-string column or one with nothing in it.
+    ///
+    /// **This is what makes a whole-column string pass divisible without making it random.** The
+    /// text index used to divide *entity* space, which is what a chunk's postings being ascending
+    /// came free from; it divides the arena instead, and pays for that with a sort at the spill
+    /// and a merge rather than a concatenation at the fan-in (`pipeline.rs`).
+    pub(crate) fn arena_windows(&self, target: usize) -> Vec<(u64, u64)> {
+        match &self.data {
+            ColumnData::Utf8(col) => col.arena.windows(target),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Every live record in one arena window, **in arena order**, as `(entity, value)`.
+    ///
+    /// A record is live when its entity is still present and `at` still names this record: a
+    /// second value written for one entity leaves the first behind, with nothing pointing at it,
+    /// and indexing that stale prose would give the entity terms it does not carry. So the yielded
+    /// pairs are exactly the `(entity, str_at(entity))` of the entities whose records fall in the
+    /// window — the same set the entity walk yielded, in another order.
+    pub(crate) fn for_each_record_in(
+        &self,
+        lo: u64,
+        hi: u64,
+        visit: &mut dyn FnMut(usize, &str) -> Result<()>,
+    ) -> Result<()> {
+        let ColumnData::Utf8(col) = &self.data else {
+            return Ok(());
+        };
+        let mut window = col.arena.window(lo, hi)?;
+        while window.has_more() {
+            let offset = window.offset();
+            let header = window.peek(RECORD_HEADER)?;
+            if header.len() < RECORD_HEADER {
+                return Err(BuildError::Invalid(format!(
+                    "arena window [{lo}, {hi}) ends inside a record header at {offset}"
+                )));
+            }
+            let entity = u32::from_le_bytes(header[0..4].try_into().expect("four bytes")) as usize;
+            let len = u32::from_le_bytes(header[4..8].try_into().expect("four bytes")) as usize;
+            window.consume(RECORD_HEADER);
+            let body = window.peek(len)?;
+            if body.len() < len {
+                return Err(BuildError::Invalid(format!(
+                    "arena window [{lo}, {hi}) ends inside the {len}-byte value at {offset}"
+                )));
+            }
+            let live = entity < self.len
+                && self.is_present(entity)
+                && col.at.as_slice()[entity] == offset;
+            if live {
+                let value = std::str::from_utf8(&body[..len]).map_err(|e| {
+                    BuildError::Invalid(format!(
+                        "arena record at {offset} is not UTF-8 ({e}) — the arena holds only bytes \
+                         written from a &str, so this is a torn file rather than a corpus value"
+                    ))
+                })?;
+                visit(entity, value)?;
+            }
+            window.consume(len);
+        }
+        Ok(())
+    }
+
+    /// Give the arena's pages back to the kernel before a streaming walk over it — see
+    /// [`crate::spill::MappedArena::unmap_pages`].
+    pub(crate) fn unmap_arena_pages(&self) {
+        if let ColumnData::Utf8(col) = &self.data {
+            col.arena.unmap_pages();
+        }
     }
 
     /// Move one value across from a staging column, leaving the source slot absent.
@@ -570,8 +618,15 @@ impl StringColumn {
                 value.len()
             ))
         })?;
-        // Length and bytes in one append, so a value is never split across a growth.
-        let mut record = Vec::with_capacity(LENGTH_PREFIX + value.len());
+        let tag = u32::try_from(entity).map_err(|_| {
+            BuildError::Invalid(format!(
+                "entity {entity} exceeds the u32 an arena record's header carries"
+            ))
+        })?;
+        // Header and bytes in one append, so a value is never split across a growth and the
+        // arena's own record marks land where a record starts.
+        let mut record = Vec::with_capacity(RECORD_HEADER + value.len());
+        record.extend_from_slice(&tag.to_le_bytes());
         record.extend_from_slice(&len.to_le_bytes());
         record.extend_from_slice(value.as_bytes());
         let offset = self.arena.append(&record)?;
@@ -583,14 +638,14 @@ impl StringColumn {
         let offset = self.at.as_slice()[entity];
         let len = u32::from_le_bytes(
             self.arena
-                .bytes(offset, LENGTH_PREFIX)
+                .bytes(offset + 4, 4)
                 .try_into()
                 .expect("a four-byte slice is four bytes"),
         ) as usize;
         // Checked rather than `from_utf8_unchecked`: the bytes came from a `&str` and cannot be
         // anything else, so the scan costs a second over a corpus's prose and buys a loud failure
         // where a torn mapping or a wrong offset would otherwise be a silently wrong value.
-        std::str::from_utf8(self.arena.bytes(offset + LENGTH_PREFIX as u64, len))
+        std::str::from_utf8(self.arena.bytes(offset + RECORD_HEADER as u64, len))
             .expect("the arena holds only bytes written from a &str")
     }
 }
@@ -625,40 +680,84 @@ mod tests {
         assert_eq!(column.present_entities().collect::<Vec<_>>(), vec![0, 2]);
     }
 
-    /// The ranges partition the column and nothing is yielded twice.
+    /// The arena windows partition the column's records and nothing is yielded twice.
     ///
-    /// A bit outside `[lo, hi)` left set by the boundary masking would be indexed by a chunk and
-    /// by its neighbour both, which the text index's merge sees as a repeated entity in one term's
-    /// postings — a wrong answer with no crash behind it. So the assertion is over strides that
-    /// divide the 64-entity word and strides that do not, and it is over the concatenation rather
-    /// than over each range alone.
+    /// **This is the property the text index's merge rests on.** A record yielded by two windows
+    /// would be a repeated entity in one term's postings, and one yielded by none would be a
+    /// document with no terms — a wrong answer with no crash behind it either way. So the
+    /// assertion is over the concatenation of every window at several window counts, against the
+    /// entity walk that the arena walk replaced, and it includes the count that exceeds the marks
+    /// the arena took.
     #[test]
-    fn the_ranges_partition_the_column_at_any_stride() {
+    fn the_arena_windows_partition_the_records_at_any_count() {
         let (scratch, _dir) = scratch();
-        const N: usize = 300;
-        let mut column = EntityColumn::filled(&scratch, ScalarType::U32, N).unwrap();
-        // A scatter that leaves whole words empty (a run of absences the walk skips 64 at a time)
-        // and words partly filled either side of an unaligned boundary.
+        const N: usize = 4_096;
+        let mut column = EntityColumn::filled(&scratch, ScalarType::Text, N).unwrap();
+        // A scatter that leaves whole words empty, filled in an order that is not entity order —
+        // which is what the arena's arrival order is.
         let present: Vec<usize> = (0..N)
             .filter(|e| e % 7 == 0 || (64..80).contains(e))
             .collect();
-        for &e in &present {
-            column.set(e, ScalarValue::U32(e as u32), "t").unwrap();
+        for step in [37usize, 1] {
+            for &e in present.iter().step_by(step) {
+                column.set(e, ScalarValue::Utf8(format!("value {e}")), "t").unwrap();
+            }
         }
-        assert_eq!(column.present_entities().collect::<Vec<_>>(), present);
-        for stride in [1usize, 7, 63, 64, 65, 128, 299, N, N + 11] {
-            let walked: Vec<usize> = (0..N)
-                .step_by(stride)
-                .flat_map(|lo| column.present_entities_in(lo, lo + stride))
-                .collect();
+        let expected: Vec<(usize, String)> = present
+            .iter()
+            .map(|&e| (e, format!("value {e}")))
+            .collect();
+        for count in [1usize, 2, 7, 64, 4_096] {
+            let windows = column.arena_windows(count);
+            assert!(!windows.is_empty(), "count {count} produced no window");
+            let mut walked: Vec<(usize, String)> = Vec::new();
+            for (lo, hi) in windows {
+                column
+                    .for_each_record_in(lo, hi, &mut |entity, value| {
+                        walked.push((entity, value.to_owned()));
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+            walked.sort_unstable();
             assert_eq!(
-                walked, present,
-                "stride {stride} did not partition the column"
+                walked, expected,
+                "window count {count} did not partition the records"
             );
         }
-        // Past the end, and empty: both are no entities rather than a panic on the trailing word.
-        assert_eq!(column.present_entities_in(N, N + 64).count(), 0);
-        assert_eq!(column.present_entities_in(70, 70).count(), 0);
+    }
+
+    /// A value larger than the window's read buffer, and one that straddles its boundary.
+    ///
+    /// **The window reads through the descriptor into a fixed buffer**, so a record longer than
+    /// that buffer is the one shape the walk cannot take a shortcut on: it has to compact what it
+    /// holds, grow, and refill. A corpus of abstracts never reaches it and a corpus with one long
+    /// document does, which is exactly the kind of value that reaches a build and not a fixture.
+    #[test]
+    fn a_value_larger_than_the_window_buffer_still_walks() {
+        let (scratch, _dir) = scratch();
+        const N: usize = 8;
+        const HUGE: usize = 9 << 20;
+        let mut column = EntityColumn::filled(&scratch, ScalarType::Text, N).unwrap();
+        for e in 0..N {
+            let len = if e == 3 { HUGE } else { 5 };
+            column
+                .set(e, ScalarValue::Utf8("x".repeat(len)), "t")
+                .unwrap();
+        }
+        let mut walked: Vec<(usize, usize)> = Vec::new();
+        for (lo, hi) in column.arena_windows(4) {
+            column
+                .for_each_record_in(lo, hi, &mut |entity, value| {
+                    walked.push((entity, value.len()));
+                    Ok(())
+                })
+                .unwrap();
+        }
+        walked.sort_unstable();
+        let expected: Vec<(usize, usize)> =
+            (0..N).map(|e| (e, if e == 3 { HUGE } else { 5 })).collect();
+        assert_eq!(walked, expected);
     }
 
     /// Values arrive by random entity index and the arena grows past its first mapping while they
