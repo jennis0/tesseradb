@@ -45,6 +45,11 @@ PATTERNS=$(cat <<'EOF'
 \bis the deliverable\b
 \bpostings?\b
 \bdescriptors?\b
+\b(the )?ladder\b
+\brungs?\b
+\bcampaign\b
+\bepics?\b
+\bto measure\b
 EOF
 )
 
