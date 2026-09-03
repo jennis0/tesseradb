@@ -1,4 +1,4 @@
-# PaperSeek + OpenAlex — the ladder's largest rung, and the first bundle larger than the box
+# PaperSeek + OpenAlex — the ladder's largest rung, and the first build the box cannot finish
 
 **102,117,343 OpenAlex works**, each with a 1024-dimensional Stella V5 embedding a third party
 computed from its title and abstract and released on Hugging Face, joined to OpenAlex itself for a
@@ -11,10 +11,13 @@ corpus tests Tessera's speed and memory, not the UMAP pipeline; layout quality m
 as the demo looks good). Recall against an exact neighbour search is not measured and layout
 fidelity is not judged.
 
-**What the rung is for is one number and what happens either side of it: a bundle bigger than the
-box's memory.** Nothing about the declaration is trimmed to make it fit — the abstracts are 118.9
-GB of characters uncompressed and they are indexed as text, because a corpus trimmed to fit deletes
-the finding.
+**The rung was built to put a bundle past the box's memory**, and nothing about the declaration was
+trimmed to make it fit — the abstracts are 118.9 GB of characters uncompressed and they are indexed
+as text, because a corpus trimmed to fit deletes the finding. **The answer arrived one stage
+earlier than expected: it is the build, not the server, that meets the wall.** The corpus prepares
+in 43.8 minutes; `tessera build` reaches the abstract text index and stops making progress there.
+Everything below the *Measured* heading is what that cost and what it was possible to prove
+instead.
 
 ```bash
 export TESSERA_LADDER=/home/joe/code/tessera/data/ladder

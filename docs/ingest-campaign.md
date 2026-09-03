@@ -24,7 +24,7 @@ is the owner's to settle.
 | **1** | **GeoNames** | **13,463,857** | **Built, verified and served**, and rebuilt 2026-08-30 on a declared `web_mercator` projection. Not done against §7.1's bar — see §2 |
 | **2** | **Overture places + divisions** | **7.4×10⁷** | **Built and verified**, and rebuilt 2026-08-30 on a declared projection with its boundary polygons in longitude and latitude — see §3 |
 | **3** | **MedCPT / PubMed** | **35,920,666** | **Built, verified and served** 2026-09-02 — see §4.6. The ladder's largest embedding rung and its first `dag` layer: MeSH's 30,217 descriptors with members over 41,321 edges, membership closed upward to **1.66×10⁹ entries** (3.27× rung 2's spill), an 11.15 GB bundle in 12 m 10 s at 16.03 GB peak, `verify --deep` clean. ⊘ Three non-reproducing host faults over two runs, §4.6 |
-| **4** | **PaperSeek + OpenAlex** | **102,117,343** | **Staged, prepared and ⊘ not built** 2026-09-03 — see §4a. The corpus exists: 254 GB staged in one 164.7-minute pass, laid out and joined to OpenAlex in 43.8 minutes at 18.4 GB, 52.2 GB of `points.parquet`, 394,325,928 topic member rows, and the ladder's first compartment that is a property of the row. **`tessera build` reaches the abstract text index and stalls there** — not refused, not killed, 93% system time against a 128 GiB mapped arena on a 47 GB box. The rung's finding is that negative |
+| **4** | **PaperSeek + OpenAlex** | **102,117,343** | **Staged and prepared whole; built, verified and served at a 10⁷ prefix; ⊘ stalled at 10⁸** 2026-09-03 — see §4a. The corpus exists: 254 GB staged in one 164.7-minute pass, laid out and joined to OpenAlex in 43.8 minutes at 18.4 GB, 52.2 GB of `points.parquet`, 394,325,928 topic member rows, and the ladder's first compartment that is a property of the row. **`tessera build` reaches the abstract text index and stalls there** — not refused, not killed, 93% system time against a 128 GiB mapped arena on a 47 GB box. The rung's finding is that negative |
 | 5 | TreeOfLife | 2.33×10⁸ | Not started. Staged |
 | 6 | GBIF | 3.50×10⁹ | Not started. Staged; needs a second local volume |
 | 7 | Overture buildings | 2.53×10⁹ | Not started. Staged; needs a second local volume |
@@ -582,7 +582,7 @@ the Rust build; **each run is otherwise bit-consistent with a recompute**; five 
 are excluded with numbers in the rung README. Recorded as a **host fault, ⊘ not proven** — the
 action is a memtest (§8), not more detection machinery.
 
-## 4a. Rung 4 — PaperSeek + OpenAlex, prepared and not built
+## 4a. Rung 4 — PaperSeek + OpenAlex: prepared whole, built at 10⁷, stalled at 10⁸
 
 All figures **local NVMe on this box** (WSL2, 12 cores, 47 GB, one RTX 3080) unless the medium says
 otherwise. The rung is [`../test_corpora/paperseek/`](../test_corpora/paperseek/README.md), which
