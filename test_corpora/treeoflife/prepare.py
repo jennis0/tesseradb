@@ -683,9 +683,29 @@ def main() -> None:
             t: dict = {}
             if whole:
                 block = np.ascontiguousarray(fit_matrix)
-                fit_xy = routes.fit_layout(block, t, managed=args.managed)
+                # **The fit layout is written before the placement starts and reused on a
+                # resume.** The placement is hours of share I/O and this box drops a read in one,
+                # so it checkpoints; a resumed pass that re-fitted would place the groups after
+                # the break into a *different* 2D space from the ones before it, because CAGRA's
+                # index build takes no seed. The index is rebuilt on a resume — it is approximate
+                # either way — but the positions it searches into are these.
+                checkpoint = sources.staging() / "placement"
+                checkpoint.mkdir(parents=True, exist_ok=True)
+                fit_xy_path = checkpoint / "fit-xy.npy"
+                if fit_xy_path.exists():
+                    fit_xy = np.load(fit_xy_path)
+                    assert len(fit_xy) == len(block), (
+                        f"{fit_xy_path} holds {len(fit_xy):,} positions against a "
+                        f"{len(block):,}-row fit sample"
+                    )
+                    print(f"  reusing {fit_xy_path} — a resumed placement must search into the "
+                          f"space its earlier groups were placed in", flush=True)
+                else:
+                    fit_xy = routes.fit_layout(block, t, managed=args.managed)
+                    np.save(fit_xy_path, fit_xy)
                 xy = routes.place_from_share(
-                    block, fit_xy, fit_rows.astype(np.int64), n, t, sources.treeoflife_files()
+                    block, fit_xy, fit_rows.astype(np.int64), n, t,
+                    sources.treeoflife_files(), checkpoint,
                 )
                 del block, fit_xy
             else:

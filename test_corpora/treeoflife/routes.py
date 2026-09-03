@@ -67,6 +67,11 @@ BATCH_ROWS = 50_000
 READ_WORKERS = 3
 READ_QUEUE = 4
 
+#: Attempts at one row group off the share before the pass refuses. This box drops a read in a
+#: multi-hour SMB pass — a 2026-09-03 placement died on `ZSTD decompression failed` from a file the
+#: fit pass had read cleanly — so a read is retried and the count is reported.
+RETRIES = 4
+
 
 @contextlib.contextmanager
 def _step(name: str, out: dict):
@@ -217,68 +222,114 @@ def fit_layout(block: np.ndarray, t: dict, *, managed: bool = False) -> np.ndarr
 # ----------------------------------------------------------------------------- the place half
 
 
-def share_batches(files, batch_rows: int = BATCH_ROWS, workers: int = READ_WORKERS):
-    """`(global offset, float16 normalised block)` per source row group, in file order.
+def placement_plan(files) -> tuple[list[tuple[int, int, int, int]], int]:
+    """`[(file, row group, global offset, rows)]` for every source row group, and the row total.
 
-    **The reads run ahead of the card on a small pool and the results are reordered.** Each row
-    group is an independent read, so the pool submits `READ_QUEUE + workers` of them at a time and
-    yields them in index order; the consumer never sees a batch out of place, and the share is
-    never idle while the GPU searches.
-
-    `batch_rows` is what a row group is split into if it is larger; the share's groups are 50,000
-    rows, which is the default, so it normally splits nothing.
+    From the 666 footers, which are ~50 ms apiece over SMB and are the only way to know a group's
+    true row count. This is the unit of work, of the ledger and of the retry below.
     """
     import pyarrow.parquet as pq
 
-    # (file index, row group, global offset) for every group, in entity order — from the footers,
-    # which are 50 ms apiece over SMB and are the only way to know a group's true row count.
-    plan: list[tuple[int, int, int]] = []
+    plan: list[tuple[int, int, int, int]] = []
     at = 0
     for i, path in enumerate(files):
         meta = pq.ParquetFile(path).metadata
         for g in range(meta.num_row_groups):
-            plan.append((i, g, at))
-            at += meta.row_group(g).num_rows
+            rows = meta.row_group(g).num_rows
+            plan.append((i, g, at, rows))
+            at += rows
+    return plan, at
 
-    def read(job):
-        i, g, offset = job
-        table = pq.ParquetFile(files[i]).read_row_group(g, columns=["emb"], use_threads=False)
-        values = table.column("emb").combine_chunks()
-        block = np.asarray(
-            values.values.to_numpy(zero_copy_only=False), dtype=np.float32
-        ).reshape(table.num_rows, -1)
-        return offset, normalise(block)
 
+def read_group(files, job, retries: int = RETRIES) -> tuple[int, int, int, np.ndarray, int]:
+    """One row group's `emb`, normalised — **retried, because this share returns corrupt bytes.**
+
+    A 2026-09-03 placement pass died 25 minutes in on
+    `ZSTD decompression failed: Src size is incorrect` from one row group of one file, and the same
+    file had been read cleanly by the fit pass. It is the box's known SMB fault class
+    (`docs/ingest-campaign.md` §7 and the memo behind it), not a property of the data: the retry
+    reopens the file, and the run records how many it needed. A group that fails every attempt is
+    the pass's refusal, with the file and group named.
+    """
+    import pyarrow.parquet as pq
+
+    i, g, offset, rows = job
+    for attempt in range(retries):
+        try:
+            table = pq.ParquetFile(files[i]).read_row_group(g, columns=["emb"], use_threads=False)
+            values = table.column("emb").combine_chunks()
+            block = np.asarray(
+                values.values.to_numpy(zero_copy_only=False), dtype=np.float32
+            ).reshape(table.num_rows, -1)
+            return i, g, offset, normalise(block), attempt
+        except Exception as exc:  # noqa: BLE001 — any read fault is retried, then refused
+            if attempt == retries - 1:
+                raise RuntimeError(
+                    f"{files[i].name} row group {g} failed {retries} times off the share: "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
+            print(f"    ⊘ {files[i].name} group {g}: {type(exc).__name__}: {exc} — "
+                  f"retry {attempt + 1}/{retries - 1}", flush=True)
+            time.sleep(2.0 * (attempt + 1))
+    raise AssertionError("unreachable")
+
+
+def share_batches(files, plan, workers: int = READ_WORKERS):
+    """`(file, group, global offset, normalised float16 block, retries)` per planned row group.
+
+    **The reads run ahead of the card on a small pool and the results are reordered.** The pool
+    holds `READ_QUEUE + workers` in flight and yields them in plan order, so the consumer never
+    sees a group out of place and the share is never idle while the GPU searches.
+    """
     with cf.ThreadPoolExecutor(workers) as pool:
         pending: collections.deque = collections.deque()
         it = iter(plan)
         for job in it:
-            pending.append(pool.submit(read, job))
+            pending.append(pool.submit(read_group, files, job))
             if len(pending) >= READ_QUEUE + workers:
                 break
         while pending:
-            offset, block = pending.popleft().result()
-            for lo in range(0, len(block), batch_rows):
-                yield offset + lo, block[lo : lo + batch_rows]
-            del block
+            got = pending.popleft().result()
+            yield got
             job = next(it, None)
             if job is not None:
-                pending.append(pool.submit(read, job))
-    return at
+                pending.append(pool.submit(read_group, files, job))
 
 
-def place(batches, fit_block: np.ndarray, fit_xy: np.ndarray, n: int, t: dict) -> np.ndarray:
-    """Every row's position, searched against one CAGRA index over the fit set.
+def place_from_share(fit_block, fit_xy, fit_rows, n: int, t: dict, files, checkpoint: Path):
+    """Every row's position, searched against one CAGRA index over the fit set — **resumable**.
 
-    `batches` yields `(global offset, normalised float16 block)`; the positions are written into
-    one `(n, 2)` float32 array — 1.86 GB at full scale, and the only thing this pass keeps.
+    The pass is ~2.5 hours of share I/O and this box drops a read in it, so the positions go
+    straight into a memmap on local disk and a ledger names the row groups already placed. A rerun
+    reads the ledger, plans only what is missing, and costs the share only that. The fit rows are
+    overwritten with their own UMAP positions at the end, so every row goes through one code path.
     """
     import cupy as cp
     from cuvs.neighbors import cagra
 
+    checkpoint.mkdir(parents=True, exist_ok=True)
+    path = checkpoint / "place.f32"
+    mode = "r+" if path.exists() and path.stat().st_size == n * 8 else "w+"
+    xy = np.memmap(path, dtype=np.float32, mode=mode, shape=(n, 2))
+
+    ledger_path = checkpoint / "place-ledger.jsonl"
+    done: set[tuple[int, int]] = set()
+    if ledger_path.exists():
+        for line in ledger_path.read_text().splitlines():
+            if line.strip():
+                rec = json.loads(line)
+                done.add((rec["file"], rec["group"]))
+
+    full, total = placement_plan(files)
+    assert total == n, f"the share holds {total:,} rows against the corpus's {n:,}"
+    plan = [job for job in full if (job[0], job[1]) not in done]
+    t["groups"], t["groups_resumed"] = len(full), len(done)
+    placed_before = sum(rows for i, g, _, rows in full if (i, g) in done)
+    print(f"    {len(plan):,} of {len(full):,} row groups to place "
+          f"({placed_before:,} rows already on disk)", flush=True)
+
     k = UMAP_PARAMS["n_neighbors"]
-    xy = np.empty((n, 2), dtype=np.float32)
-    placed = 0
+    placed, retries, last_report = 0, 0, 0
     t0 = time.time()
     with _step("place", t):
         resident = cp.asarray(fit_block)
@@ -289,39 +340,47 @@ def place(batches, fit_block: np.ndarray, fit_xy: np.ndarray, n: int, t: dict) -
         )
         positions = cp.asarray(fit_xy)
         params = cagra.SearchParams(itopk_size=ITOPK)
-        for offset, block in batches:
-            m = len(block)
-            q = cp.asarray(block)
-            nb = cp.empty((m, k), dtype=cp.uint32)
-            ds = cp.empty((m, k), dtype=cp.float32)
-            cagra.search(params, index, q, k, neighbors=nb, distances=ds)
-            # Similarity, not distance: a neighbour at distance 0 must dominate the mean, and a
-            # cosine distance of 1 is orthogonal and should count for nothing.
-            w = cp.clip(1.0 - ds, 0.0, None) + 1e-6
-            w /= w.sum(axis=1, keepdims=True)
-            got = positions[nb.astype(cp.int32)]
-            xy[offset : offset + m] = cp.asnumpy((got * w[:, :, None]).sum(axis=1))
-            del q, nb, ds, w, got
-            placed += m
-            if placed % (BATCH_ROWS * 200) < m:
-                wall = time.time() - t0
-                print(f"    placed {placed:,}/{n:,} in {wall / 60:.1f} min "
-                      f"({placed / wall:,.0f} rows/s, {placed * 1536 / wall / 1e6:.1f} MB/s "
-                      f"off the share)", flush=True)
+        with open(ledger_path, "a") as ledger:
+            for i, g, offset, block, tries in share_batches(files, plan):
+                retries += tries
+                for lo in range(0, len(block), BATCH_ROWS):
+                    part = block[lo : lo + BATCH_ROWS]
+                    m = len(part)
+                    q = cp.asarray(part)
+                    nb = cp.empty((m, k), dtype=cp.uint32)
+                    ds = cp.empty((m, k), dtype=cp.float32)
+                    cagra.search(params, index, q, k, neighbors=nb, distances=ds)
+                    # Similarity, not distance: a neighbour at distance 0 must dominate the mean,
+                    # and a cosine distance of 1 is orthogonal and should count for nothing.
+                    w = cp.clip(1.0 - ds, 0.0, None) + 1e-6
+                    w /= w.sum(axis=1, keepdims=True)
+                    got = positions[nb.astype(cp.int32)]
+                    xy[offset + lo : offset + lo + m] = cp.asnumpy(
+                        (got * w[:, :, None]).sum(axis=1)
+                    )
+                    del q, nb, ds, w, got
+                placed += len(block)
+                ledger.write(json.dumps({"file": i, "group": g, "rows": len(block)}) + "\n")
+                ledger.flush()
+                del block
+                if (placed // 10_000_000) != (last_report // 10_000_000):
+                    last_report = placed
+                    wall = time.time() - t0
+                    xy.flush()
+                    print(f"    placed {placed + placed_before:,}/{n:,} in {wall / 60:.1f} min "
+                          f"({placed / wall:,.0f} rows/s, {placed * 1536 / wall / 1e6:.1f} MB/s "
+                          f"off the share, {retries} retry(ies))", flush=True)
         cp.cuda.runtime.deviceSynchronize()
         del resident, index, positions
         cp.get_default_memory_pool().free_all_blocks()
-    t["placed"] = placed
-    assert placed == n, f"placed {placed:,} rows against {n:,}"
-    return xy
+    xy.flush()
+    t["placed"], t["read_retries"] = placed + placed_before, retries
+    assert placed + placed_before == n, f"placed {placed + placed_before:,} against {n:,}"
 
-
-def place_from_share(fit_block, fit_xy, fit_rows, n: int, t: dict, files) -> np.ndarray:
-    """The whole corpus's positions: one pass over the share, the fit rows overwritten with their
-    own UMAP positions afterwards."""
-    xy = place(share_batches(files), fit_block, fit_xy, n, t)
-    xy[fit_rows] = fit_xy
-    return xy
+    out = np.array(xy, dtype=np.float32)
+    del xy
+    out[fit_rows] = fit_xy
+    return out
 
 
 #: Two views, and only one of them is a route. `bioclip` is the embedding layout this module
