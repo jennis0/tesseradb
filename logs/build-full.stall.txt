@@ -46,3 +46,10 @@ drwxr-xr-x 5 joe joe         4096 Sep  3 03:13 ..
 397M	/home/joe/code/tessera/data/ladder/paperseek/bundle/v00000/partitions/default/attrs/publication_year
 116K	/home/joe/code/tessera/data/ladder/paperseek/bundle/v00000/partitions/default/attrs/record
 2.4G	/home/joe/code/tessera/data/ladder/paperseek/bundle/v00000/partitions/default/attrs/title
+
+## final sample, 2026-09-03T06:25:05+01:00, before the process was stopped
+   03:25:00 04:35:44
+utime_ticks 255840 stime_ticks 1398632 majflt 6464340
+io:     some avg10=73.68 avg60=73.77 avg300=70.87 total=11950589417 full avg10=61.33 avg60=61.39 avg300=56.76 total=10316380730 
+spills: 44
+anon high-water MB 0

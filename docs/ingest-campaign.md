@@ -601,7 +601,7 @@ waited on the other and the merge was clean.
 |---|---|
 | staging | **164.7 min** over SMB, 22.2 GB peak, 254 GB written locally (195 GiB of `float16` vectors, 59 GB of per-chunk parquet). ⊘ Not comparable with rung 3's 60.5 min — the OpenAlex track's own scan of `works` shared the share for half of it |
 | `prepare.py --sample 0` | **43.8 min**, **18.44 GB** peak — route 1,487 s (1,208 s placing 102,117,343 rows against a 1.5M-row fit set), the one streaming pass 980 s at a flat 18.4 GB |
-| `tessera build` | ⊘ **does not converge**, below |
+| `tessera build` | ⊘ **does not converge** at 10⁸, below; **545 s to a 7.44 GB bundle** at a 10⁷ prefix |
 | the 10⁶ sample, end to end | prepare 601 s at 12.53 GB · build **23.3 s** to **744.3 MB**, anonymous high-water **968 MB** against 2,398 MB of `VmHWM` · `verify --deep` clean in 0.33 s at 52.5 MB · served, driven, counts move with the mask |
 
 **The compartment is the first on the ladder that is a property of the row.** GeoNames and Overture
@@ -624,6 +624,11 @@ signal; it is stalled on I/O.
 | `attribute_tail` | 759.6 s | **24,409 MiB** |
 | `layers` | 84.5 s | 24,409 MiB |
 | `text_index` | **> 4 h and counting** | — |
+
+⊘ **The box was not quiet.** Another track's 3.2×10⁷-row MedCPT base build ran on the same disk
+from 03:48 and two serve batteries were driving cgroup `memory.reclaim` eviction beside it, for most
+of the 03:13–06:25 window. The mechanism is not in doubt; **the rates and the wall include
+contention** and are not this build's cost alone.
 
 Sampled four hours in: **11 of 13 threads in uninterruptible sleep on `folio_wait_bit_common`**,
 **93% of CPU in the kernel**, **~480 major faults a second**, PSI reporting the process group
@@ -653,12 +658,45 @@ abstracts were not dropped: each answers a different question from the one the r
 ask. What to do about it is the owner's, and the options are visibly (a) a budget arm, (b) an arena
 the text pass streams rather than maps, (c) a smaller corpus, (d) more RAM.
 
-**⊘ Not measured, because they need the bundle that does not exist**: `verify --deep` at 10⁸, the
-bundle's size and per-directory breakdown, the serve-under-`MemoryMax=24G` result, and the layer
-report's median box at full scale. The 10⁶ sample's layer spread is measured and is in the rung
-README: `clusters/kmeans` median **0.75%** of the map, `topics/openalex` median **2.35%** and
-tightening with depth — 6.61% at domain to **1.64%** at topic. Both layers draw; neither is
-withdrawn on that evidence.
+### The bracket at 10⁷, and everything the rung could still prove
+
+The same inputs built as a prefix (`--limit 10000000`, member files and artifact rosters cut to
+match) say where the turn is: at 10⁷ the abstract arena is ~13 GiB, fits in page cache, and the text
+index that would not finish at 10⁸ takes **178 seconds**.
+
+| | |
+|---|---|
+| `tessera build --limit 10000000` | **545 s**, **7.44 GB** bundle, anonymous high-water **1,685 MB** against 15,705 MB of `VmHWM` |
+| `verify --deep` | clean in **5.45 s** at 342 MB |
+| bundle | `attrs` 6.6 GB — `record` 4.4 GB, `abstract` 1.8 GB, `title` 242 MB — `views` 286 MB, `entities` 77 MB, `members` 54 MB. **Two thirds of it is prose**, which scales to a **~76 GB bundle** at 10⁸ |
+| served, uncapped and under `MemoryMax=24G` | **survives, and the cap never binds**: `oom 0`, `oom_kill 0`, scope `memory.peak` **242.5 MB**, and **85 of 85 count-bearing responses identical** between the two runs. p50 0.05–9.3 ms across every request kind either way |
+| anon at rest after open | **166 MB**, against rung 3's 2.06–2.17 GB on a comparable bundle |
+| the ladder, on a built bundle | 0 / 1,631,343 / 10,000,000 across no terms, `cc-by`, all eleven keys; `match abstract:"network"` 404,853 matched without moving the visible count |
+
+⊘ **The prefix is not a uniform sample** — `--limit` keeps `entity_id < 10⁷`, the first five chunks
+in staging order. It brackets the build's cost; it does not stand in for the corpus.
+
+**The serving floor is a twelfth of rung 3's, and that is a second data point for the probe's open
+question.** `probes/2026-09-02-serve-under-memory-cap/` attributed rung 3's ~2 GB floor to the
+`mesh/descriptors` artifact-projection build over 1.66×10⁹ member rows, and asked whether it scales
+with the membership. This rung's tiered layer over 38.8×10⁶ member rows in the prefix opens at
+166 MB, which is consistent with it doing so.
+
+**Both layers draw and neither is withdrawn.** The box holding the middle 90% of an artifact's
+members, as a share of the map, at 10⁷: `clusters/kmeans` median **0.069%**, `topics/openalex`
+median **2.08%** and tightening with depth — 8.23% at domain, 4.93% at field, 2.52% at subfield,
+**1.10%** at topic. Against the taxonomies withdrawn at rungs 1 and 2 (medians 13.7% and 9.6%) even
+the domain level is compact.
+
+⊘ **The build's `everywhere` fraction disagrees, and more sharply than at rung 3.** Every level of
+`topics/openalex` reports **1.000 everywhere** — at 153.0, 147.8, 115.0 and 53.0 blocks an artifact
+— against the clustering's 0.448 at 3.9. A topic whose members occupy 1.1% of the map is still
+spread across enough of row space that no tile-index node bounds it. This corpus separates
+compactness in the map from boundability in row space at every level of one layer.
+
+**⊘ Still not measured, because they need the bundle that does not exist**: `verify --deep` at 10⁸,
+the whole bundle's size and breakdown, the serve-under-cap result at 10⁸, and the layer spread at
+full scale.
 
 ## 5. The machinery this campaign built
 

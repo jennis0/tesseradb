@@ -627,12 +627,21 @@ def main() -> None:
     # **Streamed, not accumulated.** `ArtifactSet.members` holds one Python list entry per member
     # row, which is 10^8 of them here; the streaming path writes a cluster's members as one Arrow
     # batch and keeps nothing.
+    # **A cluster with no members is not declared.** Its content would carry a generating set of
+    # nothing, and content under `require_member_visibility = "all"` with an empty set is satisfied
+    # by every viewer — which the build refuses, rightly. k-means can return an empty cell, and a
+    # prefix of the corpus can empty one that was not; either way the artifact is dropped rather
+    # than published with a description nobody generated.
+    drawn = [c for c in range(k) if len(members[c])]
+    if len(drawn) != k:
+        print(f"⊘ {k - len(drawn)} of {k} k-means cells hold no member and are not declared",
+              flush=True)
     with steps.step("write artifacts"):
-        for c in range(k):
+        for c in drawn:
             artifacts.artifact(KMEANS_LAYER, f"km-{c:06d}", contents=contents_of(text.get(c)))
     with steps.step("write members"):
         rng = np.random.default_rng(SEED)
-        for c in range(k):
+        for c in drawn:
             key = f"km-{c:06d}"
             rows = members[c]
             artifacts.stream_members(KMEANS_LAYER, out, repeated(key, len(rows)), rows)
@@ -689,7 +698,7 @@ def main() -> None:
         "routes": timings,
         "bounds": {"knn": {"x": [float(xy[:, 0].min()), float(xy[:, 0].max())],
                            "y": [float(xy[:, 1].min()), float(xy[:, 1].max())]}},
-        "kmeans": {"k": k, "route": kmeans_route, "titles": len(text),
+        "kmeans": {"k": k, "declared": len(drawn), "route": kmeans_route, "titles": len(text),
                    "sizes": [int(sizes.min()), int(np.median(sizes)), int(sizes.max())]},
         "openalex": oa_stats,
         "coverage": {
