@@ -378,6 +378,24 @@ properties, and this corpus separates them at every level of one layer.
 9.6%) even the domain level is compact, and the topic level — the one a client is served at zoom
 11–16 — is an order of magnitude tighter than either.
 
+### What is on disk
+
+`$TESSERA_LADDER/paperseek` is **108 GB**, and `paperseek-1m` beside it is 1.2 GB.
+
+| | |
+|---|---|
+| `staging/` | **51 GB** — the 53 chunk parquets (49 GB) and the OpenAlex track's extract, id set and parts (2 GB) |
+| `points.parquet` | **49 GB** |
+| `bundle-10m/` | 7.0 GB |
+| `layout-knn.npy` | 780 MB — the whole corpus's positions, so a rebuild needs no GPU and no vectors |
+| the two member files | 863 MB |
+| `limited/` | 205 MB — the 10⁷ prefix's cut member files and rosters |
+
+**`staging/vectors.f16` is gone** — 194.8 GiB, deleted by `prepare.py --drop-vectors` the moment the
+layout was written, because nothing after the layout reads it. So is the stalled build's
+`.build-tmp` (151 GB) and its partial bundle. A run that wants a *new* layout must re-stage, which
+is 2.7 hours; a run that wants a new corpus over the same layout reads `layout-knn.npy`.
+
 ## The environment
 
 `~/venvs/projection` — cuVS, cuML and CuPy on the GPU with scikit-learn on the CPU — shared with
