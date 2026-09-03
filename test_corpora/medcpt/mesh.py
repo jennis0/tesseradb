@@ -385,6 +385,20 @@ class Mesh:
             n,
         )
 
+    def keys(self, closed: pa.ListArray) -> pa.ListArray:
+        """A closure's ids as descriptor keys: the same rows, each a `list<string>` of artifact keys.
+
+        This is the closure in the form a *row* carries it — the `mesh/descriptors` column of
+        `points.parquet`, one cell per article naming every artifact it is in. Under `dag` that
+        list is plain multi-membership, a set and not a lineage
+        ([decision 0125](../../docs/decisions/0125-a-dag-list-column-is-membership-not-lineage.md)), so an ingest
+        batch carrying the column lands each entry as one membership and the member table need
+        never be inverted per entity. One `take` over the flat ids; the offsets are `closed`'s own.
+        """
+        return pa.ListArray.from_arrays(
+            closed.offsets, pc.take(self._value_set, closed.values), type=pa.list_(pa.string())
+        )
+
     #: The key `_dedup` packs `(row, id)` into is `row << 15 | id`, a power of two so the unpack is
     #: a shift and a mask rather than a division — on tens of millions of entries that is seconds.
     _BITS = 15
@@ -562,7 +576,10 @@ class Mesh:
 # frontier's own per-artifact test already decides what is served; pruning is a rendering choice
 # and this layer has nothing to gain from it.
 #
-# `membership = "enumerated"` — one row per (descriptor, article), written by `write_layer`.
+# `membership = "enumerated"` — one row per (descriptor, article), written by `write_layer`. The
+# same closure travels a second way, as a `mesh/descriptors` list column on `points.parquet`
+# (`keys`), which is what an ingest batch carries: the build reads the member table, the ingest
+# cycle reads the column, and the two land the same memberships (decision 0125).
 #
 # `views = ["knn"]` — the layer is declared over the anchor layout alone. A computed property is
 # recomputed per view, and the rung's second view (if it has one) would double the cost of a layer

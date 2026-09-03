@@ -60,7 +60,7 @@ item's terms, and that visible set is computed once per session.
 Geometry is stored so that a screen tile at any zoom level is one contiguous range of rows, using
 Morton order, a row order in which every map tile falls in a single run. A viewer's visible set is
 a Roaring bitmap, a compressed set of row numbers. A count over a tile is arithmetic between that
-range and the viewer's set, rather than a scan of the tile's contents. Sampling, density and labels
+range and the visible set, rather than a scan of the tile's contents. Sampling, density and labels
 are computed the same way, from the viewer's rows and nothing else.
 
 A deletion or suppression applies to every request from the moment it is accepted. A newly

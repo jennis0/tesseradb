@@ -18,13 +18,23 @@ every point they depend on has been ingested**. An artifact cannot depend on a p
 exist yet, and that ordering is the only constraint: it holds at every fraction, so at *f* = 10% the
 base is 90% of the points and none of the artifacts.
 
+**No membership travels on a column, at either entry point, and that follows from the ordering
+rather than from a preference.** A point names its artifacts in a column of the ingest batch or of
+the rows parquet — plain multi-membership under `flat` and `dag` alike
+([decision 0125](../../docs/decisions/0125-a-dag-list-column-is-membership-not-lineage.md)) — but a
+key naming no artifact yet is minted, and `LayerRegistry::resolve_or_mint` refuses to mint on a
+layer that declares supplied content: an artifact served without content its layer declared cannot
+be told apart from one whose content was withheld. Both of this rung's layers declare some. So
+under *artifacts after their points* a column would always arrive first and always be refused —
+at the base build, where the rows are built before anything is published, and on the wire, where
+the batch precedes the publication. Membership arrives with the artifact that holds it. The driver
+drops the rung's own `mesh/descriptors` column from the base points file for the same reason.
+
 ⊘ **What this drops, deliberately.** An earlier driver built the base *with* the rung's artifact
-roster and sent membership on the wire as a column of the ingest batch. That put the layers on the
-build side of the split, made the *f* = 100% cell impossible for a layer whose content requires
-every member visible (an artifact with no members names an empty generating set, which the registry
-refuses at both entry points), and met the lineage reading of a list column, which a
-multi-membership `dag` layer cannot use (`docs/evidence/memos/2026-09-03-dag-membership-at-ingest.md`).
-Publication says *this artifact holds these members* directly, so none of the three arises.
+roster. That put the layers on the build side of the split and made the *f* = 100% cell impossible
+for a layer whose content requires every member visible: an artifact with no members names an empty
+generating set, which is satisfied by everyone and is refused at both entry points. A published
+artifact names its generating set, so the case does not arise.
 
 What it measures, in order
 --------------------------
@@ -34,11 +44,10 @@ What it measures, in order
    schema as the whole-corpus build's.
 2. **Online ingest** — Arrow IPC batches of 10,000 rows at *C* concurrent callers, `items/s`
    acked, ack p50/p99, and every refusal counted by status (429 backpressure, 409 duplicate or
-   batch-id conflict, 422 bounds or contract). The batches carry points alone: no membership
-   column, because membership arrives with the artifact that holds it.
+   batch-id conflict, 422 bounds or contract). The batches carry points alone — see below.
 3. **Publication** — every layer's whole roster, in batches under a byte cap, with each artifact's
-   whole member set (base and hold-out alike, by external addressing) and its ranked content with
-   its generating set. Its own figure: artifacts/s and members/s.
+   whole member set (base and hold-out alike, by external addressing), its ranked content with its
+   generating set, and its `parent` list. Its own figure: artifacts/s and members/s.
 4. **Flush** — the wall of `POST /control/flush`, and *time to visibility*: when a zoom-0 viewport
    under the 100% principal reaches the expected count. Those are two different numbers and the
    second is the one a viewer experiences.
@@ -131,22 +140,28 @@ def in_sorted(values: np.ndarray, sorted_ids: np.ndarray) -> np.ndarray:
     return sorted_ids[idx] == values
 
 
-def filter_parquet(source: Path, out: Path, column: str, keep: np.ndarray) -> int:
+def filter_parquet(
+    source: Path, out: Path, column: str, keep: np.ndarray, drop: Sequence[str] = ()
+) -> int:
     """Copy `source` to `out`, keeping rows whose `column` is in `keep`. **A row group at a time.**
 
-    Streaming rather than `read_table().filter()` because rung 3's member table is 1.66×10⁹ rows:
+    Streaming rather than `read_table().filter()` because rung 3's points file is 4 GB of parquet:
     read whole it is tens of gigabytes of Arrow, and the machine this runs on has 47.
+
+    `drop` names columns to leave behind — see [`write_base_inputs`], which drops the membership
+    columns a rung's points file may carry.
     """
     reader = pq.ParquetFile(source)
     writer = None
     kept = 0
     try:
-        for batch in reader.iter_batches(batch_size=1 << 20):
+        wanted = [name for name in reader.schema_arrow.names if name not in set(drop)]
+        for batch in reader.iter_batches(batch_size=1 << 20, columns=wanted):
             table = pa.Table.from_batches([batch])
             mask = pa.array(in_sorted(table.column(column).to_numpy(), keep))
             table = table.filter(mask)
             if writer is None:
-                writer = pq.ParquetWriter(out, reader.schema_arrow)
+                writer = pq.ParquetWriter(out, table.schema)
             if table.num_rows:
                 writer.write_table(table)
                 kept += table.num_rows
@@ -154,7 +169,8 @@ def filter_parquet(source: Path, out: Path, column: str, keep: np.ndarray) -> in
         if writer is not None:
             writer.close()
     if writer is None:  # an empty source still needs a file with the right schema
-        pq.write_table(reader.schema_arrow.empty_table(), out)
+        schema = pa.schema([f for f in reader.schema_arrow if f.name not in set(drop)])
+        pq.write_table(schema.empty_table(), out)
     return kept
 
 
@@ -262,11 +278,28 @@ def write_base_inputs(rung: Path, out: Path, base_ids: np.ndarray) -> dict:
     build would be the same layer supplied twice — once as a build input and once as a publication —
     and the level's keys would collide on the second.
 
+    **A membership column of the points file is dropped with them.** A rung may name a point's
+    artifacts in a column of its own rows (decision 0125; `mesh.py` writes one), which is the other
+    way a membership arrives at a build — and it would arrive *before* the artifacts exist, on a
+    layer declaring supplied content, which `LayerRegistry::resolve_or_mint` refuses outright: an
+    artifact minted from a key alone could not be served, so the key is unmintable and the build
+    stops. Membership travels with the artifact that holds it here, and only there.
+
     `corpus.toml` is rewritten by [`base_declaration`], which removes each layer's acquisition and
     keeps its declaration.
     """
     out.mkdir(parents=True, exist_ok=True)
-    kept = {"points": filter_parquet(rung / "points.parquet", out / "points.parquet", "entity_id", base_ids)}
+    layers = list(LAYER_SOURCES)
+    kept = {
+        "points": filter_parquet(
+            rung / "points.parquet", out / "points.parquet", "entity_id", base_ids, drop=layers
+        ),
+        "dropped_membership_columns": [
+            name
+            for name in pq.ParquetFile(rung / "points.parquet").schema_arrow.names
+            if name in set(layers)
+        ],
+    }
     for name in ("branch.parquet", ".env"):
         source = rung / name
         if source.exists():
@@ -292,11 +325,9 @@ def encode_batch(table: pa.Table) -> bytes:
     addressable on `/control/changes` afterwards, and what an artifact's `members` names it by on
     the same footing as a base row. The PMID travels beside it as the `pmid` attribute, as before.
 
-    **No membership column, and that is the ruling rather than an omission.** A column named for a
-    layer is the *other* way a point can name its artifacts, and it is read as a lineage on a
-    `nested` or `dag` layer (`tessera_types::layer::ListMeaning`). Publication says the same thing
-    from the artifact's side, without that reading and without a per-row edge check, so the driver
-    says it once and there.
+    **No membership column, and that is the ordering rather than an omission**: the column would
+    name artifacts that do not exist yet, and a layer declaring supplied content refuses to mint
+    them (`LayerRegistry::resolve_or_mint`). The module docstring has the whole of it.
     """
     branches = table.column("branches").to_pylist()
     entities = table.column("entity_id").to_pylist()
@@ -465,6 +496,54 @@ def json_list(values: np.ndarray) -> bytes:
     return b'["' + b'","'.join(values.tolist()) + b'"]'
 
 
+def in_parent_order(table: pa.Table) -> pa.Table:
+    """A roster's rows reordered so that no artifact precedes a parent of its own.
+
+    A publication resolves a parent key against the level as it stands **plus the artifacts earlier
+    in the same batch** (`LayerRegistry::prepare_publish`), so a child published before its parent
+    names nothing and refuses the batch. A roster is written in key order, which for a DAG of MeSH
+    descriptors is alphabetical and unrelated to depth.
+
+    By longest path to a root, which is the layer's own depth and is what a level-by-level
+    publication would have used. A parent the roster does not hold is ignored here, as it is where
+    the row is written: it is not an artifact of this layer.
+    """
+    if "parent" not in table.schema.names:
+        return table
+    keys = table.column("key").to_pylist()
+    parents = table.column("parent").to_pylist()
+    at = {key: i for i, key in enumerate(keys)}
+    depth = [-1] * len(keys)
+
+    for start in range(len(keys)):
+        # Iterative rather than recursive: 3.0×10⁴ descriptors is shallow, but a rung's DAG is the
+        # caller's data and a recursion limit is not the refusal anyone wants to read. `on_stack`
+        # is the cycle guard — the service refuses a cycle at publication, and a driver that spun
+        # for ever instead of saying so would look like a hung run.
+        stack = [start]
+        on_stack = set()
+        while stack:
+            i = stack[-1]
+            if depth[i] >= 0:
+                on_stack.discard(i)
+                stack.pop()
+                continue
+            pending = [at[k] for k in (parents[i] or []) if k in at and depth[at[k]] < 0]
+            if any(j in on_stack for j in pending):
+                raise ValueError(f"the roster's parent edges cycle at {keys[i]!r}")
+            if pending:
+                on_stack.add(i)
+                stack.extend(pending)
+                continue
+            depth[i] = 1 + max(
+                (depth[at[k]] for k in (parents[i] or []) if k in at), default=-1
+            )
+            on_stack.discard(i)
+            stack.pop()
+    order = sorted(range(len(keys)), key=lambda i: depth[i])
+    return table.take(pa.array(order, pa.int64()))
+
+
 class Publication:
     """One layer's roster, published in batches under a byte cap.
 
@@ -473,23 +552,25 @@ class Publication:
     route, so an artifact is published entire or not at all; the cap therefore splits *between*
     artifacts, and one artifact larger than the cap is sent alone.
 
-    ⊘ **Parents are not published, because the route has no field for them.** A layer's lineage is
-    `IncomingArtifact::parent_keys` inside the service and `parent` in the rung's roster, and
-    `IncomingArtifactBody` — the JSON this route takes — carries `key`, `members`, `content`,
-    `attached_to` and the shape fields, and nothing else. So a `dag` layer publishes as a flat one:
-    the memberships and the content land, every parent edge the roster declared is dropped, and the
-    count of them is recorded here beside the numbers rather than patched around
-    (`docs/evidence/memos/2026-09-03-dag-membership-at-ingest.md`).
+    **The roster's `parent` list travels as the artifact's `parent`**, which is where a `dag`
+    layer's edges are spelled and the only place they are (decision 0125). The route grew the field
+    to carry it — it had none, so a published `dag` layer came out flat whatever its roster said
+    (`docs/evidence/memos/2026-09-03-dag-membership-at-ingest.md`) — and `edges_published` counts
+    what landed, against `edges_declared`.
+
+    **Parents are published before their children**, which is what [`in_parent_order`] is for: a
+    parent must already exist or sit earlier in the same batch, an ordering an edge has always
+    carried (`annotation-representation.md` §5.0.4). A roster in key order is not in that order.
     """
 
     def __init__(self, roster: Path, members: Path, external: np.ndarray, max_bytes: int):
-        self.table = pq.read_table(roster)
+        self.table = in_parent_order(pq.read_table(roster))
         self.members = members
         self.external = external
         self.max_bytes = max_bytes
 
     def bodies(self) -> tuple[list, dict]:
-        """`[(level, body bytes, artifacts, members)]`, and what the roster declared.
+        """`[(level, body bytes, artifacts, members, edges)]`, and what the roster declared.
 
         Assembled in full before the first request, so the publication's own wall measures the
         service and not pyarrow — the driver's share is reported separately as `prepared_s`. What
@@ -499,18 +580,20 @@ class Publication:
         rows = self.table.to_pylist()
         keys = [r["key"] for r in rows]
         groups = member_groups(self.members, keys)
+        held = set(keys)
         stats = {
             "artifacts": len(rows),
             "members": 0,
             "generating_set_entries": 0,
             "edges_declared": 0,
-            "edges_published": 0,
+            "edges_in_roster_and_layer": 0,
             "artifacts_with_several_parents": 0,
         }
         by_level: dict[int, list[tuple[bytes, int]]] = {}
         for i, row in enumerate(rows):
-            parents = row.get("parent") or []
-            stats["edges_declared"] += len(parents)
+            parents = [key for key in (row.get("parent") or []) if key in held]
+            stats["edges_declared"] += len(row.get("parent") or [])
+            stats["edges_in_roster_and_layer"] += len(parents)
             stats["artifacts_with_several_parents"] += 1 if len(parents) > 1 else 0
             members = self.external[groups.get((i, -1), np.zeros(0, np.uint64))]
             stats["members"] += len(members)
@@ -529,6 +612,8 @@ class Publication:
                         + b"}"
                     )
                 parts += [b',"content":[', b",".join(blocks), b"]"]
+            if parents:
+                parts += [b',"parent":', json.dumps(parents).encode()]
             if row.get("attached_layer"):
                 parts += [
                     b',"attached_to":',
@@ -542,20 +627,21 @@ class Publication:
                 ]
             parts.append(b"}")
             level = int(row.get("level") or 0)
-            by_level.setdefault(level, []).append((b"".join(parts), len(members)))
+            by_level.setdefault(level, []).append((b"".join(parts), len(members), len(parents)))
         out = []
         for level, blocks in by_level.items():
-            batch, size, artifacts, members = [], 0, 0, 0
-            for block, n in blocks:
+            batch, size, counts = [], 0, [0, 0, 0]
+            for block, n, e in blocks:
                 if batch and size + len(block) > self.max_bytes:
-                    out.append((level, self._body(level, batch), artifacts, members))
-                    batch, size, artifacts, members = [], 0, 0, 0
+                    out.append((level, self._body(level, batch), *counts))
+                    batch, size, counts = [], 0, [0, 0, 0]
                 batch.append(block)
                 size += len(block) + 1
-                artifacts += 1
-                members += n
+                counts[0] += 1
+                counts[1] += n
+                counts[2] += e
             if batch:
-                out.append((level, self._body(level, batch), artifacts, members))
+                out.append((level, self._body(level, batch), *counts))
         return out, stats
 
     def _body(self, level: int, blocks: list[bytes]) -> bytes:
@@ -1077,13 +1163,14 @@ class Cycle:
             refusal = None
             session = requests.Session()
             t0 = time.perf_counter()
-            published = {"artifacts": 0, "members": 0}
-            for level, body, artifacts, members_n in bodies:
+            published = {"artifacts": 0, "members": 0, "edges": 0}
+            for level, body, artifacts, members_n, edges in bodies:
                 r, _ = control.publish(layer, body, session)
                 statuses[str(r.status_code)] = statuses.get(str(r.status_code), 0) + 1
                 if r.status_code == 201:
                     published["artifacts"] += artifacts
                     published["members"] += members_n
+                    published["edges"] += edges
                 elif refusal is None:
                     refusal = {"level": level, "status": r.status_code, "body": r.text[:1500]}
             wall = time.perf_counter() - t0
@@ -1095,6 +1182,7 @@ class Cycle:
                     "wall_s": round(wall, 2),
                     "published_artifacts": published["artifacts"],
                     "published_members": published["members"],
+                    "edges_published": published["edges"],
                     "artifacts_per_s": round(published["artifacts"] / wall, 1) if wall else None,
                     "members_per_s": round(published["members"] / wall, 1) if wall else None,
                     "statuses": statuses,
@@ -1110,7 +1198,7 @@ class Cycle:
                 f"  {layer}: {published['artifacts']:,} artifacts, {published['members']:,} "
                 f"members in {wall:.1f} s ({entry['artifacts_per_s']} artifacts/s, "
                 f"{entry['members_per_s']} members/s), {len(bodies)} requests, "
-                f"{stats['edges_declared']:,} parent edges the wire cannot carry"
+                f"{published['edges']:,}/{stats['edges_declared']:,} parent edges"
             )
         totals["wall_s"] = round(totals["wall_s"], 2)
         totals["artifacts_per_s"] = (
@@ -1120,11 +1208,8 @@ class Cycle:
             round(totals["members"] / totals["wall_s"], 1) if totals["wall_s"] else None
         )
         out["totals"] = totals
-        # ⊘ **The route has no field for a parent**, so a layer's lineage is dropped whatever its
-        # kind. Counted rather than worked around — see [`Publication`] and the handover memo.
-        out["edges_not_expressible"] = sum(
-            entry["edges_declared"] for entry in out["layers"].values()
-        )
+        out["edges_declared"] = sum(e["edges_declared"] for e in out["layers"].values())
+        out["edges_published"] = sum(e["edges_published"] for e in out["layers"].values())
         return out
 
     def probe_layers_after_ingest(self, served, session_cred, view, quant, all_terms) -> dict:

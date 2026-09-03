@@ -45,17 +45,22 @@ PATTERNS=$(cat <<'EOF'
 \bis the deliverable\b
 \bpostings?\b
 \bdescriptors?\b
+\b(the )?ladder\b
+\brungs?\b
+\bcampaign\b
+\bepics?\b
+\bto measure\b
 EOF
 )
 
 REGEX=$(printf '%s\n' "$PATTERNS" | paste -sd'|')
 
-hits() {  # hits <path>...: every matching line as file:line:text; backticked spans are not checked
+hits() {  # hits <path>...: every matching line as file:line:text; backticked spans and link targets are not checked
   local p f
   for p in "$@"; do
     [ -e "$p" ] || continue
     find "$p" -name '*.md' -type f | sort | while read -r f; do
-      sed 's/`[^`]*`//g' "$f" | grep -niE -e "$REGEX" | sed "s|^|$f:|"
+      sed -e 's/`[^`]*`//g' -e 's/\](\([^)]*\))/]/g' "$f" | grep -niE -e "$REGEX" | sed "s|^|$f:|"
     done
   done
 }

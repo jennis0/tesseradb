@@ -2784,6 +2784,20 @@ struct IncomingArtifactBody {
     /// stop serving on every route, the ones that traverse no edge included.
     #[serde(default)]
     attached_to: Option<AttachmentBody>,
+    /// This artifact's parents in its layer's hierarchy, **each named by the parent's own key** —
+    /// the artifact row's `parent` column, which is where a `dag` layer's edges are spelled and the
+    /// only place they are ([decision 0125](../../../docs/decisions/0125-a-dag-list-column-is-membership-not-lineage.md)).
+    ///
+    /// Empty at a root. At most one on a `nested` or `tiered` layer, which refuse a second; as many
+    /// as the child sits beneath on a `dag` layer, where a key named twice is one edge
+    /// (`dag-hierarchies.md` §4). By key rather than by ordinal for [`AttachmentBody`]'s reason: a
+    /// publication answers with a `tessera_id` and never a position in a level (C8), so a key is
+    /// the only address a caller holds. The parent must already exist or be **earlier in this same
+    /// batch** — `LayerRegistry::prepare_publish` resolves a sibling's ordinal — which is the
+    /// parent-before-child ordering an edge has always carried
+    /// (`annotation-representation.md` §5.0.4).
+    #[serde(default)]
+    parent: Vec<String>,
     /// The artifact's shape, in its layer's kind's field and no other — the same row shape the
     /// build reads (decision 0091; `polygon-membership.md` §6.1, §6.4): `bbox = [min_x, min_y,
     /// max_x, max_y]`, `circle = [cx, cy, r]`, `ellipse = [cx, cy, a, b, angle]`, or `wkt`.
@@ -3270,6 +3284,7 @@ async fn publish_artifacts(
                 ),
             };
             incoming.shape = shape;
+            incoming.parent_keys = artifact.parent;
             incoming
         })
         .collect();

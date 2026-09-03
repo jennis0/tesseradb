@@ -913,7 +913,10 @@ reviewed once (r2), all five rulings made, awaiting promotion
 the build and the ingest side of the design above are built: `kind = "dag"`; a record's parents as
 a list in the WAL row and the record blob, `BUNDLE_FORMAT` 4 → 5 and a bundle at any other number
 refused at open; the artifact row's `parent` as a list; a second parent recorded under `dag` and
-refused as before under `nested` and `tiered` at both entry points; and the cycle check the ingest
+refused as before under `nested` and `tiered` at both entry points (since 2026-09-03 the `parent`
+list is the only edge spelling under `dag`, a member row's list being plain multi-membership —
+[decision 0125](decisions/0125-a-dag-list-column-is-membership-not-lineage.md); the ingest cycle
+carries the layer from a `mesh/descriptors` column on the points rather than declining it); and the cycle check the ingest
 side lacked, in the registry's publication so one body serves the build, `publish_artifacts` and
 the commit window's mint. What is *not* in this track: the cut over parent lists, longest-path
 depth, `parent_ids` on the wire and the client — the engine and client tracks'. Ledger:

@@ -1217,11 +1217,10 @@ impl LayerRegistry {
     ///   [`EdgeCheck::Unrecorded`] as before; a child holding a different one is the contradiction,
     ///   because a parent that does not exist cannot be the parent it already has.
     ///
-    /// **On a `dag` layer the contradiction does not exist** (`dag-hierarchies.md` §4): a child
-    /// legitimately holds several parents, so a claimed parent among them is [`EdgeCheck::Agrees`]
-    /// and one not among them is an edge this route cannot add — [`EdgeCheck::Unrecorded`],
-    /// reported and the memberships still landing, exactly as a growth naming a parent for a
-    /// parentless child of a tree is.
+    /// **Every edge reaching here is a tree's.** Only a `nested` or `tiered` list column declares
+    /// edges; a `dag` layer's list is memberships alone and its several parents arrive on the
+    /// artifact row by the publish route (`dag-hierarchies.md` §4, decision 0125), so there is no
+    /// kind on which a held parent other than the claimed one is anything but the contradiction.
     ///
     /// **The child's is a fact and the parent's is a search**, which is why one is a `bool` and the
     /// other a closure. A child's level is the edge's own; a parent's is whatever the layer's shape
@@ -1248,20 +1247,18 @@ impl LayerRegistry {
         if child_mints {
             return Ok(EdgeCheck::Mints);
         }
-        let several = self
-            .layers
-            .get(layer)
-            .ok_or_else(|| RegistryError::NoSuchLayer(layer.to_string()))?
-            .declaration
-            .hierarchy
-            .kind
-            == tessera_types::layer::HierarchyKind::Dag;
+        if !self.layers.contains_key(layer) {
+            return Err(RegistryError::NoSuchLayer(layer.to_string()));
+        }
         let ordinal = self.resolve_growth_key(layer, level, child, store)?;
         let held: Vec<crate::wal::ParentRef> = store
             .get(layer, level, ordinal)
             .map(|r| r.parents.clone())
             .unwrap_or_default();
-        // A tree's child holds at most one parent, so the one it holds is the one named.
+        // A tree's child holds at most one parent, so the one it holds is the one named. Only a
+        // `nested` or `tiered` list column declares an edge, so every edge reaching here is a
+        // tree's: a `dag` layer's parents arrive on the artifact row by the publish route and its
+        // list column is memberships alone (decision 0125).
         let contradicted = |held: crate::wal::ParentRef| RegistryError::ContradictedParent {
             layer: layer.to_string(),
             level,
@@ -1272,7 +1269,6 @@ impl LayerRegistry {
         if parent_mints(parent) {
             return match held.first() {
                 None => Ok(EdgeCheck::Unrecorded),
-                Some(_) if several => Ok(EdgeCheck::Unrecorded),
                 Some(held) => Err(contradicted(*held)),
             };
         }
@@ -1282,7 +1278,6 @@ impl LayerRegistry {
         }
         match held.first() {
             None => Ok(EdgeCheck::Unrecorded),
-            Some(_) if several => Ok(EdgeCheck::Unrecorded),
             Some(held) => Err(contradicted(*held)),
         }
     }

@@ -47,6 +47,31 @@ hidden, until a **compaction** rewrites the whole partition into one segment wit
 the same arrangement as a log-structured merge tree, the storage layout behind most write-heavy
 databases; what Tessera adds is that the sort order is the map itself.
 
+```mermaid
+flowchart TB
+  subgraph bundle["bundle directory: versioned prefixes, CURRENT names the live one"]
+    manifest["manifest<br/>views, layers, vocabularies,<br/>the overlay's published record"]
+    subgraph entity["entity space, shared by every view"]
+      termidx["term index<br/>term → items"]
+      dict["term dictionary"]
+      filt["filter index and<br/>value columns"]
+      records["item records"]
+      members["artifact memberships"]
+    end
+    subgraph views["one per view"]
+      perm["permutation<br/>entity id → row id"]
+      segs["segments: rows in Morton order<br/>positions, drawn columns"]
+    end
+  end
+  wal["write-ahead log<br/>ingests and denies since the last flush"]
+  build["tessera build"] --> bundle
+  serve["tessera serve"] -- "maps and reads" --> bundle
+  serve <--> wal
+  wal -- "flush: new segment;<br/>compaction: new prefix" --> bundle
+```
+
+*What tessera build writes and tessera serve reads, and what the write path adds while serving.*
+
 A deny is in force from the moment it is acknowledged. It is recorded in the **overlay**, the
 in-memory record of what is hidden, and leaves the overlay on exactly one event: an unsuppress for
 a suppression, or the compaction that drops the rows for a deletion.
@@ -58,7 +83,7 @@ segments exist, the overlay, the rows buffered ahead of a flush, the dictionary,
 row-space mask. A request loads the pointer once, when it starts, and answers entirely from what
 it names.
 
-An ingest, a flush, a merge and a compaction fold each take effect by building a new generation and
+An ingest, a flush, a merge and a compaction each take effect by building a new generation and
 swapping the pointer to it. Nothing before that swap is visible to any request.
 
 Every write passes through one thread per partition, the write executor, in the same order:
@@ -190,11 +215,11 @@ An entry **retires** when it leaves the overlay. Each store has exactly one rout
 | Applies to | Removed by | Why only one route |
 |---|---|---|
 | A suppression (Rule S) | An explicit unsuppress, and nothing else | No rebuild or timer excludes a suppressed item on its own, so its invisibility depends entirely on this record for as long as the suppression stands. Any other removal route would let the item become visible again with no unsuppress ever issued |
-| A deletion (Rule F) | The compaction fold that removes the item's row and its term-index entries, and nothing else | The row still exists in a segment until that fold runs. Removing the record any earlier would leave a segment reachable that still contains the item |
+| A deletion (Rule F) | The compaction that removes the item's row and its term-index entries, and nothing else | The row still exists in a segment until that fold runs. Removing the record any earlier would leave a segment reachable that still contains the item |
 
 The mask a request subtracts from its answer, `denied[view]`, is derived from the union of the two
 stores. It is derived again in full at every geometry publication, a flush, a merge or a
-compaction fold, never patched by removing one row: subtracting a single row could remove one that
+compaction, never patched by removing one row: subtracting a single row could remove one that
 a still-standing deletion also covers. How a request composes an answer against this mask belongs
 to the access-control chapter.
 
@@ -248,7 +273,7 @@ next flush forward, and only one flush runs at a time.
 
 Planning reads the current generation: the rows buffered for one view, in ascending order of
 entity id. A row whose entity has since been deleted is never written. The entity id stays
-allocated, and the deletion alone hides the item until a compaction fold removes it. A row whose
+allocated, and the deletion alone hides the item until a compaction removes it. A row whose
 entity has since been suppressed is flushed as normal, because a flush that skipped it would leave
 a later unsuppress with nothing to reveal.
 
@@ -263,7 +288,7 @@ flush consumed, and the mask is re-derived against the larger row space. The mom
 or deleted item acquires a row is the moment it must appear in that mask.
 
 A flush only ever appends rows and never rewrites an existing one, so nothing a session has cached
-about the map becomes wrong at a flush. A session picks up the new rows on its next request. Every
+about the map becomes wrong at a flush. A session picks up the new rows once the background refresh has reached it, usually by its next request; until then it is served the previous generation's answer, which is still correct. Every
 response also carries a content key naming the generation it was answered from, travelling as an
 ETag; presenting an old one back is never an error.
 
@@ -277,14 +302,14 @@ row id inside that span names a different entity afterwards. Rows outside the sp
 A session's row-based structures keyed to the merged span are rebuilt rather than reused.
 
 A pending deletion is not dropped by a merge. Its row and its term-index entries are carried into
-the merged output unchanged; only a compaction fold may drop a row. The mask is re-derived against
+the merged output unchanged; only a compaction may drop a row. The mask is re-derived against
 the merged row space rather than carried forward, because a denied row id inside the merged span
 may now name a different entity.
 
 ## Compaction
 
 Compaction is the one operation that may drop a row and its term-index entries. It runs as a
-single pass called a compaction fold, and it does three things nothing else in the write path can
+single pass called a compaction, and it does three things nothing else in the write path can
 do:
 
 - it is the only way a deletion's overlay record is removed (Rule F);
@@ -294,11 +319,11 @@ do:
 
 A fold takes a snapshot at the start of its run, naming which rows and term-index entries to
 remove and which deletions to retire once they are gone. A deletion's overlay record is removed
-only once the fold that removed its row, its term-index entries and its external-id binding has
-been published. Between the snapshot and the fold's publication, more flushes, merges and denies
-can still land: an entity a flush gave a fresh row to while the fold was running is not retired
+only once the compaction that removed its row, its term-index entries and its external-id binding has
+been published. Between the snapshot and the compaction's publication, more flushes, merges and denies
+can still land: an entity a flush gave a fresh row to while the compaction was running is not retired
 this round, and the next fold takes it instead. If retirement followed the plan rather than what
-was actually removed, an entity whose row survived the fold would lose the record hiding it.
+was actually removed, an entity whose row survived the compaction would lose the record hiding it.
 
 The WAL is rotated from time to time, its oldest records dropped once every row they describe is
 safely on disc. Retiring an overlay entry does not remove every record of it at once: the WAL
@@ -308,19 +333,19 @@ row and no term-index entries left for any request to find, so what a viewer see
 The next fold clears the entry again, at little further cost, because there is nothing left for it
 to remove.
 
-A suppression is carried through a fold unchanged. Only an explicit unsuppress removes one
+A suppression is carried through a compaction unchanged. Only an explicit unsuppress removes one
 (Rule S).
 
-A compaction fold runs off the request path, over files a viewport is also reading. Its duration
-is not bounded: nothing observes it directly, so the fold is designed to disturb a live viewport
-as little as possible rather than to finish quickly. The one moment a fold is visible to a client
+A compaction runs off the request path, over files a viewport is also reading. Its duration
+is not bounded: nothing observes it directly, so the compaction is designed to disturb a live viewport
+as little as possible rather than to finish quickly. The one moment a compaction is visible to a client
 is the flip. Because it rewrites row space globally, every session's cached view of the map is
 invalid the instant the new generation is swapped in. A session's first request after the flip
-takes an ordinary cache miss and rebuilds, exactly as a newly opened session's request would. No
+reads a projection the background pass has already rebuilt or, if the pass has not reached that session yet, rebuilds it then, exactly as a newly opened session's request would. No
 request is turned away to protect that rebuild.
 
 Nothing a client already holds stops resolving. A tile is a Morton prefix and an item is a
-`tessera_id`, and both resolve against any generation; a fold moves the rows behind an identifier
+`tessera_id`, and both resolve against any generation; a compaction moves the rows behind an identifier
 without breaking the identifier itself. Presenting an old content key is therefore never an error:
 it names the generation a response was answered from and carries no authorisation weight, so a
 client that re-issues a request always gets a correct answer, only a more or less current one. How
@@ -337,8 +362,8 @@ follow the same pattern.
 
 | | Flush | Merge | Compaction |
 |---|---|---|---|
-| A session's cached projection | Extended forward with the new rows; nothing already cached becomes wrong | Rebuilt for the rows inside the merged span; the rest is untouched, because only that span renumbers | Invalid everywhere at the flip. The next request takes an ordinary cache miss and rebuilds, exactly as a newly opened session's request would |
-| Artifacts | Untouched. A flush appends rows it does not hold | Untouched. A merge renumbers rows it does not hold | Rebuilt inside the fold, the only operation that invalidates it |
+| A session's cached projection | Extended forward with the new rows; nothing already cached becomes wrong | Rebuilt for the rows inside the merged span; the rest is untouched, because only that span renumbers | Invalid everywhere at the flip. The next request reads a projection the background pass has already rebuilt or, if the pass has not reached that session yet, rebuilds it then, exactly as a newly opened session's request would |
+| Artifacts | Untouched. A flush appends rows it does not hold | Untouched. A merge renumbers rows it does not hold | Rebuilt inside the compaction, the only operation that invalidates it |
 
 *What each stage of the write path does to a session's cached row-space projection and to an
 artifact's stored membership.*
@@ -366,7 +391,7 @@ allocation order have diverged from each other.
 ## What is not built
 
 - **The label invalidation feed.** A deletion invalidates every label whose generating set held
-  the deleted item, for every principal who could see it. The deny queue is the event that should
+  the deleted item, for every viewer who could see it. The deny queue is the event that should
   trigger a notification, but neither the notification mechanism nor a consumer for it exists.
   Enforcement does not depend on it, because a label check always reads current state, but nothing
   announces the change to an interested client.
@@ -378,7 +403,7 @@ allocation order have diverged from each other.
   tracked on the session, but a client has no way to read it.
 - **Cell-granular staleness.** A content key reports only that something has changed, never which
   cells. A protocol narrowing that to the affected regions has not been designed.
-- **Entity id reuse.** Ruled, not built: an entity id a compaction fold frees by dropping its row
+- **Entity id reuse.** Ruled, not built: an entity id a compaction frees by dropping its row
   is never reissued to a later item. The allocator only grows, and an id once retired stays
   retired.
 
