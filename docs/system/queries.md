@@ -20,9 +20,17 @@ viewer's own visible set rather than a scan of the tile's contents.
 
 ```mermaid
 flowchart LR
-  req["a viewport request:<br/>a box, or a list of tiles"] --> tile["each tile is one<br/>contiguous range of rows"]
-  tile --> mask["intersected with the<br/>viewer's own visible set"]
-  mask --> out["a count, a sample of points,<br/>and any served artifacts"]
+  req["bounds + zoom<br/>(or explicit tiles)"] --> tiles["tiles<br/>each a contiguous row range"]
+  set["viewer's set<br/>minus overlay, with filters"] --> per
+  tiles --> per["per tile: rows in range ∩ set"]
+  per --> count["count"]
+  per --> sample["sampled points<br/>floor, threshold, cap"]
+  per --> cells["sub-cell density"]
+  per --> arts["artifacts and labels<br/>gated on the unfiltered set"]
+  count --> resp["one framed response"]
+  sample --> resp
+  cells --> resp
+  arts --> resp
 ```
 
 *A viewport request resolves to tiles, each a contiguous row range answered against the viewer's
@@ -76,10 +84,14 @@ can only narrow, never widen, so no combination of clauses ever draws or counts 
 what the viewer's own credentials permit.
 
 ```mermaid
-flowchart LR
-  auth["the authorised set:<br/>everything this viewer may see"] --> filt["narrowed by a filter to<br/>the filtered set"]
-  auth -.->|read directly, never narrowed| gate["labels, artifact existence,<br/>how many marks a tile is allowed"]
-  filt --> draw["points drawn,<br/>matched counts"]
+flowchart TB
+  subgraph auth["the authorised set: the viewer's terms, minus the overlay"]
+    subgraph filt["the filtered set: authorised ∩ filters"]
+      pts["points drawn<br/>matched counts"]
+    end
+    lab["labels and artifacts:<br/>gated on the whole authorised set"]
+    lod["level of detail:<br/>anchored on the whole authorised set"]
+  end
 ```
 
 *The filtered set narrows within the authorised set. Points drawn and matched counts read the
@@ -131,13 +143,13 @@ other, evaluated exactly against every point's own stored position rather than a
 the client from which map tiles the shape happens to touch.
 
 ```mermaid
-flowchart TD
-  shape["a drawn shape"] --> classify{"each tile against the shape"}
-  classify -->|outside| discard["discarded"]
-  classify -->|wholly inside| range["a row range<br/>(bitmap arithmetic)"]
-  classify -->|boundary crosses it| test["masked, then tested<br/>row by row"]
-  range --> rows["the region's rows"]
-  test --> rows
+flowchart LR
+  shape["box, circle, ellipse or polygon"] --> decomp["decompose against the Morton cells"]
+  decomp --> inside["cells wholly inside<br/>→ whole row ranges,<br/>bitmap arithmetic"]
+  decomp --> edge["cells the boundary crosses<br/>→ per-point test,<br/>after masking"]
+  decomp --> outside["cells outside<br/>→ dropped"]
+  inside --> leaf["the region as a filter leaf"]
+  edge --> leaf
 ```
 
 *A drawn shape is classified against the tile grid: cells wholly inside become a row range; only
@@ -210,7 +222,7 @@ or more of the query's words, or, for an exact phrase, items containing those wo
 and adjacent to each other. Either way the result is a plain match or no match: there is no
 relevance score and no ranking by how well an item matches.
 
-That is a deliberate limit rather than a missing feature. A relevance ranking is ordinarily
+A relevance ranking is ordinarily
 computed from how common each word is across a whole corpus, and a viewer's own results would
 then shift depending on documents that viewer cannot see, the same kind of leakage every other
 query in the system is built to avoid. A text search stays a boolean predicate,
