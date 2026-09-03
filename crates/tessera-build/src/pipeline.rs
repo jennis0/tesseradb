@@ -2169,6 +2169,20 @@ fn read_one_attribute_source(
             }
             Ok(())
         })?;
+        // **Ascending in the entity, so every lane's scatter is a forward sweep.** The sweep's own
+        // answer arrives in source-id order, and entity ids are signature-then-Morton order, so
+        // without this each lane writes its column at a uniformly random index — free while the
+        // column fits in the page cache and not free otherwise. It is the entity-ordered arena's
+        // pass two that makes it matter: that pass writes a whole record where the others write a
+        // slot, so its random walk is over the arena rather than over an offset array. Measured on
+        // the 10⁷ MedCPT sample under `MemoryMax=4G`: **347,009 major faults and 480 GB read for a
+        // 10.4 GiB arena, 1,335 s into a stage that costs 68 s in arrival order and had not
+        // finished** — against a chunk that ascends, where the pass is one forward sweep of the
+        // arena per chunk and there are six of them.
+        //
+        // **Stable**, because which of two rows carrying one entity is written last is the answer
+        // pass one recorded the length of.
+        resolved.par_sort_by_key(|&(entity, _)| entity);
         {
             // **One lane per column, and the columns share nothing.** Each entity-order column is
             // its own mapped array with its own presence bits, so a chunk's scatter splits across
