@@ -154,9 +154,19 @@ def ingest_rows(name: str, data: dict) -> list[str]:
 
 def render() -> str:
     rungs = measurements()
+    heading = [
+        "### 1.1 The campaign table",
+        "",
+        "**Generated** from `test_corpora/<rung>/measurements.json` by",
+        "[`../scripts/campaign_report.py`](../scripts/campaign_report.py) — every figure here is a",
+        "field of a committed file, and the schema those files are on is",
+        "[`../test_corpora/common/README.md`](../test_corpora/common/README.md). Do not edit this",
+        "block; re-run the script.",
+        "",
+    ]
     if not rungs:
-        return f"{BEGIN}\n\n_No rung has a `measurements.json` yet._\n\n{END}"
-    lines = [BEGIN, ""]
+        return "\n".join([BEGIN, ""] + heading + ["_No rung has a `measurements.json` yet._", "", END])
+    lines = [BEGIN, ""] + heading
     lines += [
         "**Build.** Wall and peak are the process's own, on local NVMe; `peak` is the highest",
         "`VmHWM` any stage reported, and `slowest stage` is from the same record.",

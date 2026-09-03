@@ -590,9 +590,19 @@ class Battery:
                             "which": which,
                             "box": box,
                             "density_visible_100pc": density,
-                            "distinct_locations": min(args.samples, len(rotated)),
+                            "distinct_locations": min(
+                                args.cold_samples or args.samples, len(rotated)
+                            ),
                             "conditions": {},
                         }
+                        # **Cold and hot get different sample counts, and that is deliberate.** A
+                        # hot sample is a millisecond; a cold one at 3.6×10⁷ rows under the widest
+                        # principal is a fresh fragment build plus a re-fault of the bundle, tens
+                        # of seconds — so forty of each is not one budget but two, and the cold
+                        # half decides whether a rung is measurable in an evening at all. The
+                        # count that was used is recorded per run; a reduced run must never look
+                        # like a full one.
+                        cold_n = args.cold_samples or args.samples
                         for condition in args.conditions.split(","):
                             if condition == "hot":
                                 samples = self._hot_samples(
@@ -600,11 +610,11 @@ class Battery:
                                 )
                             elif condition == "cold":
                                 samples = self._cold_samples(
-                                    terms, view_id, zoom, rotated, args.samples, True
+                                    terms, view_id, zoom, rotated, cold_n, True
                                 )
                             elif condition == "cold_pages_warm_engine":
                                 samples = self._cold_samples(
-                                    terms, view_id, zoom, rotated, args.samples, False
+                                    terms, view_id, zoom, rotated, cold_n, False
                                 )
                             else:
                                 raise SystemExit(f"unknown condition {condition!r}")
@@ -645,6 +655,7 @@ class Battery:
             "all_terms_authorise_s": round(broad_authorise_s, 4),
             "candidates_per_zoom": args.candidates,
             "samples_per_cell": args.samples,
+            "cold_samples_per_cell": args.cold_samples or args.samples,
             "conditions": args.conditions.split(","),
             "zooms": zooms,
             "deciles": deciles,
@@ -767,6 +778,13 @@ def add_arguments(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--deciles", default="0,1,2,3,4,5,6,7,8,9")
     ap.add_argument("--cells-per-decile", type=int, default=2)
     ap.add_argument("--samples", type=int, default=40)
+    ap.add_argument(
+        "--cold-samples",
+        type=int,
+        default=None,
+        help="samples per cold cell; defaults to --samples. A cold sample at 3.6e7 rows is tens "
+        "of seconds, so the two budgets are not the same budget",
+    )
     ap.add_argument("--candidates", type=int, default=500, help="candidate boxes per zoom")
     ap.add_argument("--conditions", default="cold,cold_pages_warm_engine,hot")
     ap.add_argument("--k", type=int, default=30)

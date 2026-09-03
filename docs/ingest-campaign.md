@@ -598,6 +598,16 @@ action is a memtest (§8), not more detection machinery.
 - **`~/venvs/ingest`** — DuckDB and PyArrow, with `spatial` installed for rung 2's point-in-polygon
   join (§3). ⊘ Its Python is 3.10, so it has no `tomllib`; `~/venvs/projection` does.
 - **`run_demo.sh --terms / --ranks / --label`**, and `custom` on ports of its own — see §6.
+- **The measurement drivers** (2026-09-03) — `tessera build --stage-timings-json`,
+  [`../test_corpora/common/serve_battery.py`](../test_corpora/common/serve_battery.py) and
+  [`../test_corpora/common/ingest_cycle.py`](../test_corpora/common/ingest_cycle.py), booted by
+  [`../test_corpora/common/deployment.py`](../test_corpora/common/deployment.py) and collated by
+  [`../scripts/campaign_report.py`](../scripts/campaign_report.py). Every rung records build time
+  per stage, view latency across a principal ladder, and online ingest through flush and
+  compaction, on **one schema** —
+  [`../test_corpora/common/README.md`](../test_corpora/common/README.md) is that schema, field by
+  field with each one's unit and how it was measured. The table in §1.1 is rendered from the
+  committed `measurements.json` files and must not be hand-edited.
 
 ## 6. Cross-cutting findings
 
