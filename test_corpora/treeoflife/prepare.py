@@ -394,9 +394,19 @@ def write_demo_terms(out: Path, counts: collections.Counter) -> None:
     (out / "branch-ranks.json").write_text(
         json.dumps([{"term": t, "pairs": n} for t, n in ranks], indent=None) + "\n"
     )
-    (out / "branch-terms.txt").write_text(",".join(t for t, _ in ranks) + "\n")
-    print(f"{len(ranks)} publisher terms; top five "
-          + ", ".join(f"{t} {n:,}" for t, n in ranks[:5]))
+    # ⊘ **No `branch-terms.txt` on this rung.** The other rungs write the same roster a second
+    # time as one comma-separated line, which is what `run_demo.sh --terms` reads. A publisher's
+    # name carries commas — "Museum of Comparative Zoology, Harvard University" — so that file
+    # would split 376 terms into 444 and every principal composed from it would name institutions
+    # that do not exist. `branch-ranks.json` is JSON and is what the measurement drivers read.
+    commas = sum(1 for t, _ in ranks if "," in t)
+    (out / "branch-ranks.md").write_text(
+        f"`branch-terms.txt` is not written for this rung: {commas} of {len(ranks)} publisher "
+        f"names contain a comma, and the comma-separated form the other rungs write would split "
+        f"them into terms nobody holds. Read `branch-ranks.json`.\n"
+    )
+    print(f"{len(ranks)} publisher terms ({commas} carry a comma, so no branch-terms.txt); "
+          "top five " + ", ".join(f"{t} {n:,}" for t, n in ranks[:5]))
 
 
 def vocabulary_toml(sizes: dict[str, int]) -> str:
@@ -743,7 +753,7 @@ def main() -> None:
                                  ("img_type", table.column("img_type")),
                                  *[(r, table.column(r)) for r in sources.RANKS]):
                 values[name].update(
-                    v for v in pc.unique(column.combine_chunks()).to_pylist() if v is not None
+                    v for v in pc.unique(column).to_pylist() if v is not None
                 )
             named["scientific_name"] += m - table.column("scientific_name").null_count
             named["common_name"] += m - table.column("common_name").null_count
