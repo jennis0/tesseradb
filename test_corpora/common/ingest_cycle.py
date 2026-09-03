@@ -849,10 +849,13 @@ class Cycle:
     def probe_layers_after_ingest(self, served, session_cred, view, quant, all_terms) -> dict:
         """One zoom-0 viewport **with `layers: "all"`** after the flush, timed and allowed to fail.
 
-        Its own measurement because it is the request that broke the first 3.6×10⁷ cell: the
-        segment a flush publishes carries no adopted artifact structures, so a level whose
-        derived form the prefix does not hold is rebuilt on the request path, and the server sheds
-        the stream mid-body when that outruns `serve.stream_deadline_ms`. Recorded rather than
+        Its own measurement because it is the request that broke the first 3.6×10⁷ cell. The
+        trigger is not the flush: it is `probe_layers` above, whose one-row growth into
+        `mesh/descriptors` moves the level's version, after which the engine refuses the
+        fold-written column and rebuilds the level's row form on the next layered request —
+        94–113 s here, shed against `serve.stream_deadline_ms`. Reproduced with no flush in
+        `probes/2026-09-03-growth-trigger/`; the fix is ruled in
+        `docs/evidence/memos/2026-09-03-post-flush-artifact-frames.md`. Recorded rather than
         routed around.
         """
         full = [quant["x_min"], quant["y_min"], quant["x_max"], quant["y_max"]]
@@ -891,9 +894,9 @@ class Cycle:
 
         # **`layers=None`, and that is not a detail.** A zoom-0 whole-extent viewport asking for
         # `layers: "all"` on a freshly-ingested 3.6×10⁷-row deployment was **shed mid-body** at
-        # 113 s against a 60 s stream deadline: the new segment carries no adopted artifact
-        # structures, so the mesh level is served the slow way and the response never completes.
-        # That is a result about the read path after ingest (recorded in `layers_after_ingest`),
+        # 113 s against a 60 s stream deadline: the layer probe's growth moved the mesh level's
+        # version, so its row form is rebuilt from scratch on the first layered request after it.
+        # That is a result about the read path after a record change (in `layers_after_ingest`),
         # not something a visibility poll should be measuring — what this needs is the masked
         # count, which the tiles frame carries on its own.
         def visible_now() -> int:
