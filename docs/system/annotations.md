@@ -58,7 +58,7 @@ An **enumerated** membership is a table, or a column on the points themselves, n
 artifact each point belongs to: a caller's clustering output, most often, read as one row per
 point-and-artifact pair. An **attribute predicate** turns a single category field already declared
 on every point into a layer of its own. Each distinct value in that field is an artifact, and every
-point that carries the value is automatically its member. A **shape** membership declares an
+point that carries the value is automatically its member. A **shape** membership (`spatial` in the declaration) declares an
 artifact as a box, circle, ellipse or polygon over one of the corpus's views. Its members are
 whichever points fall inside it.
 
@@ -129,7 +129,7 @@ ordinary access control plays for a point. `none` is right for a boundary that e
 not a viewer can see anything inside it. `all` is the strictest setting, withholding an artifact the
 moment a single member is hidden.
 
-Both axes are conjuncts of one test, run against the viewer's own set and never the filtered one:
+Both axes must hold, and both are tested against the viewer's own set and never the filtered one:
 an artifact MUST satisfy its own access label, its layer's, and its membership requirement together
 before it is served to a given viewer. The number shown beside a served artifact is always the
 count of its own declared membership that this viewer can see, never a total computed over the
@@ -312,5 +312,4 @@ Such a layer can declare all, any, a count, or none instead.
 §1, §4–§6, §10; `docs/design/polygon-membership.md` §1–§4, §8; `docs/design/dag-hierarchies.md`
 §1–§6; `docs/design/artifact-serving-at-scale.md` §1, §6.1, §9; `docs/design/artifact-fetch-protocol.md`
 §1–§4, §9; `docs/design/highlight-and-hierarchy.md` §2, §5; `docs/design/configuration.md` §1;
-decisions 0047, 0072, 0074, 0075, 0076, 0080, 0081, 0082, 0084, 0086, 0087, 0088, 0089, 0091, 0099,
-0103, 0107, 0109, 0111, 0114, 0117.
+decisions 0047, 0072, 0075, 0076, 0080, 0081, 0084, 0086, 0088, 0089, 0091, 0107, 0114.
