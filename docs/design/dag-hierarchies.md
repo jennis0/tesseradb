@@ -63,7 +63,7 @@ hierarchy  = { kind = "dag", prune_children = true }
 ```
 
 A fifth value beside `flat`, `nested`, `stacked` and `tiered`. It is `nested` in every respect but
-one: every artifact sits at level 0, `[[layer.levels]]` is refused, edges run within the level, the
+two: every artifact sits at level 0, `[[layer.levels]]` is refused, edges run within the level, the
 edges are **roll-up** rather than information ([decision 0087](../decisions/0087-cross-level-edges-are-information-not-rollup.md)),
 and a budget climbs the edges. Two things differ. **A child may hold several parents**, and a second
 parent arriving for a child is recorded rather than refused. And **a list key column is plain
@@ -121,12 +121,13 @@ points ([decision 0125](../decisions/0125-a-dag-list-column-is-membership-not-li
   [decision 0091](../decisions/0091-build-is-ingest-into-an-empty-database.md) forbids.
 - **A duplicate edge is one edge**, however many entries of the `parent` list stated it.
 - **A self-edge refuses, and so does a cycle.** The build has the check (`detect_cycles`, a
-  single-parent chain walk that becomes a depth-first search over parent lists). **Ingest has none
-  today** — the registry's `check_edge` accepts A→B and B→A minted in one batch, and the engine's
-  depth walks then read the loop as depth 0 by an edge-count guard, a latent gap on a tree and the
-  defining property on a DAG. So `mint_records` gains the check over the window's minted edges, and
-  that set is sufficient: a growth never adds lineage, so an edge into an existing artifact cannot
-  close a cycle, and every cycle is among the artifacts one window mints.
+  single-parent chain walk that becomes a depth-first search over parent lists). Ingest had none
+  at r1 — the registry's `check_edge` accepted A→B and B→A minted in one batch, and the engine's
+  depth walks then read the loop as depth 0 by an edge-count guard. **Built** (r4): the publish
+  route refuses a cycle among the artifacts it creates, at every kind, asserted by
+  `crates/tessera-engine/tests/artifact_hierarchy.rs`. That set is sufficient: a growth never adds
+  lineage, so an edge into an existing artifact cannot close a cycle, and every cycle is among the
+  artifacts one publication mints.
 - **A parent must exist before an edge into it** (`annotation-representation.md` §5.0.4), for every
   parent: a batch minting a child under two new parents mints both first. **A growth adds members
   and never lineage** (`artifacts-from-points.md` §6) is unchanged, and applies per parent — a

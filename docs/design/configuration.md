@@ -573,7 +573,7 @@ inferred from the edges, and the levels rule follows from it:
 |---|---|---|
 | `flat` | none | optional |
 | `nested` | a tree in the edges, every artifact at level 0 | **refused** — a tree's structure is its edges, not a ladder |
-| `dag` | a directed acyclic graph in the edges, every artifact at level 0 — `nested` in every respect but that **a child may name several parents**, on the artifact row's `parent` list; a list key column is multi-membership, as under `flat` ([`dag-hierarchies.md`](dag-hierarchies.md); decisions [0117](../decisions/0117-a-child-may-name-several-parents.md) and [0125](../decisions/0125-a-dag-list-column-is-membership-not-lineage.md)) | **refused**, as for `nested` |
+| `dag` | a directed acyclic graph in the edges, every artifact at level 0 — `nested` in every respect but two: **a child may name several parents**, on the artifact row's `parent` list, and a list key column is multi-membership, as under `flat` ([`dag-hierarchies.md`](dag-hierarchies.md); decisions [0117](../decisions/0117-a-child-may-name-several-parents.md) and [0125](../decisions/0125-a-dag-list-column-is-membership-not-lineage.md)) | **refused**, as for `nested` |
 | `stacked` | none; independent analyses, one per level | **required** |
 | `tiered` | containment edges running coarser → finer between levels | **required** |
 

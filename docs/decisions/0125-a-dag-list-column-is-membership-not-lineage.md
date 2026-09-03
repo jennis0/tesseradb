@@ -4,10 +4,9 @@
 
 ## What this answers
 
-A `dag` layer's membership is a list column at both entry points — one row per point naming the
-artifacts it sits in. A build read that list as plain membership, and rung 3 of the ingest campaign
-published a MeSH article's ancestor-closed descriptor set that way, about forty-six rows per
-article. The ingest route read the same column as a lineage — entry *k* the parent of entry *k+1*
+Rung 3 of the ingest campaign publishes a MeSH article's ancestor-closed descriptor set, about
+forty-six entries per article. A build took them as member rows, one per entry, and read plain
+membership; an ingest batch has one row per point, so the same set travels as a list column. The ingest route read the same column as a lineage — entry *k* the parent of entry *k+1*
 — which on a set of about ten unrelated descriptors asserted about nine edges per row the tree does
 not hold; the driver declined the layer, and carrying it anyway cost 31k items/s against 157k. The
 two entry points disagreed about what one column meant, which

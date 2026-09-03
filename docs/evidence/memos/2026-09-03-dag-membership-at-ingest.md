@@ -22,7 +22,7 @@ both — does not hold for this layer:
 - the ingest driver **declines** the layer by default and says so beside every count; the folded
   deployment then serves **1,792 descriptors against the all-in build's 1,926** at 10⁶ and
   **10,328 against 10,685** at 3.6×10⁷ (`test_corpora/medcpt/measurements.json`);
-- carrying the column anyway (`--carry-lineage-layers`) lands the memberships, drops the edges,
+- carrying the column anyway (`--carry-lineage-layers`, since narrowed to `--carry-nested-layers`) lands the memberships, drops the edges,
   emits a warning per row, and costs **31,445 items/s against 157,338** at 10⁶ — the edge checks
   scale with the corpus.
 
