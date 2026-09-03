@@ -320,60 +320,112 @@ def scan(limit: int | None = None) -> dict:
 # --------------------------------------------------------------------------------- the combine
 
 
-def verify_sample(table: pa.Table, n: int, rng: np.random.Generator) -> dict:
-    """A hundred matches, checked by string equality against `metadata.parquet` — not the hash.
+def verify_sample(shard_paths: list[str], n: int, rng: np.random.Generator) -> dict:
+    """Up to a hundred matches, one per randomly chosen shard, checked by string equality against
+    `metadata.parquet` — not the hash.
 
-    `table` carries `row` and the audit-only `gbifid` (dropped from the final output). For each
-    sampled row, `row // ROWS_PER_FILE` is the source file / row group (`stage.py` stamps `row =
-    arange(offset, offset + n)` in file order, so this is arithmetic, not a search), and the true
-    `source_id` is read back from that one row group — a targeted read, not a resident copy of the
-    column the rest of this module goes out of its way not to hold.
+    Not a statistically uniform sample of the 205,901,893 matched rows (shards vary in size, and
+    this takes one row per chosen shard rather than weighting by shard size) — it is an audit, the
+    brief's "verify one hundred matches", not an estimator, and reading one row from a hundred small
+    shard files costs nothing next to what a true reservoir sample over the whole join would.
+
+    For the chosen row, `row // ROWS_PER_FILE` is the source file / row group (`stage.py` stamps
+    `row = arange(offset, offset + n)` in file order, so this is arithmetic, not a search), and the
+    true `source_id` is read back from that one row group — a hundred targeted, single-row-group
+    reads, not a resident copy of the column the rest of this module goes out of its way not to
+    hold.
     """
-    total = table.num_rows
-    if total == 0:
+    if not shard_paths:
         return {"sampled": 0, "verified": 0}
-    idx = rng.choice(total, size=min(n, total), replace=False)
-    sample = table.take(pa.array(idx))
-    rows = np.asarray(sample["row"])
-    gbifids = chunked_to_numpy(sample["gbifid"])
+    chosen = rng.choice(len(shard_paths), size=min(n, len(shard_paths)), replace=False)
+    pf_meta = pq.ParquetFile(sources.staging() / "metadata.parquet")
+    sampled = verified = 0
+    for i in chosen:
+        table = pq.read_table(shard_paths[i], columns=["row", "gbifid"])
+        if table.num_rows == 0:
+            continue
+        pos = int(rng.integers(0, table.num_rows))
+        row = int(table["row"][pos].as_py())
+        gbifid = table["gbifid"][pos].as_py()
 
-    pf = pq.ParquetFile(sources.staging() / "metadata.parquet")
-    verified = 0
-    for row, gbifid in zip(rows, gbifids):
-        file_index = int(row) // sources.ROWS_PER_FILE
-        position = int(row) % sources.ROWS_PER_FILE
-        group = pf.read_row_group(file_index, columns=["row", "source_id"])
-        assert group["row"][position].as_py() == int(row), "row group is not in row order"
+        file_index = row // sources.ROWS_PER_FILE
+        position = row % sources.ROWS_PER_FILE
+        group = pf_meta.read_row_group(file_index, columns=["row", "source_id"])
+        assert group["row"][position].as_py() == row, "row group is not in row order"
         source_id = group["source_id"][position].as_py()
-        if source_id == gbifid:
-            verified += 1
-    return {"sampled": len(sample), "verified": verified}
+
+        sampled += 1
+        verified += int(source_id == gbifid)
+    return {"sampled": sampled, "verified": verified}
 
 
 def combine(sample_n: int = 100) -> dict:
-    """Shards -> `gbif-coordinates.parquet`, plus the spot check and `join.json`."""
+    """Shards -> `gbif-coordinates.parquet`, plus the spot check and `join.json`.
+
+    **Streamed shard by shard, not concatenated first.** The first version read all 2,989 matching
+    shards into one `pa.Table` before doing anything else, which peaked at 18.55 GB RSS on this
+    box's ~8 GB budget — the scan that produced the shards stayed at a measured 6.33 GB for its
+    entire ~6.6 h run (module docstring), so this was the combine step's own cost, not inherited
+    from the scan. Nothing here needs more than one shard at a time: the write is one row group per
+    shard (the same shape `stage.py`'s combine uses for `metadata.parquet`), the coordinate counts
+    are a running sum, and the string-equality audit reads one row from a hundred shards directly
+    rather than from an in-memory concatenation (`verify_sample`, above). Also why the earlier
+    `large_string` cast is gone: it existed only to let `.take()` gather a sample across the full
+    concatenation, which no longer happens.
+    """
     t0 = time.time()
     shard_paths = sorted(glob.glob(str(shards_dir() / "*.shard")))
-    tables = [pq.read_table(p, schema=SHARD_SCHEMA) for p in shard_paths]
-    table = pa.concat_tables(tables) if tables else pa.table({}, schema=SHARD_SCHEMA)
-    del tables
 
     rng = np.random.default_rng(0)
-    check = verify_sample(table, sample_n, rng)
+    check = verify_sample(shard_paths, sample_n, rng)
     assert check["verified"] == check["sampled"], (
         f"string-equality spot check failed: {check['verified']}/{check['sampled']} — "
         "a hash match disagreed with the real strings; the collision risk in the module docstring "
         "was meant to be small, not this small a sample catching one"
     )
 
-    out_table = table.select(["row", "lat", "lon", "coordinateuncertaintyinmeters", "gbif_license"])
     out = sources.staging() / "gbif-coordinates.parquet"
-    pq.write_table(out_table, out, compression="zstd", use_dictionary=["gbif_license"])
+    writer: pq.ParquetWriter | None = None
+    matched_rows = with_coords = 0
 
-    matched_rows = out_table.num_rows
-    with_coords = int(
-        matched_rows - pc.sum(pc.is_null(out_table["lat"])).as_py() if matched_rows else 0
-    )
+    for path in shard_paths:
+        table = pq.read_table(path, schema=SHARD_SCHEMA)
+        n = table.num_rows
+        if n == 0:
+            continue
+
+        # `scan()` builds `lat`/`lon`/`coordinateuncertaintyinmeters` through
+        # `np.asarray(table[col])` (module docstring's numpy detour, there for the `[qi]` gather),
+        # which silently turns an Arrow null into a float `NaN` rather than carrying the null
+        # forward — so every shard on disk already has this: a missing GBIF coordinate is a real,
+        # finite-looking `NaN`, not a null. GBIF never publishes `NaN` as an actual coordinate, so
+        # it is unambiguous evidence of the same missingness the null bit would have carried, and
+        # it is converted back to a proper null here rather than reported as if 100% of matches
+        # carried coordinates (an early run of this function did exactly that: `pc.is_null` saw no
+        # nulls because there were none, only `NaN`s).
+        for col in ("lat", "lon", "coordinateuncertaintyinmeters"):
+            table = table.set_column(
+                table.schema.get_field_index(col),
+                col,
+                pc.if_else(pc.is_nan(table[col]), pa.scalar(None, type=table[col].type), table[col]),
+            )
+
+        out_table = table.select(["row", "lat", "lon", "coordinateuncertaintyinmeters", "gbif_license"])
+        if writer is None:
+            writer = pq.ParquetWriter(
+                out, out_table.schema, compression="zstd", use_dictionary=["gbif_license"]
+            )
+        writer.write_table(out_table, row_group_size=n)
+
+        matched_rows += n
+        has_coords = pc.and_(pc.is_valid(out_table["lat"]), pc.is_valid(out_table["lon"]))
+        with_coords += int(pc.sum(has_coords).as_py())
+        del table, out_table
+
+    if writer is not None:
+        writer.close()
+    else:
+        pq.write_table(pa.table({}, schema=OUTPUT_SCHEMA), out)
 
     ids_summary = json.loads((sources.staging() / "gbif-ids.json").read_text())
     metadata_summary = json.loads((sources.staging() / "metadata.json").read_text())
@@ -408,12 +460,12 @@ def combine(sample_n: int = 100) -> dict:
             "MBps_by_part_seconds": round(scan_bytes / 1e6 / max(scan_seconds, 1e-9), 2),
         },
         "bytes_on_disk": out.stat().st_size,
+        "peak_rss_gb": round(peak_rss_gb(), 2),
         "seconds": round(time.time() - t0, 1),
     }
     (sources.staging() / "join.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary, indent=2))
     return summary
-
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
