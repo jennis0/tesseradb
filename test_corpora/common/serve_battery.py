@@ -834,6 +834,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         served.clear_scratch()
         open_at = time.time()
         served.start()
+        open_s = round(time.time() - open_at, 2)
         args.viewer, args.session = served.viewer, served.session
         args.session_cred = served.credential("session")
         args.bundle, args.cache = str(bundle), str(served.cache)
@@ -845,10 +846,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = Battery(args).run()
     finally:
         if served is not None:
-            result_open = round(time.time() - open_at, 2)
             served.stop()
     if served is not None:
-        result["open_s"] = result_open
+        # The **open**, which is `tessera serve` from launch to `/readyz` — on this rung it is the
+        # artifact projections being built at open rather than on the first request. Measured
+        # around `start()` alone; taking it around the whole run would report the battery.
+        result["open_s"] = open_s
     result["ran_s"] = round(time.time() - started, 1)
     Path(args.out).write_text(json.dumps(result, indent=2))
     print(f"wrote {args.out} in {result['ran_s']} s")
