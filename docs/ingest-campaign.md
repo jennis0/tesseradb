@@ -24,7 +24,7 @@ is the owner's to settle.
 | **1** | **GeoNames** | **13,463,857** | **Built, verified and served**, and rebuilt 2026-08-30 on a declared `web_mercator` projection. Not done against §7.1's bar — see §2 |
 | **2** | **Overture places + divisions** | **7.4×10⁷** | **Built and verified**, and rebuilt 2026-08-30 on a declared projection with its boundary polygons in longitude and latitude — see §3 |
 | **3** | **MedCPT / PubMed** | **35,920,666** | **Built, verified and served** 2026-09-02 — see §4.6. The ladder's largest embedding rung and its first `dag` layer: MeSH's 30,217 descriptors with members over 41,321 edges, membership closed upward to **1.66×10⁹ entries** (3.27× rung 2's spill), an 11.15 GB bundle in 12 m 10 s at 16.03 GB peak, `verify --deep` clean. ⊘ Three non-reproducing host faults over two runs, §4.6 |
-| 4 | PaperSeek + OpenAlex | 1.02×10⁸ | Not started. Staged |
+| **4** | **PaperSeek + OpenAlex** | **102,117,343** | **Staged, prepared and ⊘ not built** 2026-09-03 — see §4a. The corpus exists: 254 GB staged in one 164.7-minute pass, laid out and joined to OpenAlex in 43.8 minutes at 18.4 GB, 52.2 GB of `points.parquet`, 394,325,928 topic member rows, and the ladder's first compartment that is a property of the row. **`tessera build` reaches the abstract text index and stalls there** — not refused, not killed, 93% system time against a 128 GiB mapped arena on a 47 GB box. The rung's finding is that negative |
 | 5 | TreeOfLife | 2.33×10⁸ | Not started. Staged |
 | 6 | GBIF | 3.50×10⁹ | Not started. Staged; needs a second local volume |
 | 7 | Overture buildings | 2.53×10⁹ | Not started. Staged; needs a second local volume |
@@ -582,6 +582,84 @@ the Rust build; **each run is otherwise bit-consistent with a recompute**; five 
 are excluded with numbers in the rung README. Recorded as a **host fault, ⊘ not proven** — the
 action is a memtest (§8), not more detection machinery.
 
+## 4a. Rung 4 — PaperSeek + OpenAlex, prepared and not built
+
+All figures **local NVMe on this box** (WSL2, 12 cores, 47 GB, one RTX 3080) unless the medium says
+otherwise. The rung is [`../test_corpora/paperseek/`](../test_corpora/paperseek/README.md), which
+carries the per-step tables; this section is what the campaign takes from it.
+
+**The rung was chosen to put a bundle past the box's memory**, and nothing in the declaration was
+trimmed to make it fit — the abstracts are 118.9 GB of characters uncompressed and are indexed as
+text. That decision is what the rung measured, and the answer arrived one stage earlier than
+expected: **it is the build, not the server, that meets the wall.**
+
+**Two tracks, and the interface between them held.** The vectors track staged, laid out and wrote
+the corpus; the OpenAlex track produced the extract, the topic tree and the licence resolve. Neither
+waited on the other and the merge was clean.
+
+| | |
+|---|---|
+| staging | **164.7 min** over SMB, 22.2 GB peak, 254 GB written locally (195 GiB of `float16` vectors, 59 GB of per-chunk parquet). ⊘ Not comparable with rung 3's 60.5 min — the OpenAlex track's own scan of `works` shared the share for half of it |
+| `prepare.py --sample 0` | **43.8 min**, **18.44 GB** peak — route 1,487 s (1,208 s placing 102,117,343 rows against a 1.5M-row fit set), the one streaming pass 980 s at a flat 18.4 GB |
+| `tessera build` | ⊘ **does not converge**, below |
+| the 10⁶ sample, end to end | prepare 601 s at 12.53 GB · build **23.3 s** to **744.3 MB**, anonymous high-water **968 MB** against 2,398 MB of `VmHWM` · `verify --deep` clean in 0.33 s at 52.5 MB · served, driven, counts move with the mask |
+
+**The compartment is the first on the ladder that is a property of the row.** GeoNames and Overture
+compartment on a country of convenience and MedCPT on the branch letters of an indexing vocabulary;
+a work's licence is a rights fact about the work. **Owner ruling 2026-09-03:** a work with no
+licence carries `unlicensed`, an eleventh key of the closed vocabulary, rather than no term and the
+view's `public` default — the campaign's principal ladder starts at 1% and cannot be composed under
+a 77% floor every principal would hold for free. The ladder is then **0 / 14,028,593 /
+102,117,343** across no terms, `cc-by` and all eleven keys.
+
+### The build stalls in the abstract text index, and the mechanism is measured
+
+`tessera build --stage-timings` got through every stage before the text index and then stopped
+making useful progress. It was **neither refused nor killed** — no OOM, no pre-flight refusal, no
+signal; it is stalled on I/O.
+
+| stage | wall | `VmHWM` |
+|---|---|---|
+| `source_ids` … `external_ids` | 47 s total | 6,274 MiB |
+| `attribute_tail` | 759.6 s | **24,409 MiB** |
+| `layers` | 84.5 s | 24,409 MiB |
+| `text_index` | **> 4 h and counting** | — |
+
+Sampled four hours in: **11 of 13 threads in uninterruptible sleep on `folio_wait_bit_common`**,
+**93% of CPU in the kernel**, **~480 major faults a second**, PSI reporting the process group
+**fully stalled on I/O 60.8% of the time** — and an **anonymous high-water of 5.19 GB**. `title`'s
+text index finished, at 2.4 GB; the abstract column's does not.
+
+**What binds is the file the design maps, not the heap a budget models.** The build preallocates one
+arena per text column: `.build-tmp/column-13.arena` is **137,438,953,472 bytes — 128 GiB exactly** —
+against 47 GB of RAM. The text pass walks it and the page cache cannot hold enough of it, so nearly
+every access is a major fault. `--memory-budget` cannot reach this, the anonymous figure being a
+tenth of the box.
+
+⊘ **This is W2 arriving in a shape the campaign did not name.** W2 is an OOM the pre-flight should
+refuse; what happened is neither — the build stays well inside memory and stops progressing. The
+first two walls fired at neither rung 2 nor rung 3, and this is the first time either has been met
+at all.
+
+⊘ **[`../probes/2026-09-02-text-peak-split/`](../probes/2026-09-02-text-peak-split/README.md)
+extrapolated the right quantity and could not have predicted this.** Its ~6 GB for the abstracts'
+own anonymous share at 10⁸ is close to the 5.19 GB measured — which is exactly why it does not
+predict the stall. It measured to 10⁷, where the arena is ~13 GiB and fits, and the wall it named as
+"a disk question and a wall-clock question, not a memory one" is a **page-cache** question, which is
+neither of the two it separated. §8's abstracts entry should be read with that correction.
+
+**Not patched.** No `--memory-budget` arm was tried, the declaration was not trimmed and the
+abstracts were not dropped: each answers a different question from the one the rung was built to
+ask. What to do about it is the owner's, and the options are visibly (a) a budget arm, (b) an arena
+the text pass streams rather than maps, (c) a smaller corpus, (d) more RAM.
+
+**⊘ Not measured, because they need the bundle that does not exist**: `verify --deep` at 10⁸, the
+bundle's size and per-directory breakdown, the serve-under-`MemoryMax=24G` result, and the layer
+report's median box at full scale. The 10⁶ sample's layer spread is measured and is in the rung
+README: `clusters/kmeans` median **0.75%** of the map, `topics/openalex` median **2.35%** and
+tightening with depth — 6.61% at domain to **1.64%** at topic. Both layers draw; neither is
+withdrawn on that evidence.
+
 ## 5. The machinery this campaign built
 
 - **[`../test_corpora/`](../test_corpora/README.md)** — one directory per rung, in git: `prepare.py`,
@@ -773,11 +851,23 @@ depth, `parent_ids` on the wire and the client — the engine and client tracks'
   at rung 1 rather than at rung 3.
 - Everything in §2's ❌ rows: the 0091 test, the oracle census, the write cycle, p99 and a screenshot.
 
-**Before rung 4**
+**Found at rung 4**
+
+- ⊘ **The build's mapped text arena is what stops rung 4, and no budget reaches it** (§4a). The
+  abstract column's `.build-tmp` arena is 128 GiB against a 47 GB box; the build's own anonymous
+  high-water is 5.19 GB. It is neither an OOM nor a refusal — 93% system time, 11 of 13 threads on
+  `folio_wait_bit_common`, PSI `io` `full` at 61%. **This is the campaign's first wall actually
+  met**, and it is not the shape W2 names. The owner's options are a budget arm, a streamed arena,
+  a smaller corpus, or more RAM.
+- ⊘ **The abstracts ruling's evidence needs the correction above, not a reversal.** The text-peak
+  probe's anonymous extrapolation was accurate; what it could not see at 10⁷ is that the arena it
+  never had to page becomes the binding constraint at 10⁸.
+
+**Before rung 4** — *carried; rung 4 ran without either*
 
 - ~~The DAG design, reviewed and ruled~~ — **done, and built**: rung 3 is the corpus it was designed
   for and it carries a `kind = "dag"` layer end to end (§4.6).
-- Rung 0, still not taken. It confirms W1 and W2 reproduce and whether the pre-flight refuses rather
-  than being killed. ⊘ **Rungs 2 and 3 both passed without either wall firing** — rung 3 wrote
-  1.66×10⁹ membership entries and peaked at 16.03 GB — which is a reason to want the controlled run
-  rather than a reason to drop it.
+- Rung 0, still not taken, and rung 4 is a reason to want it rather than a reason to drop it. It
+  confirms W1 and W2 reproduce and whether the pre-flight refuses rather than being killed. ⊘
+  **Rungs 2 and 3 both passed without either wall firing**; rung 4 met a wall that is neither of
+  them (§4a), which is the case a controlled run would have named first.
