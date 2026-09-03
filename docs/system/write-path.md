@@ -113,7 +113,7 @@ not how a client happened to chunk its upload.
 Within one window, entity ids are assigned in order of each item's signature, its sorted,
 deduplicated list of terms, and then by external id. This groups the items carrying a term into
 contiguous runs of ids. The term index, which records for each term the items that carry it (the
-code calls these lists postings), stores runs far more compactly than scattered ids. Nothing repairs this ordering later: a wider window produces longer runs, and a narrower one
+code calls these lists `postings`), stores runs far more compactly than scattered ids. Nothing repairs this ordering later: a wider window produces longer runs, and a narrower one
 does not.
 
 The window closes when it reaches a configured row count, or when the server's incoming work is
