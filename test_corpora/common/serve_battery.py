@@ -487,10 +487,27 @@ class Battery:
         self.rng = random.Random(args.seed)
         self.oom_seen = False
         self.failures = 0
+        self.died: dict | None = None
 
-    def _fresh_token(self, terms: Sequence[str]) -> str:
-        token, _ = authorise(self.args.session, self.args.session_cred, terms)
-        return token
+    def _fresh_token(self, terms: Sequence[str]) -> str | None:
+        """A new session. `None` once the server has died — the caller stops rather than raising."""
+        try:
+            token, _ = authorise(self.args.session, self.args.session_cred, terms)
+            return token
+        except requests.exceptions.RequestException as e:
+            self._record_death("session/authorise", e, terms)
+            return None
+
+    def _record_death(self, during: str, error: Exception, terms: Sequence[str]) -> None:
+        if self.died is None:
+            events = self.evictor.cgroup_events() or {}
+            self.died = {
+                "during": during,
+                "principal_terms": list(terms),
+                "error": f"{type(error).__name__}: {error}"[:400],
+                "cgroup_events": events.get("memory.events"),
+                "oom_killed": bool(events.get("memory.events", {}).get("oom_kill")),
+            }
 
     def _watch_oom(self) -> None:
         events = self.evictor.cgroup_events()
@@ -536,15 +553,21 @@ class Battery:
         token = None
         if not fresh_session:
             token = self._fresh_token(terms)
+            if token is None:
+                return []
             # Build this session's fragments once — that is what "warm engine" means — on a
             # location that is not one of the samples, so no sample's own extent is faulted here.
             self._sample(token, view_id, zoom, pool[0][0], cold=False)
+        if token is None and not fresh_session:
+            return []
         out = []
         for i in range(n):
             box = pool[i % len(pool)][0]
             self.evictor.evict()
             if fresh_session:
                 token = self._fresh_token(terms)
+            if token is None:
+                break
             s = self._sample(token, view_id, zoom, box, cold=True)
             s["location"] = i % len(pool)
             out.append(s)
@@ -593,8 +616,18 @@ class Battery:
         ladder_out = []
         for rung in ladder_spec:
             terms = rung["terms"]
+            # **A dead server ends the run and does not lose it.** Under a cap the process can be
+            # OOM-killed part-way up the ladder — which is the result the capped run exists to
+            # find — and every principal measured before that is still a measurement. The rung
+            # that was in flight is recorded in `died` with the principal it was serving.
+            if self.died is not None:
+                break
             self.log(f"  principal target {rung['target']:.0%}: {len(terms)} term(s) {terms}")
-            token, authorise_s = authorise(args.session, args.session_cred, terms)
+            try:
+                token, authorise_s = authorise(args.session, args.session_cred, terms)
+            except requests.exceptions.RequestException as e:
+                self._record_death("session/authorise", e, terms)
+                break
             # The first viewport of a fresh session is its own figure: it carries the
             # `(view, principal)` fragment build, which is not a per-request cost and must not be
             # averaged into one.
@@ -666,6 +699,8 @@ class Battery:
                             )
                         )
 
+            # Appended even when the server died mid-rung: the cells measured before it are
+            # measurements, and `died` says where it stopped.
             rung_out = {
                 "target": rung["target"],
                 "terms": terms,
@@ -681,7 +716,11 @@ class Battery:
             rung_out["battery"] = battery_figures(cells)
             ladder_out.append(rung_out)
 
-        text = self._text_and_drilldown(token, view_id, view_id, quant, pools, zooms)
+        text = (
+            {"skipped": "the server died earlier in the run"}
+            if self.died is not None
+            else self._text_and_drilldown(token, view_id, view_id, quant, pools, zooms)
+        )
 
         return {
             "cap": args.cap_bytes,
@@ -700,6 +739,7 @@ class Battery:
             "cgroup_at_end": self.evictor.cgroup_events(),
             "oom_kill_seen": self.oom_seen,
             "request_failures": self.failures,
+            "died": self.died,
             "ladder": ladder_out,
             "text_and_drilldown": text,
         }
