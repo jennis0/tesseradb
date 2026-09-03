@@ -1,7 +1,7 @@
 # A child may name several parents — design
 
 **Date:** 2026-09-01
-**Status:** Normative (r3) for the `dag` hierarchy kind and for the rule that a withheld artifact
+**Status:** Normative (r4) for the `dag` hierarchy kind and for the rule that a withheld artifact
 is not in the viewer's tree. Reviewed once under two lenses and ruled by decision 0117 (2026-09-01); the
 rulings are folded into [`configuration.md`](configuration.md) (the `hierarchy` row and the kinds
 table), [`artifacts-from-points.md`](artifacts-from-points.md) §4, [`annotations.md`](annotations.md)
@@ -63,11 +63,12 @@ hierarchy  = { kind = "dag", prune_children = true }
 ```
 
 A fifth value beside `flat`, `nested`, `stacked` and `tiered`. It is `nested` in every respect but
-one: every artifact sits at level 0, `[[layer.levels]]` is refused, edges run within the level, the
+two: every artifact sits at level 0, `[[layer.levels]]` is refused, edges run within the level, the
 edges are **roll-up** rather than information (decision 0087),
-a list key column is read as a lineage, and a budget climbs the edges. The one difference is that
-**a child may hold several parents**, and a second parent arriving for a child is recorded rather
-than refused.
+and a budget climbs the edges. Two things differ. **A child may hold several parents**, and a second
+parent arriving for a child is recorded rather than refused. And **a list key column is plain
+multi-membership** rather than a lineage — the set of artifacts the point is in, read as `flat`
+reads one — because a DAG node's ancestor closure has no linear order for a list to carry (§4).
 
 The four-kinds table gains a row:
 
@@ -92,36 +93,41 @@ data names two coarser parents stays refused: a ward in two districts is a data 
 **Why not `polyhierarchy`.** The other values name shapes and this one would name a library
 science term, which is the argument that renamed `administrative` to `tiered` (0087).
 
-## 4. Edges: two spellings, both may name several
+## 4. Edges: one spelling, which may name several
 
-An edge has two spellings today, and both are kept: the `parent` column on an artifact row, and
-the adjacency of a lineage list on a member row. Under `dag`:
+A tree's edge has two spellings — the `parent` column on an artifact row, and the adjacency of a
+lineage list on a member row — and they never disagree, because a tree node's ancestor closure is
+a chain: a `nested` lineage list states the memberships and the edges at once. A DAG node's closure
+is a set with no linear order, so a list of its members has no adjacency anyone could have meant,
+and reading one as a lineage asserts edges the graph does not hold — rung 3's articles sit in
+about ten unrelated descriptors, some forty-six after closure, and read as lineages each row
+claimed about nine edges the tree lacks. So under `dag` an edge has **one spelling**, at both entry
+points ([decision 0125](../decisions/0125-a-dag-list-column-is-membership-not-lineage.md)):
 
 - **`parent` on the artifact row may be a list** — `list<utf8>` or `list<int>` on the rule an
   integer key already takes — or a scalar, which is a list of one. A row's grain stays one row per
   artifact: the build's refusal of one key on two rows stands, so several parents are several
-  entries in one cell rather than several rows.
-- **A lineage naming a second parent for a child adds the edge, where the edge is being created.**
-  This is the `two_parents` refusal — in the build's `record_lineage` and `apply_lineage`, in the
-  ingest route's batch check and in `mint_records`' cross-window check — turned into an insertion
-  when the layer's kind is `dag`, and left exactly as it is for `nested` and `tiered`. A point in ten
-  concepts is ten member rows each carrying one lineage; each lineage is one path from a root, and
-  the union of the paths is the graph. **Edges are settled at the publication that creates the
-  artifact**, at both entry points: the build folds every row before applying, so it sees the whole
-  graph, and a mint sees the batch and the window that mint it. A lineage naming a parent for a child
-  the layer *already holds* is the growth rule below, on a DAG exactly as on a tree — so a
-  list-spelled graph ingested in batches keeps only the edges each child arrived with, which is what
-  a tree has always done and not a divergence [decision 0091](../decisions/0091-build-is-ingest-into-an-empty-database.md)
-  forbids. Rung 3 spells its edges on the roster's `parent` column, which is complete at
-  publication, and that is the spelling to prefer for any DAG ingested rather than built.
-- **A duplicate edge is one edge**, whichever spelling stated it and however many rows did.
+  entries in one cell rather than several rows. At ingest this is the roster published on
+  `/control/layers`, complete before the points arrive.
+- **A list key column on a member row is plain multi-membership**, read exactly as `flat` reads
+  one: every entry is an artifact the point is a member of, at level 0, and no edge is read from the
+  adjacency. A point in ten concepts is one row naming ten keys, or ten rows naming one each; the
+  two are the same memberships. The `two_parents` refusal — in the build's `record_lineage` and
+  `apply_lineage`, in the ingest route's batch check and in `mint_records`' cross-window check — is
+  the tree kinds' and stays exactly as it is for `nested` and `tiered`; a `dag` list never reaches
+  it because it declares no edge to conflict over. **Edges are settled at the publication that
+  creates the artifact**, which on a DAG is the only place they are spelled, so a graph ingested
+  in batches holds exactly the edges its roster named — no divergence
+  [decision 0091](../decisions/0091-build-is-ingest-into-an-empty-database.md) forbids.
+- **A duplicate edge is one edge**, however many entries of the `parent` list stated it.
 - **A self-edge refuses, and so does a cycle.** The build has the check (`detect_cycles`, a
-  single-parent chain walk that becomes a depth-first search over parent lists). **Ingest has none
-  today** — the registry's `check_edge` accepts A→B and B→A minted in one batch, and the engine's
-  depth walks then read the loop as depth 0 by an edge-count guard, a latent gap on a tree and the
-  defining property on a DAG. So `mint_records` gains the check over the window's minted edges, and
-  that set is sufficient: a growth never adds lineage, so an edge into an existing artifact cannot
-  close a cycle, and every cycle is among the artifacts one window mints.
+  single-parent chain walk that becomes a depth-first search over parent lists). Ingest had none
+  at r1 — the registry's `check_edge` accepted A→B and B→A minted in one batch, and the engine's
+  depth walks then read the loop as depth 0 by an edge-count guard. **Built** (r4): the publish
+  route refuses a cycle among the artifacts it creates, at every kind, asserted by
+  `crates/tessera-engine/tests/artifact_hierarchy.rs`. That set is sufficient: a growth never adds
+  lineage, so an edge into an existing artifact cannot close a cycle, and every cycle is among the
+  artifacts one publication mints.
 - **A parent must exist before an edge into it** (`annotation-representation.md` §5.0.4), for every
   parent: a batch minting a child under two new parents mints both first. **A growth adds members
   and never lineage** (`artifacts-from-points.md` §6) is unchanged, and applies per parent — a

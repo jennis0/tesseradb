@@ -9687,20 +9687,15 @@ impl Executor {
             // published would be the batch's row order rather than anything the caller wrote. It is
             // made here, over the batch's own column, because that is where the two rows are — and
             // it is the whole check for a minted child, whose parent nothing else has an opinion
-            // about yet. **On a `dag` layer a second parent is an edge, not a contradiction**
-            // (`dag-hierarchies.md` §4, decision 0117), and the check passes it through to the
-            // close, where `mint_records` collects a child's parents.
-            let several = |layer: &str| {
-                registry.get(layer).is_some_and(|l| {
-                    l.declaration.hierarchy.kind == tessera_types::layer::HierarchyKind::Dag
-                })
-            };
+            // about yet. It holds at every kind: only a `nested` or `tiered` list column declares
+            // edges, and a `dag` layer's several parents arrive on its artifact rows' `parent`
+            // list by the publish route, never here (`ListMeaning`, decision 0125).
             let mut claimed: std::collections::BTreeMap<(&str, u32, &str), &str> =
                 Default::default();
             for edge in &artifacts.edges {
                 let at = (edge.layer.as_str(), edge.level, edge.child.as_str());
                 if let Some(first) = claimed.insert(at, edge.parent.as_str()) {
-                    if first != edge.parent && !several(&edge.layer) {
+                    if first != edge.parent {
                         return Err(format!(
                             "{} in level {} of {} is named as a child of both {first} and {}. A \
                              list column declares the edges, so two rows naming different parents \
@@ -9890,23 +9885,21 @@ impl Executor {
             // **A child named under two parents refuses**, across the window as it does within a
             // batch: two entries naming different parents for one artifact are two hierarchies,
             // and there is no correct output. Checked before anything is prepared, so a refusal
-            // spends nothing. **On a `dag` layer the second parent is recorded** — a child's
-            // parents are the union of what every batch in the window named for it, each key
-            // once (`dag-hierarchies.md` §4, decision 0117). The cycle those edges could close is
-            // refused where the artifacts are created, in `prepare_publish`, which walks the
-            // batch's own edges — a growth never adds lineage, so the window's minted edges are
-            // every edge a cycle could run through.
+            // spends nothing. Every kind whose list declares edges is a tree here — a `dag`
+            // layer's list is memberships and its parents travel on the artifact row (decision
+            // 0125) — so a child's parents are at most one key, held as a list because that is
+            // the record's shape. The cycle those edges could close is refused where the
+            // artifacts are created, in `prepare_publish`, which walks the batch's own edges — a
+            // growth never adds lineage, so the window's minted edges are every edge a cycle
+            // could run through.
             let mut parents: BTreeMap<(String, u32, String), Vec<String>> = BTreeMap::new();
             for edge in &edges {
-                let several = registry.get(&edge.layer).is_some_and(|l| {
-                    l.declaration.hierarchy.kind == tessera_types::layer::HierarchyKind::Dag
-                });
                 let at = (edge.layer.clone(), edge.level, edge.child.clone());
                 let named = parents.entry(at).or_default();
                 if named.contains(&edge.parent) {
                     continue;
                 }
-                if !named.is_empty() && !several {
+                if !named.is_empty() {
                     return Err(format!(
                         "{} in level {} of {} is named as a child of both {} and {}. A list \
                          column declares the edges, so two rows naming different parents for one \

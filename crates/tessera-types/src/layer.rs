@@ -294,9 +294,14 @@ pub enum HierarchyKind {
     /// A directed acyclic graph, held in the layer's edges — [`Nested`](HierarchyKind::Nested) in
     /// every respect but one: **a child may name several parents**, and a second parent arriving
     /// for a child is recorded rather than refused (`dag-hierarchies.md` §3, decision 0117). Every
-    /// artifact sits at level 0, `[[layer.levels]]` is refused, the edges are roll-up, a list key
-    /// column is read as a lineage, and a budget climbs the edges. A self-edge and a cycle refuse
-    /// at both entry points.
+    /// artifact sits at level 0, `[[layer.levels]]` is refused, the edges are roll-up, and a budget
+    /// climbs the edges. A self-edge and a cycle refuse at both entry points.
+    ///
+    /// **Its edges are spelled on the artifact row's `parent` list and nowhere else** (decision
+    /// 0125). A list key column under `dag` is plain multi-membership, read exactly as `flat`
+    /// reads one: a tree node's ancestor closure is a chain, so a `nested` lineage list states
+    /// memberships and edges at once; a DAG node's closure is a set with no linear order, so the
+    /// adjacency of its list carries nothing anyone could have meant.
     ///
     /// A kind value rather than a key on `nested`, because the kind is what every reader switches
     /// on and a tree and a graph are different shapes; and `nested`'s cousin rather than
@@ -1400,21 +1405,23 @@ pub enum ListMeaning {
     /// level. `edges` is `tiered`'s containment between consecutive entries; `stacked`'s levels are
     /// independent analyses and carry none.
     Levelled { levels: usize, edges: bool },
-    /// `nested` and `dag`: a lineage, entry *k* the parent of entry *k+1*, **every artifact at
-    /// level 0** — a treed layer's hierarchy is its edges and it declares no levels (decision
-    /// 0082). Under `dag` a second lineage naming another parent for a child adds the edge; under
-    /// `nested` it is refused (`dag-hierarchies.md` §4).
+    /// `nested`: a lineage, entry *k* the parent of entry *k+1*, **every artifact at level 0** —
+    /// a treed layer's hierarchy is its edges and it declares no levels (decision 0082). A second
+    /// lineage naming another parent for a child is refused (`artifacts-from-points.md` §4).
     Lineage,
-    /// `flat`: a membership each, at level 0, in no order. A flat layer has no positions for a list
-    /// to index, so the entries are a set and nothing is read from their adjacency.
+    /// `flat` and `dag`: a membership each, at level 0, in no order. A flat layer has no positions
+    /// for a list to index, so the entries are a set and nothing is read from their adjacency. A
+    /// `dag` layer's list is the same set: a DAG node's ancestor closure has no linear order, so
+    /// the list cannot be a lineage, and its edges are spelled on the artifact row's `parent` list
+    /// only (`dag-hierarchies.md` §4, decision 0125).
     Unordered,
 }
 
 impl ListMeaning {
     pub fn of(kind: HierarchyKind, levels: usize) -> Self {
         match kind {
-            HierarchyKind::Flat => ListMeaning::Unordered,
-            HierarchyKind::Nested | HierarchyKind::Dag => ListMeaning::Lineage,
+            HierarchyKind::Flat | HierarchyKind::Dag => ListMeaning::Unordered,
+            HierarchyKind::Nested => ListMeaning::Lineage,
             HierarchyKind::Stacked => ListMeaning::Levelled {
                 levels,
                 edges: false,
@@ -2123,12 +2130,6 @@ mod tests {
             "a nested layer holds every artifact at level 0"
         );
         assert!(lineage.declares_edges());
-        assert_eq!(
-            ListMeaning::of(HierarchyKind::Dag, 0),
-            lineage,
-            "a dag layer reads a list exactly as a nested one does; what differs is only that a \
-             second parent is recorded rather than refused"
-        );
 
         let flat = ListMeaning::of(HierarchyKind::Flat, 0);
         assert_eq!(flat.arity(), None);
@@ -2136,6 +2137,13 @@ mod tests {
         assert!(
             !flat.declares_edges(),
             "a flat list is plain multi-membership — a set, with no positions to read"
+        );
+        assert_eq!(
+            ListMeaning::of(HierarchyKind::Dag, 0),
+            flat,
+            "a dag layer reads a list as flat does: a DAG node's closure is a set, not a chain, \
+             so the list is memberships and its edges come from the artifact row's parent list \
+             alone (decision 0125)"
         );
     }
 

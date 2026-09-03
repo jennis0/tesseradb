@@ -116,7 +116,7 @@ second file per rung would put two halves of one measurement in two places.
 | `blocked` | object or absent | the cell did not run: where it stopped and the refusal, verbatim |
 | `content_removed` | list | supplied content kinds the base could not carry, one record each. Only ever non-empty at *f* = 100%: a kind declaring `require_member_visibility = "all"` is served only to a viewer who can see every document it was generated from, and an artifact with no members names an empty generating set, which is satisfied by everyone and is refused at **both** entry points. The kind is dropped from the measurement's own declaration and from the roster that supplied it, so the layer census differs on that surface by design |
 | `base_build`, `base_build_stages` | — | `tessera build` over the complement, same fields as §1 |
-| `layers` | — | which layers the wire carried, which it declined and why. **Not patched around**: a layer the wire cannot express means the ingested rows carry no membership on it and every later count on it differs by design |
+| `layers` | — | which layers the wire carried, which of those were read off a column of the rows parquet (`from_rows`) rather than inverted from the member table, which it declined and why. **Not patched around**: a layer the wire cannot express means the ingested rows carry no membership on it and every later count on it differs by design. Only `nested` is declined for its kind; a `dag` cell is a set (decision 0125) |
 | `items_per_s` | rows/s | rows **acked** ÷ the wall of the whole hold-out, at that concurrency |
 | `ack_p50`, `ack_p99` | ms | per-batch ack latency, nearest rank over the batches |
 | `statuses` | — | every HTTP status seen, counted. 429 is backpressure and is retried, not an error |

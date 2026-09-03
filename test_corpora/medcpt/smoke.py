@@ -286,6 +286,9 @@ def prepare(mesh: Mesh, out: Path, limit: int) -> dict:
                 "branches": branches,
                 "pmid": pa.array(pmids, pa.string()),
                 "title": titles,
+                # The closure as each row carries it — what an ingest batch sends for the layer
+                # (decision 0125). The rung streams this through a sidecar; 200,000 rows fit here.
+                LAYER: mesh.keys(closed),
             }
         ),
         out / "points.parquet",

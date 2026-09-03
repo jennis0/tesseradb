@@ -28270,6 +28270,7 @@
     "The capped run is 512 MiB, not half the bundle: half of 318 MB is below the engine's own per-process floor and no run would start. It was OOM-killed at the 25% principal; the three principals below it are complete and 'died' carries the cgroup's own oom_kill count.",
     "Four ingest cells: three at f=10% under three declarations (auto extent with the DAG layer carried, the all-in frame stated with it carried, the all-in frame stated with it declined), and f=100% - the whole corpus ingested into a bundle with no points, which the build's zero-item refusal blocked until 2026-09-03 (decision 0091). That cell's base_build figures are a build over nothing; its 'content_removed' says which supplied content kind an empty base cannot carry, and its layers difference is the declined mesh/descriptors layer plus that kind, not the write path.",
     "The uncapped battery overlapped the 3.6e7 base build of the ingest spectrum from 03:43; its cold figures are upper bounds.",
-    "The f=100% cell was taken with the build/empty-bundle binary; every other figure in this file is from 703cfaa7."
+    "The f=100% cell was taken with the build/empty-bundle binary; every other figure in this file is from 703cfaa7.",
+    "Superseded for the DAG layer (2026-09-03): the 'declined' entries under `layers` predate decision 0125, under which a `dag` list is plain multi-membership; `mesh/descriptors` is now carried at ingest from a column of the same name on points.parquet, and a rerun would carry it by default."
   ]
 }

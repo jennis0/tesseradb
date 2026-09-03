@@ -554,12 +554,15 @@ the positions mean is the hierarchy kind the layer already declares
 under `nested`, where entry *k* is the parent of entry *k+1* and every artifact sits at level 0. The
 declaration and the data must agree — a variable-length list against `stacked` or `tiered`, or a
 fixed-size one against `nested`, is refused rather than guessed, since choosing one reading would
-publish a hierarchy the caller did not write. **Under `flat` a list is plain multi-membership**: no
-positions are read, and the point is a member of every artifact its list names, which is what the
-same membership written as several member rows has always meant. So is **a child named under
-two different parents**, whether the two come from two rows of the column or from the column and an
-artifact row's `parent` — **except under `dag`**, where the second parent is one more edge, and the
-artifact row's `parent` may itself be a list ([`dag-hierarchies.md`](dag-hierarchies.md) §4). A null or `-1` entry places the point at no artifact *at that level* and
+publish a hierarchy the caller did not write. So is **a child named under two different parents**,
+whether the two come from two rows of the column or from the column and an artifact row's `parent`.
+**Under `flat` and `dag` a list is plain multi-membership**: no positions are read, and the point is
+a member of every artifact its list names, which is what the same membership written as several
+member rows has always meant. A tree node's ancestor closure is a chain, so a `nested` list states
+memberships and edges at once; a DAG node's is a set with no linear order, so a `dag` list has no
+adjacency to read, and the layer's edges are spelled on the artifact row's `parent`, which may
+itself be a list ([`dag-hierarchies.md`](dag-hierarchies.md) §4;
+[decision 0125](../decisions/0125-a-dag-list-column-is-membership-not-lineage.md)). A null or `-1` entry places the point at no artifact *at that level* and
 links nothing across itself; a row of nothing but those is one unclustered row. A `level` column
 beside a list key is ignored and said so, the positions being what carry the levels.
 
@@ -570,7 +573,7 @@ inferred from the edges, and the levels rule follows from it:
 |---|---|---|
 | `flat` | none | optional |
 | `nested` | a tree in the edges, every artifact at level 0 | **refused** — a tree's structure is its edges, not a ladder |
-| `dag` | a directed acyclic graph in the edges, every artifact at level 0 — `nested` in every respect but that **a child may name several parents** (2026-09-01, [`dag-hierarchies.md`](dag-hierarchies.md); decision 0117) | **refused**, as for `nested` |
+| `dag` | a directed acyclic graph in the edges, every artifact at level 0 — `nested` in every respect but two: **a child may name several parents**, on the artifact row's `parent` list, and a list key column is multi-membership, as under `flat` ([`dag-hierarchies.md`](dag-hierarchies.md); decisions 0117 and [0125](../decisions/0125-a-dag-list-column-is-membership-not-lineage.md)) | **refused**, as for `nested` |
 | `stacked` | none; independent analyses, one per level | **required** |
 | `tiered` | containment edges running coarser → finer between levels | **required** |
 

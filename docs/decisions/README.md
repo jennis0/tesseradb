@@ -46,3 +46,4 @@ Architecture and security rulings, one per file, unchanged once written. A rever
 - [0114](0114-the-drill-down-serves-the-satisfied-labels-only.md): The item drill-down serves the satisfied labels only
 - [0121](0121-the-suggestion-walk-probes-per-request-and-its-timing-is-accepted.md): The suggestion walk probes per request, and its timing channel is accepted and registered
 - [0124](0124-the-suggestion-route-may-follow-the-viewers-cardinality.md): The suggestion route may follow the viewer's own cardinality
+- [0125](0125-a-dag-list-column-is-membership-not-lineage.md): Under `dag` a list of member keys is multi-membership, not a lineage; edges are the artifact row's `parent` list alone

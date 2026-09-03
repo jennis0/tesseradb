@@ -2161,8 +2161,8 @@ fn a_child_named_under_two_parents_is_refused_naming_both() {
     assert!(message.contains("900"), "{message}");
     assert!(message.contains("901"), "{message}");
     assert!(
-        message.contains("Declare `kind = \"dag\"`"),
-        "the refusal names the remedy: {message}"
+        message.contains("is a `dag` layer, whose edges are spelled on the artifact row"),
+        "the refusal names the remedy — the kind, and where its parents go: {message}"
     );
 }
 
@@ -2222,15 +2222,18 @@ fn dag_build(
     (result, out, inputs._tmp)
 }
 
-/// **A `dag` layer builds from a parent list, and from two lineages naming different parents for
-/// one child, and the two spellings are one bundle** (`dag-hierarchies.md` §4). The lists are the
-/// ones `a_child_named_under_two_parents_is_refused_naming_both` refuses under `nested`: the same
-/// data is a refusal on a tree and a graph on a DAG, which is what declaring the kind is for.
+/// **A `dag` layer's list column is memberships and declares no edges; its edges come from the
+/// artifact row's `parent` list** (`dag-hierarchies.md` §4, decision 0125). The lists are the ones
+/// `a_child_named_under_two_parents_is_refused_naming_both` refuses under `nested`: on a DAG the
+/// same data is three artifacts each point is a member of, every one a root, with nothing to
+/// report — a DAG node's closure is a set, so the list's adjacency states nothing.
 ///
-/// Containment is per edge: the child holds every point and each parent holds half, so both
-/// edges are reported violated, named by their parent — reported and published, never refused.
+/// The same three artifacts from a parent list naming both parents, one of them twice, hold the
+/// two edges. Containment is per edge: the child holds every point and each parent holds half, so
+/// both edges are reported violated, named by their parent — reported and published, never
+/// refused.
 #[test]
-fn a_dag_layer_builds_from_a_parent_list_and_from_two_lineages_alike() {
+fn a_dag_list_column_is_memberships_and_a_parent_list_is_its_edges() {
     let lists: Vec<Vec<Option<i64>>> = (0..N_ITEMS)
         .map(|e| vec![Some(if e % 2 == 0 { 900 } else { 901 }), Some(950)])
         .collect();
@@ -2240,6 +2243,38 @@ fn a_dag_layer_builds_from_a_parent_list_and_from_two_lineages_alike() {
         write_listed_points(&inputs.points, &lists, false, None);
     });
     let report = containment_report(&from_points);
+    assert!(
+        report["violations"].as_array().unwrap().is_empty(),
+        "no edges, so nothing to contain: {:?}",
+        report["violations"]
+    );
+    let shapes = report["hierarchies"].as_array().unwrap();
+    assert_eq!(shapes.len(), 1);
+    assert_eq!(shapes[0]["kind"], "dag");
+    assert_eq!(shapes[0]["artifacts"], 3, "each key the lists named");
+    assert_eq!(shapes[0]["edges"], 0, "a dag list column declares no edges");
+    assert_eq!(shapes[0]["roots"], 3);
+    assert_eq!(shapes[0]["multi_parent"], 0);
+
+    let from_tables = format!("{}value_set = \"open\"\n{FROM_TREE_TABLES}", layer_of_dag());
+    let (from_tables, _b) = build_spelling(&from_tables, |inputs| {
+        write_listed_points(&inputs.points, &lists, false, None);
+        write_dag_artifacts(
+            &inputs.at("tree.parquet"),
+            &[("900", &[]), ("901", &[]), ("950", &["901", "900", "901"])],
+        );
+        let evens: Vec<u64> = (0..N_ITEMS).filter(|e| e % 2 == 0).collect();
+        let odds: Vec<u64> = (0..N_ITEMS).filter(|e| e % 2 == 1).collect();
+        write_treed_members(
+            &inputs.at("tree_members.parquet"),
+            &[
+                ("900", evens),
+                ("901", odds),
+                ("950", (0..N_ITEMS).collect()),
+            ],
+        );
+    });
+    let report = containment_report(&from_tables);
     let violations = report["violations"].as_array().unwrap();
     assert_eq!(
         violations.len(),
@@ -2265,30 +2300,6 @@ fn a_dag_layer_builds_from_a_parent_list_and_from_two_lineages_alike() {
     assert_eq!(shapes[0]["roots"], 2);
     assert_eq!(shapes[0]["multi_parent"], 1);
     assert_eq!(shapes[0]["max_parents"], 2);
-
-    let from_tables = format!("{}value_set = \"open\"\n{FROM_TREE_TABLES}", layer_of_dag());
-    let (from_tables, _b) = build_spelling(&from_tables, |inputs| {
-        write_listed_points(&inputs.points, &lists, false, None);
-        write_dag_artifacts(
-            &inputs.at("tree.parquet"),
-            &[("900", &[]), ("901", &[]), ("950", &["901", "900", "901"])],
-        );
-        let evens: Vec<u64> = (0..N_ITEMS).filter(|e| e % 2 == 0).collect();
-        let odds: Vec<u64> = (0..N_ITEMS).filter(|e| e % 2 == 1).collect();
-        write_treed_members(
-            &inputs.at("tree_members.parquet"),
-            &[
-                ("900", evens),
-                ("901", odds),
-                ("950", (0..N_ITEMS).collect()),
-            ],
-        );
-    });
-    assert_bundles_identical(
-        &from_points,
-        &from_tables,
-        "two lineages against a parent list naming both, one of them twice",
-    );
 }
 
 /// **A self-edge and a cycle refuse a `dag` build**, as they refuse a tree's
@@ -2334,7 +2345,8 @@ fn a_self_edge_and_a_cycle_refuse_a_dag_build() {
 
 /// **A `nested` layer still refuses two parents**, whichever spelling names them: the artifact
 /// row's own list refuses at the hierarchy check, and two lineages refuse as
-/// `a_child_named_under_two_parents_is_refused_naming_both` asserts, in the words it always used.
+/// `a_child_named_under_two_parents_is_refused_naming_both` asserts. The remedy the refusal names
+/// is the kind, since a `dag` layer's several parents are spelled exactly this way.
 #[test]
 fn a_nested_layer_refuses_a_parent_list_of_two() {
     let inputs = inputs();
