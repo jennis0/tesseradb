@@ -1,0 +1,34 @@
+[
+  {
+    "rows": 2000000,
+    "corpus": 2000000,
+    "fit": 1500000,
+    "managed": false,
+    "measured_at": "2026-09-02 23:14",
+    "gather": 7.32,
+    "shards": 1,
+    "shard_rows": 1500000,
+    "build_seconds": [
+      24.8
+    ],
+    "search_seconds": [
+      20.5
+    ],
+    "self_first": 0.9997853333333333,
+    "knn": 46.0,
+    "graph_peak_vram_gb": 4.49,
+    "umap": 15.25,
+    "layout_peak_vram_gb": 2.2,
+    "layout_vram_bytes_per_row": 1576.0,
+    "bounds": {
+      "x": [
+        -11.43099308013916,
+        13.634749412536621
+      ],
+      "y": [
+        -11.77686595916748,
+        16.28127098083496
+      ]
+    }
+  }
+]

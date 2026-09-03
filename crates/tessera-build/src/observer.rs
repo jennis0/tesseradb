@@ -189,3 +189,129 @@ impl<'a> StageTimer<'a> {
         self.start += elapsed;
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// The JSON sink — `tessera build --stage-timings-json <path>`
+// ---------------------------------------------------------------------------------------------
+
+/// One stage's record, as `--stage-timings-json` writes it.
+///
+/// **Timestamps are wall clock, seconds since the Unix epoch**, so a stage record can be lined up
+/// against anything else measured on the box during the build — an RSS sampler, a cgroup's
+/// `memory.peak`, another process's log. `started_at` is derived as `ended_at - wall_s` rather
+/// than recorded at the stage's opening: the observer is only notified at the end, and deriving it
+/// keeps the two fields exactly consistent with `wall_s`.
+///
+/// ⊘ **For a *charged* stage the pair is not a real boundary.** [`StageTimer::charge`] reports a
+/// duration measured inside an enclosing block, at the moment that block ends, so its `ended_at`
+/// is the enclosing block's end and its `started_at` is that minus its own measured cost. The
+/// duration is the measurement; the two timestamps are an interval of that length placed at the
+/// report, which for `text_index`, `record_blob`, `column_release` and `filter_postings` — the
+/// four that interleave over one column loop — is not when they ran.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct StageRecord {
+    pub stage: String,
+    pub wall_s: f64,
+    /// Whatever the stage counted — items, pairs, terms. Stage-specific, never uniform.
+    pub rows: u64,
+    /// The **process's** high-water mark at the moment the stage ended, not the stage's own: it
+    /// only rises, so a stage that adds nothing repeats the last figure. What it locates is the
+    /// stage the peak arrived in.
+    pub peak_rss_kib: u64,
+    pub started_at: f64,
+    pub ended_at: f64,
+}
+
+/// Collects every stage's record, for writing as JSON at the end of the build.
+///
+/// `Mutex` rather than `RefCell` because [`BuildObserver`] is `Send + Sync`; the lock is taken
+/// once per stage, seventeen times in a build, so it costs nothing measurable.
+#[derive(Default)]
+pub struct JsonStageTimings {
+    records: std::sync::Mutex<Vec<StageRecord>>,
+}
+
+impl JsonStageTimings {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The records collected so far, in report order.
+    pub fn records(&self) -> Vec<StageRecord> {
+        self.records
+            .lock()
+            .expect("the stage-record lock is never held across a panic")
+            .clone()
+    }
+
+    /// Write the records to `path` as a JSON array.
+    pub fn write(&self, path: &std::path::Path) -> std::io::Result<()> {
+        let json = serde_json::to_string_pretty(&self.records())
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        std::fs::write(path, json)
+    }
+}
+
+impl BuildObserver for JsonStageTimings {
+    fn stage_end(&self, stage: BuildStage, elapsed: Duration, rows: u64, peak_rss_kib: u64) {
+        let ended_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        let wall_s = elapsed.as_secs_f64();
+        self.records
+            .lock()
+            .expect("the stage-record lock is never held across a panic")
+            .push(StageRecord {
+                stage: stage.name().to_string(),
+                wall_s,
+                rows,
+                peak_rss_kib,
+                started_at: ended_at - wall_s,
+                ended_at,
+            });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_json_sink_records_one_row_per_report_in_order() {
+        let sink = JsonStageTimings::new();
+        sink.stage_end(BuildStage::Dictionary, Duration::from_millis(1500), 7, 1024);
+        sink.stage_end(BuildStage::Layers, Duration::from_millis(500), 9, 2048);
+        let records = sink.records();
+        assert_eq!(
+            records.iter().map(|r| r.stage.as_str()).collect::<Vec<_>>(),
+            ["dictionary", "layers"]
+        );
+        assert!((records[0].wall_s - 1.5).abs() < 1e-9);
+        assert_eq!(records[0].rows, 7);
+        assert_eq!(records[1].peak_rss_kib, 2048);
+    }
+
+    #[test]
+    fn a_stages_start_is_its_end_less_its_wall_time() {
+        let sink = JsonStageTimings::new();
+        sink.stage_end(BuildStage::TextIndex, Duration::from_secs(3), 0, 0);
+        let r = &sink.records()[0];
+        assert!((r.ended_at - r.started_at - 3.0).abs() < 1e-6);
+        assert!(r.started_at > 1_700_000_000.0, "wall clock, not a monotonic reading");
+    }
+
+    #[test]
+    fn the_written_file_is_a_json_array_of_records() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("stages.json");
+        let sink = JsonStageTimings::new();
+        sink.stage_end(BuildStage::Manifests, Duration::from_millis(250), 3, 16);
+        sink.write(&path).expect("write");
+        let back: Vec<StageRecord> =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("parse");
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].stage, "manifests");
+        assert_eq!(back[0].rows, 3);
+    }
+}

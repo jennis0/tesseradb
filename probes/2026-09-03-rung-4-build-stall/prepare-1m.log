@@ -1,0 +1,53 @@
+staging /home/joe/code/tessera/data/ladder/paperseek/staging
+output  /home/joe/code/tessera/data/ladder/paperseek-1m
+[sample] ...
+[sample] 0.06s
+1,000,000 works sampled from 102,117,343
+[route knn] ...
+    gather fit set: 4.2s
+    shard 1/1: build 10.1s, 1,000,000 queries in 10.0s (100,145/s)
+    knn: 20.2s
+    umap: 8.9s
+[route knn] 221.51s
+  route knn: x [-11.98, 13.28] y [-15.68, 18.56]  (peak so far 12.5 GB)
+[k-means] ...
+[k-means] 0.29s
+25 clusters by whole, sizes 422..85,717 (median 46,720)
+[vectorise titles] ...
+[vectorise titles] 20.96s
+43,837 candidate terms over 1,000,000 titles
+[titles] ...
+[titles] 0.08s
+25 of 25 clusters got a distinctive title
+[resolve, layer and points] ...
+    1,000,000/1,000,000  (12.5 GB)
+[resolve, layer and points] 348.0s
+licence: 223,783 of 1,000,000 (22.4%) carry a real one, over 11 keys; 968,528 (96.9%) carry a year; 416,542 (41.7%) are open access; 965,584 carry a topic
+[write artifacts] ...
+[write artifacts] 0.0s
+[write members] ...
+[write members] 0.13s
+4,816 artifacts, 4,868,986 member rows across 2 layers
+[write the demo's terms] ...
+11 terms; top five unlicensed 776,217, cc-by 137,868, cc-by-nc-nd 27,922, cc-by-nc 20,721, other-oa 14,805
+[write the demo's terms] 0.0s
+minted TESSERA_IDENTITY_KEY, TESSERA_PAPERSEEK_SESSION_CRED, TESSERA_PAPERSEEK_OPERATOR_CRED in /home/joe/code/tessera/data/ladder/paperseek-1m/.env
+
+wrote to /home/joe/code/tessera/data/ladder/paperseek-1m:
+  .env                                     0.00 MB
+  clusters-kmeans-members.parquet          1.25 MB
+  clusters-kmeans.parquet                  0.00 MB
+  corpus.toml                              0.01 MB
+  layout-knn.npy                           8.00 MB
+  licence-ranks.json                       0.00 MB
+  licence-terms.txt                        0.00 MB
+  manifest.json                            0.00 MB
+  points.parquet                         519.71 MB
+  tessera.toml                             0.00 MB
+  topics-openalex-members.parquet          9.39 MB
+  topics-openalex.parquet                  0.14 MB
+  vocab-licence.parquet                    0.00 MB
+  vocab-type.parquet                       0.00 MB
+
+next:
+  cd /home/joe/code/tessera/data/ladder/paperseek-1m && tessera check --payloads && tessera build --stage-timings

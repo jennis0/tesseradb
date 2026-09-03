@@ -105,6 +105,16 @@ enum Command {
         #[arg(long)]
         stage_timings: bool,
 
+        /// Write the same per-stage records as JSON to this path at the end of the build.
+        ///
+        /// The stderr lines `--stage-timings` prints are for a person watching a build; a
+        /// measurement campaign wants the same numbers in a file it can put beside a rung's other
+        /// figures on one schema. Both may be given, and this one enables the observation on its
+        /// own. One object per stage, in report order: `stage`, `wall_s`, `rows`,
+        /// `peak_rss_kib`, `started_at`, `ended_at`.
+        #[arg(long, value_name = "PATH")]
+        stage_timings_json: Option<PathBuf>,
+
         /// Carry `identity.key` and `identity.idset` forward from an existing bundle's
         /// MANIFEST.json. **This is the normal rebuild path** (contracts §2.2).
         #[arg(long, value_name = "BUNDLE_ROOT")]
@@ -874,7 +884,16 @@ fn collect_bindings(
 /// **Peak RSS is the process's high-water at the moment the stage ended**, not the stage's own —
 /// it only ever rises, so a stage that adds nothing repeats the last figure. What it locates is
 /// the stage the peak arrived in, which is the question `--memory-budget` is answered against.
-struct StageTimings;
+///
+/// **One observer, two sinks**, rather than a second observer for `--stage-timings-json`: the
+/// pipeline takes one, and a wrapper that fanned out to two would have to re-sample nothing but
+/// still be a second place a stage could be dropped from.
+struct StageTimings {
+    /// Print a line per stage — `--stage-timings`. Off when only the JSON path was asked for.
+    print: bool,
+    /// Collect the records — `--stage-timings-json`. `None` when only the lines were asked for.
+    json: Option<tessera_build::observer::JsonStageTimings>,
+}
 
 impl tessera_build::observer::BuildObserver for StageTimings {
     fn stage_end(
@@ -884,12 +903,23 @@ impl tessera_build::observer::BuildObserver for StageTimings {
         rows: u64,
         peak_rss_kib: u64,
     ) {
-        eprintln!(
-            "stage {:>16}  {:>8.2}s  rows={rows:<12} peak={:>6} MiB",
-            stage.name(),
-            elapsed.as_secs_f64(),
-            peak_rss_kib / 1024,
-        );
+        if self.print {
+            eprintln!(
+                "stage {:>16}  {:>8.2}s  rows={rows:<12} peak={:>6} MiB",
+                stage.name(),
+                elapsed.as_secs_f64(),
+                peak_rss_kib / 1024,
+            );
+        }
+        if let Some(json) = &self.json {
+            tessera_build::observer::BuildObserver::stage_end(
+                json,
+                stage,
+                elapsed,
+                rows,
+                peak_rss_kib,
+            );
+        }
     }
 }
 
@@ -1391,6 +1421,7 @@ fn main() -> ExitCode {
             batch_items,
             memory_budget,
             stage_timings,
+            stage_timings_json,
             carry_id_key_from,
             identity_file,
             mint_id_key,
@@ -1730,12 +1761,25 @@ fn main() -> ExitCode {
                 layer_inputs: acquired.layers,
                 scoped_layers,
             };
-            let observer = StageTimings;
-            let built = if stage_timings {
+            let observer = StageTimings {
+                print: stage_timings,
+                json: stage_timings_json
+                    .is_some()
+                    .then(tessera_build::observer::JsonStageTimings::new),
+            };
+            let built = if stage_timings || stage_timings_json.is_some() {
                 tessera_build::build_observed(&args, &observer)
             } else {
                 tessera_build::build(&args)
             };
+            // Written whether the build succeeded or failed: a build that died in `layers` is
+            // exactly the one whose per-stage record is worth having, and the records collected
+            // before the failure are as true as any other.
+            if let (Some(path), Some(json)) = (&stage_timings_json, &observer.json) {
+                if let Err(e) = json.write(path) {
+                    eprintln!("stage timings: writing {}: {e}", path.display());
+                }
+            }
             match built {
                 Ok(report) => {
                     // **The other half of the frame report**, and the half the clamp count
