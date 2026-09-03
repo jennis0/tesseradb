@@ -60,12 +60,21 @@ authorised items are drawn or counted and can never widen the set, so adding a f
 introduce an access defect. The viewer's set is the only path to the geometry, and a build check
 fails if any other path is added.
 
-## A label is served only when its whole basis is visible
+## A derived artifact is served on the terms its layer declares
 
-A label MUST be served only if every item it was built from is inside the requesting viewer's
-authorised set. If one member is outside it, the label is withheld in full. The check runs on the
-authorised set, never on a filtered one, so narrowing a query cannot make a withheld label appear,
-and it runs on every request.
+Labels, clusters, hulls and hierarchy nodes are built from sets of items. Whether a viewer is
+served one is decided per request, over the viewer's own set, on two axes the layer declares:
+
+- **An access label of its own.** A layer, or an artifact within it, can carry an access label
+  like an item, and is then visible only to viewers whose terms satisfy it.
+- **A membership requirement.** How much of the artifact's member set the viewer must be able to
+  see: all of it, any of it, a fraction, a count, or none. "All" withholds a label if a single
+  member is hidden; "none" serves the artifact to every viewer the access label admits, which is
+  right for a boundary that exists whether or not this viewer can see a document inside it.
+
+Both tests MUST run on the viewer's authorised set, never on a filtered one, so narrowing a query
+cannot make a withheld artifact appear. A count or a hull served with an artifact is computed over
+the members the viewer can see.
 
 ## Samples are taken after masking
 
@@ -131,7 +140,7 @@ accepted rather than closed, for the reason given.
 | Property | How it is checked | What is not covered |
 |---|---|---|
 | Every quantity computed from the viewer's own set | Compared, value for value, against an independent second implementation across three planted states, over every served surface: tiles, the points batch and the density layer. The same property was probed manually against a running server across the request contract and the memory-safety surface beneath it, and no route past it was found | Served artifacts travel on their own frame and are not part of this comparison today |
-| A label served only when its whole basis is visible | Compared against an independent implementation with two principals differing by exactly one item inside a label's basis, and the difference asserted before anything downstream rests on it | None |
+| A derived artifact served on the terms its layer declares | Compared against an independent implementation with two principals differing by exactly one item inside an artifact's member set, under the strictest requirement, and the difference asserted before anything downstream rests on it | The other membership requirements are covered by Rust tests rather than the differential suite |
 | Samples taken after masking | Compared against an independent implementation with a wrong-shaped stand-in, a sample taken in storage order rather than from the authorised set, that the comparison is required to disagree with | None |
 | A client never sees an entity id | Scanned across every wire surface, the sub-cell stream and the logs for a byte pattern matching the underlying identity, with a planted true positive on every scan confirming the scan itself works | None |
 | An incomplete answer is refused | The built half is covered by tests around shared in-progress work and cancellation, though not by the differential test form the design describes | The two compartment rules have no test at all, for the reason stated above: nothing exists yet for either to apply to |
