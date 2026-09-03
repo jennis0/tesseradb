@@ -64,8 +64,10 @@ and under `MemoryMax=4G`, where the same corpus flips:
 
 ⊘ **At 10⁸ the line was never reached**, because the disk pre-flight refuses before the join (§5).
 The payload it would have summed is in that refusal's own breakdown, from the same footers:
-**113,576 MiB of abstracts, 8,836 MiB of titles and 1,456 MiB of keyword — 123,868 MiB**, against a
-budget this box derives at ~29,000 MiB. `auto` takes `entity` there by a factor of about 8.5.
+**113,576 MiB of abstracts, 8,836 MiB of titles and 1,456 MiB of keyword — 123,868 MiB**. The
+budget is `MemAvailable` damped, which this box derived at **27,173 and 35,565 MiB** on the two runs
+above, so the share is 13,500–17,800 MiB and `auto` takes `entity` by a factor of seven to nine.
+⊘ Derived from the refusal's own figures, not read off the line the switch would have printed.
 
 ## 2. What the second decode costs
 
