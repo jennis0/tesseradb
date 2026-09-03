@@ -4790,6 +4790,16 @@ fn views_of(generation: &Generation) -> Vec<String> {
     views
 }
 
+/// The `(layer, level)` a record changes the artifacts of, and `None` for every other record —
+/// what a caller needs to read that level's version before the record moves it.
+fn artifact_level_of(record: &WalRecord) -> Option<(&str, u32)> {
+    match record {
+        WalRecord::ArtifactPublish { layer, level, .. }
+        | WalRecord::ArtifactGrow { layer, level, .. } => Some((layer.as_str(), *level)),
+        _ => None,
+    }
+}
+
 /// **The growth records one closed window owes**, with the index of the entry to blame if an append
 /// fails, in the order they are to be appended.
 ///
@@ -10322,6 +10332,28 @@ impl Executor {
         // artifact by a point nothing could yet see. The reverse order costs nothing: both are
         // durable by this line, and the log is what a restart reads.
         if !minted.is_empty() || !growth.is_empty() {
+            // **The level versions these records are about to move, read in the order they move
+            // them** — what each record's held row form must be at for that record's delta to be
+            // the one it is missing (`Executor::bring_artifacts_forward`). Two records of one
+            // window may name the same level, so the version is carried forward across the
+            // sequence rather than read once: every publication and every growth bumps exactly one
+            // level exactly once.
+            let mut befores: Vec<u64> = Vec::with_capacity(minted.len() + growth.len());
+            self.live.with_artifacts(|store| {
+                let mut seen: std::collections::BTreeMap<(&str, u32), u64> =
+                    std::collections::BTreeMap::new();
+                for (record, _) in minted.iter().chain(growth.iter()) {
+                    let Some((layer, level)) = artifact_level_of(record) else {
+                        befores.push(0);
+                        continue;
+                    };
+                    let at = seen
+                        .entry((layer, level))
+                        .or_insert_with(|| store.level_version(layer, level));
+                    befores.push(*at);
+                    *at += 1;
+                }
+            });
             let undecodable = self.live.with_publication_state(|registry, store, _| {
                 let mut undecodable = 0;
                 // The registry half first, per record: a mint may have extended its level's
@@ -10343,6 +10375,31 @@ impl Executor {
                     count = undecodable,
                     "ALARM: a membership growth did not survive its own round trip"
                 );
+            }
+            // **And every held row form takes the same deltas the records just took**, in the same
+            // order, rather than being invalidated by the version moves they made — the ingest
+            // twin of `commit_growth`'s own bring-forward.
+            for ((record, _), before) in minted.iter().chain(growth.iter()).zip(befores) {
+                match record {
+                    WalRecord::ArtifactPublish {
+                        layer,
+                        level,
+                        artifacts,
+                        ..
+                    } => {
+                        let ordinals: Vec<u32> = artifacts.iter().map(|a| a.ordinal).collect();
+                        self.bring_artifacts_forward(
+                            layer,
+                            *level,
+                            &crate::artifacts::LevelDelta::Published(&ordinals),
+                            before,
+                        );
+                    }
+                    WalRecord::ArtifactGrow { layer, level, .. } => {
+                        self.bring_grown_forward(layer, *level, record, before)
+                    }
+                    _ => {}
+                }
             }
             // A growth against an artifact **above** its level's high-water is carried by the next
             // tail pack like any other unpublished record; one below it waits for the fold, held in
@@ -10604,6 +10661,78 @@ impl Executor {
         }
     }
 
+    /// **Apply an accepted write to every held row form of the level it changed**, in every view
+    /// the generation carries — the delta, rather than the version move that would make the next
+    /// request project the level whole
+    /// (`docs/evidence/memos/2026-09-03-post-flush-artifact-frames.md`).
+    ///
+    /// `before` is the level's version as it stood when the delta was prepared; a form at any other
+    /// version is dropped rather than amended, which
+    /// [`crate::artifacts::ArtifactProjections::bring_forward`] argues in full.
+    ///
+    /// A view two partitions carry is skipped, exactly as `Engine::warm_artifact_projections`
+    /// skips it: it is `EngineError::MultiPartitionView` on the request path, so there is no row
+    /// space here that a request would agree with.
+    fn bring_artifacts_forward(
+        &self,
+        layer: &str,
+        level: u32,
+        delta: &crate::artifacts::LevelDelta<'_>,
+        before: u64,
+    ) {
+        let generation = self.generation.load_full();
+        let mut views: std::collections::BTreeMap<&str, Option<&tessera_store::read::ViewData>> =
+            std::collections::BTreeMap::new();
+        for partition in generation.bundle.partitions.values() {
+            for (name, data) in &partition.views {
+                views
+                    .entry(name.as_str())
+                    .and_modify(|held| *held = None)
+                    .or_insert(Some(data));
+            }
+        }
+        self.live.with_artifacts(|store| {
+            for (view, data) in views {
+                let Some(data) = data else { continue };
+                self.artifact_projections.bring_forward(
+                    &generation.prefix,
+                    view,
+                    layer,
+                    level,
+                    store,
+                    &data.row_space,
+                    delta,
+                    before,
+                );
+            }
+        });
+    }
+
+    /// [`Self::bring_artifacts_forward`] over an `ArtifactGrow` record — the joining sets decoded
+    /// from the log's own bytes, so what reaches the row forms is what reached the records.
+    ///
+    /// **A set that does not decode is skipped and nothing else is**, which is the same disposition
+    /// `ArtifactStore::apply_growth` makes of it: that delta did not enter the records either, and
+    /// the alarm it raised has already been said.
+    fn bring_grown_forward(&self, layer: &str, level: u32, record: &WalRecord, before: u64) {
+        let WalRecord::ArtifactGrow { growth, .. } = record else {
+            return;
+        };
+        let joins: Vec<(u32, croaring::Bitmap)> = growth
+            .iter()
+            .filter_map(|grown| {
+                tessera_lifecycle::membership::deserialise_members(&grown.joining)
+                    .map(|joining| (grown.ordinal, joining))
+            })
+            .collect();
+        self.bring_artifacts_forward(
+            layer,
+            level,
+            &crate::artifacts::LevelDelta::Grown(&joins),
+            before,
+        );
+    }
+
     /// Validate, allocate, append, sync, apply — `commit_registry`'s sequence, for the same reason
     /// and with one addition: the record lands in **two** structures, the registry (for a level
     /// that grew) and the store (for the memberships themselves), and both are applied under the
@@ -10620,6 +10749,11 @@ impl Executor {
         incoming: Vec<IncomingArtifact>,
         respond: Responder,
     ) {
+        // Read before the record is applied, because it is what says a held row form is the form
+        // this publication follows — see [`Self::bring_artifacts_forward`].
+        let before = self
+            .live
+            .with_artifacts(|store| store.level_version(&layer, level));
         let prepared = self.live.with_publication_state(|registry, store, alloc| {
             registry.prepare_publish(
                 &layer,
@@ -10675,6 +10809,13 @@ impl Executor {
                 "ALARM: an artifact membership did not survive its own round trip"
             );
         }
+        let ordinals: Vec<u32> = artifacts.iter().map(|a| a.ordinal).collect();
+        self.bring_artifacts_forward(
+            &layer,
+            level,
+            &crate::artifacts::LevelDelta::Published(&ordinals),
+            before,
+        );
         let published = Published::registry_applied(&record);
         // **A shape layer's held structures are rebuilt at publication, and every segment the
         // generation serves is resolved against them before the ack** (`polygon-membership.md`
@@ -10750,6 +10891,11 @@ impl Executor {
         joins: Vec<tessera_lifecycle::IncomingGrowth>,
         respond: Responder,
     ) {
+        // `commit_artifacts`' reason: the version a held row form must be at for this delta to be
+        // the one it is missing.
+        let before = self
+            .live
+            .with_artifacts(|store| store.level_version(&layer, level));
         let prepared = self.live.with_publication_state(|registry, store, _| {
             registry.prepare_grow(&layer, level, &joins, store)
         });
@@ -10795,6 +10941,7 @@ impl Executor {
                 "ALARM: a membership growth did not survive its own round trip"
             );
         }
+        self.bring_grown_forward(&layer, level, &record, before);
         let published = Published::registry_applied(&record);
         // A growth against an artifact **above** its level's high-water is carried by the next
         // tail pack like any other unpublished record; one below it waits for the fold, held in the
@@ -13130,6 +13277,30 @@ impl Executor {
         // or deleted item its place in the mask the moment it acquires a row: until now it was
         // buffered, had no row, and so appeared in no mask at all.
         let denied = Arc::new(crate::compose::derive_denied(&live.overlay, &next_bundle));
+
+        // **And every stored level's held row form gains this segment's rows, before the swap.**
+        // A form covers the whole row space, so a segment nothing added to it would leave every
+        // artifact one segment short — a member ingested into an artifact counting for nobody
+        // until the next fold, which under the nightly gate is hours
+        // (`docs/evidence/memos/2026-09-03-post-flush-artifact-frames.md`). This is the enumerated
+        // twin of the shape pieces installed above: one `project_extents_from` per artifact over
+        // the entities inside this extent's own range, on this thread, against the whole-level
+        // projection the alternative puts on the next request.
+        if let Some(space) = next_bundle
+            .partitions
+            .get(&completed.partition)
+            .and_then(|p| p.views.get(&completed.view))
+            .map(|v| &v.row_space)
+        {
+            self.live.with_artifacts(|store| {
+                self.artifact_projections.extend_flushed(
+                    &live.prefix,
+                    &completed.view,
+                    store,
+                    space,
+                )
+            });
+        }
 
         let next = Arc::new(Generation {
             prefix: live.prefix.clone(),

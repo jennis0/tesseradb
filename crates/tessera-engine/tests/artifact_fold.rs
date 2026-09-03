@@ -667,17 +667,20 @@ fn flush(engine: &Engine) {
     }
 }
 
-/// **The boundary condition the write cycle sets, and the cost it names.** An artifact's row form
-/// covers members holding **base** rows; a member whose row is still in a flush extent contributes
-/// nothing until the fold folds it in.
+/// **A member counts from its flush**, which is the first moment it has a row at all.
 ///
-/// That is what keeps the form untouched by a flush — an append moves no bit it holds — and it is
-/// fail-closed in the only direction available: the masked count **understates** for members
-/// ingested since the last fold, exactly as a buffered point is invisible until its flush. The
-/// alternative, rebuilding every level whenever a flush appends, is tens of seconds per level at
-/// the scale this design is for, paid by whichever request arrives next.
+/// The two boundaries are different and only one of them moved. A **buffered** member has no row
+/// anywhere and is in nobody's count, exactly as it is in no viewport; a **flushed** one has an
+/// extent row, and the level's held form gains that segment's rows at the publication that adds it
+/// (`ArtifactProjections::extend_flushed`) rather than at the next fold. Until 2026-09-03 the form
+/// covered base rows alone and this second case understated for as long as the gate between folds
+/// — hours — which was fail-closed and is now simply not the case.
+///
+/// The fold changes no count here, and that is the assertion the third case makes: it renumbers the
+/// row the member holds and the form is rebuilt over the new prefix, so the same member is counted
+/// by a different row.
 #[test]
-fn a_member_ingested_since_the_last_fold_counts_from_the_fold_and_not_before() {
+fn a_member_ingested_since_the_last_fold_counts_from_its_flush() {
     let fx = fixture();
     let engine = fx.open();
     engine.register_layer(declaration("clusters/a")).unwrap();
@@ -705,16 +708,17 @@ fn a_member_ingested_since_the_last_fold_counts_from_the_fold_and_not_before() {
     flush(&engine);
     assert_eq!(
         count(&engine),
-        300,
-        "flushed: it has a row, but an extent row — the form covers base rows, so the count \
-         understates rather than the form being rebuilt"
+        301,
+        "flushed: it holds an extent row, and the flush extended every held form by the segment \
+         it published rather than leaving the count short until a fold"
     );
 
     fold(&engine);
     assert_eq!(
         count(&engine),
         301,
-        "folded: its row is a base row now, and the pass rebuilt the form over it"
+        "folded: the same member, on a base row now — the fold renumbers what it counts and not \
+         how many"
     );
 }
 

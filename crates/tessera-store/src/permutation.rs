@@ -1075,19 +1075,19 @@ impl RowSpace {
 
     /// Project into the **base** rows alone, ignoring every extent above them.
     ///
-    /// **The artifact row forms' projection, and the asymmetry is deliberate**
-    /// (`annotation-write-cycle.md` §4.1). A session's mask must see every row a viewer may see, so
-    /// it takes [`Self::project`]; a *shared, deployment-wide* membership form must not have to be
-    /// rebuilt every time a flush appends, because at 10⁷ artifacts that rebuild is tens of seconds
-    /// and it lands on whichever request arrives next. Restricting the form to base rows is what
-    /// makes it survive a flush (an append moves no bit it holds) and a merge (only extent rows
-    /// renumber, and it references none) — so it is rebuilt only by the fold, which is the one
-    /// operation that renumbers the base.
+    /// **What the fold writes, and what a *generating set* is projected through**
+    /// (`annotation-write-cycle.md` §4.1). A durable derived structure — a row-major column, a tile
+    /// index's extents — is written over the rows the fold folded and describes nothing above them,
+    /// so this is the projection that produces one and the projection a reader must compare it
+    /// against.
     ///
-    /// The price is that a member ingested since the last fold contributes nothing to its
-    /// artifact's masked count. That is fail-closed — the count **understates**, exactly as a
-    /// buffered point is invisible until its flush — and typically zero for a clustering, whose
-    /// members predate the layer that names them.
+    /// **Not the artifact row forms' projection any more.** A form covers the whole row space and
+    /// is extended by each flush in place (`tessera_engine::artifacts`); what base-only bought was
+    /// that a form survived a flush and a merge untouched, and what it cost was that a member
+    /// ingested since the last fold contributed nothing to its artifact's masked count — fail-closed
+    /// and hours wide under the nightly compaction gate. A generating set stays here, because the
+    /// containment partition composed beside it is a function of the level's records and knows
+    /// nothing of the geometry.
     pub fn project_base(&self, mask: &croaring::Bitmap) -> croaring::Bitmap {
         self.base.project(mask)
     }

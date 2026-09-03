@@ -3,6 +3,24 @@
 **Status:** problem statement, 2026-09-03. Found by the measurement campaign's ingest cycle on
 rung 3 (MedCPT) at 3.6×10⁷ rows. No solution is proposed here.
 
+**Built 2026-09-03**, on the owner's ruling, in `crates/tessera-engine/src/artifacts.rs` — whose
+module doc is the account of what is maintained and how:
+
+- a **growth** or a **publication** applies its own delta to every held row form of the level it
+  moved and moves the form's key with it (`ArtifactProjections::bring_forward`), from
+  `Executor::commit_growth`, `Executor::commit_artifacts` and the ingest window's close. The level
+  is no longer projected again by the request that follows a write;
+- a **flush** extends every held form of its view by the segment it published
+  (`ArtifactProjections::extend_flushed`), so a form covers the whole row space rather than the
+  base alone and an ingested member counts from its flush rather than from the next fold;
+- a form is checked against the row space at every cache hit (`ArtifactRows::covers`), which is
+  what a *merge* — the one publication that renumbers extent rows — is caught by.
+
+⊘ **Not re-measured at rung 3.** The change is covered by
+`crates/tessera-engine/tests/artifact_bring_forward.rs`, including a differential asserting the
+maintained form equals one built from scratch; the 94–177 s figures above stand as the last
+measurement of the path this replaces, and nothing here restates them as an after.
+
 ## The problem
 
 Decision 0094 puts the choice of a level's serving layout — and the writing of the derived row
