@@ -40,12 +40,12 @@ systemd-run --user --scope -p MemoryMax=4G -p MemorySwapMax=0 -- \
 ```
 
 Every stage before the text index cost what it costs uncapped — `attribute_tail` **35.95 s**
-against 34.79 s, `layers` **108.93 s** against 104.91 s — so the cap on its own is not what the
+against 34.94 s, `layers` **108.93 s** against 111.05 s — so the cap on its own is not what the
 build is paying for. Then:
 
 | | uncapped | `MemoryMax=4G` |
 |---|---|---|
-| `text_index` | **68.89 s** | **> 624 s, killed unfinished** — at least **9.1×** |
+| `text_index` | **114.11 s** | **> 624 s, killed unfinished** — at least **5.5×** |
 | major faults | — | **441 a second** |
 | `read_bytes` over the stage | — | **1,922 GiB** for a **13.2 GB** arena — **146×** |
 | bytes fetched per major fault | — | **7.3 MiB** |
@@ -56,6 +56,11 @@ build is paying for. Then:
 ⊘ **The stage was killed at 624 s rather than run to completion**, to leave the box for the other
 three arms; it was making progress and would have finished eventually. The claim here is the ratio
 and the mechanism, not a wall.
+
+⊘ **The uncapped figure this is divided by is 114.11 s and not the 68.89 s an earlier probe
+measured** on the same corpus and the same code. Both are real: which one a run gets depends on
+whether the box has the memory to keep the whole arena resident, which is precisely the property
+the cap removes. §5.
 
 Those are the rung 4 figures: `folio_wait_bit_common`, ~480 major faults a second and PSI io `full`
 at 60.8% (`docs/ingest-campaign.md` §4a), reproduced at a fifteenth of the scale with nothing else
