@@ -308,7 +308,18 @@ def joined_names(mesh, major) -> pa.Array:
 # --------------------------------------------------------------------------------- the outputs
 
 
-def write_points(out: Path, *, entity, xy, access: pa.Array, extra) -> None:
+#: Where the MeSH loop streams each article's closed descriptor set before `write_points` folds it
+#: into `points.parquet`. A sidecar rather than a column held across the run: the closure is
+#: 1.66×10⁹ entries over the corpus, and the whole-corpus prepare already peaks at 43 GB on a
+#: 47 GB box (`README.md`), so nothing of it may survive the loop in memory.
+MESH_SIDECAR = "mesh-descriptors-column.parquet.tmp"
+
+#: Rows per row group of `points.parquet` when the sidecar is folded in — the parquet is read back
+#: in slices of this size and the in-memory columns sliced to match, so this bounds the peak.
+POINTS_ROW_GROUP = 1_000_000
+
+
+def write_points(out: Path, *, entity, xy, access: pa.Array, extra, sidecar: Path | None = None) -> None:
     """The view's positions and every entity-space column, one row per article.
 
     `access` is the `branches` column as Arrow already — the MeSH module builds it a slice at a
@@ -317,6 +328,13 @@ def write_points(out: Path, *, entity, xy, access: pa.Array, extra) -> None:
     **Raw coordinates, written as they are.** `extent = "auto"` fits a square box around exactly
     these numbers; scaling by hand is the failure the extent moved into the declaration to prevent
     (`../arxiv/README.md`).
+
+    **`sidecar` is the MeSH loop's streamed `mesh/descriptors` column**, one row per article in
+    the same order, and it is folded in a row group at a time: the sidecar is read back in
+    `POINTS_ROW_GROUP`-row batches, the in-memory columns are sliced to match, and each batch is
+    one row group of the output. The column is never held whole, and the sidecar is removed once
+    the points file is complete. Without one the table is written in a single call, as every rung
+    before this one wrote it.
     """
     cols = {
         "entity_id": pa.array(entity, pa.uint64()),
@@ -325,7 +343,25 @@ def write_points(out: Path, *, entity, xy, access: pa.Array, extra) -> None:
         "branches": access,
     }
     cols.update(extra)
-    pq.write_table(pa.table(cols), out / "points.parquet")
+    table = pa.table(cols)
+    if sidecar is None:
+        pq.write_table(table, out / "points.parquet")
+        return
+
+    source = pq.ParquetFile(sidecar)
+    assert source.metadata.num_rows == table.num_rows, (
+        f"{source.metadata.num_rows:,} sidecar rows against {table.num_rows:,} points"
+    )
+    (name,) = source.schema_arrow.names
+    schema = table.schema.append(pa.field(name, pa.list_(pa.string())))
+    written = 0
+    with pq.ParquetWriter(out / "points.parquet", schema) as writer:
+        for batch in source.iter_batches(batch_size=POINTS_ROW_GROUP):
+            rows = table.slice(written, batch.num_rows).append_column(name, batch.column(0))
+            writer.write_table(rows.cast(schema), row_group_size=POINTS_ROW_GROUP)
+            written += batch.num_rows
+    assert written == table.num_rows
+    sidecar.unlink()
 
 
 def write_vocabulary(out: Path, branches: list[str]) -> None:
@@ -542,7 +578,14 @@ def main() -> None:
     # small, survive the loop. `write_layer` streams its member rows straight to the layer's
     # parquet and re-declares its artifacts each call, so it needs no last-call signal;
     # `close_streams` finishes the file.
+    #
+    # **The closure leaves the loop twice, and neither copy is held.** The member table is what
+    # `tessera build` reads; the same sets, one `list<string>` cell per article, stream to a
+    # sidecar that `write_points` folds into `points.parquet` as the `mesh/descriptors` column —
+    # the form an ingest batch carries, each entry one membership (decision 0125), so the ingest
+    # cycle sends a row's own cell instead of inverting the member table per entity.
     artifacts = ArtifactSet()
+    sidecar: Path | None = None
     with steps.step("mesh"):
         if Mesh is None:
             mesh = None
@@ -555,6 +598,10 @@ def main() -> None:
             access_parts, major_parts = [], []
             mesh_stats = collections.Counter()
             unresolved = collections.Counter()
+            sidecar = out / MESH_SIDECAR
+            column = pq.ParquetWriter(
+                sidecar, pa.schema([pa.field(MESH_LAYER, pa.list_(pa.string()))]), compression="zstd"
+            )
             for lo in range(0, n, MESH_SLICE):
                 hi = min(lo + MESH_SLICE, n)
                 explicit, major, stats = mesh.resolve(raw.slice(lo, hi - lo))
@@ -563,6 +610,7 @@ def main() -> None:
                 check_closure_contains(explicit, closed, len(mesh.descriptors), int(take[lo]))
                 mesh.write_layer(out, artifacts, closed,
                                  np.arange(lo, hi, dtype=np.uint64))
+                column.write_table(pa.table({MESH_LAYER: mesh.keys(closed)}))
                 access_parts.append(mesh.branches(explicit, empty=UNINDEXED))
                 major_parts.append(joined_names(mesh, major))
                 mesh_stats.update({k: v for k, v in stats.items() if k != "unresolved_top"})
@@ -570,6 +618,7 @@ def main() -> None:
                 print(f"    mesh {hi:,}/{n:,}: {len(closed.values):,} closed pairs", flush=True)
                 del explicit, major, closed
             artifacts.close_streams()
+            column.close()
             # Left chunked: combining `mesh_major` into one array would concatenate ~2 GB of
             # characters and meet the same 32-bit offset limit `take_strings` documents.
             access = pa.chunked_array(access_parts)
@@ -636,7 +685,7 @@ def main() -> None:
             # Read here rather than with the base columns: ~30 GB of Arrow buffers at 36M rows,
             # wanted by the write and by nothing before it.
             extra["abstract"] = read_staged(take, ["abstract"]).column("abstract")
-        write_points(out, entity=entity, xy=xy, access=access, extra=extra)
+        write_points(out, entity=entity, xy=xy, access=access, extra=extra, sidecar=sidecar)
     branch_terms = sorted(counts)
     print(f"{len(flat_access):,} (article, branch) labels over {len(branch_terms)} terms")
 

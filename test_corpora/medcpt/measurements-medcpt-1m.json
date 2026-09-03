@@ -27853,6 +27853,7 @@
     "The proving rung for the measurement drivers, not a ladder rung: a 10^6-row sample of MedCPT (test_corpora/medcpt/prepare.py --sample 1000000). Committed as measurements-medcpt-1m.json rather than as a rung's own measurements.json, so the campaign table does not list it.",
     "The capped run is 512 MiB, not half the bundle: half of 318 MB is below the engine's own per-process floor and no run would start. It was OOM-killed at the 25% principal; the three principals below it are complete and 'died' carries the cgroup's own oom_kill count.",
     "Four ingest cells at one fraction rather than four fractions: f=1.0 is blocked (see its 'blocked' field) and the other three are the same f=10% under three declarations - auto extent with the DAG layer carried, the all-in frame stated with it carried, and the all-in frame stated with it declined.",
-    "The uncapped battery overlapped the 3.6e7 base build of the ingest spectrum from 03:43; its cold figures are upper bounds."
+    "The uncapped battery overlapped the 3.6e7 base build of the ingest spectrum from 03:43; its cold figures are upper bounds.",
+    "Superseded for the DAG layer (2026-09-03): the 'declined' entries under `layers` predate decision 0125, under which a `dag` list is plain multi-membership; `mesh/descriptors` is now carried at ingest from a column of the same name on points.parquet, and a rerun would carry it by default."
   ]
 }

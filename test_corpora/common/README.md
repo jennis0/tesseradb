@@ -115,7 +115,7 @@ second file per rung would put two halves of one measurement in two places.
 | `base_rows`, `holdout_rows` | count | the split |
 | `blocked` | object or absent | the cell did not run: where it stopped and the refusal, verbatim |
 | `base_build`, `base_build_stages` | — | `tessera build` over the complement, same fields as §1 |
-| `layers` | — | which layers the wire carried, which it declined and why. **Not patched around**: a layer the wire cannot express means the ingested rows carry no membership on it and every later count on it differs by design |
+| `layers` | — | which layers the wire carried, which of those were read off a column of the rows parquet (`from_rows`) rather than inverted from the member table, which it declined and why. **Not patched around**: a layer the wire cannot express means the ingested rows carry no membership on it and every later count on it differs by design. Only `nested` is declined for its kind; a `dag` cell is a set (decision 0125) |
 | `items_per_s` | rows/s | rows **acked** ÷ the wall of the whole hold-out, at that concurrency |
 | `ack_p50`, `ack_p99` | ms | per-batch ack latency, nearest rank over the batches |
 | `statuses` | — | every HTTP status seen, counted. 429 is backpressure and is retried, not an error |

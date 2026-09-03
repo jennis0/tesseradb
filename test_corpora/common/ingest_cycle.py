@@ -206,6 +206,11 @@ def encode_batch(table: pa.Table, layers: Sequence[str], membership: dict) -> by
     `access` is the passthrough plugin's wire form — a comma-separated descriptor list — and
     `external_id` is the article's PMID as bytes, which is what makes an ingested row addressable
     on `/control/changes` afterwards.
+
+    A layer's membership column is `list<string>`, one cell per row naming every artifact the row
+    is in. Where the rows parquet already carries a column named for the layer, the cell is that
+    column's, unchanged; otherwise it is looked up in `membership`, the member table inverted per
+    entity by `HoldOut`.
     """
     branches = table.column("branches").to_pylist()
     pmids = table.column("pmid").to_pylist()
@@ -221,10 +226,17 @@ def encode_batch(table: pa.Table, layers: Sequence[str], membership: dict) -> by
     ]
     names = ["x", "y", "access", "external_id", "published", "title", "mesh_major", "pmid"]
     if layers:
-        entities = table.column("entity_id").to_pylist()
+        entities = None
         for layer in layers:
-            per = membership[layer]
-            arrays.append(pa.array([per.get(int(e), []) for e in entities], pa.list_(pa.string())))
+            if layer in table.column_names:
+                arrays.append(table.column(layer).combine_chunks().cast(pa.list_(pa.string())))
+            else:
+                if entities is None:
+                    entities = table.column("entity_id").to_pylist()
+                per = membership[layer]
+                arrays.append(
+                    pa.array([per.get(int(e), []) for e in entities], pa.list_(pa.string()))
+                )
             names.append(layer)
     batch = pa.RecordBatch.from_arrays([pa.array(a) if not isinstance(a, pa.Array) else a for a in arrays], names=names)
     sink = pa.BufferOutputStream()
@@ -240,10 +252,13 @@ class HoldOut:
     4 GB of parquet, tens of gigabytes of Arrow — and holding it beside a running server on a
     47 GB box is the run failing for a reason that has nothing to do with what it measures.
 
-    Membership for a *carried* layer is the exception and is held: the wire wants one cell per
-    entity and the member table is one row per `(key, entity)` pair, so the inversion has to
-    happen somewhere. `--max-member-rows` is what stops that being attempted for rung 3's
-    1.66×10⁹-row DAG membership.
+    A carried layer's membership comes from one of two places. Where `points.parquet` carries a
+    `list<string>` column named for the layer — rung 3's `mesh/descriptors`, each article's closed
+    descriptor set as the row itself holds it — the cell goes on the wire as it is, and nothing is
+    held. Otherwise the wire's one-cell-per-entity form has to be made from the member table's
+    one-row-per-`(key, entity)` form, and that inversion is held in memory; `--max-member-rows` is
+    what stops it being attempted on a table the size of rung 3's 1.66×10⁹-row DAG membership,
+    which is why that layer travels as a column instead.
     """
 
     def __init__(self, rung: Path, held: np.ndarray, layers: Sequence[str], head_rows: int = 0):
@@ -253,11 +268,16 @@ class HoldOut:
         self.head_rows = head_rows
         self.head: pa.Table | None = None
         self.membership: dict[str, dict[int, list[str]]] = {}
+        columns = row_columns(rung)
+        #: Layers whose cell is read off the rows parquet rather than inverted.
+        self.from_rows = [layer for layer in self.layers if layer in columns]
         sources = {
             "clusters/kmeans": "clusters-kmeans-members.parquet",
             "mesh/descriptors": "mesh-descriptors-members.parquet",
         }
         for layer in self.layers:
+            if layer in columns:
+                continue
             per: dict[int, list[str]] = {}
             reader = pq.ParquetFile(rung / sources[layer])
             for batch in reader.iter_batches(batch_size=1 << 20, columns=["key", "entity"]):
@@ -303,6 +323,23 @@ class HoldOut:
         self.total = emitted
         if head:
             self.head = pa.concat_tables(head)
+
+
+def row_columns(rung: Path) -> list[str]:
+    """The column names of the rung's rows parquet, from its footer — the file is not read."""
+    return list(pq.ParquetFile(rung / "points.parquet").schema_arrow.names)
+
+
+def first_row(rung: Path) -> pa.Table:
+    """The first row of the rung's rows parquet, over the columns a probe batch carries.
+
+    Read as one batch of one row rather than as the table sliced: at full scale the file is 4 GB
+    of parquet before its membership column, and the probe needs a single row of it.
+    """
+    wanted = ["x", "y", "branches", "published", "title", "mesh_major"]
+    reader = pq.ParquetFile(rung / "points.parquet")
+    batch = next(reader.iter_batches(batch_size=1, columns=wanted))
+    return pa.Table.from_batches([batch])
 
 
 def probe_batch(points: pa.Table, external_id: str, layer: str, keys: Sequence[str]) -> bytes:
@@ -726,9 +763,11 @@ class Cycle:
             layers = self.probe_layers(control, served, view)
             head = 3 * args.write_cycle_n if args.write_cycle else 0
             hold = HoldOut(self.rung, self.held, list(layers["carried"]), head_rows=head)
+            layers["from_rows"] = hold.from_rows
             self.log(
                 f"ingesting {len(self.held):,} rows at C={args.concurrency}, "
-                f"layers={layers['carried']} (declined {list(layers['declined'])})"
+                f"layers={layers['carried']} (from the rows parquet {hold.from_rows}; "
+                f"declined {list(layers['declined'])})"
             )
             self.result["ingest"] = self.run_ingest(control, hold.batches(), "cycle")
             self.result["layers"] = layers
@@ -766,17 +805,19 @@ class Cycle:
         """Does the membership path carry this rung's two layers, end to end?
 
         One single-row batch per layer, sent before the run proper and **deleted again** so the
-        probe leaves the deployment as it found it. What it can find out is which of the two the
-        *wire* can express — and the answer is not the same for both, because a membership
-        column's meaning is the layer's hierarchy kind
-        (`tessera_types::layer::ListMeaning`): a `flat` layer's cell is an unordered set of keys,
-        so one point in one cluster is one entry; a `dag` layer's cell is a **lineage**, one path
-        from a root, so one cell cannot say *this article is in ten unrelated concepts*, which is
-        what a MeSH-indexed article is.
+        probe leaves the deployment as it found it. What it can find out is whether the *wire*
+        accepts a membership cell for the layer, and what the driver can then say is whether it
+        can supply one. A membership column's meaning is the layer's hierarchy kind
+        (`tessera_types::layer::ListMeaning`): under `flat` and `dag` a cell is an unordered set
+        of keys — one point in one cluster is one entry, and a MeSH article in forty-six closed
+        descriptors is forty-six
+        ([decision 0125](../../docs/decisions/0125-a-dag-list-column-is-membership-not-lineage.md))
+        — while under `nested` it is a **lineage**, one path from a root, which a
+        multi-membership rung cannot write.
 
         Whatever this finds is recorded and the run proceeds with the layers that work. It is not
-        patched around: a fraction whose ingested rows carry no `mesh/descriptors` membership has
-        a different masked count on that layer **by design**, and the equivalence block must
+        patched around: a fraction whose ingested rows carry no membership on a declined layer
+        has a different masked count on that layer **by design**, and the equivalence block must
         report the difference rather than have it hidden by a driver that quietly filled it in.
         """
         out: dict = {"probed": {}, "carried": [], "declined": {}}
@@ -785,7 +826,8 @@ class Cycle:
             for layer in tomllib.loads((self.rung / "corpus.toml").read_text()).get("layer", [])
         }
         out["hierarchy_kinds"] = declared
-        points = pq.read_table(self.rung / "points.parquet").slice(0, 1)
+        columns = row_columns(self.rung)
+        points = first_row(self.rung)
         rosters = {
             "clusters/kmeans": "clusters-kmeans.parquet",
             "mesh/descriptors": "mesh-descriptors.parquet",
@@ -810,22 +852,19 @@ class Cycle:
                 rows = pq.ParquetFile(self.rung / members[layer]).metadata.num_rows
                 entry["member_rows"] = rows
                 kind = declared.get(layer, "flat")
-                if kind in ("dag", "nested") and not self.args.carry_lineage_layers:
+                if kind == "nested" and not self.args.carry_nested_layers:
                     # **The path exists — the probe above was a 200 — and the semantics do not
-                    # match.** Under `dag` and `nested` a membership cell is a *lineage*: entry k
-                    # is the parent of entry k+1, every artifact at level 0
-                    # (`tessera_types::layer::ListMeaning`). This rung's articles are in a mean of
-                    # 10.6 unrelated MeSH descriptors, and a list of ten unrelated keys read as a
-                    # lineage declares nine parent edges the NLM's DAG does not have.
-                    #
-                    # **Measured, 2026-09-03: the server does not absorb them.** A probe batch of
-                    # three keys produced `an ingest batch's list column names parent edges these
-                    # layers do not hold; the memberships are applied and the edges are not` —
-                    # so the hierarchy is *not* silently extended, and the memberships do land.
-                    # The layer is still declined by default because the cell would be saying
-                    # something the data does not mean and the warning count would scale with the
-                    # corpus; `--carry-lineage-layers` runs it deliberately, and on medcpt-1m
-                    # that run cost 31k items/s against 157k with the column absent.
+                    # match.** Under `nested` a membership cell is a *lineage*: entry k is the
+                    # parent of entry k+1, every artifact at level 0
+                    # (`tessera_types::layer::ListMeaning`). A point in several unrelated
+                    # artifacts cannot be written that way — ten unrelated keys read as a lineage
+                    # declare nine parent edges the tree does not have. The server does not absorb
+                    # them (measured 2026-09-03, when `dag` still read a list this way: the
+                    # memberships are applied, the edges are refused and warned per row, and the
+                    # warnings cost 31k items/s against 157k on medcpt-1m), so the layer is
+                    # declined rather than sent as something the data does not mean;
+                    # `--carry-nested-layers` runs it deliberately. `dag` is not here: under it a
+                    # list is a set (decision 0125), and this rung's DAG is carried below.
                     #
                     # Stated, not patched around: the ingested rows carry no membership on this
                     # layer, so every later count on it differs by design, and the equivalence
@@ -833,13 +872,18 @@ class Cycle:
                     out["declined"][layer] = (
                         f"declared `kind = \"{kind}\"`, whose membership cell is a lineage; this "
                         f"rung's points are in several unrelated artifacts each, which a lineage "
-                        f"cannot express and which a `dag` would absorb as new parent edges"
+                        f"cannot express"
                     )
+                elif layer in columns:
+                    # The rows parquet carries the cell itself, so the member table's size is no
+                    # concern of the driver's: nothing is inverted.
+                    out["carried"].append(layer)
                 elif rows > self.args.max_member_rows:
                     out["declined"][layer] = (
                         f"{rows:,} member rows exceeds --max-member-rows "
-                        f"{self.args.max_member_rows:,}; the driver would have to hold the whole "
-                        f"membership in memory to invert it per entity"
+                        f"{self.args.max_member_rows:,}, and points.parquet carries no `{layer}` "
+                        f"column; the driver would have to hold the whole membership in memory "
+                        f"to invert it per entity"
                     )
                 else:
                     out["carried"].append(layer)
@@ -1090,11 +1134,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--write-cycle-n", type=int, default=1000)
     ap.add_argument("--reuse-base", action="store_true")
     ap.add_argument(
-        "--carry-lineage-layers",
+        "--carry-nested-layers",
         action="store_true",
-        help="send a membership column for a `dag`/`nested` layer anyway. The cell is a lineage "
-        "there, so a multi-membership rung's keys become parent edges: measure it deliberately, "
-        "never by default",
+        help="send a membership column for a `nested` layer anyway. The cell is a lineage there, "
+        "so a multi-membership rung's keys become parent edges the server refuses one by one: "
+        "measure it deliberately, never by default. A `dag` layer needs no flag — its cell is a "
+        "set (decision 0125)",
     )
     ap.add_argument(
         "--state-extent",
@@ -1107,8 +1152,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--max-member-rows",
         type=int,
         default=200_000_000,
-        help="decline to carry a layer whose member table is larger than this: the driver inverts "
-        "it per entity in memory, and rung 3's DAG membership is 1.66e9 rows",
+        help="decline to carry a layer whose member table is larger than this and whose cell is "
+        "not already a column of points.parquet: the driver inverts the table per entity in "
+        "memory. Rung 3's 1.66e9-row DAG membership travels as a column and is not counted",
     )
     ap.add_argument("--flush-timeout", type=float, default=900.0)
     ap.add_argument("--fold-timeout", type=float, default=7200.0)

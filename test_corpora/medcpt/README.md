@@ -359,7 +359,13 @@ scale, after the route and the MeSH pass had both completed.
 **The MeSH closure cannot be held.** 1.66×10⁹ pairs is 14 GB of `int64` before anything is written,
 so `prepare.py` resolves, closes and writes a million rows at a time and only the access column and
 the joined major-topic names survive the loop; `mesh.write_layer` streams its member rows straight
-to parquet and re-declares its artifacts on each call.
+to parquet and re-declares its artifacts on each call. The same closure also leaves the loop as a
+`mesh/descriptors` column on `points.parquet` — each article's closed descriptor set as one
+`list<string>` cell, streamed through a sidecar and folded in a row group at a time — which is what
+the ingest cycle sends for the layer: under `dag` a list is plain multi-membership
+([decision 0125](../../docs/decisions/0125-a-dag-list-column-is-membership-not-lineage.md)), so the layer is carried
+at ingest from the row's own cell and the driver never inverts the member table. ⊘ What the column
+adds to `points.parquet` and to the prepare's wall is not yet measured; the figures above predate it.
 
 ## The environment
 
