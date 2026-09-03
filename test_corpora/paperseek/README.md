@@ -306,6 +306,25 @@ No `--memory-budget` arm was tried, the declaration was not trimmed, and the abs
 dropped — each of those would answer a different question from the one the rung was built to ask.
 The process was stopped after 3 h 25 m and its partial bundle deleted.
 
+### Since: two stalls fixed, and the wall is now the disk
+
+**Both random walks this rung found have been removed, and the 10⁸ build has still not been run.**
+
+| | |
+|---|---|
+| `text_index` at 10⁸ | *over four hours, unfinished* → **2,371.9 s (39.5 min)**, 4,131 major faults over the whole stage and 153.3 GiB read against a 128 GiB arena. [`../../probes/2026-09-03-text-arena-streaming/`](../../probes/2026-09-03-text-arena-streaming/README.md) |
+| `record_blob` at 10⁷ under a 4 GB cap | *> 2,134 s, unfinished*, 2,348 GiB read for a 10.2 GiB arena → **64.31 s**, its uncapped wall. [`../../probes/2026-09-03-entity-ordered-arena/`](../../probes/2026-09-03-entity-ordered-arena/README.md) |
+| what the second fixed | the attribute join's **scatter** — resolved in source-id order, written at signature-then-Morton entity indices — and, behind the switch `--arena-order`, an arena filled in entity order by a second decode of the source's prose |
+| the bundle | **byte-identical** under every arm, at 10⁶ and 10⁷ |
+
+⊘ **The 10⁸ build is now refused before it starts, by the disk pre-flight**: **274.5 GB needed at
+peak against 257.7 GB free — 16.3 GiB short**. Of the modelled need, the abstract column is
+115,536 MiB and the text index's sorted runs — charged at the column they are tokenised from, a
+term `residency.rs` states is loose — another 115,147 MiB. **What holds the volume is not this
+corpus**: 209 GB of the 1,007 GB filesystem is one other session's `target/debug`. The rung's
+`tessera build`, `verify --deep`, bundle breakdown and serve battery at 10⁸ are all still owed, and
+what they need is free disk rather than another change to the build.
+
 ### The bracket — 10,000,000 rows, and the declaration proved end to end
 
 The same inputs, built as a prefix (`--limit 10000000`, with the two member files and their artifact
