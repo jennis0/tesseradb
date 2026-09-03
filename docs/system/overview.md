@@ -91,15 +91,16 @@ single machine: one box with 47 GB of RAM, no cluster.
 
 | Corpus | Points | What it declares | Build time | Build rate | Peak RSS | Bundle | Viewport p50 |
 |---|---|---|---|---|---|---|---|
-| Synthetic | 10⁹ | a category vocabulary of 47,968 terms, averaging 1.7 per item | 2 h 37 m | 106 k points/s | 27.5 GB | 47.0 GB | 135–164 ms |
+| Synthetic, current build pipeline | 10⁹ | a category vocabulary, averaging 1.7 terms per item | 6 m 46 s | 2.5 M points/s | 27.6 GB | not measured | not measured |
+| Synthetic, earlier build pipeline | 10⁹ | a category vocabulary of 47,968 terms, averaging 1.7 per item | 2 h 37 m | 106 k points/s | 27.5 GB | 47.0 GB | 135–164 ms |
 | Overture places and divisions | 73,631,092 | 625,754 division polygons drawn as regions, a text index over names, and category filters | 31 m 18 s | 39 k points/s | 26.75 GB | 12.57 GB | not measured |
 | MedCPT / PubMed | 35,920,666 | an embedding view, titles indexed for text search, a MeSH hierarchy layer of 30,217 headings over 41,321 edges with 1.66×10⁹ membership entries | 12 m 10 s | 49 k points/s | 16.03 GB | 11.15 GB | not measured |
 | GeoNames | 13,463,857 | 8 vocabularies, 13 attributes, 2 layers | 2 m 59 s | 75 k points/s | 3.55 GB | 1.34 GB | not measured |
 | arXiv | 2,422,486 | two embedding views (kNN and PCA) with two clusterings each, clusters titled from their own text | 54 s | 44 k points/s | not measured | 1.5 GB | not measured |
 
-No real corpus in this table has a recorded viewport latency yet. A later rework of the build
-pipeline cut the synthetic corpus's build time to about 7 minutes at the same scale and label
-shape; bundle size and viewport latency have not been re-measured against it.
+The two synthetic rows are one corpus built twice: the bundle size and viewport latency were
+measured on the earlier build, and the build pipeline was then reworked, which cut the build to
+under seven minutes.
 
 One streaming pass produces the whole bundle. There is no separate spatial-index build, because
 the row order the geometry is written in, Morton order, is the index. A build plans its memory
@@ -108,10 +109,6 @@ that plan and the number of distinct terms rather than the point count. Build ra
 a corpus declares rather than with its size: the synthetic corpus carries categories only, and the
 real corpora carry text indexes, polygons and hierarchy layers. Sustained ingest rate into a
 running service has not been measured since the write path was reworked.
-
-These figures depend on how a deployment's access labels are distributed. The synthetic corpus
-uses a low-cardinality label set; the result should be re-measured against a real label
-distribution before being relied on.
 
 ## What it consists of
 
