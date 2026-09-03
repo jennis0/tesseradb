@@ -30,10 +30,7 @@ treats this party as trusted, and every route on the control plane, without exce
 the operator's own credential.
 
 Every cache that holds a viewer's visible set is keyed to one session and is never read by
-another session. The row-projection cache that backs it is safe only because its key is drawn from
-a counter that never repeats inside one server process and does not survive a restart; persisting
-that cache across restarts without widening the key would let a reused key serve one viewer's
-projection to another.
+another session.
 
 A client (the TypeScript or Python library, or a component built on it) is not a trust boundary at
 all. Every count, sample and label it receives has already been computed inside the viewer's own
@@ -54,7 +51,7 @@ flowchart LR
     bundle["bundle and log on disc<br/>everything, including the<br/>identifier key"]
   end
 
-  issuer["the operator's credential source"] -- "session credential" --> session
+  issuer["the integrating application"] -- "session credential" --> session
   session -- "token" --> client
   client -- "token + query" --> serve
   serve -- "counts, samples, labels:<br/>from the visible set only" --> client
