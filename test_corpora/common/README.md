@@ -11,7 +11,7 @@ files. **The table is generated; do not hand-edit the marked block.**
 |---|---|
 | [`deployment.py`](deployment.py) | boots a `tessera serve` over an existing bundle, on its own ports and scratch state, always inside a transient cgroup scope |
 | [`serve_battery.py`](serve_battery.py) | the view-latency battery — a principal ladder, density-decile locations, three conditions |
-| [`ingest_cycle.py`](ingest_cycle.py) | the ingest cycle — split, build the complement, ingest the hold-out, flush, fold, and decision 0091's equivalence test |
+| [`ingest_cycle.py`](ingest_cycle.py) | the ingest cycle — split, build the complement's **points and declarations**, ingest the hold-out, publish every layer's artifacts, flush, fold, and decision 0091's equivalence test |
 | `scripts/campaign_report.py assemble` | collates a rung's driver outputs into `measurements.json` on the schema below |
 
 ## Running one rung
@@ -44,12 +44,12 @@ checkout use them.
 
 ## `measurements.json`
 
-`schema_version` is `1`. A renderer refuses a file whose version it does not know rather than
+`schema_version` is `2`. A renderer refuses a file whose version it does not know rather than
 reading its fields under a schema they were not written to.
 
 ```jsonc
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "rung": "medcpt",              // the directory under test_corpora/
   "rows": 35920666,              // the corpus's row count, as the rung's own README states it
   "binary_commit": "…",          // the git commit of the tessera binary every figure was taken with
@@ -114,9 +114,8 @@ second file per rung would put two halves of one measurement in two places.
 | `concurrency` | count | concurrent callers on `/control/ingest` |
 | `base_rows`, `holdout_rows` | count | the split |
 | `blocked` | object or absent | the cell did not run: where it stopped and the refusal, verbatim |
-| `content_removed` | list | supplied content kinds the base could not carry, one record each. Only ever non-empty at *f* = 100%: a kind declaring `require_member_visibility = "all"` is served only to a viewer who can see every document it was generated from, and an artifact with no members names an empty generating set, which is satisfied by everyone and is refused at **both** entry points. The kind is dropped from the measurement's own declaration and from the roster that supplied it, so the layer census differs on that surface by design |
-| `base_build`, `base_build_stages` | — | `tessera build` over the complement, same fields as §1 |
-| `layers` | — | which layers the wire carried, which it declined and why. **Not patched around**: a layer the wire cannot express means the ingested rows carry no membership on it and every later count on it differs by design |
+| `base_build`, `base_build_stages` | — | `tessera build` over the complement's **points and declarations alone**, same fields as §1 |
+| `publish` | — | the publication, per layer — see below |
 | `items_per_s` | rows/s | rows **acked** ÷ the wall of the whole hold-out, at that concurrency |
 | `ack_p50`, `ack_p99` | ms | per-batch ack latency, nearest rank over the batches |
 | `statuses` | — | every HTTP status seen, counted. 429 is backpressure and is retried, not an error |
@@ -127,6 +126,22 @@ second file per rung would put two halves of one measurement in two places.
 | `equivalence` | — | decision 0091's test, split by surface — see below |
 | `write_cycle` | — | deletes, suppressions, re-ingests, a second fold, and the census again; each with its latency to visibility |
 
+**`publish` is its own block because publication is its own phase** (owner ruling, 2026-09-03): the
+base bundle carries the built fraction's points and every layer's *declaration*, and each layer's
+artifacts, memberships and supplied content are published through
+`PUT /control/layers/{name}/artifacts` after every point they depend on has been ingested.
+
+| field | unit | how it was measured |
+|---|---|---|
+| `layers.<name>.artifacts`, `.members`, `.generating_set_entries` | count | what the rung's roster and member table declared for that layer |
+| `layers.<name>.published_artifacts`, `.published_members` | count | what the route answered 201 for. A difference from the two above is a refusal, and `first_refusal` carries it verbatim |
+| `layers.<name>.requests` | count | publications sent. A batch is split between artifacts to stay under `--publish-max-bytes`; one artifact over it is sent alone, the batch being the commit unit |
+| `layers.<name>.prepared_s` | seconds | reading the roster and inverting the member table, in the driver. **Not** part of the throughput below: it measures pyarrow, not the service |
+| `layers.<name>.wall_s`, `.artifacts_per_s`, `.members_per_s` | — | the publication itself, one caller, serial |
+| `layers.<name>.edges_declared`, `.artifacts_with_several_parents` | count | the roster's lineage |
+| `layers.<name>.edges_published` | count | **0 at every layer**: `IncomingArtifactBody` — the JSON the route takes — carries `key`, `members`, `content`, `attached_to` and the shape fields, and has no field for a parent. A `dag` layer therefore publishes as a flat one, and `edges_not_expressible` totals what was dropped (`docs/evidence/memos/2026-09-03-dag-membership-at-ingest.md`) |
+| `declined` | object | a layer whose member table exceeds `--max-member-rows`, with the count. **Not patched around**: it is declared and empty on the folded deployment, so every count on it differs from the all-in build's by design, and `equivalence.layers` says so |
+
 **`equivalence` is split into three surfaces because they are not equally comparable.**
 
 * `zoom0_equal` — the whole extent under each principal. Frame-independent, so this is the
@@ -136,4 +151,7 @@ second file per rung would put two halves of one measurement in two places.
   complement quantises onto a slightly different grid and the margins of a box disagree by a
   handful of rows. `frames` carries both quantisations and `frames_equal` says whether they are
   the same, so a box difference is attributable rather than mysterious.
-* `layers_equal` — the artifact frames served with the viewport, by frame kind.
+* `layers_equal` — the kind-5 artifact frame, **per layer**: how many artifacts the principal is
+  served on it, and the sum of their masked counts. Both, because an artifact count alone passes a
+  defect that serves the right artifacts with the wrong memberships, and a masked-count sum alone
+  passes one that moves members between artifacts of the same layer.

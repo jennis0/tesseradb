@@ -7,24 +7,48 @@ entities back, builds the complement, serves it, and puts the hold-out through `
 stated as a number instead of a principle: *build is ingest into an empty database*, so a
 deployment assembled either way must answer identically.
 
+Everything is ingested after the build (owner ruling, 2026-09-03)
+----------------------------------------------------------------
+
+**The base bundle carries points and declarations, and nothing else.** The rung's `corpus.toml` is
+copied with every `[[layer]]`'s `source` and `[layer.members]` removed, so each layer is declared —
+kind, levels, visibility rules, content kinds — and empty. Its artifacts, their memberships and
+their supplied content are then published through `PUT /control/layers/{name}/artifacts` **after
+every point they depend on has been ingested**. An artifact cannot depend on a point that does not
+exist yet, and that ordering is the only constraint: it holds at every fraction, so at *f* = 10% the
+base is 90% of the points and none of the artifacts.
+
+⊘ **What this drops, deliberately.** An earlier driver built the base *with* the rung's artifact
+roster and sent membership on the wire as a column of the ingest batch. That put the layers on the
+build side of the split, made the *f* = 100% cell impossible for a layer whose content requires
+every member visible (an artifact with no members names an empty generating set, which the registry
+refuses at both entry points), and met the lineage reading of a list column, which a
+multi-membership `dag` layer cannot use (`docs/evidence/memos/2026-09-03-dag-membership-at-ingest.md`).
+Publication says *this artifact holds these members* directly, so none of the three arises.
+
 What it measures, in order
 --------------------------
 
-1. **The split and the base build** — `tessera build --stage-timings-json`, so the base's per-stage
-   record is on the same schema as the whole-corpus build's.
+1. **The split and the base build** — `tessera build --stage-timings-json` over the complement's
+   points and the declaration-only `corpus.toml`, so the base's per-stage record is on the same
+   schema as the whole-corpus build's.
 2. **Online ingest** — Arrow IPC batches of 10,000 rows at *C* concurrent callers, `items/s`
    acked, ack p50/p99, and every refusal counted by status (429 backpressure, 409 duplicate or
-   batch-id conflict, 422 bounds or contract).
-3. **Flush** — the wall of `POST /control/flush`, and *time to visibility*: when a zoom-0 viewport
+   batch-id conflict, 422 bounds or contract). The batches carry points alone: no membership
+   column, because membership arrives with the artifact that holds it.
+3. **Publication** — every layer's whole roster, in batches under a byte cap, with each artifact's
+   whole member set (base and hold-out alike, by external addressing) and its ranked content with
+   its generating set. Its own figure: artifacts/s and members/s.
+4. **Flush** — the wall of `POST /control/flush`, and *time to visibility*: when a zoom-0 viewport
    under the 100% principal reaches the expected count. Those are two different numbers and the
    second is the one a viewer experiences.
-4. **The fold** — `POST /control/compact`, its wall and its RSS, both read from
+5. **The fold** — `POST /control/compact`, its wall and its RSS, both read from
    `/control/status`'s own `compaction` block rather than timed from outside: the route answers
    202 immediately, so an outside timer would measure the request and not the fold.
-5. **Equivalence** — the ladder's masked counts on the folded deployment against the all-in build,
-   at zoom 0 and on a set of boxes, per layer and per principal. Exact zero difference, or a
-   listed one.
-6. **The write cycle** — deletes, suppressions, re-ingests, another fold and the census again.
+6. **Equivalence** — the ladder's masked counts on the folded deployment against the all-in build,
+   at zoom 0, on a set of boxes, and **per layer**: artifact count and summed masked count off the
+   kind-5 artifact frame, per principal. Exact zero difference, or a listed one.
+7. **The write cycle** — deletes, suppressions, re-ingests, another fold and the census again.
 
 ⊘ **A hold-out is not a random sample of the map.** Entity ids are assigned in signature-sorted
 order at a build and above the high-water at ingest (0091's own stated internal difference), so
@@ -43,20 +67,17 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.parse
 import uuid
 from pathlib import Path
 from typing import Sequence
 
 import numpy as np
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import requests
 from pyarrow import ipc
-
-try:  # 3.11+
-    import tomllib
-except ModuleNotFoundError:  # 3.10 on this box
-    import tomli as tomllib
 
 from . import serve_battery
 from .deployment import Deployment
@@ -64,6 +85,14 @@ from .deployment import Deployment
 #: Write-path §2's per-batch row cap. The driver sends exactly this, so a run also exercises the
 #: cap's own boundary rather than sitting comfortably under it.
 BATCH_ROWS = 10_000
+
+#: `layer name -> (roster file, member file)` for the rungs this driver runs. The names are the
+#: rung's own, and a layer whose roster is absent is skipped — which is how a rung prepared without
+#: `mesh.py` runs the same cell with one layer instead of two.
+LAYER_SOURCES = {
+    "clusters/kmeans": ("clusters-kmeans.parquet", "clusters-kmeans-members.parquet"),
+    "mesh/descriptors": ("mesh-descriptors.parquet", "mesh-descriptors-members.parquet"),
+}
 
 
 # ---------------------------------------------------------------------------------------------
@@ -169,123 +198,82 @@ def state_extent(corpus_toml: Path, bundle: Path, view: str | None = None) -> di
     return {"view": chosen["id"], "quantisation": q, "from_version": version}
 
 
-def strip_all_members_content(out: Path) -> list[dict]:
-    """Drop the supplied content kinds an **empty** base cannot carry, from the base declaration
-    and from the rosters that supply them.
+def base_declaration(text: str) -> tuple[str, list[dict]]:
+    """The rung's `corpus.toml` as a **declaration-only** one: every layer stated, none supplied.
 
-    A supplied kind declaring `require_member_visibility = "all"` is served only to a viewer who
-    can see every document it was generated from, so an artifact carrying it must name that
-    generating set — an empty one is satisfied by everyone, and the registry refuses it at both
-    entry points alike (`tessera_lifecycle::registry`). A generating set is named by the member
-    rows carrying a `rank`, so a base with **no rows at all** has no generating set for any
-    artifact, and the kind cannot exist there.
+    A `[[layer]]` block says two kinds of thing. Its declaration — kind, levels, views, the three
+    disclosure controls, the content kinds — is what a running deployment holds and what
+    `PUT /control/layers` takes. Its `source` and `[layer.members]` are *acquisition*: where the
+    rows come from, which is build-only and is the half decision 0091 excludes from the rule that
+    the two entry points say the same things (`configuration.md` §2). Removing exactly that half
+    leaves a layer that exists, is empty, and can be published into.
 
-    That is not a defect and it is not patched around: an empty deployment genuinely has no
-    description that was generated from its corpus, because it has no corpus. The kind is removed
-    from the base's declaration, the roster's `contents` column is nulled where nothing else is
-    declared to fill it, and what was removed is recorded — so the layer census below reports the
-    difference rather than hiding it. Only the *measurement's* copy is edited, never the rung's.
+    **A layer declared with no source is legal and needed no change** (`Config::layer_sources`
+    carries `None` for it): the build reads no artifact table, plans no artifacts, and writes an
+    empty level. What the build *does* refuse for an empty layer is nothing at all — the refusals
+    an earlier driver met at *f* = 100% were about an empty **corpus**, not an empty layer, and
+    they are gone with the roster.
 
-    Returns one record per kind removed, empty when the declaration has none.
+    Only `source` at a `[[layer]]`'s own depth is removed. `[defaults]` and `[[view]]` carry a
+    `source` too and are untouched: the points still come from a file.
+
+    Returns the rewritten text and one record per layer, saying what was removed from it.
     """
-    corpus_toml = out / "corpus.toml"
-    lines = corpus_toml.read_text().splitlines(keepends=True)
-    sources: dict[str, str] = tomllib.loads(corpus_toml.read_text()).get("sources", {})
-
+    out: list[str] = []
     removed: list[dict] = []
-    keep: list[str] = []
-    layer = {"name": None, "source": None}
-    remaining_supplied: dict[str, int] = {}
-    i = 0
-    while i < len(lines):
-        head = lines[i].strip()
-        if head == "[[layer]]":
-            layer = {"name": None, "source": None}
-        if head.startswith("[[layer.content.supplied]]"):
+    section: str | None = None
+    layer: dict | None = None
+    skipping = False
+    for line in text.splitlines(keepends=True):
+        head = line.strip()
+        if head.startswith("[") and not head.startswith("[["):
+            section = head
+        elif head.startswith("[["):
+            section = head
+        if head.startswith("[[layer]]"):
+            layer = {"layer": None, "removed": []}
+            removed.append(layer)
+        if head.startswith("[") and not head.startswith("[layer.members]"):
+            skipping = False
+        if head.startswith("[layer.members]"):
             # The block runs to the next table header at any indent, or to the end of the file.
-            j = i + 1
-            while j < len(lines) and not lines[j].strip().startswith("["):
-                j += 1
-            block = "".join(lines[i:j])
-            if '"all"' in block and "require_member_visibility" in block:
-                removed.append(
-                    {
-                        "layer": layer["name"],
-                        "source": layer["source"],
-                        "kind": next(
-                            (
-                                line.split("=", 1)[1].strip().strip('"')
-                                for line in block.splitlines()
-                                if line.strip().startswith("name")
-                            ),
-                            None,
-                        ),
-                    }
-                )
-            else:
-                remaining_supplied[layer["name"]] = remaining_supplied.get(layer["name"], 0) + 1
-                keep.extend(lines[i:j])
-            i = j
+            skipping = True
+            if layer is not None:
+                layer["removed"].append("[layer.members]")
             continue
-        if layer["name"] is None and head.startswith("name") and "=" in head:
-            layer["name"] = head.split("=", 1)[1].strip().strip('"')
-        if layer["source"] is None and head.startswith("source") and "=" in head:
-            layer["source"] = head.split("=", 1)[1].strip().strip('"')
-        keep.append(lines[i])
-        i += 1
-
-    if not removed:
-        return []
-    corpus_toml.write_text("".join(keep))
-    for entry in removed:
-        if remaining_supplied.get(entry["layer"]):
-            # Something else still fills the column, so the roster keeps it; the values of the
-            # removed kind stay where they sit and the build reads one fewer of them.
+        if skipping:
             continue
-        roster = sources.get(entry["source"] or "")
-        path = out / roster if roster else None
-        if path is None or not path.exists():
-            entry["roster"] = None
+        if layer is not None and head.startswith("name") and layer["layer"] is None:
+            layer["layer"] = head.split("=", 1)[1].strip().strip('"')
+        if section == "[[layer]]" and head.startswith("source") and "=" in head:
+            if layer is not None:
+                layer["removed"].append(head)
             continue
-        table = pq.read_table(path)
-        column = table.schema.field("contents")
-        table = table.set_column(
-            table.schema.get_field_index("contents"),
-            column,
-            pa.nulls(table.num_rows, column.type),
-        )
-        pq.write_table(table, path)
-        entry["roster"] = roster
-    return removed
+        out.append(line)
+    return "".join(out), removed
 
 
 def write_base_inputs(rung: Path, out: Path, base_ids: np.ndarray) -> dict:
-    """The complement's inputs: the points file filtered, the member tables filtered, the rest copied.
+    """The complement's inputs: **the points, and the declaration. Nothing else.**
 
-    **The artifact rosters are copied whole**, not filtered: a cluster or a descriptor exists
-    because the layer declares it, and dropping the ones whose members all fell into the hold-out
-    would make the two deployments differ in their *roster* as well as in their membership, which
-    is a second variable in a test that has one. It is also what makes the *f* = 100% cell
-    possible at all on a rung whose layers are `value_set = "closed"`: an arriving point may only
-    join an artifact that already exists, so the roster is what the empty bundle is for.
+    No artifact roster and no member table is copied, and that is the whole shape of this driver
+    (owner ruling, 2026-09-03). Every artifact, every membership and every supplied content is
+    published on the wire after the points it depends on have been ingested, so a roster beside the
+    build would be the same layer supplied twice — once as a build input and once as a publication —
+    and the level's keys would collide on the second.
 
-    The one thing an empty base cannot carry is a supplied content kind requiring every member
-    visible — see [`strip_all_members_content`], which the caller applies there.
+    `corpus.toml` is rewritten by [`base_declaration`], which removes each layer's acquisition and
+    keeps its declaration.
     """
     out.mkdir(parents=True, exist_ok=True)
     kept = {"points": filter_parquet(rung / "points.parquet", out / "points.parquet", "entity_id", base_ids)}
-    for name in ("clusters-kmeans-members.parquet", "mesh-descriptors-members.parquet"):
-        kept[name] = filter_parquet(rung / name, out / name, "entity", base_ids)
-    for name in (
-        "branch.parquet",
-        "clusters-kmeans.parquet",
-        "mesh-descriptors.parquet",
-        "corpus.toml",
-        ".env",
-    ):
+    for name in ("branch.parquet", ".env"):
         source = rung / name
         if source.exists():
             shutil.copy2(source, out / name)
+    declaration, removed = base_declaration((rung / "corpus.toml").read_text())
+    (out / "corpus.toml").write_text(declaration)
+    kept["declaration_only"] = removed
     (out / "tessera.toml").write_text((rung / "tessera.toml").read_text())
     return kept
 
@@ -295,33 +283,37 @@ def write_base_inputs(rung: Path, out: Path, base_ids: np.ndarray) -> dict:
 # ---------------------------------------------------------------------------------------------
 
 
-def encode_batch(table: pa.Table, layers: Sequence[str], membership: dict) -> bytes:
-    """One Arrow IPC stream for a slice of the hold-out.
+def encode_batch(table: pa.Table) -> bytes:
+    """One Arrow IPC stream for a slice of the hold-out. **Points alone.**
 
     `access` is the passthrough plugin's wire form — a comma-separated descriptor list — and
-    `external_id` is the article's PMID as bytes, which is what makes an ingested row addressable
-    on `/control/changes` afterwards.
+    `external_id` is the **source entity id, eight bytes little-endian** — the same form the build
+    mints under `--mint-external-ids` (see [`external_ids`]). That is what makes an ingested row
+    addressable on `/control/changes` afterwards, and what an artifact's `members` names it by on
+    the same footing as a base row. The PMID travels beside it as the `pmid` attribute, as before.
+
+    **No membership column, and that is the ruling rather than an omission.** A column named for a
+    layer is the *other* way a point can name its artifacts, and it is read as a lineage on a
+    `nested` or `dag` layer (`tessera_types::layer::ListMeaning`). Publication says the same thing
+    from the artifact's side, without that reading and without a per-row edge check, so the driver
+    says it once and there.
     """
     branches = table.column("branches").to_pylist()
-    pmids = table.column("pmid").to_pylist()
+    entities = table.column("entity_id").to_pylist()
     arrays = [
         table.column("x").cast(pa.float64()).combine_chunks(),
         table.column("y").cast(pa.float64()).combine_chunks(),
         pa.array([",".join(b) for b in branches], pa.string()),
-        pa.array([p.encode() for p in pmids], pa.binary()),
+        pa.array([int(e).to_bytes(8, "little") for e in entities], pa.binary()),
         table.column("published").combine_chunks(),
         table.column("title").combine_chunks(),
         table.column("mesh_major").combine_chunks(),
         table.column("pmid").combine_chunks(),
     ]
     names = ["x", "y", "access", "external_id", "published", "title", "mesh_major", "pmid"]
-    if layers:
-        entities = table.column("entity_id").to_pylist()
-        for layer in layers:
-            per = membership[layer]
-            arrays.append(pa.array([per.get(int(e), []) for e in entities], pa.list_(pa.string())))
-            names.append(layer)
-    batch = pa.RecordBatch.from_arrays([pa.array(a) if not isinstance(a, pa.Array) else a for a in arrays], names=names)
+    batch = pa.RecordBatch.from_arrays(
+        [pa.array(a) if not isinstance(a, pa.Array) else a for a in arrays], names=names
+    )
     sink = pa.BufferOutputStream()
     with ipc.new_stream(sink, batch.schema) as writer:
         writer.write_batch(batch)
@@ -333,37 +325,15 @@ class HoldOut:
 
     **Streamed, never materialised.** At *f* = 100% of rung 3 the hold-out is the whole corpus —
     4 GB of parquet, tens of gigabytes of Arrow — and holding it beside a running server on a
-    47 GB box is the run failing for a reason that has nothing to do with what it measures.
-
-    Membership for a *carried* layer is the exception and is held: the wire wants one cell per
-    entity and the member table is one row per `(key, entity)` pair, so the inversion has to
-    happen somewhere. `--max-member-rows` is what stops that being attempted for rung 3's
-    1.66×10⁹-row DAG membership.
+    47 GB box is the run failing for a reason that has nothing to do with what it measures. Only
+    `head_rows` rows are kept, for the write cycle, which needs the same bytes twice.
     """
 
-    def __init__(self, rung: Path, held: np.ndarray, layers: Sequence[str], head_rows: int = 0):
+    def __init__(self, rung: Path, held: np.ndarray, head_rows: int = 0):
         self.rung = rung
         self.held = np.sort(held)
-        self.layers = list(layers)
         self.head_rows = head_rows
         self.head: pa.Table | None = None
-        self.membership: dict[str, dict[int, list[str]]] = {}
-        sources = {
-            "clusters/kmeans": "clusters-kmeans-members.parquet",
-            "mesh/descriptors": "mesh-descriptors-members.parquet",
-        }
-        for layer in self.layers:
-            per: dict[int, list[str]] = {}
-            reader = pq.ParquetFile(rung / sources[layer])
-            for batch in reader.iter_batches(batch_size=1 << 20, columns=["key", "entity"]):
-                entity = batch.column("entity").to_numpy()
-                inside = np.nonzero(in_sorted(entity, self.held))[0]
-                if not len(inside):
-                    continue
-                keys = batch.column("key").to_pylist()
-                for i in inside:
-                    per.setdefault(int(entity[i]), []).append(keys[i])
-            self.membership[layer] = per
 
     def batches(self, rows: int = BATCH_ROWS):
         """Yield `(first row index, body bytes, row count)` for the whole hold-out, in file order."""
@@ -386,46 +356,214 @@ class HoldOut:
             pending_rows += table.num_rows
             while pending_rows >= rows:
                 whole = pa.concat_tables(pending)
-                yield emitted, encode_batch(whole.slice(0, rows), self.layers, self.membership), rows
+                yield emitted, encode_batch(whole.slice(0, rows)), rows
                 emitted += rows
                 rest = whole.slice(rows)
                 pending = [rest] if rest.num_rows else []
                 pending_rows = rest.num_rows
         if pending_rows:
             whole = pa.concat_tables(pending)
-            yield emitted, encode_batch(whole, self.layers, self.membership), pending_rows
+            yield emitted, encode_batch(whole), pending_rows
             emitted += pending_rows
         self.total = emitted
         if head:
             self.head = pa.concat_tables(head)
 
 
-def probe_batch(points: pa.Table, external_id: str, layer: str, keys: Sequence[str]) -> bytes:
-    """A one-row batch carrying one layer's membership column, for the end-to-end layer probe.
+# ---------------------------------------------------------------------------------------------
+# Publication — the artifacts, after their points
+# ---------------------------------------------------------------------------------------------
 
-    Built from the rung's **roster** rather than its member table: the point of the probe is
-    whether the wire accepts a membership cell for this layer at all, and reading a 1.66×10⁹-row
-    member table to find out would cost more than the run it precedes.
+
+def external_ids(points: Path) -> np.ndarray:
+    """`entity_id -> base64 external id`, as a fixed-width bytes array indexed by entity id.
+
+    **The external id is the source entity id, little-endian, because that is the one address both
+    halves of the split share.** A publication names its members by external id, and its members
+    are base rows and ingested rows alike: the ingested half carries whatever `external_id` the
+    batch supplied, and the built half carries whatever the build minted — which is
+    `source_id.to_le_bytes()` under `--mint-external-ids` (`tessera-build`'s `ExternalIdRow`), and
+    nothing at all without it. So the driver builds the base with that flag and sends the same
+    eight bytes on ingest, and one member list then addresses both.
+
+    ⊘ **This is why the PMID is no longer the external id.** An earlier driver sent the PMID, which
+    is the natural caller identifier for this corpus and is still the `pmid` attribute — but the
+    build has no way to mint *that* as an external id from a column, so a published membership over
+    base rows was unaddressable and the whole batch was refused, naming member 0 of artifact 0.
+    Measured 2026-09-03.
+
+    Encoded **once per entity** rather than once per member: rung 3's member table names each
+    article ~46 times. `S16` and not `object`: 3.6×10⁷ Python `bytes` are several gigabytes of
+    interpreter objects beside a running server, and base64 of eight bytes is twelve characters.
+    NumPy strips trailing NULs on the way out and base64 contains none, so the value that comes
+    back is exactly what went in.
     """
-    row = points.slice(0, 1)
-    batch = pa.RecordBatch.from_arrays(
-        [
-            pa.array([float(row.column("x").to_pylist()[0])], pa.float64()),
-            pa.array([float(row.column("y").to_pylist()[0])], pa.float64()),
-            pa.array([",".join(row.column("branches").to_pylist()[0])], pa.string()),
-            pa.array([external_id.encode()], pa.binary()),
-            pa.array(row.column("published").to_pylist(), row.column("published").type),
-            pa.array(row.column("title").to_pylist(), pa.string()),
-            pa.array(row.column("mesh_major").to_pylist(), pa.string()),
-            pa.array([external_id], pa.string()),
-            pa.array([list(keys)], pa.list_(pa.string())),
-        ],
-        names=["x", "y", "access", "external_id", "published", "title", "mesh_major", "pmid", layer],
-    )
-    sink = pa.BufferOutputStream()
-    with ipc.new_stream(sink, batch.schema) as writer:
-        writer.write_batch(batch)
-    return sink.getvalue().to_pybytes()
+    ids = pq.read_table(points, columns=["entity_id"]).column("entity_id").to_numpy()
+    out = np.zeros(int(ids.max()) + 1, dtype="S16")
+    for lo in range(0, len(ids), 1 << 21):
+        chunk = ids[lo : lo + (1 << 21)]
+        out[chunk] = [
+            base64.b64encode(int(e).to_bytes(8, "little")) for e in chunk.tolist()
+        ]
+    return out
+
+
+def member_groups(path: Path, keys: Sequence[str]) -> dict:
+    """`(key index, rank) -> entity ids`, read off a rung's member table in one pass.
+
+    A member row carries a `rank`: **null is the artifact's membership, `k` is `contents[k]`'s
+    generating set** — the same reading the build's member pass makes (`tessera-build/src/layers.rs`),
+    so the wire publishes what a build would have planned.
+
+    Grouped by a single `lexsort` over the whole table rather than by a per-key dictionary: at
+    4.6×10⁷ rows the dictionary is the cost of the run, and the sort is three columns of numbers.
+    """
+    idx_parts, rank_parts, entity_parts = [], [], []
+    value_set = pa.array(list(keys), pa.string())
+    reader = pq.ParquetFile(path)
+    for batch in reader.iter_batches(batch_size=1 << 21, columns=["key", "rank", "entity"]):
+        idx = pc.index_in(batch.column("key"), value_set=value_set)
+        if idx.null_count:
+            missing = pc.filter(batch.column("key"), pc.is_null(idx)).to_pylist()[:3]
+            raise ValueError(f"{path.name}: member rows name keys the roster does not: {missing}")
+        idx_parts.append(idx.to_numpy(zero_copy_only=False).astype(np.int32))
+        rank = batch.column("rank")
+        rank_parts.append(np.where(
+            np.asarray(rank.is_null()), np.int16(-1), rank.fill_null(0).to_numpy().astype(np.int16)
+        ))
+        entity_parts.append(batch.column("entity").to_numpy().astype(np.uint64))
+    if not idx_parts:
+        return {}
+    idx = np.concatenate(idx_parts)
+    rank = np.concatenate(rank_parts)
+    entity = np.concatenate(entity_parts)
+    del idx_parts, rank_parts, entity_parts
+    order = np.lexsort((rank, idx))
+    idx, rank, entity = idx[order], rank[order], entity[order]
+    del order
+    # One integer per `(key, rank)` group, so the boundaries are a single `diff`. 1024 ranks is
+    # three orders above any ranking a rung writes, and it is checked rather than assumed: a wider
+    # ranking would silently fold two groups into one.
+    if rank.max(initial=0) >= 1023:
+        raise ValueError(f"{path.name}: a content rank of {int(rank.max())} does not fit this pass")
+    key = idx.astype(np.int64) * 1024 + (rank.astype(np.int64) + 1)
+    edges = np.flatnonzero(np.diff(key)) + 1
+    out = {}
+    for lo, hi in zip(np.r_[0, edges], np.r_[edges, len(key)]):
+        out[(int(idx[lo]), int(rank[lo]))] = entity[lo:hi]
+    return out
+
+
+def json_list(values: np.ndarray) -> bytes:
+    """A JSON array of base64 external ids, assembled as bytes.
+
+    `json.dumps` over 7.6×10⁵ strings is the largest single cost in a publication and it produces
+    exactly this; the join does the same work without building the intermediate list.
+    """
+    if not len(values):
+        return b"[]"
+    return b'["' + b'","'.join(values.tolist()) + b'"]'
+
+
+class Publication:
+    """One layer's roster, published in batches under a byte cap.
+
+    **Every artifact carries its whole member set** — base rows and ingested rows alike, addressed
+    by external id, which is the address both halves share. The batch is the commit unit at the
+    route, so an artifact is published entire or not at all; the cap therefore splits *between*
+    artifacts, and one artifact larger than the cap is sent alone.
+
+    ⊘ **Parents are not published, because the route has no field for them.** A layer's lineage is
+    `IncomingArtifact::parent_keys` inside the service and `parent` in the rung's roster, and
+    `IncomingArtifactBody` — the JSON this route takes — carries `key`, `members`, `content`,
+    `attached_to` and the shape fields, and nothing else. So a `dag` layer publishes as a flat one:
+    the memberships and the content land, every parent edge the roster declared is dropped, and the
+    count of them is recorded here beside the numbers rather than patched around
+    (`docs/evidence/memos/2026-09-03-dag-membership-at-ingest.md`).
+    """
+
+    def __init__(self, roster: Path, members: Path, external: np.ndarray, max_bytes: int):
+        self.table = pq.read_table(roster)
+        self.members = members
+        self.external = external
+        self.max_bytes = max_bytes
+
+    def bodies(self) -> tuple[list, dict]:
+        """`[(level, body bytes, artifacts, members)]`, and what the roster declared.
+
+        Assembled in full before the first request, so the publication's own wall measures the
+        service and not pyarrow — the driver's share is reported separately as `prepared_s`. What
+        that costs is the whole roster's bodies in memory at once: ~700 MB for 4.6×10⁷ members,
+        which is why a layer past `--max-member-rows` is declined rather than published slowly.
+        """
+        rows = self.table.to_pylist()
+        keys = [r["key"] for r in rows]
+        groups = member_groups(self.members, keys)
+        stats = {
+            "artifacts": len(rows),
+            "members": 0,
+            "generating_set_entries": 0,
+            "edges_declared": 0,
+            "edges_published": 0,
+            "artifacts_with_several_parents": 0,
+        }
+        by_level: dict[int, list[tuple[bytes, int]]] = {}
+        for i, row in enumerate(rows):
+            parents = row.get("parent") or []
+            stats["edges_declared"] += len(parents)
+            stats["artifacts_with_several_parents"] += 1 if len(parents) > 1 else 0
+            members = self.external[groups.get((i, -1), np.zeros(0, np.uint64))]
+            stats["members"] += len(members)
+            parts = [b'{"key":', json.dumps(row["key"]).encode(), b',"members":', json_list(members)]
+            contents = row.get("contents") or []
+            if contents:
+                blocks = []
+                for rank, values in enumerate(contents):
+                    generated = self.external[groups.get((i, rank), np.zeros(0, np.uint64))]
+                    stats["generating_set_entries"] += len(generated)
+                    blocks.append(
+                        b'{"values":'
+                        + json.dumps(list(values)).encode()
+                        + b',"generated_from":'
+                        + (json_list(generated) if len(generated) else b"[]")
+                        + b"}"
+                    )
+                parts += [b',"content":[', b",".join(blocks), b"]"]
+            if row.get("attached_layer"):
+                parts += [
+                    b',"attached_to":',
+                    json.dumps(
+                        {
+                            "layer": row["attached_layer"],
+                            "level": int(row.get("attached_level") or 0),
+                            "key": row["attached_key"],
+                        }
+                    ).encode(),
+                ]
+            parts.append(b"}")
+            level = int(row.get("level") or 0)
+            by_level.setdefault(level, []).append((b"".join(parts), len(members)))
+        out = []
+        for level, blocks in by_level.items():
+            batch, size, artifacts, members = [], 0, 0, 0
+            for block, n in blocks:
+                if batch and size + len(block) > self.max_bytes:
+                    out.append((level, self._body(level, batch), artifacts, members))
+                    batch, size, artifacts, members = [], 0, 0, 0
+                batch.append(block)
+                size += len(block) + 1
+                artifacts += 1
+                members += n
+            if batch:
+                out.append((level, self._body(level, batch), artifacts, members))
+        return out, stats
+
+    def _body(self, level: int, blocks: list[bytes]) -> bytes:
+        return (
+            b'{"level":' + str(level).encode() + b',"addressing":"external","artifacts":['
+            + b",".join(blocks)
+            + b"]}"
+        )
 
 
 # ---------------------------------------------------------------------------------------------
@@ -471,6 +609,27 @@ class Control:
         return requests.put(
             f"{self.base}/control/layers", headers=self.headers, json=declaration, timeout=120
         )
+
+    def publish(self, layer: str, body: bytes, session: requests.Session, timeout=1800):
+        """`PUT /control/layers/{name}/artifacts`, with the body already serialised.
+
+        Sent as bytes under an explicit content type rather than through `json=`: the body is
+        assembled once as bytes by [`Publication`], and handing `requests` a dict would serialise
+        a 10⁶-member artifact a second time.
+
+        **The layer name is percent-encoded**, because the route matches one path segment and this
+        rung's names are path-shaped: `clusters/kmeans` unencoded is a 404 at the router rather
+        than a refusal from the handler, which reads as an empty publication rather than as an
+        error.
+        """
+        t0 = time.perf_counter()
+        r = session.put(
+            f"{self.base}/control/layers/{urllib.parse.quote(layer, safe='')}/artifacts",
+            headers=self.headers | {"Content-Type": "application/json"},
+            data=body,
+            timeout=timeout,
+        )
+        return r, time.perf_counter() - t0
 
 
 def wait_for(predicate, timeout: float, interval: float = 0.5) -> tuple[bool, float]:
@@ -529,18 +688,23 @@ def census(
             timeout=300,
         )
         r.raise_for_status()
-        row["layers"] = layer_frame_counts(r.content)
+        row["layers"] = artifact_frame_census(r.content)
         out[f"{rung['target']:.4f}"] = row
     return out
 
 
-def layer_frame_counts(content: bytes) -> dict:
-    """Every frame in a viewport response after the tiles frame, by kind: rows and count sums.
+def artifact_frame_census(content: bytes) -> dict:
+    """The kind-5 artifact frames of a viewport response, **per layer**: artifacts and masked count.
 
-    The wire is a sequence of `(u8 kind, u32 length, payload)` frames. What this needs from the
-    artifact frames is a number that changes if a layer's masked membership changes, and `count`
-    summed over the frame's rows is that number; the frame's own kind is carried so a change in
-    which frames were served is visible too.
+    The wire is a sequence of `(u8 kind, u32 LE length, payload)` frames, and kind 5 is one row per
+    served artifact (`tessera-wire/src/payload.rs`). Its `layer` column is dictionary-encoded and
+    its `masked_count` is what the viewer is shown, so grouping the rows by layer gives exactly
+    what decision 0091's per-layer test asks for: how many artifacts this principal is served on
+    each layer, and how many documents those artifacts count for them.
+
+    **Two numbers per layer, not one.** An artifact count alone passes a defect that serves the
+    right artifacts with the wrong memberships; a summed masked count alone passes one that moves
+    members between artifacts of the same layer.
     """
     out: dict = {}
     offset = 0
@@ -549,17 +713,15 @@ def layer_frame_counts(content: bytes) -> dict:
         length = int.from_bytes(content[offset + 1 : offset + 5], "little")
         payload = content[offset + 5 : offset + 5 + length]
         offset += 5 + length
-        if kind == 1 or not payload:
+        if kind != 5 or not payload:
             continue
-        try:
-            table = ipc.open_stream(payload).read_all()
-        except Exception:
-            continue
-        entry = {"rows": table.num_rows}
-        for column in ("count", "visible", "members"):
-            if column in table.column_names:
-                entry[column] = sum(int(v or 0) for v in table.column(column).to_pylist())
-        out.setdefault(str(kind), []).append(entry)
+        table = ipc.open_stream(payload).read_all()
+        layers = table.column("layer").to_pylist()
+        counts = table.column("masked_count").to_pylist()
+        for layer, count in zip(layers, counts):
+            entry = out.setdefault(layer, {"artifacts": 0, "masked_count": 0})
+            entry["artifacts"] += 1
+            entry["masked_count"] += int(count or 0)
     return out
 
 
@@ -576,7 +738,8 @@ def compare_census(folded: dict, all_in: dict) -> dict:
       from the complement quantises onto a slightly different grid than the all-in build does and
       the margins of a box disagree by a handful of rows. That is a property of `auto`, not of
       ingest, and the frames are recorded beside the counts so a reader can see it.
-    * `layers` — the artifact frames served with the viewport, by frame kind.
+    * `layers` — the kind-5 artifact frame, per layer: how many artifacts this principal is
+      served on it and what they count for them. One entry per layer that differs.
     """
     differences = []
     for key in sorted(set(folded) | set(all_in)):
@@ -603,10 +766,22 @@ def compare_census(folded: dict, all_in: dict) -> dict:
                         "all_in": y["visible"],
                     }
                 )
-        if a["layers"] != b["layers"]:
-            differences.append(
-                {"principal": key, "where": "layers", "folded": a["layers"], "all_in": b["layers"]}
-            )
+        # **One difference per layer**, not one per principal: a layer the wire declined and a
+        # layer whose masked counts moved are different findings, and a single blob comparison
+        # reports them as one.
+        for layer in sorted(set(a["layers"]) | set(b["layers"])):
+            folded_layer = a["layers"].get(layer)
+            all_in_layer = b["layers"].get(layer)
+            if folded_layer != all_in_layer:
+                differences.append(
+                    {
+                        "principal": key,
+                        "where": "layers",
+                        "layer": layer,
+                        "folded": folded_layer,
+                        "all_in": all_in_layer,
+                    }
+                )
     by_surface: dict[str, int] = {}
     for d in differences:
         where = d.get("where", "missing")
@@ -660,13 +835,6 @@ class Cycle:
             shutil.rmtree(base_dir)
         self.log(f"splitting: base {len(base_ids):,} rows, hold-out {len(held):,} rows")
         write_base_inputs(self.rung, base_dir, base_ids)
-        if len(base_ids) == 0:
-            # **The empty base.** A description generated from every member of an artifact that has
-            # no members is satisfied by everyone, which the registry refuses at either entry point;
-            # the kind comes out of the measurement's own declaration and the removal is recorded.
-            self.result["content_removed"] = strip_all_members_content(base_dir)
-            if self.result["content_removed"]:
-                self.log(f"empty base: removed {self.result['content_removed']}")
         if self.args.state_extent:
             self.result["stated_extent"] = state_extent(
                 base_dir / "corpus.toml", self.rung / "bundle"
@@ -681,6 +849,11 @@ class Cycle:
             [
                 str(self.binary),
                 "build",
+                # **The base's rows must be addressable by external id**, because the artifacts
+                # published after the ingest name their members that way and most of those members
+                # are base rows. The flag mints one per item from its source entity id
+                # (`ExternalIdRow`), which is the form [`encode_batch`] sends for the hold-out.
+                "--mint-external-ids",
                 "--deployment",
                 str(base_dir / "tessera.toml"),
                 "--stage-timings-json",
@@ -825,16 +998,17 @@ class Cycle:
                 [quant["x_min"], quant["y_min"], quant["x_max"], quant["y_max"]], k=1
             )["counts"]["visible"]
 
-            layers = self.probe_layers(control, served, view)
             head = 3 * args.write_cycle_n if args.write_cycle else 0
-            hold = HoldOut(self.rung, self.held, list(layers["carried"]), head_rows=head)
-            self.log(
-                f"ingesting {len(self.held):,} rows at C={args.concurrency}, "
-                f"layers={layers['carried']} (declined {list(layers['declined'])})"
-            )
+            hold = HoldOut(self.rung, self.held, head_rows=head)
+            self.log(f"ingesting {len(self.held):,} rows at C={args.concurrency}")
             self.result["ingest"] = self.run_ingest(control, hold.batches(), "cycle")
-            self.result["layers"] = layers
             self.log(f"  {self.result['ingest']['items_per_s']} items/s")
+
+            # **Every artifact, after every point it depends on.** Before the flush, deliberately:
+            # an ingested row is resolvable by its external id from the moment it is acked
+            # (`Session::resolve_external_ids` consults the live map first), so the ordering the
+            # ruling states — points before the artifacts that name them — is the only one there is.
+            self.result["publish"] = self.publish_layers(control)
 
             # **Each phase's failure is recorded and the run continues.** A cell that died at the
             # flush used to lose its ingest figures too, which are the expensive half; and a
@@ -862,98 +1036,103 @@ class Cycle:
             served.stop()
         return self.result
 
-    # -- layer membership on the wire ------------------------------------------------------
+    # -- the artifacts, on the wire --------------------------------------------------------
 
-    def probe_layers(self, control: Control, served: Deployment, view: str) -> dict:
-        """Does the membership path carry this rung's two layers, end to end?
+    def publish_layers(self, control: Control) -> dict:
+        """Publish every declared layer's roster, in batches under the byte cap. Its own figure.
 
-        One single-row batch per layer, sent before the run proper and **deleted again** so the
-        probe leaves the deployment as it found it. What it can find out is which of the two the
-        *wire* can express — and the answer is not the same for both, because a membership
-        column's meaning is the layer's hierarchy kind
-        (`tessera_types::layer::ListMeaning`): a `flat` layer's cell is an unordered set of keys,
-        so one point in one cluster is one entry; a `dag` layer's cell is a **lineage**, one path
-        from a root, so one cell cannot say *this article is in ten unrelated concepts*, which is
-        what a MeSH-indexed article is.
+        **The whole roster, and the whole of each artifact's membership** — base rows and ingested
+        rows alike. An artifact exists because the layer declares it, so publishing only the ones
+        whose members survived the split would make the two deployments differ in their *roster* as
+        well as in their membership, which is a second variable in a test that has one.
 
-        Whatever this finds is recorded and the run proceeds with the layers that work. It is not
-        patched around: a fraction whose ingested rows carry no `mesh/descriptors` membership has
-        a different masked count on that layer **by design**, and the equivalence block must
-        report the difference rather than have it hidden by a driver that quietly filled it in.
+        A layer whose member table is larger than `--max-member-rows` is **declined and recorded**,
+        not silently skipped: the driver inverts the table in memory to address it per artifact, and
+        rung 3's DAG membership is 1.66×10⁹ rows. The layer is then declared and empty on the folded
+        deployment, every count on it differs from the all-in build's by design, and the equivalence
+        block reports the difference rather than hiding it.
         """
-        out: dict = {"probed": {}, "carried": [], "declined": {}}
-        declared = {
-            layer["name"]: layer.get("hierarchy", {}).get("kind", "flat")
-            for layer in tomllib.loads((self.rung / "corpus.toml").read_text()).get("layer", [])
-        }
-        out["hierarchy_kinds"] = declared
-        points = pq.read_table(self.rung / "points.parquet").slice(0, 1)
-        rosters = {
-            "clusters/kmeans": "clusters-kmeans.parquet",
-            "mesh/descriptors": "mesh-descriptors.parquet",
-        }
-        members = {
-            "clusters/kmeans": "clusters-kmeans-members.parquet",
-            "mesh/descriptors": "mesh-descriptors-members.parquet",
-        }
-        for layer, roster in rosters.items():
-            keys = pq.read_table(self.rung / roster, columns=["key"]).column("key").to_pylist()[:3]
-            probe_id = f"layer-probe-{uuid.uuid4().hex[:12]}"
-            body = probe_batch(points, probe_id, layer, keys)
-            r, _ = control.ingest(body, probe_id, requests.Session())
-            entry = {"status": r.status_code, "keys_offered": len(keys), "body": r.text[:800]}
-            if r.status_code == 200:
-                # Withdraw it: a probe row left behind would be one row of difference between the
-                # folded deployment and the all-in build, in a test whose answer is "exact zero".
-                withdraw, _ = control.changes(
-                    [{"external_id": base64.b64encode(probe_id.encode()).decode(), "op": "delete"}]
+        external = external_ids(self.rung / "points.parquet")
+        out: dict = {"layers": {}, "declined": {}}
+        totals = {"artifacts": 0, "members": 0, "wall_s": 0.0, "requests": 0}
+        for layer, (roster, members) in LAYER_SOURCES.items():
+            roster_path, members_path = self.rung / roster, self.rung / members
+            if not roster_path.exists():
+                continue
+            rows = pq.ParquetFile(members_path).metadata.num_rows
+            if rows > self.args.max_member_rows:
+                out["declined"][layer] = (
+                    f"{rows:,} member rows exceeds --max-member-rows "
+                    f"{self.args.max_member_rows:,}; the driver would have to hold the whole "
+                    f"membership in memory to address it per artifact"
                 )
-                entry["withdrawn"] = withdraw.status_code
-                rows = pq.ParquetFile(self.rung / members[layer]).metadata.num_rows
-                entry["member_rows"] = rows
-                kind = declared.get(layer, "flat")
-                if kind in ("dag", "nested") and not self.args.carry_lineage_layers:
-                    # **The path exists — the probe above was a 200 — and the semantics do not
-                    # match.** Under `dag` and `nested` a membership cell is a *lineage*: entry k
-                    # is the parent of entry k+1, every artifact at level 0
-                    # (`tessera_types::layer::ListMeaning`). This rung's articles are in a mean of
-                    # 10.6 unrelated MeSH descriptors, and a list of ten unrelated keys read as a
-                    # lineage declares nine parent edges the NLM's DAG does not have.
-                    #
-                    # **Measured, 2026-09-03: the server does not absorb them.** A probe batch of
-                    # three keys produced `an ingest batch's list column names parent edges these
-                    # layers do not hold; the memberships are applied and the edges are not` —
-                    # so the hierarchy is *not* silently extended, and the memberships do land.
-                    # The layer is still declined by default because the cell would be saying
-                    # something the data does not mean and the warning count would scale with the
-                    # corpus; `--carry-lineage-layers` runs it deliberately, and on medcpt-1m
-                    # that run cost 31k items/s against 157k with the column absent.
-                    #
-                    # Stated, not patched around: the ingested rows carry no membership on this
-                    # layer, so every later count on it differs by design, and the equivalence
-                    # block reports the difference.
-                    out["declined"][layer] = (
-                        f"declared `kind = \"{kind}\"`, whose membership cell is a lineage; this "
-                        f"rung's points are in several unrelated artifacts each, which a lineage "
-                        f"cannot express and which a `dag` would absorb as new parent edges"
-                    )
-                elif rows > self.args.max_member_rows:
-                    out["declined"][layer] = (
-                        f"{rows:,} member rows exceeds --max-member-rows "
-                        f"{self.args.max_member_rows:,}; the driver would have to hold the whole "
-                        f"membership in memory to invert it per entity"
-                    )
-                else:
-                    out["carried"].append(layer)
-            out["probed"][layer] = entry
+                self.log(f"  {layer}: DECLINED, {rows:,} member rows")
+                continue
+            t0 = time.perf_counter()
+            bodies, stats = Publication(
+                roster_path, members_path, external, self.args.publish_max_bytes
+            ).bodies()
+            prepared_s = time.perf_counter() - t0
+            statuses: dict[str, int] = {}
+            refusal = None
+            session = requests.Session()
+            t0 = time.perf_counter()
+            published = {"artifacts": 0, "members": 0}
+            for level, body, artifacts, members_n in bodies:
+                r, _ = control.publish(layer, body, session)
+                statuses[str(r.status_code)] = statuses.get(str(r.status_code), 0) + 1
+                if r.status_code == 201:
+                    published["artifacts"] += artifacts
+                    published["members"] += members_n
+                elif refusal is None:
+                    refusal = {"level": level, "status": r.status_code, "body": r.text[:1500]}
+            wall = time.perf_counter() - t0
+            entry = dict(stats)
+            entry.update(
+                {
+                    "requests": len(bodies),
+                    "prepared_s": round(prepared_s, 2),
+                    "wall_s": round(wall, 2),
+                    "published_artifacts": published["artifacts"],
+                    "published_members": published["members"],
+                    "artifacts_per_s": round(published["artifacts"] / wall, 1) if wall else None,
+                    "members_per_s": round(published["members"] / wall, 1) if wall else None,
+                    "statuses": statuses,
+                    "first_refusal": refusal,
+                }
+            )
+            out["layers"][layer] = entry
+            totals["artifacts"] += published["artifacts"]
+            totals["members"] += published["members"]
+            totals["wall_s"] += wall
+            totals["requests"] += len(bodies)
+            self.log(
+                f"  {layer}: {published['artifacts']:,} artifacts, {published['members']:,} "
+                f"members in {wall:.1f} s ({entry['artifacts_per_s']} artifacts/s, "
+                f"{entry['members_per_s']} members/s), {len(bodies)} requests, "
+                f"{stats['edges_declared']:,} parent edges the wire cannot carry"
+            )
+        totals["wall_s"] = round(totals["wall_s"], 2)
+        totals["artifacts_per_s"] = (
+            round(totals["artifacts"] / totals["wall_s"], 1) if totals["wall_s"] else None
+        )
+        totals["members_per_s"] = (
+            round(totals["members"] / totals["wall_s"], 1) if totals["wall_s"] else None
+        )
+        out["totals"] = totals
+        # ⊘ **The route has no field for a parent**, so a layer's lineage is dropped whatever its
+        # kind. Counted rather than worked around — see [`Publication`] and the handover memo.
+        out["edges_not_expressible"] = sum(
+            entry["edges_declared"] for entry in out["layers"].values()
+        )
         return out
 
     def probe_layers_after_ingest(self, served, session_cred, view, quant, all_terms) -> dict:
         """One zoom-0 viewport **with `layers: "all"`** after the flush, timed and allowed to fail.
 
         Its own measurement because it is the request that broke the first 3.6×10⁷ cell. The
-        trigger is not the flush: it is `probe_layers` above, whose one-row growth into
-        `mesh/descriptors` moves the level's version, after which the engine refuses the
+        trigger is not the flush: it is the record change under a level — a publication here, a
+        one-row growth before — which moves the level's version, after which the engine refuses the
         fold-written column and rebuilds the level's row form on the next layered request —
         94–113 s here, shed against `serve.stream_deadline_ms`. Reproduced with no flush in
         `probes/2026-09-03-growth-trigger/`; the fix is ruled in
@@ -1100,18 +1279,22 @@ class Cycle:
     def do_write_cycle(self, control, served, session_cred, view, quant, all_terms, hold) -> dict:
         """1,000 deletes, 1,000 suppressions, 1,000 re-ingests, a fold, and the census again.
 
-        Addressed by `external_id` — the PMID — because that is the address an ingested row has
-        that survives a delete: `tessera_id`s are per entity and a deleted holder does not block a
-        re-ingest of the same external id (decision 0047, edit is delete + re-ingest).
+        Addressed by `external_id` — the source entity id, as [`external_ids`] spells it — because
+        that is the address an ingested row has that survives a delete: `tessera_id`s are per
+        entity and a deleted holder does not block a re-ingest of the same external id (decision
+        0047, edit is delete + re-ingest).
         """
         if hold.head is None or hold.head.num_rows < 2:
             return {"skipped": "hold-out too small for a write cycle"}
-        pmids = hold.head.column("pmid").to_pylist()
-        n = min(self.args.write_cycle_n, len(pmids) // 3)
+        ids = [
+            base64.b64encode(int(e).to_bytes(8, "little")).decode()
+            for e in hold.head.column("entity_id").to_pylist()
+        ]
+        n = min(self.args.write_cycle_n, len(ids) // 3)
         if n == 0:
             return {"skipped": "hold-out too small for a write cycle"}
-        deletes = pmids[:n]
-        suppressions = pmids[n : 2 * n]
+        deletes = ids[:n]
+        suppressions = ids[n : 2 * n]
         full = [quant["x_min"], quant["y_min"], quant["x_max"], quant["y_max"]]
 
         def visible() -> int:
@@ -1123,14 +1306,12 @@ class Cycle:
         start_visible = visible()
         out: dict = {"n": n, "visible_before": start_visible}
 
-        for op, ids in (("delete", deletes), ("suppress", suppressions)):
-            items = [
-                {"external_id": base64.b64encode(p.encode()).decode(), "op": op} for p in ids
-            ]
+        for op, batch in (("delete", deletes), ("suppress", suppressions)):
+            items = [{"external_id": external, "op": op} for external in batch]
             r, wall = control.changes(items)
-            expected = start_visible - len(ids) if op == "delete" else None
+            expected = start_visible - len(batch) if op == "delete" else None
             reached, visibility_s = wait_for(
-                lambda: visible() <= (expected if expected is not None else start_visible - len(ids)),
+                lambda: visible() <= (expected if expected is not None else start_visible - len(batch)),
                 timeout=120,
                 interval=0.25,
             )
@@ -1146,12 +1327,12 @@ class Cycle:
 
         # Re-ingest: the deleted rows, under fresh batch ids. A deleted holder never blocks a
         # re-ingest (decision 0047), so these must be accepted rather than 409'd.
-        # `deletes` is `pmids[:n]`, so the rows to re-ingest are the head's first `n` — the same
+        # `deletes` is `ids[:n]`, so the rows to re-ingest are the head's first `n` — the same
         # bytes, under fresh batch ids, which is what makes this a re-ingest rather than a replay.
         def head_slice():
             for start in range(0, n, BATCH_ROWS):
                 chunk = hold.head.slice(start, min(BATCH_ROWS, n - start))
-                yield start, encode_batch(chunk, hold.layers, hold.membership), chunk.num_rows
+                yield start, encode_batch(chunk), chunk.num_rows
 
         out["reingest"] = self.run_ingest(control, head_slice(), "recycle")
         control.flush()
@@ -1195,11 +1376,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--write-cycle-n", type=int, default=1000)
     ap.add_argument("--reuse-base", action="store_true")
     ap.add_argument(
-        "--carry-lineage-layers",
-        action="store_true",
-        help="send a membership column for a `dag`/`nested` layer anyway. The cell is a lineage "
-        "there, so a multi-membership rung's keys become parent edges: measure it deliberately, "
-        "never by default",
+        "--publish-max-bytes",
+        type=int,
+        default=32 * 1024 * 1024,
+        help="the publication byte cap: a batch is split between artifacts to stay under it. One "
+        "artifact larger than this is sent alone, the batch being the commit unit; the route's own "
+        "cap is 64 MiB",
     )
     ap.add_argument(
         "--state-extent",
@@ -1212,8 +1394,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--max-member-rows",
         type=int,
         default=200_000_000,
-        help="decline to carry a layer whose member table is larger than this: the driver inverts "
-        "it per entity in memory, and rung 3's DAG membership is 1.66e9 rows",
+        help="decline to publish a layer whose member table is larger than this: the driver holds "
+        "it in memory to address it per artifact, and rung 3's DAG membership is 1.66e9 rows",
     )
     ap.add_argument("--flush-timeout", type=float, default=900.0)
     ap.add_argument("--fold-timeout", type=float, default=7200.0)
