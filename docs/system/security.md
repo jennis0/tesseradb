@@ -1,9 +1,7 @@
 # Security
 
 Every count, cluster, density figure and label Tessera serves is computed from inside the
-requesting viewer's own authorised set, not filtered into that shape afterward. This chapter
-states that guarantee in full: the adversary it is built against, the five properties that make it
-up, how each is enforced, what is accepted rather than closed, and what is not claimed.
+requesting viewer's own authorised set, not filtered into that shape afterward.
 
 ## The adversary and the boundary
 
@@ -12,22 +10,18 @@ Three parties reach the system, and the design treats them differently.
 A viewer holds a session token: whatever credentials it presented at authorisation, and as many
 requests as it likes against the resulting access. This is the adversary the properties below are
 built against: someone who can hold any grant, ask anything, and read every response, but cannot
-forge a credential or bypass the authorisation step itself. The evidence in this chapter, and the
-register in particular, states what such a viewer can learn.
+forge a credential or bypass the authorisation step itself.
 
 A bundle holder holds the built artifact on disk: the manifest, the per-deployment key, the full
-term index and the geometry. None of the properties below defend against this party. Anyone with
-the bundle already has the masks, the term index and the coordinates; the identifier scheme
-described below adds nothing against them, and none is claimed.
+term index and the geometry. Nothing here defends against this party: the bundle contains the masks, the term index and the
+coordinates.
 
 An operator drives the control plane: ingest, deletion, suppression and compaction. The design
-treats this party as trusted. The write path's own correctness against a trusted operator is that
-chapter's subject rather than this one's.
+treats this party as trusted.
 
 A client (the TypeScript or Python library, or a component built on it) is not a trust boundary at
 all. Every count, sample and label it receives has already been computed inside the principal's own
-mask before it left the server. What a client can get wrong is truthful display, not disclosure;
-that is covered in the clients chapter.
+mask before it left the server. What a client can get wrong is truthful display.
 
 ```mermaid
 flowchart LR
@@ -115,24 +109,18 @@ compartment today, so neither case can arise and neither rule has anything to te
 | Cryptographic strength of the client-facing identifier | Not needed. The permutation hides a lower bound on the number of hidden items and their grouping by access, a low-severity channel. An adversary who recovered the key would be back at that channel and nothing more. |
 | A defence against a bundle holder | Anyone holding the bundle has the key, the term index and the coordinates. None of the properties above are claimed against them. |
 | Isolation of compartmented partitions | **Not built yet.** The design specifies physical separation for data that must be held apart. A deployment today has one store, so no isolation beyond masking is available. |
-| Agreement between the two authorisation functions | See below. |
+| Agreement between the two authorisation functions | Nothing checks that the function deriving terms from an item's label and the one deriving terms from a viewer's credentials agree about what a term means. The only plugin that exists passes strings through unchanged, so they cannot disagree; a check needs a plugin whose functions could. |
 | Verification of what an operator declares | A vocabulary value, a layer's label or supplied artifact content that the operator declares visible is served as declared. The service cannot check provenance. |
-| Closure of the timing channel | Accepted and unquantified; see the register. |
-| Protection of data at rest | This chapter covers what a viewer can learn from responses. Data on disc has a different adversary and is covered where the storage is described. |
-| The client as a trust boundary | The client never decides what is visible; every value it holds has already passed the server's mask. Its rules concern truthful display and are in the clients chapter. |
-| Availability and denial of service | Outside this chapter. The serving chapter covers admission and load shedding. |
+| Closure of the timing channel | Accepted and unquantified. |
+| Protection of data at rest | This chapter covers what a viewer can learn from responses. Data on disc has a different adversary. |
+| The client as a trust boundary | The client never decides what is visible; every value it holds has already passed the server's mask. Its rules concern truthful display. |
+| Availability and denial of service | Not a disclosure property. |
 
-The caller supplies two functions: one derives terms from an item's access label, the other from a
-viewer's credentials. Every property above rests on the two agreeing about what a term means, and
-nothing checks that they do. The only plugin that exists passes strings through unchanged, so its
-two functions cannot disagree; the check cannot exist until a plugin does whose functions could.
 
 ## Residual disclosure
 
 Three channels let a viewer learn something beyond the items they are entitled to see. Each is
-accepted rather than closed, for the reason given. The last column names the specification's
-register rows each one covers, for a reader tracing a code from the specification or the
-conformance suite.
+accepted rather than closed, for the reason given.
 
 | What a viewer can learn | How | Severity | Why it is accepted | Specification rows |
 |---|---|---|---|---|
@@ -140,11 +128,6 @@ conformance suite.
 | When an item they once saw was deleted or suppressed, or when their own grant changed; and that another viewer is looking at the same item | A `tessera_id` is stable for the item's life, so a held one stops resolving at the moment of the change, and two viewers who compare identifiers can match them. An operator's external ids carry whatever structure the operator put in them | Medium | The price of an identifier a client can bookmark and share. Probing across a key rotation is closed: nothing lets a client vary the key | C6, C17, C20 |
 | An upper bound on how many values a category has | Where an operator numbers a vocabulary's values densely, the largest code a viewer can see bounds the count | Low | The operator's own numbering; an owner ruling that set-size inference from it is not defended against | C22 |
 
-The specification's register lists thirty-three channels. The others were considered and are
-either closed (a filter's match count before intersection, relevance ranking,
-vector neighbours, background term frequencies, node bounds and hull shapes, label existence) or
-restate a quantity the viewer is already served (coarse density, drill-down relations, highlight
-counts). They are not disclosures and are not repeated here.
 
 ## Evidence
 
