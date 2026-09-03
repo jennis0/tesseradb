@@ -1,0 +1,9 @@
+# Rung 4 shares the arXiv rung's environment exactly: `~/venvs/projection`, cuVS, cuML and CuPy on
+# the GPU with scikit-learn and SciPy on the CPU. Nothing here needs a package that rung does not
+# already have, so the versions are named in one place rather than two.
+#
+#   ~/venvs/projection/bin/python -m test_corpora.paperseek.stage
+#   ~/venvs/projection/bin/python -m test_corpora.paperseek.prepare --sample 1000000
+#
+# See ../arxiv/requirements.txt.
+-r ../arxiv/requirements.txt

@@ -128,12 +128,18 @@ class ArtifactSet:
         ]
     )
 
-    def stream_members(self, layer, out: Path, keys, entities, *, level=0) -> int:
+    def stream_members(self, layer, out: Path, keys, entities, *, level=0, rank=None) -> int:
         """Append one row group of `(artifact, entity)` rows to the layer's member file.
 
         `keys` is an Arrow string array of artifact keys and `entities` a parallel array of source
         entity ids; both are already the flat, deduplicated shape the file wants. Returns the rows
         written. The file is opened on the first call and closed by `close_streams`.
+
+        `rank` is the accumulating path's, and it is here because a layer whose *membership* is too
+        large to accumulate still has generating sets that are not: rung 4's clustering streams
+        10⁸ member rows and a few hundred ranked rows per artifact into the same file, and a layer
+        may only be written one way. `None` — the default, and every earlier caller's behaviour —
+        is the artifact's own membership.
         """
         assert not self.member_rows[layer][1], (
             f"{layer}: member rows were accumulated as well as streamed"
@@ -153,9 +159,14 @@ class ArtifactSet:
                 {
                     "level": pa.array(np.full(n, level, dtype=np.uint32), pa.uint32()),
                     "key": keys,
-                    # Null throughout: a rank names the generating set of a ranked content, and
-                    # every row here is the artifact's own membership.
-                    "rank": pa.nulls(n, pa.uint32()),
+                    # A rank names the generating set of a ranked content; null is the artifact's
+                    # own membership, which is what a streamed layer writes for all but a few
+                    # hundred rows an artifact.
+                    "rank": (
+                        pa.nulls(n, pa.uint32())
+                        if rank is None
+                        else pa.array(np.full(n, rank, dtype=np.uint32), pa.uint32())
+                    ),
                     "entity": pa.array(np.asarray(entities, dtype=np.uint64), pa.uint64()),
                 },
                 schema=self.MEMBER_SCHEMA,
