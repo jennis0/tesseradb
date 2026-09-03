@@ -242,9 +242,11 @@ impl<T: Zeroable> Drop for MappedArray<T> {
 /// anonymous is nothing, and what the column costs is one 8-byte offset per entity plus the
 /// characters themselves, on disk.
 ///
-/// **Arrival order, not entity order**, which is what makes it a single pass: the attribute join
-/// discovers values in the source file's order and scatters them by entity, so an entity-ordered
-/// arena would need a prefix-sum pass over lengths and a second scan of the source.
+/// **Filled in one of two orders**, and this type takes both: appended in the source's *arrival*
+/// order through [`Self::append`], which is one pass; or laid out in *entity* order by a caller
+/// that has already measured every record, through [`Self::note_record`], [`Self::reserve_exact`]
+/// and [`Self::write_at`], which costs a second scan of the source and makes the record blob's
+/// walk sequential. `column.rs` holds the argument and `crate::ArenaOrder` the switch.
 ///
 /// **Its order carries no meaning, so the readers that walk all of it walk it in *arena* order.**
 /// That is not what the shape started as: the text index walked entity ranges and reached the
@@ -454,10 +456,67 @@ impl MappedArena {
         }
     }
 
+    /// Remember `offset` as a record start, under the same stride-and-count rule
+    /// [`Self::append`] applies — for the entity-ordered fill, which computes every record's
+    /// offset before a byte is written and so never appends.
+    ///
+    /// Offsets must arrive ascending, which is what [`Self::windows`] reads them as.
+    pub(crate) fn note_record(&mut self, offset: u64) {
+        if offset >= self.next_mark || self.since_mark >= ARENA_MARK_RECORDS {
+            self.marks.push(offset);
+            self.next_mark = offset + ARENA_MARK_STRIDE;
+            self.since_mark = 0;
+        }
+        self.since_mark += 1;
+    }
+
+    /// Size the arena to exactly `bytes` and declare all of it used, for a caller that has
+    /// already decided where every record goes ([`Self::write_at`]).
+    ///
+    /// **One `posix_fallocate` for the whole file rather than a doubling per append**: the
+    /// entity-ordered fill knows the total from its prefix sum, so the arena is never copied,
+    /// never remapped mid-fill, and never carries the up-to-2× slack a doubling leaves.
+    pub(crate) fn reserve_exact(&mut self, bytes: u64) -> Result<()> {
+        if bytes > self.capacity {
+            self.map_to(bytes)?;
+        }
+        self.used = bytes;
+        Ok(())
+    }
+
+    /// Write `bytes` at `offset`, which must lie inside what [`Self::reserve_exact`] set aside.
+    ///
+    /// Refused rather than allowed to wrap onto the next record: an overrun here would put one
+    /// entity's prose inside another's record and desynchronise every window after it, which no
+    /// later check could attribute back to this call.
+    pub(crate) fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<()> {
+        let end = offset.saturating_add(bytes.len() as u64);
+        if end > self.used {
+            return Err(BuildError::Invalid(format!(
+                "an arena write of {} bytes at {offset} runs past the {} reserved",
+                bytes.len(),
+                self.used
+            )));
+        }
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let map = self
+            .map
+            .as_mut()
+            .expect("a reserved arena holds its mapping");
+        map[offset as usize..end as usize].copy_from_slice(bytes);
+        Ok(())
+    }
+
     fn grow(&mut self, need: u64) -> Result<()> {
-        let capacity = need
-            .max(self.capacity.saturating_mul(2))
-            .max(ARENA_MIN_BYTES);
+        self.map_to(
+            need.max(self.capacity.saturating_mul(2))
+                .max(ARENA_MIN_BYTES),
+        )
+    }
+
+    fn map_to(&mut self, capacity: u64) -> Result<()> {
         // A released column's arena owns no file, and nothing appends to one: reaching here is a
         // caller that kept a column past `release`.
         let (Some(file), Some(path)) = (&self.file, &self.path) else {

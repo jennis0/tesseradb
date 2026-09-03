@@ -93,6 +93,8 @@
 
 use tessera_spatial::ScalarType;
 
+use crate::ArenaOrder;
+
 /// The unenumerated transients: decode buffers, a stage's scratch, the allocator's slack. The
 /// batch loop's own model carries a constant of the same size and for the same reason.
 pub(crate) const SLACK: u64 = 64 << 20;
@@ -310,16 +312,26 @@ pub(crate) fn entity_order_residency(
     for (index, column) in columns.iter().enumerate() {
         let width = fixed_width(column.ty);
         let presence = n.div_ceil(8);
+        // **The entity-ordered fill's transient**, charged on every string column rather than on
+        // the ones that take it. Pass one keeps a `u32` length per entity so the prefix sum can
+        // lay the arena out, and gives it back the moment pass two is done — so it stands beside
+        // the column but not beside the stages after the join. It is charged unconditionally
+        // because the order is decided from the budget and this figure feeds the budget, and the
+        // circle is worth less than the four bytes: at 10⁸ it is 400 MB against an arena two
+        // orders of magnitude larger, and it errs in the direction that costs a rerun
+        // (`crate::ArenaOrder`, `column.rs`).
+        let layout = if is_variable_width(column.ty) { 4 * n } else { 0 };
         let bytes = width
             .saturating_mul(n)
             .saturating_add(presence)
-            .saturating_add(column.payload_bytes);
+            .saturating_add(column.payload_bytes)
+            .saturating_add(layout);
         let ty = column.ty.arrow_type_name();
         terms.push(Term {
             what: if column.payload_bytes > 0 {
                 format!(
                     "declared column {index} ({ty}): {width} B/item of offset plus \
-                     {} MiB of characters, in .build-tmp/",
+                     {} MiB of characters and 4 B/item of arena layout, in .build-tmp/",
                     column.payload_bytes >> 20
                 )
             } else {
@@ -345,7 +357,10 @@ pub(crate) fn entity_order_residency(
                     "the text index's sorted runs over column {index}, charged at the column they \
                      are tokenised from"
                 ),
-                bytes,
+                // The column's own storage, without the arena layout's transient: the layout is
+                // given back at the end of the join and the runs spill three stages later, so the
+                // two never stand on the disk together.
+                bytes: bytes - layout,
                 mapped: true,
             });
         }
@@ -431,6 +446,117 @@ pub(crate) fn model(args: &crate::BuildArgs, n: u64) -> Residency {
     entity_order_residency(n, &columns, member_rows)
 }
 
+/// The string columns' payload against the memory budget, and the arena order that follows.
+///
+/// **Decided before the join, from Parquet footers alone**, which is what makes it a decision and
+/// not a reaction: [`ColumnCost::payload_bytes`] is known before a row is read, and the two orders
+/// produce the same bundle, so a wrong guess costs time and never correctness.
+#[derive(Debug, Clone)]
+pub(crate) struct ArenaDecision {
+    /// Each declared string column, with the uncompressed bytes its source's footer reports.
+    pub columns: Vec<(String, u64)>,
+    /// Their sum — what the arena will hold, to a footer's accuracy.
+    pub payload_bytes: u64,
+    /// The build's memory budget, as [`crate::pipeline::BuildPlan`] resolved it.
+    pub budget: u64,
+    /// The budget share above which the two-pass fill is taken.
+    pub share: u64,
+    /// The resolved order — never [`ArenaOrder::Auto`].
+    pub order: ArenaOrder,
+    /// Whether the operator named the order rather than `auto` deciding it.
+    pub forced: bool,
+}
+
+/// The share of the memory budget the string payload may take before the arena is filled in
+/// entity order: **one half**.
+///
+/// **Not a share of the machine, and not a tighter one, for two reasons that pull the same way.**
+/// The arena is not alone in the page cache at the join: the entity-order columns, their presence
+/// bitmaps, `at`, the source ids and the ordinal map are all mapped and all live across the same
+/// stages, and the stages that then read the arena — the text index and the record blob — hold
+/// their own spill runs beside it. So an arena at the whole budget is already thrashing, and half
+/// is the point past which the *other* mapped files stop fitting alongside it.
+///
+/// It is not tighter than a half because the two-pass fill is not free: it is a second decode of
+/// the source's prose, measured at 33% of the join at 10⁷ (`docs/ingest-campaign.md` §4a). Paying
+/// that on a corpus whose arena would have sat in the page cache is a real cost for nothing, and
+/// the miss is symmetric — the estimate is a footer's, which under-reads a dictionary-encoded
+/// column rather than over-reading it, so a half already errs towards the two-pass fill.
+///
+/// ⊘ **Modelled, not tuned.** No sweep over the share was run; what was measured is the two
+/// endpoints — 13.2 GB against a 4 GiB cap and against no cap (`probes/2026-09-03-text-arena-streaming/`).
+/// The number to revisit if a build is caught on the wrong side of it is this one.
+const ARENA_BUDGET_SHARE: u64 = 2;
+
+/// Which arena order this build takes, and the numbers behind it.
+pub(crate) fn decide_arena_order(
+    args: &crate::BuildArgs,
+    budget: u64,
+) -> ArenaDecision {
+    let mut columns: Vec<(String, u64)> = Vec::new();
+    for source in &args.attribute_sources {
+        let metadata = footer(&source.path);
+        for &index in &source.attributes {
+            let Some(attribute) = args.schema.attributes.get(index) else {
+                continue;
+            };
+            if !is_variable_width(attribute.ty) {
+                continue;
+            }
+            let bytes = metadata
+                .as_ref()
+                .map_or(0, |m| uncompressed_column_bytes(m, attribute.column()));
+            columns.push((attribute.name.clone(), bytes));
+        }
+    }
+    let payload_bytes: u64 = columns.iter().map(|&(_, bytes)| bytes).sum();
+    let share = budget / ARENA_BUDGET_SHARE;
+    let (order, forced) = match args.arena_order {
+        ArenaOrder::Auto if columns.is_empty() => (ArenaOrder::Arrival, false),
+        ArenaOrder::Auto if payload_bytes > share => (ArenaOrder::Entity, false),
+        ArenaOrder::Auto => (ArenaOrder::Arrival, false),
+        chosen => (chosen, true),
+    };
+    ArenaDecision {
+        columns,
+        payload_bytes,
+        budget,
+        share,
+        order,
+        forced,
+    }
+}
+
+impl ArenaDecision {
+    /// The decision as the join prints it — every number it turned on, so a wall measured under
+    /// one order can be read against the estimate that chose it.
+    pub(crate) fn report(&self) {
+        if self.columns.is_empty() {
+            return;
+        }
+        for (name, bytes) in &self.columns {
+            println!(
+                "  string column '{name}': {} MiB of characters (uncompressed, from the footer)",
+                bytes >> 20
+            );
+        }
+        let how = if self.forced {
+            "named by --arena-order"
+        } else if self.order == ArenaOrder::Entity {
+            "auto: over the share, so the arena is filled in entity order by a second decode"
+        } else {
+            "auto: under the share, so the arena is filled in one pass in arrival order"
+        };
+        println!(
+            "  arena: {} MiB of string payload against a {} MiB budget, share {} MiB (half) — {} ({how})",
+            self.payload_bytes >> 20,
+            self.budget >> 20,
+            self.share >> 20,
+            self.order.as_str(),
+        );
+    }
+}
+
 /// One Parquet file's metadata, or `None` where it cannot be had.
 fn footer(
     path: &std::path::Path,
@@ -460,6 +586,69 @@ fn uncompressed_column_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The switch's rule, from stated inputs**: the string columns' payload against half the
+    /// budget, and an operator's word over both.
+    ///
+    /// Written against the decision function rather than a build, because what is being asserted
+    /// is the *rule* — a build would only show which side of it one corpus fell on.
+    #[test]
+    fn the_arena_order_turns_on_half_the_budget_and_an_operator_overrides_it() {
+        fn decide(payload: u64, budget: u64, asked: ArenaOrder) -> ArenaDecision {
+            // The shape `decide_arena_order` builds from footers, stated directly: a corpus
+            // whose one string column holds `payload` uncompressed bytes.
+            let share = budget / ARENA_BUDGET_SHARE;
+            let (order, forced) = match asked {
+                ArenaOrder::Auto if payload > share => (ArenaOrder::Entity, false),
+                ArenaOrder::Auto => (ArenaOrder::Arrival, false),
+                chosen => (chosen, true),
+            };
+            ArenaDecision {
+                columns: vec![("abstract".into(), payload)],
+                payload_bytes: payload,
+                budget,
+                share,
+                order,
+                forced,
+            }
+        }
+        const GIB: u64 = 1 << 30;
+        // Under half the budget: one pass, and the second decode is not paid for.
+        assert_eq!(decide(3 * GIB, 24 * GIB, ArenaOrder::Auto).order, ArenaOrder::Arrival);
+        // Exactly half is under the rule, which is `>` and not `>=`: a share it just fits in is a
+        // share it fits in.
+        assert_eq!(decide(12 * GIB, 24 * GIB, ArenaOrder::Auto).order, ArenaOrder::Arrival);
+        // Over it: two passes. Rung 4's own numbers — a 119 GB arena against a 24 GiB budget.
+        assert_eq!(decide(119 * GIB, 24 * GIB, ArenaOrder::Auto).order, ArenaOrder::Entity);
+        // The same corpus on a box big enough to hold it stays in one pass.
+        assert_eq!(decide(119 * GIB, 512 * GIB, ArenaOrder::Auto).order, ArenaOrder::Arrival);
+        // And the operator's word beats the estimate in both directions, and says it did.
+        for (asked, payload) in [(ArenaOrder::Arrival, 119 * GIB), (ArenaOrder::Entity, GIB)] {
+            let decision = decide(payload, 24 * GIB, asked);
+            assert_eq!(decision.order, asked);
+            assert!(decision.forced);
+        }
+    }
+
+    /// The decision over a real corpus, with the payload read from the footer it is actually read
+    /// from — the half of the rule the arithmetic above cannot check.
+    #[test]
+    fn the_decision_reads_the_string_columns_payload_from_the_footer() {
+        let (args, _temp) = fixture(20_000);
+        // One declared string column: the fixture's `blurb`.
+        let generous = decide_arena_order(&args, 1 << 40);
+        assert_eq!(
+            generous.columns.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            vec!["blurb"]
+        );
+        assert!(generous.payload_bytes > 0, "the footer gave no payload");
+        assert_eq!(generous.order, ArenaOrder::Arrival);
+        assert!(!generous.forced);
+        // The same corpus against a budget its prose does not fit half of.
+        let tight = decide_arena_order(&args, generous.payload_bytes);
+        assert_eq!(tight.order, ArenaOrder::Entity);
+        assert_eq!(tight.payload_bytes, generous.payload_bytes);
+    }
 
     fn column(ty: ScalarType, payload: u64) -> ColumnCost {
         ColumnCost {
@@ -515,7 +704,9 @@ mod tests {
             .iter()
             .find(|t| t.mapped)
             .expect("the column is a term of its own");
-        assert_eq!(term.bytes, ARENA_OFFSET * n + n.div_ceil(8) + 400 * n);
+        // The offsets, the presence bits, the characters, and the 4 B/item the entity-ordered
+        // fill's layout pass holds across the join.
+        assert_eq!(term.bytes, ARENA_OFFSET * n + n.div_ceil(8) + 400 * n + 4 * n);
         assert!(
             with_text.describe().contains("(mapped)"),
             "the breakdown must say which terms are files: {}",
@@ -541,10 +732,12 @@ mod tests {
         let column_bytes = ARENA_OFFSET * n + n.div_ceil(8) + 400 * n;
 
         let without = entity_order_residency(n, &[plain], 0);
-        assert_eq!(without.mapped(), column_bytes);
+        assert_eq!(without.mapped(), column_bytes + 4 * n);
 
+        // The runs are charged the column's storage and **not** its layout transient, which the
+        // join has already given back by the time they spill.
         let with = entity_order_residency(n, &[indexed], 0);
-        assert_eq!(with.mapped(), 2 * column_bytes);
+        assert_eq!(with.mapped(), 2 * column_bytes + 4 * n);
         assert_eq!(
             with.total(),
             without.total(),
@@ -763,6 +956,7 @@ require_member_visibility = "none"
         std::fs::write(&config_path, &config).unwrap();
         let parsed = crate::config::Config::parse(&config_path, &Default::default()).unwrap();
         let args = crate::BuildArgs {
+            arena_order: Default::default(),
             views: vec![crate::ViewArgs {
                 visibility: None,
                 view_id: "s0".into(),

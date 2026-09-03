@@ -123,6 +123,7 @@ fn args(dir: &Path, config: &Config, out: PathBuf) -> BuildArgs {
         tessera_build::config::acquire_view(&registry[0]).expect("the view acquires its inputs");
     let _ = dir;
     BuildArgs {
+        arena_order: Default::default(),
         views: vec![tessera_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),

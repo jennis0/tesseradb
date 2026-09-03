@@ -110,6 +110,7 @@ fn build_fixture_with_sparse_term(out: &Path, points_path: &Path, pairs_path: &P
     write_points_n(points_path, N_ITEMS);
     write_pairs_with_sparse_term(pairs_path, N_ITEMS);
     let args = BuildArgs {
+        arena_order: Default::default(),
         views: vec![tessera_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),

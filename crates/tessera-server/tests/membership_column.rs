@@ -261,6 +261,7 @@ fn build_side(rows: &[u64], layer: &str) -> Built {
         .expect("the fixture declaration parses");
     let root = dir.join("bundle");
     let args = BuildArgs {
+        arena_order: Default::default(),
         views: vec![tessera_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),

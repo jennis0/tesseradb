@@ -357,6 +357,7 @@ fn write_attributed_points(path: &Path) {
 
 fn args_for(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
     BuildArgs {
+        arena_order: Default::default(),
         views: vec![tessera_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
@@ -1022,6 +1023,7 @@ fn reference_build_at_scale() {
     let out = PathBuf::from("/tmp/tessera-reference-scale");
     let _ = std::fs::remove_dir_all(&out);
     let report = build_in_memory(&BuildArgs {
+        arena_order: Default::default(),
         views: vec![tessera_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),

@@ -158,6 +158,7 @@ fn build_fixture_with_attributes(out: &Path, tmp: &Path, n: u64) {
     write_pairs_n(&pairs, n);
     let schema = parse_schema(tmp);
     let args = BuildArgs {
+        arena_order: Default::default(),
         views: vec![tessera_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
@@ -389,6 +390,7 @@ fn both_build_implementations_write_the_same_tail() {
     write_pairs_n(&pairs, 2_000);
     let schema = parse_schema(tmp.path());
     let args_for = |out: &Path| BuildArgs {
+        arena_order: Default::default(),
         views: vec![tessera_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
@@ -887,6 +889,7 @@ fn build_non_prefix_fixture(out: &Path, tmp: &Path, n: u64) {
         .map(|c| c.schema)
         .expect("the non-prefix fixture schema parses");
     let args = BuildArgs {
+        arena_order: Default::default(),
         views: vec![tessera_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
@@ -1298,6 +1301,7 @@ fn build_record_fixture(out: &Path, tmp: &Path, n: u64) {
         .map(|c| c.schema)
         .expect("the record fixture schema parses");
     let args = BuildArgs {
+        arena_order: Default::default(),
         views: vec![tessera_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),

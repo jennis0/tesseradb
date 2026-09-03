@@ -176,6 +176,7 @@ fn build_fixture_with_schema(out: &Path, points: &Path, pairs: &Path) {
         .unwrap()
         .schema;
     let args = BuildArgs {
+        arena_order: Default::default(),
         views: vec![tessera_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),

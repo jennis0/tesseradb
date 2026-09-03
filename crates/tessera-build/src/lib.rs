@@ -327,6 +327,10 @@ pub struct BuildArgs {
     /// is recorded in MANIFEST provenance, and an identity-preserving rebuild must replay it:
     /// a different batch size is a different permanent assignment, i.e. a different corpus.
     pub batch_items: Option<u64>,
+    /// Which order the declared string columns' arenas are filled in — see [`ArenaOrder`].
+    /// `Auto` decides from the columns' Parquet payload against the memory budget, and is what
+    /// every caller but a measurement wants.
+    pub arena_order: ArenaOrder,
     /// Peak-RSS budget in bytes for the build's own structures. `None` = detect from the
     /// machine (MemAvailable, damped). Drives batch and band sizing and the fail-closed
     /// pre-flight; it cannot buy off the irreducible floors (the sorted source ids, the
@@ -347,6 +351,56 @@ pub struct BuildArgs {
     /// across rebuilds carrying one key, and a schema that widened the fixed table by default
     /// would break it for reasons unrelated to identity.
     pub schema: crate::config::Schema,
+}
+
+/// Which order the attribute join fills a string column's arena in (`column.rs`).
+///
+/// **The two produce the same bundle**: the arena is `.build-tmp/` scratch and its order reaches
+/// no artefact, so this is a cost decision and a wrong one costs time, never correctness.
+///
+/// `Arrival` is one pass — values are appended as the source yields them. `Entity` is two — pass
+/// one keeps each entity's length, a prefix sum lays the records out in entity order, and pass two
+/// decodes the source's string columns again and writes each value at its place. What entity order
+/// buys is the stage after the join: `record_blob` walks entities 0..n and reads each string by
+/// offset, so an arrival-order arena costs it one random read per document, which is free while
+/// the arena fits in memory and ruinous when it does not (`probes/2026-09-03-text-arena-streaming/`
+/// §4 measured 56 KB/s at 10⁸). What it costs is a second decode of the source's prose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ArenaOrder {
+    /// Decide from the string columns' uncompressed Parquet payload against the memory budget —
+    /// see `residency::decide_arena_order` for the share and why it is that one.
+    #[default]
+    Auto,
+    /// Two passes, always.
+    Entity,
+    /// One pass, always.
+    Arrival,
+}
+
+impl ArenaOrder {
+    /// The spelling `--arena-order` takes and the build report records.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ArenaOrder::Auto => "auto",
+            ArenaOrder::Entity => "entity",
+            ArenaOrder::Arrival => "arrival",
+        }
+    }
+}
+
+impl std::str::FromStr for ArenaOrder {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, String> {
+        match s {
+            "auto" => Ok(ArenaOrder::Auto),
+            "entity" => Ok(ArenaOrder::Entity),
+            "arrival" => Ok(ArenaOrder::Arrival),
+            other => Err(format!(
+                "'{other}' is not an arena order: expected auto, entity or arrival"
+            )),
+        }
+    }
 }
 
 /// **Hand-written, not derived: `identity_key_hex` is the deployment key in plaintext.**
@@ -374,6 +428,7 @@ impl std::fmt::Debug for BuildArgs {
             .field("mint_external_ids", &self.mint_external_ids)
             .field("emit_oracle_pairs", &self.emit_oracle_pairs)
             .field("batch_items", &self.batch_items)
+            .field("arena_order", &self.arena_order)
             .field("memory_budget", &self.memory_budget)
             .field("band_rows", &self.band_rows)
             .finish()
@@ -437,6 +492,10 @@ pub struct BuildReport {
     /// one byte of the bundle — the one defect a bundle comparison cannot see. The linear build
     /// counts the same thing serially, so the two are comparable (`tests/attribute_pass.rs`).
     pub attribute_coverage: Vec<AttributeCoverage>,
+    /// Which order the declared string columns' arenas were filled in — the resolved choice, so
+    /// never [`ArenaOrder::Auto`]. Recorded because `auto` decides from a Parquet footer estimate
+    /// and the operator reading a wall needs to know which of the two they measured.
+    pub arena_order: ArenaOrder,
 }
 
 /// **How many of the grid's cells the placed points actually landed in**, beside how many points
@@ -1994,6 +2053,9 @@ fn write_manifests(
         artifact_levels: Vec::new(),
         hierarchy_shapes: Vec::new(),
         attribute_coverage: Vec::new(),
+        // Filled by the streaming pipeline, which is the only build that has an arena at all: the
+        // linear reference build holds its strings as `ScalarValue`s and never opens one.
+        arena_order: ArenaOrder::Arrival,
     })
 }
 
@@ -2570,6 +2632,7 @@ mod tests {
     fn build_args_debug_does_not_print_the_identity_key() {
         const KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
         let args = BuildArgs {
+            arena_order: Default::default(),
             views: vec![crate::ViewArgs {
                 visibility: None,
                 view_id: "s0".to_string(),

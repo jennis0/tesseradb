@@ -346,6 +346,7 @@ fn build_scan_fixture(dir: &Path, rows: u64) -> PathBuf {
         .schema;
     let bundle = dir.join("bundle");
     tessera_build::build(&tessera_build::BuildArgs {
+        arena_order: Default::default(),
         views: vec![tessera_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
