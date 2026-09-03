@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "rung": "medcpt",
   "rows": 35920666,
   "binary_commit": "c47d2ade",
@@ -8518,205 +8518,198 @@
   ],
   "ingest": [
     {
-      "fraction": 0.1,
+      "fraction": 1.0,
       "concurrency": 8,
       "seed": 0,
-      "base_rows": 32328599,
-      "holdout_rows": 3592067,
+      "base_rows": 0,
+      "holdout_rows": 35920666,
       "blocked": null,
       "base_build": {
-        "wall_s": 9584.12,
+        "wall_s": 0.05,
         "returncode": 0,
-        "stdout": "built /home/joe/code/tessera/data/ladder/.measure/medcpt36/cycle/base-0.1/bundle (v00000): 32328599 items, 18 terms, 148749743 pairs, 10048479702 bytes on disk, 0 artifact(s) minted, 0 unclustered member row(s)\n  view knn: 32328599 row(s)\n",
-        "stderr_tail": "view 'knn': quantising against x [-17.894932670593263, 20.183564109802248], y [-20.086218280792238, 17.992278499603273]\n        the data spans x [-17.52161407470703, 19.810245513916016], y [-17.711769104003906, 15.617829322814941] \u2014 64252 x 57364 of the 65536 x 65536 cells\n        32328599 point(s) placed, none on the frame's edge\nschema: 4 column(s), 8.00 B/row against the 12 B fixed row (+67%)\n        7.44 GiB per 10^9 items \u2014 unalterable without rewriting the corpus\n        every column materialises in EVERY view \u2014 including ones whose items carry no value for it (\u00a73.9). Per-view columns need contracts \u00a72.6's per-view enumeration\nstage       source_ids      2.24s  rows=32328599     peak=   512 MiB\nstage       dictionary     29.89s  rows=18           peak=  1321 MiB\nstage    geometry_read     22.25s  rows=32328599     peak=  3595 MiB\nstage       pairs_pack      0.00s  rows=148749743    peak=  3595 MiB\nstage   signature_sort      9.62s  rows=32328599     peak=  3595 MiB\nstage       assignment     30.00s  rows=32328599     peak=  3595 MiB\nstage       assignment      1.35s  rows=32328599     peak=  3595 MiB\nstage   postings_write      5.26s  rows=148749743    peak=  3595 MiB\nstage     external_ids      0.00s  rows=0            peak=  3595 MiB\nattribute 'published': 32,303,432 of 32,328,599 entities have a value\nattribute 'title': 32,299,079 of 32,328,599 entities have a value\nattribute 'mesh_major': 27,316,171 of 32,328,599 entities have a value\nattribute 'pmid': 32,328,599 of 32,328,599 entities have a value\n        0 source row(s) named entities this build did not load\nstage   attribute_tail     47.09s  rows=32328599     peak=  3595 MiB\nstage           layers   1259.57s  rows=2            peak=  5439 MiB\nstage       text_index    104.00s  rows=1695820      peak=  8564 MiB\nstage  filter_postings    353.87s  rows=32328599     peak=  8564 MiB\nstage      record_blob   7461.72s  rows=32328599     peak=  8564 MiB\nstage   column_release      0.85s  rows=32328599     peak=  8564 MiB\nstage       tiler_sort     17.89s  rows=32328599     peak=  8564 MiB\nstage    segment_write     10.10s  rows=32328599     peak=  8564 MiB\nartifact layouts, chosen from the bundle's own row space (218839 ms):\n  clusters/kmeans level 0 [knn]: 256 artifact(s) with rows, 0.121 everywhere, 6.9 blocks/artifact, disjoint \u2014 served rows\n  mesh/descriptors level 0 [knn]: 30214 artifact(s) with rows, 0.967 everywhere, 217.6 blocks/artifact, overlapping \u2014 served list\n  wrote 1 tile index(es), 1 row-major column(s), 2 containment partition(s), 0 shape row form(s), 0 decomposition file(s)\nstage        manifests    221.07s  rows=10048479702  peak=  8564 MiB\nview 'knn': 32328599 point(s) landed in 29536654 distinct cell(s) \u2014 91.4% of them have a position of their own\n",
-        "bundle_bytes": 10048523588
+        "stdout": "built /tmp/aotw-36m/base-1/bundle (v00000): 0 items, 1 terms, 0 pairs, 10971 bytes on disk, 0 artifact(s) minted, 0 unclustered member row(s)\n  view knn: 0 row(s)\n",
+        "stderr_tail": "view 'knn': quantising against x [-17.894932670593263, 20.183564109802248], y [-20.086218280792238, 17.992278499603273]\n        the source selects no rows, so nothing was placed\nschema: 4 column(s), 8.00 B/row against the 12 B fixed row (+67%)\n        7.44 GiB per 10^9 items \u2014 unalterable without rewriting the corpus\n        every column materialises in EVERY view \u2014 including ones whose items carry no value for it (\u00a73.9). Per-view columns need contracts \u00a72.6's per-view enumeration\nstage       source_ids      0.00s  rows=0            peak=    13 MiB\nstage       dictionary      0.00s  rows=1            peak=    13 MiB\nstage    geometry_read      0.00s  rows=0            peak=    13 MiB\nstage       pairs_pack      0.00s  rows=0            peak=    13 MiB\nstage       assignment      0.00s  rows=0            peak=    13 MiB\nstage   postings_write      0.00s  rows=0            peak=    14 MiB\nstage     external_ids      0.00s  rows=0            peak=    14 MiB\nattribute 'published': 0 of 0 entities have a value\nattribute 'title': 0 of 0 entities have a value\nattribute 'mesh_major': 0 of 0 entities have a value\nattribute 'pmid': 0 of 0 entities have a value\n        0 source row(s) named entities this build did not load\nstage   attribute_tail      0.00s  rows=0            peak=    14 MiB\nstage           layers      0.00s  rows=2            peak=    14 MiB\nstage       text_index      0.01s  rows=0            peak=    15 MiB\nstage  filter_postings      0.01s  rows=0            peak=    15 MiB\nstage      record_blob      0.00s  rows=0            peak=    15 MiB\nstage   column_release      0.00s  rows=0            peak=    15 MiB\nstage       tiler_sort      0.00s  rows=0            peak=    15 MiB\nstage    segment_write      0.00s  rows=0            peak=    15 MiB\nstage        manifests      0.01s  rows=10971        peak=    24 MiB\nview 'knn': 0 point(s) landed in 0 distinct cell(s) \u2014 100.0% of them have a position of their own\n",
+        "bundle_bytes": 23888
       },
       "base_build_stages": [
         {
           "stage": "source_ids",
-          "wall_s": 2.238913466,
-          "rows": 32328599,
-          "peak_rss_kib": 524364,
-          "started_at": 1788403733.8366437,
-          "ended_at": 1788403736.0755572
+          "wall_s": 0.00011687,
+          "rows": 0,
+          "peak_rss_kib": 13512,
+          "started_at": 1788425217.2764976,
+          "ended_at": 1788425217.2766144
         },
         {
           "stage": "dictionary",
-          "wall_s": 29.885376209,
-          "rows": 18,
-          "peak_rss_kib": 1353444,
-          "started_at": 1788403736.0756915,
-          "ended_at": 1788403765.9610677
+          "wall_s": 0.002682051,
+          "rows": 1,
+          "peak_rss_kib": 13576,
+          "started_at": 1788425217.276681,
+          "ended_at": 1788425217.279363
         },
         {
           "stage": "geometry_read",
-          "wall_s": 22.252868854,
-          "rows": 32328599,
-          "peak_rss_kib": 3682152,
-          "started_at": 1788403765.9611928,
-          "ended_at": 1788403788.2140617
+          "wall_s": 0.000451545,
+          "rows": 0,
+          "peak_rss_kib": 13576,
+          "started_at": 1788425217.2794251,
+          "ended_at": 1788425217.2798767
         },
         {
           "stage": "pairs_pack",
-          "wall_s": 1.633e-06,
-          "rows": 148749743,
-          "peak_rss_kib": 3682152,
-          "started_at": 1788403788.2141056,
-          "ended_at": 1788403788.2141073
-        },
-        {
-          "stage": "signature_sort",
-          "wall_s": 9.621722891,
-          "rows": 32328599,
-          "peak_rss_kib": 3682152,
-          "started_at": 1788403788.2409708,
-          "ended_at": 1788403797.8626938
+          "wall_s": 1.061e-06,
+          "rows": 0,
+          "peak_rss_kib": 13576,
+          "started_at": 1788425217.279938,
+          "ended_at": 1788425217.279939
         },
         {
           "stage": "assignment",
-          "wall_s": 29.997871165,
-          "rows": 32328599,
-          "peak_rss_kib": 3682152,
-          "started_at": 1788403797.8793354,
-          "ended_at": 1788403827.8772066
-        },
-        {
-          "stage": "assignment",
-          "wall_s": 1.347853487,
-          "rows": 32328599,
-          "peak_rss_kib": 3682152,
-          "started_at": 1788403827.8773077,
-          "ended_at": 1788403829.225161
+          "wall_s": 0.004754471,
+          "rows": 0,
+          "peak_rss_kib": 13772,
+          "started_at": 1788425217.2800047,
+          "ended_at": 1788425217.2847593
         },
         {
           "stage": "postings_write",
-          "wall_s": 5.264561806,
-          "rows": 148749743,
-          "peak_rss_kib": 3682152,
-          "started_at": 1788403829.225336,
-          "ended_at": 1788403834.489898
+          "wall_s": 0.003922468,
+          "rows": 0,
+          "peak_rss_kib": 14840,
+          "started_at": 1788425217.284826,
+          "ended_at": 1788425217.2887485
         },
         {
           "stage": "external_ids",
-          "wall_s": 3.77e-07,
+          "wall_s": 0.001775649,
           "rows": 0,
-          "peak_rss_kib": 3682152,
-          "started_at": 1788403834.4899704,
-          "ended_at": 1788403834.489971
+          "peak_rss_kib": 14848,
+          "started_at": 1788425217.2888088,
+          "ended_at": 1788425217.2905846
         },
         {
           "stage": "attribute_tail",
-          "wall_s": 47.089363026,
-          "rows": 32328599,
-          "peak_rss_kib": 3682152,
-          "started_at": 1788403834.490142,
-          "ended_at": 1788403881.5795052
+          "wall_s": 0.000838438,
+          "rows": 0,
+          "peak_rss_kib": 14860,
+          "started_at": 1788425217.2906442,
+          "ended_at": 1788425217.2914827
         },
         {
           "stage": "layers",
-          "wall_s": 1259.569165944,
+          "wall_s": 0.00169542,
           "rows": 2,
-          "peak_rss_kib": 5569880,
-          "started_at": 1788403881.6221497,
-          "ended_at": 1788405141.1913157
+          "peak_rss_kib": 15312,
+          "started_at": 1788425217.291549,
+          "ended_at": 1788425217.2932444
         },
         {
           "stage": "text_index",
-          "wall_s": 103.995968007,
-          "rows": 1695820,
-          "peak_rss_kib": 8770316,
-          "started_at": 1788405495.0602484,
-          "ended_at": 1788405599.0562165
+          "wall_s": 0.005998642,
+          "rows": 0,
+          "peak_rss_kib": 15524,
+          "started_at": 1788425217.2997706,
+          "ended_at": 1788425217.3057692
         },
         {
           "stage": "filter_postings",
-          "wall_s": 353.870449533,
-          "rows": 32328599,
-          "peak_rss_kib": 8770316,
-          "started_at": 1788405245.1874783,
-          "ended_at": 1788405599.0579278
+          "wall_s": 0.00652564,
+          "rows": 0,
+          "peak_rss_kib": 15524,
+          "started_at": 1788425217.2993164,
+          "ended_at": 1788425217.3058422
         },
         {
           "stage": "record_blob",
-          "wall_s": 7461.718863719,
-          "rows": 32328599,
-          "peak_rss_kib": 8770316,
-          "started_at": 1788405711.7837563,
-          "ended_at": 1788413173.50262
+          "wall_s": 0.004389113,
+          "rows": 0,
+          "peak_rss_kib": 15716,
+          "started_at": 1788425217.3059385,
+          "ended_at": 1788425217.3103275
         },
         {
           "stage": "column_release",
-          "wall_s": 0.849614476,
-          "rows": 32328599,
-          "peak_rss_kib": 8770316,
-          "started_at": 1788413173.50292,
-          "ended_at": 1788413174.3525343
+          "wall_s": 5.0299e-05,
+          "rows": 0,
+          "peak_rss_kib": 15716,
+          "started_at": 1788425217.3103888,
+          "ended_at": 1788425217.310439
         },
         {
           "stage": "tiler_sort",
-          "wall_s": 17.885962489,
-          "rows": 32328599,
-          "peak_rss_kib": 8770316,
-          "started_at": 1788413175.262025,
-          "ended_at": 1788413193.1479876
+          "wall_s": 0.001125286,
+          "rows": 0,
+          "peak_rss_kib": 15716,
+          "started_at": 1788425217.3104994,
+          "ended_at": 1788425217.3116248
         },
         {
           "stage": "segment_write",
-          "wall_s": 10.103939242,
-          "rows": 32328599,
-          "peak_rss_kib": 8770316,
-          "started_at": 1788413193.1480892,
-          "ended_at": 1788413203.2520285
+          "wall_s": 0.004238055,
+          "rows": 0,
+          "peak_rss_kib": 15804,
+          "started_at": 1788425217.311688,
+          "ended_at": 1788425217.315926
         },
         {
           "stage": "manifests",
-          "wall_s": 221.073603274,
-          "rows": 10048479702,
-          "peak_rss_kib": 8770316,
-          "started_at": 1788413209.2944431,
-          "ended_at": 1788413430.3680465
+          "wall_s": 0.005191968,
+          "rows": 10971,
+          "peak_rss_kib": 24756,
+          "started_at": 1788425217.316004,
+          "ended_at": 1788425217.321196
         }
       ],
-      "layers": {
-        "probed": {
+      "publish": {
+        "layers": {
           "clusters/kmeans": {
-            "status": 200,
-            "keys_offered": 3,
-            "body": "{\"accepted\":1,\"over_bound\":0,\"over_bound_ids\":[],\"clipped\":0,\"tessera_ids\":[17196262984240797091],\"minted\":0}",
-            "withdrawn": 200,
-            "member_rows": 35987669
-          },
-          "mesh/descriptors": {
-            "status": 200,
-            "keys_offered": 3,
-            "body": "{\"accepted\":1,\"over_bound\":0,\"over_bound_ids\":[],\"clipped\":0,\"tessera_ids\":[9765698294934699723],\"minted\":0}",
-            "withdrawn": 200,
-            "member_rows": 1658437807
+            "artifacts": 256,
+            "members": 35920666,
+            "generating_set_entries": 67003,
+            "edges_declared": 0,
+            "edges_in_roster_and_layer": 0,
+            "artifacts_with_several_parents": 0,
+            "requests": 17,
+            "prepared_s": 10.29,
+            "wall_s": 33.89,
+            "published_artifacts": 256,
+            "published_members": 35920666,
+            "edges_published": 0,
+            "artifacts_per_s": 7.6,
+            "members_per_s": 1059970.1,
+            "statuses": {
+              "201": 17
+            },
+            "first_refusal": null
           }
         },
-        "carried": [
-          "clusters/kmeans"
-        ],
         "declined": {
-          "mesh/descriptors": "declared `kind = \"dag\"`, whose membership cell is a lineage; this rung's points are in several unrelated artifacts each, which a lineage cannot express and which a `dag` would absorb as new parent edges"
+          "mesh/descriptors": "1,658,437,807 member rows exceeds --max-member-rows 200,000,000; the driver would have to hold the whole membership in memory to address it per artifact"
         },
-        "hierarchy_kinds": {
-          "clusters/kmeans": "flat",
-          "mesh/descriptors": "dag"
-        }
+        "totals": {
+          "artifacts": 256,
+          "members": 35920666,
+          "wall_s": 33.89,
+          "requests": 17,
+          "artifacts_per_s": 7.6,
+          "members_per_s": 1059919.3
+        },
+        "edges_declared": 0,
+        "edges_published": 0
       },
-      "items_per_s": 12054.2,
-      "accepted": 3592067,
-      "ack_p50": 2014.6564,
-      "ack_p99": 5192.108,
+      "items_per_s": 11267.0,
+      "accepted": 35920666,
+      "ack_p50": 3071.0773,
+      "ack_p99": 16623.8773,
       "statuses": {
-        "200": 360,
-        "429": 316
+        "200": 3593,
+        "429": 2349
       },
-      "flush_s": 8.036,
-      "visibility_s": 0.321,
-      "fold_s": 110,
-      "fold_peak_rss": 13549883392,
+      "flush_s": 3.035,
+      "visibility_s": 1.214,
+      "fold_s": 103,
+      "fold_peak_rss": 11308052480,
       "equivalence": {
         "equal": false,
         "zoom0_equal": true,
@@ -8729,169 +8722,61 @@
           {
             "principal": "0.0100",
             "where": "layers",
-            "folded": {
-              "5": [
-                {
-                  "rows": 10328
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
-            },
+            "layer": "mesh/descriptors",
+            "folded": null,
             "all_in": {
-              "5": [
-                {
-                  "rows": 10685
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
+              "artifacts": 10685,
+              "masked_count": 50745010
             }
           },
           {
             "principal": "0.0500",
             "where": "layers",
-            "folded": {
-              "5": [
-                {
-                  "rows": 10328
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
-            },
+            "layer": "mesh/descriptors",
+            "folded": null,
             "all_in": {
-              "5": [
-                {
-                  "rows": 10685
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
+              "artifacts": 10685,
+              "masked_count": 50745010
             }
           },
           {
             "principal": "0.1000",
             "where": "layers",
-            "folded": {
-              "5": [
-                {
-                  "rows": 20757
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
-            },
+            "layer": "mesh/descriptors",
+            "folded": null,
             "all_in": {
-              "5": [
-                {
-                  "rows": 21262
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
+              "artifacts": 21262,
+              "masked_count": 201992498
             }
           },
           {
             "principal": "0.2500",
             "where": "layers",
-            "folded": {
-              "5": [
-                {
-                  "rows": 20760
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
-            },
+            "layer": "mesh/descriptors",
+            "folded": null,
             "all_in": {
-              "5": [
-                {
-                  "rows": 21264
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
+              "artifacts": 21262,
+              "masked_count": 201992498
             }
           },
           {
             "principal": "0.5000",
             "where": "layers",
-            "folded": {
-              "5": [
-                {
-                  "rows": 26303
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
-            },
+            "layer": "mesh/descriptors",
+            "folded": null,
             "all_in": {
-              "5": [
-                {
-                  "rows": 26540
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
+              "artifacts": 26540,
+              "masked_count": 1047131783
             }
           },
           {
             "principal": "1.0000",
             "where": "layers",
-            "folded": {
-              "5": [
-                {
-                  "rows": 28907
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
-            },
+            "layer": "mesh/descriptors",
+            "folded": null,
             "all_in": {
-              "5": [
-                {
-                  "rows": 29042
-                }
-              ],
-              "3": [
-                {
-                  "rows": 1
-                }
-              ]
+              "artifacts": 28789,
+              "masked_count": 1658404289
             }
           }
         ],
@@ -8977,16 +8862,425 @@
         "delete": {
           "status": 200,
           "body": null,
-          "wall_s": 0.021,
-          "visibility_s": 0.14,
+          "wall_s": 0.017,
+          "visibility_s": 0.203,
           "visibility_reached": true,
           "visible_after": 35919666
         },
         "suppress": {
           "status": 200,
           "body": null,
-          "wall_s": 0.018,
-          "visibility_s": 0.141,
+          "wall_s": 0.016,
+          "visibility_s": 0.179,
+          "visibility_reached": true,
+          "visible_after": 35918666
+        },
+        "reingest": {
+          "batches": 1,
+          "rows_offered": 1000,
+          "accepted": 1000,
+          "minted": 0,
+          "wall_s": 0.03,
+          "items_per_s": 29095.1,
+          "ack_ms": {
+            "p25": 18.4989,
+            "p50": 18.4989,
+            "p75": 18.4989,
+            "p95": 18.4989,
+            "p99": 18.4989,
+            "max": 18.4989,
+            "mean": 18.4989,
+            "n": 1
+          },
+          "statuses": {
+            "200": 1
+          }
+        },
+        "fold": {
+          "completed": true,
+          "observed_s": 160.45,
+          "fold_s": 139,
+          "fold_peak_rss_bytes": 11492270080
+        },
+        "visible_after_cycle": 35919666,
+        "overlay": {
+          "depth": 1000,
+          "retirable": 0,
+          "soft_limit_alarms": 0
+        }
+      }
+    },
+    {
+      "fraction": 0.5,
+      "concurrency": 8,
+      "seed": 0,
+      "base_rows": 17960333,
+      "holdout_rows": 17960333,
+      "blocked": null,
+      "base_build": {
+        "wall_s": 146.8,
+        "returncode": 0,
+        "stdout": "built /tmp/aotw-36m/base-0.5/bundle (v00000): 17960333 items, 18 terms, 82637062 pairs, 3312744162 bytes on disk, 0 artifact(s) minted, 0 unclustered member row(s)\n  view knn: 17960333 row(s)\n",
+        "stderr_tail": "view 'knn': quantising against x [-17.894932670593263, 20.183564109802248], y [-20.086218280792238, 17.992278499603273]\n        the data spans x [-17.519983291625977, 17.080204010009766], y [-17.711769104003906, 15.617829322814941] \u2014 59550 x 57364 of the 65536 x 65536 cells\n        17960333 point(s) placed, none on the frame's edge\nschema: 4 column(s), 8.00 B/row against the 12 B fixed row (+67%)\n        7.44 GiB per 10^9 items \u2014 unalterable without rewriting the corpus\n        every column materialises in EVERY view \u2014 including ones whose items carry no value for it (\u00a73.9). Per-view columns need contracts \u00a72.6's per-view enumeration\nstage       source_ids      0.33s  rows=17960333     peak=   296 MiB\nstage       dictionary     11.47s  rows=18           peak=  1211 MiB\nstage    geometry_read      8.62s  rows=17960333     peak=  2934 MiB\nstage       pairs_pack      0.00s  rows=82637062     peak=  2934 MiB\nstage   signature_sort      2.93s  rows=17960333     peak=  2934 MiB\nstage       assignment      6.99s  rows=17960333     peak=  2934 MiB\nstage       assignment      0.74s  rows=17960333     peak=  2934 MiB\nstage   postings_write      2.26s  rows=82637062     peak=  2934 MiB\nstage     external_ids      1.70s  rows=17960333     peak=  2934 MiB\nattribute 'published': 17,946,275 of 17,960,333 entities have a value\nattribute 'title': 17,943,846 of 17,960,333 entities have a value\nattribute 'mesh_major': 15,175,926 of 17,960,333 entities have a value\nattribute 'pmid': 17,960,333 of 17,960,333 entities have a value\n        0 source row(s) named entities this build did not load\nstage   attribute_tail     13.57s  rows=17960333     peak=  2965 MiB\nstage           layers      0.66s  rows=2            peak=  2965 MiB\nstage       text_index     25.22s  rows=1237375      peak=  4735 MiB\nstage  filter_postings     46.23s  rows=17960333     peak=  4735 MiB\nstage      record_blob     21.57s  rows=17960333     peak=  4735 MiB\nstage   column_release      0.23s  rows=17960333     peak=  4735 MiB\nstage       tiler_sort      0.66s  rows=17960333     peak=  4735 MiB\nstage    segment_write      2.36s  rows=17960333     peak=  4735 MiB\nstage        manifests      0.62s  rows=3312744162   peak=  4735 MiB\nview 'knn': 17960333 point(s) landed in 16979576 distinct cell(s) \u2014 94.5% of them have a position of their own\n",
+        "bundle_bytes": 3312757592
+      },
+      "base_build_stages": [
+        {
+          "stage": "source_ids",
+          "wall_s": 0.332657673,
+          "rows": 17960333,
+          "peak_rss_kib": 304048,
+          "started_at": 1788429532.261775,
+          "ended_at": 1788429532.5944326
+        },
+        {
+          "stage": "dictionary",
+          "wall_s": 11.469080182999999,
+          "rows": 18,
+          "peak_rss_kib": 1240372,
+          "started_at": 1788429534.4822164,
+          "ended_at": 1788429545.9512966
+        },
+        {
+          "stage": "geometry_read",
+          "wall_s": 8.622621957,
+          "rows": 17960333,
+          "peak_rss_kib": 3005072,
+          "started_at": 1788429545.951389,
+          "ended_at": 1788429554.574011
+        },
+        {
+          "stage": "pairs_pack",
+          "wall_s": 1.175e-06,
+          "rows": 82637062,
+          "peak_rss_kib": 3005072,
+          "started_at": 1788429554.5740533,
+          "ended_at": 1788429554.5740545
+        },
+        {
+          "stage": "signature_sort",
+          "wall_s": 2.927733725,
+          "rows": 17960333,
+          "peak_rss_kib": 3005072,
+          "started_at": 1788429554.5741377,
+          "ended_at": 1788429557.5018713
+        },
+        {
+          "stage": "assignment",
+          "wall_s": 6.991139234,
+          "rows": 17960333,
+          "peak_rss_kib": 3005072,
+          "started_at": 1788429557.5019655,
+          "ended_at": 1788429564.4931047
+        },
+        {
+          "stage": "assignment",
+          "wall_s": 0.739380578,
+          "rows": 17960333,
+          "peak_rss_kib": 3005072,
+          "started_at": 1788429564.4932103,
+          "ended_at": 1788429565.232591
+        },
+        {
+          "stage": "postings_write",
+          "wall_s": 2.260845564,
+          "rows": 82637062,
+          "peak_rss_kib": 3005072,
+          "started_at": 1788429565.232716,
+          "ended_at": 1788429567.4935617
+        },
+        {
+          "stage": "external_ids",
+          "wall_s": 1.7021498739999998,
+          "rows": 17960333,
+          "peak_rss_kib": 3005072,
+          "started_at": 1788429567.493673,
+          "ended_at": 1788429569.195823
+        },
+        {
+          "stage": "attribute_tail",
+          "wall_s": 13.573364485,
+          "rows": 17960333,
+          "peak_rss_kib": 3036572,
+          "started_at": 1788429571.1337564,
+          "ended_at": 1788429584.707121
+        },
+        {
+          "stage": "layers",
+          "wall_s": 0.655667552,
+          "rows": 2,
+          "peak_rss_kib": 3036572,
+          "started_at": 1788429584.7072108,
+          "ended_at": 1788429585.3628783
+        },
+        {
+          "stage": "text_index",
+          "wall_s": 25.221840974,
+          "rows": 1237375,
+          "peak_rss_kib": 4849504,
+          "started_at": 1788429635.5716949,
+          "ended_at": 1788429660.7935357
+        },
+        {
+          "stage": "filter_postings",
+          "wall_s": 46.232166555,
+          "rows": 17960333,
+          "peak_rss_kib": 4849504,
+          "started_at": 1788429614.5614107,
+          "ended_at": 1788429660.7935772
+        },
+        {
+          "stage": "record_blob",
+          "wall_s": 21.566551372,
+          "rows": 17960333,
+          "peak_rss_kib": 4849504,
+          "started_at": 1788429662.714079,
+          "ended_at": 1788429684.2806304
+        },
+        {
+          "stage": "column_release",
+          "wall_s": 0.226433977,
+          "rows": 17960333,
+          "peak_rss_kib": 4849504,
+          "started_at": 1788429684.2807662,
+          "ended_at": 1788429684.5072002
+        },
+        {
+          "stage": "tiler_sort",
+          "wall_s": 0.66062428,
+          "rows": 17960333,
+          "peak_rss_kib": 4849504,
+          "started_at": 1788429684.507306,
+          "ended_at": 1788429685.1679304
+        },
+        {
+          "stage": "segment_write",
+          "wall_s": 2.359624154,
+          "rows": 17960333,
+          "peak_rss_kib": 4849504,
+          "started_at": 1788429685.1680284,
+          "ended_at": 1788429687.5276525
+        },
+        {
+          "stage": "manifests",
+          "wall_s": 0.620525657,
+          "rows": 3312744162,
+          "peak_rss_kib": 4849504,
+          "started_at": 1788429687.5277274,
+          "ended_at": 1788429688.148253
+        }
+      ],
+      "publish": {
+        "layers": {
+          "clusters/kmeans": {
+            "artifacts": 256,
+            "members": 35920666,
+            "generating_set_entries": 67003,
+            "edges_declared": 0,
+            "edges_in_roster_and_layer": 0,
+            "artifacts_with_several_parents": 0,
+            "requests": 17,
+            "prepared_s": 7.31,
+            "wall_s": 122.29,
+            "published_artifacts": 256,
+            "published_members": 35920666,
+            "edges_published": 0,
+            "artifacts_per_s": 2.1,
+            "members_per_s": 293722.4,
+            "statuses": {
+              "201": 17
+            },
+            "first_refusal": null
+          }
+        },
+        "declined": {
+          "mesh/descriptors": "1,658,437,807 member rows exceeds --max-member-rows 200,000,000; the driver would have to hold the whole membership in memory to address it per artifact"
+        },
+        "totals": {
+          "artifacts": 256,
+          "members": 35920666,
+          "wall_s": 122.29,
+          "requests": 17,
+          "artifacts_per_s": 2.1,
+          "members_per_s": 293733.5
+        },
+        "edges_declared": 0,
+        "edges_published": 0
+      },
+      "items_per_s": 10746.0,
+      "accepted": 17960333,
+      "ack_p50": 2575.6252,
+      "ack_p99": 19197.7967,
+      "statuses": {
+        "200": 1797,
+        "429": 1497
+      },
+      "flush_s": 900.212,
+      "visibility_s": 0.8,
+      "fold_s": 116,
+      "fold_peak_rss": 8484818944,
+      "equivalence": {
+        "equal": false,
+        "zoom0_equal": true,
+        "boxes_equal": true,
+        "layers_equal": false,
+        "differences_by_surface": {
+          "layers": 6
+        },
+        "differences": [
+          {
+            "principal": "0.0100",
+            "where": "layers",
+            "layer": "mesh/descriptors",
+            "folded": null,
+            "all_in": {
+              "artifacts": 10685,
+              "masked_count": 50745010
+            }
+          },
+          {
+            "principal": "0.0500",
+            "where": "layers",
+            "layer": "mesh/descriptors",
+            "folded": null,
+            "all_in": {
+              "artifacts": 10685,
+              "masked_count": 50745010
+            }
+          },
+          {
+            "principal": "0.1000",
+            "where": "layers",
+            "layer": "mesh/descriptors",
+            "folded": null,
+            "all_in": {
+              "artifacts": 21262,
+              "masked_count": 201992498
+            }
+          },
+          {
+            "principal": "0.2500",
+            "where": "layers",
+            "layer": "mesh/descriptors",
+            "folded": null,
+            "all_in": {
+              "artifacts": 21262,
+              "masked_count": 201992498
+            }
+          },
+          {
+            "principal": "0.5000",
+            "where": "layers",
+            "layer": "mesh/descriptors",
+            "folded": null,
+            "all_in": {
+              "artifacts": 26540,
+              "masked_count": 1047131783
+            }
+          },
+          {
+            "principal": "1.0000",
+            "where": "layers",
+            "layer": "mesh/descriptors",
+            "folded": null,
+            "all_in": {
+              "artifacts": 28789,
+              "masked_count": 1658404289
+            }
+          }
+        ],
+        "frames": {
+          "folded": {
+            "x_max": 20.183564109802248,
+            "x_min": -17.894932670593263,
+            "y_max": 17.992278499603273,
+            "y_min": -20.08621828079224
+          },
+          "all_in": {
+            "x_max": 20.183564109802248,
+            "x_min": -17.894932670593263,
+            "y_max": 17.992278499603273,
+            "y_min": -20.08621828079224
+          }
+        },
+        "frames_equal": true,
+        "ladder": [
+          {
+            "target": 0.01,
+            "terms": [
+              "K",
+              "V"
+            ]
+          },
+          {
+            "target": 0.05,
+            "terms": [
+              "K",
+              "V"
+            ]
+          },
+          {
+            "target": 0.1,
+            "terms": [
+              "L",
+              "V"
+            ]
+          },
+          {
+            "target": 0.25,
+            "terms": [
+              "L",
+              "V",
+              "unindexed"
+            ]
+          },
+          {
+            "target": 0.5,
+            "terms": [
+              "C",
+              "K"
+            ]
+          },
+          {
+            "target": 1.0,
+            "terms": [
+              "A",
+              "B",
+              "C",
+              "D",
+              "E",
+              "F",
+              "G",
+              "H",
+              "I",
+              "J",
+              "K",
+              "L",
+              "M",
+              "N",
+              "V",
+              "Z",
+              "unindexed"
+            ]
+          }
+        ]
+      },
+      "write_cycle": {
+        "n": 1000,
+        "visible_before": 35920666,
+        "delete": {
+          "status": 200,
+          "body": null,
+          "wall_s": 0.019,
+          "visibility_s": 0.202,
+          "visibility_reached": true,
+          "visible_after": 35919666
+        },
+        "suppress": {
+          "status": 200,
+          "body": null,
+          "wall_s": 0.016,
+          "visibility_s": 0.201,
           "visibility_reached": true,
           "visible_after": 35918666
         },
@@ -8996,15 +9290,15 @@
           "accepted": 1000,
           "minted": 0,
           "wall_s": 0.04,
-          "items_per_s": 22223.8,
+          "items_per_s": 22498.8,
           "ack_ms": {
-            "p25": 16.9966,
-            "p50": 16.9966,
-            "p75": 16.9966,
-            "p95": 16.9966,
-            "p99": 16.9966,
-            "max": 16.9966,
-            "mean": 16.9966,
+            "p25": 32.8534,
+            "p50": 32.8534,
+            "p75": 32.8534,
+            "p95": 32.8534,
+            "p99": 32.8534,
+            "max": 32.8534,
+            "mean": 32.8534,
             "n": 1
           },
           "statuses": {
@@ -9013,9 +9307,9 @@
         },
         "fold": {
           "completed": true,
-          "observed_s": 451.9,
-          "fold_s": 135,
-          "fold_peak_rss_bytes": 15391354880
+          "observed_s": 160.48,
+          "fold_s": 142,
+          "fold_peak_rss_bytes": 8955133952
         },
         "visible_after_cycle": 35919666,
         "overlay": {
@@ -9030,8 +9324,11 @@
     "Both batteries are reduced runs and the parameters are in each: zooms 0/6/12, decile 9 only, one cell per decile, 40 hot samples and 8 cold. A cold sample at 3.6e7 rows under the widest principal is a fresh fragment build plus a re-fault of an 11.15 GB bundle, so cold and hot are two budgets rather than one.",
     "The uncapped run was taken on an idle box. The build's own wall (913.9 s) is 15:14 against the 12:10 the rung README records for the 2026-09-02 build on a different branch - not a controlled comparison.",
     "The 6 GiB cap is half the 11.15 GB bundle. It served the whole ladder with zero oom_kill; memory.peak sat exactly at the cap and memory.events counted 3,203,663 reclaim-at-max events. Hot latency is unchanged by the cap (14.03 -> 14.32 ms at the 100% principal); cold is 7% slower (1376.9 -> 1472.2 ms).",
-    "ONE ingest cell, f = 10% at C = 8. The 25% and 50% cells were not run for time; f = 100% is blocked outright by tessera build's refusal of a zero-row corpus, which needs no scale to reproduce and is recorded in measurements-medcpt-1m.json.",
-    "The f = 10% cell's base build ran for 9,584 s against the 914 s the all-in build took on an idle box: another session's 1.02e8 build held the machine throughout. Its 12,054 items/s, its 2.01 s ack p50 and its 316 x 429 are therefore LOWER bounds on throughput and upper bounds on latency; the flush, fold, equivalence and write-cycle figures were taken after that build had finished and the box was ours.",
-    "Superseded for the DAG layer (2026-09-03): the 'declined' entries under `layers` predate decision 0125, under which a `dag` list is plain multi-membership; `mesh/descriptors` is now carried at ingest from a column of the same name on points.parquet, and a rerun would carry it by default."
+    "Two ingest cells, f = 50% and f = 100% at C = 8, both taken on 2026-09-03 on an idle box under the ruling that everything is ingested after the build: the base bundle carries the built fraction's points and both layers' declarations, and the artifacts are published through /control/layers/{name}/artifacts after the hold-out is in. The f = 10% cell of the earlier collation is not carried forward - it measured a driver that built the base with the rung's artifact roster, which is a different experiment.",
+    "clusters/kmeans is published in full at both fractions - 256 artifacts, 35,920,666 members - and the per-layer census matches the all-in build exactly, 253 artifacts and 35,920,607 masked at the 100% principal. Publication cost 1,059,970 members/s into an empty deployment (f = 100%) and 293,722 members/s into one holding half the corpus as base rows (f = 50%): a member is addressed by external id, and a base row resolves through the bundle's external-id index where an ingested row is in the live map.",
+    "mesh/descriptors is DECLINED at this scale and its six census rows are the only equivalence differences in either cell. Its member table is 1,658,437,807 rows against the driver's --max-member-rows of 2e8: the driver holds a layer's whole membership in memory to address it per artifact, and the bodies for 1.7e9 members are ~25 GB. The layer is therefore declared and empty on the folded deployment while the all-in build serves 10,685 to 28,789 of its artifacts by principal - a difference by design, not a write-path result. Publishing it would need a streaming publication that never holds the roster whole.",
+    "The base build is fast at this scale because it builds points and declarations alone: 146.8 s over 1.8e7 rows at f = 50%, against the 913.9 s the all-in build takes over 3.6e7 rows with both layers' member tables.",
+    "The f = 50% flush is 900.2 s, the whole of the driver's flush timeout, and the count it was waiting for had already been reached (visibility 0.8 s). Read it as 'the executor's flushes counter had not moved within 900 s', not as time to visibility.",
+    "Every ingest figure here is from 2af9cc8b, the first binary whose publication route carries an artifact's `parent` list (decision 0125) and whose body cap on that route is stated rather than inherited from axum's 2 MiB. binary_commit stays c47d2ade, which is the build and serve blocks'."
   ]
 }

@@ -21,9 +21,10 @@ both — does not hold for this layer:
 
 - the ingest driver **declines** the layer by default and says so beside every count; the folded
   deployment then serves **1,792 descriptors against the all-in build's 1,926** at 10⁶ and
-  **10,328 against 10,685** at 3.6×10⁷ (`test_corpora/medcpt/measurements.json`);
-- carrying the column anyway (`--carry-lineage-layers`, since narrowed to `--carry-nested-layers`) lands the memberships, drops the edges,
-  emits a warning per row, and costs **31,445 items/s against 157,338** at 10⁶ — the edge checks
+  **10,328 against 10,685** at 3.6×10⁷ (those cells are in git history: both rungs'
+  `measurements.json` were re-measured under the ruling below);
+- carrying the column anyway landed the memberships, dropped the edges, emitted a warning per
+  row, and cost **31,445 items/s against 157,338** at 10⁶ — the edge checks
   scale with the corpus.
 
 ## Postscript, 2026-09-03: the publication route had no `parent` field
@@ -54,7 +55,8 @@ and declarations alone and publishes every artifact on the wire — so on `medcp
 
 ## Where the evidence is
 
-`test_corpora/common/ingest_cycle.py` (`declined`, `--carry-lineage-layers`),
-`test_corpora/medcpt/measurements.json`, `crates/tessera-engine/src/write.rs` (the warning),
+`test_corpora/common/ingest_cycle.py` (`publish`, `edges_published`),
+`test_corpora/medcpt/measurements.json`, `crates/tessera-server/src/control.rs`
+(`IncomingArtifactBody`), `crates/tessera-engine/src/write.rs` (the warning),
 `crates/tessera-types/src/layer.rs` (the lineage rule), `docs/design/configuration.md`
 (the list-column paragraph), `docs/design/dag-hierarchies.md` §4 and §8.
