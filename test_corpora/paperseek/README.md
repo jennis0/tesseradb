@@ -199,6 +199,98 @@ ones that draw. Against the withdrawn taxonomies of rungs 1 and 2 (medians 13.7%
 domain level is compact. ⊘ These are the 1,000,000-row sample's figures; the whole corpus's are
 below and are the ones that decide.
 
+### The whole corpus — 102,117,343 works
+
+`prepare.py --sample 0 --drop-vectors` **43.8 minutes** at **18.44 GB** peak `VmHWM`, on a box
+otherwise idle.
+
+| step | | |
+|---|---|---|
+| route `knn` | **1,487 s** | gather the 1.5M fit set off the 209 GB memmap 216 s · CAGRA build 16.6 s · graph search 16.3 s (92,009 q/s) · UMAP 27.2 s · **place 102,117,343 rows 1,208 s** |
+| k-means | 48 s | cuML over the 102M × 2 layout, whole rather than sampled, k = 256 |
+| vectorise titles | 83 s | 104,680 candidate terms over a 4,000,000-title sample |
+| titles | 2 s | 254 of 256 cells titled |
+| **resolve, layer and points** | **980 s** | the one pass: the OpenAlex join, 394,325,928 topic member rows streamed, and 52.2 GB of `points.parquet` written — at a **flat 18.4 GB** of `VmHWM` from the first row group to the last |
+
+99.98% of the fit set's rows came back with themselves first. 256 k-means cells hold 187 …
+1,056,873 works (median 459,697).
+
+**The OpenAlex join, over the whole corpus:**
+
+| | |
+|---|---|
+| ids matched | 98,925,699 of 102,117,343 (**96.9%**) — 3,191,644 unmatched, null throughout and carrying `unlicensed` |
+| with a topic | 98,581,482 (96.5%) |
+| with a publication year | 98,894,561 (96.8%) |
+| open access | 42,549,161 (41.7%) |
+| **with a real licence** | **22,814,890 (22.3%)** |
+| topic-layer member rows | **394,325,928** over 4,798 artifacts across four levels |
+| clustering member rows | 102,117,343 over 256, plus 42,672 ranked generating-set rows |
+
+**The principal ladder** — the ruling's whole point, and the figure every count below is against:
+
+| principal | terms | visible |
+|---|---|---|
+| no terms | — | **0** |
+| `cc-by` | 1 of 11 | **14,028,593** (13.7%) |
+| all licences | 11 of 11 | **102,117,343** |
+
+The rest of the roster, for composing a ladder between those: `unlicensed` 79,302,453 ·
+`cc-by-nc-nd` 2,864,246 · `cc-by-nc` 2,127,041 · `other-oa` 1,503,856 · `cc-by-sa` 921,373 ·
+`cc-by-nc-sa` 809,116 · `public-domain` 455,882 · `cc-by-nd` 106,419 · `publisher-specific-oa`
+7,902 · `mit` 62. `licence-ranks.json` and `licence-terms.txt` beside the corpus carry the same
+list, ranked, which is what a measurement driver composes principals from.
+
+### ⊘ The whole-corpus build does not converge on this box
+
+**This is the rung's finding and it is a negative one.** `tessera build --stage-timings` reached the
+text index and stopped making useful progress there. It was neither refused nor killed: it is still
+running, and it is stalled on I/O rather than computing.
+
+| stage | wall | `VmHWM` |
+|---|---|---|
+| `source_ids` | 2.3 s | 1,584 MiB |
+| `dictionary` | 18.1 s | 1,832 MiB |
+| `geometry_read` … `external_ids` | 27 s total | 6,274 MiB |
+| `attribute_tail` | **759.6 s** | 24,409 MiB |
+| `layers` | **84.5 s** | 24,409 MiB |
+| `text_index` | **> 4 hours and counting** | — |
+
+Every attribute landed on every entity it should: `publication_year` 98,894,561, `type`
+102,117,343, `is_oa` 98,925,699, `openalex_id` 102,117,343, `title` 102,117,343, `abstract`
+102,117,343, and **no source row named an entity the build did not load**. `title`'s text index
+finished — 2.4 GB of it. It is the abstract column the stage does not get through.
+
+**What it is doing, measured rather than inferred**, sampled four hours in:
+
+| | |
+|---|---|
+| threads in uninterruptible sleep on `folio_wait_bit_common` | **11 of 13** |
+| CPU in the kernel | **93%** (`stime` 1,336,792 ticks against `utime` 251,644) |
+| major faults | **~480 /s**, 6.2×10⁶ so far |
+| PSI `io` `full` avg300 | **60.8%** — the process group is fully stalled on I/O three fifths of the time |
+| PSI `memory` `full` avg300 | 21.2% |
+| **anonymous high-water** | **5.19 GB** |
+| abstract spill runs written | 42, ~22 MB each, at roughly one every four to eight minutes |
+
+**The mechanism is the mapped design meeting a column bigger than the box.** The build preallocates
+one arena file per text column and maps it: `.build-tmp/column-13.arena` is **137,438,953,472 bytes
+— 128 GiB exactly** — against 47 GB of RAM. The abstract text pass walks that arena, and the page
+cache cannot hold enough of it, so nearly every access is a major fault. `--memory-budget` does not
+reach this: the anonymous high-water is 5.19 GB, so the build is nowhere near a budget it could
+respect, and what binds is the *file* the design maps rather than the heap the budget models.
+
+⊘ **`probes/2026-09-02-text-peak-split/` extrapolated the wrong quantity, and said so.** Its
+"abstracts are a run, not a build" conclusion is correct about *memory* — the anonymous figure it
+predicted, ~6 GB for the abstracts' own share at 10⁸, is close to the 5.19 GB measured here — and
+that is exactly why it does not predict this. The probe measured to 10⁷, where the arena is ~13 GiB
+and fits; the wall it named as "a disk question and a wall-clock question, not a memory one" turns
+out to be a **page-cache** question, which is neither of the two it separated.
+
+⊘ **The build was not patched to get past it** (the brief's instruction: report rather than patch).
+No `--memory-budget` arm was tried, the declaration was not trimmed, and the abstracts were not
+dropped — each of those would answer a different question from the one the rung was built to ask.
+
 ## The environment
 
 `~/venvs/projection` — cuVS, cuML and CuPy on the GPU with scikit-learn on the CPU — shared with

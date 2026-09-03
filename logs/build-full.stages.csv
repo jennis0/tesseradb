@@ -1,0 +1,26 @@
+t,line
+0.003,"warning: vocabulary 'type': `visibility = ""public""` with `value_set = ""open""` publishes data-derived value names on nobody's authority (per-point-attributes §3.8, relaxed from a refusal to a warning by owner ruling 2026-08-07). Confirm this is intended"
+6.024,"view 'knn': quantising against x [-18.047295265197754, 20.4786421585083], y [-18.525674991607666, 20.00026243209839]"
+6.024,"        the data spans x [-17.66958999633789, 20.100936889648438], y [-13.0900297164917, 14.564617156982422] — 64252 x 47044 of the 65536 x 65536 cells"
+6.024,"        102117343 point(s) placed, none on the frame's edge"
+6.024,"schema: 6 column(s), 5.12 B/row against the 12 B fixed row (+43%)"
+6.024,        4.77 GiB per 10^9 items — unalterable without rewriting the corpus
+6.024,        every column materialises in EVERY view — including ones whose items carry no value for it (§3.9). Per-view columns need contracts §2.6's per-view enumeration
+8.282,stage       source_ids      2.26s  rows=102117343    peak=  1584 MiB
+26.409,stage       dictionary     18.13s  rows=12           peak=  1832 MiB
+45.303,stage    geometry_read     18.89s  rows=102117343    peak=  4186 MiB
+45.303,stage       pairs_pack      0.00s  rows=102117343    peak=  4186 MiB
+49.258,stage   signature_sort      3.96s  rows=102117343    peak=  5890 MiB
+90.267,stage       assignment     41.01s  rows=102117343    peak=  6274 MiB
+90.728,stage       assignment      0.46s  rows=102117343    peak=  6274 MiB
+93.833,stage   postings_write      3.10s  rows=102117343    peak=  6274 MiB
+93.833,stage     external_ids      0.00s  rows=0            peak=  6274 MiB
+853.415,"attribute 'publication_year': 98,894,561 of 102,117,343 entities have a value"
+853.417,"attribute 'type': 102,117,343 of 102,117,343 entities have a value"
+853.417,"attribute 'is_oa': 98,925,699 of 102,117,343 entities have a value"
+853.417,"attribute 'openalex_id': 102,117,343 of 102,117,343 entities have a value"
+853.417,"attribute 'title': 102,117,343 of 102,117,343 entities have a value"
+853.417,"attribute 'abstract': 102,117,343 of 102,117,343 entities have a value"
+853.417,        0 source row(s) named entities this build did not load
+853.417,stage   attribute_tail    759.58s  rows=102117343    peak= 24409 MiB
+937.916,stage           layers     84.50s  rows=2            peak= 24409 MiB
