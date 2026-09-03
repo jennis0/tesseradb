@@ -115,6 +115,7 @@ async fn serve_two_frames(tmp: &TempDir) -> TestServer {
     write_pairs_n(&pairs, PLACES.len() as u64);
     let bundle = dir.join("bundle");
     build(&BuildArgs {
+        arena_order: Default::default(),
         views: vec![
             view("world", world_frame(), Projection::WebMercator, &points, &pairs),
             view(

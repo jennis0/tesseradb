@@ -349,7 +349,11 @@ fn join_chunk<P: Copy + Send>(
     source_ids: &[u64],
     mut on_row: impl FnMut(Option<u32>, u64, P) -> Result<()>,
 ) -> Result<()> {
-    chunk.par_sort_unstable_by_key(|entry| entry.0);
+    // **Stable**, so rows carrying the same source id resolve in the order the file gave them.
+    // Which of two duplicate rows' values an entity ends up with was previously whichever the
+    // sort happened to place last; the entity-ordered arena fill needs the two sweeps to agree
+    // about it, and a build that answers the same question twice should answer it the same way.
+    chunk.par_sort_by_key(|entry| entry.0);
     let mut i = 0usize;
     for &(id, payload) in chunk.iter() {
         // Both sides ascend, so `i` only ever moves forward; it does not advance past a match,
@@ -1498,6 +1502,12 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // The columns' files live in the same `.build-tmp/` as the spill and band files, so a killed
     // build leaves them to the next `TmpDir::create` exactly as it leaves those.
     let scratch = crate::column::ColumnScratch::new(tmp.path());
+    // **Which order the string arenas are filled in, decided here and printed.** The inputs are
+    // Parquet footers and the budget this plan was derived under, both known before a row is
+    // joined; the two orders write the same bundle, so this is a cost decision (`residency.rs`,
+    // [`crate::ArenaOrder`]).
+    let arena = crate::residency::decide_arena_order(args, plan.budget);
+    arena.report();
     let (attributes_by_entity, coverage) = read_attributes_by_entity(
         args,
         n,
@@ -1505,6 +1515,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         &entity_of_ordinal,
         &mut minters,
         &scratch,
+        arena.order,
     )?;
     // **Printed here, where the join has just happened and the numbers are the join's own.** The
     // linear build reports the identical figures from its own pass, so the two builds agree about
@@ -1909,6 +1920,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // so it scales with bundle size rather than with item count.
     timer.end(BuildStage::Manifests, report.bundle_bytes);
     report.attribute_coverage = coverage;
+    report.arena_order = arena.order;
     report.artifact_levels = artifact_levels;
     Ok(report)
 }
@@ -1932,6 +1944,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
 /// how many rows named entities this build never loaded, are counted per source and printed:
 /// a source covering a subset is a column that is simply absent for the rest, and a source
 /// covering a superset is the ordinary shape of a table that lives elsewhere.
+#[allow(clippy::too_many_arguments)]
 fn read_attributes_by_entity(
     args: &BuildArgs,
     n: u64,
@@ -1939,6 +1952,7 @@ fn read_attributes_by_entity(
     entity_of_ordinal: &[u32],
     minters: &mut std::collections::HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
     scratch: &crate::column::ColumnScratch,
+    arena_order: crate::ArenaOrder,
 ) -> Result<(Vec<EntityColumn>, Vec<crate::AttributeCoverage>)> {
     if args.schema.is_empty() {
         return Ok((Vec::new(), Vec::new()));
@@ -1950,11 +1964,29 @@ fn read_attributes_by_entity(
         .iter()
         .map(|a| EntityColumn::filled(scratch, a.ty, n as usize))
         .collect::<Result<_>>()?;
+    let two_pass = arena_order == crate::ArenaOrder::Entity;
     // **One sweep per source, not one over a single corpus file.** Each declared attribute names
     // the file it is read from, so the groups are the passes; a build whose columns sit in three
     // files reads three files, and each one joins on the identity column its own group declared.
+    //
+    // **A group's string columns are laid out and placed before the next group is read**, not at
+    // the end: an attribute is read from exactly one source, so this group's lengths are final the
+    // moment its own measuring sweep is, and holding the per-entity length arrays of every group
+    // at once would cost 4 bytes an entity per string column for no reason.
     let mut coverage = Vec::with_capacity(args.attribute_sources.len());
     for group in &args.attribute_sources {
+        let strings: Vec<usize> = group
+            .attributes
+            .iter()
+            .copied()
+            .filter(|&i| is_string_column(attributes[i].ty))
+            .collect();
+        let measuring = two_pass && !strings.is_empty();
+        if measuring {
+            for &i in &strings {
+                by_entity[i].begin_measuring(scratch)?;
+            }
+        }
         read_one_attribute_source(
             args,
             group,
@@ -1965,9 +1997,64 @@ fn read_attributes_by_entity(
             scratch,
             &mut by_entity,
             &mut coverage,
+            if measuring {
+                JoinPass::Measure
+            } else {
+                JoinPass::Single
+            },
         )?;
+        if measuring {
+            let mut reserved = 0u64;
+            for &i in &strings {
+                reserved += by_entity[i].reserve_arena()?;
+            }
+            println!(
+                "attributes: source '{}' — {} string column(s) laid out in entity order, \
+                 {} MiB of arena; decoding the source's prose a second time to fill it",
+                group.name,
+                strings.len(),
+                reserved >> 20
+            );
+            read_one_attribute_source(
+                args,
+                group,
+                n,
+                source_ids,
+                entity_of_ordinal,
+                minters,
+                scratch,
+                &mut by_entity,
+                &mut coverage,
+                JoinPass::Place,
+            )?;
+            for &i in &strings {
+                by_entity[i].seal_arena();
+            }
+        }
     }
     Ok((by_entity, coverage))
+}
+
+/// Whether a declared type's values live in the arena — the columns the two-pass fill is about.
+fn is_string_column(ty: ScalarType) -> bool {
+    matches!(
+        ty,
+        ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text
+    )
+}
+
+/// Which of the attribute join's sweeps this is (`column.rs`, [`crate::ArenaOrder`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JoinPass {
+    /// The whole join in one sweep, filling every column as it goes — the arrival-order fill.
+    Single,
+    /// Pass one of the entity-ordered fill: identical to [`Self::Single`] except that a string
+    /// column keeps each entity's length instead of writing its bytes.
+    Measure,
+    /// Pass two: the same sweep again over the string columns alone, writing each value at the
+    /// offset the layout gave it. Counts nothing — [`Self::Measure`] already reported coverage,
+    /// and this sweep meets exactly the same rows.
+    Place,
 }
 
 /// One attribute source's merge sweep into the entity-major columns.
@@ -1982,9 +2069,21 @@ fn read_one_attribute_source(
     scratch: &crate::column::ColumnScratch,
     by_entity: &mut [EntityColumn],
     coverage: &mut Vec<crate::AttributeCoverage>,
+    pass: JoinPass,
 ) -> Result<()> {
-    let columns: Vec<&crate::config::Attribute> = group
-        .attributes
+    // **Pass two reads the string columns and nothing else** — the fixed-width columns and every
+    // presence bit were filled by pass one, and re-filling them would be a second decode of
+    // exactly the data the second decode is being paid to avoid.
+    let filled: Vec<usize> = match pass {
+        JoinPass::Place => group
+            .attributes
+            .iter()
+            .copied()
+            .filter(|&i| is_string_column(args.schema.attributes[i].ty))
+            .collect(),
+        _ => group.attributes.clone(),
+    };
+    let columns: Vec<&crate::config::Attribute> = filled
         .iter()
         .map(|&i| &args.schema.attributes[i])
         .collect();
@@ -2021,7 +2120,18 @@ fn read_one_attribute_source(
     // happens between batches, so the buffer has to hold the largest one whatever the byte budget
     // works out at. On a corpus smaller than a batch that is the only term that matters, and it is
     // a few hundred kilobytes of file per column.
-    let staged_rows = staging_rows(attributes, n).max(input::ATTRIBUTE_BATCH_ROWS);
+    // **Sized from the whole group in both passes, not from the columns this one fills.** The
+    // buffer's size is what decides where a chunk ends, and a chunk boundary decides which rows
+    // are sorted together in [`join_chunk`] — so a pass two with its own boundaries could resolve
+    // two rows carrying one entity in the other order from pass one. The layout that pass one
+    // reserved would then be filled by the wrong one of them. A few unused staged slots is the
+    // whole price of the two passes agreeing.
+    let whole_group: Vec<&crate::config::Attribute> = group
+        .attributes
+        .iter()
+        .map(|&i| &args.schema.attributes[i])
+        .collect();
+    let staged_rows = staging_rows(&whole_group, n).max(input::ATTRIBUTE_BATCH_ROWS);
     let mut staged: Vec<EntityColumn> = attributes
         .iter()
         .map(|a| EntityColumn::filled(scratch, a.ty, staged_rows))
@@ -2071,8 +2181,7 @@ fn read_one_attribute_source(
             // slot the declaration gave that attribute.
             let mut homes: Vec<Option<&mut EntityColumn>> =
                 by_entity.iter_mut().map(Some).collect();
-            let mut lanes: Vec<(usize, &mut EntityColumn, &mut EntityColumn)> = group
-                .attributes
+            let mut lanes: Vec<(usize, &mut EntityColumn, &mut EntityColumn)> = filled
                 .iter()
                 .zip(staged.iter_mut())
                 .map(|(&column, src)| {
@@ -2180,6 +2289,11 @@ fn read_one_attribute_source(
     drop(staged);
     drop(chunk);
     drop(resolved);
+    if pass == JoinPass::Place {
+        // Pass one already reported this source: the two sweeps meet the same rows, and a second
+        // entry would say the join happened twice.
+        return Ok(());
+    }
     coverage.push(crate::AttributeCoverage {
         source: group.name.clone(),
         entities: n,

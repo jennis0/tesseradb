@@ -246,6 +246,7 @@ fn build_fixture_with_every_home(out: &Path, tmp: &Path, n: u64) {
         .map(|c| c.schema)
         .expect("the every-home fixture schema parses");
     let args = BuildArgs {
+        arena_order: Default::default(),
         views: vec![tessera_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),

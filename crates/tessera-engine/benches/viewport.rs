@@ -70,6 +70,7 @@ fn ensure_bundle() -> PathBuf {
     if !bundle_root.join("CURRENT").exists() {
         let root = workspace_root();
         let args = BuildArgs {
+            arena_order: Default::default(),
             views: vec![tessera_build::ViewArgs {
                 visibility: None,
                 view_id: "s0".to_string(),

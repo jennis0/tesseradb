@@ -68,6 +68,7 @@ fn build_projected(out: &Path, tmp: &Path, projection: Projection, frame: Bounds
     write_lon_lat_points(&points, N_ITEMS);
     write_pairs_n(&pairs, N_ITEMS);
     let args = BuildArgs {
+        arena_order: Default::default(),
         views: vec![tessera_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
