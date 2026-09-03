@@ -4,8 +4,7 @@ A client asks Tessera for a view and displays what comes back. The server decide
 may see before any byte leaves it; nothing a client does can widen or narrow that. What a client
 can get wrong is different in kind: showing a sample as though it were the whole set, showing a
 stale view as current, showing a refusal as an empty corpus, showing a masked count as if it were
-a size. This chapter is about that second kind of mistake, and the rules that keep a client from
-making it.
+a size.
 
 ```mermaid
 flowchart LR
@@ -37,8 +36,8 @@ Nothing already shown is retracted; a newer answer simply exists.
 | The identity a token names (a new token, a rotated key) | Every identifier the client holds is meaningless. Start over. |
 | The content behind the current identity (an item added, denied, or unsuppressed) | The client's counts and marks may be older than the corpus. Mark the view stale and offer refresh. |
 
-A third kind of change happens on disc constantly, as compaction moves rows around and segments
-merge, and it never reaches a client at all: nothing a client holds is addressed by row, so none
+A third kind of change happens on disc from time to time, as segments merge and compaction moves
+rows, and it never reaches a client at all: nothing a client holds is addressed by row, so none
 of it is affected.
 
 Marking a view stale is built: the store compares content keys on every answer and flips a flag a
@@ -75,12 +74,13 @@ could see. Asking on its own avoids that at the cost of one extra request per se
 
 ```mermaid
 flowchart LR
-  gesture["a pan, a zoom, a filter change"] --> store["the store:<br/>decides when to ask,<br/>at what depth, what to keep"]
-  store -- "requests" --> replica["the replica:<br/>held geometry"]
-  replica --> frame["the presented frame"]
-  store -. "its own request,<br/>on its own schedule" .-> channel["the artifact channel"]
-  channel --> frame
-  frame --> render["rendering:<br/>a map layer, a custom element,<br/>a host's own canvas"]
+  srv["tessera serve"] -- "framed responses" --> replica["replica<br/>what has been served,<br/>keyed by content key"]
+  replica --> frame["presented frame<br/>what is on screen now"]
+  frame --> render["renderer<br/>deck.gl layer, or your own"]
+  gesture["pan, zoom, filter, select"] --> driver["driver<br/>a state machine:<br/>what to ask, when, at what depth"]
+  driver -- "requests" --> srv
+  driver --> replica
+  stamp["generation stamp on a response"] -. "stale: refetch" .-> driver
 ```
 
 *The store decides when to ask and what to hold. Rendering only draws what it is handed.*
