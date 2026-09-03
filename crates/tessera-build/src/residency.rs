@@ -97,10 +97,14 @@ use tessera_spatial::ScalarType;
 /// batch loop's own model carries a constant of the same size and for the same reason.
 pub(crate) const SLACK: u64 = 64 << 20;
 
-/// What a string value costs in the entity-indexed array of [`crate::column::EntityColumn`]: the
-/// arena offset alone. The characters ride in the arena and are counted as its payload; the
-/// `String` header this replaced was 24 bytes per entity, paid before a character was stored.
-const ARENA_OFFSET: u64 = 8;
+/// What a string value costs outside its characters: the entity-indexed arena offset in
+/// [`crate::column::EntityColumn`], plus the arena record's own header.
+///
+/// Eight bytes of offset and eight of header — the entity and the length the record carries so the
+/// arena can be read in its own order (`column.rs`). The characters ride in the arena and are
+/// counted as its payload; the `String` header this replaced was 24 bytes per entity, paid before
+/// a character was stored.
+const ARENA_OFFSET: u64 = 8 + 8;
 
 /// One named term of the residency, so a refusal prints where the bytes are rather than a total.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,8 +190,8 @@ fn is_variable_width(ty: ScalarType) -> bool {
 }
 
 /// The fixed width one entity's value occupies in [`crate::column::EntityColumn`]'s typed
-/// storage. A variable-width type answers [`ARENA_OFFSET`] here and carries its characters in
-/// [`ColumnCost::payload_bytes`].
+/// storage. A variable-width type answers [`ARENA_OFFSET`] here — its offset and its record
+/// header — and carries its characters in [`ColumnCost::payload_bytes`].
 fn fixed_width(ty: ScalarType) -> u64 {
     match ty {
         ScalarType::Bool => 1,
@@ -511,7 +515,7 @@ mod tests {
             .iter()
             .find(|t| t.mapped)
             .expect("the column is a term of its own");
-        assert_eq!(term.bytes, 8 * n + n.div_ceil(8) + 400 * n);
+        assert_eq!(term.bytes, ARENA_OFFSET * n + n.div_ceil(8) + 400 * n);
         assert!(
             with_text.describe().contains("(mapped)"),
             "the breakdown must say which terms are files: {}",
@@ -534,7 +538,7 @@ mod tests {
             text_index: true,
             ..plain
         };
-        let column_bytes = 8 * n + n.div_ceil(8) + 400 * n;
+        let column_bytes = ARENA_OFFSET * n + n.div_ceil(8) + 400 * n;
 
         let without = entity_order_residency(n, &[plain], 0);
         assert_eq!(without.mapped(), column_bytes);

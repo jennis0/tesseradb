@@ -2226,11 +2226,9 @@ fn write_scoped_columns(
     let mut render_columns: Vec<ScopedRenderColumn> = Vec::new();
     // The text pass's budget, derived once for the build rather than per column, exactly as the
     // entity-scoped pass derives it: the plan bounds the transient a tokenise holds, and it is a
-    // function of the machine and the entity space rather than of which column is being indexed.
-    let text_plan = TextIndexPlan::for_budget(
-        args.memory_budget.unwrap_or_else(detect_memory_budget),
-        n as usize,
-    );
+    // function of the machine rather than of which column is being indexed.
+    let text_plan =
+        TextIndexPlan::for_budget(args.memory_budget.unwrap_or_else(detect_memory_budget));
     for family in &args.scoped_attributes {
         let attribute = &family.attribute;
         // **What `render` buys, and the one place it still does not reach.** The build's own
@@ -2639,13 +2637,12 @@ pub(crate) fn write_filter_postings(
     by_entity: &[EntityColumn],
     memory_budget: u64,
 ) -> Result<(Vec<PathBuf>, TextIndexCost)> {
-    let entities = by_entity.first().map_or(0, EntityColumn::len);
     write_filter_postings_banded(
         partition_dir,
         schema,
         by_entity,
         POSTINGS_BAND_ROWS,
-        TextIndexPlan::for_budget(memory_budget, entities),
+        TextIndexPlan::for_budget(memory_budget),
     )
 }
 
@@ -3306,7 +3303,7 @@ fn push_numeric_chunks(
 /// alone would be a memory bound only for the corpus it was measured on.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TextIndexPlan {
-    chunk_entities: usize,
+    chunks: usize,
     worker_bytes: usize,
     merge_slice_cap: usize,
 }
@@ -3330,11 +3327,6 @@ pub(crate) struct TextIndexPlan {
 const TEXT_BUDGET_SHARE: u64 = 16;
 const TEXT_BUDGET_MAX: u64 = 2 << 30;
 const TEXT_BUDGET_MIN: u64 = 128 << 20;
-
-/// The floor on a chunk: below this, splitting entity space buys nothing and costs a spill file
-/// per chunk. Every test corpus in the repository is one chunk by this rule, which is why the
-/// chunk seam below exists for the tests that need several.
-const TEXT_MIN_CHUNK_ENTITIES: usize = 1 << 16;
 
 /// The floor on a worker's byte budget, so a tiny `--memory-budget` cannot derive a plan that
 /// spills a run per document.
@@ -3365,7 +3357,7 @@ const TEXT_MERGE_SLICE_CAP: usize = 1 << 22;
 
 impl TextIndexPlan {
     /// The plan a build's memory budget derives.
-    pub(crate) fn for_budget(budget: u64, entities: usize) -> TextIndexPlan {
+    pub(crate) fn for_budget(budget: u64) -> TextIndexPlan {
         let threads = rayon::current_num_threads().max(1);
         let allowance = (budget / TEXT_BUDGET_SHARE).clamp(TEXT_BUDGET_MIN, TEXT_BUDGET_MAX);
         let worker_bytes = (allowance as usize / threads).max(TEXT_MIN_WORKER_BYTES);
@@ -3385,11 +3377,14 @@ impl TextIndexPlan {
         // other 92 had finished, so most of the chunk pass is still one region's segmentation.
         // Splitting finer again would need the fan-in raised with it, and is worth about a
         // further 30 s on this corpus — measured, not modelled, and not taken.
-        let chunk_entities = entities
-            .div_ceil((threads * 8).max(1))
-            .max(TEXT_MIN_CHUNK_ENTITIES);
+        //
+        // **The chunks are arena windows now, not entity ranges** (`column.rs`), so the number is
+        // a target and the arena's own record marks decide how close to it the split lands. Eight
+        // a thread carries over unchanged: what it balances — a segmentation cost that varies by
+        // an order of magnitude with the script — is a property of the documents, and the windows
+        // hold the same documents the entity ranges did.
         TextIndexPlan {
-            chunk_entities,
+            chunks: (threads * 8).max(1),
             worker_bytes,
             merge_slice_cap: TEXT_MERGE_SLICE_CAP,
         }
@@ -3398,13 +3393,9 @@ impl TextIndexPlan {
     /// An explicit plan, for the tests that must force several chunks and several runs a chunk out
     /// of a corpus small enough to assert over.
     #[cfg(test)]
-    fn explicit(
-        chunk_entities: usize,
-        worker_bytes: usize,
-        merge_slice_cap: usize,
-    ) -> TextIndexPlan {
+    fn explicit(chunks: usize, worker_bytes: usize, merge_slice_cap: usize) -> TextIndexPlan {
         TextIndexPlan {
-            chunk_entities: chunk_entities.max(1),
+            chunks: chunks.max(1),
             worker_bytes: worker_bytes.max(1),
             merge_slice_cap,
         }
@@ -3517,10 +3508,18 @@ fn write_text_index(
         })?;
 
     // ---- 1. the chunk pass, in parallel, spilling sorted runs -------------------------------
-    let chunks: Vec<(usize, usize)> = (0..values.len())
-        .step_by(plan.chunk_entities)
-        .map(|lo| (lo, (lo + plan.chunk_entities).min(values.len())))
-        .collect();
+    //
+    // **Windows of the arena, not ranges of entity space.** Entity order is signature-then-Morton
+    // order and the arena is in arrival order, so an entity range's documents are scattered
+    // through the arena: at 1.02×10⁸ abstracts that is one major fault per document over a file
+    // two and a half times the size of the box, and the pass did not finish in four hours
+    // (`probes/2026-09-03-text-arena-streaming/`). Each worker now reads one contiguous stretch of
+    // the arena front to back and releases it behind itself, and what that costs is the two steps
+    // below: a sort at the spill and a merge rather than a concatenation at the fan-in.
+    let chunks = values.arena_windows(plan.chunks);
+    // The join wrote every one of those bytes through the mapping, so they are all in this
+    // process's page tables and no `fadvise` would release them. See `MappedArena::unmap_pages`.
+    values.unmap_arena_pages();
     // **One analyser, shared.** Its construction deserialises the segmenter's dictionary data —
     // the cost the type exists to amortise — and it holds no per-document state, so it is `Sync`
     // and the workers borrow it. What each worker does hold of its own is the normalisation
@@ -3575,21 +3574,26 @@ fn write_text_index(
     })
 }
 
-/// Index one contiguous entity range, spilling one or more sorted runs.
+/// Index one contiguous **arena window**, spilling one or more sorted runs.
 ///
-/// The worker's whole residency is `terms`, and it is what the byte budget bounds: the tracked
-/// figure is an estimate ([`TEXT_TERM_ENTRY_BYTES`]) rather than an allocator reading, so it is
-/// deliberately generous. A run is spilled the moment the estimate reaches the budget — mid
-/// document is not possible, because the check sits between documents, so the true overshoot is
-/// one document's terms.
+/// The worker's whole residency is `terms` and the window's read buffer, and the budget bounds the
+/// first: the tracked figure is an estimate ([`TEXT_TERM_ENTRY_BYTES`]) rather than an allocator
+/// reading, so it is deliberately generous. A run is spilled the moment the estimate reaches the
+/// budget — mid document is not possible, because the check sits between documents, so the true
+/// overshoot is one document's terms.
+///
+/// A window yields the same `(entity, value)` pairs the entity walk did, in arena order rather
+/// than ascending: what is *not* a window's business is which entities they belong to, and the two
+/// places that used to get entity ordering for free — the duplicate collapse and the merge — pay
+/// for it at [`spill_text_run`] and [`TextRunMerge::drain`] instead.
 #[allow(clippy::too_many_arguments)]
 fn index_text_chunk(
     column_dir: &Path,
     chunk: usize,
-    lo: usize,
-    hi: usize,
+    lo: u64,
+    hi: u64,
     values: &EntityColumn,
-    attribute: &crate::config::Attribute,
+    _attribute: &crate::config::Attribute,
     analyser: &tessera_analyse::Analyser,
     worker_bytes: usize,
 ) -> Result<Vec<spill::SpillReceipt>> {
@@ -3600,29 +3604,16 @@ fn index_text_chunk(
     let mut seq = 0usize;
     // The analyser's normalisation buffer, held across the whole chunk rather than per document.
     let mut scratch = tessera_analyse::TokenScratch::default();
-    // **Absent runs are skipped a word at a time**, not an entity at a time: presence is a bit
-    // vector, one column of this corpus is 84.5% absent, and the alternative is a call and a shift
-    // per entity to learn nothing.
-    for entity in values.present_entities_in(lo, hi) {
-        // Absence is `Null`, and the empty string is a value a corpus may hold — the same
-        // out-of-band rule the string families share. Neither yields a term.
-        //
-        // Borrowed: this walks every string in the corpus, and a clone per entity would be a
-        // second copy of the column for the duration of the tokenise.
-        let Some(prose) = values.str_at(entity) else {
-            return Err(BuildError::Invalid(format!(
-                "attribute '{}': a text column's value must be a string, got {:?}",
-                attribute.name,
-                values.value_at(entity)
-            )));
-        };
+    values.for_each_record_in(lo, hi, &mut |entity, prose| {
         let entity = entity as u32;
         analyser.for_each_token(prose, &mut scratch, &mut |token| {
             // Looked up before it is owned: a term already seen costs no allocation, which over a
             // corpus is every occurrence but the first of every word.
             if let Some(postings) = terms.get_mut(token.as_bytes()) {
-                // Entities arrive ascending, so the duplicate a repeated term produces is always
-                // the last entry — no sort and no set needed to collapse it.
+                // A term repeated *within one document* is still the last entry, because a
+                // document is one record: that is the duplicate a posting-as-a-set has to
+                // collapse, and it is the only one — an entity appears in exactly one live arena
+                // record, so no two documents in this window carry the same entity.
                 if postings.last() != Some(&entity) {
                     postings.push(entity);
                     bytes += TEXT_POSTING_BYTES;
@@ -3636,7 +3627,8 @@ fn index_text_chunk(
             spill_text_run(column_dir, chunk, &mut seq, &mut terms, &mut receipts)?;
             bytes = 0;
         }
-    }
+        Ok(())
+    })?;
     spill_text_run(column_dir, chunk, &mut seq, &mut terms, &mut receipts)?;
     Ok(receipts)
 }
@@ -3661,6 +3653,14 @@ fn spill_text_run(
     let path = column_dir.join(format!("text-run-{chunk:05}-{seq:04}.spill"));
     let mut writer = spill::TextRunWriter::create(&path)?;
     {
+        // **Sorted here, because the window walked the arena and not entity space.** A run's
+        // entities must ascend strictly within a term (`spill::TextRunWriter::push_entity`
+        // refuses otherwise), and they arrive in the order the documents sit in the arena. The
+        // sort is over one worker's accumulator, which the byte budget bounds, so it is a bounded
+        // cost per run rather than a term-sized one at the merge.
+        for postings in terms.values_mut() {
+            postings.sort_unstable();
+        }
         let mut order: Vec<&[u8]> = terms.keys().map(|key| &**key).collect();
         order.sort_unstable();
         for term in order {
@@ -3677,10 +3677,14 @@ fn spill_text_run(
 /// ascending order.
 ///
 /// The heap holds **run indices**, and the comparison reaches into the readers — so a term is
-/// never copied into the heap and the merge allocates nothing per record. Ties break by run index,
-/// which is what puts the runs carrying one term in ascending entity order: the run list is held
-/// in chunk order, chunks partition entity space ascending, and a worker's own runs are in the
-/// order it walked its chunk.
+/// never copied into the heap and the merge allocates nothing per record.
+///
+/// **The entities are merged, not concatenated.** They used to be concatenated: chunks partitioned
+/// entity space ascending, the run list was held in chunk order, and a term's list was therefore
+/// sorted for free. The chunk pass divides the *arena* now (`column.rs`), so a run holds entities
+/// from all over entity space and two runs' lists interleave — [`Self::drain`] compares their
+/// heads. What that costs is a comparison per posting against a copy per posting; what it buys is
+/// a sequential read of a file larger than the machine.
 struct TextRunMerge {
     cursors: Vec<spill::TextRunReader>,
     heap: Vec<usize>,
@@ -3691,6 +3695,9 @@ struct TextRunMerge {
     selected: Vec<usize>,
     /// Entities the selected term carries across all of them.
     postings: u64,
+    /// The selected runs' unconsumed heads, `(entity, run)`, smallest first. Held on the merge
+    /// rather than built per term so a corpus's whole vocabulary costs one allocation.
+    heads: std::collections::BinaryHeap<std::cmp::Reverse<(u32, usize)>>,
 }
 
 impl TextRunMerge {
@@ -3715,6 +3722,7 @@ impl TextRunMerge {
             term: Vec::new(),
             selected: Vec::new(),
             postings: 0,
+            heads: std::collections::BinaryHeap::new(),
         })
     }
 
@@ -3759,24 +3767,34 @@ impl TextRunMerge {
     /// Feed the selected term's entities to `sink`, ascending, checking the ascent as it goes.
     ///
     /// The check is over the *merged* list, not each run's: a run's own ascent is the writer's
-    /// business, and what could go wrong here is the run ordering. `encode_posting` re-checks the
-    /// slice path, but the bitmap path has no such check to make — a `Bitmap` is a set — which is
-    /// why the test lives here rather than there.
+    /// business, and what could go wrong here is the merge. It is also what catches an entity
+    /// carried by two runs — which cannot happen, because an entity has exactly one live arena
+    /// record and one window holds it, and is exactly the failure a silent `>=` would hide.
+    /// `encode_posting` re-checks the slice path, but the bitmap path has no such check to make —
+    /// a `Bitmap` is a set — which is why the test lives here rather than there.
     fn drain(&mut self, sink: &mut impl FnMut(u32) -> Result<()>) -> Result<()> {
+        self.heads.clear();
+        for i in 0..self.selected.len() {
+            let run = self.selected[i];
+            if let Some(entity) = self.cursors[run].next_entity()? {
+                self.heads.push(std::cmp::Reverse((entity, run)));
+            }
+        }
         let mut last: Option<u32> = None;
-        for &run in &self.selected {
-            self.cursors[run].take_entities(&mut |entity| {
-                if let Some(previous) = last {
-                    if entity <= previous {
-                        return Err(BuildError::Invalid(format!(
-                            "text run merge: entity {entity} does not ascend past {previous} — \
-                             the runs were not merged in entity order"
-                        )));
-                    }
+        while let Some(std::cmp::Reverse((entity, run))) = self.heads.pop() {
+            if let Some(previous) = last {
+                if entity <= previous {
+                    return Err(BuildError::Invalid(format!(
+                        "text run merge: entity {entity} does not ascend past {previous} — one \
+                         entity's document reached two runs"
+                    )));
                 }
-                last = Some(entity);
-                sink(entity)
-            })?;
+            }
+            last = Some(entity);
+            sink(entity)?;
+            if let Some(next) = self.cursors[run].next_entity()? {
+                self.heads.push(std::cmp::Reverse((next, run)));
+            }
         }
         Ok(())
     }
