@@ -784,6 +784,15 @@ full scale.
   cell expressible: with the frame given there is nothing to fit, so `tessera build` writes a bundle
   with no points and the whole corpus arrives through `/control/ingest` (decision 0091). `auto` over
   no rows stays a refusal, and it names the remedy.
+- **Everything is ingested after the build** (owner ruling, 2026-09-03). A cell's base bundle
+  carries the built fraction's points and every layer's *declaration* — kind, levels, visibility
+  rules, content kinds — and no roster, member table or content; each layer's artifacts, their
+  memberships, their ranked content with its generating set and their `parent` lists are published
+  through `PUT /control/layers/{name}/artifacts` once every point they depend on has been ingested.
+  That ordering is the only constraint and it holds at every fraction, so at *f* = 10% the base is
+  90% of the points and none of the artifacts. It is also why no membership travels on a column
+  here: a column names artifacts that do not exist yet, and a layer declaring supplied content
+  refuses to mint one from a key alone.
 
 ## 6. Cross-cutting findings
 
