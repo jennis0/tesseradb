@@ -191,7 +191,7 @@ def main():
         tokens[label] = authorise(args.session, args.session_cred, terms)
     results["principals"] = dict(principals)
 
-    m = meta(args.viewer, tokens[order[0]])
+    m = meta(args.viewer, tokens[order[-1]])
     view_id = m["views"][0]["id"]
     q = m["views"][0]["quantisation"]
     results["view"] = view_id
@@ -209,15 +209,17 @@ def main():
         if not record_kind(f"viewport_pan_{label}", gen):
             break
 
-    # 2. match filter, common and absent tokens, on the narrowest principal (the one most
-    # likely to survive a cap that the broader ones do not).
+    # 2. match filter, common and absent tokens, on the **broadest** principal. The probe this is
+    # a copy of used its narrowest, so that a cap too small for the broad one still measured
+    # something; here the narrowest principal holds no term and sees nothing, so a `match` against
+    # it would report zero matched at every zoom and measure the mask rather than the text index.
     if results["died"] is None:
         for word in (args.match_token, "zzzxyq_rare_token_probe"):
 
             def gen(word=word):
                 for zoom, bbox in pan_sequence(q)[:5]:
                     s = viewport(
-                        args.viewer, tokens[order[0]], view_id, zoom, bbox, k=30,
+                        args.viewer, tokens[order[-1]], view_id, zoom, bbox, k=30,
                         filters={args.match_field: {"match": word}},
                     )
                     yield s, {"zoom": zoom, "bbox": bbox, "sha256": s["sha256"], "bytes": s["bytes"], "counts": s["counts"]}
@@ -232,7 +234,7 @@ def main():
                 t0 = time.perf_counter()
                 r = requests.post(
                     f"{args.viewer}/v1/items/{h}",
-                    headers={"Authorization": f"Bearer {tokens[order[0]]}"},
+                    headers={"Authorization": f"Bearer {tokens[order[-1]]}"},
                     json={},
                     timeout=10,
                 )
@@ -251,7 +253,7 @@ def main():
                 t0 = time.perf_counter()
                 r = requests.post(
                     f"{args.viewer}/v1/artifacts/{h}",
-                    headers={"Authorization": f"Bearer {tokens[order[0]]}"},
+                    headers={"Authorization": f"Bearer {tokens[order[-1]]}"},
                     json={},
                     timeout=10,
                 )

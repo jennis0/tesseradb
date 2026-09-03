@@ -1,0 +1,6 @@
+staging /home/joe/code/tessera/data/ladder/paperseek/staging
+output  /home/joe/code/tessera/data/ladder/paperseek
+[sample] ...
+[sample] 0.24s
+102,117,343 works sampled from 102,117,343
+[route knn] ...
