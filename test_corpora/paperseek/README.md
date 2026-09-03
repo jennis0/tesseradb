@@ -127,7 +127,77 @@ one has 10⁸ membership rows and a few hundred ranked generating-set rows in th
 
 ## Measured
 
-*(figures to follow — this section is written when the runs land)*
+All figures **local NVMe on this box** (WSL2, 12 cores, 47 GB, one RTX 3080) unless the medium says
+otherwise. The staging pass is the one **network-source** figure.
+
+### Staging — one pass off the share
+
+**2026-09-02/03**, SMB. **164.7 minutes** for all 53 chunks, 22.2 GB peak `VmHWM` — most of it the
+page cache behind a 209 GB memmap being written — producing **254 GB** locally: 195 GiB of
+`vectors.f16` and 59 GB of per-chunk parquet. ⊘ **Not comparable with rung 3's 60.5 minutes for 163
+GB**: the OpenAlex track's own full scan of `works` shared the share for about half of this pass,
+and the per-chunk rate moved from 149 s to 219 s and back as it came and went.
+
+| | |
+|---|---|
+| rows | 102,117,343 — counted from the 53 footers |
+| with a title | 101,873,782 (**99.8%**) |
+| with an abstract | 102,028,375 (**99.9%**) |
+| ids not spelled as the full URL | 0 |
+| zero-norm vectors | 0 |
+
+The abstract coverage is the one figure worth holding beside rung 3's: PaperSeek selected works
+that *have* an English title and abstract, so this is 99.9% where MedCPT's PubMed is 68.9%. The
+corpus is not a sample of the scholarly record and no coverage claim should be read off it — 102M
+of OpenAlex's ~322M works, by a selection that is a property of the publisher's pipeline.
+
+### The 1,000,000-row sample
+
+`prepare.py --sample 1000000` **601 s** at **12.53 GB** peak `VmHWM`: route 222 s (CAGRA build
+4.6 s over the fit set, graph search 20.2 s, UMAP 8.9 s, placement 5.2 s — the rest is the gather of
+a scattered 1M-row sample off the 209 GB memmap), the resolve/layer/points pass 348 s, titles 21 s,
+k-means 0.3 s. 25 k-means cells (422 … 85,717, median 46,720), 25 of 25 titled out of 43,837
+candidate terms.
+
+**The OpenAlex join, on this sample:** 968,824 of 1,000,000 ids matched (**96.9%**), 965,584 carry a
+topic, 968,528 a year, 416,542 are open access, and **223,783 (22.4%) carry a real licence** — the
+other 776,217 carry `unlicensed`.
+
+`tessera build` **23.3 s** to a **744.3 MB** bundle over 12 terms; `verify --deep` clean in **0.33 s
+at 52.5 MB**. The build's memory split, by the text-peak probe's method:
+
+| | anonymous | file-backed | `VmHWM` |
+|---|---|---|---|
+| whole run high-water | **968 MB** | 1,744 MB | 2,398 MB |
+| the stage it lands on | `text_index` | `attribute_tail` | `text_index` |
+
+**Served on 8131, and the ladder is what the ruling asked for**: 0 / 137,868 / 1,000,000 visible at
+zoom 0 across *no terms*, `cc-by` and all eleven keys. `match` on `abstract` moves the matched count
+without moving the visible one — 36,695 of 1,000,000 for `network`, 0 for a token the corpus does
+not carry.
+
+⊘ **The item and artifact drill-downs return 404 and 422.** `drive.py` asks for handles 1…20, which
+are not `tessera_id`s, so nothing resolves — the same shape the memory-cap probe recorded, and it
+measures the route's cost rather than a drill-down. The 422 on the artifact route is rung 3's open
+attached-layer finding, not this rung's.
+
+### Layer spread at 1,000,000 — both layers draw
+
+The box holding the middle 90% of an artifact's members, as a share of the map. k-means exactly over
+all 25; the topic tree over a uniform sample of 150 artifacts per level, keeping those with ten
+members or more:
+
+| | median | p90 | max | under 5% |
+|---|---|---|---|---|
+| `clusters/kmeans` (25) | **0.75%** | 1.06% | 3.64% | 100% |
+| `topics/openalex` (329 sampled) | **2.35%** | 6.96% | 28.2% | 78% |
+| *by level:* domain (4) · field (26) · subfield (150) · topic (149) | 6.61% · 5.10% · 2.83% · **1.64%** | | | |
+
+**The tree tightens with depth, which is the property the layer is declared for**: a domain is a
+quarter of the map and a topic is 1.6% of it, so the levels a client is served at zoom 11–16 are the
+ones that draw. Against the withdrawn taxonomies of rungs 1 and 2 (medians 13.7% and 9.6%) even the
+domain level is compact. ⊘ These are the 1,000,000-row sample's figures; the whole corpus's are
+below and are the ones that decide.
 
 ## The environment
 
