@@ -74,8 +74,10 @@ def secs(n) -> str:
     return f"{int(n) // 60}:{int(n) % 60:02d}"
 
 
-def gib(n) -> str:
-    return "—" if not n else f"{n / 1024**3:.2f} GB"
+def gb(n) -> str:
+    """Decimal GB, which is the unit every figure in this tracker is already quoted in — the
+    rung READMEs say 11.15 GB for a bundle of 11,150,611,895 bytes."""
+    return "—" if not n else f"{n / 1e9:.2f} GB"
 
 
 def ms(n) -> str:
@@ -89,7 +91,7 @@ def build_row(name: str, data: dict) -> str:
     peak = max((s["peak_rss_kib"] for s in stages), default=None)
     return (
         f"| {name} | {si(data.get('rows'))} | {secs(build.get('wall_s'))} | "
-        f"{gib(peak * 1024 if peak else None)} | {gib(build.get('bundle_bytes'))} | "
+        f"{gb(peak * 1024 if peak else None)} | {gb(build.get('bundle_bytes'))} | "
         f"{top[0]['stage'] + ' ' + secs(top[0]['wall_s']) if top else '—'} |"
     )
 
@@ -97,7 +99,7 @@ def build_row(name: str, data: dict) -> str:
 def serve_row(name: str, data: dict) -> list[str]:
     rows = []
     for run in data.get("serve", []):
-        cap = "uncapped" if run.get("cap") is None else gib(run["cap"])
+        cap = "uncapped" if run.get("cap") is None else gb(run["cap"])
         for rung in run.get("ladder", []):
             battery = rung.get("battery", {})
 
@@ -196,8 +198,12 @@ def render() -> str:
         "| rung | f | C | items/s | ack p50 | ack p99 | visibility | fold | 0091 equivalence |",
         "|---|---|---|---|---|---|---|---|---|",
     ]
+    ingest = []
     for name, data in rungs:
-        lines += ingest_rows(name, data)
+        ingest += ingest_rows(name, data)
+    lines += ingest or [
+        "| — | — | — | — | — | — | — | — | _no rung has an ingest cell; see each rung's `notes`_ |"
+    ]
     lines += ["", END]
     return "\n".join(lines)
 
