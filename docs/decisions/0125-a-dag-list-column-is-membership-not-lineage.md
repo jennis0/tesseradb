@@ -30,7 +30,7 @@ not recover the graph, it invents one.
 
 ## What this changes
 
-- The sentence of [0117](0117-a-child-may-name-several-parents.md) that read *a second parent is
+- The sentence of 0117 that read *a second parent is
   recorded, not refused* as applying to a lineage list is withdrawn; `dag-hierarchies.md` §4's
   second bullet, which spelled that out, is rewritten. A second parent is still recorded when it
   arrives on the artifact row's `parent` list.

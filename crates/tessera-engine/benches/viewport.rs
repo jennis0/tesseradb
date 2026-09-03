@@ -217,7 +217,7 @@ fn bench_viewport(c: &mut Criterion) {
 
     // zoom 8 gives a 256x256 tile grid, and 23,170 of 65,536 units covers tile coordinates 0..=90
     // per axis — **8,281 tiles spanning 242,221 rows**, measured directly with `tiles_for_bbox` +
-    // `tile_ranges_all` on this fixture (`docs/evidence/memos/2026-07-31-viewport-bench-regression.md`,
+    // `tile_ranges_all` on this fixture (docs/evidence/memos/2026-07-31-viewport-bench-regression.md,
     // reproduced as the `f35/z8` cell of `probes/2026-08-01-two-axis-sweep/`).
     //
     // **Not a ~300-tile shape**, however much it resembles the calibration sweep's z8 cell (289

@@ -26,7 +26,7 @@ Positions are quantised exactly as the build quantises, against the extent the b
 `MANIFEST.json` records, so a shape computed here is over the same integer lattice the engine's is.
 
 **Nothing subsamples in the survey.** A shape over a sample is a different object from a shape over
-`membership ∩ M_auth` ([decision 0099](../../docs/decisions/0099-the-map-follows-datamapplot-and-cluster-colour-is-exact-only.md)),
+`membership ∩ M_auth` (decision 0099),
 so the families that cannot be run over 2.4M members in Python — the k-NN hull and the buffered
 union — are drawn and labelled as sampled, never measured. `mask_sweep.py` samples on purpose and
 says so.

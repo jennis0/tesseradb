@@ -49,7 +49,7 @@ independent **of the gate**, and that stands untouched: the two axes are orthogo
 must satisfy both. What 0075 also happened to separate — the count test from the containment test —
 is merged here.
 
-[0079](0079-the-gate-is-one-flag-not-three-modes.md)'s substance survives under new names.
+0079's substance survives under new names.
 `artifacts_carry_own` becomes `artifact_visibility = { field, default }`, where the presence of
 `field` is the declaration that artifacts carry their own labels and `default` is what one carrying
 none gets. Its hazard argument is unchanged: a schema word must not disable a disclosure control,

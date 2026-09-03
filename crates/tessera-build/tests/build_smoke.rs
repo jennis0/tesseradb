@@ -530,14 +530,19 @@ fn build_refuses_to_clobber_an_existing_bundle() {
     open_bundle(&out).unwrap();
 }
 
+/// **An empty selection is a bundle, not a refusal** (decision 0091): `--limit 0` selects nothing
+/// from a populated corpus and the build writes a zero-item bundle, which opens and verifies like
+/// any other. The full walk of that case — every declared column, every declared layer, the two
+/// builds byte-identical, and `extent = "auto"` still refused — is `empty_bundle.rs`.
 #[test]
-fn build_rejects_an_empty_selection() {
+fn an_empty_selection_builds_an_empty_bundle() {
     let tmp = tempfile::tempdir().unwrap();
     let points = tmp.path().join("points.parquet");
     let pairs = tmp.path().join("pairs.parquet");
     write_points(&points);
     write_pairs(&pairs);
-    assert!(build(&BuildArgs {
+    let out = tmp.path().join("bundle");
+    build(&BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
@@ -552,7 +557,7 @@ fn build_rejects_an_empty_selection() {
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
         attribute_sources: Vec::new(),
-        out: tmp.path().join("bundle"),
+        out: out.clone(),
         limit: Some(0),
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -568,7 +573,12 @@ fn build_rejects_an_empty_selection() {
         band_rows: None,
         schema: Default::default(),
     })
-    .is_err());
+    .expect("a build that selects no rows writes a bundle with no items");
+
+    let bundle = open_bundle(&out).expect("the empty bundle opens and its digests verify");
+    assert_eq!(bundle.manifest.entity_id_high_water, 0);
+    let partition = bundle.partitions.values().next().expect("one partition");
+    assert_eq!(partition.manifest.segments[0].row_count, 0);
 }
 
 /// A points file storing Morton codes is exact only against the grid's own extent. Any other

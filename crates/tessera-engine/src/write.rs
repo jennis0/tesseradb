@@ -8771,8 +8771,8 @@ impl Executor {
     /// The specified third trigger is `opened_at.elapsed() >= commit_window_max_age_ms`, whose
     /// stated purpose is to stop a lone ingest on an idle server waiting the full window age
     /// "for company that is not coming". **It is declined, and `ingest.commit_window_max_age_ms`
-    /// is deleted** (`docs/decisions/0034-the-window-does-not-linger.md` carries the no-linger
-    /// argument; `docs/decisions/0045-inert-config-keys-are-deleted.md` the key's removal).
+    /// is deleted** (docs/decisions/0034-the-window-does-not-linger.md carries the no-linger
+    /// argument; docs/decisions/0045-inert-config-keys-are-deleted.md the key's removal).
     ///
     /// An age bound is the safety cap on a **linger** — "having drained the queue empty, wait for
     /// more" — and this executor has no linger. A window is a local of this function and every exit

@@ -64,7 +64,7 @@
 //! * **F3 — the `apply_window` buffer clone — is confirmed**, by `WriteStage` rather than by
 //!   inference. It was the largest single stage until a `BufferedItem` went behind an `Arc`; the
 //!   `B²/2W` law is untouched by that change, only its constant. Reopening conditions for removing
-//!   the term itself are in `docs/evidence/memos/2026-08-05-ingest-buffer-snapshot.md`.
+//!   the term itself are in docs/evidence/memos/2026-08-05-ingest-buffer-snapshot.md.
 //!
 //! F2 — `compose` iterating the whole overlay and buffer per viewport, with a `perm.row_of` per
 //! entry — is confirmed and linear, at ~10 ns per buffered item flat over 50x of depth. That is a

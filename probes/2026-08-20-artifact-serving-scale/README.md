@@ -10,7 +10,7 @@ as the run that is reproduced. (This line used to link `data/`, a target no clea
 
 **The corrected probe has been run and its figures are the design memo's**
 ([`docs/design/artifact-serving-at-scale.md`](../../docs/design/artifact-serving-at-scale.md) §7,
-with [0093](../../docs/decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md)
+with 0093
 carrying the parity and census evidence). **Every figure in the rest of this file predates the
 correction** and is kept as the campaign's record, not as a measurement: read the corrected numbers
 from the memo or from the data files named below.

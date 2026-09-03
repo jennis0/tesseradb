@@ -27822,38 +27822,455 @@
       "seed": 0,
       "base_rows": 0,
       "holdout_rows": 1000000,
-      "blocked": {
-        "at": "base build",
-        "fraction": 1.0,
-        "refusal": "view 'knn': quantising against x [-12.541571340560914, 17.449042043685914], y [-13.982567033767701, 16.008046350479127]\n        the source selects no rows, so nothing was placed\nschema: 4 column(s), 8.00 B/row against the 12 B fixed row (+67%)\n        7.44 GiB per 10^9 items \u2014 unalterable without rewriting the corpus\n        every column materialises in EVERY view \u2014 including ones whose items carry no value for it (\u00a73.9). Per-view columns need contracts \u00a72.6's per-view enumeration\nbuild FAILED: invalid input: no points selected \u2014 a bundle with no items has no expressible entity range\n"
-      },
+      "blocked": null,
+      "content_removed": [
+        {
+          "layer": "clusters/kmeans",
+          "source": "kmeans",
+          "kind": "topic",
+          "roster": "clusters-kmeans.parquet"
+        }
+      ],
       "base_build": {
-        "wall_s": 0.0,
-        "returncode": 1,
-        "stdout": "",
-        "stderr_tail": "view 'knn': quantising against x [-12.541571340560914, 17.449042043685914], y [-13.982567033767701, 16.008046350479127]\n        the source selects no rows, so nothing was placed\nschema: 4 column(s), 8.00 B/row against the 12 B fixed row (+67%)\n        7.44 GiB per 10^9 items \u2014 unalterable without rewriting the corpus\n        every column materialises in EVERY view \u2014 including ones whose items carry no value for it (\u00a73.9). Per-view columns need contracts \u00a72.6's per-view enumeration\nbuild FAILED: invalid input: no points selected \u2014 a bundle with no items has no expressible entity range\n",
-        "bundle_bytes": 0
+        "wall_s": 0.68,
+        "returncode": 0,
+        "stdout": "built /home/joe/code/tessera/data/ladder/.measure/empty-bundle/base-1/bundle (v00000): 0 items, 1 terms, 0 pairs, 2858636 bytes on disk, 0 artifact(s) minted, 0 unclustered member row(s)\n  view knn: 0 row(s)\n",
+        "stderr_tail": "view 'knn': quantising against x [-12.541571340560914, 17.449042043685914], y [-13.982567033767701, 16.008046350479127]\n        the source selects no rows, so nothing was placed\nschema: 4 column(s), 8.00 B/row against the 12 B fixed row (+67%)\n        7.44 GiB per 10^9 items \u2014 unalterable without rewriting the corpus\n        every column materialises in EVERY view \u2014 including ones whose items carry no value for it (\u00a73.9). Per-view columns need contracts \u00a72.6's per-view enumeration\nstage       source_ids      0.00s  rows=0            peak=    12 MiB\nstage       dictionary      0.00s  rows=1            peak=    13 MiB\nstage    geometry_read      0.00s  rows=0            peak=    13 MiB\nstage       pairs_pack      0.00s  rows=0            peak=    13 MiB\nstage       assignment      0.01s  rows=0            peak=    13 MiB\nstage   postings_write      0.00s  rows=0            peak=    14 MiB\nstage     external_ids      0.00s  rows=0            peak=    14 MiB\nattribute 'published': 0 of 0 entities have a value\nattribute 'title': 0 of 0 entities have a value\nattribute 'mesh_major': 0 of 0 entities have a value\nattribute 'pmid': 0 of 0 entities have a value\n        0 source row(s) named entities this build did not load\nstage   attribute_tail      0.00s  rows=0            peak=    14 MiB\nstage           layers      0.30s  rows=2            peak=    87 MiB\nstage       text_index      0.01s  rows=0            peak=    87 MiB\nstage  filter_postings      0.01s  rows=0            peak=    87 MiB\nstage      record_blob      0.00s  rows=0            peak=    87 MiB\nstage   column_release      0.00s  rows=0            peak=    87 MiB\nstage       tiler_sort      0.00s  rows=0            peak=    87 MiB\nstage    segment_write      0.00s  rows=0            peak=    87 MiB\nartifact layouts, chosen from the bundle's own row space (300 ms):\n  clusters/kmeans level 0 [knn]: 0 artifact(s) with rows, 0.000 everywhere, 0.0 blocks/artifact, disjoint \u2014 served rows\n  mesh/descriptors level 0 [knn]: 0 artifact(s) with rows, 0.000 everywhere, 0.0 blocks/artifact, disjoint \u2014 served rows\n  wrote 2 tile index(es), 0 row-major column(s), 2 containment partition(s), 0 shape row form(s), 0 decomposition file(s)\nstage        manifests      0.31s  rows=2858636      peak=    87 MiB\nview 'knn': 0 point(s) landed in 0 distinct cell(s) \u2014 100.0% of them have a position of their own\n",
+        "bundle_bytes": 2892661
       },
-      "base_build_stages": [],
-      "layers": null,
-      "items_per_s": null,
-      "accepted": null,
-      "ack_p50": null,
-      "ack_p99": null,
-      "statuses": null,
-      "flush_s": null,
-      "visibility_s": null,
-      "fold_s": null,
-      "fold_peak_rss": null,
-      "equivalence": {},
+      "base_build_stages": [
+        {
+          "stage": "source_ids",
+          "wall_s": 0.000126595,
+          "rows": 0,
+          "peak_rss_kib": 13256,
+          "started_at": 1788420477.6557598,
+          "ended_at": 1788420477.6558864
+        },
+        {
+          "stage": "dictionary",
+          "wall_s": 0.003909475,
+          "rows": 1,
+          "peak_rss_kib": 13384,
+          "started_at": 1788420477.6559606,
+          "ended_at": 1788420477.6598701
+        },
+        {
+          "stage": "geometry_read",
+          "wall_s": 0.000754867,
+          "rows": 0,
+          "peak_rss_kib": 13384,
+          "started_at": 1788420477.659949,
+          "ended_at": 1788420477.660704
+        },
+        {
+          "stage": "pairs_pack",
+          "wall_s": 1.116e-06,
+          "rows": 0,
+          "peak_rss_kib": 13384,
+          "started_at": 1788420477.6607792,
+          "ended_at": 1788420477.6607804
+        },
+        {
+          "stage": "assignment",
+          "wall_s": 0.005707991,
+          "rows": 0,
+          "peak_rss_kib": 13644,
+          "started_at": 1788420477.6608636,
+          "ended_at": 1788420477.6665716
+        },
+        {
+          "stage": "postings_write",
+          "wall_s": 0.004565682,
+          "rows": 0,
+          "peak_rss_kib": 14780,
+          "started_at": 1788420477.6666594,
+          "ended_at": 1788420477.671225
+        },
+        {
+          "stage": "external_ids",
+          "wall_s": 1.44e-07,
+          "rows": 0,
+          "peak_rss_kib": 14784,
+          "started_at": 1788420477.6712894,
+          "ended_at": 1788420477.6712897
+        },
+        {
+          "stage": "attribute_tail",
+          "wall_s": 0.001785502,
+          "rows": 0,
+          "peak_rss_kib": 14800,
+          "started_at": 1788420477.6713474,
+          "ended_at": 1788420477.673133
+        },
+        {
+          "stage": "layers",
+          "wall_s": 0.303693468,
+          "rows": 2,
+          "peak_rss_kib": 89932,
+          "started_at": 1788420477.673245,
+          "ended_at": 1788420477.9769385
+        },
+        {
+          "stage": "text_index",
+          "wall_s": 0.00618716,
+          "rows": 0,
+          "peak_rss_kib": 89932,
+          "started_at": 1788420477.9838934,
+          "ended_at": 1788420477.9900806
+        },
+        {
+          "stage": "filter_postings",
+          "wall_s": 0.006954716,
+          "rows": 0,
+          "peak_rss_kib": 89932,
+          "started_at": 1788420477.9831848,
+          "ended_at": 1788420477.9901395
+        },
+        {
+          "stage": "record_blob",
+          "wall_s": 0.004781741,
+          "rows": 0,
+          "peak_rss_kib": 89932,
+          "started_at": 1788420477.990239,
+          "ended_at": 1788420477.9950206
+        },
+        {
+          "stage": "column_release",
+          "wall_s": 9.3571e-05,
+          "rows": 0,
+          "peak_rss_kib": 89932,
+          "started_at": 1788420477.995093,
+          "ended_at": 1788420477.9951866
+        },
+        {
+          "stage": "tiler_sort",
+          "wall_s": 0.001535602,
+          "rows": 0,
+          "peak_rss_kib": 89932,
+          "started_at": 1788420477.9952636,
+          "ended_at": 1788420477.9967992
+        },
+        {
+          "stage": "segment_write",
+          "wall_s": 0.004721974,
+          "rows": 0,
+          "peak_rss_kib": 89932,
+          "started_at": 1788420477.9968798,
+          "ended_at": 1788420478.0016017
+        },
+        {
+          "stage": "manifests",
+          "wall_s": 0.308166465,
+          "rows": 2858636,
+          "peak_rss_kib": 89932,
+          "started_at": 1788420478.0016904,
+          "ended_at": 1788420478.309857
+        }
+      ],
+      "layers": {
+        "probed": {
+          "clusters/kmeans": {
+            "status": 200,
+            "keys_offered": 3,
+            "body": "{\"accepted\":1,\"over_bound\":0,\"over_bound_ids\":[],\"clipped\":0,\"tessera_ids\":[13900308031199380834],\"minted\":0}",
+            "withdrawn": 200,
+            "member_rows": 1009832
+          },
+          "mesh/descriptors": {
+            "status": 200,
+            "keys_offered": 3,
+            "body": "{\"accepted\":1,\"over_bound\":0,\"over_bound_ids\":[],\"clipped\":0,\"tessera_ids\":[83581130202747291],\"minted\":0}",
+            "withdrawn": 200,
+            "member_rows": 46178538
+          }
+        },
+        "carried": [
+          "clusters/kmeans"
+        ],
+        "declined": {
+          "mesh/descriptors": "declared `kind = \"dag\"`, whose membership cell is a lineage; this rung's points are in several unrelated artifacts each, which a lineage cannot express and which a `dag` would absorb as new parent edges"
+        },
+        "hierarchy_kinds": {
+          "clusters/kmeans": "flat",
+          "mesh/descriptors": "dag"
+        }
+      },
+      "items_per_s": 53498.9,
+      "accepted": 1000000,
+      "ack_p50": 1381.3738,
+      "ack_p99": 3662.3413,
+      "statuses": {
+        "200": 100
+      },
+      "flush_s": 19.079,
+      "visibility_s": 0.031,
+      "fold_s": 1,
+      "fold_peak_rss": 1853607936,
+      "equivalence": {
+        "equal": false,
+        "zoom0_equal": true,
+        "boxes_equal": true,
+        "layers_equal": false,
+        "differences_by_surface": {
+          "layers": 6
+        },
+        "differences": [
+          {
+            "principal": "0.0100",
+            "where": "layers",
+            "folded": {
+              "5": [
+                {
+                  "rows": 32
+                }
+              ],
+              "3": [
+                {
+                  "rows": 1
+                }
+              ]
+            },
+            "all_in": {
+              "5": [
+                {
+                  "rows": 1926
+                }
+              ],
+              "3": [
+                {
+                  "rows": 1
+                }
+              ]
+            }
+          },
+          {
+            "principal": "0.0500",
+            "where": "layers",
+            "folded": {
+              "5": [
+                {
+                  "rows": 32
+                }
+              ],
+              "3": [
+                {
+                  "rows": 1
+                }
+              ]
+            },
+            "all_in": {
+              "5": [
+                {
+                  "rows": 1926
+                }
+              ],
+              "3": [
+                {
+                  "rows": 1
+                }
+              ]
+            }
+          },
+          {
+            "principal": "0.1000",
+            "where": "layers",
+            "folded": {
+              "5": [
+                {
+                  "rows": 32
+                }
+              ],
+              "3": [
+                {
+                  "rows": 1
+                }
+              ]
+            },
+            "all_in": {
+              "5": [
+                {
+                  "rows": 5445
+                }
+              ],
+              "3": [
+                {
+                  "rows": 1
+                }
+              ]
+            }
+          },
+          {
+            "principal": "0.2500",
+            "where": "layers",
+            "folded": {
+              "5": [
+                {
+                  "rows": 37
+                }
+              ],
+              "3": [
+                {
+                  "rows": 1
+                }
+              ]
+            },
+            "all_in": {
+              "5": [
+                {
+                  "rows": 5445
+                }
+              ],
+              "3": [
+                {
+                  "rows": 1
+                }
+              ]
+            }
+          },
+          {
+            "principal": "0.5000",
+            "where": "layers",
+            "folded": {
+              "5": [
+                {
+                  "rows": 35
+                }
+              ],
+              "3": [
+                {
+                  "rows": 1
+                }
+              ]
+            },
+            "all_in": {
+              "5": [
+                {
+                  "rows": 12657
+                }
+              ],
+              "3": [
+                {
+                  "rows": 1
+                }
+              ]
+            }
+          },
+          {
+            "principal": "1.0000",
+            "where": "layers",
+            "folded": {
+              "5": [
+                {
+                  "rows": 39
+                }
+              ],
+              "3": [
+                {
+                  "rows": 1
+                }
+              ]
+            },
+            "all_in": {
+              "5": [
+                {
+                  "rows": 16102
+                }
+              ],
+              "3": [
+                {
+                  "rows": 1
+                }
+              ]
+            }
+          }
+        ],
+        "frames": {
+          "folded": {
+            "x_max": 17.449042043685914,
+            "x_min": -12.541571340560914,
+            "y_max": 16.008046350479127,
+            "y_min": -13.9825670337677
+          },
+          "all_in": {
+            "x_max": 17.449042043685914,
+            "x_min": -12.541571340560914,
+            "y_max": 16.008046350479127,
+            "y_min": -13.9825670337677
+          }
+        },
+        "frames_equal": true,
+        "ladder": [
+          {
+            "target": 0.01,
+            "terms": [
+              "K",
+              "V"
+            ]
+          },
+          {
+            "target": 0.05,
+            "terms": [
+              "K",
+              "V"
+            ]
+          },
+          {
+            "target": 0.1,
+            "terms": [
+              "L",
+              "V"
+            ]
+          },
+          {
+            "target": 0.25,
+            "terms": [
+              "L",
+              "V",
+              "unindexed"
+            ]
+          },
+          {
+            "target": 0.5,
+            "terms": [
+              "C",
+              "K",
+              "V"
+            ]
+          },
+          {
+            "target": 1.0,
+            "terms": [
+              "A",
+              "B",
+              "C",
+              "D",
+              "E",
+              "F",
+              "G",
+              "H",
+              "I",
+              "J",
+              "K",
+              "L",
+              "M",
+              "N",
+              "V",
+              "Z",
+              "unindexed"
+            ]
+          }
+        ]
+      },
       "write_cycle": null
     }
   ],
   "notes": [
     "The proving rung for the measurement drivers, not a ladder rung: a 10^6-row sample of MedCPT (test_corpora/medcpt/prepare.py --sample 1000000). Committed as measurements-medcpt-1m.json rather than as a rung's own measurements.json, so the campaign table does not list it.",
     "The capped run is 512 MiB, not half the bundle: half of 318 MB is below the engine's own per-process floor and no run would start. It was OOM-killed at the 25% principal; the three principals below it are complete and 'died' carries the cgroup's own oom_kill count.",
-    "Four ingest cells at one fraction rather than four fractions: f=1.0 is blocked (see its 'blocked' field) and the other three are the same f=10% under three declarations - auto extent with the DAG layer carried, the all-in frame stated with it carried, and the all-in frame stated with it declined.",
+    "Four ingest cells: three at f=10% under three declarations (auto extent with the DAG layer carried, the all-in frame stated with it carried, the all-in frame stated with it declined), and f=100% - the whole corpus ingested into a bundle with no points, which the build's zero-item refusal blocked until 2026-09-03 (decision 0091). That cell's base_build figures are a build over nothing; its 'content_removed' says which supplied content kind an empty base cannot carry, and its layers difference is the declined mesh/descriptors layer plus that kind, not the write path.",
     "The uncapped battery overlapped the 3.6e7 base build of the ingest spectrum from 03:43; its cold figures are upper bounds.",
+    "The f=100% cell was taken with the build/empty-bundle binary; every other figure in this file is from 703cfaa7.",
     "Superseded for the DAG layer (2026-09-03): the 'declined' entries under `layers` predate decision 0125, under which a `dag` list is plain multi-membership; `mesh/descriptors` is now carried at ingest from a column of the same name on points.parquet, and a rerun would carry it by default."
   ]
 }

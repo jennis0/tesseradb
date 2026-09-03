@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-25
 **Status:** Provisional r5 — **built through §9's six steps** (2026-08-25; the record is
-[`client-delivery.md`](../client-delivery.md), which wins over this document wherever they differ).
+client-delivery.md, which wins over this document wherever they differ).
 Still Provisional because three decisions remain the owner's — D10 (viewer-plane CORS), D4 (the
 notebook's proxy arm) and D11 (the selection operand). The fourth is settled: the leak-register row
 for D12 (C30, proposed in `evidence/memos/2026-08-25-d12-membership-column.md`) is **not taken** —
@@ -965,71 +965,3 @@ membership, which the wire does not carry; §5.10 records the consequence.
 On the roadmap: [#10] becomes four packages; [#46]'s reference viewer becomes §7's demo; the
 widget precedes [#47] and does not depend on it, and both live in `tesseradb`. The roadmap
 paragraph is updated on promotion.
-
-## Appendix R — review trail
-
-- 2026-08-24: r1 drafted; r2 reviewed across three lenses (disclosure, embeddability, corpus
-  fit), twenty-seven findings dispositioned in one pass — the token traitlet unsound (now a
-  custom message), the artifact count typed as a sample (now `Masked`), a bare served count via
-  `marks.length` (now carried with its `Count`), a held layer that never saw the content key
-  rotate, `setFilters` without its drop, the migration's first two steps coupled, colour ranks
-  on both sides of the boundary, the change signal absent, "session" colliding with the wire's
-  term, the drop-in deck.gl layer missing, the third package amending client-architecture §1
-  unstated.
-- 2026-08-24: r3 — re-cut on owner direction around four customers, obligations as truthfulness,
-  the composite `<tessera-explorer>`, data by property, the store as C2's surface, C3's
-  document set, the wire idioms, the CORS question; `tesseradb` and the `@tesseradb` scope;
-  box and lasso selection; §5 rewritten from user tasks; the design canvas and the owner's
-  rulings on it (several layers for feature kinds, no tile grid, the strip as default).
-- 2026-08-25: r4 — r3 reviewed across three lenses (truthfulness and corpus fit, embeddability,
-  the four customers), forty-one findings, dispositioned in one pass; every one accepted. The
-  ones that changed the shape: **per-point membership is not on the wire**, so the DataMapPlot
-  rendering splits into what draws exactly from the number channel and the served hull, what
-  the client assigns as a mapping (nearest served centroid), and what a membership column
-  would make exact (D12); **`x-tessera-stale` is the broadcast geometry stamp**,
-  so staleness keys on the content key with numbers refreshed eagerly and marks stale-marked;
-  **counting a region at pixel depth** is 10⁶ tiles, so the `tiles` form at a bounded depth with
-  the inexactness typed; **the drop-in's token** comes from the host's server calling authorise
-  with the session credential, which under the only plugin is the claim-minting proxy — said
-  where C1 reads it, with a verified-assertion plugin asked for (D14) and `session-url` removed
-  from every non-demo surface; **browser-direct needs viewer-plane CORS** and cannot serve VS
-  Code or Colab, so D4 and D10 are one ruling and the recommendation on D10 flips to yes;
-  **labels are a dependent layer** with no target on the wire (D13; the picker names the
-  closure); **the notebook entry point takes a token**, with the credential form operator-only;
-  `expired` defined against a best-effort 403 and a post-sweep 401; 503 in `retrying`; the
-  positional palette's centre; `setView`'s conversion and coordinate space; f32 world positions;
-  `extentOf`; the encoding accumulators to the store (amending client-architecture F8);
-  optional peers and per-element entries; the inline worker in the single-file bundle; context
-  precedence; deferred finalize; shared store as shared camera; decimal ids in traitlets and
-  events; the "no such value" filter obligation; provisional marks as a plain count; the state
-  mapping; the basemap's alignment condition; by-property data outside the harness's claim; D4
-  amended not kept; step 0 rescoped; the bundle built by the wheel's hook; the harness beside
-  the gate; the decisions split into ruled and open with the count corrected to thirteen.
-  Style: vocabulary aligned with annotations.md, process narration moved here, the §8.6
-  misquotation removed, file citations kept to §9.
-- 2026-08-25: owner, on r4: colour by cluster is **exact only** — the nearest-centroid mapping is
-  dropped and D12 becomes a prerequisite; the render target is multi-million marks and 10⁴-plus
-  artifacts a layer; §5.10 rewritten as the data path — the deepest-served column, the session
-  artifact table with ordinals named on the main thread from a worker-local index, the
-  membership attribute and lookup texture so every colouring interaction is O(artifacts), the
-  table walk for hierarchy, colour coverage and what refetches under a cut change or a layer
-  switch, and the per-point byte table at several million marks.
-- 2026-08-25: r5 — built, steps 0–6 and the server track for D12, one day, one controller and
-  seven implementers. The owner ruled three more things mid-build: **D8 declined** (no fetch-model
-  hint; the store picks by observation); **D13 as a count, not an identifier** — a dependent
-  artifact carries its *target's* masked count, and the target's id stays off the wire; **D9's
-  `layers`: omitted or `[]` is none, the string `"all"` is every reachable layer**, `all` refused as
-  a layer name. What the building changed: (1) §7's *two views of one widget share one store* does
-  not hold — one store has one view input and two explorers over it fought for the camera; the
-  store is per view, the token supplier per model, and the active view syncs up. (2) §5.10's
-  colour-stale band does not go wholly neutral — zeroing its ordinals would be the per-point pass
-  decision 0100 refuses; it keeps drawing the ordinals that still resolve, and stand-ins draw
-  neutral. (3) §5.11's box→prefix rasterisation and the exactness rule live in the store, not the
-  deck adapter, because the store issues the request. Found at integration, none in the design:
-  the artifact channel is built at meta, so a verb before meta must be held as intent; the channel
-  must clamp its depth to `max_tiles_per_request` whatever view it is paired with; the density
-  wash at a coarse depth was the tile grid, filtered now (decision 0097); under headless swiftshader
-  the server sheds a stream the client stops reading — an environment fact the record carries with
-  the measurements. Every §5.10 figure is now measured (headed Chromium, 996,488 marks coloured
-  through the lookup texture: per settle ≤ 3.5 ms, remap median 4 ms, frame 16.7 ms) except the
-  layer-switch refill, which needs a second layer in the demo.

@@ -410,7 +410,7 @@ Two independent bounds sit in front of the engine, and neither is on the control
 
 **Ingest admission** is one semaphore, `try_acquire` only: no queue, no timeout. It bounds concurrent `/control/ingest` handlers, which is the bound on how many blocking-pool threads ingest can hold. Without it the viewer plane shared an unbounded FIFO with ingest and an already-admitted viewport would *hang* rather than shed. The control plane either takes the work now or refuses it, and the refusal costs no blocking thread, no queue slot and no WAL byte.
 
-Every 429 the gate produces is counted, and the count is deliberately not the whole 429 rate: the single-flight caches produce their own 429 (`ProjectionBuilding`, `FragmentBuilding`) *after* admission, so an operator correlating the two should expect the client-observed rate to be equal or higher. **A concurrent arrival for a row projection already being built parks on that build and is served its result** (decision [0058](../decisions/0058-a-single-flight-racer-waits-rather-than-being-refused.md), superseding r11's "waiters do not block"); its 429 remains for a wait that outran its budget, and lifecycle §7.2 carries the mechanism. The consequence *here* is that a parked request holds its compute permit while burning no CPU, so cold-start load that used to shed downstream now shows as occupancy in this gate — `shed_total` can rise on a workload whose client-observed 429 rate has fallen. That occupancy is bounded by the wait budget and deliberately not by a per-principal share of the gate, which stays unpartitioned (decision [0059](../decisions/0059-per-principal-admission-is-not-capped.md), and §9's rule against per-auth-hash labels is part of why).
+Every 429 the gate produces is counted, and the count is deliberately not the whole 429 rate: the single-flight caches produce their own 429 (`ProjectionBuilding`, `FragmentBuilding`) *after* admission, so an operator correlating the two should expect the client-observed rate to be equal or higher. **A concurrent arrival for a row projection already being built parks on that build and is served its result** (decision 0058, superseding r11's "waiters do not block"); its 429 remains for a wait that outran its budget, and lifecycle §7.2 carries the mechanism. The consequence *here* is that a parked request holds its compute permit while burning no CPU, so cold-start load that used to shed downstream now shows as occupancy in this gate — `shed_total` can rise on a workload whose client-observed 429 rate has fallen. That occupancy is bounded by the wait budget and deliberately not by a per-principal share of the gate, which stays unpartitioned (decision 0059, and §9's rule against per-auth-hash labels is part of why).
 
 **Cancellation** is the third lever and the only one that gives back work already started: a disconnected client flips a cooperative token, and the viewport path aborts wholly rather than returning a partial answer.
 
@@ -637,89 +637,3 @@ Recorded in the design's own style, because each will otherwise be re-proposed.
 17. **One thread owns the WAL, by value; the commit window sets the signature-sort scope at the server.** Ordering stops being a discipline defended by a comment and becomes a property of there being nowhere else for the steps to happen — and the sort scope stops being whatever chunk a client happened to POST.
 
 **Deliberately not decided here**, deferred with their owners: sharded index placement (measurement), retroactive revocation across views (policy), prompt-sample versus full-membership gating (recorded in the manifest either way), how a large batch lands into a live bundle (§6.7), and the mask-build tier alternative — the entity [index-ordinal split](deferred-index-ordinal-split.md), which would make signature grouping hold globally rather than within a batch, at the cost of a group-aware merge policy and a different `permutation.bin` encoding. Its trigger is measurement: §9's per-partition posting fragmentation exists to detect exactly the erosion that would justify it.
-
-## Appendix R — Review record
-
-**r17** (2026-08-19) makes §4.1's refusal claim true and then bounds it. The engine had never
-compared the manifest's data-plugin hash against the configured plugin's, so this paragraph and
-contracts §2.2 were both present-tense about machinery that did not exist — the failure mode being a
-disclosure rather than an outage, since postings written under one labelling rule read back intact
-and resolve against another with no error raised. The check now runs in `Engine::open`, an absent or
-empty manifest hash counts as a mismatch, and the paragraph says both. It also says what the check
-does *not* cover: the auth module's hash, which is not in the manifest and has no reader, so §4.3's
-⊘ narrows from "manifest fields rather than a mechanism" to the auth half alone.
-
-**r16** (2026-08-18) names the plugin ABI's second data-side export in §4.3. `terms_of_labels`
-takes an item's terms already separated and must return exactly one descriptor per element, in
-order — the property the streaming build's dictionary pass has always assumed and now probes
-through this entry point rather than through a comma-joined label. `terms_of_label` is unchanged
-and remains the route for an item whose label arrives as one opaque byte string on the wire. The
-⊘ note below it stands unaltered: there is still no wasmtime host, and `builtin:passthrough` —
-whose identity string moves to `:2`, taking both hashes with it — is still the whole of the
-policy surface.
-
-**r15** (2026-08-09) applies decisions
-[0058](../decisions/0058-a-single-flight-racer-waits-rather-than-being-refused.md) and
-[0059](../decisions/0059-per-principal-admission-is-not-capped.md). §6.3's *"single-flight waiters
-do not block"* stood since r11 and is now false of the built system; the mechanism belongs to
-lifecycle §7.2 and is recorded there, so what this document keeps is the part that is its own —
-that waiting is permit occupancy in the compute gate, that it therefore moves traffic *into*
-`shed_total` from a counter downstream of it, and that the gate stays unpartitioned. §9's status
-inventory gains the two row-projection counters, with the reason the existing one changed meaning
-rather than being renamed, and §7's sample configuration gains `single_flight_wait_ms` beside
-`admission_timeout_ms`, the two commented against each other because they are the pair an operator
-is most likely to conflate: one bounds queueing for a permit, the other bounds waiting for work a
-permit is already being held for. **§9's rule that per-auth-hash labels stay off shared dashboards is
-unchanged and load-bearing here**: it is why the waiter gauge is process-wide and cannot attribute
-occupancy to a principal, which decision 0059 states rather than leaving a reader to infer.
-
-**r13** (2026-08-05) — **one refuted sentence removed from §6.6, found by a reader's question
-rather than by a review.** It said deletion *"removes the entity from postings … and leaves a row
-tombstone for compaction"*. Both halves were wrong and both had already been corrected elsewhere:
-architecture §11.3's r33 ruled that removing postings at deny time is the fail-open reading
-(base postings are frozen, delta tiers append-only, so subtracting one **is** the fold), and there
-is no row-space tombstone — `tombstones` in the side-manifest is the durable serialisation of the
-overlay's `deleted` bitmap, which is the same fact in a second home rather than a second
-mechanism. The stale sentence was the likeliest source of the belief that deletion has two markers.
-No mechanism changed; §6.6's retirement rules and the three-stores argument are untouched.
-
-**r11** (2026-08-04) is a §6 marker refresh applied with the write-path consolidation, not a
-design change: §6.4's "flush does not exist" comes out (built — epic #3; `flush_max_items`
-deleted under decision 0045, with the out-of-bounds refusal noted per decision 0040); §6.5 loses
-its "draining pins" clause and gains the as-built rebuild note with decision 0044's obligation;
-§6.7's pin-manager bullet is replaced by the post-0041 retention statement, and its merge marker
-records what is built, what is gated on 0044, and the two recorded departures from the Lucene
-sketch. `write-path.md` §13 lists what its promotion will absorb from §6 wholesale.
-
-**r10** applies decision [0026](../decisions/0026-idset-stamp-version.md) and one design ruling. The word "epoch" is gone: §4.2 and §4.5's identity signal is the **idset**, and §6.5's lazy fragment advance and §6.6's deny-retirement rule are keyed by **stamps**. And §5 no longer *restates* the composition order — this document's own preamble says the design wins where the two differ, and restating an order it had partly inverted was the mechanism by which the two came apart. Design §10.4 now states the strategy and its clamps normatively; §5 says only where they live.
-
-
-r1 was reviewed by two independent reviewers with no stake in the draft — one against the design's invariants, one for engineering and operational soundness — and r2 resolved their findings under a third verification pass. r3 closed three specification gaps that rewrite had introduced: the deny-retirement rule, the pinned watermark bound to the fragment stamp, and the allocator's address under fan-out. r4 applied three owner-directed amendments: the bulk builder moved from Python into the engine (D4), the Python package reframed as SDK plus supervisor over language-agnostic surfaces (D1), and `authorise` split onto a dedicated session plane (D2). r5 applied an audit of the Phase 1 ingest implementation: the scope qualifier on §6.5's "correctness never depends on patching", the open question of how a large batch lands into a live bundle, and a fragmentation metric.
-
-**r6** is a rewrite rather than a patch, applying the rulings recorded in the divergence register (2026-08-01). This was the corpus's stalest document: it described a crate decomposition, a process model, an identity model, a config file and a lifecycle that largely did not exist, in a present tense that read as assurance.
-
-*Corrections of record.*
-
-- **The identity model (register S19).** §4.5 asserted that all wire identities are per-session `u32` handles, issued as a router keyed permutation, and asserted it *as the I10 mechanism*. That model was retired at design r21 and by contracts §0.3 deviation 8; this was the last place in the corpus still stating it. §4.5 now states the `tessera_id` blinding permutation, its honest threat model (the key is not secret against a bundle-holder; the defended property is viewer-plane), and I10's structural form. The handle constraint sentence is preserved, stripped of the retired mechanism, as the rule Phase 3 node handles must obey.
-- **Enforcement (S23).** "Dependency rules enforced in CI" was false in both halves: there is no CI, and the layer check runs from an opt-in pre-commit hook that is skipped without a worktree marker. §3 now says so, and its forbidden-edge list is regenerated from the script — roughly three times the documented rule set, including four rules that guard fail-open paths rather than layering. `tessera-bench` joins the crate tree as the one crate that may violate the layering, which is the unlisted exception to §3's structural claim.
-- **The build (S26).** §6.1 described an in-memory linear build. The real build is eleven streaming stages with external spill; the linear build was OOM-killed at 10⁹ on a 47 GiB box and survives only as the byte-identity oracle. Its memory-bounded character is what makes 10⁹ reachable. **Batch size is recorded as identity-bearing under I9** — a rebuild at a different batch size forks identities — which had no home in the corpus at all.
-- **What does not exist (S27, S29).** Crates `tessera-labels` and `tessera-filter`, the `python/` tree, the router/worker split, the wasmtime host, seven of ten control verbs, the build credential tier, the metrics emitter, the sealed maintenance reader, the `M_sel`/frontier cache and the tile and candidate artifacts are all removed or marked. `clients/ts/` is added as a live second reader of the wire contract, and pins are relocated to `tessera-engine`.
-- **Configuration (S28).** The example would not have parsed: five keys were wrong against `deny_unknown_fields` sections, and its plugin value is refused at startup. It is regenerated from the code, with the twenty-five real `[serve]` keys and the ten `[ingest]` keys. The philosophy sentence is kept verbatim; it is verified live.
-- **The bundle tree (S30).** Contracts §0.3 has **eleven** deviations, not nine, and all eleven remain live; five of them target this document's §4.1, which had never been amended. The tree now matches the code: `morton.u32`, `pairs.parquet`, `terms/postings.arrow` CSR, per-partition side-manifests, the external-ID sidecar and its locator, and no tiles or candidates files. The sidecar's **transitional** status — an owner ruling mirrored verbatim in the source — enters this document for the first time.
-
-*Added because it exists and was undescribed:* the commit window and its honest sizing analysis (§6.2), the single write executor that owns the WAL by value (§6.2, D17), the two-stage admission gate and cooperative cancellation (§6.3), and executor posture (§9).
-
-**r7** applies an independent loss-detection review of r6 — a reviewer with no stake in the rewrite, reading it against the corpus and the code for what the rewrite dropped or overstated. Eight findings, none of them judgement calls:
-
-- **The I13a/I13b split.** Design r25 split I13 because one number named two properties: I13a (a failed or cancelled request yields no partial answer) is implemented and annotated throughout the code; I13b (a partition not consulted fails closed) has one hardcoded partition, no gate and no test. This document still used a bare `I13` in three places meaning two different invariants — §2.2 and §2.3 mean I13b, §5 means I13a — which re-merged the split and let I13a's coverage read as evidence for I13b.
-- **Two false or unmarked claims about the configuration.** `commit_window_max_age_ms` is inert — an age bound has no subject in an executor whose commit window never waits, and a test asserts it — but §6.2 claimed a size-or-age bound and the config example carried the key unannotated, directly above two keys marked inert. And "every section is `deny_unknown_fields`" excluded `[disclosure]`, which is hand-validated: it rejects a missing key and silently ignores an unknown one. The exposure is narrower than the false sentence implied, but it fell on the one section whose keys are disclosure controls.
-- **Three rules returned to their owner.** Overlay precedence, the positional CRC rule and the disk-full triple are stated in `concurrency-lifecycle.md`; §6.6 and §6.2 restated them, and §6.6 restated *the rule against restating them* next to the rule it governs. §6.2's copy was the worse shape — it carried each rule's justification without the rule, leaving an implementer knowing that position matters and not what to do at either position. All three are now citations. The drain-entry and pin-reclaim-ordering points stay, being statements about system shape rather than transcriptions.
-- **Three obligations the rewrite dropped.** Removing r5's sealed maintenance reader was right — it does not exist — but compaction is still specified, still rewrites columns unmasked, and the rule that its output may never reach a response left the document with it; it returns as a forward obligation inside §6.7's marker, to be proved by test. `/v1/meta`'s label vocabulary regains its **C11** citation, the leak-register row justifying the one data-derived field on the one untrusted metadata verb. The decision list regains a provenance line.
-- **A dangling dependency and a misleading example.** §4.1's rollback story and §6.2's WAL-retirement rule both rest on a retention window that has no knob and no mechanism; the config regeneration correctly dropped `wal_retention`, leaving the reliance unmarked. §4.1 now marks it and §6.2 cites that marker. The example's `max_k = 500` is labelled illustrative against a default of 1000.
-- **A deferral restored.** The mask-build tier alternative — plan §14's entity index-ordinal split — left the deferral list while §9's fragmentation metric, which exists to detect its trigger, stayed and said so.
-
-**r8** folds the dependency register into §3 from the implementation plan, which is being retired. This document owns crates, packaging and dependencies, so the register belongs with the component structure rather than in a plan. Every row was checked against the workspace manifests and `clients/ts/` before it was written down, and six of the eleven turned out to be choices rather than dependencies: `wasmtime`, OPA/Cedar, the label grammar, the JVM label oracle, the DuckDB mask oracle and the thin-client tile grid are marked ⊘. The plan's frozen-view *verification obligation* on the `croaring` binding is **discharged** and now reads as a requirement met, with the FFI-shim fallback kept because it is what makes the dependency survivable rather than critical. The plan's deepscatter rejection is not folded in — it is [decision 0022](../decisions/0022-deepscatter-rejected.md), cited from the renderer row where a reader would otherwise ask.
-
-**r9** applies [decision 0025](../decisions/0025-rotation-is-a-session-invalidation-event.md): a key rotation is a session invalidation event. §6.8 previously said that a stale identifier presented with its rotation counter got a `409` and one presented without it might silently name a different item, called the caller's accepted trade. It replaces that with the rule that an identifier is assumed current, that the live **idset** is published on `/v1/meta` for a consumer to poll, and that a rotation must end every live session — with a ⊘ marker, because nothing binds a token to an idset today and the obligation is therefore operational. §4.2 drops the identity parameter from `/v1/items`, there being none to supply, and §4.5 points at the rule. Design r28 carries the same ruling, the reasoning, and the leak-register row (**C20**) for the probe a variable counter would have opened.
-
-*Raised, not settled.* Three items want an owner's ruling and are deliberately left as they stand: the presence registry and the session pin's rate of change each want an Appendix C row; `README.md`'s marker table needs this document's ⊘ markers folded in, which is an edit to a file this revision did not touch.

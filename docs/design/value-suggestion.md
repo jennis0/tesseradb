@@ -19,12 +19,12 @@ the shipped route by the implementation's bench, the representation and single-p
 [`filter-index.md`](filter-index.md) §1.1, §2.3; [`records-and-search.md`](records-and-search.md)
 §4.3; `architecture.md` §4 (I2, I3, I12), §8.2, §8.3, Appendix C (C8, C11, C22, C23, C24, C25,
 C31); decisions
-[0039](../decisions/0039-multi-valued-categoricals-are-slow-path-only.md),
+0039,
 [0063](../decisions/0063-category-postings-serve-public-listings-and-never-per-viewer-ones.md),
 [0067](../decisions/0067-term-timing-is-accepted-for-text-and-keyword-postings.md),
 [0069](../decisions/0069-filter-do-not-rank-sharpens-to-no-corpus-global-statistics.md),
-[0090](../decisions/0090-a-vocabulary-has-one-visibility-axis.md),
-[0093](../decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md);
+0090,
+0093;
 [`probes/2026-08-07-category-membership/`](../../probes/2026-08-07-category-membership/results.md),
 [`probes/2026-08-03-dict-fst/`](../../probes/2026-08-03-dict-fst/README.md).
 
@@ -952,78 +952,3 @@ F → 0123.** Three bind other documents — A confirms two refusals in `filter-
 `records-and-search.md` without amending either, D widens decision 0063 and narrows
 per-point-attributes §3.8's indistinguishable-in-work claim, and E puts a C8 quantity on a new
 surface.
-
-## Appendix R — review trail
-
-**r1 (2026-09-02) — drafted**, from a brainstorm with the owner: autocomplete over categories,
-gated per viewer, at a target the owner then set at ~10⁷ values with memory first and 10–100 ms per
-keystroke acceptable. A per-session visible-value set and a per-request probe walk were both drawn;
-**the owner accepted the probe walk's timing channel the same day**, which made the walk the
-construction and the set a priced lever.
-The probe campaign ran the same day and chose the dictionary format over the FST and the arena,
-moved the walk budget from 10⁴ to 10⁵, replaced C24's modelled hidden-value constant with a
-measured sub-microsecond one, found the sort to be the build cost at 10⁷, and ruled the
-all-postings route out for the lever. All six questions in §10 were then ruled — the draft's
-recommendation on each except **E**, where counts are served on request.
-
-**r2 (2026-09-02) — reviewed and promoted.** Three lenses attacked the draft; all three would have
-promoted it, and none found a fail-open path. What bit: `more` was defined twice and the two
-definitions carried different quantities; §3 claimed the enumeration's indistinguishable-**in-work**
-property, which contradicts decision 0063 and is a filter's property rather than a listing's; the
-boolean predicate the whole walk rests on **does not exist** in `ColumnPostings`, so §6.2 was
-reusing something it had to build; a per-value read failure mid-walk would have refused
-prefix-dependently; the index was specified against a `SortedDict` that carries no payload and
-refuses duplicates; and it was to be rebuilt once per flush, which is a 38-second sort for a change
-it does not see. What changed: `more` is the walk's own stopping condition and is registered as a
-thresholded pre-mask count **on the wire**; §3 claims outcome alone and points at §8; `intersects`
-is a named deliverable and both doors move onto it; the index is five mapped structures carried
-across publications behind an `Arc` and rebuilt only when values or titles change; admission is
-`spawn_blocking` with one suggest in flight per session; and §8's route bullet splits the
-declaration-fixed route from the early termination on the caller's own mask. The channel is
-registered as **C31**, and the vocabulary's own read side left as issue #130.
-
-**r3 (2026-09-02) — figures corrected against the implementation's bench.** The engine's suggestion
-index and walk were built on branch `vs/engine`, and §6's shipped-route measurements replace r2's,
-which had timed `Bitmap::intersect` with the record in hand and so understated the sparsest
-viewer's keystroke by a factor of six to thirty; the counts and the extents sweep are measured where
-r2 modelled or owed them.
-Four deviations the implementation took are recorded at their claims: the index lives in the
-engine's cache directory rather than a bundle runtime directory that does not exist, its payload
-record is 12 B rather than the 4 B r2 costed, its rebuild is dispatched on a 4,096-value side-map
-threshold rather than on every change, and `counts=true` composes a candidate on a `public` column
-and refuses where it cannot.
-
-**r4 (2026-09-02) — the probe's time is split, and the set becomes the second route.** Arm 4 of the
-probe campaign put **68–72% of a probe in the binary search for the record**, against a 13–29%
-reading taken with the code array warm, and priced two fixes against the stages: a 4.2 MB bucket
-table over the code's top 20 bits, **taken** (§6.2, ⊘ not built, ~28–40 ms modelled for the sparsest
-viewer), and a per-record container-key sidecar, **declined** — 12–17% at best, nothing at all
-against a scattered candidate, and 82 MB per column.
-**§6.3 stops being a lever held in reserve and becomes the second route**, built on demand and keyed
-by session, resolved column, generation and overlay version, with the probe route answering the
-first keystrokes on a pair and the two routes differing only on `more`.
-**The route follows the viewer's own cardinality** (owner ruling; decision 0124): the set is built
-only at or under `selection.max_suggest_set_entities`, which narrows §8.2's rule on this surface
-alone — the quantity consulted is the viewer's own, which `/v1/viewport` already serves — and closes
-C31 for an indexed column once the set is warm.
-
-**r5 (2026-09-02) — corrected against the built bucket table and the built set.** §6.2's **(b′)** is
-measured rather than modelled: the search stage falls to 160–209 ns and the sparsest viewer's spent
-budget at 10⁷ from 67.7 to 35.9 ms contiguous and from 79.5 to 50.1 ms scattered, which meets r4's
-modelled ~28–40 ms on the contiguous shape and misses it by 10 ms on the scattered. The table is
-built at open for a keyed column of 65,536 records or more and the file format does not move.
-
-**§6.3's set is built, and r4's "iterates its set bits inside `[lo, hi)`" cannot be read literally**
-— a prefix range is over entry strings and a dense position is a rank in key order, so the set route
-keeps the walk over entries and replaces the posting probe with a bit test. **C31 is therefore
-narrowed by an order of magnitude and not closed**: 3.4–3.8 ms against 41–45 ms for a viewer seeing
-nothing under a broad one-character prefix, with the time still tracking the entries under the
-prefix. The set over payload records that would close it exactly is named as the reserve, declined
-under memory-first. Decision 0124 and `architecture.md` r60 say *closed*; the decision is immutable,
-so the correction is recorded here, in §8 and in C31's own row.
-
-The sweep is **237 ms at a 10⁷-entity candidate** rather than r4's 46–61 ms — the probe campaign
-measured the value-column pass without the code → position mapping, having conflated the two — and
-is still off the request path and inside rule 3's ceiling. An unbudgeted set walk can also be slower
-than a budgeted probe walk for a wide viewer (3.93 ms against 0.80 ms at a 10⁶-entity contiguous
-candidate), which the ceiling keeps from mattering.

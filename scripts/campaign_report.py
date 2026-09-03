@@ -244,6 +244,11 @@ def assemble(args) -> int:
                 "base_rows": cell.get("base_rows"),
                 "holdout_rows": cell.get("holdout_rows"),
                 "blocked": cell.get("blocked"),
+                # What an **empty** base could not carry (the *f* = 100% cell): a supplied content
+                # kind requiring every member visible has no generating set when there are no
+                # members, which the registry refuses at either entry point. Recorded so the layer
+                # census's difference is attributable.
+                "content_removed": cell.get("content_removed"),
                 "base_build": {
                     k: v for k, v in (cell.get("build") or {}).items() if k != "stages"
                 },

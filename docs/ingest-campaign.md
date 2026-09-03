@@ -7,7 +7,7 @@ which is a *plan* and has already been departed from in several places — where
 this document records what was actually done and why.
 
 ⊘ **This tracker has no pointer in `CLAUDE.md`.** It follows the convention
-[`artifact-delivery.md`](artifact-delivery.md) and [`client-delivery.md`](client-delivery.md) use,
+artifact-delivery.md and client-delivery.md use,
 both of which are named there by owner direction. Whether the campaign is tracked here or on issues
 is the owner's to settle.
 
@@ -468,7 +468,7 @@ on the wire to say it is one thing. It remains the cheap fallback if the DAG is 
 **A DAG corrupts no count, and that was checked rather than assumed.** The number beside a served
 artifact is always the masked count of the artifact's **own declared membership** (`annotations.md`
 §3), never a sum over children; roll-up within a level is *substitution* of a parent for its
-children rather than aggregation ([decision 0087](decisions/0087-cross-level-edges-are-information-not-rollup.md));
+children rather than aggregation (decision 0087);
 and containment is verified one intersection per edge, so a concept need only be a subset of each of
 its parents, which it is. The two-parents refusal is there because ambiguous data is not the tree the
 layer *declared* — a layer declaring a DAG is not ambiguous, and this one would be declaring the
@@ -773,6 +773,16 @@ full scale.
   [`../test_corpora/common/README.md`](../test_corpora/common/README.md) is that schema, field by
   field with each one's unit and how it was measured. The table in §1.1 is rendered from the
   committed `measurements.json` files and must not be hand-edited.
+- **Every deployment of a rung shares the frame its first all-in build recorded**, and a deployment
+  may start with no points in it at all (owner ruling, 2026-09-03). A rung declaring
+  `extent = "auto"` fits its frame to the rows the build saw, so a base built from part of the
+  corpus quantises onto a different grid and every box-level count differs at the margins for a
+  reason that has nothing to do with the write path; `ingest_cycle.py --state-extent` copies
+  `MANIFEST.views[].quantisation` out of the all-in bundle into the measurement's own copy of the
+  declaration, never the rung's committed one. Stating the frame is also what makes the *f* = 100%
+  cell expressible: with the frame given there is nothing to fit, so `tessera build` writes a bundle
+  with no points and the whole corpus arrives through `/control/ingest` (decision 0091). `auto` over
+  no rows stays a refusal, and it names the remedy.
 
 ## 6. Cross-cutting findings
 
@@ -903,7 +913,10 @@ reviewed once (r2), all five rulings made, awaiting promotion
 the build and the ingest side of the design above are built: `kind = "dag"`; a record's parents as
 a list in the WAL row and the record blob, `BUNDLE_FORMAT` 4 → 5 and a bundle at any other number
 refused at open; the artifact row's `parent` as a list; a second parent recorded under `dag` and
-refused as before under `nested` and `tiered` at both entry points; and the cycle check the ingest
+refused as before under `nested` and `tiered` at both entry points (since 2026-09-03 the `parent`
+list is the only edge spelling under `dag`, a member row's list being plain multi-membership —
+[decision 0125](decisions/0125-a-dag-list-column-is-membership-not-lineage.md); the ingest cycle
+carries the layer from a `mesh/descriptors` column on the points rather than declining it); and the cycle check the ingest
 side lacked, in the registry's publication so one body serves the build, `publish_artifacts` and
 the commit window's mint. What is *not* in this track: the cut over parent lists, longest-path
 depth, `parent_ids` on the wire and the client — the engine and client tracks'. Ledger:

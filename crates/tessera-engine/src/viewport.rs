@@ -3080,7 +3080,7 @@ impl Engine {
         // Resolve every tile's row range in ONE monotone sweep rather than two full-column binary
         // searches per tile. A few hundred independent `log2(rows)` searches is where a sparse
         // request's time actually goes — measured at 26-64% of one
-        // (`docs/evidence/memos/2026-07-30-f1-selection-overdraw.md`), and flat in density, because
+        // (docs/evidence/memos/2026-07-30-f1-selection-overdraw.md), and flat in density, because
         // the cost is the searching rather than the rows found.
         //
         // `tile_ranges_all` returns ranges positionally aligned with `tiles`, so the zip below
@@ -6919,7 +6919,7 @@ pub const SERIAL_FALLBACK_MAX_ROWS: u64 = 500_000_000;
 /// or a test's override — see `Engine::set_serial_fallback_max_rows_for_test`'s doc for why an
 /// override exists at all and why it lives on `Engine`, not here.
 /// **Two terms since 2026-08-01** (owner decision, on the two-axis sweep —
-/// `docs/evidence/memos/2026-07-31-tile-parallelism-calibration.md`, "Follow-up 4, answered", and
+/// docs/evidence/memos/2026-07-31-tile-parallelism-calibration.md, "Follow-up 4, answered", and
 /// `probes/2026-08-01-two-axis-sweep/`). The row term is unchanged; [`TILE_PAR_MIN_TILES`] is new,
 /// and the fan-out runs when **either** fires.
 #[inline]

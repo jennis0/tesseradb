@@ -47,7 +47,7 @@ transform of its own.
 The npm scope is `@tesseradb/*`, matching the Python package (design §8); it was `@tessera/*` until
 the store landed.
 
-Design: [`docs/archive/plans/2026-08-01-mvp-client-and-deckgl-viewer-design.md`](../../docs/archive/plans/2026-08-01-mvp-client-and-deckgl-viewer-design.md).
+Design: docs/archive/plans/2026-08-01-mvp-client-and-deckgl-viewer-design.md.
 It is the first slice of
 [`client-interaction.md`](../../docs/design/client-interaction.md),
 which owns the client architecture proper.

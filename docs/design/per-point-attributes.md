@@ -21,10 +21,10 @@ Appendix C (C8, C11); contracts §2.1–§2.4, §3.2, §3.4; [`write-path.md`](w
 §5.4; [`records-and-search.md`](records-and-search.md) §2–§3, §4.2, §5 (cited as **records §n**);
 `views.md` §51, §53, §61, §80, §87 (itself provisional);
 `system-architecture.md` §7; design memo 2026-07-29 (secondary attribute indexing);
-decisions [0013](../decisions/0013-mark-specified-vs-implemented.md),
-[0039](../decisions/0039-multi-valued-categoricals-are-slow-path-only.md),
-[0064](../decisions/0064-an-absent-number-is-a-presence-bitmap-beside-the-column.md),
-[0068](../decisions/0068-a-row-space-operand-bounded-by-the-requests-domain-is-admitted.md).
+decisions 0013,
+0039,
+0064,
+0068.
 **Citation convention:** unprefixed §n is the architecture design; this document's own sections are
 cited as **spec §n**.
 
@@ -321,7 +321,7 @@ access.
 indexed column or a blob-resident one — and never with `render = true`. A rendered mark has one
 colour, so declaring `render` on a multi-valued attribute is
 refused at parse with that reason — and **no projection, derived value or summary of one earns a
-hot column on its behalf either** (decision [0039](../decisions/0039-multi-valued-categoricals-are-slow-path-only.md)).
+hot column on its behalf either** (decision 0039).
 A caller who wants to colour by a value drawn from a multi-valued field declares an ordinary
 single-valued attribute carrying that value: they say which single value they mean, in a column
 that means exactly that, with no mechanism between the declaration and the row.
@@ -558,7 +558,7 @@ describe**. Nothing here is waiting on someone to type it out.
 - **No aggregation.** Category counts are C8's existing shape — an `and_cardinality` against
   `M_auth`, per request, never precomputed — and a breakdown surface is a separate design against
   §8.2. The one place a count is served is beside a **suggestion**, on request
-  ([decision 0122](../decisions/0122-a-count-is-served-beside-a-suggestion-on-request.md),
+  (decision 0122,
   `value-suggestion.md` §3): the caller chose the prefix and the page is at most `limit` values, and
   the number never orders it. ⊘ Not built. `/v1/categories` still serves none, because a count
   beside every code a client drew is the per-viewport breakdown this design does not do.
@@ -587,106 +587,3 @@ The fixtures carry no attribute tail today, so no arm can see any of this.
   stopping short of that will report attribute cost as free and be wrong.
 
 ---
-
-## Appendix R — review trail
-
-**2026-09-02 — §3.8's indistinguishable-in-work claim is narrowed, and §7 names the one count that
-is served.** [`value-suggestion.md`](value-suggestion.md) r2 designs a typeahead over a category
-vocabulary, and its review found this document claiming for the listing surfaces a property that is
-the filter's: a `derived` operand is answered by the masked scan, so its work names nothing the
-caller typed, but both listing surfaces probe one posting per value walked and their time is a
-count of the values walked. §3.8 now claims outcome for the listings and points at the register row
-that carries the rest (**C31**, accepted by owner ruling). §7's "no aggregation" gains the single
-exception: a count beside a suggested value, on request, never as an order. Nothing this document
-refuses is withdrawn, and no key or default moves.
-
-**2026-08-18 — the configuration surface is rebuilt on two axes, and enumerated.** §4.0 is new: the
-whole surface in one place, six blocks, every key and every enumerated value. It is worth having
-because the set is **closed** — `deny_unknown_fields` on every block, an enumerated set behind every
-value that is a word rather than a caller's string — and closure is what the leak register rests on,
-the register being exhaustive because the surface is enumerable. A key added without an entry there
-is a disclosure control nobody has reasoned about.
-
-**2026-08-18 — the rebuild itself.** §4 is replaced wholesale and
-§3.8 and §3.9 follow it.
-[Decision 0088](../decisions/0088-visibility-is-two-axes-and-the-membership-test-is-one.md) is the
-ruling and
-[`../evidence/memos/2026-08-18-configuration-surface.md`](../evidence/memos/2026-08-18-configuration-surface.md)
-is the design; two reviews of its first draft — user experience and fail-closed properties — are
-what produced most of what changed. **No rule of this design is weakened**: every refusal in the
-old §4.3 survives under the new keys, and three are added where the collapse would otherwise have
-opened a hole (an unresolved vocabulary reference, a closed vocabulary with no source, and widths
-disagreeing across a shared vocabulary — the last now inexpressible rather than refused).
-
-What changed: `listing` and the layer's `gate`/`ungated`/`artifacts_carry_own` become `visibility`
-and a member default; `visible_when` and `corpus_derived` merge into
-`require_member_visibility`; `derived` is retired as a word meaning two quantifiers and returns as
-one setting of that key; `public` becomes a reserved access label at term `0` rather than a config
-keyword; vocabularies become objects, taking `width` with them; every object declares its own
-`source` and an optional `fields` override map, replacing five CLI flags with `--file`; and `slice`
-becomes `view` throughout. ⊘ A view's own gate remains specified and not implemented.
-
-**2026-08-12 — corrected against the built declaration surface.** The placement set this document
-introduced is gone: a field is a `type` and three booleans, `render` and `index` are the two words a
-caller writes, and a declaration claiming neither is **blob-resident** rather than refused. Records
-§2–§3 owns that rule and the three homes; this document keeps the category, its vocabulary and its
-disclosure controls. `inspect` disappears as a placement and not as a capability — §10.3's
-per-interaction cadence is the record blob's, so there is nothing left to opt into. Three claims
-were false against the parser and are now marked at the site: `render_in` is refused rather than
-defaulted (§3.9), `listing = "public"` on a discovered vocabulary warns rather than refuses (§4.3),
-and `index` on a **rendered** number or datetime is admitted, decision 0064's presence bitmap beside the hot column being what the row route needs to tell an absence from a stored zero
-(§4.3) — a combination that worked under the old surface, walked back deliberately, since
-store-once would answer that filter from a hot column storing absence as zero. No rule of this
-design changed.
-
-**2026-08-07 — corrected against the built `render` placement, and against five owner rulings.**
-No rule of this design changed; what changed is which of its claims are still true.
-
-§1's marker no longer says the design is unexercisable — the render half runs end to end — and it
-no longer names §3.5's attribute dictionary as where a minted category value would land. That was
-the day's sharpest correction: a **category needs no attribute dictionary**, because the vocabulary
-already enumerates its values and the code is the identifier, so nothing caller-supplied is
-interned and §3.5's authorisation-bypass hazard cannot arise for one. §3.5's separation still
-governs attribute *terms*; it was over-applied to categories here.
-
-§6 becomes a **status list**, because executing it as written would now deliver two things decided
-against — per-slice hot columns (`render_in` is refused; the flat `declared_scalars` cannot express
-them) and an attribute dictionary for categories — and three whose content the rulings changed.
-
-The rulings, none of which alters a rule above: **cardinality is not a threat** (an ordinal leaking
-set size is accepted, so §3.4's dense-code guidance is a preference rather than a control, and what
-must be enforced is that a principal sees a value only if it belongs to data they can see);
-**aggregates over categories are masked**, C8's existing `and_cardinality` shape; **no residency
-ceiling** (Appendix A gains none; §2.3's report-never-refuse stands unqualified); **`listing =
-"public"` on a discovered vocabulary is permitted with a warning** rather than refused — §3.8's
-prohibition relaxes, an operator may have reason to publish; and the **legend is global, served as
-metadata**, with per-viewport counts deferred to the filter contract.
-
-One measurement now exists where the design had a prediction. §3.3's membership sets were sized at
-**0.31–1.01× the render column they index**, across two label sets chosen to bracket entity-space
-contiguity, with a full 171-value legend evaluating in 0.013–1.10 ms
-(`probes/2026-08-07-category-membership/`). §3.3's expectation that sparse principals are cheapest
-is **supported, not confirmed** — it held on one corpus and was untested on the other. The probe
-also found the cost model's own asymmetry in a new place: many narrow grants cost more than a few
-wide ones at a fifteenth of the mask cardinality, so the expensive principal is term count, not
-coverage.
-
-**2026-08-04 — corrected against the built write path.** Flush and descriptor promotion exist, so
-§1's streaming marker names what is actually missing (§3.5's attribute dictionary) rather than flush;
-the retirement citations move to write-path §5.4's Rule S and Rule F, which replaced lifecycle §3's
-stamp ledger; and `overlay_version` exists, which §3.3's cache key assumed it did not. No rule
-changed.
-
-**Reviewed 2026-08-02**, three lenses across successive drafts.
-
-The findings that changed the design: a namespace tag inside the descriptor is insufficient, because
-`DictWriter` interns caller-supplied bytes — hence separate dictionaries and postings files (§3.5);
-dense codes on the wire are a cardinality lower bound, closed structurally by random assignment
-rather than accepted into the register (§3.4); a filter naming an invisible value must contribute an
-empty operand or become an existence oracle (§3.8); membership-derived visibility retires correctly
-only against the composed verdict, since a suppression never touches postings (§3.3); and attributes
-sharing a vocabulary could disagree on `listing` (§3.9).
-
-Corrected against the corpus: Appendix A carries no residency ceiling, so the plan step reports
-rather than refuses (§2.3); and the claim that category codes cost the same at any width is assumed
-rather than measured, the repo's own gather arm modelling cost per column by width (§3.6).

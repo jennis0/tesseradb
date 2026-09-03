@@ -124,7 +124,7 @@ architecture design.
 | [`conformance.md`](conformance.md) | Normative | The suite: the definitions-oracle, canaries, the byte-scanner, interleavings |
 | [`client-interaction.md`](client-interaction.md) | Provisional | What a client is: holdings, version coordinates, display obligations, protocol |
 | [`client-architecture.md`](client-architecture.md) | Provisional | The client/vis boundary rule, the driver as an explicit state machine, the replica's API and frame composition on the tile grid. Driver built; §6's migration half done, finished by `client-components.md` |
-| [`client-components.md`](client-components.md) | Provisional r5 | The client stack organised by four customers: the wire as C3's product, the headless store as C2's, the `<tessera-explorer>` composite and its pieces as C1's, the demo and the `tesseradb` widget as C4's — six packages, two count types, a token-and-parts-and-slots styling contract, token-as-message custody. **Built through §9's six steps** (see [`../client-delivery.md`](../client-delivery.md)); r5 records what the building changed. The rulings of §11 are decisions 0095–0102 |
+| [`client-components.md`](client-components.md) | Provisional r5 | The client stack organised by four customers: the wire as C3's product, the headless store as C2's, the `<tessera-explorer>` composite and its pieces as C1's, the demo and the `tesseradb` widget as C4's — six packages, two count types, a token-and-parts-and-slots styling contract, token-as-message custody. **Built through §9's six steps** (see ../client-delivery.md); r5 records what the building changed. The rulings of §11 are decisions 0095–0102 |
 | [`client-obligations.md`](client-obligations.md) | Provisional | The twelve rules a client keeps because the server cannot — display states, both figures or neither, staleness on the content key, masked counts are never sizes, absence carries no reason, the artifact channel, `k` on zoom, `u64` ids, the six proxied headers, the 401/403 split, depth as the client's choice with its formula stated — each with what goes wrong on the screen if it is broken |
 | [`caching.md`](caching.md) | Provisional | Where data rests and what that costs — caching as feasibility, not optimisation |
 | [`delta-serving.md`](delta-serving.md) | Provisional | What a client may declare it holds, and what that lets the server omit, skip or elide |
@@ -162,14 +162,6 @@ rediscovered — explicitly not a design, and not to be built from.
 **Provisional** means code is already written against the document but it is not yet normative.
 Each says in its first lines what remains before it becomes so. Read the `Status:` line before
 trusting any document — location does not tell you standing.
-
-Revision numbers are deliberately not listed here. They live in each document's `Status:` line and
-are collected in the generated [`inventory.md`](inventory.md); a second hand-maintained copy would
-go stale, and did.
-
-Every document carries its review trail in an Appendix R. Read it before re-opening a decision;
-most obvious objections have been raised and answered there, and the trail records which of them
-were wrong.
 
 ## Specified, not implemented
 

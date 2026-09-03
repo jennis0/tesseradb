@@ -7,12 +7,12 @@ nothing. Six rulings are named in §5.
 **Reads against:** [`filter-index.md`](../../design/filter-index.md) §2.1–§2.6, §5, §6.2;
 [`filter-surface.md`](../../design/filter-surface.md) §3–§4; architecture §4 (I2, I7, I12), §8.2,
 §10.3; [`per-point-attributes.md`](../../design/per-point-attributes.md) §3.7, §4.3; decisions
-[0013](../../decisions/0013-mark-specified-vs-implemented.md),
-[0039](../../decisions/0039-multi-valued-categoricals-are-slow-path-only.md),
+0013,
+0039,
 [0062](../../decisions/0062-filters-compose-as-a-boolean-tree-inside-the-candidate.md),
 [0063](../../decisions/0063-category-postings-serve-public-listings-and-never-per-viewer-ones.md),
-[0064](../../decisions/0064-an-absent-number-is-a-presence-bitmap-beside-the-column.md),
-[0065](../../decisions/0065-the-inverse-permutation-is-stored-for-the-filtered-viewport.md),
+0064,
+0065,
 [0066](../../decisions/0066-none-of-requires-a-value-and-names-one-column.md).
 
 ---

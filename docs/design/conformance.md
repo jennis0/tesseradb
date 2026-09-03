@@ -45,7 +45,7 @@ indistinguishability (a timing property), the ingest-time join, and a scoped `te
 family. The §0 count marker moves with the suite, to **692**. r17 stands otherwise — **the pinned-leaf cases pin by key alone** (r17, 2026-08-31): ordinals are
 removed (decision 0113), so the differential's `@#n` arm is gone and `conformance/suite`'s roster
 check asserts the field is absent rather than ascending. No coverage row moves. r16 stands
-otherwise — **the multi-view differential is written**: `views.md` §11's conformance row, over four views of one entity space, with its coverage recorded in the existing I1, I2, I7, I10 and I12 cells and the four things it did **not then** reach — the gate, the gate's work-indistinguishability, the ingest-time join, a scoped category or text family — named below §4.6's table (r18 reaches the gate, and the scoped category was reached before it; the list there is now three). **No row is added and none moves position.** r15 stands otherwise — **the suite ran green**: 432 of 432, for the first time since the configuration rework, and the 27 failures r14 recorded are fixed rather than merely diagnosed. *(That sentence is r15's, and both its halves went stale the day after it was written; §0's first table carries what is true, and the count it states is now checked against the suite rather than maintained by hand.)* Two causes and one fixture consequence, all of them the mask catalogue's assumptions rather than defects (§0, and `oracle/catalogue.py`'s own header). r14 stands otherwise — **I3 moved to covered**, both halves, in `conformance/tests/test_label_containment.py` over a fixture built backwards from the property's edge: two principals **one entity apart**, that entity inside the widest generating set and nowhere else, with the artifact drawn from it **absent whole** for the narrower principal and an artifact of the same layer over the same membership served to them in the same response (§4.4, §4.6). It is the first row to move because a test was written rather than because machinery arrived, which is what r13 said was available to do. Two things a reader must carry with it. **The suite around it did not run green when the row moved**, and does now *(r15)*: the configuration rework changed `tessera serve`'s flag, so no module could spawn a server at all until 2026-08-20, and with that fixed 27 of 432 tests failed for two causes outside this row — `public` interned at term 0 shifting every catalogue descriptor's dictionary id by one, and [decision 0073](../decisions/0073-entity-ties-are-ordered-by-morton-code.md)'s Morton tiebreak breaking the mask catalogue's `entity_id == source_id` identity, which `verify()` could not see because its block check compares sets and a within-block permutation preserves them (§0, §6). **And the I11 route named at r13 is still unwritten.** r13 stands otherwise — a correction, not a design change: the **annotation machinery is built**, and this document's reasons for three uncovered rows were written when it was not. I3's containment test, generating sets (I8) and the existence criterion are built, enforced and filter-blind; the *frontier* is withdrawn as a concept rather than missing (decisions 0080, 0082, 0083). I3, I8 and I12's frontier half move from *no implementation to test* to **untested machinery**, which is a testing gap where it previously was not one (§0, §4.1, §4.2, §4.4, §4.6). I6 is untouched — there is still no wasmtime host. **No coverage row moves.** r12 stands otherwise — the I12 row names the **existence criterion** rather than the deleted `min_visible_members` key (Appendix R); r11 stands otherwise — §5's marker refreshed to decision 0071's state of the world: five pause sites, the seam three landed by extending the switchboard as the marker demands, and the gate now "no default-features build", the feature being declarable for the correctness suite's faults build. §5's eight points remain unbuilt. r10 stands otherwise — a correction, not a design change: the compaction fold is **built**, and three of this document's claims that it does not exist are wrong. Scripts 2, 3 and 6 move from "no machinery to test" to **untested machinery**, which is a testing gap where it previously was not one (§0, §2, §5). **No coverage row moves** — §4.6 is untouched, per decision 9. r9 stands otherwise: I12's mask half is covered by the attribute-filter differential in the form filter-surface §9 specifies, its frontier half blocked on the label service with I3; script 5 is unreconstructable and the stamp-ledger and retirement-floor scripts are void (Rule S / Rule F, write-path §5.4)
+otherwise — **the multi-view differential is written**: `views.md` §11's conformance row, over four views of one entity space, with its coverage recorded in the existing I1, I2, I7, I10 and I12 cells and the four things it did **not then** reach — the gate, the gate's work-indistinguishability, the ingest-time join, a scoped category or text family — named below §4.6's table (r18 reaches the gate, and the scoped category was reached before it; the list there is now three). **No row is added and none moves position.** r15 stands otherwise — **the suite ran green**: 432 of 432, for the first time since the configuration rework, and the 27 failures r14 recorded are fixed rather than merely diagnosed. *(That sentence is r15's, and both its halves went stale the day after it was written; §0's first table carries what is true, and the count it states is now checked against the suite rather than maintained by hand.)* Two causes and one fixture consequence, all of them the mask catalogue's assumptions rather than defects (§0, and `oracle/catalogue.py`'s own header). r14 stands otherwise — **I3 moved to covered**, both halves, in `conformance/tests/test_label_containment.py` over a fixture built backwards from the property's edge: two principals **one entity apart**, that entity inside the widest generating set and nowhere else, with the artifact drawn from it **absent whole** for the narrower principal and an artifact of the same layer over the same membership served to them in the same response (§4.4, §4.6). It is the first row to move because a test was written rather than because machinery arrived, which is what r13 said was available to do. Two things a reader must carry with it. **The suite around it did not run green when the row moved**, and does now *(r15)*: the configuration rework changed `tessera serve`'s flag, so no module could spawn a server at all until 2026-08-20, and with that fixed 27 of 432 tests failed for two causes outside this row — `public` interned at term 0 shifting every catalogue descriptor's dictionary id by one, and decision 0073's Morton tiebreak breaking the mask catalogue's `entity_id == source_id` identity, which `verify()` could not see because its block check compares sets and a within-block permutation preserves them (§0, §6). **And the I11 route named at r13 is still unwritten.** r13 stands otherwise — a correction, not a design change: the **annotation machinery is built**, and this document's reasons for three uncovered rows were written when it was not. I3's containment test, generating sets (I8) and the existence criterion are built, enforced and filter-blind; the *frontier* is withdrawn as a concept rather than missing (decisions 0080, 0082, 0083). I3, I8 and I12's frontier half move from *no implementation to test* to **untested machinery**, which is a testing gap where it previously was not one (§0, §4.1, §4.2, §4.4, §4.6). I6 is untouched — there is still no wasmtime host. **No coverage row moves.** r12 stands otherwise — the I12 row names the **existence criterion** rather than the deleted `min_visible_members` key (Appendix R); r11 stands otherwise — §5's marker refreshed to decision 0071's state of the world: five pause sites, the seam three landed by extending the switchboard as the marker demands, and the gate now "no default-features build", the feature being declarable for the correctness suite's faults build. §5's eight points remain unbuilt. r10 stands otherwise — a correction, not a design change: the compaction fold is **built**, and three of this document's claims that it does not exist are wrong. Scripts 2, 3 and 6 move from "no machinery to test" to **untested machinery**, which is a testing gap where it previously was not one (§0, §2, §5). **No coverage row moves** — §4.6 is untouched, per decision 9. r9 stands otherwise: I12's mask half is covered by the attribute-filter differential in the form filter-surface §9 specifies, its frontier half blocked on the label service with I3; script 5 is unreconstructable and the stamp-ledger and retirement-floor scripts are void (Rule S / Rule F, write-path §5.4)
 
 **Owns:** the design of `conformance/` and `reference/` — harness architecture, oracle interfaces, fixtures, the invariant matrix's concrete test forms, the interleaving machinery, and what "pass" means. The implementation plan (§10.1) is blunt that the suite is the deliverable; this document exists so it is designed, not accreted.
 
@@ -115,7 +115,7 @@ the wrong entities — which is what the byte-scan's drill-down control was doin
 now the corpus's, `Block.dict_term_id(bundle)` resolves the dictionary's from the bundle, and
 `verify()` checks the interning **rule** rather than an assumed equality.
 
-**Second, [decision 0073](../decisions/0073-entity-ties-are-ordered-by-morton-code.md) made the
+**Second, decision 0073 made the
 within-signature tiebreak the Morton code**, and the mask catalogue was designed so that
 `entity_id == source_id` — which held only while the tiebreak was the source id. Every block's
 posting *set* is still exactly its intended range, which is why `verify()` passed that check and
@@ -136,7 +136,7 @@ rather than from a rebuild: a term interned earlier renumbers the dictionary, an
 renumbers entity ids. Both are recorded at the fixture's own header as well, because that is where
 the next person will be standing.
 
-**What did not move, and why it did not.** *(r14: I3 moved — see the status line and §4.6. The paragraph below is r13's, with I3 struck from its lists.)* Five invariants remain uncovered *(r14; six)*, and **two of them — I8 and I11 — are gaps in this suite** *(r13; it was one)* — which is a correction, not a movement: no row of §4.6 moves, and what changes is why each stands where it does. **One — I6 — has no implementation to test**: there is no wasmtime host, so nothing loads a guest module and nothing sandboxes one. **I8 no longer belongs in that sentence** *(r13; I3 did not either, and at r14 it is covered)*. The annotation machinery is built: artifacts carry ranked contents with generating sets, containment (`|G ∩ M| == |G|`, all or nothing) is evaluated on every serving route, and the existence criterion is a live control. I8 is therefore untested machinery here — the engine's own fold tests cover it in substance, and this suite does not drive it. (I12 left this list at r9: the filter surface landed and its mask half is covered by the attribute-filter differential. Its **frontier half** is a third case again *(r13)*: the frontier is not missing, it is **withdrawn** — every artifact is tested on its own and the root-down descent is gone (decisions [0080](../decisions/0080-the-frontier-is-a-per-artifact-test.md), [0082](../decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md), [0083](../decisions/0083-the-frontier-is-a-request-time-budget.md)) — so what survives of I12 on the artifact side is what architecture §8.4 states: a filter never touches containment and never relaxes the criterion, both running against `M_auth` alone. That is built and blind to the filter by construction, and untested here.) I5 needs an authorisation plugin whose two functions can genuinely diverge before any oracle could disagree with it (decision [0027](../decisions/0027-i5-is-unverified.md)). I13b needs a required-set gate. Of the eight interleaving scripts, two (4 and 5) drive a stamp ledger and a retirement floor that are deleted from the spec rather than merely unbuilt (owner-ruled 2026-08-03; Rule S / Rule F at write-path §5.4), so they will never be written in the form specified. **The other three — 2, 3 and 6 — are a testing gap now, and were not when this section was first written.** They wait on the compaction fold, and the fold is built, retires and is scheduled ([`compaction.md`](compaction.md), normative). What blocks them is this suite's own unbuilt harness — the pause points and `ledger_state()` of §5 — which is the same thing blocking script 8. A reader should read those three as untested machinery, not as machinery that does not exist. **I11 is the third**: the pin that carried it is deleted (decision [0041](../decisions/0041-pins-become-a-staleness-stamp.md)) and neither replacement §4.4 names is written, which §4.6 records as a regression in coverage rather than a reclassification.
+**What did not move, and why it did not.** *(r14: I3 moved — see the status line and §4.6. The paragraph below is r13's, with I3 struck from its lists.)* Five invariants remain uncovered *(r14; six)*, and **two of them — I8 and I11 — are gaps in this suite** *(r13; it was one)* — which is a correction, not a movement: no row of §4.6 moves, and what changes is why each stands where it does. **One — I6 — has no implementation to test**: there is no wasmtime host, so nothing loads a guest module and nothing sandboxes one. **I8 no longer belongs in that sentence** *(r13; I3 did not either, and at r14 it is covered)*. The annotation machinery is built: artifacts carry ranked contents with generating sets, containment (`|G ∩ M| == |G|`, all or nothing) is evaluated on every serving route, and the existence criterion is a live control. I8 is therefore untested machinery here — the engine's own fold tests cover it in substance, and this suite does not drive it. (I12 left this list at r9: the filter surface landed and its mask half is covered by the attribute-filter differential. Its **frontier half** is a third case again *(r13)*: the frontier is not missing, it is **withdrawn** — every artifact is tested on its own and the root-down descent is gone (decisions [0080](../decisions/0080-the-frontier-is-a-per-artifact-test.md), 0082, 0083) — so what survives of I12 on the artifact side is what architecture §8.4 states: a filter never touches containment and never relaxes the criterion, both running against `M_auth` alone. That is built and blind to the filter by construction, and untested here.) I5 needs an authorisation plugin whose two functions can genuinely diverge before any oracle could disagree with it (decision [0027](../decisions/0027-i5-is-unverified.md)). I13b needs a required-set gate. Of the eight interleaving scripts, two (4 and 5) drive a stamp ledger and a retirement floor that are deleted from the spec rather than merely unbuilt (owner-ruled 2026-08-03; Rule S / Rule F at write-path §5.4), so they will never be written in the form specified. **The other three — 2, 3 and 6 — are a testing gap now, and were not when this section was first written.** They wait on the compaction fold, and the fold is built, retires and is scheduled ([`compaction.md`](compaction.md), normative). What blocks them is this suite's own unbuilt harness — the pause points and `ledger_state()` of §5 — which is the same thing blocking script 8. A reader should read those three as untested machinery, not as machinery that does not exist. **I11 is the third**: the pin that carried it is deleted (decision [0041](../decisions/0041-pins-become-a-staleness-stamp.md)) and neither replacement §4.4 names is written, which §4.6 records as a regression in coverage rather than a reclassification.
 
 ## 1. Components
 
@@ -199,7 +199,7 @@ Engine vs oracle, five families (viewport, region, labels, drill-down, authorise
 
 **Byte comparison rests on response determinism, and that is legitimate only because the suite pins its own configuration.** The same request produces byte-identical responses at any `compute_threads` today, but design §10.4 records that as an implementation detail rather than a guarantee, and downstream must not rely on it. The suite is not downstream in the relevant sense: it fixes the deployment configuration it runs against, so what it depends on is determinism *at one thread count* — a far weaker thing than stability across configurations, and a variable it controls. **A run at a different thread count is outside what has been argued**, and is the likely cause of an otherwise unexplained comparison failure. Canonicalisation is what makes the comparison independent of that; until it exists, the pinned configuration is the whole of the argument, and it must be pinned deliberately rather than by accident.
 
-> **Built — and the canonicalisation is simpler than this subsection specifies, because the column it was written to defeat no longer exists.** §4.2 above specifies a handle→`fx_key` rewrite on the grounds that raw comparison is impossible while per-session handle bytes are in the body. Decision [0006](../decisions/0006-per-session-handles-retired.md) retired that column and contracts r6 replaced it with `tessera_id`, so the points batch is `(tessera_id, x, y, declared scalars…)` — every column a deterministic function of the bundle, none a function of the session. The only per-session bytes left are the token and `x-tessera-pin`, both headers.
+> **Built — and the canonicalisation is simpler than this subsection specifies, because the column it was written to defeat no longer exists.** §4.2 above specifies a handle→`fx_key` rewrite on the grounds that raw comparison is impossible while per-session handle bytes are in the body. Decision 0006 retired that column and contracts r6 replaced it with `tessera_id`, so the points batch is `(tessera_id, x, y, declared scalars…)` — every column a deterministic function of the bundle, none a function of the session. The only per-session bytes left are the token and `x-tessera-pin`, both headers.
 >
 > So the join `fx_key` was wanted for is an equality on a column the wire already carries: the fixture builds every state under one identity key, and the allocation rules keep each base item's entity id identical across builds. What is implemented is: the points batch compared as **its own bytes in served order** (contracts §3.2 orders the served points ascending by `tessera_id` within each tile, so comparing it unsorted is stronger than sorting it); the tile batch sorted by tile id and re-serialised, since emission order is not contract; and nothing stripped from the body. That last is asserted rather than assumed — a test reissues one request under a second independently-authorised session and requires identical bytes, so the day something session-dependent enters the body, the premise fails loudly.
 >
@@ -280,7 +280,7 @@ Durability ordering is not an invariant row, and it is recorded here because it 
 
 **Commands** (feature-gated RPCs, distinct from pauses, because a pause can only wait): `evict_fragment(key)` · `ledger_state()` (overlay entry states — so retirement is *observed*, not assumed; a deny-retirement test that cannot see retirement passes vacuously. Its stamp-count and retirement-floor components are **void**: the ledger they would report is deleted from the spec, and what a fold-era test must observe instead is that the entry left the overlay in the fold's own publication).
 
-A third, `fsync_offset()`, was specified here and **retired rather than built** (decision [0038](../decisions/0038-fsync-offset-is-a-sidecar-not-a-command.md)): the WAL's `.sync` sidecar already publishes the number durably, so the crash tests read it from disk. Retiring it does not buy the crash tests any evidential strength — see the crash-realism marker below, which is blunt that neither route establishes ack ordering.
+A third, `fsync_offset()`, was specified here and **retired rather than built** (decision 0038): the WAL's `.sync` sidecar already publishes the number durably, so the crash tests read it from disk. Retiring it does not buy the crash tests any evidential strength — see the crash-realism marker below, which is blunt that neither route establishes ack ordering.
 
 > **⊘ Mostly specified, not implemented — and two things matter more than the count.**
 >
@@ -326,371 +326,10 @@ A differential failure is a defect until proven a fixture bug. The oracle change
 
 1. Black-box first; hooks are pause points + a **two**-command introspection RPC, feature-gated; **wire tests certify the feature-free build** — the two-binary split is documented, not hidden. *(Unbuilt; a different pause mechanism exists — §5. `fsync_offset()` left the command list rather than being built: the number it would report is already on disk, and a command would have had the engine report on the property under test.)*
 2. The oracle implements definitions; its inputs are bundle + acked-control journal + the build's own points file, behind explicit barriers. *(Built, and its layering is enforced by a test. The third input arrived with cell-plus-residual geometry — §1; its binding to the bundle has not.)*
-3. **Canonicalise-then-compare** for I2. *(Built — §4.2. The canonicalisation is not the handle→`fx_key` rewrite this decision named: decision [0006](../decisions/0006-per-session-handles-retired.md) retired the column that rewrite existed to defeat, so `tessera_id` is the join and the points batch compares as its own bytes.)*
+3. **Canonicalise-then-compare** for I2. *(Built — §4.2. The canonicalisation is not the handle→`fx_key` rewrite this decision named: decision 0006 retired the column that rewrite existed to defeat, so `tessera_id` is the join and the points batch compares as its own bytes.)*
 4. `fx_key` join scalars replace any handle reverse map — no extra endpoint, no I10 tension. *(Planted, not served; pinned by a strict xfail — §2.)*
 5. Positive controls for both pass-only tests: the scanner must catch a planted emission; the comparator must flag a visible-items state. *(Both built — §4.3, §4.4. The scanner keeps its real-traffic control alongside the plant; the two answer different questions.)*
 6. Pause points + commands + **truncate-to-fsync-offset** over a simulation framework — the truncation variant is what makes ack ordering falsifiable. *(Truncation built, and it needed no command: the WAL's `.sync` sidecar already publishes the offset. Pause points and the other two commands unbuilt — §5.)*
 7. Exact equality; ties broken identically by definition. *(Built.)*
 8. The oracle is the second implementation of record, versioned with the design corpus. *(Built.)*
 9. **Coverage is reported, not claimed.** §4.6 is the matrix of record, and a row moves only when a test moves with it.
-
-## Appendix R — Review record
-
-**r22 — 2026-09-02. The suggestion verb's second route, and C31's two states.** The engine track
-built `value-suggestion.md` §6.3's per-session visible-value set and decision 0124's route rule, so
-the suggestion verb now has two routes where r20's differential could only see one. Two cases are
-added to `conformance/tests/test_suggest_differential.py`.
-
-The first sweeps the same prefixes twice on one session, with a pause between, and asserts the page
-is **identical** across the seam the set lands on — the same values in §7's order, the same titles,
-spans and counts, both readings checked against the oracle so "identical" cannot be satisfied by two
-equally wrong answers. `more` is the one field the two routes may differ on, and only in one
-direction: the probe route may set it on a spent walk budget where the set route, reading no posting
-and spending no budget, answers exactly. `false → true` would mean the set withheld a value the
-probe route offered and is asserted against.
-
-The second spawns a **second server** whose `selection.max_suggest_set_entities` no principal is
-inside, so every request takes the probe route however many times a session asks, and asserts the
-same oracle agreement. One is the schema's floor rather than zero — `/v1/meta` publishes the
-constant with `minimum: 1`, so nothing below it is a legal deployment value — and every principal
-this fixture grants sees more than one entity.
-
-**No row of §4.6 moves.** The evidence lands in the I12 cell's C31 sentence, which is rewritten:
-the timing channel is still not asserted and still says so, and what is now driven is the pair of
-*states* decision 0124's amendment to C31 names — closed once a set is warm, open on the probe
-route. The checked marker moves by 2, to 759.
-
-**r20 — 2026-09-02. The suggestion verb gets a differential, and C31 is named and declined.**
-`value-suggestion.md` (Normative r2) specifies `GET /v1/categories/{column}/suggest`; the engine
-and server tracks built it (`crates/tessera-engine/src/suggest.rs`, `crates/tessera-engine/src/
-categories.rs`, `crates/tessera-server/src/viewer.rs`). This track adds
-`conformance/tests/test_suggest_differential.py` against a new `conformance/suggest_fixture.py` —
-a Python re-derivation of `tessera_analyse::{Fold, SuggestionFold}`'s fold rule (NFKC, then full
-case folding, then whitespace collapse; entries from the key, the title, and every word start
-after the first) over a small dedicated corpus, built backwards from the fold's own edge cases
-(mixed case and extra whitespace, full-width forms, a leading non-word run, an underscore-joined
-key with no title) rather than the mask catalogue, whose planted values are single words with no
-titles and cannot reach the title or word-start entries at all. No entity or bundle join is used —
-a suggestion response carries no item, only value codes, keys, titles and match spans, so
-visibility is a fact about the corpus's own source-id space and never needs the built bundle's
-permutation.
-
-The sweep is a prefix set (empty, one character, a whole key, a title word-start, a folded/NFKC
-variant of a query, a miss) over a `derived` and a `public` column, for a principal pair separated
-by exactly one hidden value (`omega`, on `oracle.label_fixture`'s "one entity apart" discipline).
-The served page is asserted equal to the oracle's exactly, in §7's order, including `match.field`,
-`match.start` and the response-time-derived `match.len`; `counts=true` against the oracle's masked
-cardinality; `more` under both its causes, kept apart by a `limit`/`walk_budget` pair chosen to
-interact; a hidden and a hollow value simply absent, with a single-visible-member positive control
-(C11, restated for this surface); `title: null` where none was authored; a viewport filter on the
-same session moving nothing suggested (I12's direction, restated for a verb with no filter operand
-to send); and the unresolvable-column refusal byte-identical to `/v1/categories`'s own.
-
-**No row of §4.6 moves.** I2 and I12 were already covered rows — the canary comparator and the
-attribute-filter differential respectively — and what this adds is a second surface for each
-rather than a new invariant; both cells carry a sentence saying so. C11 gains this surface beside
-the filter's. **C31**, the timing channel `architecture.md` Appendix C registers for both listing
-surfaces on the owner's 2026-09-02 ruling, is named in the I12 cell and declined on the same
-argument C11's work-indistinguishability already is (§4.2's note): a timing property, measured
-separately (`probes/2026-09-02-value-suggestion/`), not a conformance-test assertion. The checked
-marker moves by 32, to 739.
-
-**Two divergences from the Rust implementation are legitimate and stated rather than papered
-over**: `unicodedata.normalize("NFKC", …)`/`str.casefold()` are CPython's own Unicode Character
-Database tables where the engine's `Fold` is `icu4x`'s pinned data, so the two are expected to
-agree everywhere both revisions assign a code point and could differ only on one neither does —
-which this fixture's plain Latin and full-width text does not reach. Neither module doc treats a
-disagreement found in this suite as this gap; it would be a defect.
-
-**r19 — 2026-08-31. A family licensed by `render` alone joins the differential.** `views.md` §5
-r26 closed the asymmetry between an entity-scoped column and a group-scoped family: the operand
-licence is `index` **or** `render` on both sides. The multi-view corpus gains `glow`, declared
-`render = true` with no `index`, planted by its own generator like every other column here and
-compared against it rather than against `attrs/`. Six cases — three resolution shapes over two
-principals — assert that the leaf resolves at all and that it reads the **pinned** view's column.
-The second is the one the licence needed: a rendered family occupies each view's row tail as well,
-and the tail in front of the request holds different values, so a route through it would answer
-the pinned cases with the request view's numbers. No coverage row moves — I12's mask half already
-covered the scoped operand, and what changed is which declarations it covers. The count marker
-moves by six.
-
-**r18 — 2026-08-31. The gate acquires an oracle, and §4.6's views paragraphs lose a clause.**
-`views.md` §11's row asked for the gate's cases and r16 recorded them as unreachable: the gate was
-unbuilt when the corpus was written, and a fixture carrying a gated view would have had expected
-answers no implementation could produce. It is built, so the corpus carries one —
-`reference/oracle/multiview.py`'s `sealed`, two views behind `visibility = "cc4"`. The label had to
-be one of the corpus's own compartments: a gate resolves through the **dictionary**, so a label
-naming a descriptor no item carries is satisfied by nobody and a fixture inventing one would drive
-the fail-closed path and call it a gate.
-
-Three claims, kept apart because they are three, and one of them is a claim about the corpus rather
-than about the engine. A failing principal finds the group on no surface — the roster omits the
-group and every view id, the viewer verb's **status and body** are those of a name nobody declared
-with the name substituted out of both, and both spellings of a leaf over the group's scoped
-attribute take the unknown-column `422` compared whole against a column that was never declared. A
-passing principal is served the **ungated** expectation, per-tile counts and served set alike,
-computed exactly as the public views' are. And the union-equals-mask equality now ranges over the
-views each principal may reach — four for one, six for another, the same mask, which is the shape a
-gate has to have: it withholds coordinate systems, not entities. The corpus makes the middle claim
-bite, because the gate's label is one compartment and the passing principal holds three: an engine
-reading the gate as a second row filter serves a strict subset and disagrees.
-
-**No coverage row moves.** Views are not an invariant (§4.6), and the gate's evidence sits in the
-cells the dimension already occupies. What §4.6's paragraph still owes is three things and no
-longer four: the gate's *work* indistinguishability, which is a timing property of the class §4.2
-declines to assert here; the ingest-time join, driven in `crates/tessera-server`'s own tests
-against a real flush; and a scoped `text` family, which has no serving artefact a request can
-reach here for an oracle to disagree with — the **rendered** family left this list at r19, when
-`render` alone became an operand licence.
-
-**r17 — 2026-08-31. The pinned-leaf cases lose their ordinal arm.** Ordinals are removed
-([decision 0113](../decisions/0113-ordinals-are-removed-and-the-key-is-the-only-address.md),
-`views.md` r16), so the multi-view differential pins by key alone and the `@#n` case is now one of
-the malformed ids the unknown-view `404` covers. The I12 cell says so. `conformance/suite`'s roster
-check changes direction with it: where it asserted a group's ordinals were ascending and distinct,
-it now asserts the field is **absent** from every served view — the shape that would say the
-removed machinery had come back. No coverage row moves and no case is lost: the arm that went was
-a second spelling of an address, not a property.
-
-**r16 — 2026-08-31. The multi-view differential, and no new row.** `views.md` §11 asked this
-document for a two-view differential and the pinned-leaf cases. They are written —
-`conformance/tests/test_multiview_differential.py` over a second designed corpus,
-`reference/oracle/multiview.py` — and the coverage they buy is recorded in the **existing** I1, I2,
-I7, I10 and I12 cells rather than in a fourteenth row, because a view is not an invariant. What
-each cell gained, and what the three uncovered clauses are, is stated below §4.6's table.
-
-**The corpus is a second fixture rather than a widening of the catalogue**, and the reason is worth
-carrying: the catalogue is built backwards from the mask *shapes* §2 enumerates, so adding views to
-it would change every entity id in every mask case for a question that is not about mask shape. The
-multi-view corpus is built backwards from §1's factoring instead — a mask that must not vary with
-the view, and four views that must not agree with each other. Both halves are checked: the served
-set equals `mask ∩ members(view)` exactly in each view, and a negative control fails if any two
-views serve the same per-tile counts.
-
-**Three findings from the doing, all in the oracle and all fixed there.** The oracle laid a view id
-down as a **single** path component, so `quarter:2026-Q3` named a directory no multi-view build
-writes; `Bundle.view_dir` now nests the two, as `tessera_store::view_path` does. `Bundle` held one
-source geometry for the whole bundle, which is a bundle-wide reading of a per-view fact — a driver
-now attaches one file per view and every geometry re-derivation asks for its own. And
-`viewport.counts` decoded a bbox against `bundle.extent`, which on a multi-view bundle raises
-rather than answering; it asks `extent_of(view_id)` now. None of the three could have produced a
-wrong answer on a single-view bundle, and none would have survived the first multi-view test.
-
-**One defect found outside the oracle and not fixed here** *(reported, `tessera-build`)*: a view
-group's declared `text` metadata field is written into `MANIFEST.groups[..].metadata` as
-`"ty": "int"` — the build's mapping from the declaration's scalar type matches `Utf8` and falls
-through `text` and `keyword` to the integer arm. `/v1/meta` serves the type off the stored *value*
-so a build looks right, and the roster's own type check is what would refuse a `text` value on a
-view created while the service runs.
-
-**r15 — 2026-08-20. The suite runs green, 432 of 432.** r14 diagnosed the 27 failures and recorded
-that fixing them was a fixture rework nobody had done; this is that rework. Nothing in the engine
-moved — the diff is eleven Python files, and every change is the fixture learning something about
-the build it had been assuming.
-
-**What the fix actually is, in one line each.** `Block.term_id` is the corpus's term id and
-`Block.dict_term_id(bundle)` resolves the bundle's, because `public` at term 0 made them different
-numbers for the same block. `Bundle.source_of_entity` carries the join that decision 0073's Morton
-tiebreak broke, and the planted columns — filter, keyword, text, record blob, `fx_key` — are keyed
-by entity through it rather than by source id under an equality that no longer holds. The overlay
-differential strides its denied set, because entity ids now track the map and a prefix of them is a
-region.
-
-**The check that was missing is the one worth remembering.** `verify()`'s block check compares
-posting **sets** against the block's entity range, and a within-block permutation preserves a set
-exactly — so the check whose comment said it re-derived `entity_id == source_id` had never tested
-it, and the day the identity went, this function reported green while every per-item join in the
-suite silently compared one item's planted value against another's. **Check 3b** now compares the
-two spaces item by item. A precondition elsewhere did catch its own case honestly — the overlay
-differential refused to draw a conclusion from 23 tiles — which is the shape the rest of this wants.
-
-⊘ `conformance/suite` was not run: it imports `tomllib` and needs Python 3.11+, which this machine
-does not have. It is the correctness suite's shared battery rather than a row of this matrix.
-
-**r14 — 2026-08-20. The first row to move because a test was written.** r13 recorded that I3's
-machinery was built and undriven, and named the two halves §4.4 asks for. Both are now written, in
-`conformance/tests/test_label_containment.py` over a new `oracle/label_fixture.py`, and §4.6's I3
-row moves to **covered**. Three choices in it are worth carrying: the fixture is its own rather than
-the mask catalogue's, because what this row needs is two principals a **single entity** apart and
-the catalogue is designed backwards from adversarial mask *shapes*; the absence is checked against a
-control in the same response, so a deleted containment check cannot read green; and the **pin** §4.4
-asks to re-present is not, because decision 0041 made it advisory and never authorisation — the
-token is what carries session state across an overlay change, and it is what the cache half holds
-fixed. §4.4's row records that substitution at its site.
-
-**Two things found in the doing, both recorded rather than fixed.** The harness could not spawn a
-server at all — `tessera serve` has taken `--deployment` since the configuration rework and the
-harness passed `-c` — so no module had run since that landed; that one line is fixed. With it fixed,
-27 of 432 tests fail, for `public` at term 0 and decision 0073's Morton tiebreak, neither of which
-`verify()` catches: its block check compares posting *sets*, and a within-block permutation
-preserves a set, so the check that says it proves `entity_id == source_id` does not. §0 carries the
-diagnosis and what a fix would need. **A coverage row is not claimed on a green suite, and this one
-is not**: the module moving I3 passes on its own fixture and does not touch the catalogue, which is
-why the row moves while the suite stays red.
-
-**r13 — 2026-08-19. A correction, in r10's shape.** This document said in five places that the
-machinery behind I3, I8 and I12's frontier half does not exist: *no label service*, *no generating
-sets*, *no labels batch*. It exists. Artifacts carry ranked contents with generating sets;
-containment is `|G ∩ M| == |G|`, all or nothing, evaluated on every route that serves an artifact;
-the existence criterion is a live control; a served artifact reaches a client on its own frame with
-its masked count, its derived geometry and the one content that viewer contains. §0, §4.1, §4.2,
-§4.4 and §4.6's reason column are corrected.
-
-**The frontier is the third case, and it is not the same case.** "There is no frontier" is true, and
-true for a reason the old sentence did not mean: the frontier was **withdrawn** rather than left
-unbuilt — every artifact is tested on its own and the root-down descent is gone (decisions
-[0080](../decisions/0080-the-frontier-is-a-per-artifact-test.md),
-[0082](../decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md),
-[0083](../decisions/0083-the-frontier-is-a-request-time-budget.md)), and the depth that remains is a
-request-time budget, which is not a disclosure control. So §4.4's *frontier-depth property under
-filters* names a test of a thing that no longer exists. What survives of I12 on the artifact side is
-architecture §8.4's half: a filter never touches containment and never relaxes the criterion, both
-running against `M_auth` alone. That is built, and blind to the filter by construction.
-
-**I6 is untouched, and was checked rather than assumed.** There is no wasmtime host: nothing loads a
-guest module, and the only plugin a deployment can run is the built-in passthrough. Its row stands
-word for word.
-
-**No coverage row moves** — those rows are invariant coverage, no test moved with them, and decision
-9 governs. What moves is the arithmetic of the reasons: **one** uncovered invariant now stands for
-want of an implementation where three did, and I3, I8 and I12's frontier half are gaps in this
-suite. A suite that records built machinery as absent understates its own gap, which is the whole
-of what this revision repairs.
-
-**r12 — 2026-08-19. One word.** §4.6's I12 row named the frontier-depth threshold
-`min_visible_members`, a config key that is deleted; the control it names is the **existence
-criterion**, declared per layer ([decision 0085](../decisions/0085-the-existence-criterion-has-no-deployment-wide-form.md),
-`annotations.md` §5). No coverage row moves and no status claim changes.
-
-
-**r11** (2026-08-15) refreshes §5's marker to what exists after decision
-[0071](../decisions/0071-fault-injection-reaches-a-served-binary-by-its-own-build.md): the fault
-switchboard's pause sites went from two to five (the correctness suite's three publication-seam
-sites landed **by extending the switchboard**, the route this marker demands), and its gate is no
-longer "only through a self dev-dependency" — the feature is declarable on
-`tessera-server`/`tessera-cli` for the faults build, and the guarantee is now "no default-features
-build carries it". §5's own eight pause points remain unbuilt and the marker's instruction stands
-unchanged; nothing else in this document moves.
-
-**r10** (2026-08-14) is a correction. This document said in three places that the compaction fold
-does not exist; it is built, normative and reviewed three times against its implementation
-([`compaction.md`](compaction.md) r11), it derives its executed set from what the publication
-demonstrably removed, and it retires against that set. §0, §2's fixture catalogue and §5's script
-marker are corrected.
-
-**One characterisation changes, and it changes against this suite.** §0 previously grouped scripts
-2, 3 and 6 with the invariants that have nothing to test, under "none of that is a testing gap".
-With the fold built that is no longer true: the machinery exists, this suite does not test it, and
-the only thing in the way is the pause-point-and-command harness §5 has specified since r1. They
-are named as a gap. **No row of §4.6 moves** — those rows are invariant coverage, no test moved
-with them, and decision 9 governs.
-
-The second post-deletion state (executed and retired) is now reachable, so §2's catalogue names
-both states and records that it carries only the first.
-
-**r9** (2026-08-09) moves one row of §4.6, with the test that moves it: **I12's mask half is
-covered**. The filter surface landed (decision 0062; contracts §3.2 r26), and
-`conformance/tests/test_filter_differential.py` runs the differential in the form
-[`filter-surface.md`](filter-surface.md) §9 specifies, against a new definitional oracle module,
-`reference/oracle/filters.py` — a per-entity walk over the **fixture's own planted values**,
-which keeps it a second implementation: the engine reads `attrs/`, the oracle reads what the
-synthesised corpus was given, and the two meet only at the served surface (the same construction
-as the geometry input, §1). The mask catalogue's corpus gains two `filter`-only columns —
-a `per_viewer` category and a string column (`utf8` then, `keyword` since that family replaced it) —
-deliberately **decorrelated** from the grant structure, a precondition the suite asserts rather than assumes, because a correlated fixture
-passes every cross-principal check while testing nothing. Surface §9's adversarial value shapes
-are partially planted: a hidden value, a hollow (declared, memberless) value, a single-member
-value; container-straddling membership comes free of the cycling values. Not planted: values
-whose only member is deleted or suppressed (Rule S over filter counts — needs the overlay
-machinery's private-bundle servers) and tier-straddling values (no attribute ingest exists).
-§4.4's I12 row — the frontier-depth form — is untouched and still blocked on the label service,
-with I3; the row's coverage claim names the distinction. One divergence was recorded when this
-suite was written and is now resolved rather than pinned: a cross-family operator (`prefix` or
-`contains` on a category) answered as an empty operand where `match` on the same surface refused
-`422`. Contracts §3.2 rules it — an unknown column and an operator outside the column's family are
-both `422`, an unknown *value* is an empty operand, the split being which side of the trust
-boundary the fact lives on — and the differential asserts the `422` rather than carrying an xfail.
-The report's second case, `in` on a string column, was itself the bug: `in` is `eq` over a list
-rather than a category-only generalisation, so a string column takes it and it is no cross-family
-operator at all.
-
-**r8** (2026-08-06) applies decision
-[0048](../decisions/0048-no-deployments-exist-so-delete-rather-than-support.md). Script 5 was
-already void twice over — it inherits script 4's deleted floor, and the `predicate` op it drives
-is withdrawn — and r7 still allowed that "only legacy evaluate entries from pre-0047 WALs will
-ever meet a fold". There are no such WALs, and the machinery that would have read one is deleted,
-so the script is void a third time and **unreconstructable**: no state any deployment could reach
-produces the entry it folds. §2's oracle-input note drops its predicate-change example for the
-same reason. **No coverage claim moves** — a void script covered nothing before this and covers
-nothing after it, and §4.6's matrix is untouched.
-
-**r7** (2026-08-04) carries [`write-path.md`](write-path.md)'s promotion into §5, and it
-**removes** obligations rather than adding any. Two of the five unwritten interleaving scripts
-tested a deletion stamp ledger and a fragment-insertion retirement floor; both are **deleted from
-the spec**, not deferred (owner-ruled 2026-08-03 — Rule S / Rule F at write-path §5.4), so they
-must be rewritten against the fold's identity match rather than resurrected, and `ledger_state()`'s
-stamp-count and floor components are void with them. The compaction fold the other three need is
-still unbuilt, so the five remain unwritable — but for one reason now instead of three, and the
-one that remains is honest.
-
-A second pass over the same promotion caught four more sites the first missed, all of the same
-kind — machinery named at the claim that the ruling had already deleted. §2's fixture catalogue
-asked for "post-deletion states at every ledger stage", of which there is now exactly one; §5's
-deadlock rule and its `before_fragment_insert` entry still named the retirement scan and the floor
-refusal; and **script 5 is void twice over**, because the `predicate` change it drives is
-withdrawn as well (decision 0047), so nothing a post-0047 deployment can do produces the entry it
-folds. Scripts 4 and 5 are marked ⊘ at the claim rather than only in the block below them, and
-script 8 gains the observation that a **merge** is now the sharpest publication to drive it with.
-
-**One coverage claim changes, downwards, and it is arithmetic rather than evidence.** §4.6's
-summary line read "two in substance, six not covered" while the table above it listed one and
-seven: I11 moved out of *in substance* at r6 and the line did not follow it. §0's "six invariants
-remain uncovered" undercounted the same way. Both now match the table, and I11 is named in §0 as
-the one uncovered row that is a genuine gap in this suite rather than a missing implementation.
-
-**Nothing moves upwards.** The engine's new maintenance tests (`coalesce`, `merge`, `soak`,
-`projection_patch`, `rotation_e2e`) discharge write-path §14's obligations, not §4.6's rows: no
-row's position changes, and I11 in particular stays a **negative result** — the pin that carried
-it is deleted (decision 0041) and neither replacement test exists. What did change about I11 is
-its route: §4.4 said the boundary test needs compaction, and a **merge** publication now moves
-row space, so the route waits on a pause point alone. §1's barrier note records that the
-entity-space coalesce is the one publication `segments_version` cannot see.
-
-**r6** records the falsifiability epic (#11's first, third and fourth gates). Four rows of §4.6 move and each moved with a test. **No test form was weakened, and one was retired as redundant:** script 7's positional-CRC property is already covered in Rust, in both directions and with the sidecar variants besides, so it is recorded as covered in substance rather than transcribed into Python for the sake of the layout.
-
-Three findings this revision produced that the design did not anticipate, all in the direction of less machinery:
-
-1. **§4.2's canonicalisation was specified against a column that no longer exists.** The handle→`fx_key` rewrite exists because per-session handle bytes made raw comparison impossible; decision 0006 retired that column two revisions before this document was last touched. `tessera_id` is the join, and the points batch compares as its own bytes. `fx_key` stays planted-but-unserved, and its xfail stays the marker.
-2. **`fsync_offset()` did not need building.** The WAL's `.sync` sidecar already publishes the offset durably, because replay needs it. A command would have exposed a number already on disk *and* had the engine report on the property under test. It leaves the command list; the `conformance` feature is not required for crash realism, only for the interleavings.
-3. **The catalogue could not supply the byte-scan's grant set.** Moving the scan off the Phase 0 corpus required a grant admitting and denying entity IDs above the scan's floor, and `filler_tail` was the only block straddling it — so every ID above the floor was admitted or denied together. The layout gains a `high_tail` block with no `MaskCase`, existing solely for that, and `verify()` refuses a corpus that stops satisfying it.
-
-**r6 was independently reviewed under three lenses — invariant evidence, falsifiability, and prose against code — and four of its claims did not survive.** Recorded here rather than quietly fixed, because each was a claim this document made about its own strength:
-
-1. **The crash test does not falsify ack-before-fsync, and §5 said it did.** Stubbing `sync_data()` to a no-op, so the WAL is never fsynced while the offset is still published, leaves both restart-replay tests passing. `discarded == 0` compares the engine's own published offset against the file size — it catches a sidecar that stops advancing, not a prefix that was never synced. §5 and decision 0038 now say so, and #71 tracks whether an end-to-end check is worth building.
-2. **The canary comparator pinned no surface.** Returning one concatenated blob meant dropping the points batch left every canary test green, and so did dropping the tile batch: the control fired on whatever remained. §4.2's "explicitly including the points batches" was enforced by nothing. The comparison is now three separately-addressable surfaces and the control requires all three to move.
-3. **The canary never asked for the §3.3 underlay**, whose per-cell masked counts are the only derived aggregate in the system besides tile counts — so an I2 defect confined to that path would have moved nothing this compared. §4.6's I2 row claimed no such aggregate existed. Both fixed.
-4. **The x/y plant sat at lane 0**, so it was caught by any stride dividing 8 and did not pin the straddling window it exists to justify; it also never wrote to `y`. Both sabotages passed. The halves now straddle lanes 1|2 and each column is planted separately.
-
-**What r6 did not change:** every uncovered row's reason. Six invariants were uncovered at r5 and five are now; the one that moved (I4) moved because a harness was built, not because the system gained a feature. I3, I6, I8 and I12 still have no implementation to test, I5 still needs a plugin whose two functions can diverge, and I13b still needs a required-set gate.
-
-**r5** applies three owner rulings. No test form changes and §4.6's matrix is untouched.
-
-**The differential has a stated prerequisite** (decision [0028](../decisions/0028-postings-requirement-and-the-pair-relation.md)): the bundle under test must carry `terms/pairs.parquet`. It is optional for a serving deployment and required here, because it is the flat relation the oracle scans while the engine unions postings — without it the second implementation has nothing to work from and I1's coverage disappears. §3 says so.
-
-**The canary comparison's reliance on determinism is argued rather than assumed** (decision [0030](../decisions/0030-determinism-is-not-a-guarantee.md)). Byte-identical responses across thread counts are a documented implementation detail of the engine, not a guarantee (design §10.4), so a suite leaning on them needs a reason. It has one: **the suite pins its own configuration**, and relying on determinism at a fixed thread count is far weaker than relying on stability across them. §4.2 states it, because the first person to run the suite at a different thread count would otherwise get an unexplained failure. Canonicalisation, unbuilt at r5, was what would remove the dependency; it was built at r6 and does not, because it canonicalises order rather than serialisation — the dependency on determinism at a pinned thread count stands.
-
-**I5's oracle route is open** (decision [0027](../decisions/0027-i5-is-unverified.md)). §4.5 keeps its design, and its marker now records that the design specification no longer elects `accumulo-access` — an external implementation and a second implementation written alongside this suite are both live, and both need a plugin whose two functions can genuinely diverge before either can be built.
-
-r1 was independently reviewed (verdict: needs-rework — architecture right; the two central mechanisms unimplementable as specified). r2 resolved all twelve findings: canonicalisation replaced raw byte comparison, with the canary allocation rules stated; the `fx_key` join replaced the reverse map; oracle inputs split into bundle + acked journal with barriers; restart-replay split into its two coherent variants; two request-path pause points, three commands and the eighth script added; truncate-to-fsync-offset made durability ordering falsifiable; I3's cache half given its behavioural black-box form; positive controls added for scanner and comparator; I11's second clause restated in drivable form; CRC corruption bounded to the live replay range; container-boundary masks achieved via sparse allocation. r3 split the stamp-regression script into the two tests whose order actually exercises the floor refusal, added the pause-outside-locks rule and the labels-batch canonicalisation key, scoped the barrier to async operations only, and retired the C17 decorrelation check.
-
-**r4** is the audit pass against the built suite. **No design decision was changed and no argument withdrawn**; what changed is that the document now reports what exists. §0 is new and leads with the measured position; §4.6 is new and is the coverage claim of record; decision 9 is new and says coverage is reported rather than claimed.
-
-Marked **⊘** in r4: the `conformance` build split (preamble); the directory layout and three of five differential families (§1); `fx_key` service (§2); property-based generation on the differential (§3); compile-fail rows (§4.1); the canary canonicalisation (§4.2); the comparator's third fixture state (§4.4); external oracles (§4.5); the pause points and two of three commands (§5); crash realism (§5); the whole of §6.
-
-Three findings r4 produced that the design did not anticipate — **the first two were closed at r6**, and they are left as written because a review record that quietly drops what it found stops being one:
-
-1. **The suite contains the test its own §5 pre-emptively rejects.** Restart-replay is SIGKILL-only — the variant this document calls insufficient, in the words "an engine that acked before fsync would pass them all". Marked at §5.
-2. **The canary comparator has no proof it can fail**, and the other two differential suites carry theirs. That makes it a specific omission rather than a suite-wide habit, which is why §4.4's marker names the two controls that do exist.
-3. **A second pause mechanism is about to be built.** The write path's fault switchboard is §5's mechanism under different names, in a different crate, behind a different gate, and three stages early. §5's marker and lifecycle §7.3 both say so, in both directions, because either document read alone leads to the duplicate.
-
-One divergence resolved in the suite's favour: **the byte-scanner exceeds its design** on reach (identity-key and external-ID sweeps across wire, sub-cell stream and logs; C17 asserted positively) while falling short on falsifiability (its negative control demonstrates the byte-window mechanism on a real transmitted `tessera_id` rather than on a planted entity ID). Both halves are recorded at §4.3 rather than netted off, because they answer different questions.

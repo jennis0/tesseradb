@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-01
 **Status:** Normative (r4) for the `dag` hierarchy kind and for the rule that a withheld artifact
-is not in the viewer's tree. Reviewed once under two lenses and ruled by [decision 0117](../decisions/0117-a-child-may-name-several-parents.md) (2026-09-01); the
+is not in the viewer's tree. Reviewed once under two lenses and ruled by decision 0117 (2026-09-01); the
 rulings are folded into [`configuration.md`](configuration.md) (the `hierarchy` row and the kinds
 table), [`artifacts-from-points.md`](artifacts-from-points.md) §4, [`annotations.md`](annotations.md)
 §6 r9, [`contracts.md`](contracts.md) §3.2 r71 and `architecture.md` C29 r57. **Built 2026-09-01** on
@@ -64,7 +64,7 @@ hierarchy  = { kind = "dag", prune_children = true }
 
 A fifth value beside `flat`, `nested`, `stacked` and `tiered`. It is `nested` in every respect but
 two: every artifact sits at level 0, `[[layer.levels]]` is refused, edges run within the level, the
-edges are **roll-up** rather than information ([decision 0087](../decisions/0087-cross-level-edges-are-information-not-rollup.md)),
+edges are **roll-up** rather than information (decision 0087),
 and a budget climbs the edges. Two things differ. **A child may hold several parents**, and a second
 parent arriving for a child is recorded rather than refused. And **a list key column is plain
 multi-membership** rather than a lineage — the set of artifacts the point is in, read as `flat`
@@ -361,36 +361,3 @@ absent: a feature's containment membership is spatial and already nests.
   zoom map, exactly as the Overture boundary layer has none.
 - **The client's presentation of one artifact under several parents** — the components work's.
 - **`tiered` with several parents.** Refused as today; nothing in either rung wants it.
-
-## Appendix R — review trail
-
-**r1** (2026-09-01) — drafted after the rung 3 survey and the owner's keying ruling. Established
-before drafting that the tracker's first surface change is not one (§2): a member source is one row
-per `(artifact, entity)`, and the reader has no per-entity uniqueness under any kind. ⊘ Awaiting one
-adversarial review and the §9 rulings.
-
-**r2** (2026-09-01) — two reviews, disclosure and implementability, dispositioned in one pass.
-Disclosure found that the budgeted cut is a function of withheld nodes on a tree already and that a
-DAG widens the channel by a sibling path and by longest-path depth — escalated as §9 (E) and ruled
-the same day: a withheld node is not in the viewer's tree, and the implementation is corrected; and that §6's covering claim was stronger than the rule gives (now *at least one
-path*). Implementability found no ingest-side cycle check exists (§4 now specifies one in
-`mint_records`, and stops citing the registry); that edge-adding at ingest contradicted the growth
-rule (§4 now settles edges at the publication that creates the artifact, at both entry points); that
-§8's cost compared the wrong quantities (restated against the spill's 5.07×10⁸ and the resident
-membership); that the parent is encoded twice in the bundle, that `response_depth` and
-`Lineage::nearest` are single-chain walks that change, and that the membership column's tie is
-hash-ordered today on any multi-membership layer (§6 now breaks it by lowest `tessera_id`, owed
-now); that §5 is load-bearing for §6's pass order; and that the client's list deduplicates today.
-§6's cut rule and its one-pass computation were attacked and held; §2 was verified against the
-reader. All five §9 rulings made 2026-09-01.
-
-**r3** (2026-09-01) — promoted. The rulings folded into the five documents the Status line names,
-and [decision 0117](../decisions/0117-a-child-may-name-several-parents.md) written. No design change since r2.
-
-**r4** (2026-09-03) — the lineage-list spelling of a DAG's edges is withdrawn (§3, §4). The ingest
-campaign's rung 3 found the two entry points reading one column two ways: a build took the
-ancestor-closed descriptor set as memberships and the ingest driver, reading it as lineages,
-declined the layer. The cause is structural — a DAG node's closure is a set, so a list of it has no
-adjacency to read — and the fix is the reading, not the driver. A `dag` list column is now plain
-multi-membership at both entry points and the artifact row's `parent` list is the only edge
-spelling. Ruled in [decision 0125](../decisions/0125-a-dag-list-column-is-membership-not-lineage.md).

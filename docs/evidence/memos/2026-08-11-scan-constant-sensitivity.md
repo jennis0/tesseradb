@@ -181,5 +181,5 @@ weight it does — noise does not produce a clean function of shift mod 64 in wh
 - All experimental edits to `crates/tessera-filter` were reverted and the tree rebuilds
   byte-identical to `b818a00`'s binary; `git status` at finish shows this memo as the only change
   from this work (one unrelated pre-existing modification to
-  `docs/evidence/memos/2026-08-10-filter-rulings.md` belongs to a concurrent session and was not
+  docs/evidence/memos/2026-08-10-filter-rulings.md belongs to a concurrent session and was not
   touched).

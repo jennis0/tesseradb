@@ -4,7 +4,7 @@
 `1e9.txt`, `1e8.txt`
 
 The two measurements decision
-[0044](../../docs/decisions/0044-invisible-means-stale-serve-plus-background-refresh.md) requires
+0044 requires
 before its refresh mechanism is coded. Machine: 12 threads, 47 GB.
 
 Re-run:

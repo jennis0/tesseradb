@@ -1,6 +1,6 @@
 # 0005 — `tessera_id` is a keyed bijection, not a 128-bit random
 
-**Date:** 2026-07-29 · **Status:** Settled · **Refines:** [0003](0003-external-id-as-boundary-identity.md)
+**Date:** 2026-07-29 · **Status:** Settled · **Refines:** 0003
 
 ## Decision
 

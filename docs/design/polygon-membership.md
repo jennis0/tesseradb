@@ -212,7 +212,7 @@ default_space = "view"            # the fallback for rows carrying no `space`; "
   carry `space`, `view` if absent.
 
 **A shape layer may span several views, and its geometry is declared once** (owner, 2026-08-29;
-widened 2026-08-30, [decision 0111](../decisions/0111-a-shape-spans-projected-views-through-wgs84.md)).
+widened 2026-08-30, decision 0111).
 The membership is resolved **per view**, because each view has its own row space: a view's rows
 are tested against the shape in that view's frame, so a point carried in two views is in
 whichever shape contains it *there*, independently. The views need share **neither the extent
@@ -434,7 +434,7 @@ before the generation is published, never lazily on a request. The interior tile
 members whole; the rows in boundary cells are tested one by one against the shapes whose boundary
 cells contain them (the index below says which). **The output is a per-row source** — for each
 row, the artifacts it is in — which is exactly what an enumerated layer's member table is, and it
-is written into **the serving layout the existing pick chooses** ([decision 0094](../decisions/0094-the-serving-layout-is-chosen-at-build-and-re-evaluated-at-the-fold.md)):
+is written into **the serving layout the existing pick chooses** (decision 0094):
 
 - **`rows`** — one run-optimised Roaring bitmap per artifact in view row space, interior rows as
   runs and boundary rows as scattered entries, at O(containers touched). Right for a level of
@@ -855,7 +855,7 @@ alone (§7.2).
 ## 12. Order of work, and what each stage amends
 
 Each stage in its own worktree, on the artifact convention; the status record is
-[`../artifact-delivery.md`](../artifact-delivery.md), which gains a row per stage as it lands.
+../artifact-delivery.md, which gains a row per stage as it lands.
 
 1. **The core** — `tessera_spatial::shape`: the `Region` trait and its four kinds, WKB and WKT
    readers, canonical form with weights, decomposition, point test, densification for the wire.
@@ -959,102 +959,3 @@ differently from the recommendation:
 - **(k)** The per-segment membership is resolved in the write executor at the flush, before the
   generation publishes (§6.3) — *taken as recommended*; [`write-path.md`](write-path.md) gains the
   paragraph.
-
-## Appendix R — review trail
-
-- **r10 (2026-08-31)** — §4.3's cross-projection spanning is **built**. `canonical_shapes` takes a
-  frame — view id, projection, extent — per view; the build's layer read and `PUT /control/layers`
-  each resolve one per view of the layer, neither reading a first or an anchor view for all of
-  them. The layer-level refusal (projected mixed with `none`) is at the declaration on both entry
-  points and names the layer and both sides; the row-level one (`space = "view"` over unequal
-  frames) is at the row, the space being a fact about the submission. Out-of-extent is a per-view
-  count in the build's report and a per-view flag in the publication's, never a refusal. The
-  pre-0111 refusal of a shape layer whose views declare different projections is deleted from the
-  config parse. `test_corpora/multiview` carries the case (`regions` over `world` and
-  `world_flat`); `crates/tessera-build/tests/shape_span.rs` and
-  `crates/tessera-server/tests/shape_span_serving.rs` are the tests. No design content changed.
-- **r9 (2026-08-30)** — cross-projection spanning (decision 0111): a `wgs84` shape spans any
-  projected views through each view's own transform; `view`-space geometry spans only equal
-  frames; all-projected or all-`none` per layer; the two-`none` warning removed (opt-in needs no
-  second-guess); wholly-out-of-extent shapes warn and never block. Owner-ruled; the mechanism
-  review folds into the shape stage.
-
-**r1 (2026-08-27).** Written from the owner's ruling that three consumers needing one operation
-makes it a first-class capability rather than a per-consumer workaround. Requirements only, by owner
-direction: assumptions and candidate mechanisms deliberately excluded. R9–R12 added later the same
-day on the owner's ruling that a polygon may arrive in either coordinate space rather than the
-caller being forced to pick one. **Not reviewed.**
-
-**r2 (2026-08-29).** The design, §3–§13, on the owner's direction to design and build polygons as
-an artifact type sharing the selection and classification paths. §4 of r1 (open questions) is
-answered in place: R5 is bounded by a publication vertex cap, the artifact pass's existing budget
-and a reported-not-capped held structure (§9); a request-time region is an operand, and a
-published polygon is that operand held (§5); multipolygons and holes are required by consumer
-§1.1 and admitted under even-odd (§4.1); `depth` has no meaning on a polygon and is refused
-(§6.1). **Not reviewed; six rulings open.**
-
-**r3 (2026-08-29).** The six rulings taken as recommended, and two questions from the owner folded
-in. The space moved off the layer and onto the submission (§4.3): a layer-level declaration encoded
-an input-side fact into storage configuration. Circles and ellipses joined as kinds, and the design
-generalised from *polygon* to *shape* on the observation that the decomposition asks two questions
-of a shape and every kind answers them in the same arithmetic — which also made the box's
-depth-cover form a second meaning of "inside" and deleted it (rulings (g), (h)). `tessera_spatial::polygon`
-became `tessera_spatial::shape`. **Not reviewed.**
-
-**r4 (2026-08-29).** One adversarial review under three lenses — disclosure and the invariants;
-cost at scale, with the owner's requirement that 10⁴ shape tests across 10⁶ visible points fit
-one request named as the lens; and the contracts. Seventeen findings, dispositioned in one pass.
-The four majors on cost changed §6.3 and §9 together: (1) candidacy scanned every artifact and a
-count cost O(ranges), which `ranges.rs` gets away with because a box is few ranges and a polygon
-is not — replaced by one run-optimised bitmap per artifact and a geometry-derived artifact index,
-so the request path is bitmap arithmetic with no per-point test; (2) "incremental by construction"
-had no structure to rest on and inherited a rebuild on the request thread — replaced by
-per-segment bitmaps built in the write executor before the generation publishes (ruling (k));
-(3) the design did not say the edge table is held, and it must be — now stated, indexing the
-canonical vertices; (4) per-cell edge lists were the dominant memory at world scale and the
-fallback aimed at countries when localities are the mass — boundary cells hold codes and parity
-only, edges re-derived per (cell, segment), and `tessera check` reports the decomposition's size
-before a build. The fifth major found the content-shape sentence unspecifiable against
-`list<utf8>` — own columns (ruling (i)); the sixth found the served ring could promote a hole to
-an outer — fixed in the core and stated in §7.2. Minors: a membership shape is corpus-independent
-by declaration (§4.1); geometry-derived candidacy bounds rather than a row statistic; one view per
-shape layer (ruling (j)); refusal scope of `space` at ingest; the `spatial:bbox:depth` dependents
-enumerated in §12; a served ring is never the predicate and the tie rule joins the client's
-obligation; the publication cost corrected to O(V·16 + p·16) and `max_region_cells` shown to
-bound cells × segments; the oracle owes a spatial evaluation, there being no second reader.
-Notes: the leaf-by-id's timing is C4's family; independent simplification of shared borders is
-accepted; the declared size is never on the wire. What the review could not break is recorded in
-its report: the leaf-by-artifact gate, `none_of` over a served shape, simplification as a function
-of shape and depth alone, the boundary bitmap as membership rather than a served quantity. The R2
-failure mode it named — bookkeeping and ties, invisible from inside — is now what §12 aims the
-conformance suite at.
-
-**r5 (2026-08-29).** The three contract points ruled (§13 (i)–(k)), two against the
-recommendation, and the consequences written in: one drawn geometry per artifact of a declared
-kind in one column pair (§7.1), views sharing a coordinate system sharing a shape (§4.3), the
-flush resolving membership before publish (§6.3). Also from the owner's questions the same day:
-the flush is a per-row source and the serving layout is chosen rather than fixed (§6.2, §6.3), with
-the precomputation trade stated against the delivery record's 78.5 GB / 4 GB measurement (§9).
-
-**r6 (2026-08-29).** Promoted to Normative on the four stages landing (§12) — the last, the
-region leaf, promoting `selection-operand.md` with it and removing `architecture.md` §8.2's ⊘.
-
-**r7 (2026-08-30).** `wgs84` unblocked, on `projections.md` §10 landing: §4.3's ⊘ comes off and the
-paragraph says what is true — the view's own declared transform, each edge densified to one
-depth-16 cell before projection, a box in degrees still a box, a coordinate outside ±180 × ±90
-refused. §11 loses its `wgs84` bullet and ruling (f) keeps its second half, which is what the
-build rests on. Two things the document asserted became checkable at the same moment and are now
-checked: a shape layer whose views declare **different** projections is refused at the
-declaration, and the several-views warning fires only where nothing says whether the views share a
-space — two views both declaring `projection = "none"`. One thing it asserts is now blind and says
-so: the degree-looking report cannot fire on a projected view, whose frame is itself inside
-±180 × ±90. **Not reviewed** — the design is unchanged, R10 included; what changed is which of it
-is built.
-
-**r8 (2026-08-30).** §6.1 names the **space** in the list of what an authored shape content shares
-with a membership shape. It was covered by "read exactly as a membership shape is" and by nothing
-more specific, and both entry points had read the shorter list — the reader, the report and the
-vertex cap — as the whole of the parity and fixed the space at `view`. The design did not change;
-the sentence now says the one property the enumeration left implicit, and both the build and
-`PUT /control/layers/{name}/artifacts` resolve a table's `default_space` and a row's own `space`
-for authored content by the same route they resolve them for a membership shape.

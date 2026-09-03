@@ -725,6 +725,11 @@ fn plan_build(
             b
         }
     };
+    // **A stride of at least one item**, so an empty corpus divides. `n = 0` derives a batch of
+    // zero from every arm above (the whole corpus is the whole corpus), and the batch loop below
+    // runs `0..batches` — so the stride only has to be a legal divisor, and the plan it produces
+    // is zero batches over zero items.
+    let batch_items = batch_items.max(1);
     let batches = n.div_ceil(batch_items);
 
     // The RAM backing needs the WHOLE relation beside the resolve scan's own residents.
@@ -819,12 +824,15 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // **union** of every view's ids, which is the order the linear build walks items in — so
     // "first appearance" below, and the source-id tiebreak in the signature sort, are both
     // expressible as ordinal comparisons, exactly as they were when a build read one file.
+    //
+    // **`n = 0` is a bundle, not a refusal** (decision 0091): a deployment must be able to start
+    // from a bundle with no points, with its frame stated, and take the whole corpus through
+    // `/control/ingest`. Every stage below is walked for that case — empty segments, empty
+    // postings, a dictionary holding only what the declaration mints, `entity_id_high_water = 0`,
+    // every declared column present and empty, every declared layer registered with no artifacts.
+    // What is still refused is `extent = "auto"` over no rows, because a frame cannot be fitted to
+    // nothing (`config::empty_auto_source`) — and that refusal already names the remedy.
     let (source_ids, view_anchors) = read_source_ids_union(args)?;
-    if source_ids.is_empty() {
-        return Err(BuildError::Invalid(
-            "no points selected — a bundle with no items has no expressible entity range".into(),
-        ));
-    }
     let n = source_ids.len() as u64;
     if n > u32::MAX as u64 {
         return Err(BuildError::Invalid(format!(
@@ -835,7 +843,13 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // and an order-independent mixed sum of its ids ([`mix64`]) — are in `view_anchors`, and the
     // geometry pass below is checked against them: a points file swapped mid-build would
     // otherwise hand every item of that view another item's position, with nothing to notice.
-    let (ids_first, ids_last) = (source_ids[0], *source_ids.last().expect("non-empty"));
+    // `(0, 0)` over no items: the only reader is the dense fast path at step 8c, whose test
+    // (`ids_last - ids_first + 1 == source_ids.len()`) is false for an empty union either way, so
+    // the placeholder cannot make a lookup take the wrong branch.
+    let (ids_first, ids_last) = match (source_ids.first(), source_ids.last()) {
+        (Some(&first), Some(&last)) => (first, last),
+        _ => (0, 0),
+    };
 
     timer.end(BuildStage::SourceIds, source_ids.len() as u64);
 

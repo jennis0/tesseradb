@@ -86,7 +86,7 @@ force — the representation cites it in the present tense — and one of the fa
 exists once it is. As things stand a 10⁷-artifact layer regenerated daily consumes the identifier
 space in about fourteen months, after which every write refuses, points included. This belongs to
 the corpus rather than to this design: mark the citation specified-not-implemented
-([decision 0013](../../decisions/0013-mark-specified-vs-implemented.md)) and decide separately when
+(decision 0013) and decide separately when
 0072 is built.
 
 ## 4. Where the model is undecided rather than wrong

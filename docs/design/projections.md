@@ -1,9 +1,9 @@
 # Projections
 
 **Status:** **Normative (r8)** — promoted 2026-08-30. The rulings it rests on are
-[decision 0105](../decisions/0105-a-view-declares-a-projection-from-a-closed-set.md) (the closed
+decision 0105 (the closed
 set, the frame in degrees, the filled grid) and
-[decision 0106](../decisions/0106-the-coordinate-path-is-f64.md) (the coordinate path). It amends
+decision 0106 (the coordinate path). It amends
 [`configuration.md`](configuration.md) §1 and [`contracts.md`](contracts.md) §2.2, §3.2 and §3.4.
 
 **Built, and the ladder is on it.** The transform, the declaration, the frame and its snap, the
@@ -433,42 +433,3 @@ affected and a sparse hand-written polygon is.
   a rare flake in a differential test rather than a wrong answer. `equirectangular` has no
   transcendentals and is bit-exact by construction, which makes it the right projection for a
   geographic test fixture.
-
-## Appendix R — review trail
-
-**r8 (2026-08-30).** Promoted. Built in eight phases and reviewed twice more during the build — at
-the configuration surface and at the shapes — beyond the design review at r5. Both later reviews
-found defects in *this document* rather than in the code it had produced, which is recorded in r6
-and r7 and is the reason the build was allowed to amend it: the degenerate-box rule, the
-build-versus-ingest asymmetry, the example report, and a `tessera check` behaviour it described and
-nothing implemented. Every stored position in both geographic corpora — 87,094,949 across GeoNames
-and Overture — agrees with an independent recomputation through the module that placed them before.
-
-**r7.** Four corrections the build found, each at a claim the implementation could check and the
-design could not. §3 had the write path's out-of-frame check *warning*; it refuses, where the build's
-counterpart clamps — and the asymmetry that exposes between the two entry points is recorded as open
-rather than resolved. §3 gains the bundle's recorded projection, without which no second reader can
-tell a projected bundle from one holding raw coordinates. §4.2's degenerate-box rule was written for
-a point and wrong for a box degenerate on one axis only, where the cap returns a frame excluding its
-own data. §8's example report was composed rather than computed, in both its frame and its numbers.
-
-**r6.** Three corrections the implementation forced. §4.2 had a box of zero width or height taking
-the offset cap, which is true of a point and false of a zero-width box spanning thirty degrees of
-latitude — the cap would return a frame excluding its own data. Containment comes first and the cap
-second. §4.1 gains the consequence nobody had stated: the prime meridian and the equator are
-boundaries at the first offset, so a region crossing either takes the world frame and no sub-square
-at all. §8's example report was illustrative rather than computed, and its box straddles the meridian,
-so the tile beside it was one no box could snap to.
-
-**r5.** Reviewed adversarially. The frame model, the y-south rule, the enumerated set and the
-precision argument survived recomputation. Four things changed: §10 had a shape's edges straight in
-the projected plane, contradicting `polygon-membership.md` R10, and supported it with meridional
-figures that measure a parameterisation shift no membership depends on; §3 did not exist, so the
-transform's place on the write path, the ingest schema's axis names and a clipped latitude at ingest
-were all unassigned; §4.2 had no answer for a degenerate box, an antimeridian box or an empty source,
-and §4.1 no maximum offset; and `/v1/meta` published grid alignment as though it were basemap
-availability, which is true only for Web Mercator.
-
-**r4.** The design completed from the high-level position: the enumerated set and its spelling, the
-filled grid with the standard parallel as a display parameter, `f64` on the coordinate path, the axis
-names, the clip counter, the build report and the `/v1/meta` fields. **Not reviewed.**

@@ -48,24 +48,15 @@ the change would make it say, what the code actually does in one sentence, the o
 their consequences, and a recommendation with what it costs if wrong. An escalation that
 requires the owner to open a source file to answer it has failed and goes back for rework.
 
-**5. Promotion.** On approval: the `Status:` line becomes `Normative (rN)`, the revision is
-bumped, an Appendix R entry records what the review found and what changed, and every
+**5. Promotion.** On approval: the `Status:` line becomes `Normative`, and every
 cross-reference to the document is updated. Rulings are written to
 [`../decisions/`](../decisions/) — a decision that exists only in a review thread does not
 exist.
-
-Appendix R is a trail, not a changelog. One short entry per revision: what the review attacked
-and what changed as a result. Anything a reader needs in order to understand the system belongs
-in the body; anything they do not need belongs in git. Older entries collapse — once a revision
-is several revisions back, a single line covering the range is enough, and Appendix R should
-never approach the length of the design it trails.
 
 ## Changing a normative document
 
 Same review, no exceptions for small changes. Additionally:
 
-- Bump `rN` and add the Appendix R entry. A revision that changes content without a trail entry
-  is the failure this convention exists to prevent.
 - If the change touches the invariants or the leak register, expect it to show up as a one-line
   diff in `docs/design/inventory.md`. That is deliberate — those two things are too important to
   change invisibly inside a thousand-line document.

@@ -30,3 +30,4 @@ clients/ts/tessera.toml
 clients/ts/viewer/public/clusters.json
 *.env.local
 clients/ts/.vite.out
+**/target/
