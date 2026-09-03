@@ -4,7 +4,7 @@
 the filter-latency budget below.**
 **Reads with:** [`filter-index.md`](../../design/filter-index.md),
 [`filter-surface.md`](../../design/filter-surface.md) (both Provisional),
-[`2026-08-08-filter-index-structures.md`](2026-08-08-filter-index-structures.md) (the structural
+2026-08-08-filter-index-structures.md (the structural
 analysis), [`probes/2026-08-08-filter-layout/`](../../../probes/2026-08-08-filter-layout/) (the
 measurements this memo turns on)
 

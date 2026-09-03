@@ -67,7 +67,7 @@ matches the live generation and overlay version is discarded rather than served,
 fail-closed; one build in flight per key; this cardinality rule; and no set for a column with
 nothing to sweep.
 
-**Decision [0093](0093-nothing-is-materialised-per-token-over-the-artifact-population.md) is
+**Decision 0093 is
 honoured, not widened.** Nothing is materialised per session in advance: the build is dispatched by
 the first suggest on the pair, that request is answered by the probe route meanwhile, and residency
 and eviction stay under 0093's byte budget.

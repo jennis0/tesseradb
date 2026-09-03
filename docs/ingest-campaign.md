@@ -7,7 +7,7 @@ which is a *plan* and has already been departed from in several places — where
 this document records what was actually done and why.
 
 ⊘ **This tracker has no pointer in `CLAUDE.md`.** It follows the convention
-[`artifact-delivery.md`](artifact-delivery.md) and [`client-delivery.md`](client-delivery.md) use,
+artifact-delivery.md and client-delivery.md use,
 both of which are named there by owner direction. Whether the campaign is tracked here or on issues
 is the owner's to settle.
 
@@ -468,7 +468,7 @@ on the wire to say it is one thing. It remains the cheap fallback if the DAG is 
 **A DAG corrupts no count, and that was checked rather than assumed.** The number beside a served
 artifact is always the masked count of the artifact's **own declared membership** (`annotations.md`
 §3), never a sum over children; roll-up within a level is *substitution* of a parent for its
-children rather than aggregation ([decision 0087](decisions/0087-cross-level-edges-are-information-not-rollup.md));
+children rather than aggregation (decision 0087);
 and containment is verified one intersection per edge, so a concept need only be a subset of each of
 its parents, which it is. The two-parents refusal is there because ambiguous data is not the tree the
 layer *declared* — a layer declaring a DAG is not ambiguous, and this one would be declaring the

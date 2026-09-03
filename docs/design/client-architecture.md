@@ -249,25 +249,3 @@ The 2026-08-10 adversarial architecture review (nine findings) is the structural
 `docs/evidence/memos/2026-08-10-viewer-pipeline-cost-model.md`. Phase-0 instrumentation
 (`ring`/`ringskip`/`covered`/`novel`/`revalidate` trace events) landed in `affd5bc` and is what
 produced Appendix M.
-
-## Appendix R — review trail
-
-- 2026-08-10: drafted (Provisional).
-- 2026-08-10: adversarial review, eight findings, all accepted in one disposition pass —
-  §3 rewritten from five exclusive states to orthogonal regions (F1); item/category requests
-  and the legend fold routed to client, encoding accumulators to vis with client-enforced
-  lifetime (F2, F8); §5 qualified per-band-projected, two-tier evaluation retained (F3);
-  anticipation re-arm guard stated and its spend made D5 (F4); D1 split into D1a/D1b (F5);
-  D2 restated with the interaction-driven alternative and visibility as an injected input
-  (F6); the presented-frame handle added so migration step 1 does not read viewer state (F7).
-  Reviewer verdict: ready to bind after these changes; D3's deletion verified safe.
-- 2026-08-10: D4 ruled — no rename; the package stayed `@tessera/viewer` (its scope later became
-  `@tesseradb/viewer` at the client-components design's step 1 — a scope rename, not a renaming of
-  the package).
-- 2026-08-10: owner "generally on board" (D1a accepted); D1b ruled moot pre-launch; D2 ruled
-  — minutes-scale staleness acceptable, latency-neutrality binding, timer (if any)
-  configurable; D3 ruled — delete, with the tile-engine adapter story preserved over
-  `fetch`/`read`.
-- 2026-08-10: D5 ruled — **start at design budgets, then measure**: the restored ring ships
-  at its designed bites/byte budgets, and the first Appendix M re-measure judges the spend.
-- All decisions ruled. Phase 2 (§6 migration) begins.

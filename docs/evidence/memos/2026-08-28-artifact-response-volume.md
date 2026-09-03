@@ -9,9 +9,9 @@ for an owner design pass, so §5 poses questions rather than answering them.
 §6 (the zoom→level map, and the cost model this contradicts),
 [`../../design/artifact-serving-at-scale.md`](../../design/artifact-serving-at-scale.md) (the
 evaluation cost, which is not the problem),
-[decision 0083](../../decisions/0083-the-frontier-is-a-request-time-budget.md),
-[decision 0087](../../decisions/0087-cross-level-edges-are-information-not-rollup.md) and
-[decision 0092](../../decisions/0092-the-build-reports-a-layers-shape-and-no-layer-carries-a-declared-bound.md).
+decision 0083,
+decision 0087 and
+decision 0092.
 
 ---
 
@@ -98,7 +98,7 @@ compiled, and already published on `/v1/meta`.
 **Every level is served `ArtifactMajor`** — one row-space bitmap per artifact, spelled `rows` in the
 configuration surface — and the build wrote `0 row-major column(s)`. That is the correct choice and
 not a missed one: the trigger is the level's `everywhere` fraction
-([decision 0094](../../decisions/0094-the-serving-layout-is-chosen-at-build-and-re-evaluated-at-the-fold.md)),
+(decision 0094),
 these levels are spatially localised (0.453 falling to 0.001), and the row-major column exists for
 levels too wide for any node of the tile index. None of these are. **The zoom sweep above is that
 choice being vindicated** — a level with `everywhere` of 0.001 is one the tile index can prune
@@ -121,7 +121,7 @@ document's cost is evaluation, and evaluation here is fine.
 
 ### 4.1 The budget is inert on a tiered layer, and that is a ruling
 
-[Decision 0087](../../decisions/0087-cross-level-edges-are-information-not-rollup.md) is explicit:
+Decision 0087 is explicit:
 a tiered layer's edges are *information — what contains what*, not *roll-up — the ladder a cut
 climbs*. `artifact_budget` is inert, `prune_children` has nothing to prune, and **a coarser view is
 another level, chosen by the client**. `crates/tessera-engine/tests/artifact_hierarchy.rs` asserts
@@ -169,14 +169,14 @@ output **unservable**.
 
 **There is no ceiling.** No key in `tessera-server`'s config, no enforcement in the engine, and the
 only `max_artifacts` in the tree is a flag on `crates/tessera-bench/src/bin/membership_residency.rs`.
-[Decision 0092](../../decisions/0092-the-build-reports-a-layers-shape-and-no-layer-carries-a-declared-bound.md)
+Decision 0092
 declined a *declared* bound on a layer, which is a different object from a *per-request* ceiling —
 but its own §2 records that `artifact-delivery.md` had carried an owed item, *"the per-request bound
 must refuse on the layer's declared artifact count before any evaluation"*.
 
 ⊘ **Corrected 2026-08-28.** An earlier revision said that item did *"not appear to have been
 re-homed"*. It was **withdrawn**, explicitly and in writing:
-[`artifact-delivery.md`](../../artifact-delivery.md) §2 reads *"The second item on this list is
+artifact-delivery.md §2 reads *"The second item on this list is
 withdrawn… No bound machinery is owed by any stage"*, and §8's row gives the reason — *"what costs
 is row-space locality rather than the count, so a threshold on the count refuses the cheap layer and
 admits the dear one"*.
@@ -185,10 +185,10 @@ admits the dear one"*.
 served artifact, so the served *count* is what predicts its size where it is the wrong predictor of
 time. The 110 B a row costs here is **this layer's**, not a constant — it follows what the layer
 declares, and a level declaring a hull has no bound at all, the rings being a function of the
-membership. That is why [decision 0103](../../decisions/0103-a-request-naming-no-levels-is-answered-at-the-declared-ones.md)
+membership. That is why decision 0103
 has the build report the artifact count and no byte estimate. A response-volume ceiling would therefore have been a different object from both
 0092's declared bound and the withdrawn evaluation bound — and the owner has now declined it too
-([decision 0103](../../decisions/0103-a-request-naming-no-levels-is-answered-at-the-declared-ones.md)):
+(decision 0103):
 a large response is slow rather than wrong, so it is reported at the build and served. §5's question
 3 is answered *nowhere, and deliberately*.
 
@@ -267,9 +267,9 @@ Posed, not answered. Each is genuinely open.
 
 ## 5a. What was decided and built, 2026-08-28
 
-**Answered by the owner the same day, and built** — [decision 0103](../../decisions/0103-a-request-naming-no-levels-is-answered-at-the-declared-ones.md),
+**Answered by the owner the same day, and built** — decision 0103,
 contracts r41, `annotation-representation.md` r8, and S10's row in
-[`client-delivery.md`](../../client-delivery.md).
+client-delivery.md.
 
 - **Q1 — is the level a request parameter?** Yes. `/v1/viewport` takes `levels`, and its **absent
   case is the layer's own declared zoom→level map** against the request's depth. The declaration and
@@ -313,7 +313,7 @@ no candidate walk, no masked probe and no derived geometry over its members.
 **What remained after that, in the levels a request does serve, was the artifacts' own names**: the
 supplied content of every served artifact was read one zstd block at a time, ≈163 µs each, which is
 why a level of 23,821 artifacts cost 3.75 s here whatever the response carried. A level's contents
-are now read once per level and held — S18 in [`client-delivery.md`](../../client-delivery.md)
+are now read once per level and held — S18 in client-delivery.md
 carries the before-and-after.
 
 ## 6. Reproducing

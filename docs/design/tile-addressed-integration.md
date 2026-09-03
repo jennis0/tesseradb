@@ -189,7 +189,7 @@ they point in the same direction once the alias is a facade rather than a front 
 
 ## 9. Provenance
 
-**r2 (2026-08-01) applies decision [0029](../decisions/0029-view-key.md).** What §4.2 called an
+**r2 (2026-08-01) applies decision 0029.** What §4.2 called an
 "epoch" is the **view key** — mask, overlay version, view, *k*, idset. The viewport is not one of
 its components, which is what makes §3's answer-store property expressible at all: one cached
 evaluation stays valid across every tile and every pan within a view key. §4.2's cache-key list

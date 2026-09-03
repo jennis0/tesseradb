@@ -1976,7 +1976,7 @@ fn gallop(codes: &[u32], from: usize, target: u64) -> usize {
 /// Called once per tile, [`tile_ranges`] does two full-column binary searches. A viewport asks
 /// for a few hundred tiles, so a sparse request spends most of its time binary searching
 /// `morton.u32` several hundred times over — measured at 26–64% of a low-density request
-/// (`docs/evidence/memos/2026-07-30-f1-selection-overdraw.md`), and *flat in density*, because the
+/// (docs/evidence/memos/2026-07-30-f1-selection-overdraw.md), and *flat in density*, because the
 /// cost is the searching, not the rows found. At 2.42M rows, zoom 8, 289 tiles, that is ~20 µs of
 /// a 31 µs request.
 ///

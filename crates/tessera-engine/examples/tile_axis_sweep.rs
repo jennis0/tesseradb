@@ -11,7 +11,7 @@
 //! tops out at 1,024 (z5). Nothing in the campaign exceeds 1,024 tiles. The one shape above it
 //! that exists anywhere — `benches/viewport.rs`'s 8,281-tile / 242,221-row request — is a ~2×
 //! *parallel* win at 2.42M, the least parallel-friendly scale
-//! (`docs/evidence/memos/2026-07-31-viewport-bench-regression.md`). Within a family where tile count
+//! (docs/evidence/memos/2026-07-31-viewport-bench-regression.md). Within a family where tile count
 //! barely varies, tile count cannot discriminate; that is a property of the sampling, not of the
 //! predictor.
 //!

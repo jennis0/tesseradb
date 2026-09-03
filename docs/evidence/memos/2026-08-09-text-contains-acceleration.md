@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-09 · **Status:** Evidence memo — recommends, does not rule.
 **Reads with:** [`filter-index.md`](../../design/filter-index.md) §1.1, §2.2,
-[`2026-08-09-filter-performance-options.md`](2026-08-09-filter-performance-options.md) §7,
+2026-08-09-filter-performance-options.md §7,
 [`probes/2026-08-08-filter-layout/`](../../../probes/2026-08-08-filter-layout/) arms 6, 10 and the
 two arms this memo adds: `textdecomp` and `textaccel`.
 

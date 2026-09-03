@@ -10,10 +10,10 @@
 the ruling, superseding 0075's separation of the two membership tests; the register's C27 and C28
 are renamed onto the new keys at architecture r46. Those documents govern where they and this
 differ. The staged plan is
-[`2026-08-18-configuration-surface-plan.md`](2026-08-18-configuration-surface-plan.md).
+2026-08-18-configuration-surface-plan.md.
 **Reads with:** [`annotations.md`](../../design/annotations.md),
 [`records-and-search.md`](../../design/records-and-search.md) §2, and the working memo
-[2026-08-15 artifact configurations](2026-08-15-artifact-configurations.md), which this supersedes.
+2026-08-15 artifact configurations, which this supersedes.
 
 ## 1. What this is for
 
@@ -623,7 +623,7 @@ without disturbing the rest: the label layer's `visibility` defaulting to its pa
 ## 12. Cost and the plan
 
 The staged plan is
-[`2026-08-18-configuration-surface-plan.md`](2026-08-18-configuration-surface-plan.md).
+2026-08-18-configuration-surface-plan.md.
 
 
 

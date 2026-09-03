@@ -20,7 +20,7 @@ plans whose checkboxes were entirely unticked while the work was in fact complet
 completion was tracked somewhere else that was never committed.
 
 **One exception is live, by owner direction (2026-08-15): the artifact work is tracked in
-[`../artifact-delivery.md`](../artifact-delivery.md)**, which is the sole authority for its stages.
+../artifact-delivery.md**, which is the sole authority for its stages.
 The rule the convention protects is unchanged — one place, not two — so that file moves in the
 change that moves the work, and the two artifact issues carry no status while it stands.
 
@@ -48,8 +48,8 @@ for one execution; it has no value once the work has landed, and keeping it invi
 read it later as though it were a specification.
 
 What the issue holds is what a person needs to understand and check the work. What the brief
-holds is what an agent needs to do it. These are different documents and conflating them is what
-produced the three-thousand-line plans now sitting in `docs/archive/plans/`.
+holds is what an agent needs to do it. These are different documents and conflating them produced
+three-thousand-line plans that were later deleted.
 
 ## Closing an epic
 

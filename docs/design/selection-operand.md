@@ -24,10 +24,10 @@ is); [`client-interaction.md`](client-interaction.md) §9 (the ruling that selec
 content-addressed filter operand) and §8.1 (the export threshold);
 [`filter-surface.md`](filter-surface.md) and [`filter-result-cache.md`](filter-result-cache.md).
 Decisions [0062](../decisions/0062-filters-compose-as-a-boolean-tree-inside-the-candidate.md),
-[0065](../decisions/0065-the-inverse-permutation-is-stored-for-the-filtered-viewport.md),
+0065,
 [0066](../decisions/0066-none-of-requires-a-value-and-names-one-column.md),
-[0068](../decisions/0068-a-row-space-operand-bounded-by-the-requests-domain-is-admitted.md)
-and [0097](../decisions/0097-the-tile-grid-is-never-shown.md) are the ones it rests on.
+0068
+and 0097 are the ones it rests on.
 
 ## 1. The problem, and what changes
 
@@ -438,100 +438,3 @@ precedent. The alternative is a key in the trailer, whose key set is deliberatel
 contents are diagnostics — and which arrives last, after the counts it qualifies.
 *Recommendation: the header.* *Cost if wrong:* one field moves, and a client must decode the trailer
 before it can render a number honestly.
-
-## Appendix R — review trail
-
-**r1 (2026-08-26).** Drafted against the owner's ruled approach and taken through one adversarial
-review across the three lenses the corpus uses — disclosure and the invariants, cost at scale, and
-the client contract. Nine findings, dispositioned in one pass; six changed the document.
-
-1. *(major, disclosure)* The stop depth was written as a budget on **boundary rows**, which made the
-   exact/cover verdict a function of corpus density along the shape's edge — a fact about data the
-   viewer was not served, reaching them through a header they can read. → The budget counts
-   **boundary cells**, a function of the shape and the grid alone (§6). This is the finding that
-   would otherwise have produced a register row, and closing it in the mechanism is why there is none.
-2. *(major, cost)* The result was drafted in entity space, following the delivery record's wording,
-   and the first draft justified the change by claiming no row→entity artefact exists. Decision 0065
-   stores one, so the crossing is cheap; the objection is the representation, and it is **measured**
-   rather than argued — a per-Morton-cell entity set is scattered in entity space, which
-   `probes/2026-08-11-viewport-crossing/` refuted as the slowest of three routes by 4–400× and
-   O(corpus) rather than O(the region). → Row space, on that evidence, with the departure stated at
-   the claim and escalated as §10 (a) rather than made silently.
-3. *(major, cost)* The descent was specified without a floor, implying refinement below one cell. Row
-   order is `(cell, tessera_id)`; the residual is not a sort key, so a sub-cell region is not a row
-   range at all. → The depth-16 floor is stated as the grid rather than a parameter, with the
-   arithmetic showing it costs nothing (§3), and the re-sort alternative recorded as declined.
-4. *(minor, invariants)* Negation over a region was left implicit, and reads as a weakening of
-   decision 0066. → §5 states it: geometry is total over **rowed** entities, so `none_of` is the
-   complement within the candidate, and a buffered or rowless entity matches neither the region nor
-   its negation. The one-flush lag is stated rather than left to be discovered.
-5. *(minor, client)* The client's live highlight and the server's test could diverge along the edge
-   without either being wrong on its own terms. → §8 makes the shared predicate an obligation with
-   three checkable parts, the quantisation being the one a client would omit.
-6. *(minor, cost)* The per-point test was specified as point-in-polygon over all vertices, which is
-   O(V) per row and unaffordable at the vertex cap. → §3's incremental edge list and corner parity,
-   marked modelled rather than measured.
-7. *(note)* The cache key was "the polygon", which is neither small nor canonical. → A digest over a
-   quantised canonical form, with the form kept beside it so a collision is detected (§5).
-8. *(note)* `region` as a leaf name collides with a plausible column name. → Reserved at the build on
-   decision 0062's own precedent, marked ⊘ as unbuilt (§2).
-9. *(note)* An earlier draft claimed the answer is "exact". → Narrowed to *exact for the shape
-   against the stored geometry*, with what that excludes said plainly (§6).
-
-What the review attacked and could not break, recorded so it is not re-litigated: that the interior
-is bitmap arithmetic and the cost is a perimeter rather than an area; that the operand adds no leak
-register row once finding 1 is closed; that composition needs no change to decision 0062's tree or
-0068's one-crossing rule; and that the client's existing even-odd rule is the right one to make
-normative rather than replace. What the review could not test at all is the cost model: no arm of
-this route has been run, and every figure in §4 is arithmetic.
-
-**r2 (2026-08-29) — built, and what the build changed.** Promoted to Normative with stage 4 of the
-shape work (`artifacts/shape-region`). Against the r1 text:
-
-1. **The leaf has four geometric spellings and one by artifact** (§2), not two: `circle` and
-   `ellipse` joined `polygon` and `bbox` with the shape work's ruling (h), each carrying `space`;
-   `artifact` is `polygon-membership.md` §8's leaf by published shape, answered from the held
-   membership under the artifact's own verdict and always exact. The reserved column name is
-   refused at the build.
-2. **What is cached is the decomposition, never the rows** (§5, `tessera_engine::region`). The r1
-   text cached "the row set"; a row set tested under a mask cannot be shared across principals,
-   and the ruling (b) shares. So the entry is the interior tiles' rows, the boundary cells with
-   their contexts and their per-segment ranges — a function of `(view, generation, canonical
-   shape, stop depth)` and of no principal — and each request tests the boundary cells' rows under
-   its own composed mask, masked first. The signature `RegionDecomposition::rows_under(mask, …)`
-   takes the mask so the boundary path cannot run without one, which is the assurance a test that
-   the pre-mask cardinality is never materialised could not give; `viewport.rs` skips its
-   `filter_matched` probe count for a tree carrying a region leaf on the same argument. The cache
-   is a second `SingleFlightCache` beside the row projections', bounded by `serve.region_cache_bytes`
-   and pruned of superseded generations at every geometry swap; a digest collision is detected by
-   comparing the canonical bytes and answered from a fresh, unretained decomposition.
-3. **The result's extent is the tree's** (§5). A region leaf's own rows are `FilterRows::Complete`;
-   a tree of region leaves and projected entity verdicts stays complete, and a render-column leaf
-   anywhere in it — or a per-tile crossing — bounds the answer to the request's domain, in which
-   case the region's rows are clamped to that domain and the answer is `FilterRows::Viewport`.
-   `none_of` over a region is the complement within that scope.
-4. **The verdict is settled where the ruling needed it** — the head is delivered after the filter
-   is evaluated and before the sweep, so `x-tessera-region` precedes the streamed body.
-5. **The client** (§8): `region.ts` lost the depth walk, the tile bound, the `k = 0` counting
-   request and `cellExceedsPixel`; a selection *is* the filter — the leaf rides every request, the
-   map and every count narrow to it, and the region's count is the frame's own `matched` sum —
-   with `outside` as `none_of` over the leaf and *filter to this* / *outside this* on the artifact
-   card as the leaf by artifact. The highlight's predicate is the server's: even-odd over the
-   quantised grid, an edge inside, in exact integer arithmetic. `Masked.exact` is the header's
-   verdict *and* the replica holding every tile of the shape's extent — a frame that did not cover
-   the shape counted the part in view.
-6. **Two deployment constants** on `/v1/meta`'s `selection` block: `max_region_vertices`
-   (default 10,000; over it a `422` naming the count and the cap) and `max_region_cells` (default
-   262,144, the perimeter of a whole-world box in depth-16 cells; over it a cover, never a
-   refusal).
-7. **Second readers**: `reference/oracle/filters.py`'s `RegionColumn` — an even-odd walk over each
-   entity's stored position, by artifact through the fixture's own membership — and
-   `conformance/tests/test_region_leaf.py`: the lasso against the oracle under three principals;
-   the cover a superset with one verdict for every principal; the leaf by artifact equal to the
-   masked count and composed with a numeric leaf; `none_of` the complement; an unknown, a
-   suppressed and a withheld artifact one response byte for byte; the reserved name refused at
-   the build. `crates/tessera-engine/tests/region_leaf.rs` holds the same claims against the
-   fixture's generator.
-
-§4's cost model is still **modelled, not measured** by a probe; what the evidence run recorded is in
-[`../evidence/screenshots/2026-08-29-shape-region/`](../evidence/screenshots/2026-08-29-shape-region/README.md).

@@ -232,7 +232,7 @@ Gates, most authoritative first:
 | **G3** | each stage's share of total within 10 points | one stage got slower while another got faster |
 
 Raw random-sweep p99 is emitted for a dashboard but is **never** a gate: the
-[tail-attribution memo](../docs/evidence/memos/2026-07-30-tail-attribution.md) showed it mostly
+tail-attribution memo showed it mostly
 measures the input distribution, not the system.
 
 ---

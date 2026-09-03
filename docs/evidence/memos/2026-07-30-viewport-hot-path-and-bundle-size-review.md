@@ -39,7 +39,7 @@ produced them.
 
 ### 1.1 The baseline that no longer measures this engine
 
-The committed baseline (`docs/archive/plans/bench-baselines/2026-07-29-1e9-k-sweep.json`)
+The committed baseline (docs/archive/plans/bench-baselines/2026-07-29-1e9-k-sweep.json)
 predates, by one day, essentially the entire selection subsystem it would now be compared
 against. Landed **after** it was recorded: the real §7.2 selection (floor ∪ threshold ∪ cap,
 263ba72), the density underlay and `served` column (84c840d), the k-default and cap change

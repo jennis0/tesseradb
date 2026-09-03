@@ -2,9 +2,9 @@
 
 **Date:** 2026-08-22
 **Status:** **Ruled, reviewed, amended, and re-measured.** §9's question is answered by
-[decision 0092](../decisions/0092-the-build-reports-a-layers-shape-and-no-layer-carries-a-declared-bound.md),
-with [0093](../decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md) and
-[0094](../decisions/0094-the-serving-layout-is-chosen-at-build-and-re-evaluated-at-the-fold.md)
+decision 0092,
+with 0093 and
+0094
 beside it. The adversarial review over this document and
 [the selection surface](../evidence/memos/2026-08-21-artifact-layout-selection.md) has run and is
 dispositioned — [the record](../evidence/memos/2026-08-21-artifact-serving-scale-review.md). One part
@@ -106,7 +106,7 @@ bounds what is *served* and never what is *evaluated*. Nothing here changes that
   set; see §4.2 for its grain, its key and what it costs.
 
 **Per token: nothing sized by the artifact population**
-([0093](../decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md)), with
+(0093), with
 the one exception that ruling names — a masked-count histogram for a **row-major** layer, which is
 sized by that layer's artifact count and has no other route to the whole-membership count (§5.1).
 A layer declaring an existence criterion is the case that does not fully dissolve; see §4.3.
@@ -211,7 +211,7 @@ ever exist.
 **The grain is `(artifact, rank)`, and the answer is a rank rather than a boolean.** An artifact
 holds **ranked contents** and is served the first entry whose generating set the viewer contains
 entire ([decisions 0076](../decisions/0076-an-artifact-is-served-whole-or-not-at-all.md)
-and [0078](../decisions/0078-the-service-takes-no-opinion-on-which-variation.md)) — which
+and 0078) — which
 is what `satisfied_rank` returns and what the request needs. So the partition holds one expression
 identifier per `(artifact, rank)`, and a request resolves it by taking the **lowest** rank whose
 expression the principal satisfies. Storage multiplies by the mean content count, which is a property
@@ -342,7 +342,7 @@ one worth ruling on:
 
 - Hold the counts per token after all — which is what §8.5 buys, and what many tokens make
   expensive. It is now the *only* thing that structure would be for, and
-  [0093](../decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md) closes
+  0093 closes
   it for an artifact-major layer. **The one exception that ruling names is a row-major layer**, whose
   count has no other route: see §5.1.
 - Keep, per artifact, a count **per signature group** — build-time and mask-independent, summed over
@@ -350,7 +350,7 @@ one worth ruling on:
   thirty-two groups is ~200 bytes, so ~2 GB at 10⁷ — and thirty-two is the fixture's number, not a
   corpus's (§4.2).
 - **Evaluate only the levels the request can serve from — built 2026-08-28**
-  ([decision 0103](../decisions/0103-a-request-naming-no-levels-is-answered-at-the-declared-ones.md)),
+  (decision 0103),
   and it changes what is **served** as well as what is evaluated, which this bullet had the wrong way
   round. A whole-map request ran every level of a levelled layer when the client could draw the coarse
   one; `/v1/viewport` now takes `levels`, whose absent case is the layer's own declared zoom ranges
@@ -584,7 +584,7 @@ The route called **hoisted** is the design's: the build-time containment partiti
 hierarchical row-range index with extents (§3), and `viewport ∩ M_auth` composed once per request
 (§4 step 2). **grouped** is the same without the hoisting. `shipped`, `index` and `early` are the
 per-artifact loop and its variants. `settled` and `index+session` are the per-token route
-[decision 0093](../decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md)
+decision 0093
 deletes, kept as a comparison. `column` and `listed` are §5.1's row-major forms.
 
 **What the correction cost, in one cell.** The whole-map request at 10⁷ artifacts over 10⁸ points
@@ -906,7 +906,7 @@ wrong guess costs a rebuild:
 **Recommended: (c) always, (a) wherever the layer partitions, (b) as a warning.**
 
 **Ruled 2026-08-21: (c) always, (a) wherever the layer partitions, and (b) not at all** —
-[decision 0092](../decisions/0092-the-build-reports-a-layers-shape-and-no-layer-carries-a-declared-bound.md).
+decision 0092.
 The recommendation is not taken in full: there is no declared-bound machinery, as a refusal or as a
 warning key, because what costs is locality rather than the count and the report already prints the
 measured number a declared one would have been compared against. The ruling also withdraws the
@@ -944,47 +944,3 @@ per-request bound the delivery record had owed since the model was written.
   candidate rather than for the served few, which is §4.3's wide case at every zoom. Nothing here
   makes them cheap: the structure that would have (a per-token count) is what 0093 declines. The
   ranking contract itself is unruled and is not proposed here.
-
-## Appendix R — review trail
-
-- **r3** — **the re-measurement, folded in** (2026-08-22; `run-remeasure.sh`, medians in the probe's
-  `data/`). Every grid r2 superseded is replaced by a corrected one: the routes now perform §4 step
-  2's masked probe, the fixture is decorrelated with ranked contents and a member count that covers
-  the corpus, and every cell is the median of three runs of three iterations. **The omitted work was
-  real** — 31.7 ms becomes 553 ms at 10⁷ artifacts over 10⁸ points, and candidacy is 549 of it — and
-  the conclusion holds: 10–25× ahead of the per-artifact loop, the budget met at every measured cell,
-  the cost inversion fixed, and flatness in corpus size confirmed at 10⁶ artifacts. Three negative
-  results are recorded rather than smoothed: **10⁹ points with 10⁷ artifacts exhausted the box** and
-  is modelled, not measured (§7.1); the **blocks = 8 point of the layout sweep breaks the trend**
-  with no fixture explanation, so no threshold is quoted (§5); and the scattered layer's ~2×10⁵ wall
-  was the old structures' rather than the shape's, which moves §5.1's argument from speed to
-  **residency**. §4.2 gains the **expression census**, which is the campaign's largest design
-  finding: 32 distinct expressions under per-term authoring against ~10⁶ — one per artifact — for
-  generating sets drawn across a real signature distribution, so the partition's wide-viewport union
-  route exists only for per-term-authored sets and the per-candidate lookup carries the rest. §4.2
-  also records what the deleted per-token route would have cost, which is 0093's evidence with a
-  price on it.
-- **r2** — **the adversarial review, dispositioned** (2026-08-21;
-  [the record](../evidence/memos/2026-08-21-artifact-serving-scale-review.md)). Three lenses —
-  disclosure, correctness and lifecycle, claims audit — over this document,
-  [the selection surface](../evidence/memos/2026-08-21-artifact-layout-selection.md) and decisions
-  0092–0094. **Two fail-opens in the unbuilt design.** §4's settled half claimed containment answered
-  *"has a visible member"*, which the structure 0093 kept does not answer, and the probe's routes G
-  and H omitted the test; §4 step 2 now specifies one early-exiting `Bitmap::intersect` against
-  `viewport ∩ M_auth`, exact for a settled artifact because membership ⊆ viewport, and §4.1's second
-  bullet is the collapse rather than an answer. And §4.2's deny correction is `deleted ∪ suppressed`
-  evaluated live at the ack, not a refresh with a window — with the entity→artifacts index it needs
-  recorded against `annotation-write-cycle.md` §4.5, which exists to avoid exactly that lookup.
-  **Every §7 grid is superseded pending re-measurement**, marked at each table. Containment is
-  restated at `(artifact, rank)`; the expression count is marked unmeasured and the fixture's
-  thirty-two named as an axiom; the partition's key, cadence and unmeasured build cost are stated;
-  §10 is rewritten because the row-major layouts are a durable form touching four write-path seams;
-  §6 is rewritten around the downward walk with one table per arm. Figure corrections through §7:
-  the stage table is an assembly with its totals withdrawn, the flat-in-corpus-size table is the
-  deleted per-token route, the ridge is 232–279 ms over three runs, the coarse-node count is 20–52 ms
-  and slopes with the viewport, the 10⁹/10⁷ layer covers ~10% of the corpus, and four figures that
-  appear in no committed log are marked *unrecorded, re-measurement queued*. Two leak-register
-  annotations were approved with it (architecture Appendix C, C4 and C15 shapes), and the three
-  sentences claiming the layout choice has no disclosure content are narrowed to *nothing on the wire
-  names a layout*.
-- **r1** — first draft, the campaign's options memo, ruled by decisions 0092–0094 (2026-08-21).

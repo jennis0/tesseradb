@@ -60,7 +60,7 @@
 //!
 //! Lifecycle §5.1 *permits* deny dispositions to share the window — "**may** share", a permission
 //! rather than a requirement. **The permission is declined**
-//! (`docs/decisions/0033-both-lanes-group-commit.md`), and the reason is that it buys almost
+//! (docs/decisions/0033-both-lanes-group-commit.md), and the reason is that it buys almost
 //! nothing and is paid for in the machinery that keeps denies fail-closed. A reader who thinks the
 //! mixed window is the obvious next step should read this before building it.
 //!
@@ -490,7 +490,7 @@ pub struct CommitWindow<W> {
     /// else: **there is no age bound and no timer**. A window closes on its row bound or on the work
     /// queue being observed empty; the age bound the specification mentions is the safety cap on a
     /// linger, and there is no linger
-    /// (`docs/decisions/0034-the-window-does-not-linger.md`).
+    /// (docs/decisions/0034-the-window-does-not-linger.md).
     opened_at: Instant,
     /// The window's sequence number, which is what the executor's `BatchState::Held { window_seq,
     /// .. }` names. Nothing else reads it beyond diagnostics.

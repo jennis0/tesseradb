@@ -1,7 +1,7 @@
 # Views — design
 
 **Status:** Normative (r29) — **a dropped view key is reusable** (r29, 2026-09-01, owner ruling;
-[decision 0115](../decisions/0115-a-dropped-view-key-is-reusable.md); `contracts.md` §2.3/§3.4
+decision 0115; `contracts.md` §2.3/§3.4
 r70). §3.4's burn is withdrawn: `PUT` on a previously dropped key is a `201` and the `409` remains
 for a key that is **live**, because a key is a name the caller chose rather than a system identity
 and the immutable-record correction workflow (§3.2) is useless if the correction cannot be made
@@ -37,7 +37,7 @@ served" is superseded.
 **Date:** 2026-09-01
 **Status:** Normative (r27) — **a scoped value's address is `(attribute → its group, key)`, and the
 join rule is decided on the serial writer** (r27, 2026-09-01, owner rulings;
-[decision 0116](../decisions/0116-a-scoped-values-address-is-the-attribute-and-the-key.md);
+decision 0116;
 `contracts.md` §3.1 r68). Two changes, one section each. §5's write half admitted a scoped family's
 columns only on a batch whose view the **owning** group holds; that one-door rule is withdrawn, and
 with it the "two extents claiming one entity" argument that justified it. A batch whose view's key
@@ -126,7 +126,7 @@ of its discriminator column as its keys, one view per value, sorted by key bytes
 records are ordinary roster records, so nothing above the mint can tell them from written ones;
 §3.1 carries the four rules the declaration does not settle. **a shape layer canonicalises per
 view** (r17, 2026-08-31; spec §2's marker,
-[decision 0111](../decisions/0111-a-shape-spans-projected-views-through-wgs84.md)): the
+decision 0111): the
 three consumers that read one frame for a layer's several views each take a frame per view, the two
 spans 0111 refuses are refused, and `test_corpora/multiview` carries a layer over two frames.
 **Ordinals are removed** (r16, 2026-08-31, owner ruling): a view of a
@@ -137,8 +137,8 @@ which is roster-record order, so the ordering a client walks survives without a 
 tombstones are unchanged — a dropped key is refused for ever *(no longer true — superseded at r27,
 annotated here 2026-09-01 because a reader meeting this entry first would take a stale one)*.
 Appendix C's C27 (the ordinal gap) is
-deleted and [decision 0110](../decisions/0110-the-ordinal-gap-is-accepted.md) is superseded by
-[0113](../decisions/0113-ordinals-are-removed-and-the-key-is-the-only-address.md): with no ordinal
+deleted and decision 0110 is superseded by
+0113: with no ordinal
 served there is no gap to observe. **The gate is built** (r15, 2026-08-31): spec §6 is end to end.
 `visibility` is accepted on a view, a group and a roster record, checked at acceptance against the
 plugin that will evaluate it, and stored on the manifest; a session's **visible-view set** is
@@ -288,7 +288,7 @@ grid, which is why the extent is per view and not per bundle.
 > (decision 0048), and `bundle_format` did not move — the required field is the loud guard.
 >
 > **Implemented 2026-08-31 — a shape layer canonicalises per view, in each view's own frame**
-> ([decision 0111](../decisions/0111-a-shape-spans-projected-views-through-wgs84.md)). The three
+> (decision 0111). The three
 > consumers that read one frame for a layer's several views now each take a frame per view:
 > `canonical_shapes` takes a `ViewFrame` — view id, projection, extent — per view rather than one
 > projection and one extent for all of them; `/control/layers` resolves one per view of the layer;
@@ -422,7 +422,7 @@ permutation, segments, extents and θ — and they are what a request names.
 ### 3.2 Keys
 
 A view of a group is addressed as **`<group>:<key>`**, and by nothing else (owner ruling
-2026-08-31, [decision 0113](../decisions/0113-ordinals-are-removed-and-the-key-is-the-only-address.md)).
+2026-08-31, decision 0113).
 The key is the caller's, **required at creation**, under the column-name charset (ASCII letters,
 digits, `_`, `-`); a caller who wants a numeric ordering mints numeric keys. That form is the view
 id wherever a view id goes: the request body, `x-tessera-view`, `/v1/meta`, the manifest. On disc
@@ -458,7 +458,7 @@ into the segments manifest at every flush and carried forward, exactly as
 in the log is lost at the first rotation, and a roster that came back short would serve a group as
 though nothing had ever been added to it — while a **dead incarnation** that came back forgotten
 would let a key created again adopt its predecessor's row spaces
-([decision 0115](../decisions/0115-a-dropped-view-key-is-reusable.md)).
+(decision 0115).
 
 **Metadata names are bounded by the roster's own keys**: `key`, `source`, `visibility` and, on
 a form B group, the discriminator's field name are refused as metadata names — the inline block
@@ -531,7 +531,7 @@ artifacts are reclaimed at the next fold. Under `members` sharing the drop is of
 takes the view out of every group on it.
 
 **The key is freed, and a recreate adopts nothing**
-([decision 0115](../decisions/0115-a-dropped-view-key-is-reusable.md), r27). A key is a name the
+(decision 0115, r27). A key is a name the
 caller chose, and the immutable-record rule of §3.2 makes a drop-and-recreate the *only* way to
 correct a wrong gate or wrong metadata — which is no remedy at all if the correction cannot be made
 under the name the operator's pipelines already carry. So `PUT` on a dropped key is a `201`, drop
@@ -1112,7 +1112,7 @@ that disagrees between appearances (it is the entity's label, not the row's), an
 `(external_id, view)`, and the same entity in two views is the ordinary case rather than a
 duplicate.
 
-**The allocation key over several sources** ([decision 0112](../decisions/0112-the-anchor-view-orders-a-signature-groups-ids.md),
+**The allocation key over several sources** (decision 0112,
 extending 0073): within a signature group, ties order by the item's Morton code in the
 **declared anchor view** — `[defaults].allocation_view`, required when more than one view is
 declared, refused absent naming the candidates — then by `external_id` bytes. An item absent
@@ -1426,324 +1426,3 @@ batches under `x-tessera-view: quarter:2026-Q4` carrying `doc_id, x, y, access, 
 under `quarter_map:2026-Q4` carrying `doc_id, lon, lat, access`. A paper already known joins
 each view under spec §4's rule. Either batch may carry `sentiment`: the two views share the key
 `2026-Q4`, and the key is the value's address (decision 0116).
-
-## Appendix R — review trail
-
-- **r29 (2026-09-01)** — **a dropped view key is reusable** (owner ruling;
-  [decision 0115](../decisions/0115-a-dropped-view-key-is-reusable.md)). §3.4's burn is withdrawn
-  and the create verb's `409` narrows to a **live** key. The rule was never separately ruled: it
-  arrived with the roster work as a read-across from `layer_tombstones` and cited decision 0029,
-  which names a *cache coordinate* containing no view id — so the argument that a reused key
-  repoints a client cache was an over-generalisation, and the layer analogy does not carry either
-  (a layer name travels in bookmarks, edges and suppressions; a view key addresses a row space and
-  a roster record, and both go with the drop). What the burn was really holding is internal: a
-  dropped view's segments, columns, derived structures and buffered rows outlive the drop, and a
-  naive recreate would adopt them. That is closed by an **incarnation** — a monotone counter on
-  every roster record, minted at create and recorded rather than re-derived, stamped onto every
-  artifact of a view; composition, replay and restart attach only the live one, and the fold
-  reclaims the rest through the omission it already performs. It is internal throughout: on no
-  wire surface, not part of a view id, and with no timing structure, so a principal cannot tell a
-  recreated key from a fresh one. `SegmentsManifest.view_tombstones` becomes
-  `dead_view_incarnations` — renamed rather than repurposed, because it no longer refuses anything
-  — and a publication applies the deaths before the creations, which is what makes a drop and a
-  recreate in one window land as the recreate. Buffered rows resolve through replay order rather
-  than carrying a stamp: the drop is met between the rows it kills and the rows the recreate takes,
-  and the alternative would widen every row buffer in the commit window to record what the sequence
-  already states. `WAL_VERSION` moves to 18 (`ViewCreate` and `ViewDrop` both change shape);
-  `bundle_format` stays at 4 and the new manifest fields are required, an absent incarnation
-  otherwise reading as the build's — the one value a leftover artifact could carry.
-  `delete_dangling`, the two removal rules and the immutability of a roster record are untouched;
-  decision 0113's "key tombstones are unchanged" clause is superseded in part.
-- **r27a (2026-09-01)** — review round on r27's implementation. One finding was a hole and the rest
-  were cleanups. **The hole**: a scoped `text` family escaped the cell arm across a flush boundary —
-  its column has no value per entity to compare against, so a second door's differing prose was
-  neither deduped nor refused, and the flush wrote a second text layer stamped with the same view
-  for `match` to union silently. The arm now asks occupancy from the layers' presence bitmaps and
-  refuses a supplied string for an occupied cell, equal or not; the build's base writes no presence
-  file and is not covered, which is stated at the claim. Also: the label and attribute arms, the
-  descriptor drop and the render backfill are one pass per joining row, sharing one buffer lookup and
-  one record-blob decompression; the refusal body is pinned whole by a test as well as compared
-  across its two sources; and the demotion direction — a row that stops being a join keeps its label
-  — is covered.
-
-- **r27 (2026-09-01)** — **two owner rulings, implemented together.** (1) A scoped value's address
-  is `(attribute → its group, key)`: §5's one-door rule is withdrawn, a batch through any view
-  whose key is in the attribute's group's key set may carry the family's columns, and the value
-  lands in the one cell. The old rule's argument — two views of one key would put two extents over
-  one entity — is dissolved by a comparison rather than answered: an identical second value is
-  deduped so there is one claimant, and a differing one is a 409 naming the column and the key. §5's
-  remaining ⊘ is discharged and a narrower one takes its place, about a row tail a previous flush
-  already published. (2) §4's label and attribute arms move from `/control/ingest`'s handler onto
-  the serial writer, beside `established_collisions`, which is what settles join-ness — one site
-  instead of two, closing the race in which a row promoted to a join between the handler's pass and
-  the apply met no arm. The refusal bodies did not move with the site and are byte-identical. The
-  handler keeps the duplicate answer, which is the one refusal that may name the caller's own ids,
-  and the sidecar half of the join resolution, which cannot go stale. No other design content
-  changed.
-
-- **r26 (2026-08-31)** — **`render` alone makes a scoped family a filter operand** (owner ruling),
-  and §5's remaining restriction is withdrawn rather than discharged: it was a hole, not a rule.
-  The licence is now `index` **or** `render` on both sides of the scope, one predicate each side
-  (`filter::scoped_is_filterable`, `filter::is_filterable`), and the leaf resolution, the operand
-  list, `/v1/categories`' admission and the gate collapse follow from the one they already called.
-  What the old marker had right is that a **lane** cannot answer a pin; what it had wrong is that
-  the lane was ever the route. A scoped family's per-view column is entity space and every build
-  has written it whatever the flags — the `index` gate stood at the *opener*, not at the writer —
-  so a rendered family is answered by the same scan an indexed one is, from the same file, and a
-  pin reads the named view's column rather than the rows in front of the request. The cost is
-  therefore only what was previously written and never opened, plus the flush's extents, the empty
-  base of a view created since the build, and a rendered **category**'s per-view postings — the
-  last because one admission decides the filter surface and the value list together, so a rendered
-  category earns `/v1/categories` as well and its postings must exist for it. `text` is excluded at
-  the predicate: it owes no value column, and `render` on a scoped `text` family is refused at the
-  declaration, so the combination would name a token index no pass wrote. No format moves, no
-  version moves, and the gate collapse is the same single site (`viewport::resolve_filter_column`).
-- **r25 (2026-08-31)** — §5's write half is built and its three ⊘ markers are discharged; no
-  design content changed. Ingest: a batch into a view of a group carries the group's scoped columns
-  under their plain names, in a second positional list against the group's own `scoped_scalars`,
-  the entity-space refusal untouched. Flush: the family's per-view extents beside the build's, the
-  empty base a runtime-created view has none of, and the render lane written from the row's own
-  value — so a join row carries this view's scoped value and nothing else. Merge and fold: the
-  **view's** writer schema rather than the bundle's, which is where the ⊘ was understating itself —
-  a rewritten segment did not merely lack a column a rebuild would supply, it *lost* values already
-  being served — and the fold's attribute pass now folds each family's per-view column, which it
-  had never written at all. Two markers replace them, both narrow: a sharing group's views take no
-  value from a batch (the column is the owner's, and a second writer for one `(entity, view)`
-  column is two layers claiming one entity), and §4's attribute arm is unchanged.
-- **r24 (2026-08-31)** — §4's attribute arm is exact past a flush and the section's last ⊘ is
-  discharged. No design content changed: the rule §4 states is the one it always stated. What the
-  marker got wrong is worth keeping, because both errors were in the direction of leaving it
-  marked. It called the read-back "a second value oracle across every declared family"; it is one
-  read per column, the declaration already deciding which of three homes holds the value (records
-  §3, decision 0068), and the fold and the coalesce owe no pass at all — they rewrite those homes
-  already. And it called the accepted row inert, which held for the two entity-space homes and not
-  for the third: a joining row's scalars travel in its own row tail, so a rendered column's
-  differing value was reaching the joined view's hot column. A refusal is withdrawn in the same
-  change: a batch leaving a **category** null was a `409` against an entity holding a value,
-  because the arm read absence only in its `null` spelling and a category says it with the reserved
-  code. That was the buffered arm's behaviour, so the correction moves both. Two findings from the
-  review of the change itself are folded in. The **backfill** is the owner's ruling on the
-  divergence the third home exposed: an accepted join that omitted a `render` value must not write
-  an absence into the joined view's tail while another view renders a value, so it takes the stored
-  one. And the hot-column read scanned views out of a `HashMap` and stopped at the first that held
-  a *row*, reading a clear presence bit as "no value held" — so the one disagreement the backfill
-  cannot close, an entity holding nothing where it was ingested and a value where it was joined,
-  answered a later join by hash order. It now scans every view and absence never pre-empts a value.
-- **r23 (2026-08-31)** — §4's label arm is exact past a flush and its ⊘ is discharged; the
-  attribute half stays marked, with what it would cost stated. No design content changed: the rule
-  §4 states is the one it always stated, and what moved is that the deployment can now enforce it.
-  The oracle is `contracts.md` §2.4's `entities/terms/`, built for the drill-down's `labels` array
-  ([decision 0114](../decisions/0114-the-drill-down-serves-the-satisfied-labels-only.md)) and read
-  here for the full set it also holds.
-- **r22 (2026-08-31)** — spec §5's `render` marker is discharged and no design content changed.
-  Built: each view's column of a rendered family permuted into that view's row space at the build,
-  with its presence bitmap; a per-view, per-principal render list at the one site the head's names
-  and the gather's buffers both come from; and `/v1/meta`'s `scoped_scalars`, a family's
-  counterpart to `declared_scalars`, carrying the type, the vocabulary, the analyser, the two
-  placement flags and the view ids that have a column — the vocabulary and the analyser moving
-  there from the operand entry, which is the operand surface and carries neither for an
-  entity-scoped column either. Review (2026-08-31) added three things and changed one: the
-  published view list **expands** to every group sharing the family's views and is gate-filtered
-  per id, without which a client under a shared view reads that the column it is receiving does not
-  exist; `tessera verify --deep` checks the lane per build segment, the one defect here that
-  serving cannot distinguish from an absent value; and the flushed-segment path — the one that
-  turns a missing column into silence — is driven by a test rather than only described. What stays marked: the **ingest** half, so a view created while the
-  service runs has no column until a rebuild; a merge or fold, which takes its writer schema from
-  the bundle-wide list and so drops the column from a segment it rewrites; and the filter surface,
-  where `index` remains the whole licence — a leaf resolves to one entity-space column and a pin
-  may make that another view's, which a scan of the request's own rows cannot answer.
-- **r21 (2026-08-31)** — §3.4's ⊘ is discharged by a test, and the test found a defect. What the
-  section claims is reclamation *by omission*: a dropped view is absent from the bundle the fold
-  plans over, so its segments are not carried into the new prefix and its files go with the
-  superseded one. The first half held; the second did not. A drop removes the view from the bundle
-  and from the roster, and leaves its `SegmentDescriptor`s in the partition's side-manifest until
-  something rewrites it — so the fold's publication treated them as *not consumed*, tried to carry
-  them forward, and discarded itself on the check that every carried segment must have a base in
-  the plan. The effect was that **no fold ever published again** on a bundle a non-empty view had
-  been dropped from: no segments merged, no deletions retired, no disc reclaimed, and only a
-  warning to say so. The fix is one filter in the carry-forward, which is the omission the plan had
-  already made. `tests/views_write.rs` drives the whole claim — the plan's omission, the files, a
-  restart serving the survivors, and the tombstone outliving the fold's manifest rewrite.
-- **r20 (2026-08-31)** — spec §5's two ⊘ markers are discharged and no design content changed.
-  Built: a scoped **category**'s per-view keyed postings, which are both the filter route on a
-  `public` vocabulary and what `/v1/categories` derives a value list from on a `derived` one; a
-  scoped **text** column's per-view token dictionary and positional postings, that family owing no
-  value column; `/v1/categories` addressed by view — `?view=` or the pinned path — through the same
-  resolution and the same gate collapse the filter leaf takes; and an attribute's own `source`,
-  one row per `(entity, view)` routed by `fields.view`. Two refusals are new and both are
-  declaration-time: a scoped `text` column without `index = true`, whose prose would otherwise have
-  no home at all — the record blob is bundle-wide and a family has no slot in it — and `fields` on
-  an attribute with no view to choose between. Still marked, each at its claim: `render` on a
-  scoped attribute, and the ingest half, which is absent by construction rather than by omission —
-  a buffered row's scalars are positional against `MANIFEST.declared_scalars`, and a family is
-  deliberately not in it.
-- **r19 (2026-08-31)** — first-batch-creates is withdrawn (owner ruling): §3.2's exception for a
-  record-less group is deleted, a batch naming an unknown key being a 404 for every group, and the
-  §3.2 marker keeps only its category-metadata item. Creation is the explicit operation, so a
-  mistyped key refuses instead of minting a view around the mistake.
-- **r18 (2026-08-31)** — the last roster form is built: a group declaring neither
-  `[[view_group.view]]` blocks nor a `[view_group.views]` table has its keys minted from the
-  distinct values of its discriminator column (owner ruling: implement it). The design content is
-  in §3.1's four rules, which are the points the declaration leaves open — order, an unusable
-  value, metadata and the gate — and they are marked as recoverable architect's choices rather than
-  as invariants. Two of them a principal does observe: roster order **is** served order (§3.2), and
-  the gate decides which principals may reach a view at all. Neither is a **disclosure**. The
-  order is a deployment constant, the same list for every principal, computed from the declaration
-  and its sources rather than from anything inside `M_auth`; and a minted view taking the group's
-  own gate is exactly what a roster record carrying no `visibility` already does, so no view is
-  reachable that a written roster would have closed. They are recoverable because a later ruling
-  costs a rebuild, not because nothing sees them. The mint hooks in where the roster table is read,
-  so it produces roster records and forks no downstream path; §7's marker is now a description
-  rather than a gap, and the register gains no row.
-- **r17 (2026-08-31)** — **a shape layer is canonicalised per view, in each view's own frame**
-  (decision 0111), and spec §2's marker and §11's contracts row record it. `canonical_shapes` takes
-  a frame per view rather than one projection and one extent for every view of a layer;
-  `/control/layers` resolves one per view; the build's layer read passes every view it
-  materialises rather than the anchor's. The 2026-08-29 refusal of a shape layer whose views
-  declare different projections is **deleted** — 0111 supersedes it — and two narrower refusals
-  replace it: the mix of a projected view and a `projection = "none"` one, at the declaration on
-  both entry points, and a `space = "view"` row over frames that are not identical, at the row. A
-  shape wholly outside a view's extent warns with that view's own count and is published. A
-  layer's `scope` is now a field of the declaration and therefore of the manifest (contracts r59),
-  which is §11's remaining `§2.2` item. No design content changed: this revision records what was
-  built against text r9 of `polygon-membership.md` §4.3 already specified.
-- **r16 (2026-08-31)** — **ordinals are removed** (owner ruling), and the removal is total rather
-  than an address form withdrawn. Gone: `/v1/meta`'s `ordinal` field, the roster record's and the
-  `ViewDrop` record's ordinal, the per-group high-water, the manifest's stored number, the
-  `<group>:#<ordinal>` id and the `@#n` pinned leaf. What replaces it is the order the records are
-  already in: roster records are appended and never rewritten, so a group's views are served in
-  creation order without a number to sort by, which is what a client walking `groups[..].views`
-  was already doing. `#` is no longer reserved out of a key by name — the column-name charset
-  refuses it, as it refuses every other punctuation — and an id in the old form now names a key
-  nobody declared, which is the ordinary unknown-view `404`. **Key tombstones are unchanged**: a
-  dropped key is refused for ever, and it was always the key rather than the number that repointed
-  a client cache (decision 0029) *(no longer true — superseded at r27, decision 0115; annotated
-  here 2026-09-01 because a reader meeting this entry first would take a stale one)*. The disclosure this closes is spec §9's own: with no position
-  served, a gate-filtered roster is a shorter list and nothing else, so Appendix C's **C27 is
-  deleted** and decision 0110 is superseded by 0113 — the register does not carry a row for a
-  channel that no longer exists. Design content did change in this revision, which is what the
-  ruling was; nothing else of §3.2 moved.
-- **r15 (2026-08-31)** — the gate is built, and spec §5's and §6's markers record it. `visibility`
-  is accepted on every surface that declares one and evaluated at authorise into a per-session
-  visible-view set, by the intersection semantics this document has specified since r1 — *not* the
-  conservative label join, whose required-set reading passes every principal on a disjunctive gate.
-  Three properties are structural rather than incidental, and each is written at its site: the set
-  is resolved **once**, over every view whatever the outcome, so the request path makes one
-  set-membership lookup and asks the plugin nothing; that lookup is made on **both** outcomes, so a
-  gate-failed name and a never-declared one cost the same work rather than merely reading the same;
-  and the acceptance check is the plugin call an item's label already gets at ingest, so a gate no
-  principal could satisfy is refused where its author can read the message instead of stored. A
-  view's gate is written twice — the roster record publishes it, the view descriptor is what the
-  evaluation reads — and a manifest whose two copies disagree refuses at open, which is the
-  fail-closed direction for the one disagreement that matters. Not moved, and stated rather than
-  assumed: the set is **fixed** for the session's life, so a view created since is a 404 until
-  re-authorisation (owner ruling, spec §6); ordinal gaps are **visible and not hidden** (spec §9,
-  decision 0110); and the control plane is ungated, holding the operator credential that writes the
-  roster. Appendix C's amendments for the gate are made — C11's precedent for `/v1/meta`'s view
-  fields, C4's closure for view existence; the ordinal gap's own accepted row (spec §11) is not,
-  and the table says so. No design content changed in this revision.
-- **r14 (2026-08-31)** — the write half is built, and the markers at spec §1, §3.2, §3.4 and §4
-  record it. `PUT`/`DELETE /control/views/{group}/{key}` create and drop a view of a declared
-  group; the roster's durable home is `SegmentsManifest.views`/`view_tombstones` (renamed
-  `dead_view_incarnations` at r27), carried forward
-  at every publication as `layer_tombstones` is, with the WAL's `ViewCreate`/`ViewDrop` replayed
-  over it at open; a created view answers a viewer verb empty — a view with no files now has an
-  empty row space rather than being absent from the bundle — and takes its first row space at the
-  next flush; the ingest join is spec §4's rule, with a joining row carrying geometry and nothing
-  else; and `delete_dangling` submits ordinary deletions on the deny lane, probe and submission in
-  one step on the executor. Three things are recorded rather than assumed, each at its marker: a
-  category-typed metadata name has no create that can satisfy it, the join's label and attribute
-  arms are exact only while the entity's own row is still buffered, and a dropped view's files are
-  reclaimed by the fold's omission rather than by a sweep, which no test drove until r21. Two defects the
-  work surfaced and fixed, both older than it: a group's view laid its flush and merge files down
-  at `views/<group>/<key>/` while naming them `views/<group>:<key>` in the manifest — every file
-  under the view unverifiable at the next open — and the bundle-wide watermark was `entity_hi + 1`
-  of whichever view flushed, which under several views regresses and is refused, leaving those rows
-  buffered for ever. No design content changed in this revision.
-- **r13 (2026-08-31)** — a group-scoped attribute answers filters, and spec §5's marker moves
-  from *on no serving surface* to *served, with three named gaps*. Built since r12: the family's
-  record in `MANIFEST.groups[..].scoped_scalars` — the group is where it belongs, beside the
-  ordinals a pin resolves against, `declared_scalars` being positional and having no slot for a
-  family; one column opened per view; `filter_operands` carrying the scope; and the resolution
-  this section specifies, in one place, over the same view namespace a request's own `view` goes
-  through. Evaluation is unchanged and that is the point: the scope decides which column file, and
-  a scoped leaf is answered by the family's ordinary scan under the candidate, its presence bitmap
-  for absence, and an entity bitmap the mask meets before any count — I2's argument untouched.
-  **Two refusals, deliberately different codes** (contracts §3.1's closed list): a bare leaf where
-  nothing decides is a `422` naming the group, since a leaf with no column to read is malformed
-  rather than a constraint; a pin naming no view of the group is the `404` an unknown view gets,
-  in the same detail shape, because that is the answer a gate-failed pin must take when spec §6
-  lands and the two must already be indistinguishable. Not moved: a **category** or **text** scoped
-  family, whose per-view postings nothing writes; **`render`**, which reaches no row's hot tail in
-  any view; and the **gate**, so no pin is filtered against a visible-view set — the site it will
-  be is named at the claim. No design content changed in this revision; the wire shape is contracts
-  §2.2/§3.2 r55.
-- **r12 (2026-08-31)** — the roster is served, and spec §1's and §3.2's markers record it. Built
-  since r10: `/v1/meta` publishes every view in roster order with its `group`, `key`, `ordinal` and
-  typed `metadata`, and a `groups` array giving each group's view ids in ordinal order; every view
-  of every group answers a viewer verb; and `<group>:#<ordinal>` resolves wherever a view id goes,
-  in one place both planes take, so an unknown name, an absent key and an ordinal no view holds are
-  one 404. The wire shape is contracts §3.2 r54. Not moved: creation and drop while the service
-  runs — no control route, no WAL create or tombstone record, no ordinal high-water across a flush
-  — and no gate (spec §6), so every declared view is reachable by every principal, which the served
-  roster says rather than pretends otherwise. **A group's `title` is on no surface**: no title
-  survives the build for any view either, so publishing a group's would be the only one on the
-  document. No design content changed in this revision.
-- **r11 (2026-08-31)** — the paged permutation is built, and spec §8's marker is discharged.
-  Every view's `permutation.bin` is a directory over 2¹⁶-entry pages with the payload holding only
-  the pages the view occupies; the representation stayed behind `Permutation`, so no consumer
-  outside `tessera-store` moved. The version field carries the refusal a `bundle_format` bump would
-  have, by owner direction. Two things are recorded rather than assumed: the saving is zero below
-  2¹⁶ entities, where one page covers the whole entity space, and the fold's transient scatter is
-  unchanged. No design content changed in this revision — contracts r53 carries the encoding.
-- **r10 (2026-08-31)** — the build is complete for a declaration, and the markers at spec §1, §5
-  and §7 record it. Built since r9: form B's selection (a view's rows picked out of a shared
-  points file by `fields.view`, with a stray key refused naming the roster); a roster read from a
-  `[view_group.views]` table, under the inline block's own rules; `extent = "auto"` on a group,
-  surveyed over every view's source and fitted once; a group-scoped attribute's column family at
-  `attrs/<column>/<group>/<key>/`, storage only; and layers over a group — a group name in `views`
-  expanded to its views, and a scoped layer's artifacts drawn each in its own view. Not moved, and
-  each refusing or absent by name: a group whose views are minted from a discriminator, a scoped
-  attribute with its own `source`, a scoped layer reusing one key in two views (the store keys an
-  artifact per `(layer, key)`), every serving surface for a scoped column, and the paged
-  permutation (spec §8), which r11 then built. No design content changed in this revision.
-- **r9 (2026-08-30)** — spec §7's two passes are implemented for the point half, and the markers
-  at spec §1, §7 and §8 record what did and did not move. `tessera build` materialises every
-  plain view and every inline-declared view of a group; `[defaults].allocation_view` is read and
-  refused absent; the label-agreement rule is a refusal naming the entity and the files, made
-  exact by a count identity rather than a hash; the roster is published in the manifest and
-  validated at open; `views/<group>/<key>/` is derived from the joined id by one function every
-  path consumer goes through. Not moved, and each refusing by name: a roster table, a
-  discriminator group, a `fields.view` selection, a group-scoped attribute's column family, a
-  layer over a group, and the paged permutation (spec §8) — the flat array is what a sparse view
-  is written as.
-- **r7 (2026-08-30)** — spec §2's extent move is implemented, and the marker inverted: the
-  bundle-level `Manifest.quantisation` is deleted, `ViewDescriptor` and each `/v1/meta` `views`
-  entry carry the frame, and a manifest whose view omits it refuses at open with no fallback
-  (contracts r52; decision 0040's ruling, unchanged since 2026-08-02). `bundle_format` did not
-  move, by owner direction. What the marker now says is what did *not* move: a shape publication
-  still canonicalises a layer's views against the first one's frame, which
-  `polygon-membership.md` §4.3 wants per view and which waits on a bundle carrying two. No
-  design content changed in this revision.
-- **r8 (2026-08-30)** — decision 0112 recorded (the anchor view orders a signature group's
-  ids); the extent examples corrected to the surface's own spelling and the `members`-group
-  roster contradiction settled the parser's way, both found by the build-surface implementation.
-- **r6 (2026-08-30)** — the two-lens review. Security found one fail-open (the pinned leaf and
-  `filter_operands` escaping the gate — closed, spec §5), one disclosure (the ordinal gap —
-  accepted as a register row, spec §9), and the session/creation contradiction (ruled:
-  re-authorisation, spec §6, with roster immutability); it confirmed the intersection-semantics
-  gate, the join rule's byte-match arms, I7/0008 and I10 under attack. Implementability found
-  the join rule missing the commit window (fixed, spec §4), the allocation key ungrounded over
-  several sources (now a boxed proposal, spec §7), the roster with no durable home (fixed —
-  segments manifest, spec §3.2), the id↔path mapping unspecified (fixed, spec §3.2), the
-  keyless view (removed: key required), the metadata-name collision (reserved names, spec §3.2)
-  and the unassigned charset refusal (assigned, spec §3.2). Promoted to Normative on
-  disposition.
-- **r5 (2026-08-30)** — rewritten against the built system. Views separated from signature
-  grouping; view groups with two roster forms, shared views, attribute and layer scope added; the ingest map withdrawn in favour of
-  per-batch addressing; runtime creation of plain views withdrawn; identity tiers and roll-mode
-  rotation moved out. Not yet reviewed.
-- **r1–r4 (2026-08-01 → 2026-08-18)** — three independent reviews (performance, security,
-  maintainability) of the joint views-and-tables design; the accepted findings are carried where
-  they survive (the gate's intersection semantics, the mandatory idset on writes, the permutation
-  budget) and the rest is in git at `ead7e906`. r4 was the slice→view rename.

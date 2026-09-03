@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-26 · **Status:** Settled (owner ruling — D10 of
 [`client-components.md`](../design/client-components.md) §3, ruled option (a); ⊘ the server change
-is not built, tracked as S1 in [`client-delivery.md`](../client-delivery.md)).
+is not built, tracked as S1 in client-delivery.md).
 
 ## Context
 

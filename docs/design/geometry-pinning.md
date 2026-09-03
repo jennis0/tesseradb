@@ -152,7 +152,7 @@ Two consequences:
 
 - A staleness signal that distinguishes prefixes distinguishes the only boundary that matters.
 - **A Morton prefix is a permanently stable address.** An earlier draft carried re-quantisation as
-  the one case where it stops being one; [decision 0040](../decisions/0040-quantisation-is-slice-scoped-index-config.md)
+  the one case where it stops being one; decision 0040
   removes the case. Quantisation is view-scoped index configuration, immutable at runtime, and
   compaction carries each view's forward byte-for-byte — re-quantisation is not one of the
   reorganisations compaction does. So a client never has to be told to discard cell identifiers,
@@ -359,45 +359,3 @@ security one, and it is recorded there as such.
 
 This is what makes spec §7 implementable as one comparison against the live generation rather than
 as a per-session diff, and it is why C15 needs no mitigation beyond an accurate description.
-
-## Appendix R — Review record
-
-**r1 (2026-08-02) — drafted.**
-
-**r2 (2026-08-02) — three independent reviews: invariants, implementability, client contract.**
-The central argument survived all three. `client-interaction.md` §6.2 in fact states the conclusion
-more definitively than the draft did — its tier table has the pin advancing on compaction and
-voiding *"nothing"* for a client.
-
-**r3 (2026-08-03) — disposition and sign-off.** Six corrections, all to the document rather than to
-the design:
-
-1. §4's mechanism was false — row ids are *not* immutable within a prefix, because merge permutes
-   row space within the merged span. Replaced and inverted into the rule that no row-space artefact
-   may key on the prefix.
-2. §10's headline benefit was false. The binding floor on `flush_max_age_secs` is the
-   row-projection rebuild, not the pin TTL. §0's motivation rewritten to the honest case: mapped
-   bytes and lines of mechanism.
-3. §5's re-quantisation caveat is gone under decision 0040, and §12's superseded-prefix obligation
-   with it.
-4. §14 listed five documents; the real set is ten. Five added, and the `x-tessera-pin` citation
-   corrected from contracts §3.4 to §3.1/§3.2.
-5. The owner's leak ruling recorded in §14 and here.
-6. C15's mitigation column corrected — `PinId` is plaintext, identical for every principal.
-
-**One finding verified and rejected.** The client reviewer argued the real cross-request dependency
-is frame assembly: a tile-addressed client issues one request per tile, and spec §2 obliges it to
-*"render only responses sharing one view key"*. Checked against `client-interaction.md`: §6.2 makes
-content version (flush) and pin/segment-set version (compaction) **separate tiers**, and §6.1
-assigns frame assembly to a client-side replica store — *"Fetch behind the current display and flip
-atomically when the visible tiles and their counts are complete"* — with rule 2 going further, that
-*"auto-flipping is the wrong default"*. So the pin is not the mechanism frame assembly rests on,
-and removing it does not remove one. The §6.2 inconsistency the finding surfaced on the way (the
-tier table assumes `segments_version` moves only on compaction; flush moves it every tick) is real
-and is fixed there.
-
-**The fallback that was not taken, named so it is not rediscovered as novel.** The reviewer offered
-a **frame-window retention** — prefix-scoped, depth 1–2, seconds rather than 300 s — as a middle
-path keeping most of the stability benefit at a fraction of the cost. It was put to the owner
-alongside full deletion and full deletion was chosen. If spec §11's objections turn out to bite,
-this is the cheaper thing to reintroduce, and it is cheaper than what was removed.

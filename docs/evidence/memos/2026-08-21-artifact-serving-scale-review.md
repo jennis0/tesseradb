@@ -6,9 +6,9 @@ account of what was attacked and what survived.
 **Reviewed:** [`artifact-serving-at-scale.md`](../../design/artifact-serving-at-scale.md) (the
 design), [`2026-08-21-artifact-layout-selection.md`](2026-08-21-artifact-layout-selection.md) (the
 selection surface), and decisions
-[0092](../../decisions/0092-the-build-reports-a-layers-shape-and-no-layer-carries-a-declared-bound.md),
-[0093](../../decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md) and
-[0094](../../decisions/0094-the-serving-layout-is-chosen-at-build-and-re-evaluated-at-the-fold.md),
+0092,
+0093 and
+0094,
 all one day old and none of it built.
 **Method:** three independent reviewers, distinct lenses — disclosure, correctness and lifecycle,
 claims audit — none seeing another's report, each briefed to refute rather than approve. Every

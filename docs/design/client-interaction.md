@@ -1498,7 +1498,7 @@ archive is forbidden.*
 ## 16. Provenance
 
 **r2 (2026-08-01) applies two decisions and changes no mechanism.** Decision
-[0029](../decisions/0029-view-key.md) names the composite this document is largely about: the
+0029 names the composite this document is largely about: the
 coordinate **(mask, overlay version, view, *k*, idset)** within which `served(viewport)` is
 stable was a fourth thing called "epoch", and is now the **view key** (§6). *Key* rather than
 *state* because the viewport is deliberately **not** one of its components — a served viewport is

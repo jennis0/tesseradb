@@ -490,22 +490,3 @@ to land before a published client closes the `api_version = 1` window.
 Elision is sequenced behind its own measurement. Its recorded value is policy-dependent — small at
 the current mark target, large at big mark budgets — so the mark-budget sweep decides it rather than
 an argument.
-
-## Appendix R — Review record
-
-**r2 (2026-08-08) — the built half folded back in.** Three findings from implementing it, each of
-which changed the document rather than the code: emptiness must be cached before anything else or a
-mostly-empty viewport re-asks forever (§3); the per-request floor is a warm-cache figure and reads
-as an assurance without that condition (§1); and anticipation needs hysteresis rather than an
-equality or containment guard, because a renderer's view-state events drift rather than repeat
-(§13). The last was found by measurement, not review — seven rings per idle pause, in code whose
-unit tests all passed.
-
-**r1 (2026-08-08) — drafted**, from `caching.md` §7's mechanism and `client-interaction.md` §5's
-declarations, against three independent adversarial reviews of the implementation plan (performance,
-invariants, interface). Four of their findings changed the design rather than the prose: the content
-coordinate keys on the watermark rather than the segment-set version, so a compaction no longer voids
-every declaration; the key is minted from the geometry served rather than the generation snapshot,
-closing a hole a stale-geometry serve would otherwise open; cuts and counts are separated, because a
-count does not compose parent-granularly; and the reachability of a zero cap removed a proposed
-encoding that read a zero served count as a skip marker.

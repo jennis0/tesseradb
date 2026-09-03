@@ -3,7 +3,7 @@
 //!
 //! # Why there is a battery mode rather than only a random sweep
 //!
-//! `docs/evidence/memos/2026-07-30-tail-attribution.md` showed that a uniform-random p99 mostly
+//! docs/evidence/memos/2026-07-30-tail-attribution.md showed that a uniform-random p99 mostly
 //! measures the *input distribution*: Sigma-visible spans 1 to 1.4x10^8 across random bboxes, and
 //! repeating one fixed viewport collapsed p99-p50 from 47.4 ms to 5.1 ms. Its recommendation was
 //! a fixed representative-viewport battery chosen across the corpus's actual density spectrum,

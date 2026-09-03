@@ -1,159 +1,46 @@
 # How to write here
 
-This governs everything in `docs/` and every code comment. The audience for the design corpus is
-a competent technical reader who has not worked on Tessera: an assurer checking the security
-argument, an engineer evaluating the approach, a contributor arriving cold. Write for them.
+This governs everything in `docs/` and every code comment. Write for a competent technical reader who has not worked on Tessera: an assessor checking the security argument, an engineer evaluating the approach, a contributor arriving cold.
 
-## The six rules
+## Rules
 
-### 1. Describe the system, not its construction
+1. **Describe the system, not its history.** Say what it is and why. Do not say which revision changed it, who found it in review, or what it used to be. History lives in git and in `docs/decisions/`. Do not use phase or task numbers, "currently" or "for now".
 
-Write what the system **is** and **why it is that way**. Not how it came to be that way.
+   > ✗ "r3 replaced r1's retirement stamp, because for suppressions that was fail-open."
+   >
+   > ✓ "A suppression is removed only when it is lifted. A retirement stamp would let it expire and re-expose the item."
 
-A reader wants to know that a suppression retires only by its unsuppress while a deletion retires
-only at the compaction fold that executes it, and why those differ. They do not want to know that
-this was revision 3's correction to revision 1, that it was found in review, or which phase built
-it.
+2. **Mark what is not built, at the claim.** Present tense about absent machinery reads as an assurance. Write "Not built yet:" followed by what happens instead and whether that is safe. Put it where the claim is made, not only in a preamble.
 
-On the rare occasions that history is worth keeping, it belongs in `docs/decisions/` and in git — not
-interleaved with the explanation. A document whose paragraphs are half archaeology forces every
-reader to separate the two, every time.
+3. **Each paragraph stands alone.** Expand an acronym or project term on first use in each document. Say what a cross-reference is for ("the rejected alternative is in §7.2"), and do not use one in place of the text.
 
-This applies to the revision trail too. Appendix R exists so a reviewer can see what was already
-attacked; it is a few lines per revision, collapsing as revisions age. A design document that is
-mostly its own history has inverted the ratio and needs the history cut, not the design expanded.
+4. **Cover the substance and stop.** No introduction restating the title, no summary restating the body, no alternatives nobody proposed. If a reader cannot get a paragraph at reading speed, once, it is either padded or compressed.
 
-> ✗ "r3 replaced r1's blanket retirement stamp, because for suppressions that was fail-open. §5.1
-> was then amended in r4 once flush became the visibility mechanism."
->
-> ✓ "A suppression retires only when it is lifted. Assigning it a retirement stamp — as deletion
-> denies have — would eventually expire the entry and make the item visible again."
+5. **Emphasis is rare.** Bold only for a defined term at its definition, or at the head of a list item. Do not call a design choice novel or key. Give a mechanism the space its consequences warrant, not the space it took to get right.
 
-The second sentence keeps the whole reason. It just does not narrate.
+6. **Draw structures, flows and state machines.** Mermaid in a fenced block with a caption. A diagram that duplicates a paragraph is padding; one that replaces it is right. A three-way comparison is a table.
 
-Corollary: avoid phase numbers, task numbers, and "currently"/"for now" in the corpus. If
-something is not built yet, mark it — see below — rather than writing in a present tense that
-quietly means "eventually".
+7. **Say what is true, precisely.** Distinguish measured from modelled from assumed, and say which. Record negative results ("F3: not confirmed by measurement"). Say what something does not do where the scope is contestable. Argue rather than assert: a reader who disagrees should be able to find the reason.
 
-#### Marking what is specified but not built
+8. **British spelling**, and the established security vocabulary: conservative label join, boolean expression indexing, partial evaluation, Non-Truman model, compartmented MAC.
 
-The corpus specifies a target; the code is behind it in places. Present tense about absent
-machinery is the most damaging error available here, because on a security property it reads as
-an assurance. Mark it **at the claim**, never only in a preamble the reader has forgotten by §5:
+## Register
 
-> **⊘ Specified, not implemented.** One sentence on what exists instead, and what the reader must
-> not assume meanwhile.
+Plain technical English: subject, verb, object. Short sentences, one idea each. Do not write any of the following.
 
-Rules for the marker:
-
-- It goes immediately after the claim it qualifies — same paragraph or the line below.
-- It says what *is* true now. "Not implemented" alone leaves the reader unable to reason about
-  the system they actually have.
-- Where the unbuilt thing is a **guarantee**, it also says what the current behaviour is instead,
-  and whether that is safe. "Safe today only because nothing retires at all" is the useful form.
-- Every marker is counted per document in `docs/design/inventory.md`, which is generated, so the set is countable without anyone maintaining a list by hand.
-
-Use **⊘ Partially implemented** where some of a mechanism exists, and name which part.
-
-### 2. A paragraph should be readable on its own
-
-A reader should not need three other documents open to parse one paragraph.
-
-- **Expand an acronym or a project term on first use in each document.** Not once across the
-  corpus — once per document. `M_auth`, `I7`, `C4`, DNF, LOD, *conservative label join*: each
-  gets a clause the first time it appears, even though it is defined properly elsewhere.
-- **Say what a cross-reference is for.** "See §7.2" tells the reader nothing about whether they
-  need to go. "The alternative route, and why it was rejected, is in §7.2" tells them.
-- Cross-references support the text; they do not substitute for it.
-
-### 3. Calibrate density, and length
-
-Two failures, equally common. **Padding**: restating the heading, narrating the structure
-("in this section we will…"), or three sentences where the second was the point. **Compression**:
-a paragraph so dense the reader has to decompress it — clauses stacked with em-dashes, three
-distinct claims sharing one sentence.
-
-The test is whether a competent reader gets it at reading speed, once.
-
-Length is governed by the same test at document scale. Cover the substance and stop. A document
-does not need an introduction restating its title, a summary restating its body, a section for
-every heading a similar document happened to have, or an enumeration of alternatives nobody
-proposed. Most design documents here are a few hundred lines. Two run past a thousand; they
-earned it by specifying the whole system, and are not a model to imitate. If a draft has grown
-past what it needs, the fix is to cut it before review, not to explain the length.
-
-### 4. Proportion
-
-Emphasis is a budget. If everything is load-bearing, critical and non-negotiable, the reader
-cannot tell which things actually are — and this corpus has a small number of things that
-genuinely are.
-
-- Reserve **bold** for the sentence a skimming reader must not miss. A paragraph with four bold
-  phrases has none. This governs corpus prose. Bold at the head of a list item is a different
-  construction — a handle the reader skips by — and is not covered by this rule.
-- Do not call a reasonable design choice groundbreaking, novel, or the key insight. Say what it
-  does and let it be judged.
-- Scale the space to the importance. A mechanism that took a week to get right but is
-  three lines of consequence gets three lines.
-
-### 5. Use a diagram when it beats prose
-
-Reach for one when the subject is a **structure, a flow, or a state machine** — anything the
-reader would otherwise reconstruct in their head from a paragraph. Data layout, request paths,
-the generation/pin lifecycle, mask composition, the retirement rules: all clearer drawn.
-
-Mermaid, in a fenced ```mermaid block, so it stays diffable and renders on GitHub. Give it a
-caption saying what it shows. A diagram that duplicates an adjacent paragraph is padding; a
-diagram that replaces one is the point.
-
-Tables count. A three-way comparison is a table, not three paragraphs.
-
-### 6. Say what is true, precisely
-
-- **Distinguish measured from modelled from assumed**, and say which. `clients/ts/core/src/coords.ts`
-  writes "Measured, not assumed" and names the test that measured it. That is the form.
-- **Record negative results.** `crates/tessera-bench/src/arms/ingest.rs` says
-  *"F3: NOT confirmed by measurement — do not claim it is."* A refuted hypothesis is a result,
-  and it stops the idea coming back.
-- **Distinguish specified from implemented.** The marker convention, and why present tense about
-  absent machinery is the most damaging error available here, is under rule 1.
-- **Argue, do not assert.** A reader who disagrees should be able to find the reason and attack
-  it. `crates/tessera-engine/src/select.rs` spends fifty lines on "why there is no candidate-list
-  route" because the rejected alternative looks obviously better and will be proposed again.
-- **Say what something deliberately does not do**, wherever the scope is contestable.
-- **British spelling**: authorisation, visualisation, licence, behaviour.
-- **Use the established security vocabulary** rather than inventing terms: *conservative label
-  join*, *boolean expression indexing*, *partial evaluation*, *Non-Truman model*,
-  *compartmented MAC*. Each carries a literature a reviewer will find anyway.
+- **Aphorisms or slogans as rules.** Write the rule: "The service does not refuse a deny because it is busy."
+- **Antithesis.** "Not X, but Y", "X, not Y", "this is not X; it is Y". Say what it is.
+- **Metaphor as jargon.** load-bearing, discharges, obligation, owes, the lane, the seam, the frontier, the gate, the fold, the spine, rides, machinery. Use the technical word. "Fail-open" and "fail-closed" describe access decisions only.
+- **Abstract nouns for actions.** "when the entry is removed", not "the retirement position of the entry".
+- **Em-dashes and stacked clauses.** If a clause matters, make it a sentence. If not, cut it.
+- **Justifying a rule by its failure mode or importance.** "which is the point", "by construction", "deliberately", "importantly", "note that", "the failure this exists to prevent". Give the reason once, in a clause.
+- **Anecdotes as justification.** "Caught in review twice", "shipped three defects". Keep the reason, drop the story.
+- **Symmetry for effect.** Paired clauses, triads, mirrored sentences.
+- **Absolutes and drama.** "silently", "quietly", "catastrophic", "never", "always", unless the claim is absolute.
+- **Hedging.** "arguably", "in practice", "generally", "tends to". Say what is true or leave it out.
+- **Pronoun-led summaries.** Name the subject.
+- **Instructions disguised as observations about the reader.** Say what to do.
 
 ## Code comments
 
-The same rules, plus:
-
-**Module docs carry the design argument, and run long here where that is warranted.** A long `//!`
-is right when the module upholds an invariant in a way the code does not show, when an obvious
-construction was rejected for a non-obvious reason, when a measurement drove a shape that
-otherwise looks arbitrary, or when something is duplicated deliberately and a reader would
-otherwise "fix" it. Absent one of those, a few lines saying what the module is for is the whole
-job. Length follows from having something to say; it is not a target, and restating the code is
-never warranted.
-
-**Comments record decisions and evidence, not backlog.** There are essentially no `TODO` or
-`FIXME` markers here, deliberately. Open work is an issue, where it can be found and closed.
-
-**State each rule once, where it belongs.** `crates/tessera-engine/src/geometry.rs` states the
-within-request half of I11 under a heading saying so, and every other site refers to it rather than
-restating it. A rule repeated in five places is four chances to disagree with yourself.
-
-**Prefer stable citations.** `§4`, `contracts §2.5` survive edits. `file.rs:184` does not — it
-drifts on any change above the cited line, and a stale one has already stranded a worker
-mid-task. `scripts/check-doc-links.py` warns on the ones that have visibly rotted.
-
-**State load-bearing assumptions at the site.** If the assumption is load-bearing, prefer a test;
-failing that an assertion; failing that, say so and say why neither was possible.
-
-## The test
-
-Before committing prose, ask two questions. **Could a reader who disagrees find the argument and
-attack it?** If not, you asserted. **Could a reader who has never seen this system follow the
-paragraph without opening another document?** If not, you wrote for yourself.
+The same rules. A module doc carries the design argument when the module upholds an invariant the code does not show, rejects an obvious construction for a non-obvious reason, or has a shape a measurement drove; otherwise a few lines on what the module is for. State a rule once, where it belongs, and refer to it elsewhere. Cite `§4` or `contracts §2.5`, not `file.rs:184`. No `TODO` or `FIXME`; open work is an issue.

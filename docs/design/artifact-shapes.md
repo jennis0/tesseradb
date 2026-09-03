@@ -15,7 +15,7 @@ It does not own the declaration syntax (`annotations.md` §4.2), the wire column
 **Reads with:** [`annotations.md`](annotations.md) §4.2 (what a layer declares and the closure
 rule); [`contracts.md`](contracts.md) §3.2 item 4 (the artifacts frame);
 [`architecture.md`](architecture.md) §4 (**I2**) and Appendix C's head note (the inclusion test §10
-applies); [decision 0099](../decisions/0099-the-map-follows-datamapplot-and-cluster-colour-is-exact-only.md)
+applies); decision 0099
 (exact only); [`2026-08-26-concave-hulls.md`](../evidence/memos/2026-08-26-concave-hulls.md) (what
 the single-ring shape cost, before this).
 
@@ -146,7 +146,7 @@ not a thing a wire-size guard should be allowed to decide.
 > for.** The owner: *"it really doesn't matter if a small number of points are outside the hull, so
 > long as it's showing the overall shape correctly."* A shape is a **summary of where a cluster is**,
 > not a per-point assertion — that is what the membership column is, and what
-> [decision 0099](../decisions/0099-the-map-follows-datamapplot-and-cluster-colour-is-exact-only.md)
+> decision 0099
 > governs. A member drawn a little outside its own outline is an imprecise summary; it asserts
 > nothing false about that member and nothing at all about members the viewer cannot see, so it is
 > not a disclosure question and it was wrong to treat it as one. What the test still forbids is a
@@ -188,7 +188,7 @@ whose fill is 1.000 by construction, it costs fewer bytes than the dig, and it y
 holes without being asked. It fails on containment: over `clusters/hdbscan` it leaves 24 members
 outside their own artifact's shape (2 of 197 artifacts), and on the k-means control 137 (4 of 64). A
 member outside its artifact's shape is a point the client would draw in the cluster's colour,
-outside the cluster's outline — the display contradiction [decision 0099](../decisions/0099-the-map-follows-datamapplot-and-cluster-colour-is-exact-only.md)'s
+outside the cluster's outline — the display contradiction decision 0099's
 *exact only* exists to prevent. It is retained as the fill denominator, not as a candidate.
 
 **The k-NN hull terminates when it feels like it.** The Moreira–Santos walk restarts with `k + 1`
@@ -363,7 +363,7 @@ holes would therefore mean changing the family, not adding a column.
 
 Nothing would consume them. A hole is a claim — *no members here* — of exactly the same kind as the
 outer boundary and exactly as exact, so a client could honour it. But no client tests a point
-against a served shape: [decision 0099](../decisions/0099-the-map-follows-datamapplot-and-cluster-colour-is-exact-only.md)
+against a served shape: decision 0099
 forbids the geometric guess, and `extentOf` reads the served `box`. A hole would be drawn and never
 used, and it would need a third level of nesting on the wire and an even-odd rule in the pick path
 to be drawn correctly at all.
@@ -789,9 +789,9 @@ entitled to it.
 declare; if a second is ever added, the choice belongs to the layer author at declaration, because
 the right family follows the clustering that produced the layer, which is what the author knows and
 neither the service nor the viewer can see. The service may *measure* a layer's shape and report
-what it found, in the way [decision 0092](../decisions/0092-the-build-reports-a-layers-shape-and-no-layer-carries-a-declared-bound.md)
+what it found, in the way decision 0092
 has the build report a layer's shape without binding anything to it. It must not flip one at a fold:
-[decision 0094](../decisions/0094-the-serving-layout-is-chosen-at-build-and-re-evaluated-at-the-fold.md)'s
+decision 0094's
 automatic-with-override shape does not transfer, because a serving layout puts nothing on the wire
 and both layouts answer identically, where a shape family *is* the bytes of `shape_x` and `shape_y`.
 
@@ -1026,187 +1026,3 @@ to, can end up knowing something about data they were not served.*
 
 **No register row, and this note is where that is recorded** — Appendix C's head note asks that a
 check which found nothing sit beside the mechanism it checked rather than in the register.
-
-## Appendix R — Review trail
-
-- **r5 — 2026-08-28. The derivation is made cheap, twice over, and the family question is
-  re-measured on what it now costs.** Deriving one shape was ~10 ms and linear in the visible
-  membership, when what it produces is bounded by the drawing.
-  **The input is reduced before the shape is computed** (§7.1): one real member per occupied cell
-  of a 1,024-across grid over the artifact's own extent, which is a quantisation and not a sample.
-  The whole layer's digging goes 1,906 → 903 ms and the corpus root 167 → 39 ms. Two things are
-  recorded rather than smoothed over. **α does not survive a naive reduction** — it follows the
-  sampling density, and over the representatives alone it moved by up to 3.6× and changed a shape
-  rather than blurring it; carrying every possible convex-hull vertex through the reduction makes it
-  exact instead. And **§1's containment is given up**: 1,965 member positions of 12.8M now sit
-  outside their own shape, by at most a cell, which is admissible only because of §4's ruling and
-  which §1 now quantifies rather than promising the opposite.
-  **Derived geometry is held per principal** (§7.2), keyed so that no entry is ever shared across
-  principals — a hover on the corpus root is 70 ms cold and 0.48 ms warm, and a pan of twelve
-  viewports with three hovers each is 220 ms out and 27 ms back.
-  **Ruling A is not reopened, and §4.2 is the number that would reopen it.** On the reduced input
-  the triangulated route is 1.77× the dig over the layer rather than 3.44×, and the corpus root's
-  triangulated shape is **121 ms** rather than 2,017 ms — so *"two seconds is not a hover"*, which
-  is what r4's re-ruling rested on, is no longer the argument. The dig is still 3.6× cheaper at the
-  median and 7.4× at the worst, and whether that is enough is the owner's to rule.
-  The derivation acquires no `rayon` and must not: parallelism stays at the request level so that
-  concurrent requests use the cores rather than one request oversubscribing them (owner ruling).
-
-- **r1** — Drafted 2026-08-27 as an investigation from
-  [`probes/2026-08-27-artifact-shapes/`](../../probes/2026-08-27-artifact-shapes/), with five open
-  rulings. Three measurements shaped it: the built shape's limit is its **vertex budget** and not
-  the flush-flank case its own documentation records (108 of 197 artifacts stop at the budget with a
-  bridge live, against 13 refused digs over the whole layer); **multi-modality is rare on this layer
-  and mask-stable** (3 of 197 at full membership, flat under uniform random masks down to 0.2%);
-  and the **χ-shape reaches the dig's best fidelity for 37% of its wire**.
-- **r2 — 2026-08-28. Promoted, and the shape changed.** Six rulings, in the order they fell.
-  **D (owner, 2026-08-27): several rings**, overriding r1's recommendation, on the ground that the
-  measurement answered the wrong question — the wire is not shaped by one corpus's statistics, and a
-  family whose failure mode is lying about the ground is the wrong default whatever its frequency
-  (§3). **C: the engine does not acquire a triangulation** — measured Rust against Rust, 1.4–1.5 s
-  for the 2.4M-member artifact's Delaunay against 0.16 s for the whole dig, 7.6–8.1× over the layer
-  (§4.1). **A: the dig is kept**, which C forces; the χ-shape's 24% fewer bytes and 7% tighter area
-  are the stated price. **B: the budget stays 64**, now per artifact and shared across rings, so
-  several groups do not multiply the wire. **E: nobody chooses** — one family leaves nothing to
-  declare, and the rule that survives is that no request field names a family or an α (§8).
-  **F (new): no holes** — the construction cannot produce one, nothing would consume one under
-  decision 0099, and the residual is an annulus drawn as a disk (§6). Two findings are recorded as
-  negative results rather than smoothed over: **a member may lie inside a second ring of its own
-  artifact** where one group wraps around another (24 positions on `clusters/kmeans`, 0 on three
-  other layers), and **grid grouping is not exact** — it agrees with single-linkage at α on 192 of
-  197 artifacts and coarsens the rest, and no grid can converge on exactness (§5).
-- **r3 — 2026-08-28. Ruling B reopened on fresh measurement and settled the other way: the budget
-  is 2,048, not 64.** The multi-ring grouping landed after r2's figures were taken, and a budget
-  shared across an artifact's rings does not buy what a single ring's did, so the sweep was re-run
-  on the built shape over three layers (§8 B). It found the cap doing the job B itself says it must
-  not: 108 of 197, 34 of 64 and 100 of 574 artifacts ran out of budget with a bridging edge still
-  live, which is why a shape rounded at the client still failed to follow its members. The dig
-  **terminates on its own** at 732, 833 and 197 digs, and 2,048 is 2.5× the largest of those, so
-  the cap is now a guard on the wire rather than a control on the shape — the number is chosen from
-  where the digging stops, not from an area curve, which no longer has a knee. Nothing else moved:
-  family, grouping, α and the wire's shape are r2's.
-  Three consequences are recorded rather than smoothed over. The wire roughly doubles — a real
-  `k = 0` artifacts response for `clusters/hdbscan` goes 130,471 → 262,055 bytes, hull columns 79%
-  → 88% of it — and derivation over that layer at full membership goes 0.91 → 1.91 s. **Ruling C's
-  margin narrowed from 7.6–8.1× to 3.2×**, because half of it was the old budget; C was not
-  re-litigated, and the χ-shape's advantage is now 67% fewer hull bytes rather than 24%, while its
-  area is no longer the tighter of the two (0.789 against the dig's 0.771). And §2's fill and
-  overlap figures were measured at 64 and are left standing as a **lower bound**, marked at the
-  claim, because re-measuring fill needs the probe's α-complex and no ruling turned on them.
-- **r4 — 2026-08-28. The shape is served where it is drawn, the family is re-ruled at that scale,
-  and the drawn ring is a spline.** Two things forced it. The owner ruled (§4's head) that
-  containment is not required, which re-admits the α-complex and spline smoothing; and a
-  measurement found the hull was **92% of a `k = 0` artifacts request** — 2.03 s for
-  `clusters/hdbscan`'s 197 shapes against 0.07 s for a layer declaring none — while the client
-  draws **one**.
-  **C (new): `/v1/viewport` carries `computed`** (§8 C), a narrowing of each layer's own
-  declaration and never a widening of it. The request above is now **164 ms and 26 KB**, and
-  `clusters/toponymy` at every level 803 ms → 81 ms. It is not the dialable family §8 refuses: a
-  family would let a caller ask the same members a different question, where this asks strictly
-  fewer of the same ones.
-  **A re-ruled, and the answer did not move**: at one shape per request the χ-shape's 67% fewer
-  hull bytes is worth about 450 bytes on the one shape drawn, while the triangulation it needs is
-  3.7× the dig at the median and 11.2× at worst — 2.11 s against 0.21 s on the corpus root, which
-  is hovered like any other artifact. The α-complex and the χ-shape share that triangulation (76%
-  of the route's time), so the re-admission changes nothing in the comparison. The dig keeps the
-  job, now on interaction latency rather than on layer-wide cost.
-  **Smoothing landed client-side** (§9): a periodic uniform cubic B-spline through the served
-  vertices, DataMapPlot's construction, replacing the containment-preserving corner cut that
-  refused to round a reflex corner. The served ring is unchanged and is what every containment
-  argument and the pick still read; the drawn curve leaves it by at most a third of the longest
-  adjacent edge.
-  One consequence is recorded rather than smoothed over: **a hover is resolved against the `box`
-  until the shape arrives**, so at rest the map's hover index is rectangles. Depth, the smaller
-  box and the mark's own membership column separate them, and the index is rebuilt on the true
-  shape when it lands — 2–5 ms for an ordinary cluster, 188 ms for the corpus root.
-- **r7 — 2026-08-28. The per-member passes, at the cost of one traversal each, and the shapes
-  proved unchanged rather than argued to be.** r6 profiled the derivation and found the per-member
-  work a fifth of it; this took that fifth apart without touching the dig, the family, α, the
-  budget, the binning resolution or the 75,000-member floor.
-  **The gather reads the mask a block of rows at a time and the block as its runs** (§7.3): the
-  bitmap's iterator crosses an FFI boundary the compiler cannot inline through, against a body of
-  two indexed loads and a bit permutation, so the call was a third of the pass. 109 → 57 ms over the
-  layer, 28 → 18 on the corpus root.
-  **The fold reads a cell index and nothing else**, the cell being the top bits of a member's
-  position on both axes; the interleaved key, the cell centre and the squared distance are computed
-  per *cell* and only where a cell has a choice to make — not for a cell of one member, and not at
-  all for an artifact the occupancy test declines, which a run count answers exactly wherever the
-  runs ascend. A run went from 32 bytes to one `u32`, the representatives became the vector the
-  candidates are appended to, and a cell is tested against the octagon at one corner rather than
-  four. 95 → 79 ms.
-  **`compute` traverses the gathered positions once**, not three times: the mean and the extremes
-  come off one pass and the box that pass produces is the box the binning grid is scaled from. The
-  whole derivation is 991 → 913 ms, and a layer declaring no hull 120 → 67 ms — the case this helps
-  most, and the one the owner's target is measured against.
-  **The purity is the deliverable and it is tested both ways.** `the_reduction_is_the_definition`
-  derives all 197 artifacts through the engine and through an oracle written from §7.1 that shares
-  no code with it, and requires the representative sets to be equal and the rings byte-identical;
-  it passes against this implementation and against the one it replaced. Every served figure —
-  26,740 vertices, 215 rings, 1,809 members outside their own shape, the area ratios — is unmoved.
-  No `rayon`, per the standing ruling.
-
-- **r6 — 2026-08-28. What the derivation's time is actually made of, and the reduction reaches the
-  artifacts it is for.** The brief this answered assumed the per-member scan dominated. Profiled
-  stage by stage (§7.3) it is a fifth of the derivation and the dig is three quarters, so the work
-  was re-scoped to the two things that could move without touching the family.
-  **The gather resolves a segment once per stretch of visible rows rather than once per row**
-  (170 → 106 ms), which is the row-space property — rows are Morton rank — paying as locality.
-  **The occupied cells are folded out of runs rather than binned into a dense grid** (§7.1): the
-  grid is anchored at the corpus origin, so a cell is a Morton block and its members arrive
-  consecutively, and the octagon that keeps α exact is found over cells rather than over members.
-  Three alternative routes to the same cells were measured and lost, the jump-per-cell one that the
-  brief proposed included, and §7.3 records the crossover: it needs a few tens of members to a cell
-  and this corpus has 2.5, one member to a Morton cell.
-  **The reduction gained a 75,000-member floor**, because without one it reached small artifacts and
-  merged α-groups — 45 of `clusters/kmeans`'s 190 rings — which §3 exists to refuse. Above the floor
-  every fidelity column improved against r5: 1,965 → 1,809 members outside their own shape, worst
-  artifact 0.09% → 0.083%, worst area 0.988 → 0.996, worst departure 4.4% → 3.5% of an artifact's
-  extent, α exact as before. The 197-shape request is 1,053 → 964 ms cold, 3 ms warm.
-  **The owner's target is not reached and §7.3 says so at the claim**: a layer declaring no hull
-  costs 59 ms on this bundle. Three quarters of the 964 ms is the dig, which is §8 B's and §4's
-  ground rather than this section's.
-
-- **r7 — 2026-08-28. The dig is indexed, and the stopping rule that was meant to go with it is
-  measured and not served.** r6 left three quarters of the derivation in the dig and named it §8 B's
-  ground. It was not: half of it was a linear scan that an index removes without touching the family,
-  the budget or a single served vertex.
-  **The profile inside the dig contradicted the brief it was taken under.** The `O(V)` admissibility
-  check, the obvious suspect, is 57 ms of the layer's 775; the candidate search is 455 ms (§7.4).
-  **The candidate search now descends a Morton-ordered tree of boxes over the buckets**, best-first,
-  retiring a box whose best corner fails any of the three conditions a candidate must meet. The two
-  projection conditions are what make it work — bounding on distance to the bridge's line alone
-  leaves 428 ms of the original 455, and with the strip it is 87 ms — and Morton order is what makes
-  a range of buckets a compact region rather than a strip across the grid. The admissibility check
-  keeps its full pass behind a bounding box, 57 → 7 ms.
-  **Both are filters over an exhaustive answer and both are held to an oracle** written from the
-  definition, because the dug triangle is empty only if the candidate is the true minimiser: an index
-  returning a nearly-nearest member would break §1 silently and pass every timing test. The ring sets
-  are **byte-identical over 2,321 artifacts**, and so are they against `main` after the merge below.
-  The layer's shape construction is 760 → 373 ms, the derivation 912 → 525 ms, and the 197-shape
-  request **905 → 519 ms** cold against a control of 58 ms — measured with a server from each side
-  of the change running side by side and the requests alternated, so the control reads identically
-  on both.
-  **The stopping rule is measured and neither form is served** (§7.5), and the first is a negative
-  result worth keeping: refusing a bridge shorter than a binning cell **cannot fire**, because the
-  dig already stops at α and α is 34–270 cells on every artifact the reduction engages on. Refusing
-  a dig *shallower* than a cell does fire — 26,740 → 18,414 vertices for an unchanged area, and
-  1,809 → 2 members outside their own shape — but it costs one artifact's deep narrow crevice, and
-  whether that trade is worth taking is a ruling about what the shape claims. **Not taken here.** The
-  zoom-dependent alternative to both is refused for §7.1's reason and the argument is now written
-  down: a cell is a property of the artifact and a pixel is a property of the request, and only the
-  first can key a shape derived once and served to everyone entitled to it.
-  **§4.2 is re-derived and ruling A is still not reopened.** The dig moved and the triangulated route
-  did not, so the margin over the layer is 3.53× where r6 measured 1.94×. That is a stronger cost
-  argument than r6's and a weaker one than r4's, and neither is what would settle A.
-  **The owner's target is still not reached**: 519 ms against 58 ms. What is left is not
-  concentrated anywhere an index would reach — the largest single term is now sorting and wrapping
-  the reduced input — so the next move is §7.1's resolution or §4's family, not another index.
-  **Every figure in this entry and in §4.2, §7, §7.3, §7.4 and §8 B is the merged tree**, because
-  this work and the gather and fold of §7.3 were done on separate branches and each was measured
-  against a tree without the other in it. The two published profiles — 57/16/79/767 and
-  119/16/102/391 — describe trees that no longer exist; merged it is 58/16/79/373. Both tracks'
-  oracles were run against the merge: gather's `the_reduction_is_the_definition`, and this one's
-  ring digest over all 2,321 artifacts of the eleven membership packs.
-  One defect fixed on the way: `the_budget_sweep` asserted plain containment, which the reduction
-  gave up at r5, and had been failing on `clusters/hdbscan` ever since; it now asserts what §1
-  claims, that a member sits at most a cell outside its own shape.

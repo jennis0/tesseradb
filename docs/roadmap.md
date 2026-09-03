@@ -204,7 +204,7 @@ at 2.4×10⁶ and 2.5×10⁷ against an independently decoded oracle
 refusing by name; `none_of` landed with decision 0066. They are not equal in cost: lists need their
 own addressing before the fold's blanking and the coalesce's merge are sound for them. The open work
 is handed over in
-[`2026-08-10-filter-handover.md`](evidence/memos/2026-08-10-filter-handover.md).
+2026-08-10-filter-handover.md.
 
 **That remainder is sequenced by [`records-and-search.md`](design/records-and-search.md) §13, which
 subsumes it.** That design generalises per-item data to five families under one declaration — a
@@ -268,7 +268,7 @@ found contradictory answers. They also govern [#43]'s frontier behaviour and pha
 [#43] changes shape under them, since the frontier is now a per-node test with a request-time budget
 rather than a descent.
 
-**What orders the work is [`artifact-delivery.md`](artifact-delivery.md), not these two issues.** By
+**What orders the work is artifact-delivery.md, not these two issues.** By
 owner direction the artifact work's stages, gates and status live there; [#13] and [#41] describe
 the capability from outside and are not the status record.
 

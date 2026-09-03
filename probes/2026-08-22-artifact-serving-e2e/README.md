@@ -1,8 +1,8 @@
 # The artifact serving campaign, end to end
 
 **Date:** 2026-08-22 · **Status:** Probe record — evidence, not normative. The stage it discharges
-is [`artifact-delivery.md`](../../docs/artifact-delivery.md)'s **Stage 7**; the plan is
-[the campaign memo](../../docs/evidence/memos/2026-08-21-artifact-scale-plan.md) §8–9; the design it
+is artifact-delivery.md's **Stage 7**; the plan is
+the campaign memo §8–9; the design it
 validates is [`artifact-serving-at-scale.md`](../../docs/design/artifact-serving-at-scale.md); the
 closing memo is [`2026-08-22-artifact-scale-campaign.md`](../../docs/evidence/memos/2026-08-22-artifact-scale-campaign.md).
 
@@ -423,7 +423,7 @@ the level has **998** artifacts against a floor of 1 000, so it stays artifact-m
 are the finding: the build reports 108.0 and 73.3 blocks per artifact — decision 0092's figure — and
 records a layout that its own reported figure contradicts. `RowMajorLabel`/`RowMajorList` arrive at
 the first fold, which is
-[0094](../../docs/decisions/0094-the-serving-layout-is-chosen-at-build-and-re-evaluated-at-the-fold.md)'s
+0094's
 re-evaluation doing what it says. What 0094 also says is that the layout is *chosen at the build*,
 and on this evidence the build does not choose it. **It is a report, not a fix** — the campaign
 writes no engine code.

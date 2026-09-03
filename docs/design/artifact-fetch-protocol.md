@@ -19,13 +19,13 @@ took at r44; it states them).
 
 **Reads with:** [`client-obligations.md`](client-obligations.md) rules 6 and 7,
 [`delta-serving.md`](delta-serving.md) (as the shape the *future* replica-sync question would take,
-not as a source of borrowed mechanism — see §5.4), [`artifact-cache-handover.md`](../artifact-cache-handover.md)
+not as a source of borrowed mechanism — see §5.4), artifact-cache-handover.md
 (the work's map and its traps), and decisions
 [0030](../decisions/0030-determinism-is-not-a-guarantee.md),
 [0076](../decisions/0076-an-artifact-is-served-whole-or-not-at-all.md),
-[0083](../decisions/0083-the-frontier-is-a-request-time-budget.md),
-[0087](../decisions/0087-cross-level-edges-are-information-not-rollup.md),
-[0103](../decisions/0103-a-request-naming-no-levels-is-answered-at-the-declared-ones.md) and
+0083,
+0087,
+0103 and
 [0104](../decisions/0104-a-filter-answers-a-boolean-per-served-artifact.md).
 
 ---
@@ -436,57 +436,3 @@ the same day:**
   stale-marked treatment, and delta sync (§5.4) — both premature until continuous ingest is close.
 - **Promotion of this document**, which is a normal review-and-promote and not a re-litigation of
   the shape.
-
-## Appendix R
-
-**r3 — 2026-08-28.** Built, the same day as r2, on the owner's direction, in four seams: the wire
-and server (§5.2, §5.3, §8 — contracts r44, the OpenAPI description, the oracle's reader); the
-channel's fetch model (§6); the TypeScript client's decode and its identity path; the Python
-readers and the conformance run. What the building changed, each recorded at its site: an identity
-response still runs the content-servability probe, that being selection rather than payload
-(§5.2); the rung is computed after every narrowing, not the budget cut alone (§5.3); hull presence
-is decided from the served rows, which is equivalent to *a served layer declares a hull* because a
-served artifact always has a visible member and a declared hull then always computes; dictionary
-keys are `u16`; `api_version` stays at 1 on deviation 10's argument as the r26 framing rework's
-precedent, the schema itself being the loud break. Two things the client work found: the shipped
-channel had **never sent `filters`** on the artifact request, so decision 0104's bit had never
-reached the client it was built for — closed as a consequence of *a filter always asks the
-server*; and a channel answering views locally issues no request of its own, so the point path's
-observed content key is now handed to it, which is the only route by which rule 7 can fire while a
-hold stands. The promotion ratchet was built with a 10,000-artifact gate and **the owner refused
-it** — not a bound in bytes, the drop rules being the bound as they are for the store — so it was
-removed and §6 rewritten (§10). The measured figures in §8 are the gate's, and stand beside the
-review's. Merged to `main` the same day across three tracks that had landed there meanwhile —
-`computed` on the request (contracts r42, which this document's revisions therefore renumbered
-to r43 and r44), the per-principal derived cache that is §7.3's memo, and the cells work — with
-the whole-scope promotion taught the same `computed` narrowing the per-view request sends.
-
-**r2 — 2026-08-28.** Reworked the same day as r1, after its review and an owner discussion that
-settled the shape. r1 posed three filter modes and a held-set cache claim; r2 replaces both with
-§4's row/column rule, §5.2's projection and §6's fetch model, on the owner's acceptance of the
-argument that every defect the review found was a case of a client supplying rows. The review — one
-independent reviewer on performance, the API user's and client author's experience, and simplicity;
-fourteen findings — was dispositioned in one pass and **the review memo deleted at the owner's
-direction**, its measured figures carried into §8 with their provenance. Dispositions: F1 (byte
-model wrong 2.4×) accepted — corrected in §8, and it is the number that declined the claim; F2 and
-F3 (elided rows collide with 0076's null rule; mode 1 breaks `parent_id` and the membership column)
-accepted by declining every row-supplying shape, §4 — the identity schema survives as §5.2's
-caller-asked projection, where neither defect can occur; F4, F5 and F10 (the budgeted client could
-never claim; `prune_children` breaks the claim's union; artifacts do not partition by cell)
-accepted, recorded as §4's second decline; F6 (the no-protocol server memo never priced) accepted —
-§7.3, named as the naive caller's insurance; F7 (server cost misattributed) moot with the claim,
-the grid's exclusions now cited nowhere; F8 (the borrowed idiom unbuilt, mis-cited, inverted)
-accepted — delta-serving is now cited only as the future replica-sync framing, and its
-no-elided-count rule is kept at §9; F9 (rotation may make the cache inert) accepted — §6's ⊘
-condition; F11 (mode-3 bits 2× low) corrected at §5.4; F12 (MiB/MB) corrected at §8; F13 (the
-status record repeats the wrong figure) applied to [`client-delivery.md`](../client-delivery.md)
-and the map's §4a in the change that landed r2; F14 (a recommendation beats a fourth open question)
-overtaken — §10 records rulings.
-
-**r1 — 2026-08-28.** Written after the owner asked for the whole artifact-fetch space in one place,
-following the two steps that landed that day (the filter bit; the client's payload store). Its
-shape was the four questions, three filter modes, and a cache claim borrowed from the point path;
-its byte model was modelled rather than measured, and the review measured it wrong by 2.4× in the
-direction that reversed §5's argument. Three things it settled at their sites survive r2: a
-bits-only mode forces a contractual order and a digest and is deferred; the claim and
-`artifact_budget` do not compose; a filtered elision may never touch identity.
