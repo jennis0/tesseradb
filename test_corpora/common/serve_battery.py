@@ -187,7 +187,7 @@ class Evictor:
         roots: Sequence[Path],
         server_pid: int | None,
         cgroup: Path | None,
-        reclaim_bytes: int = 64 * 1024**3,
+        reclaim_bytes: int = 8 * 1024**3,
     ):
         self.roots = [Path(r) for r in roots if r]
         self.server_pid = server_pid
@@ -225,12 +225,19 @@ class Evictor:
             # `memory.reclaim` takes a byte count; asking for more than is charged is not an
             # error, it reclaims what it can. Absent on a kernel without it, which is not a
             # failure of the run — the fadvise pass above is the primary mechanism.
-            # A large ask: `memory.reclaim` reclaims what it can and is not an error for asking
-            # too much, and this is the only mechanism here that reaches pages the server holds
-            # mapped. Written per eviction, so it runs before **every** cold sample.
+            # **Sized to what the cgroup is actually holding**, read fresh each time, rather than
+            # a fixed large number: `memory.reclaim` iterates until it has reclaimed what it was
+            # asked for or run out of candidates, so an ask far above the charge spends real time
+            # scanning for pages that are not there — at 4,000 evictions in a battery that is the
+            # run's duration. This is the only mechanism here that reaches pages the server holds
+            # mapped, and it runs before **every** cold sample.
+            try:
+                charged = int((self.cgroup / "memory.current").read_text().strip())
+            except OSError:
+                charged = self.reclaim_bytes
             try:
                 with open(self.cgroup / "memory.reclaim", "w") as f:
-                    f.write(f"{self.reclaim_bytes}\n")
+                    f.write(f"{max(charged, 1 << 20)}\n")
             except OSError:
                 self.reclaim_errors += 1
         self.files_evicted += n
@@ -745,12 +752,12 @@ def battery_figures(cells: Sequence[dict]) -> dict:
 
 
 def add_arguments(ap: argparse.ArgumentParser) -> None:
-    ap.add_argument("--viewer", required=True)
-    ap.add_argument("--session", required=True)
-    ap.add_argument("--session-cred", required=True)
-    ap.add_argument("--bundle", required=True, help="the bundle directory, for eviction")
+    ap.add_argument("--viewer", help="a running server's viewer base URL")
+    ap.add_argument("--session")
+    ap.add_argument("--session-cred")
+    ap.add_argument("--bundle", help="the bundle directory, for eviction")
     ap.add_argument("--cache", default=None, help="the deployment's cache directory")
-    ap.add_argument("--ranks", required=True, help="the rung's branch-ranks.json")
+    ap.add_argument("--ranks", help="the rung's branch-ranks.json; defaults to <boot-rung>/branch-ranks.json")
     ap.add_argument("--server-pid", type=int, default=None)
     ap.add_argument("--cgroup", default=None, help="the server's cgroup v2 directory, when capped")
     ap.add_argument("--cap-bytes", type=int, default=None, help="MemoryMax, recorded in the result")
@@ -769,6 +776,14 @@ def add_arguments(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--text-samples", type=int, default=10)
     ap.add_argument("--drilldowns", type=int, default=20)
     ap.add_argument("--seed", type=int, default=0)
+    # Booting one here rather than being handed one: a battery has to know the server's pid and
+    # its cgroup, and both are properties of how it was started. Given `--boot-rung`, everything
+    # above is filled in from the deployment this creates.
+    ap.add_argument("--boot-rung", help="a rung directory to serve, instead of an already-running server")
+    ap.add_argument("--boot-bundle", help="the bundle to serve; defaults to <rung>/bundle")
+    ap.add_argument("--boot-scratch", help="where the scratch deployment, cache and WAL go")
+    ap.add_argument("--boot-binary", help="the tessera binary")
+    ap.add_argument("--boot-port0", type=int, default=8151)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -777,7 +792,38 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--out", required=True)
     args = ap.parse_args(argv)
     started = time.time()
-    result = Battery(args).run()
+    served = None
+    if args.boot_rung:
+        from .deployment import Deployment
+
+        rung = Path(args.boot_rung)
+        bundle = Path(args.boot_bundle) if args.boot_bundle else rung / "bundle"
+        served = Deployment(
+            rung,
+            bundle,
+            Path(args.boot_scratch),
+            (args.boot_port0, args.boot_port0 + 1, args.boot_port0 + 2),
+            Path(args.boot_binary),
+            cap_bytes=args.cap_bytes,
+        )
+        served.clear_scratch()
+        open_at = time.time()
+        served.start()
+        args.viewer, args.session = served.viewer, served.session
+        args.session_cred = served.credential("session")
+        args.bundle, args.cache = str(bundle), str(served.cache)
+        args.server_pid = served.pid
+        args.cgroup = str(served.cgroup) if served.cgroup else None
+        args.ranks = args.ranks or str(rung / "branch-ranks.json")
+        print(f"served pid={served.pid} cgroup={served.cgroup}", flush=True)
+    try:
+        result = Battery(args).run()
+    finally:
+        if served is not None:
+            result_open = round(time.time() - open_at, 2)
+            served.stop()
+    if served is not None:
+        result["open_s"] = result_open
     result["ran_s"] = round(time.time() - started, 1)
     Path(args.out).write_text(json.dumps(result, indent=2))
     print(f"wrote {args.out} in {result['ran_s']} s")
