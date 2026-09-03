@@ -13,7 +13,7 @@ Tessera serves an interactive map over billions of documents or records from one
 | [docs/agents/](docs/agents/) | How work is done here, and [writing.md](docs/agents/writing.md), the house style |
 | [docs/roadmap.md](docs/roadmap.md) | What constrains the order of work. Not a status record |
 | [docs/evidence/](docs/evidence/), [probes/](probes/) | Measurements and investigations. Not normative; re-run a figure before relying on it. Superseded material is in git history, not in the tree |
-| GitHub issues | What is being worked on. [docs/ingest-campaign.md](docs/ingest-campaign.md) tracks the test-corpus ladder |
+| GitHub issues | What is being worked on. [`docs/ingest-campaign.md`](docs/ingest-campaign.md) records the test corpora and their build figures |
 
 A document's `Status:` line says whether it is normative or provisional. The directory does not.
 

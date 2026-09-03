@@ -109,7 +109,7 @@ stays held until delivery ends, whichever of the four exits reaches it first.*
 
 ## What a client may already hold
 
-A response carries two keys and a stamp a client can compare against what it already holds.
+A response carries two keys and a generation name a client can compare against what it already holds.
 
 Whether a held answer may still be shown at all depends on the identity key, carried as
 `x-tessera-identity-key`. It changes when the viewer's own session changes, and it changes for
@@ -131,7 +131,7 @@ served](queries.md#how-many-points-are-shown) is the most expensive part of answ
 testing whether an item is visible at all. Every tile a request does name pays that cost in full,
 whatever the client already has.
 
-A third value, the generation a response was answered from, travels as a stamp,
+A third value, the generation a response was answered from, travels as a header,
 `x-tessera-pin`, and a request may echo it back. [What that buys a
 client](write-path.md#geometry-and-staleness) is one comparison against the current generation,
 reported as a flag on the response, `x-tessera-stale`.
