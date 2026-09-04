@@ -58,7 +58,8 @@ pub use dict::{
 };
 pub use extent::{extent_paths, open_extent, write_extent, EXTENTS_DIR};
 pub use record::{
-    encode_row, RecordBlob, RecordError, RecordField, RecordValue, RECORD_BLOCKS_FILE,
+    encode_row, RecordBlob, RecordError, RecordField, RecordRowCursor, RecordValue,
+    RECORD_BLOCKS_FILE,
     RECORD_BLOCK_TARGET, RECORD_DIRECTORY_FILE, RECORD_HASROW_FILE,
 };
 pub use record_stack::{RecordExtentPaths, RecordStack};

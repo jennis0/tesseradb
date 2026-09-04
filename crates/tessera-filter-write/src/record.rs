@@ -43,6 +43,8 @@
 //! A writer abandoned part-way leaves a partial `blocks.bin` behind; no manifest names it, and
 //! the next build truncates it at create.
 
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -53,7 +55,7 @@ use arrow::buffer::{OffsetBuffer, ScalarBuffer};
 use arrow::datatypes::{DataType, Field, Schema};
 use croaring::{Bitmap, Portable};
 
-use tessera_filter::{encode_row, RecordBlob, RecordError, RecordField};
+use tessera_filter::{encode_row, RecordBlob, RecordField};
 
 /// zstd's default level — the operating point the string-storage probe measured its block ratios
 /// at. A writer's choice, not a format fact: the reader decompresses whatever level wrote the
@@ -335,18 +337,124 @@ fn write_merged_rows(
         .map(|(i, layer)| (i, layer.hasrow().clone()))
         .collect();
     let (order, _) = crate::ordered_disjoint(present, pass)?;
+    let mut cursors: Vec<BlobRows> = order
+        .iter()
+        .map(|(layer, _)| BlobRows::over(layers[*layer]))
+        .collect();
+    let mut sources: Vec<&mut dyn RecordRows> = cursors
+        .iter_mut()
+        .map(|c| c as &mut dyn RecordRows)
+        .collect();
+    merge_record_rows(
+        &mut sources,
+        tombstones,
+        blocks_path,
+        hasrow_path,
+        directory_path,
+        target,
+    )
+}
+
+/// One ascending stream of rows, as [`merge_record_rows`] reads it.
+///
+/// A build's producer is not a blob: its rows come from the columns it has just joined and from
+/// the extents it spilled while joining them, so the merge takes a stream rather than a layer.
+pub trait RecordRows {
+    /// The next row, ascending strictly in the entity. `None` ends the stream.
+    fn next_row(&mut self) -> io::Result<Option<(u32, Vec<RecordField>)>>;
+}
+
+/// A [`RecordBlob`]'s own rows as such a stream.
+pub struct BlobRows<'a> {
+    cursor: tessera_filter::RecordRowCursor<'a>,
+}
+
+impl<'a> BlobRows<'a> {
+    /// Every row of `blob`, which is the walk that revalidates its addressing.
+    pub fn over(blob: &'a RecordBlob) -> Self {
+        BlobRows {
+            cursor: blob.rows_cursor(),
+        }
+    }
+
+    /// The rows of blocks `[lo, hi)` of `blob`, for a producer that divides one extent.
+    pub fn over_blocks(blob: &'a RecordBlob, lo: usize, hi: usize) -> Self {
+        BlobRows {
+            cursor: blob.rows_cursor_over(lo, hi),
+        }
+    }
+}
+
+impl RecordRows for BlobRows<'_> {
+    fn next_row(&mut self) -> io::Result<Option<(u32, Vec<RecordField>)>> {
+        self.cursor.next_row().map_err(io::Error::from)
+    }
+}
+
+/// Merge several ascending row streams into one blob in entity order, skipping `tombstones`.
+///
+/// **One entity's row is the union of what the streams carry for it**, its fields ordered by tag,
+/// with a later stream's value winning a tag two streams both carry. That is what a build needs:
+/// its prose lives in spilled extents, one per text column per join chunk, and the rest of the
+/// row lives in the entity-ordered columns, so an entity's row is assembled here and nowhere
+/// else. The fold and the coalesce pass streams their own guard has already proved disjoint, so
+/// for them the merge is a concatenation and the bytes are the ones a single stream wrote.
+///
+/// Held at once: one open row per stream, and the writer's open block.
+pub fn merge_record_rows(
+    sources: &mut [&mut dyn RecordRows],
+    tombstones: &Bitmap,
+    blocks_path: &Path,
+    hasrow_path: &Path,
+    directory_path: &Path,
+    target: usize,
+) -> io::Result<()> {
+    let mut heads: Vec<Option<(u32, Vec<RecordField>)>> = Vec::with_capacity(sources.len());
+    let mut heap: BinaryHeap<Reverse<(u32, usize)>> = BinaryHeap::with_capacity(sources.len());
+    for (i, source) in sources.iter_mut().enumerate() {
+        let head = source.next_row()?;
+        if let Some((entity, _)) = &head {
+            heap.push(Reverse((*entity, i)));
+        }
+        heads.push(head);
+    }
     let mut writer = RecordBlobWriter::create(blocks_path, hasrow_path, directory_path, target)?;
-    for (layer, _) in &order {
-        layers[*layer]
-            .for_each_row(&mut |entity, fields| {
-                if tombstones.contains(entity) {
-                    // Rule F's remove-emit-no-bytes: the row leaves the artefact by never being
-                    // written, not by being overwritten.
-                    return Ok(());
+    let mut fields: Vec<RecordField> = Vec::new();
+    while let Some(Reverse((entity, _))) = heap.peek().copied() {
+        fields.clear();
+        while let Some(&Reverse((head, source))) = heap.peek() {
+            if head != entity {
+                break;
+            }
+            heap.pop();
+            let taken = heads[source].take().expect("a stream in the heap has a head");
+            for field in taken.1 {
+                match fields.iter_mut().find(|held| held.tag == field.tag) {
+                    // A later stream is the later write. The build's streams carry disjoint tags
+                    // for one entity, so this arm is the refusal's absence rather than a route
+                    // anything takes.
+                    Some(held) => held.value = field.value,
+                    None => fields.push(field),
                 }
-                writer.push_row(entity, &fields).map_err(RecordError::from)
-            })
-            .map_err(io::Error::from)?;
+            }
+            let next = sources[source].next_row()?;
+            if let Some((next_entity, _)) = &next {
+                if *next_entity <= entity {
+                    return Err(invalid(format!(
+                        "a row stream yielded entity {next_entity} at or below its predecessor                          {entity}; the merge reads streams that ascend"
+                    )));
+                }
+                heap.push(Reverse((*next_entity, source)));
+            }
+            heads[source] = next;
+        }
+        if tombstones.contains(entity) {
+            // Rule F's remove-emit-no-bytes: the row leaves the artefact by never being written,
+            // not by being overwritten.
+            continue;
+        }
+        fields.sort_by_key(|field| field.tag);
+        writer.push_row(entity, &fields)?;
     }
     writer.finish()
 }
