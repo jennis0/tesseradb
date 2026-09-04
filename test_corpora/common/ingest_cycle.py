@@ -69,6 +69,10 @@ principal is served, which is what a client can observe.
 from __future__ import annotations
 
 import argparse
+try:  # 3.11+
+    import tomllib
+except ModuleNotFoundError:  # 3.10 on this box
+    import tomli as tomllib
 import base64
 import concurrent.futures
 import json
@@ -183,6 +187,23 @@ def filter_parquet(
         schema = pa.schema([f for f in reader.schema_arrow if f.name not in set(drop)])
         pq.write_table(schema.empty_table(), out, compression=codec)
     return kept
+
+
+def ranks_file(rung: Path) -> Path:
+    """The rung's principal ladder — `[{"term": …, "pairs": …}, …]`, richest term first.
+
+    **Named after the rung's own axis, not after MedCPT's.** Rung 3 and MedCPT rank by branch and
+    write `branch-ranks.json`; rung 4 ranks by licence and writes `licence-ranks.json`. A driver
+    that opened the first by name refused to run against the second at all, after building its
+    base.
+    """
+    named = rung / "branch-ranks.json"
+    if named.exists():
+        return named
+    candidates = sorted(rung.glob("*-ranks.json"))
+    if not candidates:
+        raise FileNotFoundError(f"no <axis>-ranks.json in {rung}")
+    return candidates[0]
 
 
 def state_extent(corpus_toml: Path, bundle: Path, view: str | None = None) -> dict | None:
@@ -337,32 +358,46 @@ def write_base_inputs(rung: Path, out: Path, base_ids: np.ndarray) -> dict:
 # ---------------------------------------------------------------------------------------------
 
 
-def encode_batch(table: pa.Table) -> bytes:
+def wire_schema(rung: Path) -> tuple[str, list[str]]:
+    """`(the descriptor column, the attribute columns)` — **read off the rung's declaration.**
+
+    The batch a rung's hold-out is sent as is not a property of this driver: it is the view's
+    `point_visibility.field` and the `[[attribute]]` names the build itself reads. Hard-coding
+    MedCPT's four made the driver refuse rung 4 after building its 92M-row base, on a `KeyError`
+    for a column that rung does not have. The descriptor column may be a list per row (rung 3 and
+    MedCPT) or one string (rung 4's licence); [`encode_batch`] handles both.
+    """
+    declaration = tomllib.loads((rung / "corpus.toml").read_text())
+    field = declaration["view"][0]["point_visibility"]["field"]
+    return field, [a["name"] for a in declaration.get("attribute", [])]
+
+
+def encode_batch(table: pa.Table, schema: tuple[str, list[str]]) -> bytes:
     """One Arrow IPC stream for a slice of the hold-out. **Points alone.**
 
     `access` is the passthrough plugin's wire form — a comma-separated descriptor list — and
     `external_id` is the **source entity id, eight bytes little-endian** — the same form the build
     mints under `--mint-external-ids` (see [`external_ids`]). That is what makes an ingested row
     addressable on `/control/changes` afterwards, and what an artifact's `members` names it by on
-    the same footing as a base row. The PMID travels beside it as the `pmid` attribute, as before.
+    the same footing as a base row. Every declared attribute travels beside it, by the name the
+    declaration gives it — see [`wire_schema`].
 
     **No membership column, and that is the ordering rather than an omission**: the column would
     name artifacts that do not exist yet, and a layer declaring supplied content refuses to mint
     them (`LayerRegistry::resolve_or_mint`). The module docstring has the whole of it.
     """
-    branches = table.column("branches").to_pylist()
+    field, attributes = schema
+    descriptors = table.column(field).to_pylist()
     entities = table.column("entity_id").to_pylist()
+    access = [",".join(d) if isinstance(d, list) else ("" if d is None else str(d))
+              for d in descriptors]
     arrays = [
         table.column("x").cast(pa.float64()).combine_chunks(),
         table.column("y").cast(pa.float64()).combine_chunks(),
-        pa.array([",".join(b) for b in branches], pa.string()),
+        pa.array(access, pa.string()),
         pa.array([int(e).to_bytes(8, "little") for e in entities], pa.binary()),
-        table.column("published").combine_chunks(),
-        table.column("title").combine_chunks(),
-        table.column("mesh_major").combine_chunks(),
-        table.column("pmid").combine_chunks(),
-    ]
-    names = ["x", "y", "access", "external_id", "published", "title", "mesh_major", "pmid"]
+    ] + [table.column(name).combine_chunks() for name in attributes]
+    names = ["x", "y", "access", "external_id"] + list(attributes)
     batch = pa.RecordBatch.from_arrays(
         [pa.array(a) if not isinstance(a, pa.Array) else a for a in arrays], names=names
     )
@@ -383,6 +418,7 @@ class HoldOut:
 
     def __init__(self, rung: Path, held: np.ndarray, head_rows: int = 0):
         self.rung = rung
+        self.schema = wire_schema(rung)
         self.held = np.sort(held)
         self.head_rows = head_rows
         self.head: pa.Table | None = None
@@ -408,14 +444,14 @@ class HoldOut:
             pending_rows += table.num_rows
             while pending_rows >= rows:
                 whole = pa.concat_tables(pending)
-                yield emitted, encode_batch(whole.slice(0, rows)), rows
+                yield emitted, encode_batch(whole.slice(0, rows), self.schema), rows
                 emitted += rows
                 rest = whole.slice(rows)
                 pending = [rest] if rest.num_rows else []
                 pending_rows = rest.num_rows
         if pending_rows:
             whole = pa.concat_tables(pending)
-            yield emitted, encode_batch(whole), pending_rows
+            yield emitted, encode_batch(whole, self.schema), pending_rows
             emitted += pending_rows
         self.total = emitted
         if head:
@@ -1170,7 +1206,7 @@ class Cycle:
         try:
             control = Control(served.control, served.credential("operator"))
             session_cred = served.credential("session")
-            ranks = json.loads((self.rung / "branch-ranks.json").read_text())
+            ranks = json.loads(ranks_file(self.rung).read_text())
             all_terms = sorted(r["term"] for r in ranks)
             token, _ = serve_battery.authorise(served.session, session_cred, all_terms)
             m = serve_battery.meta(served.viewer, token)
@@ -1533,7 +1569,7 @@ class Cycle:
         def head_slice():
             for start in range(0, n, BATCH_ROWS):
                 chunk = hold.head.slice(start, min(BATCH_ROWS, n - start))
-                yield start, encode_batch(chunk), chunk.num_rows
+                yield start, encode_batch(chunk, hold.schema), chunk.num_rows
 
         out["reingest"] = self.run_ingest(control, head_slice(), "recycle")
         control.flush()
