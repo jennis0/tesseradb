@@ -26,6 +26,14 @@
 //! | points ×1 | external ids (when minting) | 20N |
 //! | points ×1 | geometry, the tiler sort, and the segment | 28N |
 //!
+//! ## A text column's prose is never permuted
+//!
+//! Every other declared family is placed at its entity index as the join resolves it. Prose is
+//! the corpus's bytes, so placing it is a permutation of the source through a mapping larger than
+//! memory. Instead each join chunk of each `text` column is written as one record-blob extent in
+//! that chunk's entity order ([`crate::prose`], `build-prose-extents.md`); the text index reads
+//! the extents in block windows and the record blob merges them.
+//!
 //! ## Batch-scoped signature assignment (§11.1)
 //!
 //! Entity ids are assigned by signature order **within each batch and only within one** — the
@@ -74,8 +82,8 @@
 //! scatters and tallies each column on a thread of its own
 //! ([`read_one_attribute_source`]). It participates in no ordering decision either, and for a
 //! stronger reason than the sorts do: the lanes never meet. Each column is its own mapped array
-//! with its own presence bits and its own arena, indexed by entity, so no two lanes can name the
-//! same byte; the only shared state is read-only (the join's answer, the declaration) and the
+//! with its own presence bits and its own arena, indexed by entity, and each `text` column its own
+//! extent writer ([`crate::prose`]), so no two lanes can name the same byte; the only shared state is read-only (the join's answer, the declaration) and the
 //! only shared *result* is the coverage tally, which is returned per lane and folded in
 //! declaration order rather than accumulated across threads. Minting stays where it was — a
 //! serial pre-pass per decoded batch, in file order — so the vocabulary codes a build assigns are
@@ -1672,9 +1680,9 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // avoid), so an index-only column is dead from this line — but it was living to the end of the
     // segment write, straight through the tiler sort's 12 B/row and the record batch beside it.
     //
-    // For a `text` column that is the whole of the corpus's prose: ~24 GB of strings at 2.5×10⁸
-    // titles, held for a stage that will not read one of them. Releasing here is what lets a schema
-    // carry text at all at these scales without the peak paying for it twice over.
+    // A `text` column has nothing left to release — its prose was spilled as extents and the
+    // extents are unlinked above — but every other index-only column was living to the end of the
+    // segment write, and at 2.5×10⁸ a keyword column is gigabytes of it.
     let mut attributes_by_entity = attributes_by_entity;
     for (column, attribute) in attributes_by_entity
         .iter_mut()
