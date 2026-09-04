@@ -285,6 +285,28 @@ descriptors per row and a 2.42M base. The write-path memo's figure is at a 250M 
 it, this campaign does not reproduce it as an allocator-pressure effect, and it should not be
 carried as one.
 
+## Postscript, 2026-09-04: the deployment was off the end of the axis this campaign swept
+
+[`probes/2026-09-04-ingest-executor/`](../../../probes/2026-09-04-ingest-executor/) attributed a
+real rung's 11,813 rows/s against this campaign's 250,000–465,000, on MedCPT's 36M-row 10% cell.
+**It is `B/W`, off the right-hand end of §1's table**, and this memo named the mechanism without
+being able to name the regime: "a loader sustaining ~380,000 rows/s across the shipped 90 s tick
+buffers ~34,000,000 rows — `B/W` of 3,400 … what the table says about that regime is that per-row
+cost keeps climbing; what it cannot say is how far". It climbs to **14.3 µs/row in
+`buffer_clone` alone**, 66% of the executor's cost, against 0.325 at `B/W` = 24 here.
+
+Two things this memo could not see, both since fixed. **`B` is now a knob**: the flush tick comes
+due on `ingest.flush_max_items` as well as on age (write-path §4.1), so "this is a knob a
+deployment does not currently have" no longer holds. And **the clone's constant was 145 ns an
+entry, not a memcpy's ~10**, because the `Arc<BufferedItem>` change §5 measures took the items out
+of the copy but left a bare `Vec` per entity in it — so a close still paid one allocation per
+buffered row. §2's "`buffer_clone` is no longer the term to chase" is correct at `B/W` ≤ 24 and
+wrong at 100. Together the two take that cell from 11,813 to 61,999 rows/s.
+
+§5's allocator-pressure coupling **reproduces from the other side**: removing the per-entity
+allocation moves `allocate` 2.00 → 0.78 and `admit` 1.31 → 0.53 µs/row, in code neither fix
+touches.
+
 ## Caveats
 
 - **WSL2**, per the Phase 0 memo's standing note. Shapes, not absolutes. Every cell is `min` over
