@@ -1,0 +1,4 @@
+# shards: 100000000 rows as 1 and as 8 × 12500000, fixtures written
+shards scratch=false coverage=0.25 card=24995266  one=137.04 ms (cpu 139.54)  sharded=121.93 ms (cpu 124.15) (+ split 2.82 ms)  ratio 0.890 project-only, 0.910 with split  heap one=12513208 B sharded=12529664 B ratio 1.0013
+shards scratch=false coverage=0.1 card=9996828  one=76.73 ms (cpu 78.14)  sharded=59.84 ms (cpu 60.94) (+ split 2.92 ms)  ratio 0.780 project-only, 0.818 with split  heap one=12513208 B sharded=12529664 B ratio 1.0013
+shards scratch=false coverage=0.01 card=1002387  one=21.84 ms (cpu 22.25)  sharded=34.62 ms (cpu 35.26) (+ split 1.39 ms)  ratio 1.585 project-only, 1.649 with split  heap one=2016990 B sharded=2017062 B ratio 1.0000
