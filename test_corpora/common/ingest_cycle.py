@@ -73,6 +73,12 @@ import base64
 import concurrent.futures
 import json
 import shutil
+
+try:  # 3.11+
+    import tomllib
+except ModuleNotFoundError:  # 3.10 on this box
+    import tomli as tomllib
+
 import subprocess
 import sys
 import time
@@ -300,9 +306,41 @@ def write_base_inputs(rung: Path, out: Path, base_ids: np.ndarray) -> dict:
             if name in set(layers)
         ],
     }
+    # **Every file the declaration still names**, read off the declaration rather than listed here.
+    # A vocabulary is copied whole — it is a value set, not rows, and a base built from half the
+    # corpus declares the same closed set. Any *other* view's points file is filtered by entity id
+    # exactly as the anchor's is: a rung may carry several row spaces over one entity space
+    # (rung 5's `bioclip` and `geo`), and a declaration naming a file the base directory does not
+    # hold refuses the build with `No such file or directory`.
+    declared = tomllib.loads((rung / "corpus.toml").read_text())
+    named = declared.get("sources", {})
+    anchor = declared.get("defaults", {}).get("source", "points")
+
+    def path_of(key: str) -> Path:
+        return rung / named.get(key, key)
+
+    for vocabulary in declared.get("vocabulary", []):
+        source = vocabulary.get("source")
+        if source is None:
+            continue
+        got = path_of(source)
+        if got.exists():
+            shutil.copy2(got, out / got.name)
+            kept.setdefault("vocabularies", []).append(got.name)
+
+    for view in declared.get("view", []):
+        source = view.get("source", anchor)
+        if source == anchor:
+            continue
+        got = path_of(source)
+        if got.exists():
+            kept.setdefault("views", {})[got.name] = filter_parquet(
+                got, out / got.name, "entity_id", base_ids, drop=layers
+            )
+
     for name in ("branch.parquet", ".env"):
         source = rung / name
-        if source.exists():
+        if source.exists() and not (out / name).exists():
             shutil.copy2(source, out / name)
     declaration, removed = base_declaration((rung / "corpus.toml").read_text())
     (out / "corpus.toml").write_text(declaration)
@@ -316,32 +354,70 @@ def write_base_inputs(rung: Path, out: Path, base_ids: np.ndarray) -> dict:
 # ---------------------------------------------------------------------------------------------
 
 
-def encode_batch(table: pa.Table) -> bytes:
+def wire_columns(rung: Path) -> tuple[str | None, list[str]]:
+    """`(access column, attribute columns)` for the hold-out's batches, **read off the rung's own
+    declaration** rather than listed here.
+
+    The access column is the first `point_visibility.field` any view declares — a rung compartments
+    on one column, and the plugin takes one descriptor list a row. The attribute columns are every
+    `[[attribute]]` the declaration names, which is what makes the ingested rows carry the same
+    columns the built ones do; a rung whose points file does not hold one of them is a rung whose
+    build would have refused too.
+
+    ⊘ **Points of the anchor view alone.** A rung with several row spaces over one entity space
+    (rung 5's `bioclip` and `geo`) ingests its hold-out into the anchor view; the other views'
+    rows for those entities do not travel, so an equivalence census over a second view is not
+    comparable and the run says so.
+    """
+    declared = tomllib.loads((rung / "corpus.toml").read_text())
+    access = None
+    for view in declared.get("view", []):
+        field = (view.get("point_visibility") or {}).get("field")
+        if field:
+            access = field
+            break
+    held = set(pq.ParquetFile(rung / "points.parquet").schema_arrow.names)
+    attributes = [a["name"] for a in declared.get("attribute", []) if a["name"] in held]
+    return access, attributes
+
+
+def encode_batch(table: pa.Table, access: str | None, attributes: list[str]) -> bytes:
     """One Arrow IPC stream for a slice of the hold-out. **Points alone.**
 
-    `access` is the passthrough plugin's wire form — a comma-separated descriptor list — and
-    `external_id` is the **source entity id, eight bytes little-endian** — the same form the build
-    mints under `--mint-external-ids` (see [`external_ids`]). That is what makes an ingested row
-    addressable on `/control/changes` afterwards, and what an artifact's `members` names it by on
-    the same footing as a base row. The PMID travels beside it as the `pmid` attribute, as before.
+    `access` is the passthrough plugin's wire form — a comma-separated descriptor list, so a list
+    column is joined and a scalar column travels as itself — and `external_id` is the **source
+    entity id, eight bytes little-endian**, the same form the build mints under
+    `--mint-external-ids` (see [`external_ids`]). That is what makes an ingested row addressable on
+    `/control/changes` afterwards, and what an artifact's `members` names it by on the same footing
+    as a base row. Every declared attribute travels beside it.
 
     **No membership column, and that is the ordering rather than an omission**: the column would
     name artifacts that do not exist yet, and a layer declaring supplied content refuses to mint
     them (`LayerRegistry::resolve_or_mint`). The module docstring has the whole of it.
     """
-    branches = table.column("branches").to_pylist()
     entities = table.column("entity_id").to_pylist()
     arrays = [
         table.column("x").cast(pa.float64()).combine_chunks(),
         table.column("y").cast(pa.float64()).combine_chunks(),
-        pa.array([",".join(b) for b in branches], pa.string()),
-        pa.array([int(e).to_bytes(8, "little") for e in entities], pa.binary()),
-        table.column("published").combine_chunks(),
-        table.column("title").combine_chunks(),
-        table.column("mesh_major").combine_chunks(),
-        table.column("pmid").combine_chunks(),
     ]
-    names = ["x", "y", "access", "external_id", "published", "title", "mesh_major", "pmid"]
+    names = ["x", "y"]
+    if access is not None:
+        column = table.column(access).combine_chunks()
+        if pa.types.is_list(column.type) or pa.types.is_large_list(column.type):
+            column = pa.array([",".join(v or []) for v in column.to_pylist()], pa.string())
+        else:
+            column = column.cast(pa.string())
+        arrays.append(column)
+        names.append("access")
+    arrays.append(pa.array([int(e).to_bytes(8, "little") for e in entities], pa.binary()))
+    names.append("external_id")
+    # **Every declared attribute, the access column included.** The scalar tail is read back by
+    # position, so an omission misaligns it exactly as a spurious column does — and a rung whose
+    # compartment is also a rendered attribute (rung 5's `publisher`) sends it twice on purpose:
+    # once as `access`, the plugin's own descriptor list, and once as the column itself.
+    for name in attributes:
+        arrays.append(table.column(name).combine_chunks())
+        names.append(name)
     batch = pa.RecordBatch.from_arrays(
         [pa.array(a) if not isinstance(a, pa.Array) else a for a in arrays], names=names
     )
@@ -362,6 +438,7 @@ class HoldOut:
 
     def __init__(self, rung: Path, held: np.ndarray, head_rows: int = 0):
         self.rung = rung
+        self.access, self.attributes = wire_columns(rung)
         self.held = np.sort(held)
         self.head_rows = head_rows
         self.head: pa.Table | None = None
@@ -387,14 +464,14 @@ class HoldOut:
             pending_rows += table.num_rows
             while pending_rows >= rows:
                 whole = pa.concat_tables(pending)
-                yield emitted, encode_batch(whole.slice(0, rows)), rows
+                yield emitted, encode_batch(whole.slice(0, rows), self.access, self.attributes), rows
                 emitted += rows
                 rest = whole.slice(rows)
                 pending = [rest] if rest.num_rows else []
                 pending_rows = rest.num_rows
         if pending_rows:
             whole = pa.concat_tables(pending)
-            yield emitted, encode_batch(whole), pending_rows
+            yield emitted, encode_batch(whole, self.access, self.attributes), pending_rows
             emitted += pending_rows
         self.total = emitted
         if head:
@@ -658,9 +735,14 @@ class Publication:
 
 
 class Control:
-    def __init__(self, base: str, cred: str):
+    def __init__(self, base: str, cred: str, view: str | None = None):
         self.base = base
         self.headers = {"Authorization": f"Bearer {cred}"}
+        # **`x-tessera-view` where the bundle has more than one.** A batch carries one row space,
+        # and which one it belongs to is not inferable from its columns, so a multi-view deployment
+        # refuses an unlabelled batch outright (contracts §3.4). One view is the header's absence,
+        # which is what every rung below rung 5 sends.
+        self.view = view
 
     def status(self) -> dict:
         r = requests.get(f"{self.base}/control/status", headers=self.headers, timeout=60)
@@ -672,7 +754,8 @@ class Control:
         r = session.post(
             f"{self.base}/control/ingest",
             headers=self.headers
-            | {"x-tessera-batch-id": batch_id, "Content-Type": "application/octet-stream"},
+            | {"x-tessera-batch-id": batch_id, "Content-Type": "application/octet-stream"}
+            | ({"x-tessera-view": self.view} if self.view else {}),
             data=body,
             timeout=timeout,
         )
@@ -1071,7 +1154,17 @@ class Cycle:
         self.log(f"served pid={served.pid} open={self.result['open_s']} s")
 
         try:
-            control = Control(served.control, served.credential("operator"))
+            # The anchor view: the hold-out's rows are that row space's, and a bundle carrying
+            # more than one refuses an unlabelled batch. Named from the declaration rather than
+            # from `/v1/meta`'s order, which is creation order and not the anchor.
+            declared = tomllib.loads((self.rung / "corpus.toml").read_text())
+            views = [v["name"] for v in declared.get("view", [])]
+            anchor = declared.get("allocation_view") or (views[0] if views else None)
+            control = Control(
+                served.control, served.credential("operator"),
+                view=anchor if len(views) > 1 else None,
+            )
+            self.result["ingested_view"] = control.view
             session_cred = served.credential("session")
             ranks = json.loads((self.rung / "branch-ranks.json").read_text())
             all_terms = sorted(r["term"] for r in ranks)
@@ -1417,7 +1510,7 @@ class Cycle:
         def head_slice():
             for start in range(0, n, BATCH_ROWS):
                 chunk = hold.head.slice(start, min(BATCH_ROWS, n - start))
-                yield start, encode_batch(chunk), chunk.num_rows
+                yield start, encode_batch(chunk, hold.access, hold.attributes), chunk.num_rows
 
         out["reingest"] = self.run_ingest(control, head_slice(), "recycle")
         control.flush()

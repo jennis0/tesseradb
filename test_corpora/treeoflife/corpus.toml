@@ -1,0 +1,335 @@
+# TreeOfLife-200M — 233,055,986 specimen images, the ladder's largest rung and its first with two
+# geometries over one entity space.
+#
+# Produced by `prepare.py`, which writes an edited copy of this file next to the parquets;
+# `[sources]` is relative to the declaring document (configuration.md §3), so the copy beside the
+# data is what `tessera build` reads and this one is what gets reviewed.
+#
+# **Two markers are filled by the run rather than committed conditional.** `# <vocabularies>` is
+# the eleven minted value sets, whose sizes are a property of the corpus the run saw, and
+# `# <kmeans-layer>` is the clustering, which a run without a GPU layout does not write. Where a
+# marker is not filled the copy says so in place, so the declaration beside the data always states
+# what it does and does not carry.
+#
+# **Every path is named once.** A `source` anywhere below names one of these keys rather than
+# repeating a path.
+
+[sources]
+points          = "points.parquet"
+points_geo      = "points-geo.parquet"
+publisher       = "vocab-publisher.parquet"
+source_dataset  = "vocab-source-dataset.parquet"
+basis           = "vocab-basis.parquet"
+img_type        = "vocab-img-type.parquet"
+kingdom         = "vocab-kingdom.parquet"
+phylum          = "vocab-phylum.parquet"
+class           = "vocab-class.parquet"
+order           = "vocab-order.parquet"
+family          = "vocab-family.parquet"
+genus           = "vocab-genus.parquet"
+species         = "vocab-species.parquet"
+taxonomy        = "members-taxonomy.parquet"
+kmeans          = "clusters-kmeans.parquet"
+kmeans_members  = "clusters-kmeans-members.parquet"
+
+[defaults]
+source          = "points"
+entity_id_field = "entity_id"
+
+# **Required, this declaration carrying more than one view** (decision 0112): within a signature
+# group, entity ids are ordered by the item's Morton code in the *anchor* view, then by external
+# id. `bioclip` is the anchor because it is the layout the clustering is computed over and the only
+# view every entity appears in; what matters is that it is named rather than inferred.
+allocation_view = "bioclip"
+
+# ---------------------------------------------------------------------------------------------
+# **Two views of one entity space, and this is the rung's reason for existing.** The same specimen
+# image is a point on an embedding layout and — where the record was matched to a GBIF occurrence
+# with coordinates — a point on the ground. The ladder has had two views before (arXiv, one
+# embedding laid out twice) and a projected view before (GeoNames, Overture); it has not had one
+# entity space carrying an embedding *and* a geography, and it has not had a view that holds a
+# subset of the corpus.
+#
+# **`geo` holds 176,899,537 of the 233,055,986 rows** — every row whose `source_dataset` is `gbif`,
+# whose `source_id` matched a GBIF `gbifid`, and whose occurrence carries a latitude and longitude
+# (75.90% of the corpus; `README-join.md` for the three rates). An entity absent from a view is
+# what views.md §2 allows and is the point of the rung: the other 56,156,449 rows are on the
+# specimen map and nowhere on the world map.
+#
+# `bioclip`: `projection = "none"` is the default and is written for clarity — an embedding layout
+# is not a map and there is no transform between these coordinates and any ground. `extent =
+# "auto"` squares a box around the coordinates the run produced.
+#
+# `geo`: the extent is written on the **input** side of the projection (projections.md §4.2) — the
+# box below is longitude and latitude in degrees and it is Web Mercator's whole domain, so it snaps
+# to the world square at zoom offset 0 and a 16-bit cell is exactly an XYZ tile at zoom 16. The
+# transform, the normalisation and the south-running y all happen inside the build, which is why
+# `points-geo.parquet` carries `lon` and `lat` exactly as GBIF publishes them.
+#
+# **`point_visibility` reads `publisher` on both views, and it is the real organisational
+# compartment**: the institution that published the occurrence record. 473 of them, and it is a
+# property of the row rather than a synthetic stand-in.
+#
+# **The `default` never fires**, and that is an owner ruling (2026-09-03) rather than a property of
+# the data. A row with no publisher — every `bioscan`, `eol` and `fathomnet` row, and any GBIF row
+# whose record names none — carries `unpublished`, a key of the closed vocabulary below, so the
+# column is never empty and a principal holding no term **sees nothing**. Written this way because
+# the campaign's principal ladder starts at 1% of the corpus and cannot be composed under a floor
+# every principal would hold for free: a `public` default would put a quarter of the map in front
+# of a viewer with no grant at all, and every masked count taken against it would measure that
+# floor rather than the compartment. Rung 4's `unlicensed` and rung 3's `unindexed` have the same
+# shape and exist for the same reason.
+# ---------------------------------------------------------------------------------------------
+
+[[view]]
+name             = "bioclip"
+title            = "Specimen map"
+projection       = "none"
+extent           = "auto"
+source           = "points"
+visibility       = "public"
+point_visibility = { field = "publisher", default = "unpublished" }
+
+[[view]]
+name             = "geo"
+title            = "Where it was recorded"
+projection       = "web_mercator"
+extent           = { lon = [-180.0, 180.0], lat = [-85.0511287798066, 85.0511287798066] }
+source           = "points_geo"
+visibility       = "public"
+point_visibility = { field = "publisher", default = "unpublished" }
+
+# ---------------------------------------------------------------------------------------------
+# Vocabularies, all eleven minted from `staging/metadata.parquet` and all **closed**: a value
+# neither set names is a refusal rather than a quietly minted compartment, which is the one thing
+# an access vocabulary must never do and a reasonable default for the rest.
+#
+# **`publisher` is `derived` and the other ten are `public`.** A publisher is the compartment, so
+# serving its whole roster to a principal holding one term would name the compartments they do not
+# hold — GeoNames' reasoning for its administrative vocabularies, applied to the one value set here
+# that is also the access column. `derived` serves a value where the viewer can see at least one
+# item carrying it, evaluated per request from inside the mask (decision 0090).
+#
+# The ten others are the published names of the tree of life and of GBIF's own controlled
+# vocabularies. ⊘ `check` warns that a `public` value set minted from the corpus publishes
+# data-derived value names on nobody's authority. That warning is right and is answered here rather
+# than silenced: a taxon name is not this corpus's to withhold, and the file is a roster of which
+# of the tree's names these 233 million photographs happened to contain.
+#
+# Widths follow the code space and not the bytes in a row: `genus` at 138,171 and `species` at
+# 240,084 exceed a `u16` outright, and both are rendered, so the width is what a code must address.
+# ---------------------------------------------------------------------------------------------
+
+# <vocabularies>
+
+# ---------------------------------------------------------------------------------------------
+# Attributes. **This rung carries no prose**: the search surface is names, so `scientific_name` is
+# an indexed keyword and `common_name` an indexed text column, and there is no abstract, no
+# description and no record body beyond them. That is deliberate — rung 4 measured what 118.9 GB of
+# abstracts do to a build, and this rung measures what 2.33x10^8 rows do to one without them.
+#
+# The seven ranks are rendered and not indexed: a rank is a legend and a colour, and the tiered
+# layer below is how the tree is navigated. `scientific_name` and `uuid` are indexed and not
+# rendered — `render` on a keyword is refused, the hot column being a fixed-width slot per row, and
+# an indexed keyword puts the string in entity space at no cost to it.
+# ---------------------------------------------------------------------------------------------
+
+[[attribute]]
+name       = "kingdom"
+title      = "Kingdom"
+type       = "category"
+vocabulary = "kingdom"
+render     = true
+
+[[attribute]]
+name       = "phylum"
+title      = "Phylum"
+type       = "category"
+vocabulary = "phylum"
+render     = true
+
+[[attribute]]
+name       = "class"
+title      = "Class"
+type       = "category"
+vocabulary = "class"
+render     = true
+
+[[attribute]]
+name       = "order"
+title      = "Order"
+type       = "category"
+vocabulary = "order"
+render     = true
+
+[[attribute]]
+name       = "family"
+title      = "Family"
+type       = "category"
+vocabulary = "family"
+render     = true
+
+[[attribute]]
+name       = "genus"
+title      = "Genus"
+type       = "category"
+vocabulary = "genus"
+render     = true
+
+[[attribute]]
+name       = "species"
+title      = "Species"
+type       = "category"
+vocabulary = "species"
+render     = true
+
+# The compartment, declared as an attribute as well: `{ attribute = "publisher" }` below evaluates
+# its membership against the indexed column, and a predicate layer over an unindexed one has
+# nothing to evaluate.
+[[attribute]]
+name       = "publisher"
+title      = "Publisher"
+type       = "category"
+vocabulary = "publisher"
+render     = true
+index      = true
+
+[[attribute]]
+name       = "source_dataset"
+title      = "Source dataset"
+type       = "category"
+vocabulary = "source_dataset"
+render     = true
+index      = true
+
+[[attribute]]
+name       = "basisOfRecord"
+title      = "Basis of record"
+type       = "category"
+vocabulary = "basis"
+render     = true
+
+[[attribute]]
+name       = "img_type"
+title      = "Image type"
+type       = "category"
+vocabulary = "img_type"
+render     = true
+
+# The binomial, indexed as a keyword: an exact name is what a specimen map is asked for.
+[[attribute]]
+name  = "scientific_name"
+title = "Scientific name"
+type  = "keyword"
+index = true
+
+# The vernacular name, indexed as text: "monarch butterfly" is two tokens and a viewer asks for
+# either. Present on part of the corpus, which `README.md` states; `match` over it is this rung's
+# text-index measurement.
+[[attribute]]
+name  = "common_name"
+title = "Common name"
+type  = "text"
+index = true
+
+# TreeOfLife's own record identifier. Indexed rather than rendered, for the reason above.
+[[attribute]]
+name  = "uuid"
+title = "TreeOfLife uuid"
+type  = "keyword"
+index = true
+
+# ---------------------------------------------------------------------------------------------
+# **The tree of life itself, seven levels deep over every row** — the largest tiered layer the
+# ladder has carried, at 2.33x10^8 member rows and ~1.63x10^9 membership entries once closed
+# upward. Declared over both views, because a clade is a property of the specimen and not of a
+# projection: the same artifact is drawn on the embedding map and on the world map, with a
+# different box and a different centroid in each.
+#
+# A member row is one specimen with a list whose positions are the seven declared levels
+# (GeoNames' `members-admin.parquet` form). A null entry means *in no artifact at that level*,
+# which is what a chain that simply ends is. **A hole in the chain becomes an artifact, not a
+# null**: a row with a family and no order carries an explicit `NOT_RECORDED` key at the order
+# level, because `parent_edges` is `windows(2)` and does not read past a gap — skipping would state
+# a containment no row makes. A level is filled only where something *below* it is present.
+#
+# `value_set = "open"`: no artifact roster is supplied, so the artifacts are exactly what the
+# member file names and each carries its own key as its name. `require_member_visibility =
+# { count = 1 }` with `artifact_visibility = "inherited"` is what makes containment structural
+# rather than declared — a genus is served only to a principal who can already see a specimen in
+# it.
+# ---------------------------------------------------------------------------------------------
+
+[[layer]]
+name                      = "taxonomy/tree"
+title                     = "Taxonomy"
+views                     = ["bioclip", "geo"]
+membership                = "enumerated"
+value_set                 = "open"
+hierarchy                 = { kind = "tiered", prune_children = true }
+visibility                = "public"
+artifact_visibility       = { default = "inherited" }
+require_member_visibility = { count = 1 }
+
+[[layer.levels]]
+level = 0
+title = "Kingdom"
+zoom  = [0, 3]
+
+[[layer.levels]]
+level = 1
+title = "Phylum"
+zoom  = [2, 5]
+
+[[layer.levels]]
+level = 2
+title = "Class"
+zoom  = [4, 7]
+
+[[layer.levels]]
+level = 3
+title = "Order"
+zoom  = [6, 9]
+
+[[layer.levels]]
+level = 4
+title = "Family"
+zoom  = [8, 11]
+
+[[layer.levels]]
+level = 5
+title = "Genus"
+zoom  = [10, 13]
+
+[[layer.levels]]
+level = 6
+title = "Species"
+zoom  = [12, 16]
+
+# Recomputed per viewer from `membership ∩ M_auth` and nothing else, so they are contained by
+# construction and take no visibility declaration. Without them a taxonomy layer cannot answer
+# "zoom to this clade" for the clade the viewer can actually see — and on this rung it answers it
+# twice, once per view.
+[layer.content]
+computed = ["centroid", "box"]
+
+[layer.members]
+source = "taxonomy"
+
+# The tagged-programme case, and here it is the compartment itself: an attribute predicate whose
+# artifacts are the distinct values of the indexed `publisher` column and whose membership is
+# evaluated rather than published. It declares no content, no levels and no hierarchy but `flat`,
+# which is what a predicate membership is allowed. Over both views, for the taxonomy layer's
+# reason.
+[[layer]]
+name                      = "publishers/source"
+title                     = "Publishing institution"
+views                     = ["bioclip", "geo"]
+membership                = { attribute = "publisher" }
+value_set                 = "closed"
+hierarchy                 = { kind = "flat" }
+visibility                = "public"
+artifact_visibility       = { default = "inherited" }
+require_member_visibility = { count = 1 }
+
+# <kmeans-layer>

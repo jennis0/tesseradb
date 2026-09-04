@@ -97,3 +97,34 @@ def staging() -> Path:
     path = rung() / "staging"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+#: The rows UMAP is fitted over, staged by `stage.py --fit` and read by `routes.py`. 2,500,000 x
+#: 768 float16 is 3.84 GB — rung 3's fit size at rung 3's width, and the size `README.md` records a
+#: measurement for.
+FIT_ROWS = 2_500_000
+
+#: BioCLIP-2's width.
+EMBED_DIM = 768
+
+
+def fit_matrix():
+    """The staged fit sample and its sidecar: `(memmap (rows, 768) float16, global row ids, meta)`.
+
+    **Refuses a partial sample rather than reading its zeros.** The memmap is written by 666
+    workers into their own slots, so an interrupted pass leaves holes rather than a short file.
+    """
+    import json
+
+    import numpy as np
+
+    dirpath = staging()
+    meta = json.loads((dirpath / "fit.json").read_text())
+    assert meta["complete"], (
+        f"{dirpath / 'fit.f16'} is a partial sample: {meta['files_done']} of {FILE_COUNT} files. "
+        f"Finish `stage.py --fit` — it is resumable per file."
+    )
+    matrix = np.memmap(dirpath / "fit.f16", dtype=np.float16, mode="r",
+                       shape=(meta["rows"], meta["dim"]))
+    rows = np.load(dirpath / "fit-rows.npy")
+    return matrix, rows, meta

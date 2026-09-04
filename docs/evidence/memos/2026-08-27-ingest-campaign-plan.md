@@ -211,7 +211,7 @@ numbers are half of what this campaign is for.
 | **2** | **Overture places + divisions** 7.4×10⁷ | First rung past the 5×10⁷ wall — **W1 and W2 are expected here, and that is the point** | `division_area`: 1.07M polygons, 12 subtypes, explicit `hierarchies[]` — the only tiered boundary layer |
 | **3** | **MedCPT / PubMed** 3.6×10⁷ | The projection experiment's first real test (§6) | MeSH: 30,594 descriptors, 64,687 tree numbers, depth 13, **a polyhierarchy** — the case `configuration.md`'s two-parents refusal has never met |
 | **4** | **PaperSeek + OpenAlex** 1.02×10⁸ | Prose at scale; 1024-d vectors with title and abstract **inline** — no join needed for text | Per-work licence and OA status as a real compartment; the 4-level topic tree; the honest 40×-arXiv comparison |
-| **5** | **TreeOfLife** 2.33×10⁸ | Largest rung that fits without §4 | The GBIF join — one entity in two geometries. Also: **ingest the same rows in taxonomy order and shuffled**, everything else held, which measures entity-space contiguity directly |
+| **5** | **TreeOfLife** 2.33×10⁸ | Largest rung that fits without §4 | The GBIF join — one entity in two geometries. ~~Also: **ingest the same rows in taxonomy order and shuffled**, everything else held, which measures entity-space contiguity directly~~ — **withdrawn, owner ruling 2026-09-03**: allocation orders entity ids within a signature group by Morton code and not by arrival ([`../../design/annotation-representation.md`](../../design/annotation-representation.md) §2.2), so input order changes nothing and the two arms would differ only by the cost of shuffling. The rung is built once |
 | **6** | **GBIF** 3.5×10⁹ | Needs §4's volume; the real top rung | Real collection-bias density; per-record CC0/BY/NC; `eventdate` with diurnal and seasonal structure; monthly snapshots as a real add-and-withdraw stream |
 | **7** | **Overture buildings** 2.53×10⁹ | Needs §4's volume | 10⁹ geometry with almost no labels — the pure point-layer scale test |
 
@@ -500,8 +500,11 @@ c-TF-IDF text with generating sets — the disclosure-controlled label case).
 
 **TreeOfLife**: taxonomy-sorted parquet, so read the ~29 B/row label columns whole (6.8 GB) and
 stream the vectors for the graph. `taxonomy/tree` as `tiered` with seven levels;
-`publishers/source` as `{ attribute = "publisher" }`. **Ingest the same rows twice — in file order
-and shuffled** — everything else held, which measures entity-space contiguity directly.
+`publishers/source` as `{ attribute = "publisher" }`. ⊘ **Withdrawn, owner ruling 2026-09-03**: the plan's "ingest the same
+rows twice, in file order and shuffled" measures nothing, allocation having made entity order within a
+signature group the Morton code's rather than the input's
+([`../../design/annotation-representation.md`](../../design/annotation-representation.md) §2.2:
+`(signature, morton_code, source_id)`).
 
 **GBIF**: an 18-column projection of 104 B/row down to ~25 B/row. `point_visibility = { field = "license", default = "public" }`
 is **the real per-record compartment in the ladder**. Order by `eventdate`. Rendered: the seven ranks

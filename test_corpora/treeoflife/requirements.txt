@@ -1,0 +1,8 @@
+# Rung 5 shares the embedding rungs' environment, `~/venvs/projection` — cuVS, cuML and CuPy on
+# the GPU with scikit-learn on the CPU. The one file to install from is the arXiv rung's
+# `test_corpora/arxiv/requirements.txt`; nothing here needs anything it does not carry.
+#
+# `drive.py` is the exception and runs on the system `python3`: it needs `requests` and `pyarrow`
+# and nothing the rung's environment carries.
+
+-r ../arxiv/requirements.txt
