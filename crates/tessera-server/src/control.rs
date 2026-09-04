@@ -3584,8 +3584,9 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
         //
         // `last_secs` and `last_rss_bytes` are the last fold's cost, from the fold thread's entry
         // to the superseded prefix's reclaim: the publication's phases (the membership rewrite,
-        // the derived structures, the manifest, the flip, the warm, the reclaim) are rows of the
-        // same staircase as the thread's passes. **`last_rss_bytes` is a staircase maximum sampled
+        // the derived structures, the report, the manifest, the flip, the retire walk, the prefix
+        // open, the adoptions, the warm, the WAL rotation, the reclaim) are rows of the same
+        // staircase as the thread's passes. **`last_rss_bytes` is a staircase maximum sampled
         // at pass boundaries, not a peak** — a spike inside a pass is invisible to it, and probe
         // P1 is what says how far under the true peak it sits. It is published because compaction
         // §3's memory budget is a *modelled* figure and this is the only number a deployment has

@@ -675,12 +675,10 @@ fn a_fold_that_retires_a_member_writes_the_tile_index_the_publication_adopts() {
     );
 }
 
-/// **A fold that retires an artifact's own entity leaves that artifact out of the tile index it
-/// writes.** The artifact's slot becomes a hole at the retirement, and the index the fold writes
-/// for the level, stamped with the post-retirement version, has a hole at its ordinal too; the
-/// survivors after it keep their ordinals. The publication and a restart both adopt the index.
-#[test]
-fn a_fold_that_retires_an_artifacts_own_entity_leaves_it_out_of_the_tile_index() {
+/// Publish three artifacts, retire the one at `retired` by its own entity, fold, and check the
+/// index the fold writes leaves it out: the publication claims the index, the survivors are
+/// served whole, and a restart claims it again.
+fn own_entity_retired_at(retired: usize) {
     let fx = fixture();
     let engine = fx.open();
     engine.register_layer(declaration("clusters/a")).unwrap();
@@ -704,10 +702,12 @@ fn a_fold_that_retires_an_artifacts_own_entity_leaves_it_out_of_the_tile_index()
         out.sort();
         out
     };
-    let survivors = vec![(Some("c0".into()), 100), (Some("c2".into()), 100)];
+    let survivors: Vec<(Option<String>, u64)> = (0..3)
+        .filter(|ordinal| *ordinal != retired)
+        .map(|ordinal| (Some(format!("c{ordinal}")), 100))
+        .collect();
 
-    // The middle one, so the index the fold writes has a hole between two live ordinals.
-    let deleted = artifact_entity(&engine, ids[1]);
+    let deleted = artifact_entity(&engine, ids[retired]);
     engine
         .accept_change(deleted, ChangeOp::Delete)
         .expect("an artifact takes a deletion like any other entity");
@@ -730,6 +730,24 @@ fn a_fold_that_retires_an_artifacts_own_entity_leaves_it_out_of_the_tile_index()
     let engine = fx.open();
     assert_eq!(served(&engine), survivors);
     assert_eq!(engine.artifact_tile_indexes_adopted(), 1);
+}
+
+/// **A fold that retires an artifact's own entity leaves that artifact out of the tile index it
+/// writes.** The artifact's slot becomes a hole at the retirement, and the index the fold writes
+/// for the level, stamped with the post-retirement version, has a hole at its ordinal too; the
+/// survivors after it keep their ordinals. The middle one, so the hole sits between two live
+/// ordinals.
+#[test]
+fn a_fold_that_retires_an_artifacts_own_entity_leaves_it_out_of_the_tile_index() {
+    own_entity_retired_at(1);
+}
+
+/// **The top ordinal retired.** The level's slots still reach past it, and the reader sizes the
+/// level at one past the highest live ordinal, so an index one ordinal longer would be refused
+/// for covering a different range. The fold sizes its index the same way.
+#[test]
+fn a_fold_that_retires_the_top_artifact_writes_an_index_the_survivors_fit() {
+    own_entity_retired_at(2);
 }
 
 /// A second fold over an already-folded prefix is the case that catches a rewrite which reads its

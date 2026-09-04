@@ -905,21 +905,20 @@ fn a_fold_that_retires_a_member_writes_the_column_the_publication_transposes() {
     assert_eq!(reopened.columns_composed(), 0);
 }
 
-/// **A fold that retires an artifact's own entity leaves that artifact out of the column it
-/// writes.** The column is composed from the records the retirement leaves, so no row carries the
-/// retired artifact's ordinal; the survivors' rows carry theirs. Checked on the column the
-/// publication adopted, row by row, and against the artifact-major twin.
-#[test]
-fn a_fold_that_retires_an_artifacts_own_entity_leaves_it_out_of_the_column() {
+/// Retire the flat artifact `key` by its own entity, fold, and check the column the fold writes
+/// leaves it out: the publication transposes the column, no row of `retired` carries a label,
+/// every row of `survivor` carries one, the artifact is served to nobody, and the artifact-major
+/// twin agrees.
+fn own_entity_retired(key: &str, retired: std::ops::Range<u64>, survivor: std::ops::Range<u64>) {
     let fx = fixture();
     let engine = published(
         &fx,
         Some(ServingLayout::RowMajorLabel),
         Some(ServingLayout::ArtifactMajor),
     );
-    let p3 = flat_artifact_entity(&engine, "p3");
+    let entity = flat_artifact_entity(&engine, key);
     engine
-        .accept_change(p3, ChangeOp::Delete)
+        .accept_change(entity, ChangeOp::Delete)
         .expect("an artifact takes a deletion like any other entity");
     fold(&engine);
     assert_eq!(
@@ -937,27 +936,27 @@ fn a_fold_that_retires_an_artifacts_own_entity_leaves_it_out_of_the_column() {
         column.for_each_label(row, |ordinal| at.push(ordinal));
         at
     };
-    for row in rows_of(&fx, &engine, 1_500..2_000) {
+    for row in rows_of(&fx, &engine, retired) {
         assert!(
             labels_at(row).is_empty(),
             "row {row} was a member of the retired artifact and is labelled with nothing"
         );
     }
-    let survivor: std::collections::BTreeSet<Vec<u32>> = rows_of(&fx, &engine, 1_000..1_500)
+    let surviving: std::collections::BTreeSet<Vec<u32>> = rows_of(&fx, &engine, survivor)
         .into_iter()
         .map(labels_at)
         .collect();
     assert_eq!(
-        survivor.len(),
+        surviving.len(),
         1,
-        "every row of the surviving artifact before the hole carries its one ordinal"
+        "every row of the surviving artifact carries its one ordinal"
     );
-    assert_eq!(survivor.iter().next().unwrap().len(), 1);
+    assert_eq!(surviving.iter().next().unwrap().len(), 1);
     let live = sweep(&engine);
     assert!(
         !live
             .iter()
-            .any(|(_, _, set)| set.iter().any(|s| s.key.as_deref() == Some("p3"))),
+            .any(|(_, _, set)| set.iter().any(|s| s.key.as_deref() == Some(key))),
         "the retired artifact is served to nobody"
     );
 
@@ -967,14 +966,32 @@ fn a_fold_that_retires_an_artifacts_own_entity_leaves_it_out_of_the_column() {
         Some(ServingLayout::ArtifactMajor),
         Some(ServingLayout::ArtifactMajor),
     );
-    let twin_p3 = flat_artifact_entity(&twin, "p3");
-    twin.accept_change(twin_p3, ChangeOp::Delete).unwrap();
+    let twin_entity = flat_artifact_entity(&twin, key);
+    twin.accept_change(twin_entity, ChangeOp::Delete).unwrap();
     fold(&twin);
     assert_same(
         &live,
         &sweep(&twin),
         "after a fold that retired an artifact",
     );
+}
+
+/// **A fold that retires an artifact's own entity leaves that artifact out of the column it
+/// writes.** The column is composed from the records the retirement leaves, so no row carries the
+/// retired artifact's ordinal; the survivors' rows carry theirs. Checked on the column the
+/// publication adopted, row by row, and against the artifact-major twin. The retired artifact
+/// sits between live ordinals.
+#[test]
+fn a_fold_that_retires_an_artifacts_own_entity_leaves_it_out_of_the_column() {
+    own_entity_retired("p3", 1_500..2_000, 1_000..1_500);
+}
+
+/// **The top ordinal retired.** The reader refuses a column shorter than one past the highest
+/// live ordinal and the fold sizes its column the same way, so the column it writes for a level
+/// whose last artifact left still covers every survivor.
+#[test]
+fn a_fold_that_retires_the_top_artifact_writes_a_column_the_survivors_fit() {
+    own_entity_retired("p15", 7_500..8_000, 7_000..7_500);
 }
 
 /// **A column whose coordinate has moved is not adopted**, and the level recomposes on first use.

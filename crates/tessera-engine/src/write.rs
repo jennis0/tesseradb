@@ -7378,6 +7378,7 @@ impl Executor {
             discard(&format!("CURRENT would not flip ({e})"));
             return;
         }
+        stairs.record("11 flip");
 
         // **The resident store retires here, before the new generation is installed** — not after
         // the warm below. The generation this fold is about to publish carries an overlay with the
@@ -7403,6 +7404,9 @@ impl Executor {
         // this retirement (`PendingRetirement`). `levels_moved_by` and `retire` read one predicate,
         // so any other outcome is unreachable; the check is what keeps a structure from being
         // carried into a later manifest at a version it does not describe if that ever changes.
+        // It protects the live lists and the manifests later flushes write from them; the fold's
+        // own manifest is already durable with the version and the structures it states, and for
+        // that the shared predicate (`membership.rs`'s `record_moved_by`) is the whole guarantee.
         moved.sort();
         let mut expected = pending.levels.clone();
         expected.sort();
@@ -7459,6 +7463,7 @@ impl Executor {
         self.shape_rows_extents = shape_rows;
         self.shape_held_extents = shape_held;
         *lock_recover(&self.health.last_fold_report) = degraded;
+        stairs.record("12 retire");
 
         // ---- steps 5 and 6: open the new prefix, then one swap ---------------------------------
         let rotation = crate::session::open_rotation(
@@ -7535,6 +7540,8 @@ impl Executor {
             return;
         }
 
+        stairs.record("13 open");
+
         // **The structures this fold wrote, adopted by the process that wrote them.**
         // `Engine::open` adopts a prefix's containment partitions, tile indexes and row columns
         // against the store it seeded; this is the same prefix and the same store, retired above.
@@ -7562,7 +7569,7 @@ impl Executor {
                 store,
             );
         });
-        stairs.record("11 flip");
+        stairs.record("14 adopt");
 
         // **The row forms, rebuilt here rather than by whoever arrives first.** Row space renumbers
         // globally at a fold, so every projection built over the old one is invalid at the flip —
@@ -7579,7 +7586,7 @@ impl Executor {
         // the retire is about to bump, and the whole warm would be discarded on the first request —
         // paying the stall it exists to prevent, having already paid for the warm.
         self.warm_artifact_caches();
-        stairs.record("12 warm");
+        stairs.record("15 warm");
 
         // ---- step 7: rotate the WAL ------------------------------------------------------------
         //
@@ -7590,6 +7597,7 @@ impl Executor {
         // entities with no row and no postings) and **permanently**, since a rotation snapshot
         // applies entries and never assigns.
         self.rotate_wal();
+        stairs.record("16 wal");
 
         // ---- step 8: reclaim the superseded prefix (compaction §8) ------------------------------
         self.pending_reclaim.push(PendingReclaim {
@@ -7600,7 +7608,7 @@ impl Executor {
             superseded_sidecars: std::mem::take(&mut self.superseded_sidecars),
         });
         self.reclaim_superseded_prefixes();
-        stairs.record("13 reclaim");
+        stairs.record("17 reclaim");
         let cost = stairs.into_cost();
 
         self.health.folds.fetch_add(1, Ordering::Relaxed);

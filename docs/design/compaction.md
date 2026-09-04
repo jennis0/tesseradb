@@ -997,9 +997,10 @@ The trigger's own log line carries it when a fold dispatches. ✔ Beside them, w
 the fold itself did: `folds` and `fold_failures`, the last fold's wall clock, and the highest
 resident set its own pass staircase saw, with the staircase unreduced beneath. The staircase runs
 from the fold thread's entry to the superseded prefix's reclaim: the publication's phases (the
-membership rewrite, the derived structures, the report, the manifest, the flip, the warm, the
-reclaim) are rows of it beside the thread's passes, since on rung 3 the publication was half the
-fold's wall and held its resident peak (`probes/2026-09-04-epoch-shard-fold-decomposition/`).
+membership rewrite, the derived structures, the report, the manifest, the flip, the retire walk,
+the prefix open, the adoptions, the warm, the WAL rotation, the reclaim) are rows of it beside
+the thread's passes, since on rung 3 the publication was half the fold's wall and held its
+resident peak (`probes/2026-09-04-epoch-shard-fold-decomposition/`).
 **`fold_failures` is the one to alarm on and it is not the mirror of `folds`** — every discard
 leaves a complete prefix `CURRENT` never named, so a fold that keeps discarding costs disc before
 it costs anything else. **The RSS figure is a staircase maximum, not a peak**: one sample per pass

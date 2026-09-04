@@ -201,8 +201,12 @@ fn the_fold_status_covers_the_publication() {
         "9 report",
         "10 manifest",
         "11 flip",
-        "12 warm",
-        "13 reclaim",
+        "12 retire",
+        "13 open",
+        "14 adopt",
+        "15 warm",
+        "16 wal",
+        "17 reclaim",
     ];
     assert_eq!(
         &names[names.len() - publication.len()..],
