@@ -73,6 +73,12 @@ import base64
 import concurrent.futures
 import json
 import shutil
+
+try:  # 3.11+
+    import tomllib
+except ModuleNotFoundError:  # 3.10 on this box
+    import tomli as tomllib
+
 import subprocess
 import sys
 import time
@@ -300,9 +306,41 @@ def write_base_inputs(rung: Path, out: Path, base_ids: np.ndarray) -> dict:
             if name in set(layers)
         ],
     }
+    # **Every file the declaration still names**, read off the declaration rather than listed here.
+    # A vocabulary is copied whole — it is a value set, not rows, and a base built from half the
+    # corpus declares the same closed set. Any *other* view's points file is filtered by entity id
+    # exactly as the anchor's is: a rung may carry several row spaces over one entity space
+    # (rung 5's `bioclip` and `geo`), and a declaration naming a file the base directory does not
+    # hold refuses the build with `No such file or directory`.
+    declared = tomllib.loads((rung / "corpus.toml").read_text())
+    named = declared.get("sources", {})
+    anchor = declared.get("defaults", {}).get("source", "points")
+
+    def path_of(key: str) -> Path:
+        return rung / named.get(key, key)
+
+    for vocabulary in declared.get("vocabulary", []):
+        source = vocabulary.get("source")
+        if source is None:
+            continue
+        got = path_of(source)
+        if got.exists():
+            shutil.copy2(got, out / got.name)
+            kept.setdefault("vocabularies", []).append(got.name)
+
+    for view in declared.get("view", []):
+        source = view.get("source", anchor)
+        if source == anchor:
+            continue
+        got = path_of(source)
+        if got.exists():
+            kept.setdefault("views", {})[got.name] = filter_parquet(
+                got, out / got.name, "entity_id", base_ids, drop=layers
+            )
+
     for name in ("branch.parquet", ".env"):
         source = rung / name
-        if source.exists():
+        if source.exists() and not (out / name).exists():
             shutil.copy2(source, out / name)
     declaration, removed = base_declaration((rung / "corpus.toml").read_text())
     (out / "corpus.toml").write_text(declaration)

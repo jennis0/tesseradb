@@ -719,6 +719,16 @@ def main() -> None:
           f"y [{xy[:, 1].min():.2f}, {xy[:, 1].max():.2f}]  (peak so far {peak_gb():.1f} GB)",
           flush=True)
     if args.layout_only:
+        # The route's own timings, beside the layout. `--reuse-layout` writes a manifest whose
+        # `routes` is empty by construction — it ran no route — so without this the CAGRA build,
+        # the graph search, the UMAP and the placement's wall would be in a log and nowhere else.
+        (out / "layout-bioclip.json").write_text(
+            json.dumps({"rows": n, "routes": timings,
+                        "bounds": {"x": [float(xy[:, 0].min()), float(xy[:, 0].max())],
+                                   "y": [float(xy[:, 1].min()), float(xy[:, 1].max())]},
+                        "seconds": dict(steps),
+                        "peak_rss_gb": round(peak_gb(), 2)}, indent=2) + "\n"
+        )
         print(f"\n--layout-only: wrote {layout_path} "
               f"({layout_path.stat().st_size / 1e9:.2f} GB). Rerun with --reuse-layout.")
         return
@@ -959,6 +969,8 @@ def main() -> None:
                             "index off the share" if whole else "fit over the sample itself"),
                      graph="cagra fp16", fit_rows=fit_meta["rows"],
                      reused_layout=bool(args.reuse_layout), managed_memory=args.managed),
+        # Empty under `--reuse-layout`, which ran no route: `layout-bioclip.json` beside the
+        # layout carries the run that produced it.
         "routes": timings,
         "bounds": {"bioclip": {"x": [float(xy[:, 0].min()), float(xy[:, 0].max())],
                                "y": [float(xy[:, 1].min()), float(xy[:, 1].max())]}},
