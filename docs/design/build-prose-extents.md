@@ -68,10 +68,17 @@ Working set: one join chunk, plus one uncompressed block per extent at the merge
 
 ### Which columns take extents
 
-`text` columns only. A `keyword` or `utf8` column keeps its arena: its values are read by the
-dictionary writer and by the blob in entity order, both of which want random access to a column
-whose payload is a fraction of the prose. Section 6 covers what that leaves `--arena-order`
+Bundle-wide `text` columns only. A `keyword` or `utf8` column keeps its arena: its values are read
+by the dictionary writer and by the blob in entity order, both of which want random access to a
+column whose payload is a fraction of the prose. Section 6 covers what that leaves `--arena-order`
 governing.
+
+A **group-scoped** `text` column keeps its arena too, and it is the one reader of a text column's
+`EntityColumn` that remains. It has no blob row — the record blob is bundle-wide and addressed by
+a column's position in `declared_scalars`, which a family has none of (`views.md` §5) — so there
+are no extents for it to be read from, and its per-view column is built from the view's own points
+file and indexed from the arena. One text pass serves both producers: it takes either a set of
+arena byte ranges or a set of extent block ranges and tokenises what the range yields.
 
 ### One extent per column, not per chunk
 
@@ -181,11 +188,13 @@ tag winning; the merge orders entities ascending and fields by tag. None of that
 boundary. The text index's dictionary is the sorted distinct term set and a posting is the entity
 set carrying that term, neither of which reads one either.
 
-Two tests hold it. `chunking_the_text_index_does_not_change_its_bytes` is unchanged and runs the
-same eleven plans over the window split. `the_prose_extents_do_not_change_the_blobs_bytes` builds
-the same corpus at several chunk budgets, over values that are absent, empty, and written twice,
-and asserts the three blob files are identical across all of them and identical to the one-chunk
-build.
+Three tests hold it. `chunking_the_text_index_does_not_change_its_bytes` runs the same eleven
+plans over both producers and over one, three and eleven interleaved extents, and asserts one
+dictionary and one postings file across all of them.
+`the_prose_extents_do_not_change_the_blobs_bytes` writes the same corpus at seven chunk budgets,
+over values that are absent, empty and written twice, and asserts the three blob files are
+identical across all of them. `folding_the_extents_leaves_the_same_rows` asserts the cascade
+leaves the same entities carrying the same values.
 
 The join chunk sort is stable, which is what makes last-write-wins an answer rather than a race.
 
