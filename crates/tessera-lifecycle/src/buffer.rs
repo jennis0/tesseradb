@@ -227,6 +227,15 @@ pub struct IngestBuffer {
     ///
     /// This does **not** remove the O(buffered) term — the hash table itself is still copied per
     /// close. It removes the per-item deep copy, which is what the measurement says dominates it.
+    ///
+    /// **The row list is behind an `Arc` too, for the same reason one step out.** With a bare
+    /// `Vec` as the value, cloning the map allocates one `Vec` per *entity* — so a close paid a
+    /// malloc and a copy per buffered row however cheap the items themselves had become, measured
+    /// at ~145 ns per entry and 14.3 µs per ingested row at a 1M-row buffer
+    /// (`probes/2026-09-04-ingest-executor/`). Behind an `Arc` the clone copies control bytes and
+    /// pointers and allocates nothing, and the four mutators go through `Arc::make_mut`, which
+    /// copies one entity's list — usually a single element — only where a published generation
+    /// still shares it.
     /// **Keyed by entity, one entry per view that entity has a row in** — usually exactly one.
     ///
     /// An entity may hold a row in several views at once (`views.md` §4: the same point in two
@@ -235,7 +244,7 @@ pub struct IngestBuffer {
     /// acked row silently; keyed by `(entity, view)` alone, every entity-space reader here would
     /// have had to dedupe. The entity's own row — the one that carries its terms — is the first
     /// element, which is what makes [`IngestBuffer::get`] a lookup rather than a scan.
-    items: FxHashMap<EntityId, Vec<Arc<BufferedItem>>>,
+    items: FxHashMap<EntityId, Arc<Vec<Arc<BufferedItem>>>>,
     /// Rows, not entities: what the occupancy bound counts and what a flush consumes.
     rows: usize,
 }
@@ -274,7 +283,9 @@ impl IngestBuffer {
             scoped: row.scoped.clone(),
             wal_pos: None,
         });
-        let rows = self.items.entry(row.entity_id).or_default();
+        // `make_mut` on a fresh entry is in place (refcount one); on an entity a published
+        // generation still holds, it copies that entity's list alone.
+        let rows = Arc::make_mut(self.items.entry(row.entity_id).or_default());
         // **One row per (entity, view), and a repeat replaces rather than accumulates.** The
         // ingest join refuses a second row in a view the entity is already in — that is the arm
         // the permutation *and* this buffer are both consulted for — so a replacement here is
@@ -297,7 +308,7 @@ impl IngestBuffer {
     /// which is the ordinary case for a stamp arriving after a flush has consumed the row.
     pub fn set_wal_pos(&mut self, entity: EntityId, view: &str, wal_pos: u64) {
         if let Some(rows) = self.items.get_mut(&entity) {
-            if let Some(item) = rows.iter_mut().find(|item| item.view == view) {
+            if let Some(item) = Arc::make_mut(rows).iter_mut().find(|item| item.view == view) {
                 // Copies only if a published generation still shares this item; at the call site it
                 // is stamped immediately after insert, where the refcount is one and this is in
                 // place.
@@ -323,7 +334,7 @@ impl IngestBuffer {
         Some(
             self.items
                 .values()
-                .flatten()
+                .flat_map(|rows| rows.iter())
                 .try_fold(u64::MAX, |acc, item| item.wal_pos.map(|p| acc.min(p))),
         )
     }
@@ -351,6 +362,7 @@ impl IngestBuffer {
             return;
         };
         let before = rows.len();
+        let rows = Arc::make_mut(rows);
         rows.retain(|item| item.view != view);
         self.rows -= before - rows.len();
         if rows.is_empty() {
