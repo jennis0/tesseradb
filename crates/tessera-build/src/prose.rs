@@ -48,6 +48,9 @@ pub(crate) struct ProseColumn {
     name: String,
     dir: PathBuf,
     extents: Vec<ExtentPaths>,
+    /// How many cascade rounds have run, so a folded extent's name cannot collide with the one it
+    /// was folded from.
+    folds: usize,
 }
 
 impl ProseColumn {
@@ -57,6 +60,7 @@ impl ProseColumn {
             name: name.to_string(),
             dir: dir.to_path_buf(),
             extents: Vec::new(),
+            folds: 0,
         }
     }
 
@@ -104,20 +108,70 @@ impl ProseColumn {
         Ok(())
     }
 
+    /// How many extents one merge holds open, and the number above which they are folded into
+    /// intermediates first: **128**.
+    ///
+    /// What an open extent costs the merge is one uncompressed block, 256 KiB, so 128 of them is
+    /// 32 MB. The cascade above that is a second write of the prose in the group, which is why the
+    /// bound is not tighter: a join chunk is `JOIN_STAGE_BYTES` of staged rows, so a corpus
+    /// reaches 128 extents of one column only at ten times the 10⁸ rung's prose.
+    pub(crate) const MERGE_FAN_IN: usize = 128;
+
+    /// Fold the extents in groups until at most [`Self::MERGE_FAN_IN`] are left.
+    ///
+    /// A group is a contiguous run in write order and is merged by the same row merge the blob
+    /// itself is written by, so an entity written twice inside one group comes out carrying the
+    /// later value and the ordering the live sets rest on survives.
+    pub(crate) fn cascade(&mut self) -> Result<()> {
+        while self.extents.len() > Self::MERGE_FAN_IN {
+            let groups = self.extents.len().div_ceil(Self::MERGE_FAN_IN);
+            let per_group = self.extents.len().div_ceil(groups);
+            let taken: Vec<ExtentPaths> = self.extents.drain(..).collect();
+            let mut folded: Vec<ExtentPaths> = Vec::with_capacity(groups);
+            for (group, extents) in taken.chunks(per_group).enumerate() {
+                let stem = format!("prose-{}-fold{}-{group:05}", self.column, self.folds);
+                let out = ExtentPaths {
+                    blocks: self.dir.join(format!("{stem}.blocks.bin")),
+                    hasrow: self.dir.join(format!("{stem}.hasrow.roaring")),
+                    directory: self.dir.join(format!("{stem}.directory.arrow")),
+                };
+                let blobs = open_all(extents)?;
+                let mut cursors: Vec<tessera_filter_write::BlobRows<'_>> = blobs
+                    .iter()
+                    .map(tessera_filter_write::BlobRows::over)
+                    .collect();
+                let mut sources: Vec<&mut dyn tessera_filter_write::RecordRows> = cursors
+                    .iter_mut()
+                    .map(|cursor| cursor as &mut dyn tessera_filter_write::RecordRows)
+                    .collect();
+                tessera_filter_write::merge_record_rows(
+                    &mut sources,
+                    &Bitmap::new(),
+                    &out.blocks,
+                    &out.hasrow,
+                    &out.directory,
+                    RECORD_BLOCK_TARGET,
+                )
+                .map_err(|e| BuildError::io(&out.blocks, e))?;
+                drop(sources);
+                drop(cursors);
+                drop(blobs);
+                for spent in extents {
+                    for path in [&spent.blocks, &spent.hasrow, &spent.directory] {
+                        let _ = std::fs::remove_file(path);
+                    }
+                }
+                folded.push(out);
+            }
+            self.folds += 1;
+            self.extents = folded;
+        }
+        Ok(())
+    }
+
     /// Open every extent, mapped, with each one's live set beside it.
     pub(crate) fn open(&self) -> Result<OpenProse> {
-        let mut blobs = Vec::with_capacity(self.extents.len());
-        for paths in &self.extents {
-            blobs.push(
-                RecordBlob::open(
-                    &paths.blocks,
-                    &paths.hasrow,
-                    &paths.directory,
-                    Access::Mapped,
-                )
-                .map_err(|e| BuildError::io(&paths.blocks, std::io::Error::from(e)))?,
-            );
-        }
+        let blobs = open_all(&self.extents)?;
         // Later extents were written later, so a repeated entity's value is the last extent's.
         // Walked backwards, `seen` is the union of every later extent's rows.
         let mut live = vec![Bitmap::new(); blobs.len()];
@@ -259,4 +313,21 @@ impl tessera_filter_write::RecordRows for ExtentRows<'_> {
             }
         }
     }
+}
+
+/// Open a run of extents, mapped.
+fn open_all(extents: &[ExtentPaths]) -> Result<Vec<RecordBlob>> {
+    let mut blobs = Vec::with_capacity(extents.len());
+    for paths in extents {
+        blobs.push(
+            RecordBlob::open(
+                &paths.blocks,
+                &paths.hasrow,
+                &paths.directory,
+                Access::Mapped,
+            )
+            .map_err(|e| BuildError::io(&paths.blocks, std::io::Error::from(e)))?,
+        );
+    }
+    Ok(blobs)
 }

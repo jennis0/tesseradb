@@ -29,8 +29,8 @@ pub mod error;
 pub mod input;
 pub mod layers;
 pub mod observer;
-mod prose;
 mod pipeline;
+mod prose;
 mod residency;
 pub mod shapes;
 pub(crate) mod spill;
@@ -1469,14 +1469,10 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                 // A `text` column's values are its extents in both builds (`crate::prose`), so
                 // its slot here carries the length and nothing else.
                 if attribute.ty == tessera_spatial::ScalarType::Text {
-                    return column::EntityColumn::prose(
-                        &scratch,
-                        attribute.ty,
-                        tiler_items.len(),
-                    )
-                    .map_err(|e| {
-                        BuildError::Invalid(format!("attribute '{}': {e}", attribute.name))
-                    });
+                    return column::EntityColumn::prose(&scratch, attribute.ty, tiler_items.len())
+                        .map_err(|e| {
+                            BuildError::Invalid(format!("attribute '{}': {e}", attribute.name))
+                        });
                 }
                 column::EntityColumn::from_values(
                     &scratch,

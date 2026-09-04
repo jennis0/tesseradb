@@ -1627,7 +1627,11 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // things the emit needs. It cannot ride on `PostingsWrite` — that stage runs before the
     // attribute values exist.
     // The extents the join spilled, opened once for both readers: the text index tokenises them
-    // in block windows and the record blob merges them (`crate::prose`).
+    // in block windows and the record blob merges them (`crate::prose`). Folded first where a
+    // column spilled more than one merge holds open.
+    for column in prose.iter_mut() {
+        column.cascade()?;
+    }
     let open_prose: Vec<crate::prose::OpenProse> = prose
         .iter()
         .map(crate::prose::ProseColumn::open)
@@ -2180,10 +2184,8 @@ fn read_one_attribute_source(
             .collect(),
         _ => group.attributes.clone(),
     };
-    let columns: Vec<&crate::config::Attribute> = filled
-        .iter()
-        .map(|&i| &args.schema.attributes[i])
-        .collect();
+    let columns: Vec<&crate::config::Attribute> =
+        filled.iter().map(|&i| &args.schema.attributes[i]).collect();
     let attributes = &columns;
     let mut matched_rows = 0u64;
     // **Counted, not refused** (`configuration.md` §1). A row naming an entity this build did not
@@ -2554,13 +2556,12 @@ fn write_scoped_columns(
                 // blob row and no index the prose would have no home at all — so the guard here is
                 // against a `Schema` built programmatically rather than parsed.
                 if attribute.index {
-                    let written =
-                        write_text_index(
-                            &column_dir,
-                            attribute,
-                            TextValues::Arena(&column.values),
-                            text_plan,
-                        )?;
+                    let written = write_text_index(
+                        &column_dir,
+                        attribute,
+                        TextValues::Arena(&column.values),
+                        text_plan,
+                    )?;
                     paths.extend(written.paths);
                 }
                 report_scoped_coverage(attribute, view, column.present, n);
@@ -3092,10 +3093,8 @@ pub(crate) fn write_record_blob(
         entity: 0,
         n,
     };
-    let mut extents: Vec<Vec<crate::prose::ExtentRows<'_>>> = prose
-        .iter()
-        .map(crate::prose::ExtentRows::over)
-        .collect();
+    let mut extents: Vec<Vec<crate::prose::ExtentRows<'_>>> =
+        prose.iter().map(crate::prose::ExtentRows::over).collect();
     let mut sources: Vec<&mut dyn tessera_filter_write::RecordRows> = Vec::new();
     if !column_tags.is_empty() {
         sources.push(&mut columns);
@@ -4484,14 +4483,7 @@ fn permute_attribute_tail(
     let scoped_lanes: Vec<Result<Option<Lane>>> = scoped
         .par_iter()
         .map(|column| {
-            render_lane(
-                &column.name,
-                column.ty,
-                &column.values,
-                entity_row,
-                scratch,
-            )
-            .map(Some)
+            render_lane(&column.name, column.ty, &column.values, entity_row, scratch).map(Some)
         })
         .collect();
     let mut presence = Vec::new();
@@ -5171,8 +5163,8 @@ mod tests {
                 )
                 .expect("typed column"),
             ];
-        let written =
-            write_record_blob(dir.path(), &schema, &only_category, &[]).expect("blob stage accepts");
+        let written = write_record_blob(dir.path(), &schema, &only_category, &[])
+            .expect("blob stage accepts");
         assert!(written.is_empty(), "no blob-resident column, no files");
 
         // But the same category under `public` owes no value column and no postings, so
@@ -5214,6 +5206,245 @@ mod tests {
             }],
             "the public category's value is the blob row"
         );
+    }
+
+    /// **The cascade is not observable either.** A column that spilled more extents than one
+    /// merge holds open folds them in groups first, and the fold has to leave the same relation:
+    /// the same entities, each carrying the last value written for it, in the same order.
+    #[test]
+    fn folding_the_extents_leaves_the_same_rows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let extents = crate::prose::ProseColumn::MERGE_FAN_IN * 2 + 3;
+        let mut spilled = crate::prose::ProseColumn::new(dir.path(), 0, "abstract");
+        // One row per extent, walking entity space in a stride so the extents interleave, plus a
+        // second value for one entity in a later extent than the one that first carried it.
+        for extent in 0..extents {
+            let entity = ((extent * 7) % extents) as u32;
+            let value = format!("value {extent}");
+            spilled
+                .push_extent(&[(entity, value.as_str())])
+                .expect("an extent");
+        }
+        spilled
+            .push_extent(&[(3u32, "the later value")])
+            .expect("an extent");
+        let before = prose_rows(&spilled);
+        spilled.cascade().expect("the cascade");
+        assert_eq!(before, prose_rows(&spilled), "the fold moved a value");
+        assert_eq!(before.get(&3).map(String::as_str), Some("the later value"));
+    }
+
+    /// Every live `(entity, value)` a spilled column holds, which is what both its readers see.
+    fn prose_rows(column: &crate::prose::ProseColumn) -> std::collections::BTreeMap<u32, String> {
+        let open = column.open().expect("the extents open");
+        let mut rows: std::collections::BTreeMap<u32, String> = Default::default();
+        for window in open.windows(3) {
+            open.for_each_record_in(window, &mut |entity, value| {
+                rows.insert(entity as u32, value.to_string());
+                Ok(())
+            })
+            .expect("the walk");
+        }
+        rows
+    }
+
+    /// **The join's chunking must not be observable in the record blob.** A chunk is one prose
+    /// extent, so a corpus joined in one chunk and the same corpus joined in chunks of three have
+    /// to be the same three files. What that pins is the merge: an entity's fields gathered from
+    /// several extents and a column, ordered by tag, with the last chunk that carried a value
+    /// winning.
+    ///
+    /// The corpus straddles what the merge has to answer. Entities carry a keyword, prose, both
+    /// or neither; one prose value is the empty string, which is a value and not absence; two
+    /// entities are written twice, one of them across a chunk boundary at several of the
+    /// chunkings and one within a chunk at all of them.
+    #[test]
+    fn the_prose_extents_do_not_change_the_blobs_bytes() {
+        const N: usize = 64;
+        let scratch_dir = tempfile::tempdir().expect("tempdir");
+        let scratch = crate::column::ColumnScratch::new(scratch_dir.path());
+        let schema = crate::config::Schema {
+            attributes: vec![
+                crate::config::Attribute {
+                    name: "note".to_string(),
+                    field: None,
+                    title: None,
+                    ty: ScalarType::Keyword,
+                    analyser: None,
+                    vocabulary: None,
+                    value_set: None,
+                    index: false,
+                    render: false,
+                },
+                crate::config::Attribute {
+                    name: "abstract".to_string(),
+                    field: None,
+                    title: None,
+                    ty: ScalarType::Text,
+                    analyser: None,
+                    vocabulary: None,
+                    value_set: None,
+                    index: false,
+                    render: false,
+                },
+            ],
+            vocabularies: Default::default(),
+        };
+        // The keyword column is entity-ordered as it always was: a third of the entities carry
+        // one, and a third of those also carry prose.
+        let notes = EntityColumn::from_values(
+            &scratch,
+            ScalarType::Keyword,
+            (0..N).map(|entity| match entity % 3 {
+                0 => ScalarValue::Utf8(format!("note-{entity}")),
+                _ => ScalarValue::Null,
+            }),
+            "note",
+        )
+        .expect("typed column");
+
+        // The prose as the source yields it: entity order is not source order, one entity is
+        // written twice adjacently and one far apart, and one value is the empty string.
+        let mut source: Vec<(u32, String)> = (0..N)
+            .filter(|entity| entity % 5 != 1)
+            .map(|entity| {
+                let value = if entity == 20 {
+                    String::new()
+                } else {
+                    format!("prose for {entity}, long enough to be worth a block")
+                };
+                ((entity * 37 % N) as u32, value)
+            })
+            .collect();
+        source.push((source[3].0, "the later value, adjacent".to_string()));
+        source.insert(2, (source[9].0, "the earlier value, far apart".to_string()));
+
+        let mut written: Vec<Vec<(PathBuf, Vec<u8>)>> = Vec::new();
+        for chunk in [1usize, 2, 3, 5, 7, 64, 4_096] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let extent_dir = dir.path().join("extents");
+            std::fs::create_dir_all(&extent_dir).expect("extent dir");
+            let mut prose = crate::prose::ProseColumn::new(&extent_dir, 1, "abstract");
+            for rows in source.chunks(chunk) {
+                // The join sorts a chunk by entity, stably, and the last row carrying a value
+                // wins — `spill_prose_chunk`'s rule, spelt here rather than called so that the
+                // test states what it is asserting about.
+                let mut held: Vec<(u32, &str)> = rows
+                    .iter()
+                    .map(|(entity, value)| (*entity, value.as_str()))
+                    .collect();
+                held.sort_by_key(|&(entity, _)| entity);
+                let mut kept: Vec<(u32, &str)> = Vec::new();
+                for row in held {
+                    if kept.last().map(|&(entity, _)| entity) == Some(row.0) {
+                        kept.pop();
+                    }
+                    kept.push(row);
+                }
+                prose.push_extent(&kept).expect("an extent");
+            }
+            let open = prose.open().expect("the extents open");
+            let by_entity = [
+                notes_clone(&scratch, &notes),
+                EntityColumn::prose(&scratch, ScalarType::Text, N).expect("the prose slot"),
+            ];
+            let paths = write_record_blob(dir.path(), &schema, &by_entity, &[open])
+                .expect("the blob merges");
+            assert_eq!(paths.len(), 3, "the blob is three files");
+            written.push(
+                paths
+                    .iter()
+                    .map(|path| {
+                        (
+                            path.strip_prefix(dir.path()).expect("under the dir").into(),
+                            std::fs::read(path).expect("read back"),
+                        )
+                    })
+                    .collect(),
+            );
+        }
+        let first = written.first().expect("at least one chunking").clone();
+        for (k, emitted) in written.iter().enumerate().skip(1) {
+            assert_eq!(emitted, &first, "chunking {k} wrote different bytes");
+        }
+
+        // And the merged blob says what the corpus says.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let extent_dir = dir.path().join("extents");
+        std::fs::create_dir_all(&extent_dir).expect("extent dir");
+        let mut prose = crate::prose::ProseColumn::new(&extent_dir, 1, "abstract");
+        for rows in source.chunks(3) {
+            let mut held: Vec<(u32, &str)> = rows
+                .iter()
+                .map(|(entity, value)| (*entity, value.as_str()))
+                .collect();
+            held.sort_by_key(|&(entity, _)| entity);
+            let mut kept: Vec<(u32, &str)> = Vec::new();
+            for row in held {
+                if kept.last().map(|&(entity, _)| entity) == Some(row.0) {
+                    kept.pop();
+                }
+                kept.push(row);
+            }
+            prose.push_extent(&kept).expect("an extent");
+        }
+        let open = prose.open().expect("the extents open");
+        let by_entity = [
+            notes_clone(&scratch, &notes),
+            EntityColumn::prose(&scratch, ScalarType::Text, N).expect("the prose slot"),
+        ];
+        write_record_blob(dir.path(), &schema, &by_entity, &[open]).expect("the blob merges");
+        let blob = tessera_filter::RecordBlob::open_dir(
+            &dir.path().join("attrs/record"),
+            tessera_filter::Access::Read,
+        )
+        .expect("open");
+        // The last value written for an entity is the one the blob holds.
+        let mut expected: std::collections::BTreeMap<u32, &str> = Default::default();
+        for (entity, value) in &source {
+            expected.insert(*entity, value.as_str());
+        }
+        for entity in 0..N as u32 {
+            let fields = blob.fields_of(entity).expect("read");
+            let prose = fields.as_ref().and_then(|fields| {
+                fields
+                    .iter()
+                    .find(|field| field.tag == 1)
+                    .map(|field| match &field.value {
+                        tessera_filter::RecordValue::Utf8(value) => value.as_str(),
+                        other => panic!("entity {entity} carries {other:?} at the prose tag"),
+                    })
+            });
+            assert_eq!(
+                prose,
+                expected.get(&entity).copied(),
+                "entity {entity}'s prose"
+            );
+            if entity % 3 == 0 {
+                let note = fields
+                    .as_ref()
+                    .expect("a note entity has a row")
+                    .iter()
+                    .find(|field| field.tag == 0)
+                    .expect("the note field");
+                assert_eq!(
+                    note.value,
+                    tessera_filter::RecordValue::Utf8(format!("note-{entity}"))
+                );
+            }
+        }
+    }
+
+    /// A second copy of an entity-ordered column, `write_record_blob` taking it by reference and
+    /// the test wanting one per chunking.
+    fn notes_clone(scratch: &crate::column::ColumnScratch, values: &EntityColumn) -> EntityColumn {
+        EntityColumn::from_values(
+            scratch,
+            ScalarType::Keyword,
+            (0..values.len()).map(|entity| values.value_at(entity)),
+            "note",
+        )
+        .expect("typed column")
     }
 
     /// **The chunking must not be observable in the artefact.** A chunk boundary is a place one
@@ -5309,13 +5540,9 @@ mod tests {
             }
             let column_dir = dir.path().join(format!("plan-{k}"));
             std::fs::create_dir_all(&column_dir).expect("column dir");
-            let written = write_text_index(
-                &column_dir,
-                &attribute,
-                TextValues::Arena(&values),
-                plan,
-            )
-            .expect("text index");
+            let written =
+                write_text_index(&column_dir, &attribute, TextValues::Arena(&values), plan)
+                    .expect("text index");
             assert_eq!(
                 written.terms,
                 expected_text_postings().len() as u64,
