@@ -995,12 +995,17 @@ consistent. **Dead bytes is deliberately not published**: it is a walk of the li
 figure recomputed on every status poll would make a dashboard the most expensive thing on the node.
 The trigger's own log line carries it when a fold dispatches. ✔ Beside them, what
 the fold itself did: `folds` and `fold_failures`, the last fold's wall clock, and the highest
-resident set its own pass staircase saw, with the staircase unreduced beneath. **`fold_failures` is
-the one to alarm on and it is not the mirror of `folds`** — every discard leaves a complete prefix
-`CURRENT` never named, so a fold that keeps discarding costs disc before it costs anything else.
-**The RSS figure is a staircase maximum, not a peak**: five samples at pass boundaries, so a spike
-inside a pass is invisible to it, and P1 is what says how far under the true peak it sits — at 10⁷,
-the staircase saw 57 MB of growth where `VmHWM` saw 445 MB.
+resident set its own pass staircase saw, with the staircase unreduced beneath. The staircase runs
+from the fold thread's entry to the superseded prefix's reclaim: the publication's phases (the
+membership rewrite, the derived structures, the report, the manifest, the flip, the retire walk,
+the prefix open, the adoptions, the warm, the WAL rotation, the reclaim) are rows of it beside
+the thread's passes, since on rung 3 the publication was half the fold's wall and held its
+resident peak (`probes/2026-09-04-epoch-shard-fold-decomposition/`).
+**`fold_failures` is the one to alarm on and it is not the mirror of `folds`** — every discard
+leaves a complete prefix `CURRENT` never named, so a fold that keeps discarding costs disc before
+it costs anything else. **The RSS figure is a staircase maximum, not a peak**: one sample per pass
+boundary, so a spike inside a pass is invisible to it, and P1 is what says how far under the true
+peak it sits — at 10⁷, the staircase saw 57 MB of growth where `VmHWM` saw 445 MB.
 
 ### The automatic trigger
 

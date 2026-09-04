@@ -975,6 +975,55 @@ pub struct PassCost {
     pub anon: u64,
 }
 
+/// A staircase under construction: the rows recorded so far and the instant the next row is
+/// measured from.
+///
+/// The fold thread starts one for its passes; `publish_fold` resumes it on the executor for the
+/// publication's phases, so `/control/status` reports the fold from the thread's entry to the
+/// superseded prefix's reclaim rather than the thread's half of it. Measured on rung 3
+/// (`probes/2026-09-04-epoch-shard-fold-decomposition/`), the publication was half the fold's wall
+/// and held the resident set's peak.
+pub(crate) struct Staircase {
+    cost: Vec<PassCost>,
+    mark: std::time::Instant,
+}
+
+impl Staircase {
+    pub(crate) fn start() -> Self {
+        Self {
+            cost: Vec::with_capacity(14),
+            mark: std::time::Instant::now(),
+        }
+    }
+
+    /// Continue a staircase another thread recorded: `cost` is its rows and `mark` is when its
+    /// last row ended, so the first row recorded here covers the hand-off.
+    pub(crate) fn resume(cost: Vec<PassCost>, mark: std::time::Instant) -> Self {
+        Self { cost, mark }
+    }
+
+    /// Close one row: the wall clock since the previous row ended, and the resident set now.
+    pub(crate) fn record(&mut self, pass: &'static str) {
+        let (rss, anon, _) = resident_set();
+        self.cost.push(PassCost {
+            pass,
+            elapsed: self.mark.elapsed(),
+            rss,
+            anon,
+        });
+        self.mark = std::time::Instant::now();
+    }
+
+    /// When the last recorded row ended.
+    pub(crate) fn mark(&self) -> std::time::Instant {
+        self.mark
+    }
+
+    pub(crate) fn into_cost(self) -> Vec<PassCost> {
+        self.cost
+    }
+}
+
 /// A fold whose files are durable under a prefix nothing yet names.
 pub(crate) struct CompletedFold {
     pub(crate) plan: FoldPlan,
@@ -990,9 +1039,14 @@ pub(crate) struct CompletedFold {
     /// The largest new base segment's `columns.arrow + morton.u32` bytes — compaction §4 step 3's
     /// operand, computed here because these are the files that were just written.
     pub(crate) base_segment_bytes: u64,
-    /// One [`PassCost`] per pass, in execution order — the fold's own account of what it spent,
-    /// logged at publication and reduced to two gauges on `/control/status`.
+    /// One [`PassCost`] per pass, in execution order — the fold thread's account of what it
+    /// spent. Publication resumes the staircase with its own phases, logs the whole and reduces it
+    /// to two gauges on `/control/status`.
     pub(crate) cost: Vec<PassCost>,
+    /// When the fold thread's last row ended, from which the publication's first row is measured.
+    /// The thread sets it after any test hold, so a held fold does not report the hold as the
+    /// hand-off.
+    pub(crate) finished: std::time::Instant,
     /// Attribute bytes pass 4a read and wrote (`filter-index.md` §6.2). **Reported, never
     /// triggered on** — the staircase attributes time and residency to the pass but not its IO,
     /// and IO is the term the non-disruption argument rests on.
@@ -1045,19 +1099,8 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
     // The staircase — see [`PassCost`]. `entry` is the zero every later reading is read against,
     // and it is taken here rather than by the caller so that what it excludes is exactly the
     // dispatch work (the plan, the tombstone clone) and nothing else.
-    let mut cost: Vec<PassCost> = Vec::with_capacity(6);
-    let mut mark = std::time::Instant::now();
-    let record = |pass: &'static str, cost: &mut Vec<PassCost>, mark: &mut std::time::Instant| {
-        let (rss, anon, _) = resident_set();
-        cost.push(PassCost {
-            pass,
-            elapsed: mark.elapsed(),
-            rss,
-            anon,
-        });
-        *mark = std::time::Instant::now();
-    };
-    record("entry", &mut cost, &mut mark);
+    let mut stairs = Staircase::start();
+    stairs.record("entry");
 
     // ---- pass 1 — row space -------------------------------------------------------------------
     //
@@ -1154,7 +1197,7 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
         });
     }
 
-    record("1 row space", &mut cost, &mut mark);
+    stairs.record("1 row space");
 
     // ---- pass 2 — postings, and `pairs.parquet` as a side output ------------------------------
     //
@@ -1206,7 +1249,7 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
     }
     written.push((postings_rel, postings_path));
     written.push((pairs_rel, pairs_path));
-    record("2 postings", &mut cost, &mut mark);
+    stairs.record("2 postings");
 
     // ---- pass 3 — external ids ----------------------------------------------------------------
     //
@@ -1244,7 +1287,7 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
         Some(run_rel)
     };
 
-    record("3 external ids", &mut cost, &mut mark);
+    stairs.record("3 external ids");
 
     // ---- pass 4a — the attribute artefact ------------------------------------------------------
     //
@@ -1520,7 +1563,7 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
         }
     }
 
-    record("4a attributes", &mut cost, &mut mark);
+    stairs.record("4a attributes");
 
     // ---- pass 4c — the entity→term transpose ---------------------------------------------------
     //
@@ -1606,7 +1649,7 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
     // — the fold's streamed-IO total covers every entity-space artefact it rewrites, and the
     // transpose is one — but the *time and resident bytes* are the staircase's business, and a
     // pass folded into its neighbour's row is a pass an operator reading the report cannot see.
-    record("4c entity terms", &mut cost, &mut mark);
+    stairs.record("4c entity terms");
 
     // ---- pass 4b — the dictionary --------------------------------------------------------------
     //
@@ -1646,8 +1689,9 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
     tessera_store::fsync_written(&paths).map_err(|e| failed("pass 5 (durability)", &e))?;
     // Pass 4b is not marked because it does nothing: the dictionary is carried forward by a link at
     // publication, and a zero-cost row in the staircase would read as an unmeasured one.
-    record("5 digests + fsync", &mut cost, &mut mark);
+    stairs.record("5 digests + fsync");
 
+    let finished = stairs.mark();
     Ok(CompletedFold {
         plan,
         prefix: ctx.to_prefix,
@@ -1655,7 +1699,8 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
         files,
         external_id_run,
         base_segment_bytes,
-        cost,
+        cost: stairs.into_cost(),
+        finished,
         attr_bytes_read: attr_read,
         attr_bytes_written: attr_written,
     })

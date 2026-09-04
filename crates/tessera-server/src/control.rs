@@ -708,7 +708,9 @@ fn membership_column<'a>(
                          tiered shape"
                     )))
                 }
-                tessera_types::layer::ListMeaning::Levelled { levels, .. } if *size as usize != levels => {
+                tessera_types::layer::ListMeaning::Levelled { levels, .. }
+                    if *size as usize != levels =>
+                {
                     return Err(ApiError::Contract(format!(
                         "ingest body: column '{name}' is a fixed-size list of {size} and that \
                          layer declares {levels} levels. Entry k is the artifact at level k, so \
@@ -1429,9 +1431,9 @@ fn resolve_view<'a>(
                 .collect::<Vec<_>>()
                 .join(", ")
         ))),
-        None => views
-            .first()
-            .ok_or_else(|| ApiError::Contract("this bundle declares no view to ingest into".into())),
+        None => views.first().ok_or_else(|| {
+            ApiError::Contract("this bundle declares no view to ingest into".into())
+        }),
         Some(id) => meta
             .resolve_view(id)
             .ok_or_else(|| ApiError::Unknown(format!("unknown view '{id}'"))),
@@ -2528,8 +2530,11 @@ async fn register_layer(
         let views: Vec<&str> = declaration.views.iter().map(String::as_str).collect();
         let meta = state.engine.meta();
         let frames = layer_frames(&meta, &views)?;
-        tessera_engine::shapes::check_shape_span(&frames, tessera_engine::shapes::ShapeSpace::Wgs84)
-            .map_err(|e| ApiError::Contract(format!("layer '{name}': {e}")))?;
+        tessera_engine::shapes::check_shape_span(
+            &frames,
+            tessera_engine::shapes::ShapeSpace::Wgs84,
+        )
+        .map_err(|e| ApiError::Contract(format!("layer '{name}': {e}")))?;
     }
     // The **shared** blocking pool, not the deny runtime beside it. That runtime exists so a
     // suppression is never queued behind ingest; a registration is not a deny, and delaying one
@@ -3131,13 +3136,14 @@ async fn publish_artifacts(
     // in their content spelling, which is what the blob stores and the serve reads back into
     // `shape_x`/`shape_y`. Refused as a membership shape is refused, naming the row.
     if let Some((slot, kind)) = declaration.as_ref().and_then(|d| d.authored_shape()) {
-        let declaration = declaration.as_ref().expect("an authored slot names a declaration");
+        let declaration = declaration
+            .as_ref()
+            .expect("an authored slot names a declaration");
         for (index, artifact) in artifacts.iter_mut().enumerate() {
             let space = match artifact.space.as_deref() {
                 None => default_space,
-                Some(word) => tessera_engine::shapes::ShapeSpace::parse(word).map_err(|e| {
-                    ApiError::Contract(format!("artifact {index}: `space`: {e}"))
-                })?,
+                Some(word) => tessera_engine::shapes::ShapeSpace::parse(word)
+                    .map_err(|e| ApiError::Contract(format!("artifact {index}: `space`: {e}")))?,
             };
             for (rank, content) in artifact.content.iter_mut().enumerate() {
                 let Some(text) = content.values.get_mut(slot) else {
@@ -3173,7 +3179,13 @@ async fn publish_artifacts(
     // different documents than the caller wrote is a disclosure rather than a stale answer.
     let widths: Vec<usize> = artifacts
         .iter()
-        .map(|a| a.members.len() + a.content.iter().map(|v| v.generated_from.len()).sum::<usize>())
+        .map(|a| {
+            a.members.len()
+                + a.content
+                    .iter()
+                    .map(|v| v.generated_from.len())
+                    .sum::<usize>()
+        })
         .collect();
     let flat: Vec<&String> = artifacts
         .iter()
@@ -3263,13 +3275,14 @@ async fn publish_artifacts(
                     tessera_lifecycle::membership::IncomingContent::new(v.values, set)
                 })
                 .collect();
-            let attached_to = artifact.attached_to.map(|a| {
-                tessera_lifecycle::membership::IncomingAttachment {
-                    layer: a.layer,
-                    level: a.level,
-                    key: a.key,
-                }
-            });
+            let attached_to =
+                artifact
+                    .attached_to
+                    .map(|a| tessera_lifecycle::membership::IncomingAttachment {
+                        layer: a.layer,
+                        level: a.level,
+                        key: a.key,
+                    });
             let mut incoming = match attached_to {
                 None => tessera_lifecycle::IncomingArtifact::with_content(
                     artifact.key,
@@ -3292,12 +3305,11 @@ async fn publish_artifacts(
 
     // The **shared** blocking pool, on `register_layer`'s argument: a publication is not a deny,
     // and delaying one under ingest load is backpressure working.
-    let ids = tokio::task::spawn_blocking(move || {
-        state.engine.publish_artifacts(name, level, incoming)
-    })
-    .await
-    .map_err(crate::error::map_join_error)?
-    .map_err(crate::error::map_accept_error)?;
+    let ids =
+        tokio::task::spawn_blocking(move || state.engine.publish_artifacts(name, level, incoming))
+            .await
+            .map_err(crate::error::map_join_error)?
+            .map_err(crate::error::map_accept_error)?;
 
     let published: Vec<serde_json::Value> = ids
         .iter()
@@ -3570,12 +3582,16 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
         // *persistent*. Rising at all means read the log for the reason; rising repeatedly means
         // the interval floor is the only thing between the deployment and a full device.
         //
-        // `last_secs` and `last_rss_bytes` are the last fold's cost. **`last_rss_bytes` is a
-        // staircase maximum sampled at five pass boundaries, not a peak** — a spike inside a pass
-        // is invisible to it, and probe P1 is what says how far under the true peak it sits. It is
-        // published because compaction §3's memory budget is a *modelled* figure and this is the
-        // only number a deployment has to compare against it. `passes` is the same staircase
-        // unreduced: the gauges alarm, and the per-pass rows say which pass to look at.
+        // `last_secs` and `last_rss_bytes` are the last fold's cost, from the fold thread's entry
+        // to the superseded prefix's reclaim: the publication's phases (the membership rewrite,
+        // the derived structures, the report, the manifest, the flip, the retire walk, the prefix
+        // open, the adoptions, the warm, the WAL rotation, the reclaim) are rows of the same
+        // staircase as the thread's passes. **`last_rss_bytes` is a staircase maximum sampled
+        // at pass boundaries, not a peak** — a spike inside a pass is invisible to it, and probe
+        // P1 is what says how far under the true peak it sits. It is published because compaction
+        // §3's memory budget is a *modelled* figure and this is the only number a deployment has
+        // to compare against it. `passes` is the same staircase unreduced: the gauges alarm, and
+        // the per-pass rows say which pass to look at.
         // **`live_rows` is the denominator of compaction §9's tombstoned-row gauge**, and the only
         // figure here that says how large the corpus is. The gauge itself is not published as a
         // ratio: an operator with the numerator (`overlay.retirable`) and the denominator can form

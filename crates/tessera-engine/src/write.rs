@@ -312,10 +312,12 @@ pub struct ExecutorHealth {
     pub(crate) fold_ended_unix: AtomicU64,
     /// The last fold's wall clock in seconds, and the highest resident set its own staircase saw
     /// (`compact::PassCost`) — the two gauges `/control/status` publishes for the most expensive
-    /// operation in the system. Both are 0 before the first fold.
+    /// operation in the system. Both are 0 before the first fold. Both cover the whole fold, from
+    /// the fold thread's entry to the superseded prefix's reclaim: the publication's phases are
+    /// rows of the same staircase (`compact::Staircase`).
     ///
     /// **The RSS figure is a staircase maximum, not a peak**, and the difference is not pedantry:
-    /// it is sampled at five pass boundaries, so a spike inside a pass is invisible to it. It is
+    /// it is sampled at pass boundaries, so a spike inside a pass is invisible to it. It is
     /// what a deployment has, and probe P1 is what says how far under the true peak it sits.
     pub(crate) last_fold_secs: AtomicU64,
     pub(crate) last_fold_rss: AtomicU64,
@@ -1561,9 +1563,10 @@ impl LiveState {
     /// artifact pass, run once the prefix carrying the rewritten extents is live. Retired artifacts
     /// leave their levels; retired members leave the memberships that survive; and each layer's
     /// `withdraw_on_member_deletion` declaration executes against the generating sets that lost a source.
-    fn retire_artifacts(&self, retired: &croaring::Bitmap) {
+    /// Returns the levels the retirement moved, which the fold compares with what it stamped.
+    fn retire_artifacts(&self, retired: &croaring::Bitmap) -> Vec<(String, u32)> {
         let policy = self.deletion_policy();
-        lock_recover(&self.artifacts).retire(retired, &policy);
+        lock_recover(&self.artifacts).retire(retired, &policy)
     }
 
     /// Each layer's `withdraw_on_member_deletion` declaration, resolved by name.
@@ -2096,23 +2099,92 @@ pub(crate) struct ManifestSeed<'a> {
     pub prefix_dir: std::path::PathBuf,
 }
 
-/// The two artifact coordinates a manifest carries: every level's version, and the containment
-/// partitions whose composed-at version is still that version.
+/// The levels a fold's retirement is about to move, and the set it retires.
+///
+/// A fold writes its manifest before it retires, because the retirement is not reversible and a
+/// manifest that would not commit must leave it undone. So at step 3a the store holds the
+/// pre-retirement records while the prefix being written holds the post-retirement ones. The
+/// retirement changes a level in three ways: an artifact whose own entity is retired leaves (its
+/// slot becomes a hole), a surviving artifact loses the retired members from its membership, and a
+/// content whose generating set lost a member is dropped or shrunk.
+///
+/// For a row column and a tile index only the first matters. Both are the memberships projected
+/// through the row space this fold wrote, and a retired entity has no row in it (pass 1 dropped
+/// them), so a surviving artifact projects to the same rows before and after its membership
+/// shrinks; a generating set is read from the store's records and from neither structure. So the
+/// fold composes both from the store's records without the artifacts the retirement removes
+/// ([`Self::records`]) and stamps them with the version the level will have once it has run
+/// ([`Self::version_after`]). A containment partition is rank-sensitive, since a dropped content
+/// shifts the ranks after it, and a spatial level's row forms are resolved from shapes the
+/// retirement removes, so those stay omitted for a pending level and recompose on first use.
+///
+/// The version after the retirement is the store's plus one for a level here and the store's own
+/// otherwise: `ArtifactStore::retire` moves a level it changes by one, and it reads the same
+/// predicate `levels_moved_by` read to fill this. `publish_fold` checks the two agree after the
+/// retirement and drops any structure whose stamp the store does not then carry.
+///
+/// What happens when the retirement does not follow the manifest. A fold discarded between the
+/// manifest and the flip leaves a prefix `CURRENT` never names, which nothing opens. A process
+/// that dies after the flip restarts from the manifest: its records are the post-retirement ones
+/// and its stated version is the stamped one, so the structures describe what was seeded, and any
+/// record the log replays over them moves the version and they are refused at the version check.
+/// In every case the level recomposes on first use, at a cost and never with another level's
+/// answer.
+struct PendingRetirement {
+    levels: Vec<(String, u32)>,
+    retired: croaring::Bitmap,
+}
+
+impl PendingRetirement {
+    fn is_pending(&self, layer: &str, level: u32) -> bool {
+        self.levels.iter().any(|(l, v)| l == layer && *v == level)
+    }
+
+    /// The version `layer`'s `level` will have once this fold's retirement has run.
+    fn version_after(&self, store: &ArtifactStore, layer: &str, level: u32) -> u64 {
+        store.level_version(layer, level) + u64::from(self.is_pending(layer, level))
+    }
+
+    /// The level's records as the retirement will leave them: every artifact but those whose own
+    /// entity is retired.
+    fn records<'s>(
+        &'s self,
+        store: &'s ArtifactStore,
+        layer: &str,
+        level: u32,
+    ) -> impl Iterator<Item = (u32, &'s tessera_lifecycle::membership::ArtifactRecord)> + 's {
+        let retired = &self.retired;
+        store
+            .level(layer, level)
+            .filter(move |(_, record)| !retired.contains(record.entity.raw() as u32))
+    }
+}
+
+/// How many ordinals a level's derived structures cover: one past the highest live ordinal,
+/// which is the length the reader sizes the level at (`ArtifactRows::build_over`). A hole below
+/// it is covered and a hole at the top is not.
+fn level_length<'a>(
+    records: impl Iterator<Item = (u32, &'a tessera_lifecycle::membership::ArtifactRecord)>,
+) -> u32 {
+    records.map(|(ordinal, _)| ordinal + 1).max().unwrap_or(0)
+}
+
+/// The two artifact coordinates a manifest carries: every level's version, and the derived
+/// structures whose stamped version is that version.
 ///
 /// **Filtered, so the invariant is true by construction rather than checked at open**: every entry
 /// a manifest names is one whose coordinate equals the version list beside it, so a manifest never
-/// names a partition that has already been invalidated. An entry whose level has moved is dropped
+/// names a structure that has already been invalidated. An entry whose level has moved is dropped
 /// here rather than carried and rejected later — carrying it would leave the prefix naming a file
 /// nothing could ever adopt, which reads as a partition that exists.
 ///
-/// `pending_retirement` is the levels this publication is *about to* change and has not yet —
-/// which is the fold's own seam, since it writes its manifest before it retires (a retirement is
-/// irreversible and a manifest that would not commit must leave it undone). For those levels the
-/// version this store reports is the pre-retirement one while the records the manifest names are
-/// the post-retirement ones, so **neither the version nor any partition is stated**: a level absent
-/// from the list is one whose version this manifest does not claim, which
-/// [`tessera_store::manifest::LevelVersion`] makes a real state rather than a defaulted zero.
-/// Every other publication passes an empty slice, having nothing pending.
+/// `pending_retirement` is the levels this publication is about to change and has not yet, which
+/// is the fold's own case ([`PendingRetirement`]). For those levels the version stated, and the
+/// version an entry must carry to be named, is the store's plus one: the version the level will
+/// have when the retirement has run, and the version the fold stamped the structures it composed
+/// for such a level with. An entry a previous prefix held for the level carries the store's own
+/// version or an older one and is dropped. Every other publication passes an empty slice, having
+/// nothing pending.
 fn artifact_coordinates(
     store: &ArtifactStore,
     held: &[tessera_store::manifest::ContainmentExtent],
@@ -2122,28 +2194,23 @@ fn artifact_coordinates(
     held_shape_held: &[tessera_store::manifest::ShapeHeldExtent],
     pending_retirement: &[(String, u32)],
 ) -> ArtifactCoordinates {
-    let pending = |layer: &str, level: u32| {
-        pending_retirement
+    let expected = |layer: &str, level: u32| {
+        let pending = pending_retirement
             .iter()
-            .any(|(l, v)| l == layer && *v == level)
+            .any(|(l, v)| l == layer && *v == level);
+        store.level_version(layer, level) + u64::from(pending)
     };
     let versions: Vec<tessera_store::manifest::LevelVersion> = store
         .level_versions()
-        .filter(|(layer, level, _)| !pending(layer, *level))
-        .map(
-            |(layer, level, version)| tessera_store::manifest::LevelVersion {
-                layer: layer.to_string(),
-                level,
-                version,
-            },
-        )
+        .map(|(layer, level, _)| tessera_store::manifest::LevelVersion {
+            layer: layer.to_string(),
+            level,
+            version: expected(layer, level),
+        })
         .collect();
     let still_true = held
         .iter()
-        .filter(|entry| {
-            !pending(&entry.layer, entry.level)
-                && store.level_version(&entry.layer, entry.level) == entry.level_version
-        })
+        .filter(|entry| expected(&entry.layer, entry.level) == entry.level_version)
         .cloned()
         .collect();
     // The tile indexes take the same filter and for the same reason. The view an entry carries is
@@ -2151,10 +2218,7 @@ fn artifact_coordinates(
     // whether the extents projected through *any* row space still describe it.
     let indexes_still_true = held_indexes
         .iter()
-        .filter(|entry| {
-            !pending(&entry.layer, entry.level)
-                && store.level_version(&entry.layer, entry.level) == entry.level_version
-        })
+        .filter(|entry| expected(&entry.layer, entry.level) == entry.level_version)
         .cloned()
         .collect();
     // The row-major columns take the same filter, and the layout tag each carries is not part of
@@ -2162,10 +2226,7 @@ fn artifact_coordinates(
     // level is the version, exactly as it is for an extent column.
     let columns_still_true = held_columns
         .iter()
-        .filter(|entry| {
-            !pending(&entry.layer, entry.level)
-                && store.level_version(&entry.layer, entry.level) == entry.level_version
-        })
+        .filter(|entry| expected(&entry.layer, entry.level) == entry.level_version)
         .cloned()
         .collect();
     // The shape row forms take the same filter. The segment half of their key is not part of it:
@@ -2173,18 +2234,12 @@ fn artifact_coordinates(
     // serves any more is a file nothing will claim, and is dropped when the prefix is.
     let shape_rows_still_true = held_shape_rows
         .iter()
-        .filter(|entry| {
-            !pending(&entry.layer, entry.level)
-                && store.level_version(&entry.layer, entry.level) == entry.level_version
-        })
+        .filter(|entry| expected(&entry.layer, entry.level) == entry.level_version)
         .cloned()
         .collect();
     let shape_held_still_true = held_shape_held
         .iter()
-        .filter(|entry| {
-            !pending(&entry.layer, entry.level)
-                && store.level_version(&entry.layer, entry.level) == entry.level_version
-        })
+        .filter(|entry| expected(&entry.layer, entry.level) == entry.level_version)
         .cloned()
         .collect();
     ArtifactCoordinates {
@@ -2195,6 +2250,36 @@ fn artifact_coordinates(
         shape_rows: shape_rows_still_true,
         shape_held: shape_held_still_true,
     }
+}
+
+/// The entries of one fold-written list whose stamped version is the level's now, after the
+/// fold's retirement has run; every other entry is dropped and named. See [`PendingRetirement`].
+fn held_at_current_version<E: Clone>(
+    store: &ArtifactStore,
+    what: &str,
+    entries: &[E],
+    coordinate: impl Fn(&E) -> (&str, u32, u64),
+) -> Vec<E> {
+    entries
+        .iter()
+        .filter(|entry| {
+            let (layer, level, stamped) = coordinate(entry);
+            let now = store.level_version(layer, level);
+            if now == stamped {
+                return true;
+            }
+            tracing::error!(
+                layer,
+                level,
+                stamped,
+                now,
+                "ALARM: a fold-written {what} is stamped with a version the level does not carry \
+                 after the retirement; it is dropped and the level recomposes on first use"
+            );
+            false
+        })
+        .cloned()
+        .collect()
 }
 
 /// What [`artifact_coordinates`] stamps into a side-manifest: the level versions and every
@@ -5803,7 +5888,8 @@ impl Executor {
         let values = crate::suggest::values_of(minter);
         self.suggest_build += 1;
         let dir = self.suggest_dir.join(vocabulary);
-        let Ok(index) = crate::suggest::SuggestIndex::build(&dir, self.suggest_build, &values, &self.pool)
+        let Ok(index) =
+            crate::suggest::SuggestIndex::build(&dir, self.suggest_build, &values, &self.pool)
         else {
             return;
         };
@@ -6303,7 +6389,7 @@ impl Executor {
             .name("tessera-fold".to_string())
             .spawn(move || {
                 match crate::compact::execute(plan, ctx) {
-                    Ok(completed) => {
+                    Ok(mut completed) => {
                         // A test holding the fold here models the flight a real corpus gives for
                         // free — see `Engine::set_fold_paused_for_test`. Always false otherwise.
                         health.fold_holding.store(true, Ordering::SeqCst);
@@ -6311,6 +6397,8 @@ impl Executor {
                             std::thread::sleep(std::time::Duration::from_millis(5));
                         }
                         health.fold_holding.store(false, Ordering::SeqCst);
+                        // After the hold, so the staircase's hand-off row is the hand-off.
+                        completed.finished = std::time::Instant::now();
                         // Set before the send, exactly as a flush's is — see
                         // `ExecutorHealth::flush_completed_pending` for the handshake's ordering.
                         health.fold_completed_pending.store(true, Ordering::SeqCst);
@@ -6395,6 +6483,11 @@ impl Executor {
         use std::collections::{BTreeMap, BTreeSet};
 
         let started = std::time::Instant::now();
+        // The fold thread's staircase, continued here for the publication's phases so the gauges
+        // on `/control/status` cover the whole fold (`compact::Staircase`). A discard below drops
+        // it with the fold.
+        let mut stairs =
+            crate::compact::Staircase::resume(completed.cost.clone(), completed.finished);
         let live = self.generation.load_full();
         let plan = &completed.plan;
         // **A node whose durable state disagrees with what it is serving publishes nothing**
@@ -6787,6 +6880,7 @@ impl Executor {
         // nothing else: a suppressed member keeps its bit (Rule S), and no generating set is
         // touched at all.
         let to_prefix_dir = self.bundle_root.join(&completed.prefix);
+        stairs.record("6 hand-off");
         let repacked = match self.rewrite_membership_extents(
             &to_prefix_dir,
             &plan.partition,
@@ -6802,25 +6896,34 @@ impl Executor {
             }
         };
 
+        stairs.record("7 memberships");
+
         // **The containment partitions, in the same pass and against the prefix just written.**
         // They are derived, so an empty list is a cost and not a fault — see
         // `write_containment_partitions`.
-        // **The levels this fold is about to change and has not yet.** `repack_all` above wrote the
-        // post-retirement records into the prefix while the store still holds the pre-retirement
-        // ones, so a partition composed from the store would describe a level the prefix does not
-        // contain — under `WithdrawContent` a content is dropped whole, which *shifts the ranks*,
-        // and a partition read at the wrong rank is a containment answer for another content's
-        // generating set. Those levels get no partition and no stated version; they recompose on
-        // first use, which is what every request did before this structure existed.
-        let pending_retirement = self
-            .live
-            .with_artifacts(|store| store.levels_moved_by(&executed));
+        // **The levels this fold is about to change and has not yet** ([`PendingRetirement`]).
+        // `repack_all` above wrote the post-retirement records into the prefix while the store
+        // still holds the pre-retirement ones. A partition composed from the store would describe
+        // a level the prefix does not contain: under `WithdrawContent` a content is dropped whole,
+        // which shifts the ranks, and a partition read at the wrong rank is a containment answer
+        // for another content's generating set. Those levels get no partition and recompose on
+        // first use. Their row columns and tile indexes are written, from the records the
+        // retirement will leave and at the version it will leave the level at: on rung 3 a fold
+        // that retired members of `mesh/descriptors` and wrote neither cost the warm 135 s and
+        // 3.7 GB of resident memory projecting the level's 1.66×10⁹ memberships, against 16 s to
+        // transpose the column (`probes/2026-09-04-epoch-shard-fold-decomposition/`).
+        let pending = PendingRetirement {
+            levels: self
+                .live
+                .with_artifacts(|store| store.levels_moved_by(&executed)),
+            retired: executed.clone(),
+        };
         let containment = self.write_containment_partitions(
             &to_prefix_dir,
             &plan.partition,
             manifest_n,
             &live.bundle.manifest.data_plugin_hash,
-            &pending_retirement,
+            &pending,
         );
         // **The row spaces every derived structure below is computed over**, opened once: base
         // only, against the permutations this fold just wrote.
@@ -6849,7 +6952,7 @@ impl Executor {
             .iter()
             .map(|view| (view.view.clone(), view.incarnation))
             .collect();
-        let layouts = self.choose_layouts(&spaces, &pending_retirement, &fold_segments);
+        let layouts = self.choose_layouts(&spaces, &pending, &fold_segments);
         for (layer, level, chosen) in &layouts {
             if self.live.record_layout(layer, *level, *chosen) {
                 self.artifact_projections.forget_level(layer, *level);
@@ -6865,7 +6968,7 @@ impl Executor {
             &fold_incarnations,
             &spaces,
             &layouts,
-            &pending_retirement,
+            &pending,
         );
         // **And the columns for the levels that do**, in the same pass and under the same
         // omissions. A level whose column will not compose gets no entry, and is served
@@ -6877,7 +6980,7 @@ impl Executor {
             &fold_incarnations,
             &spaces,
             &layouts,
-            &pending_retirement,
+            &pending,
             &fold_segments,
         );
         // **And the row forms of the spatial levels the columns do not cover**, so the next open
@@ -6889,7 +6992,7 @@ impl Executor {
             manifest_n,
             &fold_incarnations,
             &row_columns,
-            &pending_retirement,
+            &pending,
             &fold_segments,
         );
         let shape_held = self.write_shape_held(
@@ -6897,9 +7000,10 @@ impl Executor {
             &plan.partition,
             manifest_n,
             &fold_incarnations,
-            &pending_retirement,
+            &pending,
             &fold_segments,
         );
+        stairs.record("8 derived");
 
         // ---- step 3b: the report, before anything retires ---------------------------------------
         //
@@ -6917,6 +7021,7 @@ impl Executor {
         let degraded = self
             .live
             .with_artifacts(|store| store.degradations(&executed));
+        stairs.record("9 report");
 
         // ---- step 2: assemble `SEGMENTS-<n>` from the live partition manifest ------------------
         //
@@ -7238,7 +7343,7 @@ impl Executor {
             &row_columns,
             &shape_rows,
             &shape_held,
-            &pending_retirement,
+            &pending.levels,
         ) {
             discard(&format!(
                 "its SEGMENTS-{manifest_n}.json would not commit ({e})"
@@ -7264,6 +7369,7 @@ impl Executor {
             ));
             return;
         }
+        stairs.record("10 manifest");
 
         self.pause_point(PauseSiteArg::BeforeCurrentFlip);
         if let Err(e) =
@@ -7272,6 +7378,7 @@ impl Executor {
             discard(&format!("CURRENT would not flip ({e})"));
             return;
         }
+        stairs.record("11 flip");
 
         // **The resident store retires here, before the new generation is installed** — not after
         // the warm below. The generation this fold is about to publish carries an overlay with the
@@ -7283,9 +7390,7 @@ impl Executor {
         // Ahead of the swap is safe in the other direction: the generation still being served
         // carries the deletion in its own overlay, so an artifact this removes was already absent
         // for every request reaching it.
-        // Cloned rather than moved: the rotation below consumes `executed`.
-        let retired = executed.clone();
-        self.live.retire_artifacts(&retired);
+        let mut moved = self.live.retire_artifacts(&pending.retired);
         self.live.mark_memberships_published();
         // **And the growths, which only a whole rewrite reaches.** `rewrite_membership_extents`
         // wrote every level entire, from the resident store, so a membership that grew since the
@@ -7294,15 +7399,71 @@ impl Executor {
         // records as the only copy.
         self.live.mark_growth_packed();
         self.membership_extents = repacked;
-        // The partitions this fold wrote replace whatever the previous prefix held: their paths are
-        // prefix-relative and the fold publishes a new prefix, so the old entries name files this
-        // prefix does not contain.
-        self.containment_extents = segments_manifest.containment_extents.clone();
-        self.tile_index_extents = segments_manifest.tile_index_extents.clone();
-        self.row_column_extents = segments_manifest.row_column_extents.clone();
-        self.shape_rows_extents = segments_manifest.shape_rows_extents.clone();
-        self.shape_held_extents = segments_manifest.shape_held_extents.clone();
+        // **The retirement moved the levels step 3a said it would, checked rather than assumed.**
+        // A pending level's structures were stamped with the version the level would have after
+        // this retirement (`PendingRetirement`). `levels_moved_by` and `retire` read one predicate,
+        // so any other outcome is unreachable; the check is what keeps a structure from being
+        // carried into a later manifest at a version it does not describe if that ever changes.
+        // It protects the live lists and the manifests later flushes write from them; the fold's
+        // own manifest is already durable with the version and the structures it states, and for
+        // that the shared predicate (`membership.rs`'s `record_moved_by`) is the whole guarantee.
+        moved.sort();
+        let mut expected = pending.levels.clone();
+        expected.sort();
+        if moved != expected {
+            tracing::error!(
+                stamped_for = ?expected,
+                moved = ?moved,
+                "ALARM: the fold's retirement moved levels other than the ones its derived \
+                 structures were stamped for; every structure whose stamp the store does not \
+                 carry is dropped and its level recomposes on first use"
+            );
+        }
+        // The structures this fold wrote replace whatever the previous prefix held: their paths
+        // are prefix-relative and the fold publishes a new prefix, so the old entries name files
+        // this prefix does not contain. Held only at the version the store now carries.
+        let (containment, tile_indexes, row_columns, shape_rows, shape_held) =
+            self.live.with_artifacts(|store| {
+                (
+                    held_at_current_version(
+                        store,
+                        "containment partition",
+                        &segments_manifest.containment_extents,
+                        |e| (e.layer.as_str(), e.level, e.level_version),
+                    ),
+                    held_at_current_version(
+                        store,
+                        "tile index",
+                        &segments_manifest.tile_index_extents,
+                        |e| (e.layer.as_str(), e.level, e.level_version),
+                    ),
+                    held_at_current_version(
+                        store,
+                        "row column",
+                        &segments_manifest.row_column_extents,
+                        |e| (e.layer.as_str(), e.level, e.level_version),
+                    ),
+                    held_at_current_version(
+                        store,
+                        "shape row form",
+                        &segments_manifest.shape_rows_extents,
+                        |e| (e.layer.as_str(), e.level, e.level_version),
+                    ),
+                    held_at_current_version(
+                        store,
+                        "held shape",
+                        &segments_manifest.shape_held_extents,
+                        |e| (e.layer.as_str(), e.level, e.level_version),
+                    ),
+                )
+            });
+        self.containment_extents = containment;
+        self.tile_index_extents = tile_indexes;
+        self.row_column_extents = row_columns;
+        self.shape_rows_extents = shape_rows;
+        self.shape_held_extents = shape_held;
         *lock_recover(&self.health.last_fold_report) = degraded;
+        stairs.record("12 retire");
 
         // ---- steps 5 and 6: open the new prefix, then one swap ---------------------------------
         let rotation = crate::session::open_rotation(
@@ -7379,6 +7540,37 @@ impl Executor {
             return;
         }
 
+        stairs.record("13 open");
+
+        // **The structures this fold wrote, adopted by the process that wrote them.**
+        // `Engine::open` adopts a prefix's containment partitions, tile indexes and row columns
+        // against the store it seeded; this is the same prefix and the same store, retired above.
+        // Without it the warm below projects every level from its memberships and only a restart
+        // reads what the artifact pass wrote. After the swap, because a claim is keyed by prefix
+        // and a request on the outgoing generation would drop an entry the new one is about to
+        // ask for.
+        self.live.with_artifacts(|store| {
+            self.artifact_projections.adopt_all(
+                &to_prefix_dir,
+                &completed.prefix,
+                &self.containment_extents,
+                store,
+            );
+            self.artifact_projections.adopt_indexes(
+                &to_prefix_dir,
+                &completed.prefix,
+                &self.tile_index_extents,
+                store,
+            );
+            self.artifact_projections.adopt_columns(
+                &to_prefix_dir,
+                &completed.prefix,
+                &self.row_column_extents,
+                store,
+            );
+        });
+        stairs.record("14 adopt");
+
         // **The row forms, rebuilt here rather than by whoever arrives first.** Row space renumbers
         // globally at a fold, so every projection built over the old one is invalid at the flip —
         // and a level is a deployment-wide artefact rather than a per-session value, so the
@@ -7394,6 +7586,7 @@ impl Executor {
         // the retire is about to bump, and the whole warm would be discarded on the first request —
         // paying the stall it exists to prevent, having already paid for the warm.
         self.warm_artifact_caches();
+        stairs.record("15 warm");
 
         // ---- step 7: rotate the WAL ------------------------------------------------------------
         //
@@ -7404,6 +7597,7 @@ impl Executor {
         // entities with no row and no postings) and **permanently**, since a rotation snapshot
         // applies entries and never assigns.
         self.rotate_wal();
+        stairs.record("16 wal");
 
         // ---- step 8: reclaim the superseded prefix (compaction §8) ------------------------------
         self.pending_reclaim.push(PendingReclaim {
@@ -7414,6 +7608,8 @@ impl Executor {
             superseded_sidecars: std::mem::take(&mut self.superseded_sidecars),
         });
         self.reclaim_superseded_prefixes();
+        stairs.record("17 reclaim");
+        let cost = stairs.into_cost();
 
         self.health.folds.fetch_add(1, Ordering::Relaxed);
         // **The fold's own account of what it spent, at the one severity an operator reads.** The
@@ -7421,8 +7617,7 @@ impl Executor {
         // its counters said a fold happened, and nothing said what it took. The staircase is the
         // diagnostic half — a resident set that climbs on one pass names that pass — and the two
         // gauges below are the alarming half, on `/control/status`.
-        let passes = completed
-            .cost
+        let passes = cost
             .iter()
             .map(|c| {
                 // Total and anonymous, because §3's budget is a claim about the split: a fold
@@ -7439,8 +7634,14 @@ impl Executor {
             })
             .collect::<Vec<_>>()
             .join(" ");
-        let fold_secs: u64 = completed.cost.iter().map(|c| c.elapsed.as_secs()).sum();
-        let staircase_rss = completed.cost.iter().map(|c| c.rss).max().unwrap_or(0);
+        // Summed before it is truncated to seconds: a fold of many sub-second rows is not a
+        // zero-second fold.
+        let fold_secs = cost
+            .iter()
+            .map(|c| c.elapsed)
+            .sum::<std::time::Duration>()
+            .as_secs();
+        let staircase_rss = cost.iter().map(|c| c.rss).max().unwrap_or(0);
         self.health
             .last_fold_secs
             .store(fold_secs, Ordering::Relaxed);
@@ -7453,7 +7654,7 @@ impl Executor {
         self.health
             .last_fold_attr_written
             .store(completed.attr_bytes_written, Ordering::Relaxed);
-        *lock_recover(&self.health.last_fold_passes) = completed.cost.clone();
+        *lock_recover(&self.health.last_fold_passes) = cost;
         tracing::info!(
             prefix = %completed.prefix,
             segments_version,
@@ -11946,7 +12147,7 @@ impl Executor {
         partition: &str,
         n: u64,
         data_plugin_hash: &str,
-        pending_retirement: &[(String, u32)],
+        pending: &PendingRetirement,
     ) -> Vec<tessera_store::manifest::ContainmentExtent> {
         // The gate: under any plugin but the builtin the partition is not sound at all, so nothing
         // is composed and nothing is written (`crate::containment`).
@@ -11979,11 +12180,7 @@ impl Executor {
                 .collect();
             levels
                 .into_iter()
-                .filter(|(layer, level)| {
-                    !pending_retirement
-                        .iter()
-                        .any(|(l, v)| l == layer && v == level)
-                })
+                .filter(|(layer, level)| !pending.is_pending(layer, *level))
                 .filter_map(|(layer, level)| {
                     let version = store.level_version(&layer, level);
                     match crate::containment::ContainmentPartition::compose(
@@ -12106,6 +12303,23 @@ impl Executor {
         spaces
     }
 
+    /// Whether step 3a composes a level's row column and tile index: every level the retirement
+    /// does not move, and an enumerated level it does ([`PendingRetirement`]). A spatial level the
+    /// retirement moves is omitted: its rows are resolved from shapes, and the shape of an artifact
+    /// the retirement removes is still held.
+    fn composes_row_structures(
+        &self,
+        pending: &PendingRetirement,
+        layer: &str,
+        level: u32,
+    ) -> bool {
+        !pending.is_pending(layer, level)
+            || self.live.registered_layer(layer).is_some_and(|registered| {
+                registered.declaration.membership
+                    == tessera_types::layer::MembershipSource::Enumerated
+            })
+    }
+
     /// **The fold's layout re-evaluation** — decision 0094's step 4, taken inside the artifact pass
     /// and before a derived byte is written.
     ///
@@ -12136,7 +12350,7 @@ impl Executor {
     fn choose_layouts(
         &self,
         spaces: &[(String, tessera_store::RowSpace)],
-        pending_retirement: &[(String, u32)],
+        pending: &PendingRetirement,
         fold_segments: &[(String, tessera_store::read::SegmentData)],
     ) -> Vec<(String, u32, tessera_types::layer::ServingLayout)> {
         let Some((first_view, space)) = spaces.first() else {
@@ -12146,11 +12360,7 @@ impl Executor {
             store
                 .levels_and_extents()
                 .map(|(layer, level, _)| (layer.to_string(), level))
-                .filter(|(layer, level)| {
-                    !pending_retirement
-                        .iter()
-                        .any(|(l, v)| l == layer && v == level)
-                })
+                .filter(|(layer, level)| self.composes_row_structures(pending, layer, *level))
                 .collect()
         });
         let mut out = Vec::with_capacity(levels.len());
@@ -12214,7 +12424,7 @@ impl Executor {
                     observed.unwrap_or_else(tessera_store::derived::LevelShape::empty)
                 } else {
                     tessera_store::derived::observe_shape(space.base_rows(), &|visit| {
-                        for (ordinal, record) in store.level(&layer, level) {
+                        for (ordinal, record) in pending.records(store, &layer, level) {
                             visit(ordinal, &space.project_base(&record.members));
                         }
                     })
@@ -12294,16 +12504,14 @@ impl Executor {
         incarnations: &FxHashMap<String, tessera_types::view::ViewIncarnation>,
         spaces: &[(String, tessera_store::RowSpace)],
         layouts: &[(String, u32, tessera_types::layer::ServingLayout)],
-        pending_retirement: &[(String, u32)],
+        pending: &PendingRetirement,
         fold_segments: &[(String, tessera_store::read::SegmentData)],
     ) -> Vec<tessera_store::manifest::RowColumnExtent> {
         let wanted: Vec<(String, u32, tessera_types::layer::ServingLayout)> = layouts
             .iter()
             .filter(|(layer, level, layout)| {
                 layout.is_row_major()
-                    && !pending_retirement
-                        .iter()
-                        .any(|(l, v)| l == layer && v == level)
+                    && self.composes_row_structures(pending, layer, *level)
                     // **An attribute level's column is not this fold's to write**, and the reason
                     // is what it is a column *of*: its labels come from the value column the
                     // predicate names, and this pass composes from the level's stored memberships
@@ -12340,8 +12548,8 @@ impl Executor {
         )> = self.live.with_artifacts(|store| {
             let mut out = Vec::with_capacity(wanted.len() * spaces.len());
             for (layer, level, layout) in &wanted {
-                let version = store.level_version(layer, *level);
-                let ordinals = store.level(layer, *level).count() as u32;
+                let version = pending.version_after(store, layer, *level);
+                let ordinals = level_length(pending.records(store, layer, *level));
                 let spatial = self.live.registered_layer(layer).is_some_and(|registered| {
                     registered.declaration.membership
                         == tessera_types::layer::MembershipSource::Spatial
@@ -12365,7 +12573,7 @@ impl Executor {
                         })
                     } else {
                         crate::row_column::RowColumn::project(ordinals, space, *layout, || {
-                            store.level(layer, *level)
+                            pending.records(store, layer, *level)
                         })
                     };
                     match column {
@@ -12434,18 +12642,14 @@ impl Executor {
         n: u64,
         incarnations: &FxHashMap<String, tessera_types::view::ViewIncarnation>,
         columns: &[tessera_store::manifest::RowColumnExtent],
-        pending_retirement: &[(String, u32)],
+        pending: &PendingRetirement,
         fold_segments: &[(String, tessera_store::read::SegmentData)],
     ) -> Vec<tessera_store::manifest::ShapeRowsExtent> {
         let levels: Vec<(String, u32)> = self.live.with_artifacts(|store| {
             store
                 .levels_and_extents()
                 .map(|(layer, level, _)| (layer.to_string(), level))
-                .filter(|(layer, level)| {
-                    !pending_retirement
-                        .iter()
-                        .any(|(l, v)| l == layer && v == level)
-                })
+                .filter(|(layer, level)| !pending.is_pending(layer, *level))
                 .filter(|(layer, _)| {
                     self.live.registered_layer(layer).is_some_and(|registered| {
                         registered.declaration.membership
@@ -12514,7 +12718,7 @@ impl Executor {
         partition: &str,
         n: u64,
         incarnations: &FxHashMap<String, tessera_types::view::ViewIncarnation>,
-        pending_retirement: &[(String, u32)],
+        pending: &PendingRetirement,
         fold_segments: &[(String, tessera_store::read::SegmentData)],
     ) -> Vec<tessera_store::manifest::ShapeHeldExtent> {
         let filed: Vec<tessera_store::derived::Filed> = self.live.with_artifacts(|store| {
@@ -12522,11 +12726,7 @@ impl Executor {
             let levels: Vec<(String, u32)> = store
                 .levels_and_extents()
                 .map(|(layer, level, _)| (layer.to_string(), level))
-                .filter(|(layer, level)| {
-                    !pending_retirement
-                        .iter()
-                        .any(|(l, v)| l == layer && v == level)
-                })
+                .filter(|(layer, level)| !pending.is_pending(layer, *level))
                 .filter(|(layer, _)| {
                     self.live.registered_layer(layer).is_some_and(|registered| {
                         registered.declaration.membership
@@ -12583,7 +12783,7 @@ impl Executor {
         incarnations: &FxHashMap<String, tessera_types::view::ViewIncarnation>,
         spaces: &[(String, tessera_store::RowSpace)],
         layouts: &[(String, u32, tessera_types::layer::ServingLayout)],
-        pending_retirement: &[(String, u32)],
+        pending: &PendingRetirement,
     ) -> Vec<tessera_store::manifest::TileIndexExtent> {
         if spaces.is_empty() {
             return Vec::new();
@@ -12596,11 +12796,7 @@ impl Executor {
                 let levels: Vec<(String, u32)> = store
                     .levels_and_extents()
                     .map(|(layer, level, _)| (layer.to_string(), level))
-                    .filter(|(layer, level)| {
-                        !pending_retirement
-                            .iter()
-                            .any(|(l, v)| l == layer && v == level)
-                    })
+                    .filter(|(layer, level)| self.composes_row_structures(pending, layer, *level))
                     // **A row-major level has nothing to index** (selection memo §1): its candidacy
                     // is a scan of `viewport ∩ M_auth`, which the viewport already bounds. Writing
                     // one would be writing a file no reader on that route opens — and a level that
@@ -12624,14 +12820,14 @@ impl Executor {
                     .collect();
                 let mut out = Vec::with_capacity(levels.len() * spaces.len());
                 for (layer, level) in &levels {
-                    let version = store.level_version(layer, *level);
+                    let version = pending.version_after(store, layer, *level);
                     // **The level's own length, holes included** — a column sized by the last live
                     // ordinal is short, and a short one is dropped at open rather than adopted.
-                    let ordinals = store.level(layer, *level).count() as u32;
+                    let ordinals = level_length(pending.records(store, layer, *level));
                     for (view, space) in spaces {
                         let index = crate::tile_index::TileIndex::project(
                             ordinals,
-                            || store.level(layer, *level),
+                            || pending.records(store, layer, *level),
                             space,
                         );
                         out.push((
@@ -12689,6 +12885,10 @@ impl Executor {
     /// **Errors are impossible to have here and absences are not**: a view the generation does not
     /// carry is simply not warmed, and its first request builds what it needs, which is the same
     /// outcome this method exists to avoid but not a wrong one.
+    ///
+    /// What each level's build reads is what the fold wrote and the publication adopted: an
+    /// artifact-major level claims its tile index, a row-major one transposes its column, and a
+    /// level with neither projects its memberships (`ArtifactProjections::get_or_build`).
     fn warm_artifact_caches(&self) {
         let generation = self.generation.load_full();
         let levels: Vec<(String, u32)> = self.live.with_artifacts(|store| {

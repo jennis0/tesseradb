@@ -93,7 +93,10 @@ fn engine_with_faults(tmp: &Path, root: &Path) -> (Engine, Arc<FaultSwitchboard>
 fn current_prefix(root: &Path) -> String {
     let bytes = std::fs::read(root.join("CURRENT")).expect("CURRENT exists");
     let json: serde_json::Value = serde_json::from_slice(&bytes).expect("CURRENT is JSON");
-    json["prefix"].as_str().expect("CURRENT names a prefix").to_string()
+    json["prefix"]
+        .as_str()
+        .expect("CURRENT names a prefix")
+        .to_string()
 }
 
 /// How many side-manifests the live prefix's default partition carries — the durable name count
@@ -161,6 +164,82 @@ fn the_current_flip_site_parks_the_fold_with_the_old_prefix_still_committed() {
         current_prefix(&root),
         "v00001",
         "the released fold flipped CURRENT onto the folded prefix"
+    );
+}
+
+/// **The fold's cost on `/control/status` covers its publication.** The staircase the fold thread
+/// records ends at its fifth pass; the executor continues it through the publication's phases, so
+/// `last_fold_secs` and the pass list report the fold from the thread's entry to the superseded
+/// prefix's reclaim. Shown by parking the executor at the flip for over a second: the thread's
+/// passes over this fixture take milliseconds, so a gauge that covered them alone would read zero.
+#[test]
+fn the_fold_status_covers_the_publication() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let (engine, faults) = engine_with_faults(tmp.path(), &root);
+    let deleted = EntityId::new(source_to_new_map(&root, "v00000")[&4]);
+    engine
+        .accept_change(deleted, ChangeOp::Delete)
+        .expect("a delete is accepted");
+
+    faults.arm_pause(PauseSite::BeforeCurrentFlip, PauseAction::Stall);
+    engine.request_fold();
+    faults.await_arrivals(PauseSite::BeforeCurrentFlip, 1, WAIT);
+    let held = Duration::from_millis(1_200);
+    std::thread::sleep(held);
+    faults.release();
+    wait_until("the released fold publishes", || {
+        engine.write_executor_stats().folds >= 1
+    });
+
+    let passes = engine.last_fold_passes();
+    let names: Vec<&str> = passes.iter().map(|p| p.pass).collect();
+    let publication = [
+        "6 hand-off",
+        "7 memberships",
+        "8 derived",
+        "9 report",
+        "10 manifest",
+        "11 flip",
+        "12 retire",
+        "13 open",
+        "14 adopt",
+        "15 warm",
+        "16 wal",
+        "17 reclaim",
+    ];
+    assert_eq!(
+        &names[names.len() - publication.len()..],
+        &publication,
+        "the publication's phases follow the thread's passes, in execution order: {names:?}"
+    );
+    assert_eq!(names[0], "entry");
+    assert!(
+        names.contains(&"5 digests + fsync"),
+        "and the thread's passes are still there: {names:?}"
+    );
+    let flip = passes
+        .iter()
+        .find(|p| p.pass == "11 flip")
+        .expect("the flip is a row");
+    assert!(
+        flip.elapsed >= held,
+        "the hold at the flip site is attributed to the flip row: {:?}",
+        flip.elapsed
+    );
+    let whole: Duration = passes.iter().map(|p| p.elapsed).sum();
+    assert_eq!(
+        engine.write_executor_stats().last_fold_secs,
+        whole.as_secs(),
+        "last_fold_secs is the whole staircase in seconds"
+    );
+    assert!(
+        engine.write_executor_stats().last_fold_secs >= 1,
+        "which is at least the publication's wall: the thread's passes alone are under a second here"
+    );
+    assert!(
+        passes.iter().all(|p| p.rss > 0),
+        "every row carries a resident-set sample"
     );
 }
 

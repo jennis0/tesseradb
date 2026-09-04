@@ -50,27 +50,21 @@ use tessera_types::EntityId;
 /// `annotation-write-cycle.md` §2.1). Content that requires only inherited visibility carries no
 /// generating set at all and is not reached by either arm.
 ///
-/// Returns whether the record moved, which is what tells [`ArtifactStore::retire`] whether the
-/// level's version has to move with it: a level a fold walked over and did not change has a row
-/// form that is still correct, and rebuilding it would be the global grain back again in a
-/// narrower place.
-fn apply_deletion_policy(record: &mut ArtifactRecord, retired: &Bitmap, withdraw: bool) -> bool {
+/// Under either arm a content moves exactly when its generating set meets `retired`, which is the
+/// third term of [`record_moved_by`]; whether a record moved is asked there, not here.
+fn apply_deletion_policy(record: &mut ArtifactRecord, retired: &Bitmap, withdraw: bool) {
     match withdraw {
         true => {
-            let before = record.contents.len();
             record
                 .contents
                 .retain(|content| content.generated_from.and_cardinality(retired) == 0);
-            record.contents.len() != before
         }
         false => {
-            let mut moved = false;
             record.contents.retain_mut(|content| {
                 if content.generated_from.and_cardinality(retired) == 0 {
                     return true;
                 }
                 content.generated_from.andnot_inplace(retired);
-                moved = true;
                 // **A generating set with no survivors is not served**
                 // ([decision 0107](../../../docs/decisions/0107-a-generating-set-with-no-survivors-is-not-served.md)).
                 // Containment is a subset test, and the empty set is a subset of every mask — so a
@@ -88,9 +82,26 @@ fn apply_deletion_policy(record: &mut ArtifactRecord, retired: &Bitmap, withdraw
                 // takes.
                 !content.generated_from.is_empty()
             });
-            moved
         }
     }
+}
+
+/// Whether retiring `retired` changes `record`: the artifact's own entity is retired, one of its
+/// members is, or a member of one of its contents' generating sets is.
+///
+/// **The one predicate [`ArtifactStore::levels_moved_by`] and [`ArtifactStore::retire`] both
+/// read.** A fold asks the first before it writes its manifest and runs the second after the
+/// flip, and it stamps a reported level's derived structures with the version the level will
+/// have once the retirement has moved it by one (`write.rs`'s `artifact_coordinates`). The two
+/// have to agree level for level: a level reported and not moved, or moved and not reported,
+/// would leave a structure held at a version that describes other records.
+fn record_moved_by(record: &ArtifactRecord, retired: &Bitmap) -> bool {
+    retired.contains(record.entity.raw() as u32)
+        || record.members.and_cardinality(retired) != 0
+        || record
+            .contents
+            .iter()
+            .any(|content| content.generated_from.and_cardinality(retired) != 0)
 }
 
 /// One level's not-yet-published artifacts, ready to pack: `(layer, level, ordinal_lo, blobs)`.
@@ -1255,36 +1266,26 @@ impl ArtifactStore {
         self.versions.insert((layer.to_string(), level), version);
     }
 
-    /// Every level [`Self::retire`] would move, given the same `retired` set — the read-only twin
-    /// of its `changed`, and it lives beside it so the two are read together.
+    /// Every level [`Self::retire`] would move, given the same `retired` set: the read-only twin
+    /// of its `changed`, over the same predicate ([`record_moved_by`]), so the two agree level for
+    /// level.
     ///
-    /// **Conservative where it is not exact.** A level is reported whenever anything about it
-    /// *could* change: an artifact whose own entity is retired, a membership that loses a bit, or a
-    /// generating set that loses a member — which is what both deletion policies key on. Reporting
-    /// a level that would not in fact have moved costs a derived structure that is recomposed;
-    /// missing one that would have moved is a structure adopted against records it does not
-    /// describe, and that is the direction this must not fail in.
-    ///
-    /// **Why a publication needs it at all.** A fold writes its manifest *before* it retires — the
-    /// retirement is not reversible and a manifest that would not commit must leave it undone — so
-    /// the version this store reports at that moment is the pre-retirement one while the records
-    /// the manifest names are the post-retirement ones. For a level the retirement moves, those two
-    /// facts do not belong in one manifest, so neither is stated: see `write.rs`'s
-    /// `artifact_coordinates`.
+    /// **Why a publication needs it.** A fold writes its manifest before it retires, because the
+    /// retirement is not reversible and a manifest that would not commit must leave it undone. At
+    /// that moment this store reports a level's pre-retirement version while the records the
+    /// manifest names are the post-retirement ones. For a level reported here the retirement will
+    /// move the version by exactly one, and that is the version the fold stamps the level's
+    /// derived structures with: see `write.rs`'s `artifact_coordinates`.
     pub fn levels_moved_by(&self, retired: &Bitmap) -> Vec<(String, u32)> {
         if retired.is_empty() {
             return Vec::new();
         }
         let mut moved = Vec::new();
         for ((layer, level), slots) in &self.levels {
-            let touched = slots.iter().flatten().any(|record| {
-                retired.contains(record.entity.raw() as u32)
-                    || record.members.and_cardinality(retired) != 0
-                    || record
-                        .contents
-                        .iter()
-                        .any(|content| content.generated_from.and_cardinality(retired) != 0)
-            });
+            let touched = slots
+                .iter()
+                .flatten()
+                .any(|record| record_moved_by(record, retired));
             if touched {
                 moved.push((layer.clone(), *level));
             }
@@ -1534,7 +1535,7 @@ impl ArtifactStore {
                     }
                     let mut record = record.clone();
                     record.members.to_mut().andnot_inplace(retired);
-                    let _ = apply_deletion_policy(&mut record, retired, on_deletion);
+                    apply_deletion_policy(&mut record, retired, on_deletion);
                     encode_record(&record, shape)
                 })
                 .collect();
@@ -1553,12 +1554,18 @@ impl ArtifactStore {
     /// goes with it — the key indexes an ordinal, and a key left behind would resolve a caller's
     /// republication onto the identity of the artifact this fold just removed.
     ///
-    /// **Only the levels this actually changed have their version moved.** A fold walks every
-    /// level and most folds touch few of them; bumping the ones it read would be the global grain
-    /// [`Self::versions`] exists to escape, in the one place where it is least affordable.
-    pub fn retire(&mut self, retired: &Bitmap, policy: &dyn Fn(&str) -> bool) {
+    /// **Only the levels this actually changed have their version moved**, each by one, and those
+    /// levels are returned. A fold walks every level and most folds touch few of them; bumping the
+    /// ones it read would be the global grain [`Self::versions`] exists to escape, in the one place
+    /// where it is least affordable. Which levels change is [`record_moved_by`]'s answer, the one
+    /// [`Self::levels_moved_by`] gave the fold before its manifest was written.
+    pub fn retire(
+        &mut self,
+        retired: &Bitmap,
+        policy: &dyn Fn(&str) -> bool,
+    ) -> Vec<(String, u32)> {
         if retired.is_empty() {
-            return;
+            return Vec::new();
         }
         // Collected during the walk and applied after it: both indexes are fields beside `levels`,
         // which is borrowed mutably here.
@@ -1569,6 +1576,10 @@ impl ArtifactStore {
             let mut changed = false;
             for slot in slots.iter_mut() {
                 let Some(record) = slot else { continue };
+                if !record_moved_by(record, retired) {
+                    continue;
+                }
+                changed = true;
                 if retired.contains(record.entity.raw() as u32) {
                     if let Some(key) = &record.key {
                         if let Some(levels) = self.keys.get_mut(layer.as_str()) {
@@ -1584,21 +1595,15 @@ impl ArtifactStore {
                     changed = true;
                     continue;
                 }
-                // Asked before the removal rather than compared after it: `and_cardinality` is the
-                // same walk over the same containers `andnot_inplace` takes, and it answers the
-                // question the version needs without a second copy of the membership to compare
-                // against.
-                let shrinks = record.members.and_cardinality(retired) != 0;
                 record.members.to_mut().andnot_inplace(retired);
-                changed |= shrinks;
-                changed |= apply_deletion_policy(record, retired, on_deletion);
+                apply_deletion_policy(record, retired, on_deletion);
             }
             if changed {
                 moved.push((layer.clone(), *level));
             }
         }
-        for (layer, level) in moved {
-            self.bump(&layer, level);
+        for (layer, level) in &moved {
+            self.bump(layer, *level);
         }
         // A retired artifact's edge leaves with it, in both directions: its own outgoing edge here,
         // and any edges pointing *at* it — nothing can attach to an artifact that is gone, and a
@@ -1613,6 +1618,7 @@ impl ArtifactStore {
         }
         self.dependents
             .retain(|target, _| !retired.contains(target.raw() as u32));
+        moved
     }
 
     /// The supplied content of every artifact not yet in a manifest, as `(entity, tagged values)`.
@@ -2719,6 +2725,96 @@ mod tests {
                 shape: None,
             }],
         }
+    }
+
+    /// [`publication`] with one supplied content generated from `sources`.
+    fn publication_with_content(
+        layer: &str,
+        ordinal: u32,
+        entity: u64,
+        members: &[u32],
+        sources: &[u32],
+    ) -> crate::wal::WalRecord {
+        let mut record = publication(layer, ordinal, entity, members);
+        if let crate::wal::WalRecord::ArtifactPublish { artifacts, .. } = &mut record {
+            artifacts[0].contents = vec![crate::wal::PublishedContent {
+                values: vec!["a label".to_string()],
+                generated_from: serialise_members(&Bitmap::of(sources)),
+            }];
+        }
+        record
+    }
+
+    /// **`levels_moved_by` reports exactly the levels `retire` moves, and `retire` moves each by
+    /// one.** The fold stamps a reported level's derived structures with `version + 1` before the
+    /// retirement runs (`write.rs`'s `artifact_coordinates`), so a level reported and not moved, or
+    /// moved and not reported, would hold a structure at a version describing other records.
+    /// Every way a record can move is here: its own entity retired, a member retired, and a
+    /// generating-set member retired under each deletion policy, beside a level nothing touches.
+    #[test]
+    fn retire_moves_exactly_the_levels_levels_moved_by_reports_and_each_by_one() {
+        let mut store = ArtifactStore::new();
+        assert_eq!(store.apply(&publication("own", 0, 100, &[1, 2]), 0), 0);
+        assert_eq!(store.apply(&publication("member", 0, 101, &[3, 4]), 8), 0);
+        assert_eq!(
+            store.apply(
+                &publication_with_content("withdrawn", 0, 102, &[5], &[5, 6]),
+                16
+            ),
+            0
+        );
+        assert_eq!(
+            store.apply(
+                &publication_with_content("shrunk", 0, 103, &[7], &[7, 8]),
+                24
+            ),
+            0
+        );
+        assert_eq!(store.apply(&publication("untouched", 0, 104, &[9]), 32), 0);
+        let before: BTreeMap<(String, u32), u64> = store
+            .level_versions()
+            .map(|(layer, level, version)| ((layer.to_string(), level), version))
+            .collect();
+
+        let retired = Bitmap::of(&[100, 4, 6, 8]);
+        let mut reported = store.levels_moved_by(&retired);
+        reported.sort();
+        let mut moved = store.retire(&retired, &|layer| layer != "shrunk");
+        moved.sort();
+
+        let expected: Vec<(String, u32)> = ["member", "own", "shrunk", "withdrawn"]
+            .iter()
+            .map(|layer| (layer.to_string(), 0))
+            .collect();
+        assert_eq!(reported, expected, "every way a record moves is reported");
+        assert_eq!(moved, reported, "and the retirement moved exactly those");
+        for (layer, level, after) in store.level_versions() {
+            let key = (layer.to_string(), level);
+            let step = u64::from(reported.contains(&key));
+            assert_eq!(
+                after,
+                before[&key] + step,
+                "{layer}: a reported level moves by one and an unreported one not at all"
+            );
+        }
+        assert!(
+            store.get("own", 0, 0).is_none(),
+            "the artifact whose own entity was retired is gone"
+        );
+        assert_eq!(
+            store.get("member", 0, 0).unwrap().members,
+            Bitmap::of(&[3]),
+            "the retired member left the membership"
+        );
+        assert!(
+            store.get("withdrawn", 0, 0).unwrap().contents.is_empty(),
+            "the content that lost a source is withdrawn under the strict policy"
+        );
+        assert_eq!(
+            store.get("shrunk", 0, 0).unwrap().contents[0].generated_from,
+            Bitmap::of(&[7]),
+            "and shrunk to its survivors under the permissive one"
+        );
     }
 
     /// **Growth is a union, and it touches nothing else about the record.** The identity, the key,
