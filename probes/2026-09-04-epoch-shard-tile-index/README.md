@@ -240,3 +240,10 @@ level were not run for memory, and its N = 1 histogram is over a column at an ea
 with the same entry count. The contiguous rule's advantage on this build comes from where its
 entity order put the unindexed articles and from PaperSeek's topic order, and neither says anything
 about how a running system's epochs would be filled; the hash rule is the figure to plan against.
+
+- **The mesh level is served row-major, not through the tile index.** Under decision 0094 a level
+  whose everywhere fraction reaches the row-major threshold (98% here) is served by one scan of
+  `viewport ∩ M_auth`, which is the histogram-shaped walk this probe measured at about 1×. The
+  candidacy ratios on the mesh level are therefore for a route that level does not take; they stand
+  for the artifact-major levels (both k-means layers), where the same 6× to 8× applies over a few
+  hundred placed artifacts and each candidate owes a masked probe per shard. Noted at merge.
