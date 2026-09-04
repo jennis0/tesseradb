@@ -2,8 +2,8 @@
   "schema_version": 2,
   "rung": "medcpt",
   "rows": 35920666,
-  "binary_commit": "5b563f03",
-  "built_at": "2026-09-04",
+  "binary_commit": "c47d2ade",
+  "built_at": "2026-09-03",
   "host": "WSL2, 12 cores, 47 GB, local NVMe",
   "build": {
     "stages": [
@@ -8908,7 +8908,8 @@
           "retirable": 0,
           "soft_limit_alarms": 0
         }
-      }
+      },
+      "binary_commit": "c47d2ade"
     },
     {
       "fraction": 0.5,
@@ -9317,7 +9318,8 @@
           "retirable": 0,
           "soft_limit_alarms": 0
         }
-      }
+      },
+      "binary_commit": "c47d2ade"
     },
     {
       "fraction": 0.1,
@@ -12633,7 +12635,8 @@
             }
           }
         }
-      }
+      },
+      "binary_commit": "5b563f03"
     }
   ],
   "notes": [

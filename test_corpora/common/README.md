@@ -52,7 +52,11 @@ reading its fields under a schema they were not written to.
   "schema_version": 2,
   "rung": "medcpt",              // the directory under test_corpora/
   "rows": 35920666,              // the corpus's row count, as the rung's own README states it
-  "binary_commit": "…",          // the git commit of the tessera binary every figure was taken with
+  "binary_commit": "…",          // the git commit of the tessera binary the figures were taken with.
+                                 // A cell may carry its own and override it — a rung re-measured
+                                 // after an engine change has figures from two binaries, and a
+                                 // single top-level commit would be a claim about the file that is
+                                 // not true of every row in it
   "built_at": "2026-09-03",
   "host": "…",                   // free text: this box is 12 cores, 47 GB, WSL2, local NVMe
   "build":  { … },               // §1
