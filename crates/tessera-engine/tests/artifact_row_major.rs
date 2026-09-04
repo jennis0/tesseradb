@@ -809,6 +809,191 @@ fn the_masked_count_cache_is_bounded_and_a_deny_is_not_outlived() {
     );
 }
 
+/// The entity behind one served artifact of the flat layer, by its key, through the admin
+/// plane's own resolver — the route `/control/changes` takes.
+fn flat_artifact_entity(engine: &Engine, key: &str) -> EntityId {
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let response = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
+        )
+        .expect("a viewport over the whole map");
+    let id = response
+        .artifacts
+        .iter()
+        .find(|a| a.layer == FLAT && a.key.as_deref() == Some(key))
+        .expect("the artifact is served")
+        .tessera_id;
+    let idset = engine.generation().bundle.manifest.identity.idset;
+    engine.resolve_tessera_ids(&[id], idset).unwrap()[0].expect("it names what was issued")
+}
+
+/// The row of each of `sources` in the served row space, for a column check.
+fn rows_of(fx: &Fixture, engine: &Engine, sources: std::ops::Range<u64>) -> Vec<u32> {
+    let generation = engine.generation();
+    let space = &generation.bundle.partitions["default"].views["s0"].row_space;
+    fx.members(sources)
+        .into_iter()
+        .map(|entity| space.row_of(entity).expect("every member has a row").raw())
+        .collect()
+}
+
+/// **A fold that retires a member of a row-major level writes the level's column, and the
+/// publication transposes it rather than projecting the level.** The column is the memberships
+/// addressed by row over the folded row space, in which a retired member has no row, so it is the
+/// same column before and after the retirement shrinks the membership; the fold composes it from
+/// the records the retirement leaves and stamps it with the version the level has once the
+/// retirement has run. What is served is what the artifact-major twin serves, live and after a
+/// restart.
+///
+/// The retired member is outside every generating set (`labelled` samples the first twelve of
+/// each block), so the retirement moves the level through its membership alone and no content
+/// rank shifts: a restart after a strict withdrawal reads the withdrawn content's text at the
+/// surviving rank, under either layout, and that is not this case's subject.
+#[test]
+fn a_fold_that_retires_a_member_writes_the_column_the_publication_transposes() {
+    let fx = fixture();
+    let engine = published(
+        &fx,
+        Some(ServingLayout::RowMajorLabel),
+        Some(ServingLayout::ArtifactMajor),
+    );
+    engine
+        .accept_change(fx.member(13), ChangeOp::Delete)
+        .expect("the delete is accepted");
+    fold(&engine);
+    assert!(
+        !fx.row_column_files(&engine).is_empty(),
+        "the fold wrote the level's column although the retirement moved the level"
+    );
+    assert_eq!(
+        engine.columns_adopted(),
+        1,
+        "the publication adopted the column and its warm transposed it"
+    );
+    assert_eq!(
+        engine.columns_composed(),
+        0,
+        "nothing was composed from a projected form"
+    );
+    let live = sweep(&engine);
+
+    let twin_fx = fixture();
+    let twin = published(
+        &twin_fx,
+        Some(ServingLayout::ArtifactMajor),
+        Some(ServingLayout::ArtifactMajor),
+    );
+    twin.accept_change(twin_fx.member(13), ChangeOp::Delete)
+        .unwrap();
+    fold(&twin);
+    assert_same(&live, &sweep(&twin), "after a fold that retired a member");
+    drop(engine);
+
+    let reopened = fx.open();
+    assert_eq!(
+        sweep(&reopened),
+        live,
+        "the restart serves what the live engine served"
+    );
+    assert_eq!(
+        reopened.columns_adopted(),
+        1,
+        "the stated version is the one the level restarts at, so the restart claims the column"
+    );
+    assert_eq!(reopened.columns_composed(), 0);
+}
+
+/// Retire the flat artifact `key` by its own entity, fold, and check the column the fold writes
+/// leaves it out: the publication transposes the column, no row of `retired` carries a label,
+/// every row of `survivor` carries one, the artifact is served to nobody, and the artifact-major
+/// twin agrees.
+fn own_entity_retired(key: &str, retired: std::ops::Range<u64>, survivor: std::ops::Range<u64>) {
+    let fx = fixture();
+    let engine = published(
+        &fx,
+        Some(ServingLayout::RowMajorLabel),
+        Some(ServingLayout::ArtifactMajor),
+    );
+    let entity = flat_artifact_entity(&engine, key);
+    engine
+        .accept_change(entity, ChangeOp::Delete)
+        .expect("an artifact takes a deletion like any other entity");
+    fold(&engine);
+    assert_eq!(
+        engine.columns_adopted(),
+        1,
+        "the warm transposed the fold's column"
+    );
+
+    let form = engine
+        .held_artifact_form_for_test("s0", FLAT, 0)
+        .expect("the level's form is held");
+    let column = form.column().expect("the level is served row-major");
+    let labels_at = |row: u32| {
+        let mut at = Vec::new();
+        column.for_each_label(row, |ordinal| at.push(ordinal));
+        at
+    };
+    for row in rows_of(&fx, &engine, retired) {
+        assert!(
+            labels_at(row).is_empty(),
+            "row {row} was a member of the retired artifact and is labelled with nothing"
+        );
+    }
+    let surviving: std::collections::BTreeSet<Vec<u32>> = rows_of(&fx, &engine, survivor)
+        .into_iter()
+        .map(labels_at)
+        .collect();
+    assert_eq!(
+        surviving.len(),
+        1,
+        "every row of the surviving artifact carries its one ordinal"
+    );
+    assert_eq!(surviving.iter().next().unwrap().len(), 1);
+    let live = sweep(&engine);
+    assert!(
+        !live
+            .iter()
+            .any(|(_, _, set)| set.iter().any(|s| s.key.as_deref() == Some(key))),
+        "the retired artifact is served to nobody"
+    );
+
+    let twin_fx = fixture();
+    let twin = published(
+        &twin_fx,
+        Some(ServingLayout::ArtifactMajor),
+        Some(ServingLayout::ArtifactMajor),
+    );
+    let twin_entity = flat_artifact_entity(&twin, key);
+    twin.accept_change(twin_entity, ChangeOp::Delete).unwrap();
+    fold(&twin);
+    assert_same(
+        &live,
+        &sweep(&twin),
+        "after a fold that retired an artifact",
+    );
+}
+
+/// **A fold that retires an artifact's own entity leaves that artifact out of the column it
+/// writes.** The column is composed from the records the retirement leaves, so no row carries the
+/// retired artifact's ordinal; the survivors' rows carry theirs. Checked on the column the
+/// publication adopted, row by row, and against the artifact-major twin. The retired artifact
+/// sits between live ordinals.
+#[test]
+fn a_fold_that_retires_an_artifacts_own_entity_leaves_it_out_of_the_column() {
+    own_entity_retired("p3", 1_500..2_000, 1_000..1_500);
+}
+
+/// **The top ordinal retired.** The reader refuses a column shorter than one past the highest
+/// live ordinal and the fold sizes its column the same way, so the column it writes for a level
+/// whose last artifact left still covers every survivor.
+#[test]
+fn a_fold_that_retires_the_top_artifact_writes_a_column_the_survivors_fit() {
+    own_entity_retired("p15", 7_500..8_000, 7_000..7_500);
+}
+
 /// **A column whose coordinate has moved is not adopted**, and the level recomposes on first use.
 ///
 /// The direction of the mistake is what makes equality the only admissible test: a growth adds rows

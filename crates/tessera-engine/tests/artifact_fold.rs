@@ -149,6 +149,37 @@ impl Fixture {
             .filter(|p| p.extension().is_some_and(|e| e == "tsmb"))
             .collect()
     }
+
+    /// The `level_versions` the newest side manifest of the live prefix states, as
+    /// `(layer, level, version)`.
+    fn stated_level_versions(&self, engine: &Engine) -> Vec<(String, u32, u64)> {
+        let dir = self.live_prefix(engine).join("partitions").join("default");
+        let newest = std::fs::read_dir(&dir)
+            .expect("the partition directory exists")
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("SEGMENTS-") && n.ends_with(".json"))
+            })
+            .max()
+            .expect("the live prefix carries a side manifest");
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(newest).unwrap()).unwrap();
+        json["level_versions"]
+            .as_array()
+            .expect("level_versions is a list")
+            .iter()
+            .map(|v| {
+                (
+                    v["layer"].as_str().unwrap().to_string(),
+                    v["level"].as_u64().unwrap() as u32,
+                    v["version"].as_u64().unwrap(),
+                )
+            })
+            .collect()
+    }
 }
 
 fn artifacts_of(engine: &Engine) -> Vec<ArtifactOut> {
@@ -463,7 +494,7 @@ fn a_growth_after_the_fold_leaves_the_partition_unadopted() {
     );
 }
 
-/// **A fold that retires a member states nothing about that level and names no partition for it.**
+/// **A fold that retires a member names no partition for that level.**
 ///
 /// The fold writes its manifest *before* it retires, because a retirement is irreversible and a
 /// manifest that would not commit must leave it undone. So at the moment the manifest is written
@@ -472,7 +503,9 @@ fn a_growth_after_the_fold_leaves_the_partition_unadopted() {
 /// **shifts the ranks**. A partition adopted at the wrong rank answers containment with another
 /// content's generating set, which is not conservative in any direction anyone chose.
 ///
-/// So the level is left out of both lists, and it recomposes on first use.
+/// So the level gets no partition and recomposes on first use. Its version is stated, as the one
+/// the level has once the retirement has run, which is what its tile index is stamped with
+/// (`a_fold_that_retires_a_member_writes_the_tile_index_the_publication_adopts`).
 #[test]
 fn a_fold_that_retires_a_member_names_no_partition_for_that_level() {
     let fx = fixture();
@@ -485,6 +518,13 @@ fn a_fold_that_retires_a_member_names_no_partition_for_that_level() {
     assert!(
         fx.containment_files(&engine).is_empty(),
         "the fold retired a member of this level, so it wrote no partition for it"
+    );
+    assert!(
+        fx.stated_level_versions(&engine)
+            .iter()
+            .any(|(layer, level, _)| layer == "clusters/a" && *level == 0),
+        "and it states the level's version, so a restart seeds the level at the version the \
+         fold's other structures are stamped with"
     );
     rotate(&engine);
     drop(engine);
@@ -576,29 +616,138 @@ fn a_growth_after_the_fold_leaves_the_tile_index_unadopted() {
     );
 }
 
-/// A fold that retires a member states nothing about that level and names no column for it — the
-/// same omission `a_fold_that_retires_a_member_names_no_partition_for_that_level` describes, and
-/// for the same reason: the manifest is written before the retirement, so the store and the prefix
-/// disagree about the level for exactly that window.
+/// **A fold that retires a member of a level writes that level's tile index, and the publication
+/// adopts it.** The manifest is written before the retirement, so the store's version is the
+/// pre-retirement one while the prefix's records are the post-retirement ones. The index is the
+/// memberships projected through the folded row space, in which a retired member has no row, so
+/// it is projected from the records the retirement leaves and stamped with the version the level
+/// has once the retirement has run. The warm after the flip claims it rather than projecting the
+/// level's memberships, and so does a restart. A fold that omitted the level paid the whole
+/// projection at its warm: 135 s and 3.7 GB of resident memory on rung 3's `mesh/descriptors`
+/// (`probes/2026-09-04-epoch-shard-fold-decomposition/`).
 #[test]
-fn a_fold_that_retires_a_member_names_no_tile_index_for_that_level() {
+fn a_fold_that_retires_a_member_writes_the_tile_index_the_publication_adopts() {
     let fx = fixture();
     let engine = fx.open();
     publish(&fx, &engine, 0..300);
+    assert_eq!(count(&engine), 300);
     engine
         .accept_change(fx.member(7), ChangeOp::Delete)
         .expect("the delete is accepted");
     fold(&engine);
-    assert!(
-        fx.tile_index_files(&engine).is_empty(),
-        "the fold retired a member of this level, so it wrote no column for it"
+    assert_eq!(
+        fx.tile_index_files(&engine).len(),
+        1,
+        "the fold wrote the level's index although the retirement moved the level"
+    );
+    assert_eq!(
+        engine.artifact_tile_indexes_adopted(),
+        1,
+        "and its warm claimed the index rather than projecting the level"
+    );
+    assert_eq!(count(&engine), 299, "the retired member is gone");
+    assert_eq!(
+        engine.artifact_tile_indexes_adopted(),
+        1,
+        "the request read the warmed form"
+    );
+    let stated_after_retiring = fx.stated_level_versions(&engine);
+
+    // The stamped version is the one the level actually has once the retirement has run: a
+    // second fold, which retires nothing, states the store's own version for the level, and it
+    // is the same number.
+    fold(&engine);
+    assert_eq!(
+        fx.stated_level_versions(&engine),
+        stated_after_retiring,
+        "the first fold stated the version the level had after its retirement"
+    );
+    assert_eq!(engine.artifact_tile_indexes_adopted(), 2);
+    rotate(&engine);
+    drop(engine);
+
+    let engine = fx.open();
+    assert_eq!(count(&engine), 299);
+    assert_eq!(
+        engine.artifact_tile_indexes_adopted(),
+        1,
+        "the stated version is the one the level restarts at, so the restart claims it too"
+    );
+}
+
+/// Publish three artifacts, retire the one at `retired` by its own entity, fold, and check the
+/// index the fold writes leaves it out: the publication claims the index, the survivors are
+/// served whole, and a restart claims it again.
+fn own_entity_retired_at(retired: usize) {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(declaration("clusters/a")).unwrap();
+    let ids = engine
+        .publish_artifacts(
+            "clusters/a".into(),
+            0,
+            vec![
+                IncomingArtifact::from_entities(Some("c0".into()), fx.members(0..100)),
+                IncomingArtifact::from_entities(Some("c1".into()), fx.members(100..200)),
+                IncomingArtifact::from_entities(Some("c2".into()), fx.members(200..300)),
+            ],
+        )
+        .unwrap();
+    wait_for_publication(&fx, &engine, 1);
+    let served = |engine: &Engine| -> Vec<(Option<String>, u64)> {
+        let mut out: Vec<_> = artifacts_of(engine)
+            .into_iter()
+            .map(|a| (a.key, a.masked_count))
+            .collect();
+        out.sort();
+        out
+    };
+    let survivors: Vec<(Option<String>, u64)> = (0..3)
+        .filter(|ordinal| *ordinal != retired)
+        .map(|ordinal| (Some(format!("c{ordinal}")), 100))
+        .collect();
+
+    let deleted = artifact_entity(&engine, ids[retired]);
+    engine
+        .accept_change(deleted, ChangeOp::Delete)
+        .expect("an artifact takes a deletion like any other entity");
+    assert_eq!(served(&engine), survivors, "hidden at the ack");
+    fold(&engine);
+    assert_eq!(fx.tile_index_files(&engine).len(), 1);
+    assert_eq!(
+        engine.artifact_tile_indexes_adopted(),
+        1,
+        "the warm claimed the fold's index"
+    );
+    assert_eq!(
+        served(&engine),
+        survivors,
+        "the retired artifact is absent from the adopted index and the survivors are whole"
     );
     rotate(&engine);
     drop(engine);
 
     let engine = fx.open();
-    assert_eq!(count(&engine), 299, "and the retired member is gone");
-    assert_eq!(engine.artifact_tile_indexes_adopted(), 0);
+    assert_eq!(served(&engine), survivors);
+    assert_eq!(engine.artifact_tile_indexes_adopted(), 1);
+}
+
+/// **A fold that retires an artifact's own entity leaves that artifact out of the tile index it
+/// writes.** The artifact's slot becomes a hole at the retirement, and the index the fold writes
+/// for the level, stamped with the post-retirement version, has a hole at its ordinal too; the
+/// survivors after it keep their ordinals. The middle one, so the hole sits between two live
+/// ordinals.
+#[test]
+fn a_fold_that_retires_an_artifacts_own_entity_leaves_it_out_of_the_tile_index() {
+    own_entity_retired_at(1);
+}
+
+/// **The top ordinal retired.** The level's slots still reach past it, and the reader sizes the
+/// level at one past the highest live ordinal, so an index one ordinal longer would be refused
+/// for covering a different range. The fold sizes its index the same way.
+#[test]
+fn a_fold_that_retires_the_top_artifact_writes_an_index_the_survivors_fit() {
+    own_entity_retired_at(2);
 }
 
 /// A second fold over an already-folded prefix is the case that catches a rewrite which reads its

@@ -35,13 +35,13 @@ use tessera_engine::artifacts::{
 };
 use tessera_engine::compose::{compose, EffectiveMask, RowProjection};
 use tessera_engine::denied_rows_of;
+use tessera_engine::row_column::RowColumn;
 use tessera_engine::tile_index::{Extent, TileIndex, Viewport};
 use tessera_lifecycle::membership::{ArtifactRecord, ArtifactStore, Attachment, ContentSet};
 use tessera_lifecycle::wal::ParentRef;
 use tessera_lifecycle::{ChangeOp, IngestBuffer, Overlay};
 use tessera_store::write::write_permutation;
 use tessera_store::{Permutation, RowSpace};
-use tessera_engine::row_column::RowColumn;
 use tessera_types::layer::{
     ArtifactVisibility, ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource, ServingLayout,
@@ -245,7 +245,11 @@ fn spans_for(shape: Shape, rng: &mut StdRng) -> Vec<(Vec<u32>, Option<ParentRef>
             .map(|i| {
                 let span = UNIVERSE / 600;
                 let lo = i * span;
-                let hi = if i == 599 { UNIVERSE - 1 } else { lo + span - 1 };
+                let hi = if i == 599 {
+                    UNIVERSE - 1
+                } else {
+                    lo + span - 1
+                };
                 ((lo..=hi).collect(), None)
             })
             .collect(),
@@ -870,6 +874,126 @@ fn the_folds_projection_and_the_derived_index_are_the_same_column() {
     }
 }
 
+/// **An entry held for the published prefix survives a claim under the outgoing one.** A fold
+/// adopts what it wrote before it warms the levels, and the warm is sequential, so a request that
+/// loaded the outgoing generation reaches the projections under the old prefix and the store's
+/// new version while entries are waiting. A claim that removed on any mismatch took the entry
+/// with it, and the warm then projected the level whole. Only a same-prefix version mismatch drops
+/// an entry, and adoption purges what another prefix held.
+#[test]
+fn an_entry_held_for_the_published_prefix_survives_a_claim_under_the_outgoing_one() {
+    let fx = build_fixture(Shape::Partitioned);
+    let tmp = TempDir::new().unwrap();
+    std::fs::create_dir_all(tmp.path().join("partitions/default/tile-index")).unwrap();
+    std::fs::create_dir_all(tmp.path().join("partitions/default/row-column")).unwrap();
+    let index_rel = "partitions/default/tile-index/tile-index-000001-000.tsti";
+    let index = TileIndex::build(&fx.membership(), UNIVERSE);
+    std::fs::write(tmp.path().join(index_rel), index.as_bytes()).unwrap();
+    let column_rel = "partitions/default/row-column/row-column-000001-000.tsrc";
+    let column = RowColumn::compose(
+        fx.rows().membership(),
+        fx.row_space.base_rows(),
+        ServingLayout::RowMajorLabel,
+    )
+    .expect("a partitioned level composes a label column");
+    std::fs::write(tmp.path().join(column_rel), column.as_bytes()).unwrap();
+
+    // The level before the fold's retirement and after it: the version moved by one.
+    let mut before = fx.store.clone();
+    before.seed_level_version(LAYER, 0, 10);
+    let mut store = fx.store.clone();
+    store.seed_level_version(LAYER, 0, 11);
+    let mut later = fx.store.clone();
+    later.seed_level_version(LAYER, 0, 12);
+    let index_entry = |version: u64| tessera_store::manifest::TileIndexExtent {
+        incarnation: 0,
+        path: index_rel.to_string(),
+        view: "s0".to_string(),
+        layer: LAYER.to_string(),
+        level: 0,
+        level_version: version,
+    };
+    let column_entry = |version: u64| tessera_store::manifest::RowColumnExtent {
+        incarnation: 0,
+        path: column_rel.to_string(),
+        view: "s0".to_string(),
+        layer: LAYER.to_string(),
+        level: 0,
+        level_version: version,
+        layout: ServingLayout::RowMajorLabel,
+    };
+    let build = |projections: &ArtifactProjections,
+                 prefix: &str,
+                 store: &tessera_lifecycle::membership::ArtifactStore,
+                 layout: ServingLayout| {
+        projections.get_or_build(
+            prefix,
+            "s0",
+            LAYER,
+            0,
+            store,
+            &fx.row_space,
+            None,
+            layout,
+            None,
+            0,
+        )
+    };
+
+    // The index, for an artifact-major level. The outgoing prefix held an entry of its own; the
+    // fold's adoption replaces it.
+    let projections = ArtifactProjections::new();
+    projections.adopt_indexes(tmp.path(), "v00000", &[index_entry(10)], &before);
+    projections.adopt_indexes(tmp.path(), "v00001", &[index_entry(11)], &store);
+    // A request still on the outgoing generation: its prefix, the store's version. Nothing is
+    // claimed and nothing is removed.
+    let _ = build(&projections, "v00000", &store, ServingLayout::ArtifactMajor);
+    assert_eq!(projections.indexes_adopted(), 0);
+    // The warm, under the published prefix, claims it.
+    let rows = build(&projections, "v00001", &store, ServingLayout::ArtifactMajor);
+    assert_eq!(
+        projections.indexes_adopted(),
+        1,
+        "the index survived the outgoing generation's claim"
+    );
+    assert_eq!(rows.index().as_bytes(), index.as_bytes());
+
+    // The column, for a row-major level, the same way.
+    let projections = ArtifactProjections::new();
+    projections.adopt_columns(tmp.path(), "v00000", &[column_entry(10)], &before);
+    projections.adopt_columns(tmp.path(), "v00001", &[column_entry(11)], &store);
+    let _ = build(&projections, "v00000", &store, ServingLayout::RowMajorLabel);
+    assert_eq!(projections.columns_adopted(), 0);
+    // The outgoing generation's request composed a column of its own, having nothing to claim;
+    // the warm composes none.
+    let composed_by_outgoing = projections.columns_composed();
+    let rows = build(&projections, "v00001", &store, ServingLayout::RowMajorLabel);
+    assert_eq!(
+        projections.columns_adopted(),
+        1,
+        "the column survived the outgoing generation's claim"
+    );
+    assert_eq!(
+        projections.columns_composed(),
+        composed_by_outgoing,
+        "and the warm transposed it rather than composing one"
+    );
+    assert!(rows.column().is_some());
+
+    // The retention rule stands: under the entry's own prefix, a version it does not carry drops
+    // it, and a later claim at its version finds nothing.
+    let projections = ArtifactProjections::new();
+    projections.adopt_indexes(tmp.path(), "v00001", &[index_entry(11)], &store);
+    let _ = build(&projections, "v00001", &later, ServingLayout::ArtifactMajor);
+    assert_eq!(projections.indexes_adopted(), 0);
+    let _ = build(&projections, "v00001", &store, ServingLayout::ArtifactMajor);
+    assert_eq!(
+        projections.indexes_adopted(),
+        0,
+        "dropped at the same-prefix mismatch, so nothing is held for the process's life"
+    );
+}
+
 /// **The row form transposed out of a column is the row form projected from the memberships** —
 /// membership, generating sets, declared sizes and the tile index over them, artifact for
 /// artifact.
@@ -897,11 +1021,9 @@ fn a_transposed_row_form_is_the_projected_one() {
         let projected = fx.rows();
         let mut composed = 0;
         for layout in [ServingLayout::RowMajorLabel, ServingLayout::RowMajorList] {
-            let Some(column) = RowColumn::compose(
-                projected.membership(),
-                fx.row_space.base_rows(),
-                layout,
-            ) else {
+            let Some(column) =
+                RowColumn::compose(projected.membership(), fx.row_space.base_rows(), layout)
+            else {
                 continue;
             };
             composed += 1;
@@ -965,8 +1087,9 @@ fn a_transposed_row_form_is_the_projected_one() {
             // The column composed from the transposed form is the column it was transposed from,
             // which is the round trip the serving path takes: the level is served from the very
             // bytes this membership was read out of.
-            let again = RowColumn::compose(transposed.membership(), fx.row_space.base_rows(), layout)
-                .expect("the same memberships compose the same form");
+            let again =
+                RowColumn::compose(transposed.membership(), fx.row_space.base_rows(), layout)
+                    .expect("the same memberships compose the same form");
             assert_eq!(again.as_bytes(), column.as_bytes());
             for ordinal in 0..column.len() as u32 {
                 assert_eq!(again.declared_size(ordinal), column.declared_size(ordinal));

@@ -1066,7 +1066,10 @@ impl ArtifactRows {
     #[cfg(test)]
     pub(crate) fn synthetic(sets: &[Option<&[u32]>], column: Option<Arc<RowColumn>>) -> Self {
         let membership = MembershipRows {
-            rows: sets.iter().map(|s| s.map(|s| Arc::new(Bitmap::of(s)))).collect(),
+            rows: sets
+                .iter()
+                .map(|s| s.map(|s| Arc::new(Bitmap::of(s))))
+                .collect(),
             generating: vec![Vec::new(); sets.len()],
         };
         let index = TileIndex::build(&membership, 0);
@@ -1613,6 +1616,15 @@ impl ArtifactProjections {
         extents: &[tessera_store::manifest::ContainmentExtent],
         store: &ArtifactStore,
     ) {
+        // **Everything held for another prefix leaves here.** A claim leaves an entry held for a
+        // prefix other than the one it asks under, so that a request still building on the
+        // outgoing generation cannot remove what this adoption inserts ([`Self::claim_index`]);
+        // what keeps such an entry from outliving its prefix is this purge, at the adoption that
+        // supersedes it.
+        self.partitions_held
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|_, (key, _)| key.prefix == prefix);
         for extent in extents {
             let level_version = store.level_version(&extent.layer, extent.level);
             if level_version != extent.level_version {
@@ -1682,6 +1694,11 @@ impl ArtifactProjections {
         extents: &[tessera_store::manifest::TileIndexExtent],
         store: &ArtifactStore,
     ) {
+        // Purged for [`Self::adopt_all`]'s reason.
+        self.indexes_held
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|_, (key, _)| key.prefix == prefix);
         for extent in extents {
             let level_version = store.level_version(&extent.layer, extent.level);
             if level_version != extent.level_version {
@@ -1748,6 +1765,11 @@ impl ArtifactProjections {
         extents: &[tessera_store::manifest::RowColumnExtent],
         store: &ArtifactStore,
     ) {
+        // Purged for [`Self::adopt_all`]'s reason.
+        self.columns_held
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|_, (key, _)| key.prefix == prefix);
         for extent in extents {
             let level_version = store.level_version(&extent.layer, extent.level);
             if level_version != extent.level_version {
@@ -2309,12 +2331,7 @@ impl ArtifactProjections {
                 .map(Arc::new),
         };
         let transposed = claimed.as_ref().and_then(|column| {
-            ArtifactRows::build_from_column(
-                store.level(layer, level),
-                space,
-                column,
-                &mut adopted,
-            )
+            ArtifactRows::build_from_column(store.level(layer, level), space, column, &mut adopted)
         });
         let from_transpose = transposed.is_some();
         if claimed.is_some() && !from_transpose {
@@ -2426,6 +2443,14 @@ impl ArtifactProjections {
     /// has it there is no second reader, and leaving the entry behind would hold a second copy of
     /// the level's extents for the process's life. A caller that finds nothing derives, which is
     /// the same answer at the cost the fold was trying to save.
+    ///
+    /// **An entry held for another prefix is left where it is.** The fold adopts under the prefix
+    /// it published while requests that loaded the outgoing generation are still building under
+    /// theirs, against a store whose version is already the new one; a claim from one of those
+    /// that removed the entry would send the warm down the whole projection the entry exists to
+    /// replace. Only a same-prefix version mismatch drops an entry, and [`Self::adopt_indexes`]
+    /// purges whatever was held for a prefix other than the one it adopts under, so an entry
+    /// still cannot outlive its prefix.
     fn claim_index(
         &self,
         prefix: &str,
@@ -2437,7 +2462,10 @@ impl ArtifactProjections {
         let map_key = (view.to_string(), layer.to_string(), level);
         let mut held = self.indexes_held.lock().unwrap_or_else(|e| e.into_inner());
         let (key, _) = held.get(&map_key)?;
-        if key.prefix != prefix || key.level_version != level_version {
+        if key.prefix != prefix {
+            return None;
+        }
+        if key.level_version != level_version {
             // The coordinate has moved under the entry, so nothing will ever claim it. Dropped
             // here rather than left: what makes it stale is what makes it dead weight.
             held.remove(&map_key);
@@ -2623,7 +2651,8 @@ impl ArtifactProjections {
     ///
     /// **Removed rather than borrowed**, for [`Self::claim_index`]'s reason: a column belongs to one
     /// view's row form, and leaving the entry behind would hold a second copy of four bytes a row
-    /// for the process's life.
+    /// for the process's life. An entry held for another prefix is left, for that method's other
+    /// reason, and [`Self::adopt_columns`] purges what another prefix held.
     fn claim_column(
         &self,
         prefix: &str,
@@ -2635,7 +2664,10 @@ impl ArtifactProjections {
         let map_key = (view.to_string(), layer.to_string(), level);
         let mut held = self.columns_held.lock().unwrap_or_else(|e| e.into_inner());
         let (key, _) = held.get(&map_key)?;
-        if key.prefix != prefix || key.level_version != level_version {
+        if key.prefix != prefix {
+            return None;
+        }
+        if key.level_version != level_version {
             held.remove(&map_key);
             return None;
         }
