@@ -112,6 +112,15 @@ pub struct EngineConfig {
     /// in the stale-serve window, and then two publications deep, where it rebuilds. That is a
     /// real floor and a different one; see `crate::refresh`.
     pub flush_max_age_secs: u64,
+    /// The flush's **row** trigger: buffered rows at which the tick comes due early.
+    ///
+    /// The age tick alone leaves `B` — rows buffered between publications — as the arrival rate
+    /// times the period, which is unbounded in the rate. Every commit-window close deep-copies the
+    /// buffer, so a window costs `O(B)` and a flush interval pays `B²/2W`
+    /// (`docs/evidence/memos/2026-08-05-ingest-rate.md`). This is what bounds `B`, and with it the
+    /// per-row cost of a fast loader; `flush_max_age_secs` still bounds how *stale* a slow one's
+    /// rows may be. A publication satisfies both, so the two triggers never compound.
+    pub flush_max_items: usize,
     /// `merge.max_merged_segment_bytes` — the largest total one row-space merge may consume, and
     /// therefore the ceiling on how far tiering can go before segments stop being mergeable.
     ///
@@ -2918,6 +2927,7 @@ impl Engine {
             queue_bound,
             crate::write::MaintenanceDeps {
                 max_age_secs: self.config.flush_max_age_secs,
+                max_items: self.config.flush_max_items,
                 coalesce: coalesce_policy(&self.config),
                 merge: merge_policy(&self.config),
                 artifact_projections: Arc::clone(&self.artifact_projections),
@@ -2979,6 +2989,7 @@ impl Engine {
             queue_bound,
             crate::write::MaintenanceDeps {
                 max_age_secs: self.config.flush_max_age_secs,
+                max_items: self.config.flush_max_items,
                 coalesce: coalesce_policy(&self.config),
                 merge: merge_policy(&self.config),
                 artifact_projections: Arc::clone(&self.artifact_projections),

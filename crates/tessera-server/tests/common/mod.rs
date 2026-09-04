@@ -219,6 +219,9 @@ pub fn default_engine_config() -> EngineConfig {
         // The shipped defaults for lifecycle §2.2's two pin bounds — see the same two lines in
         // tessera-engine's `tests/common/mod.rs`.
         flush_max_age_secs: 90,
+        // The shipped row trigger, four commit windows (`DEFAULT_FLUSH_MAX_ITEMS`):
+        // what bounds the window close's O(buffered) copy. Nothing here reaches it.
+        flush_max_items: 40_000,
         max_merged_segment_bytes: None,
         tier_width: None,
         segment_floor_bytes: None,

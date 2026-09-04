@@ -53,12 +53,14 @@
 //! a status payload without its key.
 //!
 //! **No key is inert, by rule** (decision 0045): a key exists only while something reads it.
-//! Two were deleted under that rule — `ingest.flush_max_items` (its "flush-ready" mark had no
-//! consumer: the tick never skips a non-empty buffer, and the buffer's real bound is
-//! `ingest_buffer_max_items`) and `ingest.commit_window_max_age_ms` (an age bound has no subject
-//! in an executor whose window never lingers — decision 0034, whose keep-parsed clause 0045
-//! supersedes). A `tessera.toml` naming either is refused with an error naming it, which is
-//! louder than the silent no-op the key used to buy.
+//! Two were deleted under that rule. One is back: **`ingest.flush_max_items` was restored on
+//! 2026-09-04 with a consumer** — the flush tick now comes due on buffered rows as well as on age
+//! (see [`DEFAULT_FLUSH_MAX_ITEMS`]), which is a different mechanism from the "flush-ready" mark
+//! 0045 deleted and is read rather than merely stored. The other,
+//! `ingest.commit_window_max_age_ms`, stays deleted (an age bound has no subject in an executor
+//! whose window never lingers — decision 0034, whose keep-parsed clause 0045 supersedes), and a
+//! `tessera.toml` naming it is refused with an error naming it, which is louder than the silent
+//! no-op the key used to buy.
 
 use std::fs;
 use std::net::SocketAddr;
@@ -757,6 +759,8 @@ struct RawIngest {
     #[serde(default)]
     flush_max_age_secs: Option<u64>,
     #[serde(default)]
+    flush_max_items: Option<usize>,
+    #[serde(default)]
     ingest_buffer_max_items: Option<usize>,
     #[serde(default)]
     compaction_min_interval_secs: Option<u64>,
@@ -1131,6 +1135,9 @@ pub struct Config {
     /// The flush tick: the period at which geometry is published, and therefore the bound on how
     /// stale an acknowledged item's absence may be. See [`DEFAULT_FLUSH_MAX_AGE_SECS`].
     pub flush_max_age_secs: u64,
+    /// Buffered rows at which the flush tick comes due ahead of its period (§4.1). See
+    /// [`DEFAULT_FLUSH_MAX_ITEMS`].
+    pub flush_max_items: usize,
     /// Buffer occupancy at which `/control/ingest` is refused with a 429 (§1.3).
     ///
     /// A **distinct knob** from [`Config::ingest_queue_bound`], which bounds queued *commands*:
@@ -1735,10 +1742,30 @@ const DEFAULT_WAL_HARD_LIMIT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 /// overlay depth is a term in deny-ack latency.
 const DEFAULT_OVERLAY_SOFT_LIMIT: usize = 500_000;
 
-// `flush_max_items` is deleted, not inert (decision 0045). "Marks the buffer flush-ready" had no
-// consumer: the tick never skips a non-empty buffer and a flush consumes everything buffered for
-// its view, so the key could not have an effect. The buffer's real bound is
-// `ingest_buffer_max_items`; the tick's is `flush_max_age_secs`.
+/// **The flush's row trigger**: buffered rows at which the tick comes due ahead of its period.
+///
+/// **40,000 — four commit windows, and it is measured rather than assumed.**
+/// `docs/evidence/memos/2026-08-05-ingest-rate.md` sweeps `B/W`, rows buffered between
+/// publications over rows per window, and finds an *interior* optimum: including the flush,
+/// `B/W = 4` is at or next to the best at every term density, `B/W = 1` is 30–42% worse (the
+/// flush's fixed cost over too few rows) and `B/W = 24` is 20–36% worse (the window close's
+/// `O(B)` buffer copy, which the `B²/2W` law makes quadratic over an interval). Four windows at
+/// [`DEFAULT_COMMIT_WINDOW_MAX_ITEMS`] is that optimum.
+///
+/// **This is the knob that was missing, not a second cadence.** Under
+/// [`DEFAULT_FLUSH_MAX_AGE_SECS`] alone, `B` is the arrival rate times the tick — a loader
+/// sustaining 380,000 rows/s across a 90 s tick buffers ~34,000,000 rows, `B/W ≈ 3,400`, a
+/// hundred times the right-hand end of that table — so the age tick sets `B` by arithmetic
+/// nobody chose. A publication satisfies both triggers and restarts the period, so a fast loader
+/// publishes on rows and never reaches the age, and a slow one publishes on age and never
+/// reaches the rows.
+///
+/// **It does not replace [`DEFAULT_INGEST_BUFFER_MAX_ITEMS`]**, which is the occupancy at which
+/// ingest is *refused*. This one publishes; that one sheds.
+///
+/// (Decision 0045 deleted this key for having no reader. The reader is
+/// `Executor::tick_if_due`'s row trip, added 2026-09-04.)
+const DEFAULT_FLUSH_MAX_ITEMS: usize = 4 * DEFAULT_COMMIT_WINDOW_MAX_ITEMS;
 
 /// **The flush tick**, and therefore the bound on how stale an acknowledged item's absence may be:
 /// a buffered item contributes to no viewport, count or density until a flush gives it a row. A
@@ -2369,6 +2396,14 @@ fn parse(text: &str) -> Result<Config> {
         "the alarm would fire on the very first deny and never stop; a permanently-firing alarm \
          is indistinguishable from no alarm at all",
     )?;
+    let flush_max_items = non_zero_usize(
+        "ingest.flush_max_items",
+        raw.ingest
+            .flush_max_items
+            .unwrap_or(DEFAULT_FLUSH_MAX_ITEMS),
+        "a zero row trigger would make every commit-window close a publication, which is the \
+         B/W = 1 end of the measured curve and 30-42% worse than the optimum",
+    )?;
     let flush_max_age_secs = non_zero_u64(
         "ingest.flush_max_age_secs",
         raw.ingest
@@ -2698,6 +2733,7 @@ fn parse(text: &str) -> Result<Config> {
         overlay_soft_limit,
         compaction,
         flush_max_age_secs,
+        flush_max_items,
         row_projection_cache_bytes,
         masked_count_cache_bytes,
         fragment_cache_bytes,
@@ -3247,6 +3283,7 @@ compaction_after_deletions = 9000
         std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
         let config = parse(&valid_toml("")).expect("defaults must load");
         assert_eq!(config.flush_max_age_secs, DEFAULT_FLUSH_MAX_AGE_SECS);
+        assert_eq!(config.flush_max_items, DEFAULT_FLUSH_MAX_ITEMS);
         assert_eq!(
             config.ingest_buffer_max_items,
             DEFAULT_INGEST_BUFFER_MAX_ITEMS
@@ -3627,6 +3664,7 @@ compaction_after_deletions = 9000
         assert_eq!(config.wal_hard_limit_bytes, DEFAULT_WAL_HARD_LIMIT_BYTES);
         assert_eq!(config.overlay_soft_limit, DEFAULT_OVERLAY_SOFT_LIMIT);
         assert_eq!(config.flush_max_age_secs, DEFAULT_FLUSH_MAX_AGE_SECS);
+        assert_eq!(config.flush_max_items, DEFAULT_FLUSH_MAX_ITEMS);
         assert_eq!(
             config.row_projection_cache_bytes,
             DEFAULT_ROW_PROJECTION_CACHE_BYTES
@@ -3650,13 +3688,16 @@ compaction_after_deletions = 9000
             // 3 GiB + a bit. This key is an operand of the WAL headroom relation, so a value
             // chosen only for legibility would make the whole config refuse to start; it is kept
             // above `queue worst case + reserved deny headroom` at the defaults.
-            "commit_window_max_items = 7\nwal_hard_limit_bytes = 3000000000",
+            "commit_window_max_items = 7\nwal_hard_limit_bytes = 3000000000\nflush_max_items = 55",
         ))
         .expect("must load");
         assert_eq!(config.expected_concurrent_sessions, 42);
         assert_eq!(config.row_projection_cache_bytes, 777_000_000);
         assert_eq!(config.commit_window_max_items, 7);
         assert_eq!(config.wal_hard_limit_bytes, 3_000_000_000);
+        // Restored 2026-09-04, so it is wired here as well as defaulted above — the property
+        // decision 0045 found missing was exactly this one.
+        assert_eq!(config.flush_max_items, 55);
     }
 
     /// Every write-path knob refuses a zero, and refuses it by *name*. Zero is degenerate for all

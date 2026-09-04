@@ -736,7 +736,7 @@ Beyond what batching can reach — the win is still bounded by window size, and 
 
 ### 11.2 The buffer, the watermark and the overlay
 
-Arrivals land in an **in-memory buffer**. A flush policy turns the buffer into an immutable on-disk segment, so segment count is governed by the flush interval rather than the arrival rate. *(As built: **age alone** — `flush_max_age_secs`. The size trigger is deleted, decision 0045: "flush-ready" had no consumer, the tick never skipping a non-empty buffer. Buffer occupancy is a backpressure bound that sheds ingest with 429, not a flush trigger.)*
+Arrivals land in an **in-memory buffer**. A flush policy turns the buffer into an immutable on-disk segment, so segment count is governed by the flush interval rather than the arrival rate. *(As built: **age or buffered rows** — `flush_max_age_secs` and `flush_max_items`, write-path §4.1. The size trigger was deleted (decision 0045: the "flush-ready" mark it then was had no consumer, the tick never skipping a non-empty buffer) and **restored on 2026-09-04 as a trigger the tick reads**, because the age tick alone makes rows buffered between publications the arrival rate times the period, and the commit window's cost is `O(that)`. Buffer occupancy remains a separate backpressure bound that sheds ingest with 429.)*
 
 **The mask carries an entity high-water mark.** A mask fragment built at watermark *W* is authoritative below *W*. Entities at or above *W* are new and not yet folded in. Flushing advances *W* by OR-ing in the flushed segment's contribution for the token's already-known satisfied terms — a small, monotone patch rather than a rebuild.
 
@@ -1609,7 +1609,9 @@ Both were checked exhaustively against explicit quantification over all well-for
   segment-set version in I11"*, which **I11's own third paragraph contradicts** — a merge permutes
   row space inside one prefix, so no row-space artefact may key on it, and equating the two
   sanctioned exactly the stale-projection hazard the invariant forbids; §11.2's flush policy said
-  "size or age", and the size trigger is deleted (decision 0045).
+  "size or age", and the size trigger is deleted (decision 0045). *(2026-09-04: the size trigger
+  is back — `flush_max_items`, write-path §4.1 — so §11.2's "size or age" is again as built. What
+  0045 deleted was a mark nothing read; what exists now is a trigger the tick consults.)*
   **Four claims marked rather than rewritten, because each is the specification's intent and
   changing it is not this pass's to do**: §11.2's incremental fragment patch (⊘ — probe P2
   measured the rebuild at ~200 ms and flat in tier count, refuting the model decision 0044's D4

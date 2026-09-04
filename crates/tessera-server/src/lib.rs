@@ -224,6 +224,9 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         // The flush tick: the one write-path cadence, and the bound on how stale an acknowledged
         // item's absence may be (write-path §4.1).
         flush_max_age_secs: config.flush_max_age_secs,
+        // The flush's row trigger, which is what bounds the commit window's `O(B)` buffer copy
+        // (write-path §4.1). The age tick above bounds staleness; this one bounds cost.
+        flush_max_items: config.flush_max_items,
         // Validated against write-path §7's base-segment relation in `validate_merge_size`, and
         // now delivered: before this it was checked and dropped.
         max_merged_segment_bytes: config.max_merged_segment_bytes,

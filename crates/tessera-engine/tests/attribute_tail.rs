@@ -1639,6 +1639,10 @@ fn a_coalesce_collapses_record_extents_and_every_row_still_answers() {
         EngineConfig {
             // Long, so every flush is one this test asked for — `tests/coalesce.rs`'s posture.
             flush_max_age_secs: 3600,
+            // **The row trigger off.** This cell drives publication itself — it pins `B`
+            // by flushing and waiting, so a trigger that published on its own would
+            // measure a different buffer depth than the one the sweep set.
+            flush_max_items: usize::MAX,
             ..config()
         },
     );

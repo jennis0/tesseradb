@@ -77,6 +77,9 @@ pub fn config() -> EngineConfig {
         // it is testing (`tests/pins.rs` does), so these must never be the reason a test passes.
         // A 300 s TTL means no case here reaches it by elapsing.
         flush_max_age_secs: 90,
+        // The shipped row trigger, four commit windows (`DEFAULT_FLUSH_MAX_ITEMS`):
+        // what bounds the window close's O(buffered) copy. Nothing here reaches it.
+        flush_max_items: 40_000,
         // The built-in default; `tests/scale.rs` is where this knob is exercised.
         max_merged_segment_bytes: None,
         // The built-in merge and coalesce policies (width 4 / floor 16 MiB / width 8);

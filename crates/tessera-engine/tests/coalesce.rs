@@ -41,6 +41,10 @@ fn engine_at(tmp: &std::path::Path, root: &std::path::Path) -> Engine {
             // selected on the tick either way, and a background tick landing mid-assertion would
             // make the counts depend on wall-clock.
             flush_max_age_secs: 3600,
+            // **The row trigger off.** This cell drives publication itself — it pins `B`
+            // by flushing and waiting, so a trigger that published on its own would
+            // measure a different buffer depth than the one the sweep set.
+            flush_max_items: usize::MAX,
             max_merged_segment_bytes: None,
             // Compaction §9's trigger is off unless a deployment configures one.
             compaction: tessera_engine::CompactionSchedule::off(),
@@ -267,6 +271,7 @@ fn a_configured_coalesce_width_reaches_selection_and_changes_when_the_pass_fires
         tessera_plugin::Passthrough::new(),
         EngineConfig {
             flush_max_age_secs: 3600,
+            flush_max_items: usize::MAX,
             coalesce_width: Some(2),
             ..config()
         },

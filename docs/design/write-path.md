@@ -392,10 +392,19 @@ publishes off it:
   runs at the next loop iteration, through the one tick path with everything a tick guarantees.
   Safe where publish-on-trip was not, because an operator trigger is rate-decoupled from ingest.
   A request against an empty buffer is satisfied by the tick it triggered;
-- `flush_max_items` — **deleted** (decision 0045, 2026-08-04). Its specified role — "marks the
-  buffer flush-ready; publication waits for the tick" — had no consumer: the tick never skips a
-  non-empty buffer and a flush consumes everything buffered for its view, so the key could not
-  have an effect. The only occupancy bound is `ingest_buffer_max_items`' 429.
+- `flush_max_items` — the **row trigger**: at that many buffered rows the tick comes due ahead
+  of its period, and the publication restarts the period, so the two never compound. Default
+  40,000, four commit windows. **Restored 2026-09-04 with a reader** (decision 0045 deleted it
+  in the shape it then had: a "flush-ready" mark nothing consulted, since the tick never skips a
+  non-empty buffer). What it now bounds is not staleness but *cost*: every commit-window close
+  deep-copies the ingest buffer, so with `B` rows buffered between publications and a close
+  every `W`, an interval pays `B²/2W` item copies — and under the age tick alone `B` is the
+  arrival rate times 90 s, which is a number nobody chose. `ingest-rate.md` measures the
+  interior optimum at `B/W = 4`; on MedCPT's 36M-row 10% cell the trigger takes ingest from
+  11,813 to 50,090 rows/s — 4.2×, with the 429s gone
+  ([`probes/2026-09-04-ingest-executor/`](../../probes/2026-09-04-ingest-executor/)). It is not
+  an occupancy bound: that is still `ingest_buffer_max_items`' 429, which sheds where this one
+  publishes.
 
 **The ack→visibility bound.** One view publishes per tick (below), so the bound is
 `flush_max_age_secs` with one view and `s × flush_max_age_secs` with `s` — the dispatched plan
@@ -1244,7 +1253,7 @@ fold's asymmetry, the diverged-node publication gate, and the reader's honour-be
 | Knob / constant | Default | Governs |
 |---|---|---|
 | `flush_max_age_secs` | 90 | the tick: visibility latency and the publication period; the real floor is the projection-patch economy, not any relation |
-| `flush_max_items` | — | **deleted** (decision 0045) — "flush-ready" had no consumer (spec §4.1) |
+| `flush_max_items` | 40,000 | the tick's **row** trigger: what bounds `B`, and with it the window close's `O(B)` buffer copy (§4.1). Restored 2026-09-04 with a reader; decision 0045 deleted the earlier consumer-less "flush-ready" mark |
 | `ingest_buffer_max_items` | 1,000,000 | buffer-occupancy admission: 429, `Retry-After: 90` |
 | `ingest.commit_window_max_items` | 10,000 | rows at which a commit window closes |
 | `ingest.commit_window_max_age_ms` | — | **deleted** (decision 0045) — no linger exists to bound (decision 0034) |

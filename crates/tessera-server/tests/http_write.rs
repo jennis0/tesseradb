@@ -705,6 +705,9 @@ fn concurrent_ingest_and_change_both_survive() {
             max_tiles_per_request: 262_144,
             compute_threads: tessera_engine::default_compute_threads(),
             flush_max_age_secs: 90,
+            // The shipped row trigger, four commit windows (`DEFAULT_FLUSH_MAX_ITEMS`):
+            // what bounds the window close's O(buffered) copy. Nothing here reaches it.
+            flush_max_items: 40_000,
             max_merged_segment_bytes: None,
             tier_width: None,
             segment_floor_bytes: None,

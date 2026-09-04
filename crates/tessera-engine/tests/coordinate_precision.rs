@@ -204,6 +204,10 @@ fn a_build_and_an_ingest_place_one_coordinate_in_one_cell() {
         EngineConfig {
             // Nothing here is about the tick: the flush is asked for explicitly.
             flush_max_age_secs: 3600,
+            // **The row trigger off.** This cell drives publication itself — it pins `B`
+            // by flushing and waiting, so a trigger that published on its own would
+            // measure a different buffer depth than the one the sweep set.
+            flush_max_items: usize::MAX,
             ..config_uncapped()
         },
     )

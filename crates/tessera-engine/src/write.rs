@@ -2679,6 +2679,7 @@ impl WritePath {
                     health: Arc::clone(&health),
                     window_seq: 0,
                     flush_max_age_secs: flush.max_age_secs,
+                    flush_max_items: flush.max_items,
                     flush_in_flight: Arc::new(AtomicBool::new(false)),
                     flush_attempt: 0,
                     // Above every candidate present at open, per partition — see the field's doc.
@@ -3708,6 +3709,8 @@ pub const DENY_DURABILITY_ATTEMPTS: usize = DENY_DURABILITY_BACKOFF.len() + 1;
 /// distinguishing two `u64`s and a caller can transpose them silently.
 pub(crate) struct MaintenanceDeps {
     pub(crate) max_age_secs: u64,
+    /// §4.1's `flush_max_items` — the tick's row trigger.
+    pub(crate) max_items: usize,
     /// The entity-space coalesce's policy — see [`crate::coalesce::CoalescePolicy`].
     pub(crate) coalesce: crate::coalesce::CoalescePolicy,
     /// What a geometry publication needs to start the background refresh decision 0044's D1
@@ -4992,6 +4995,8 @@ struct Executor {
     window_seq: u64,
     /// §4's `flush_max_age_secs` — the tick's period.
     flush_max_age_secs: u64,
+    /// §4.1's `flush_max_items` — buffered rows at which the tick comes due ahead of its period.
+    flush_max_items: usize,
     /// Whether a flush is executing on the pool. A tick arriving while it is set is skipped, never
     /// queued — two concurrent flushes would double-consume the buffer range (§1.1).
     flush_in_flight: Arc<AtomicBool>,
@@ -5312,10 +5317,18 @@ impl Executor {
     /// that arrived after it came due — and after it, because a tick that publishes must not
     /// preempt a deny already queued (lifecycle §1.3's priority lane).
     ///
-    /// **Two triggers reach this cadence and neither publishes off it.** The tick itself, and
-    /// `POST /control/flush` — accepted at any time and executed here, its 202 already meaning
-    /// "accepted, not yet done". (`flush_max_items` is deleted — decision 0045: "flush-ready"
-    /// had no consumer, because this tick never skips a non-empty buffer.)
+    /// **Three triggers reach this cadence and none publishes off it.** The period, the
+    /// buffered-row count, and `POST /control/flush` — accepted at any time and executed here, its
+    /// 202 already meaning "accepted, not yet done".
+    ///
+    /// **The row trigger is what bounds the commit window's cost** (write-path §4.1). Every close
+    /// deep-copies the buffer, so with `B` rows buffered between publications and a close every `W`
+    /// a flush interval pays `B²/2W` — and under the age tick alone `B` is the arrival rate times
+    /// the period, unbounded in the rate. `flush_max_items` bounds `B` directly, which is the axis
+    /// `docs/evidence/memos/2026-08-05-ingest-rate.md` measures an interior optimum on. (This is
+    /// decision 0045's deleted key, restored 2026-09-04 with a consumer: the earlier one marked
+    /// the buffer "flush-ready" and nothing read the mark, because the tick never skipped a
+    /// non-empty buffer either.)
     ///
     /// It also drives `reclaim` — lifecycle §2.1 assigns that gap to "whichever stage introduces
     /// a periodic publisher", and this is that publisher.
@@ -5328,10 +5341,19 @@ impl Executor {
         // as for a scheduled one. The publish-on-trip hazard that killed `flush_max_items`
         // (a publication period proportional to ingest rate) does not apply: this trigger is an
         // operator action, rate-decoupled from ingest by construction.
+        // **The occupancy the executor itself maintains**, not a count derived from a generation
+        // this thread would have to load: `apply_window` and every flush publication store it, so
+        // the trigger reads the same figure `/control/ingest`'s 429 is checked against.
+        let rows_due = self.health.buffered_items.load(Ordering::SeqCst) >= self.flush_max_items;
+        // **A row trip is a tick**, with the period restarted under it — not a second cadence
+        // beside the period. That is what stops the two compounding: a loader fast enough to trip
+        // the rows publishes on the rows and the age clock never comes due, and a loader slow
+        // enough never to trip them publishes on the age exactly as before.
         let period_due = self.last_tick.elapsed() >= period;
+        let due = period_due || rows_due;
         let requested = self.health.flush_requested.load(Ordering::SeqCst);
         let fold_requested = self.health.fold_requested.load(Ordering::SeqCst);
-        if !period_due && !requested && !fold_requested {
+        if !due && !requested && !fold_requested {
             return;
         }
         // **Reclamation is checked at every tick, ahead of the flush's in-flight gate**, because it
@@ -5361,7 +5383,7 @@ impl Executor {
         // to within ~20 ms of its publication. Consuming it here would silently drop an
         // operator's "drain now" whenever it raced a scheduled flush.
         if self.flush_in_flight.load(Ordering::SeqCst) {
-            if period_due {
+            if due {
                 self.last_tick = std::time::Instant::now();
                 self.health.ticks.fetch_add(1, Ordering::Relaxed);
                 let flushable = generation
@@ -5372,7 +5394,16 @@ impl Executor {
                 self.health
                     .flushable_items
                     .store(flushable, Ordering::SeqCst);
-                if flushable > 0 {
+                // **A skipped row trip is not the alarm the skipped period is.** The row
+                // trigger asks for a publication as soon as `flush_max_items` have buffered, and
+                // a loader fast enough will ask again while the last one is still writing — that
+                // is the trigger doing its job under backpressure, and the buffer is bounded by
+                // `ingest_buffer_max_items`'s 429 whatever happens. A missed *period* is the
+                // visibility-latency breach, because it is the guarantee `flush_max_age_secs`
+                // makes. Counting both here would bury the one alarm under the other's noise:
+                // a 36M-row cell logs a few hundred row trips against a flush and none of them
+                // is a breach.
+                if flushable > 0 && period_due {
                     self.health.flush_skips.fetch_add(1, Ordering::Relaxed);
                     tracing::warn!(
                         "ALARM: a flush was still running when the next tick came due, so this \

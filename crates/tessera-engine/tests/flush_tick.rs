@@ -23,6 +23,31 @@ fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
     }
 }
 
+/// [`engine_with_tick`] with the row trigger set too — `flush_max_items`, §4.1's second trigger.
+fn engine_with_triggers(
+    tmp: &tempfile::TempDir,
+    root: &std::path::Path,
+    flush_max_age_secs: u64,
+    flush_max_items: usize,
+) -> Engine {
+    let mut engine = Engine::open(
+        root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        tessera_plugin::Passthrough::new(),
+        EngineConfig {
+            flush_max_age_secs,
+            flush_max_items,
+            ..config()
+        },
+    )
+    .expect("engine opens");
+    engine
+        .start_write_executor(8)
+        .expect("the executor starts once");
+    engine
+}
+
 fn engine_with_tick(
     tmp: &tempfile::TempDir,
     root: &std::path::Path,
@@ -209,6 +234,7 @@ fn a_deny_only_node_rotates_at_the_tick_and_the_suppression_survives_restart() {
         tessera_plugin::Passthrough::new(),
         EngineConfig {
             flush_max_age_secs: 3600,
+            flush_max_items: usize::MAX,
             max_merged_segment_bytes: None,
             // Compaction §9's trigger is off unless a deployment configures one.
             compaction: tessera_engine::CompactionSchedule::off(),
@@ -222,5 +248,46 @@ fn a_deny_only_node_rotates_at_the_tick_and_the_suppression_survives_restart() {
             .overlay
             .is_suppressed(EntityId::new(entity)),
         "the suppression must survive the rotation it was reclaimed under"
+    );
+}
+
+/// **The row trigger publishes ahead of the period** (§4.1's `flush_max_items`).
+///
+/// The deadline here is an hour, so a publication observed below is the buffered-row count's
+/// doing and nothing else's. This is the property decision 0045's deleted key never had: the mark
+/// it set was read by nothing, and the tick that would have consulted it fired on age alone — so
+/// a loader's `B`, and with it the `O(B)` copy every commit-window close pays, was the arrival
+/// rate times ninety seconds and not a number anybody chose.
+#[test]
+fn the_row_trigger_publishes_ahead_of_the_period() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let engine = engine_with_triggers(&tmp, &root, 3600, 4);
+
+    for i in 0..4u8 {
+        let row = tessera_lifecycle::UnallocatedRow {
+            external_id: Some(format!("rows-trigger-{i}").into_bytes()),
+            view: "s0".to_string(),
+            join: None,
+            descriptors: vec![b"0".to_vec()],
+            x: 0.5,
+            y: 0.5,
+            scalars: Vec::new(),
+            terms: engine.resolve_terms(&[b"0".to_vec()]),
+            scoped: Vec::new(),
+        };
+        engine
+            .accept_ingest(vec![row], format!("rows-trigger-batch-{i}"), [i; 32])
+            .expect("the row is accepted");
+    }
+
+    wait_until(
+        "the buffered rows are published by the row trigger, with no request and no elapsed tick",
+        || engine.generation().segments_version > 0,
     );
 }

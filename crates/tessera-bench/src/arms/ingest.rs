@@ -510,6 +510,10 @@ pub fn run_batch(ctx: &Context, batch_sizes: &[usize], seed: u64) -> Result<()> 
                     max_tiles_per_request: 262_144,
                     compute_threads: tessera_engine::default_compute_threads(),
                     flush_max_age_secs: 90,
+                    // **The row trigger off.** This cell drives publication itself — it pins `B`
+                    // by flushing and waiting, so a trigger that published on its own would
+                    // measure a different buffer depth than the one the sweep set.
+                    flush_max_items: usize::MAX,
                     max_merged_segment_bytes: None,
                     tier_width: None,
                     segment_floor_bytes: None,
@@ -649,6 +653,7 @@ pub fn run_continuous(ctx: &Context, checkpoints: &[u64], k: usize, seed: u64) -
                 max_tiles_per_request: 262_144,
                 compute_threads: tessera_engine::default_compute_threads(),
                 flush_max_age_secs: 90,
+                flush_max_items: usize::MAX,
                 max_merged_segment_bytes: None,
                 tier_width: None,
                 segment_floor_bytes: None,
@@ -893,6 +898,7 @@ pub fn run_concurrent(
                     max_tiles_per_request: 262_144,
                     compute_threads: tessera_engine::default_compute_threads(),
                     flush_max_age_secs: 90,
+                    flush_max_items: usize::MAX,
                     max_merged_segment_bytes: None,
                     tier_width: None,
                     segment_floor_bytes: None,
@@ -1243,6 +1249,7 @@ pub fn run_rate(ctx: &Context, sweep: &RateSweep) -> Result<()> {
                             // publication in the middle of a cycle and make `B` a function of the
                             // rate rather than an axis.
                             flush_max_age_secs: 86_400,
+                            flush_max_items: usize::MAX,
                             max_merged_segment_bytes: None,
                             tier_width: None,
                             segment_floor_bytes: None,

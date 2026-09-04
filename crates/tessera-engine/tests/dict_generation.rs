@@ -323,6 +323,9 @@ fn a_background_refresh_does_not_poison_a_later_authorise_of_the_same_credential
             tessera_plugin::Passthrough::new(),
             EngineConfig {
                 flush_max_age_secs: 1,
+                // The shipped row trigger, four commit windows (`DEFAULT_FLUSH_MAX_ITEMS`):
+                // what bounds the window close's O(buffered) copy. Nothing here reaches it.
+                flush_max_items: 40_000,
                 compaction: tessera_engine::CompactionSchedule::off(),
                 ..config_uncapped()
             },

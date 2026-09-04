@@ -275,6 +275,10 @@ fn position_of(engine: &Engine, positions: &BTreeMap<u64, u64>, external_id: &[u
 fn config() -> EngineConfig {
     EngineConfig {
         flush_max_age_secs: 3600,
+        // **The row trigger off.** This cell drives publication itself — it pins `B`
+        // by flushing and waiting, so a trigger that published on its own would
+        // measure a different buffer depth than the one the sweep set.
+        flush_max_items: usize::MAX,
         ..default_engine_config()
     }
 }
