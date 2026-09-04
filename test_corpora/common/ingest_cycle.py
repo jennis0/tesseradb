@@ -1321,10 +1321,16 @@ class Cycle:
         t0 = time.perf_counter()
         code = control.flush().status_code
         request_s = time.perf_counter() - t0
-        published, publish_s = wait_for(
-            lambda: control.status()["write_executor"]["flush"]["flushes"] > before,
-            timeout=self.args.flush_timeout,
-        )
+        # **Or nothing left to flush.** Under the row trigger (write-path §4.1) a fast loader's
+        # rows are published as they arrive, so the buffer can be empty when this request lands —
+        # and a tick against an empty buffer publishes nothing and moves no counter. Waiting on
+        # the counter alone then burns the whole `--flush-timeout` on a deployment that is already
+        # fully visible, which is what this cell would otherwise report as a 900 s flush.
+        def flush_landed() -> bool:
+            flush = control.status()["write_executor"]["flush"]
+            return flush["flushes"] > before or flush["buffered_items"] == 0
+
+        published, publish_s = wait_for(flush_landed, timeout=self.args.flush_timeout)
         full = [quant["x_min"], quant["y_min"], quant["x_max"], quant["y_max"]]
 
         # **`layers=None`, and that is not a detail.** A zoom-0 whole-extent viewport asking for
