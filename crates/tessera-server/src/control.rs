@@ -3508,6 +3508,21 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
             // operator gets both numbers because "the last ten jobs took 3 ms and this one has been
             // running for 90 s" is the diagnosis, and either figure alone hides it.
             "work_in_flight_nanos": executor.work_in_flight_nanos,
+            // The `WriteStage` laps, by stage name, in nanoseconds since the executor started.
+            // Written only under `bench-timing`; without it the clock is never read and every
+            // stage is zero, which is indistinguishable from an idle executor — hence the flag
+            // beside them, so a reader knows which of the two it is looking at. Out of contract
+            // (§0.1): an attribution surface for a bench binary, not an operator's gauge.
+            "bench_timing": cfg!(feature = "bench-timing"),
+            "stage_nanos": tessera_engine::WriteStage::ALL
+                .iter()
+                .map(|stage| {
+                    (
+                        stage.name().trim().to_owned(),
+                        serde_json::json!(executor.stage_nanos[*stage as usize]),
+                    )
+                })
+                .collect::<serde_json::Map<String, serde_json::Value>>(),
         },
         // `admission` is the bound, `in_flight` is read live off the semaphore.
         // `shed_total` counts **this bound's** 429s only — the queue-full 429 is produced inside
