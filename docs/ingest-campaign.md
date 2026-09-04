@@ -95,13 +95,6 @@ median under each condition, end to end; the last is the median cell's server-si
 online. `visibility` is when a zoom-0 viewport reached the expected count after the
 flush, not the flush's own wall; `fold` is the server's own `compaction.last_secs`.
 
-⚠ **The rows are not all the same engine.** MedCPT's *f* = 10% cell was taken on 2026-09-04 with
-the flush's restored row trigger and the buffer's row list behind an `Arc`
-([`probes/2026-09-04-ingest-executor/`](../probes/2026-09-04-ingest-executor/)); the 50% and 100%
-cells above it were taken the day before, without either. The same 10% cell reads **11,813
-items/s** on the older code and 61,999 on the newer, so read the 5.8× between the rows as those
-two changes and not as an effect of *f*.
-
 | rung | f | C | items/s | ack p50 | ack p99 | visibility | fold | 0091 equivalence |
 |---|---|---|---|---|---|---|---|---|
 | medcpt | 100% | 8 | 11,267.0 | 3.07 s | 16.62 s | 1.2 s | 1:43 | zoom-0 exact, layers 6 |
