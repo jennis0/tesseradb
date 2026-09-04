@@ -28,9 +28,22 @@
 //! A **fixed-width** column is a [`MappedArray`] of its own element type, and its presence bits are
 //! another one. That is the whole of it.
 //!
-//! A **string** column — `utf8`, `keyword` and `text` alike — is an entity-indexed
-//! [`MappedArray<u64>`] of offsets into a [`MappedArena`], each offset naming a record: the
-//! entity, a `u32` length, then the bytes.
+//! A **string** column is an entity-indexed [`MappedArray<u64>`] of offsets into a
+//! [`MappedArena`], each offset naming a record: the entity, a `u32` length, then the bytes.
+//! `utf8` and `keyword` columns are stored that way; a `text` column is not.
+//!
+//! # A text column has no storage here
+//!
+//! Prose is the corpus's bytes, and placing it at an entity index is a permutation of the source:
+//! at the 10⁸ PaperSeek rung that is 128 GiB written to a mapping on a 47 GB box and read back at
+//! random. So a `text` column's values are spilled as record-blob extents while the join decodes
+//! them ([`crate::prose`], `build-prose-extents.md`), and its slot here is
+//! [`EntityColumn::prose`]: the length and the presence bits, and no arena. The two consumers —
+//! the text index and the record blob — read the extents.
+//!
+//! What is left below about the arena is about `keyword` and `utf8` columns. A group-scoped
+//! `text` column is the one exception: it has no blob row (`views.md` §5), so the scoped pass
+//! builds it as an ordinary string column and indexes it from the arena.
 //!
 //! # The two orders the arena is filled in
 //!
@@ -46,12 +59,10 @@
 //! keeps each entity's length; a prefix sum over the presence bits then lays every record out in
 //! entity order and sizes the arena to exactly their bytes; pass two decodes the source's string
 //! columns again and writes each value at the offset it was given. The price is that second
-//! decode. What it buys is the stage after the join: `record_blob` walks entities 0..n and reads
-//! each string by offset, and it cannot be reordered, because the blob's rows *are* entity order.
-//! Against an arrival-order arena that walk is one random read per document — at 1.02×10⁸
-//! abstracts on a 47 GB box it wrote 52 MB in thirteen minutes, 56 KB/s, at 144 major faults a
-//! second (`probes/2026-09-03-text-arena-streaming/` §4–5). In entity order it is sequential, with
-//! no change to the writer.
+//! decode. What it buys is the passes after the join that read the arena by entity and cannot be
+//! reordered: the record blob's merge, and the keyword dictionary. Against an arrival-order arena
+//! that walk is one random read per value, which is free while the arena fits the page cache and
+//! ruinous when it does not.
 //!
 //! **Which one a build takes is decided before the join** from the columns' uncompressed Parquet
 //! payload against the memory budget — `residency::decide_arena_order`, and
@@ -66,16 +77,15 @@
 //! could desynchronise on. See [`ArenaFill`].
 //!
 //! **The record names its own entity, so a reader that wants every value can walk the arena
-//! instead of the column.** This is what an *arrival-order* arena needs and it is kept under both
-//! orders, because it is what makes the text pass cap-robust either way. Entity order is
-//! signature-then-Morton order and arrival order is the source file's, so under an arrival-order
-//! arena the two are unrelated: a pass that walked entities and reached the arena by offset made
-//! one random access per document. That is free while the arena fits in memory and
-//! ruinous when it does not — the text index over 1.02×10⁸ abstracts (a 119 GB arena on a 47 GB
-//! box) ran for over four hours at ~480 major faults a second and did not finish
+//! instead of the column.** Entity order is signature-then-Morton order and arrival order is the
+//! source file's, so under an arrival-order arena a pass that walked entities and reached the
+//! arena by offset made one random access per value. That is free while the arena fits in memory
+//! and ruinous when it does not: the text index over 1.02×10⁸ abstracts, when prose was still an
+//! arena, ran for over four hours at ~480 major faults a second and did not finish
 //! (`probes/2026-09-03-text-arena-streaming/`). [`EntityColumn::for_each_record_in`] is the walk
 //! that replaced it, over the contiguous byte ranges [`EntityColumn::arena_windows`] hands out,
-//! and the entity in the header is the four bytes an entity per record that buys it.
+//! and the entity in the header is the four bytes an entity per record that buys it. A
+//! group-scoped `text` column is what still reads it.
 //!
 //! A record is authoritative only while `at[entity]` still names it: a value written twice for one
 //! entity leaves the first record in the arena with nothing pointing at it, so the walk checks
@@ -313,6 +323,24 @@ impl EntityColumn {
                 &scratch.name("present"),
                 n.div_ceil(64),
             )?,
+            len: n,
+        })
+    }
+
+    /// A `text` column's slot: `n` entities, every one absent, and **no arena**.
+    ///
+    /// The prose of a `text` column is never held in entity order (`build-prose-extents.md`): the
+    /// join spills it as record-blob extents in its own chunks, and the text index and the record
+    /// blob read those. What is left here is the length and the presence bits, so the column keeps
+    /// its place in the declaration-indexed vector every later pass indexes by attribute position.
+    ///
+    /// Nothing marks a presence bit on one of these, so [`Self::str_at`] and [`Self::value_at`]
+    /// answer absence at every entity and neither reaches the empty offset array.
+    pub(crate) fn prose(scratch: &ColumnScratch, ty: ScalarType, n: usize) -> Result<Self> {
+        Ok(EntityColumn {
+            ty,
+            data: ColumnData::Utf8(StringColumn::empty()),
+            present: MappedArray::<u64>::zeroed(&scratch.dir, &scratch.name("present"), n.div_ceil(64))?,
             len: n,
         })
     }

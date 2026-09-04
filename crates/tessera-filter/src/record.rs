@@ -783,41 +783,30 @@ impl RecordBlob {
         &self,
         f: &mut dyn FnMut(u32, Vec<RecordField>) -> Result<(), RecordError>,
     ) -> Result<(), RecordError> {
-        let mut entities = self.hasrow.iter();
-        for block in 0..self.block_count() {
-            let bytes = self.block_bytes(block)?;
-            let rows = self.rows_in_block(block)?;
-            let list_lo = self.list_offsets[block] as usize;
-            let mut cursor = 0usize;
-            for local in 0..rows {
-                let offset = self.row_offsets[list_lo + local] as usize;
-                if offset != cursor {
-                    return Err(malformed(format!(
-                        "block {block} row {local} starts at byte {offset} where the previous \
-                         row ends at {cursor}; rows must tile the block"
-                    )));
-                }
-                let entity = entities.next().ok_or_else(|| {
-                    malformed("the directory addresses more rows than the has-row bitmap holds")
-                })?;
-                let (fields, end) = decode_row(&bytes, offset, entity)?;
-                cursor = end;
-                f(entity, fields)?;
-            }
-            if cursor != bytes.len() {
-                return Err(malformed(format!(
-                    "block {block} holds {} bytes but its rows end at {cursor}; a block carries \
-                     nothing but whole rows",
-                    bytes.len()
-                )));
-            }
-        }
-        if entities.next().is_some() {
-            return Err(malformed(
-                "the has-row bitmap holds entities the directory never addresses",
-            ));
+        let mut rows = self.rows_cursor();
+        while let Some((entity, fields)) = rows.next_row()? {
+            f(entity, fields)?;
         }
         Ok(())
+    }
+
+    /// The same walk as a cursor the caller pulls from, which is what a merge over several blobs
+    /// needs: a merge takes the lowest head across its inputs and cannot be driven by a visitor.
+    pub fn rows_cursor(&self) -> RecordRowCursor<'_> {
+        RecordRowCursor::over(self, 0, self.block_count(), true)
+    }
+
+    /// A cursor over the rows of blocks `[lo, hi)`, for a pass that divides one blob across
+    /// workers. The rows of a block range are a contiguous ascending run of entities, so a range
+    /// is a window in entity space as well as in bytes.
+    ///
+    /// The whole-blob checks a full walk makes do not all hold of a range: the has-row bitmap
+    /// carries entities this range does not address, and the range's rows do not start at rank 0.
+    /// Everything a block can be checked for on its own — its rows tiling it exactly, each row
+    /// decoding inside it, the discriminant agreeing with the has-row rank — is checked here as
+    /// it is there.
+    pub fn rows_cursor_over(&self, lo: usize, hi: usize) -> RecordRowCursor<'_> {
+        RecordRowCursor::over(self, lo, hi.min(self.block_count()), false)
     }
 
     /// The has-row bitmap — the entity set this layer holds a row for. Borrowed by the lifecycle
@@ -834,6 +823,104 @@ impl RecordBlob {
     /// blob adds (review B7).
     pub fn self_check(&self) -> Result<(), RecordError> {
         self.for_each_row(&mut |_, _| Ok(()))
+    }
+}
+
+/// A pull walk over a blob's rows in entity order, decompressing one block at a time.
+///
+/// [`RecordBlob::for_each_row`] is this cursor drained, so there is one walk over a blob and one
+/// place its addressing is verified. A merge over several blobs takes the lowest head across its
+/// inputs, which a visitor cannot express.
+pub struct RecordRowCursor<'a> {
+    blob: &'a RecordBlob,
+    /// The has-row bitmap positioned at the next row's rank.
+    entities: croaring::bitmap::BitmapCursor<'a>,
+    /// The block being read, and one past the last this cursor covers.
+    block: usize,
+    end_block: usize,
+    /// The open block's bytes, its row count, and where its row offsets start.
+    bytes: Vec<u8>,
+    rows: usize,
+    list_lo: usize,
+    /// The next row's index within the open block, and the byte its predecessor ended at.
+    local: usize,
+    tiled_to: usize,
+    loaded: bool,
+    /// Whether the has-row bitmap must be exhausted when the last block is done, which holds of a
+    /// walk over the whole blob and not of one over a block range.
+    whole: bool,
+}
+
+impl<'a> RecordRowCursor<'a> {
+    fn over(blob: &'a RecordBlob, lo: usize, hi: usize, whole: bool) -> Self {
+        let mut entities = blob.hasrow.cursor();
+        if lo < blob.block_count() {
+            entities.skip(blob.first_rank[lo]);
+        }
+        RecordRowCursor {
+            blob,
+            entities,
+            block: lo,
+            end_block: hi,
+            bytes: Vec::new(),
+            rows: 0,
+            list_lo: 0,
+            local: 0,
+            tiled_to: 0,
+            loaded: false,
+            whole,
+        }
+    }
+
+    /// The next row, or `None` at the end of the cursor's blocks.
+    #[allow(clippy::should_implement_trait)]
+    pub fn next_row(&mut self) -> Result<Option<(u32, Vec<RecordField>)>, RecordError> {
+        loop {
+            if self.block >= self.end_block {
+                if self.whole && self.entities.has_value() {
+                    return Err(malformed(
+                        "the has-row bitmap holds entities the directory never addresses",
+                    ));
+                }
+                return Ok(None);
+            }
+            if !self.loaded {
+                self.bytes = self.blob.block_bytes(self.block)?;
+                self.rows = self.blob.rows_in_block(self.block)?;
+                self.list_lo = self.blob.list_offsets[self.block] as usize;
+                self.local = 0;
+                self.tiled_to = 0;
+                self.loaded = true;
+            }
+            if self.local == self.rows {
+                if self.tiled_to != self.bytes.len() {
+                    return Err(malformed(format!(
+                        "block {} holds {} bytes but its rows end at {}; a block carries                          nothing but whole rows",
+                        self.block,
+                        self.bytes.len(),
+                        self.tiled_to
+                    )));
+                }
+                self.block += 1;
+                self.loaded = false;
+                continue;
+            }
+            let offset = self.blob.row_offsets[self.list_lo + self.local] as usize;
+            if offset != self.tiled_to {
+                return Err(malformed(format!(
+                    "block {} row {} starts at byte {offset} where the previous row ends at {};                      rows must tile the block",
+                    self.block, self.local, self.tiled_to
+                )));
+            }
+            let entity = self.entities.current().ok_or_else(|| {
+                malformed("the directory addresses more rows than the has-row bitmap holds")
+            })?;
+            self.entities.move_next();
+            let (fields, end) = decode_row(&self.bytes, offset, entity)?;
+            self.tiled_to = end;
+            self.local += 1;
+            return Ok(Some((entity, fields)));
+        }
     }
 }
 
