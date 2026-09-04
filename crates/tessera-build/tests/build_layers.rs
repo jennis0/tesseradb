@@ -294,13 +294,22 @@ fn inputs() -> Inputs {
 
 fn args(inputs: &Inputs, out: &Path) -> BuildArgs {
     BuildArgs {
-        point_fields: Default::default(),
-        points: inputs.points.clone(),
+        arena_order: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: inputs.points.clone(),
+            point_fields: Default::default(),
+            select: None,
+            access: tessera_build::config::AccessInput::relation(inputs.pairs.clone()),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: Vec::new(),
-        access: tessera_build::config::AccessInput::relation(inputs.pairs.clone()),
         out: out.to_path_buf(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -308,6 +317,7 @@ fn args(inputs: &Inputs, out: &Path) -> BuildArgs {
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
         mint_external_ids: false,
         emit_oracle_pairs: false,
         batch_items: None,
@@ -741,6 +751,13 @@ fn a_child_escaping_its_parent_is_reported_by_name() {
     );
     result.expect("an uncontained edge is a report, not a refusal");
     let report = containment_report(&out);
+    let shapes = report["hierarchies"].as_array().unwrap();
+    assert_eq!(shapes.len(), 1, "one treed level, reported as a graph");
+    assert_eq!(shapes[0]["kind"], "nested");
+    assert_eq!(shapes[0]["edges"], 1);
+    assert_eq!(shapes[0]["roots"], 1);
+    assert_eq!(shapes[0]["multi_parent"], 0);
+    assert_eq!(shapes[0]["max_parents"], 1);
     let violations = report["violations"].as_array().unwrap();
     assert_eq!(violations.len(), 1);
     assert_eq!(violations[0]["child"], "t-a");
@@ -826,6 +843,14 @@ fn edges_holding_a_cycle_are_refused() {
     );
     let err = result.expect_err("a cycle is a refusal");
     assert!(format!("{err}").contains("cycle"), "{err}");
+    // **Which artifact it names is pinned**, not incidental. The detection is one colour-marked
+    // pass rather than a counted walk per artifact, and the two agree only because both start
+    // their walks in key order — so the first artifact whose lineage reaches the cycle is the one
+    // reported. `t-a` sorts before `t-b`.
+    assert!(
+        format!("{err}").contains("above t-a"),
+        "the first artifact in key order whose lineage reaches the cycle: {err}"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2136,6 +2161,219 @@ fn a_child_named_under_two_parents_is_refused_naming_both() {
     assert!(message.contains("950"), "{message}");
     assert!(message.contains("900"), "{message}");
     assert!(message.contains("901"), "{message}");
+    assert!(
+        message.contains("is a `dag` layer, whose edges are spelled on the artifact row"),
+        "the refusal names the remedy — the kind, and where its parents go: {message}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The dag shape: a child under several parents (`dag-hierarchies.md`, decision 0117)
+// ---------------------------------------------------------------------------------------------
+
+/// The treed layer at the `dag` kind — `nested` in every respect but the one the tests below are
+/// about.
+fn dag_layers_toml() -> String {
+    TREED_LAYERS_TOML.replace(r#"kind = "nested""#, r#"kind = "dag""#)
+}
+
+/// An artifact table whose `parent` cell is a **list** of keys — the spelling a `dag` layer's
+/// child needs, and one every kind reads (a scalar is a list of one).
+fn write_dag_artifacts(path: &Path, rows: &[(&str, &[&str])]) {
+    let mut offsets: Vec<i32> = vec![0];
+    let mut entries: Vec<&str> = Vec::new();
+    for (_, parents) in rows {
+        entries.extend(parents.iter().copied());
+        offsets.push(entries.len() as i32);
+    }
+    let parents: ArrayRef = Arc::new(ListArray::new(
+        Arc::new(Field::new("item", DataType::Utf8, true)),
+        OffsetBuffer::new(offsets.into()),
+        Arc::new(StringArray::from(entries)),
+        None,
+    ));
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("key", DataType::Utf8, false),
+        Field::new("parent", parents.data_type().clone(), true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(
+                rows.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
+            )) as ArrayRef,
+            parents,
+        ],
+    )
+    .unwrap();
+    write(path, schema, batch);
+}
+
+/// Build a `dag` fixture from a parent-list table, returning the result and the bundle root.
+fn dag_build(
+    rows: &[(&str, &[&str])],
+    membership: &[(&str, Vec<u64>)],
+) -> (tessera_build::error::Result<()>, PathBuf, tempfile::TempDir) {
+    let inputs = inputs();
+    std::fs::write(&inputs.config, format!("{VIEW_TOML}{}", dag_layers_toml())).unwrap();
+    write_dag_artifacts(&inputs.at("tree.parquet"), rows);
+    write_treed_members(&inputs.at("tree_members.parquet"), membership);
+    let out = inputs.dir.join("bundle");
+    let result = run(&inputs, &out).map(|_| ());
+    (result, out, inputs._tmp)
+}
+
+/// **A `dag` layer's list column is memberships and declares no edges; its edges come from the
+/// artifact row's `parent` list** (`dag-hierarchies.md` §4, decision 0125). The lists are the ones
+/// `a_child_named_under_two_parents_is_refused_naming_both` refuses under `nested`: on a DAG the
+/// same data is three artifacts each point is a member of, every one a root, with nothing to
+/// report — a DAG node's closure is a set, so the list's adjacency states nothing.
+///
+/// The same three artifacts from a parent list naming both parents, one of them twice, hold the
+/// two edges. Containment is per edge: the child holds every point and each parent holds half, so
+/// both edges are reported violated, named by their parent — reported and published, never
+/// refused.
+#[test]
+fn a_dag_list_column_is_memberships_and_a_parent_list_is_its_edges() {
+    let lists: Vec<Vec<Option<i64>>> = (0..N_ITEMS)
+        .map(|e| vec![Some(if e % 2 == 0 { 900 } else { 901 }), Some(950)])
+        .collect();
+    let layer_of_dag = || layer_of_kind("dag");
+    let from_points = format!("{}value_set = \"open\"\n{FROM_LINEAGE}", layer_of_dag());
+    let (from_points, _a) = build_spelling(&from_points, |inputs| {
+        write_listed_points(&inputs.points, &lists, false, None);
+    });
+    let report = containment_report(&from_points);
+    assert!(
+        report["violations"].as_array().unwrap().is_empty(),
+        "no edges, so nothing to contain: {:?}",
+        report["violations"]
+    );
+    let shapes = report["hierarchies"].as_array().unwrap();
+    assert_eq!(shapes.len(), 1);
+    assert_eq!(shapes[0]["kind"], "dag");
+    assert_eq!(shapes[0]["artifacts"], 3, "each key the lists named");
+    assert_eq!(shapes[0]["edges"], 0, "a dag list column declares no edges");
+    assert_eq!(shapes[0]["roots"], 3);
+    assert_eq!(shapes[0]["multi_parent"], 0);
+
+    let from_tables = format!("{}value_set = \"open\"\n{FROM_TREE_TABLES}", layer_of_dag());
+    let (from_tables, _b) = build_spelling(&from_tables, |inputs| {
+        write_listed_points(&inputs.points, &lists, false, None);
+        write_dag_artifacts(
+            &inputs.at("tree.parquet"),
+            &[("900", &[]), ("901", &[]), ("950", &["901", "900", "901"])],
+        );
+        let evens: Vec<u64> = (0..N_ITEMS).filter(|e| e % 2 == 0).collect();
+        let odds: Vec<u64> = (0..N_ITEMS).filter(|e| e % 2 == 1).collect();
+        write_treed_members(
+            &inputs.at("tree_members.parquet"),
+            &[
+                ("900", evens),
+                ("901", odds),
+                ("950", (0..N_ITEMS).collect()),
+            ],
+        );
+    });
+    let report = containment_report(&from_tables);
+    let violations = report["violations"].as_array().unwrap();
+    assert_eq!(
+        violations.len(),
+        2,
+        "the child escapes each of its two parents by the other's half: {violations:?}"
+    );
+    let mut parents: Vec<&str> = violations
+        .iter()
+        .map(|v| {
+            assert_eq!(v["child"], "950");
+            v["parent"].as_str().unwrap()
+        })
+        .collect();
+    parents.sort_unstable();
+    assert_eq!(parents, vec!["900", "901"]);
+    // The layer's shape as a graph, reported for the operator (decision 0092): two edges into one
+    // child, two roots, one artifact under more than one parent.
+    let shapes = report["hierarchies"].as_array().unwrap();
+    assert_eq!(shapes.len(), 1);
+    assert_eq!(shapes[0]["kind"], "dag");
+    assert_eq!(shapes[0]["artifacts"], 3);
+    assert_eq!(shapes[0]["edges"], 2);
+    assert_eq!(shapes[0]["roots"], 2);
+    assert_eq!(shapes[0]["multi_parent"], 1);
+    assert_eq!(shapes[0]["max_parents"], 2);
+}
+
+/// **A self-edge and a cycle refuse a `dag` build**, as they refuse a tree's
+/// (`dag-hierarchies.md` §4): the check is a depth-first search over parent lists, and the refusal
+/// names the cycle child → parent.
+#[test]
+fn a_self_edge_and_a_cycle_refuse_a_dag_build() {
+    fn members<'a>(keys: &[&'a str]) -> Vec<(&'a str, Vec<u64>)> {
+        keys.iter().map(|k| (*k, (0..10).collect())).collect()
+    }
+    let (result, _out, _tmp) = dag_build(&[("t-a", &["t-a"])], &members(&["t-a"]));
+    let err = result.expect_err("a self-edge is the cycle of length one");
+    assert!(format!("{err}").contains("names itself"), "{err}");
+
+    let (result, _out, _tmp) = dag_build(
+        &[
+            ("t-a", &["t-b"]),
+            ("t-b", &["t-c"]),
+            ("t-c", &["t-a"]),
+            ("t-r", &[]),
+            ("t-d", &["t-r", "t-c"]),
+        ],
+        &members(&["t-a", "t-b", "t-c", "t-r", "t-d"]),
+    );
+    let err = result.expect_err("a cycle has no root");
+    assert!(
+        format!("{err}").contains("cycle — t-a → t-b → t-c → t-a"),
+        "the cycle is named, child → parent, from the first key in order: {err}"
+    );
+
+    // A diamond is not a cycle: two paths to one root, every edge descending.
+    let (result, _out, _tmp) = dag_build(
+        &[
+            ("t-r", &[]),
+            ("t-l", &["t-r"]),
+            ("t-m", &["t-r"]),
+            ("t-c", &["t-l", "t-m"]),
+        ],
+        &members(&["t-r", "t-l", "t-m", "t-c"]),
+    );
+    result.expect("a diamond is the shape a dag layer exists for");
+}
+
+/// **A `nested` layer still refuses two parents**, whichever spelling names them: the artifact
+/// row's own list refuses at the hierarchy check, and two lineages refuse as
+/// `a_child_named_under_two_parents_is_refused_naming_both` asserts. The remedy the refusal names
+/// is the kind, since a `dag` layer's several parents are spelled exactly this way.
+#[test]
+fn a_nested_layer_refuses_a_parent_list_of_two() {
+    let inputs = inputs();
+    std::fs::write(&inputs.config, format!("{VIEW_TOML}{TREED_LAYERS_TOML}")).unwrap();
+    write_dag_artifacts(
+        &inputs.at("tree.parquet"),
+        &[("t-a", &[]), ("t-b", &[]), ("t-c", &["t-a", "t-b"])],
+    );
+    write_treed_members(
+        &inputs.at("tree_members.parquet"),
+        &[
+            ("t-a", (0..10).collect()),
+            ("t-b", (0..10).collect()),
+            ("t-c", (0..10).collect()),
+        ],
+    );
+    let err = run(&inputs, &inputs.dir.join("bundle")).expect_err("a tree's child has one parent");
+    let text = format!("{err}");
+    assert!(
+        text.contains("t-c is claimed by both t-a and t-b"),
+        "the refusal names both parents: {text}"
+    );
+    assert!(
+        text.contains("Declare `kind = \"dag\"`"),
+        "and the remedy: {text}"
+    );
 }
 
 /// **A variable-length list against a levelled declaration is refused.** Entry *k* means level *k*
@@ -2467,14 +2705,14 @@ artifacts = [
 ]
 
   [layer.shape]
-  kind  = "bbox"
-  depth = 4
+  kind = "bbox"
 "#;
 
-/// **A shape layer publishes boxes and stores no membership**, and the report says which shape at
-/// which depth — because a box covered at another depth holds other points.
+/// **A shape layer publishes its shapes, stores no membership, and is picked a layout like any
+/// other** — and the report names the kind, which since every kind is exact is the whole of who
+/// belongs.
 #[test]
-fn a_build_publishes_a_shape_layers_boxes_and_discloses_the_depth() {
+fn a_build_publishes_a_shape_layers_shapes_and_discloses_the_kind() {
     let inputs = predicate_inputs(SHAPE_LAYER);
     let out = inputs.at("bundle");
     run(&inputs, &out).expect("a shape layer builds");
@@ -2485,33 +2723,91 @@ fn a_build_publishes_a_shape_layers_boxes_and_discloses_the_depth() {
         .iter()
         .find(|l| l.declaration.name == "regions/boxes")
         .expect("the shape layer is registered");
-    assert_eq!(
-        layer.layout_of(0),
-        tessera_types::layer::ServingLayout::SpatialRanges
+    assert!(
+        matches!(
+            layer.layout_of(0),
+            tessera_types::layer::ServingLayout::ArtifactMajor
+                | tessera_types::layer::ServingLayout::RowMajorLabel
+        ),
+        "a shape level is picked one of the same forms an enumerated one is, not a form of its own"
     );
 
     assert_eq!(
         disclosed_membership(&inputs.config, "regions/boxes"),
-        "spatial:bbox:depth=4",
-        "a report naming the kind alone would say less than the declaration does"
+        "spatial:bbox"
     );
 }
 
-/// **An artifact's box and its layer's shape are one statement**, so each half without the other is
-/// a refusal: a box on a layer that declares no shape is a region nothing evaluates, and an
-/// artifact with no box on a layer that does has no membership rule at all.
+/// **A polygon layer builds from inline WKT**, and a circle and an ellipse from their parameters —
+/// the four kinds through one reader. The `depth` an earlier surface took is refused naming where
+/// it went.
 #[test]
-fn a_box_and_a_shape_declaration_are_refused_apart() {
+fn every_shape_kind_builds_and_a_depth_is_refused() {
+    let polygon = SHAPE_LAYER
+        .replace("kind = \"bbox\"", "kind = \"polygon\"")
+        .replace(
+            "  { key = \"west\", bbox = [0.0, 0.0, 400.0, 1000.0] },\n  { key = \"east\", bbox = [600.0, 0.0, 1000.0, 1000.0] },",
+            "  { key = \"west\", wkt = \"POLYGON ((0 0, 400 0, 400 1000, 0 1000, 0 0))\" },\n  { key = \"east\", wkt = \"MULTIPOLYGON (((600 0, 1000 0, 1000 1000, 600 1000, 600 0)))\" },",
+        );
+    let inputs = predicate_inputs(&polygon);
+    run(&inputs, &inputs.at("bundle")).expect("a polygon layer builds");
+    assert_eq!(
+        disclosed_membership(&inputs.config, "regions/boxes"),
+        "spatial:polygon"
+    );
+
+    let circle = SHAPE_LAYER
+        .replace("kind = \"bbox\"", "kind = \"circle\"")
+        .replace(
+            "bbox = [0.0, 0.0, 400.0, 1000.0]",
+            "circle = [200.0, 500.0, 150.0]",
+        )
+        .replace(
+            "bbox = [600.0, 0.0, 1000.0, 1000.0]",
+            "circle = [800.0, 500.0, 150.0]",
+        );
+    let inputs = predicate_inputs(&circle);
+    run(&inputs, &inputs.at("bundle")).expect("a circle layer builds");
+
+    let ellipse = SHAPE_LAYER
+        .replace("kind = \"bbox\"", "kind = \"ellipse\"")
+        .replace(
+            "bbox = [0.0, 0.0, 400.0, 1000.0]",
+            "ellipse = [200.0, 500.0, 150.0, 300.0, 30.0]",
+        )
+        .replace(
+            "bbox = [600.0, 0.0, 1000.0, 1000.0]",
+            "ellipse = [800.0, 500.0, 150.0, 300.0, 0.0]",
+        );
+    let inputs = predicate_inputs(&ellipse);
+    run(&inputs, &inputs.at("bundle")).expect("an ellipse layer builds");
+
+    let depth = SHAPE_LAYER.replace("  kind = \"bbox\"\n", "  kind = \"bbox\"\n  depth = 4\n");
+    let inputs = predicate_inputs(&depth);
+    let message = run(&inputs, &inputs.at("bundle"))
+        .expect_err("a depth is refused")
+        .to_string();
+    assert!(
+        message.contains("polygon-membership.md") && message.contains("depth"),
+        "{message}"
+    );
+}
+
+/// **An artifact's shape and its layer's kind are one statement**, so each half without the other
+/// is a refusal: a shape on a layer that declares no kind is a region nothing evaluates, an artifact
+/// with no shape on a layer that does has no membership rule at all, and a shape of another kind is
+/// in a field the layer never declared.
+#[test]
+fn a_shape_and_a_shape_declaration_are_refused_apart() {
     let missing = SHAPE_LAYER.replace(
         "  { key = \"west\", bbox = [0.0, 0.0, 400.0, 1000.0] },",
         "  { key = \"west\" },",
     );
     let inputs = predicate_inputs(&missing);
     let out = inputs.at("bundle");
-    let message = run(&inputs, &out)
-        .expect_err("an artifact with no box is refused")
-        .to_string();
-    assert!(message.contains("carries no bounding box"), "{message}");
+    // A row with no geometry is published with an empty shape and reported, not refused
+    // (`polygon-membership.md` §6.1): an artifact with no members is a state the service has.
+    run(&inputs, &out).expect("a row with no geometry is published with none");
 
     let stray = LAYERS_TOML.replace(
         "name = \"clusters/a\"",
@@ -2521,7 +2817,7 @@ fn a_box_and_a_shape_declaration_are_refused_apart() {
     let out = inputs.at("bundle");
     assert!(
         run(&inputs, &out).is_err(),
-        "a box on a layer that declares no shape was accepted"
+        "a shape on a layer that declares no kind was accepted"
     );
 
     // A transposed box is refused rather than swapped: correcting it would publish a membership
@@ -2532,8 +2828,250 @@ fn a_box_and_a_shape_declaration_are_refused_apart() {
     let message = run(&inputs, &out)
         .expect_err("an inverted box is refused")
         .to_string();
+    assert!(message.contains("below its min"), "{message}");
+
+    // A circle in a box layer is a field the layer never declared.
+    let wrong_kind = SHAPE_LAYER.replace(
+        "bbox = [0.0, 0.0, 400.0, 1000.0]",
+        "circle = [200.0, 500.0, 100.0]",
+    );
+    let inputs = predicate_inputs(&wrong_kind);
+    let message = run(&inputs, &inputs.at("bundle"))
+        .expect_err("a circle on a box layer is refused")
+        .to_string();
+    assert!(message.contains("`shape.kind`"), "{message}");
+
+    // `wgs84` asks the view to project and this fixture's view declares no projection, so it is
+    // refused naming the view's own declaration (`projections.md` §5.3).
+    let wgs84 = SHAPE_LAYER.replace(
+        "bbox = [0.0, 0.0, 400.0, 1000.0] }",
+        "bbox = [0.0, 0.0, 400.0, 1000.0], space = \"wgs84\" }",
+    );
+    let inputs = predicate_inputs(&wgs84);
+    let message = run(&inputs, &inputs.at("bundle"))
+        .expect_err("wgs84 is refused")
+        .to_string();
+    assert!(message.contains("projections.md"), "{message}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// A predicate over a **category** column, which is the shape every real declaration uses
+// ---------------------------------------------------------------------------------------------
+
+/// The same fixture as [`write_banded_points`], with the band as a **vocabulary key** rather than
+/// a bare integer — which is what a category column is read from.
+fn write_graded_points(path: &Path) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+        Field::new("grade", DataType::Utf8, false),
+    ]));
+    let ids: Vec<u64> = (0..N_ITEMS).collect();
+    let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
+    let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
+    let grades: Vec<&str> = ids
+        .iter()
+        .map(|e| ["alpha", "beta", "gamma", "delta", "epsilon"][(e % 5) as usize])
+        .collect();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(ids)),
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(StringArray::from(grades)),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+}
+
+const GRADE_SCHEMA_AND_LAYER: &str = r#"
+[[vocabulary]]
+name       = "grade"
+width      = "u16"
+value_set  = "closed"
+visibility = "public"
+  [vocabulary.values]
+  alpha = 1
+  beta = 2
+  gamma = 3
+  delta = 4
+  epsilon = 5
+
+[[attribute]]
+name       = "grade"
+type       = "category"
+vocabulary = "grade"
+render     = true
+index      = true
+
+[[layer]]
+name                      = "grades/by-value"
+views                     = ["s0"]
+membership                = { attribute = "grade" }
+hierarchy                 = { kind = "flat" }
+visibility                = "public"
+artifact_visibility       = { default = "inherited" }
+require_member_visibility = "none"
+"#;
+
+fn category_predicate_inputs() -> Inputs {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = tmp.path().to_path_buf();
+    let points = dir.join("points.parquet");
+    let pairs = dir.join("pairs.parquet");
+    let config = dir.join("config.toml");
+    write_graded_points(&points);
+    write_pairs(&pairs);
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+[sources]
+points = "points.parquet"
+
+[defaults]
+source = "points"
+
+[[view]]
+name             = "s0"
+extent           = {{ min = 0.0, max = 1000.0 }}
+point_visibility = {{ default = "public" }}
+{GRADE_SCHEMA_AND_LAYER}
+"#
+        ),
+    )
+    .unwrap();
+    Inputs {
+        _tmp: tmp,
+        points,
+        pairs,
+        config,
+        dir,
+    }
+}
+
+/// **A predicate over a category column mints one artifact per value present**, exactly as one over
+/// a plain integer column does.
+///
+/// The distinction matters because it is the only shape a real declaration has:
+/// `a_build_mints_an_attribute_predicates_artifacts_from_its_column` above reads a bare indexed
+/// `u32`, and every column a corpus points a predicate at is a category with a vocabulary. A layer
+/// that registers, reserves an entity run and then derives nothing is declared, reachable and
+/// serving nothing — the state `membership`'s own refusals exist to prevent.
+#[test]
+fn a_predicate_over_a_category_column_mints_its_values() {
+    let inputs = category_predicate_inputs();
+    let out = inputs.at("bundle");
+    let report = run(&inputs, &out).expect("a category predicate layer builds");
+    assert!(report.items > 0);
+
+    let manifest = manifest_of(&out);
+    let level = manifest
+        .level_versions
+        .iter()
+        .find(|v| v.layer == "grades/by-value" && v.level == 0)
+        .expect("the level's version reaches the manifest — the values were published at all");
+    assert_eq!(
+        level.version, 1,
+        "the values were minted in one publication"
+    );
+    let extents: Vec<_> = manifest
+        .membership_extents
+        .iter()
+        .filter(|e| e.layer == "grades/by-value")
+        .collect();
+    assert_eq!(
+        extents.len(),
+        1,
+        "a predicate over a category is durable like any other"
+    );
+    // **The count, which is the assertion the `band` case above does not make** — and the one that
+    // says the roster was read out of the column rather than merely reserved. Five keys are
+    // authored and every one of them is carried by 50 of the 250 points.
+    assert_eq!(
+        extents[0].count, 5,
+        "one artifact per value the column carries"
+    );
+
+    // ⊘ **The artifact pass's own report is not asserted here**, it being printed rather than
+    // returned. What it prints for this level is the count above and not `LevelShape`'s: a
+    // predicate's members are the value column and are evaluated per request, so the pass's walk
+    // over stored memberships finds no rows and every figure in the shape comes back zero — for a
+    // level that holds five artifacts and serves them. `LevelLayoutReport::observed` is what keeps
+    // that from being printed as an empty layer.
+}
+
+/// An enumerated layer whose supplied content authors a polygon over each artifact.
+const AUTHORED_LAYER: &str = r#"
+[[layer]]
+name                      = "clusters/drawn"
+views                     = ["s0"]
+membership                = "enumerated"
+hierarchy                 = { kind = "flat" }
+visibility                = "public"
+artifact_visibility       = { default = "inherited" }
+require_member_visibility = "none"
+artifacts = [
+  { key = "west", members = [0, 1, 2], contents = [["West", "POLYGON ((0 0, 400 0, 400 1000, 0 1000, 0 0), (100 100, 200 100, 200 200, 100 200, 100 100))"]] },
+]
+
+  [[layer.content.supplied]]
+  name = "name"
+  type = "text"
+  require_member_visibility = "inherited"
+
+  [[layer.content.supplied]]
+  name = "outline"
+  type = "polygon"
+  require_member_visibility = "inherited"
+"#;
+
+/// **An authored shape content is read at the build as a membership shape is** — canonicalised
+/// for every view, reported, capped — and the disclosure records the kind. A value that is not
+/// the kind's spelling refuses naming the row and the content.
+#[test]
+fn a_build_reads_an_authored_shape_content_and_discloses_the_kind() {
+    let inputs = predicate_inputs(AUTHORED_LAYER);
+    run(&inputs, &inputs.at("bundle")).expect("an authored polygon builds");
+    let config = tessera_build::config::Config::parse(&inputs.config, &Default::default()).unwrap();
+    let disclosure =
+        serde_json::to_value(tessera_build::disclosure::Disclosure::of(&config)).unwrap();
+    let layer = disclosure["layers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["name"] == "clusters/drawn")
+        .expect("in the report");
+    assert_eq!(layer["shape"], serde_json::json!("authored"));
+    assert_eq!(
+        layer["content"]["supplied"][1]["type"],
+        serde_json::json!("polygon")
+    );
+
+    let bad = AUTHORED_LAYER.replace("\"POLYGON ((0 0, 400 0, 400 1000, 0 1000, 0 0), (100 100, 200 100, 200 200, 100 200, 100 100))\"", "\"a polygon, in words\"");
+    let inputs = predicate_inputs(&bad);
+    let message = run(&inputs, &inputs.at("bundle"))
+        .expect_err("a value that is not WKT is refused")
+        .to_string();
     assert!(
-        message.contains("not a box this build will store"),
+        message.contains("west") && message.contains("outline"),
         "{message}"
     );
+
+    // A hull beside it is two drawn geometries, refused at the declaration.
+    let two = AUTHORED_LAYER.replace(
+        "  [[layer.content.supplied]]\n  name = \"name\"",
+        "  [layer.content]\n  computed = [\"hull\"]\n\n  [[layer.content.supplied]]\n  name = \"name\"",
+    );
+    assert_ne!(two, AUTHORED_LAYER);
+    let inputs = predicate_inputs(&two);
+    let message = run(&inputs, &inputs.at("bundle"))
+        .expect_err("two drawn geometries are refused")
+        .to_string();
+    assert!(message.contains("one drawn geometry"), "{message}");
 }

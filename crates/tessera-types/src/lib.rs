@@ -10,6 +10,11 @@ pub use identity::{IdentityError, IdentityKey, TesseraId, IDENTITY_CONSTRUCTION,
 #[cfg(feature = "serde")]
 pub mod layer;
 
+/// The view roster — the record a create makes durable and the tombstone a drop leaves. Behind
+/// `serde` for [`layer`]'s reason, and here for the crate-graph reason its own doc gives.
+#[cfg(feature = "serde")]
+pub mod view;
+
 /// Macro for creating ID newtypes with no cross-space conversions (invariant I4).
 /// Each type gets new(raw) and raw(self) methods, with derives Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug.
 /// Under the (off-by-default) `serde` feature, also derives `Serialize`/`Deserialize`
@@ -92,9 +97,19 @@ pub struct GenerationStamp {
 // value's `label` renamed to `title` (configuration.md §1, decision 0088). The second is the one
 // that needs the number: `title` is optional, so a bundle at 2 opens against a reader at 3 with
 // every value title silently dropped, where the required key refuses loudly on its own.
+// 4: every `views` entry carries the `projection` it was built under (projections.md §3). The
+// frame alone does not imply one — a `[0, 1]` extent is a legal frame for a view with no
+// projection at all — so a bundle at 3 read as unprojected would have every second reader
+// quantising a degree as though it were a frame coordinate. The key is required, which is what
+// makes a bundle at 3 refuse at open rather than open as `none`.
+// 5: an artifact record carries its parents as a list — a `dag` layer's child may name several
+// (`dag-hierarchies.md` §7, decision 0117) — in the record blob's hand-rolled encoding
+// (`tessera_lifecycle::membership`, decision 0077) and in the WAL row. The blob at 4 carried a
+// one-byte tag and one parent, so a reader at 5 would decode its first two bytes as a count and
+// read parents out of the shape bytes that follow; the number is what stops it opening.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility (decision 0048).
-pub const BUNDLE_FORMAT: u32 = 3;
+pub const BUNDLE_FORMAT: u32 = 5;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;
@@ -118,7 +133,7 @@ mod tests {
     }
     #[test]
     fn constants() {
-        assert_eq!(BUNDLE_FORMAT, 3);
+        assert_eq!(BUNDLE_FORMAT, 5);
         assert_eq!(ROW_ABSENT, 0xFFFF_FFFF);
     }
 }

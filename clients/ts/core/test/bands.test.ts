@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {BandCache, bandSplitter, bandsOfResult, isComplete, type Band} from '../src/bands.js';
+import {BandBudget, BandCache, bandSplitter, bandsOfResult, isComplete, type Band} from '../src/bands.js';
 import {mortonOfTile, tileContains, tileOfCode, tileXY} from '../src/coords.js';
 import type {ScalarColumn, ViewportResult} from '../src/types.js';
 
@@ -24,6 +24,7 @@ function band(overrides: Partial<Band> & {depth: number; prefix: bigint; n: numb
     capUsed: 500,
     visible: BigInt(n),
     matched: BigInt(n),
+    membership: {},
     heldBelow: n === 0 ? 0n : ids[n - 1]! + 1n,
     identityKey: 'ik',
     contentKey: 'ck',
@@ -70,6 +71,7 @@ describe('bandsOfResult', () => {
       world: Float32Array.from([0, 0, 1, 1, 2, 2, 3, 3, 4, 4]),
       scalars,
       subCells: null,
+      membership: {},
       artifacts: []
     };
 
@@ -93,6 +95,7 @@ describe('bandsOfResult', () => {
       world: new Float32Array(8),
       scalars: {},
       subCells: null,
+      membership: {},
       artifacts: []
     };
     const [only] = bandsOfResult(result, 1, {identityKey: 'ik', contentKey: 'ck', capUsed: 500, now: 0});
@@ -243,6 +246,63 @@ describe('BandCache.resolve', () => {
   });
 });
 
+describe('BandBudget — one budget over every view (view-switching.md §3)', () => {
+  /** Two views' caches under one budget: the current one and one the user left. */
+  function twoViews(budgetBytes: number): {budget: BandBudget; current: BandCache; held: BandCache} {
+    const budget = new BandBudget(budgetBytes);
+    return {budget, current: new BandCache(budget), held: new BandCache(budget)};
+  }
+
+  it('counts the bytes and the holding views across every cache', () => {
+    const {budget, current, held} = twoViews(1e9);
+    expect(budget.views).toBe(0);
+    current.put(band({depth: 3, prefix: 1n, n: 4}));
+    expect(budget.bytes).toBe(current.bytes);
+    expect(budget.views).toBe(1);
+    held.put(band({depth: 3, prefix: 2n, n: 4}));
+    expect(budget.bytes).toBe(current.bytes + held.bytes);
+    expect(budget.views).toBe(2);
+  });
+
+  it('takes the view that is not current before the one being drawn', () => {
+    // Two 128-byte bands against a 250-byte budget. The current view's is on screen; the one the
+    // user left yields its tail, and its bytes are what brings the whole store under the mark.
+    const {current, held} = twoViews(250);
+    const shown = band({depth: 9, prefix: 2n, n: 4, touchedAt: 10});
+    current.put(shown);
+    held.put(band({depth: 9, prefix: 3n, n: 4, touchedAt: 0}));
+
+    current.evict({depth: 9, prefix: 0n, protect: {depth: 9, rect: {x0: shown.x, y0: shown.y, x1: shown.x, y1: shown.y}}});
+
+    expect(current.get(9, 2n)!.ids.length).toBe(4);
+    expect(held.get(9, 3n)!.ids.length).toBe(2);
+  });
+
+  it('never truncates the current view’s drawn rectangle, however little another view can give', () => {
+    // The held view holds a single point and has nothing left to shed, so the budget stays over —
+    // and the rectangle on screen is still not a candidate.
+    const {current, held} = twoViews(100);
+    const shown = band({depth: 9, prefix: 2n, n: 4, touchedAt: 0});
+    current.put(shown);
+    held.put(band({depth: 9, prefix: 3n, n: 1, touchedAt: 0}));
+
+    current.evict({depth: 9, prefix: 0n, protect: {depth: 9, rect: {x0: shown.x, y0: shown.y, x1: shown.x, y1: shown.y}}});
+
+    expect(current.get(9, 2n)!.ids.length).toBe(4);
+    expect(held.get(9, 3n)!.ids.length).toBe(1);
+  });
+
+  it('evicts the current view’s unprotected bands once the other views are down to their heads', () => {
+    const {current, held} = twoViews(150);
+    current.put(band({depth: 9, prefix: 2n, n: 4, touchedAt: 10}));
+    held.put(band({depth: 9, prefix: 3n, n: 1, touchedAt: 0}));
+
+    current.evict({depth: 9, prefix: 0n});
+
+    expect(current.get(9, 2n)!.ids.length).toBe(2);
+  });
+});
+
 describe('BandCache eviction', () => {
   it('truncates tails and never removes a band head', () => {
     const cache = new BandCache(600);
@@ -259,6 +319,19 @@ describe('BandCache eviction', () => {
       expect(held.ids.length).toBeGreaterThanOrEqual(1); // the head survives
       expect(held.ids[0]).toBe(1n); // and it is the LOW-identity head
     }
+  });
+
+  it('never truncates a band on screen at the current depth, however old its touch', () => {
+    // Two 128-byte depth-9 bands against a 250-byte budget. The older one is on screen (inside
+    // the protected rectangle) and is left whole; the newer, off-screen one is halved instead.
+    const cache = new BandCache(250);
+    const shown = band({depth: 9, prefix: 2n, n: 4, touchedAt: 0});
+    const off = band({depth: 9, prefix: 3n, n: 4, touchedAt: 5});
+    cache.put(shown);
+    cache.put(off);
+    cache.evict({depth: 9, prefix: 0n, protect: {depth: 9, rect: {x0: shown.x, y0: shown.y, x1: shown.x, y1: shown.y}}});
+    expect(cache.get(9, 2n)!.ids.length).toBe(4);
+    expect(cache.get(9, 3n)!.ids.length).toBe(2);
   });
 
   it('lowers a truncated band bound to exactly what remains', () => {
@@ -335,7 +408,7 @@ describe('BandCache.version', () => {
   const WHOLE = {x0: 0, y0: 0, x1: 3, y1: 3};
 
   it('moves on every change to what is held or covered', () => {
-    const cache = new BandCache();
+    const cache = new BandCache(1e9);
     const start = cache.version;
 
     cache.put(band({depth: 2, prefix: 0n, n: 2}));
@@ -351,7 +424,7 @@ describe('BandCache.version', () => {
   });
 
   it('does not move when the cache is only read', () => {
-    const cache = new BandCache();
+    const cache = new BandCache(1e9);
     cache.put(band({depth: 2, prefix: 0n, n: 2}));
     cache.markCovered(WHOLE, 2, 'ck', 500);
     const held = cache.version;
@@ -377,7 +450,7 @@ describe('BandCache.bandsForRegion at scale', () => {
   }
 
   it('does not scan the store to find one depth', () => {
-    const cache = new BandCache();
+    const cache = new BandCache(1e9);
     // A deep working set, as a session reaches after a few zoom-ins, plus a little at depth 8.
     for (let x = 0; x < 120; x++) for (let y = 0; y < 120; y++) cache.put(tile(11, x, y));
     for (let x = 0; x < 4; x++) for (let y = 0; y < 4; y++) cache.put(tile(8, x, y));
@@ -391,7 +464,7 @@ describe('BandCache.bandsForRegion at scale', () => {
   });
 
   it('collects a large stand-in set without exceeding the call stack', () => {
-    const cache = new BandCache();
+    const cache = new BandCache(1e9);
     // `push(...bucket)` passes one argument per entry and throws a RangeError somewhere near 10^5.
     for (let x = 0; x < 400; x++) for (let y = 0; y < 400; y++) cache.put(tile(11, x, y));
     const {fallback} = cache.bandsForRegion({x0: 0, y0: 0, x1: 63, y1: 63}, 8, 'ck', 500);
@@ -416,6 +489,7 @@ describe('bandSplitter', () => {
       world: Float32Array.from({length: n * 2}, (_, i) => i),
       scalars: {w: {arrowType: 'u32', values: Uint32Array.from({length: n}, (_, i) => i)}},
       subCells: null,
+      membership: {},
       artifacts: []
     };
     const meta = {identityKey: 'ik', contentKey: 'ck', capUsed: 500, now: 0};

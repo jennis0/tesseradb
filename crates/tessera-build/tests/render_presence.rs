@@ -23,7 +23,7 @@ use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
-use tessera_build::config::{Attribute, Visibility, Schema, Vocabulary, ValueSet};
+use tessera_build::config::{Attribute, Schema, ValueSet, Visibility, Vocabulary};
 use tessera_build::{build, BuildArgs};
 use tessera_spatial::tiler::ScalarType;
 use tessera_spatial::Bounds;
@@ -160,21 +160,30 @@ fn schema() -> Schema {
 fn args(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
     let schema = schema();
     BuildArgs {
-        point_fields: Default::default(),
-        points: points.to_path_buf(),
+        arena_order: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: Bounds {
+                x_min: 0.0,
+                x_max: 1000.0,
+                y_min: 0.0,
+                y_max: 1000.0,
+            },
+            points: points.to_path_buf(),
+            point_fields: Default::default(),
+            select: None,
+            access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: tessera_build::config::AttributeSource::over(
             points.to_path_buf(),
             &schema,
         ),
-        access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
         out,
-        extent: Bounds {
-            x_min: 0.0,
-            x_max: 1000.0,
-            y_min: 0.0,
-            y_max: 1000.0,
-        },
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -182,6 +191,7 @@ fn args(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
         mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,

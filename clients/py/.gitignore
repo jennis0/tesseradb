@@ -1,0 +1,9 @@
+# The bundle the wheel's build hook (hatch_build.py) copies here; never committed (design §7).
+tesseradb/static/*.js
+tesseradb/static/*.sri
+tesseradb/static/*.json
+dist/
+build/
+*.egg-info/
+.venv/
+.pytest_cache/

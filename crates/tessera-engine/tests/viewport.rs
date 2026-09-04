@@ -21,13 +21,13 @@ use std::sync::Arc;
 
 use tempfile::TempDir;
 
+use sha2::Digest;
 use tessera_build::{build, BuildArgs};
 use tessera_engine::viewport::{ViewportRequest, SERIAL_FALLBACK_MAX_ROWS};
 use tessera_engine::{
     default_compute_threads, CancelToken, Engine, EngineConfig, EngineError, Session,
 };
 use tessera_lifecycle::wal::{ChangeOp, Wal, WalRecord};
-use sha2::Digest;
 use tessera_plugin::{Passthrough, Plugin};
 use tessera_spatial::{morton_of, tiles_for_bbox, Bounds};
 use tessera_store::read::open_bundle;
@@ -263,7 +263,7 @@ fn d_suppressing_an_item_drops_the_count_by_one() {
 /// and the second assertion below — that the served set is *not* the first three rows — is what
 /// actually pins the fix. A sample ordered by row order is a sample ordered by **permission
 /// signature**, because entity IDs are signature-sorted permanently under I9; that is the defect
-/// `docs/evidence/memos/2026-07-30-priority-as-identity-prefix.md` exists to close.
+/// docs/evidence/memos/2026-07-30-priority-as-identity-prefix.md exists to close.
 #[test]
 fn f_selection_returns_the_lowest_tessera_ids_not_the_first_rows() {
     let tmp = TempDir::new().unwrap();
@@ -681,15 +681,20 @@ fn engine_open_seeds_the_allocator_from_the_manifest_high_water() {
     assert_eq!(engine.allocator_high_water(), N_ITEMS);
 }
 
-/// `Engine::item` inverts the wire `tessera_id` and locates its row via
-/// `Permutation::row_of` — an O(1) bijection lookup, never a linear scan of an identity column
-/// (contracts r6 replaced that column's contents with the opaque `tessera_id`, so a scan of it
-/// would search the wrong space entirely). Asserted against a source item whose signature-sorted
-/// entity id (and therefore its row) is not the first one built — a truncated or
-/// first-rows-only lookup would miss it, while the permutation's O(1) `row_of` does not care
-/// where the row sits.
+/// `Engine::item` resolves a row wherever it sits: the item asserted here is a source item whose
+/// signature-sorted entity id — and therefore its row — is not among the first built, and it comes
+/// back with the right external id. `Permutation::row_of` is an O(1) bijection lookup and does not
+/// care where the row sits; contracts r6 replaced the identity column's contents with the opaque
+/// `tessera_id`, so a scan of *that* column would search the wrong space entirely.
+///
+/// **What this pins is the reach of the lookup, not its mechanism.** An implementation that walked
+/// the entity-id column top to bottom would find the same row and pass, so the name says "far from
+/// the segment's start" rather than claiming to discriminate a scan.
+///
+/// Mutations this kills: a lookup truncated to a prefix of the rows, or one that searches only the
+/// first segment.
 #[test]
-fn item_lookup_goes_through_the_permutation_not_a_column_scan() {
+fn item_lookup_resolves_a_row_far_from_the_segments_start() {
     let tmp = TempDir::new().unwrap();
     let bundle_root = tmp.path().join("bundle");
     build_fixture(
@@ -783,13 +788,22 @@ fn item_drill_down_works_on_a_bundle_with_no_external_id_sidecar() {
     write_points_n(&tmp.path().join("points.parquet"), N_ITEMS);
     write_pairs_n(&tmp.path().join("pairs.parquet"), N_ITEMS);
     let args = BuildArgs {
-        point_fields: Default::default(),
-        points: tmp.path().join("points.parquet"),
+        arena_order: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: tmp.path().join("points.parquet"),
+            point_fields: Default::default(),
+            select: None,
+            access: tessera_build::config::AccessInput::relation(tmp.path().join("pairs.parquet")),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: Vec::new(),
-        access: tessera_build::config::AccessInput::relation(tmp.path().join("pairs.parquet")),
         out: bundle_root.clone(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -797,6 +811,7 @@ fn item_drill_down_works_on_a_bundle_with_no_external_id_sidecar() {
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
         mint_external_ids: false,
         emit_oracle_pairs: false,
         batch_items: None,
@@ -1025,10 +1040,12 @@ fn engine_open_refuses_an_out_of_range_allocator_seed() {
                 external_id: None,
                 entity_id: tessera_types::EntityId::new(u32::MAX as u64 - 1),
                 view: "s0".to_string(),
+                join: false,
                 descriptors: Vec::new(),
                 x: 0.5,
                 y: 0.5,
                 scalars: Vec::new(),
+                scoped: Vec::new(),
             }],
         })
         .unwrap();
@@ -1075,6 +1092,13 @@ impl tessera_plugin::Plugin for RelabellingPlugin {
         auth_data: &[u8],
     ) -> Result<tessera_plugin::AuthTerms, tessera_plugin::PluginError> {
         Passthrough::new().terms_of_auth(auth_data)
+    }
+
+    fn present_terms(
+        &self,
+        descriptors: &[tessera_plugin::Descriptor],
+    ) -> Result<Vec<String>, tessera_plugin::PluginError> {
+        Passthrough::new().present_terms(descriptors)
     }
 
     fn declared_bounds(&self) -> tessera_plugin::DeclaredBounds {
@@ -1230,7 +1254,11 @@ fn engine_open_does_not_touch_the_sidecar() {
         .as_object()
         .unwrap()
         .keys()
-        .filter(|rel| rel.contains("/entities/"))
+        // The external-ID sidecar's own files, not everything under `entities/`: the entity→term
+        // transpose lives there too (contracts §2.4) and is deliberately opened *at* `Engine::open`
+        // like the record blob, so deleting it would make this test assert the opposite posture for
+        // an artefact it is not about.
+        .filter(|rel| rel.contains("/entities/external-ids") || rel.contains("/entities/ext-locator"))
         .map(|rel| prefix_dir.join(rel))
         .collect();
     assert!(
@@ -1280,7 +1308,7 @@ fn engine_open_does_not_touch_the_sidecar() {
 /// fast unit test — run explicitly with `cargo test --release -p tessera-engine --test viewport \
 /// -- --ignored latency_sanity_at_2_4m_p99_under_50ms`.
 #[test]
-#[ignore]
+#[ignore = "measurement: builds /tmp/tessera-2m4 from the real corpus and times it — release only, see the doc above"]
 fn latency_sanity_at_2_4m_p99_under_50ms() {
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
@@ -1291,20 +1319,31 @@ fn latency_sanity_at_2_4m_p99_under_50ms() {
     let bundle_root = PathBuf::from("/tmp/tessera-2m4");
     if !bundle_root.join("CURRENT").exists() {
         let args = BuildArgs {
-            point_fields: Default::default(),
-            points: PathBuf::from("data/scaled/geometry.parquet"),
+            arena_order: Default::default(),
+            views: vec![tessera_build::ViewArgs {
+                visibility: None,
+                view_id: "s0".to_string(),
+                projection: tessera_spatial::Projection::None,
+                // Identity extent (contracts §2.5 grid): `geometry.parquet` stores Morton codes,
+                // not coordinates (`read_points`'s Morton branch requires this exact extent).
+                extent: Bounds {
+                    x_min: 0.0,
+                    x_max: 65536.0,
+                    y_min: 0.0,
+                    y_max: 65536.0,
+                },
+                points: PathBuf::from("data/scaled/geometry.parquet"),
+                point_fields: Default::default(),
+                select: None,
+                access: tessera_build::config::AccessInput::relation(PathBuf::from(
+                    "data/scaled/pairs/categories-subclass.pairs.parquet",
+                )),
+            }],
+            anchor: 0,
+            groups: Vec::new(),
+            scoped_attributes: Vec::new(),
             attribute_sources: Vec::new(),
-            access: tessera_build::config::AccessInput::relation(PathBuf::from("data/scaled/pairs/categories-subclass.pairs.parquet")),
             out: bundle_root.clone(),
-            // Identity extent (contracts §2.5 grid): `geometry.parquet` stores Morton codes, not
-            // coordinates (`read_points`'s Morton branch requires this exact extent).
-            extent: Bounds {
-                x_min: 0.0,
-                x_max: 65536.0,
-                y_min: 0.0,
-                y_max: 65536.0,
-            },
-            view_id: "s0".to_string(),
             limit: Some(ITEM_LIMIT),
             identity_key: test_key(),
             identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -1312,6 +1351,7 @@ fn latency_sanity_at_2_4m_p99_under_50ms() {
             shard_id: 0,
             layers: Vec::new(),
             layer_inputs: Vec::new(),
+            scoped_layers: Default::default(),
             mint_external_ids: true,
             emit_oracle_pairs: true,
             batch_items: None,
@@ -2109,7 +2149,7 @@ fn warm_row_projection_cache_serves_output_identical_to_cold() {
 
 /// **The selection-overdraw canary.**
 ///
-/// Origin: `docs/evidence/memos/2026-07-30-f1-selection-overdraw.md`. The retired placeholder sampler
+/// Origin: docs/evidence/memos/2026-07-30-f1-selection-overdraw.md. The retired placeholder sampler
 /// asked `iter_range` for a tile's visible rows and kept the first `k`, and `iter_range` was eager —
 /// so every visible row was copied into a `Vec<u32>` and all but `k` discarded, ~100 MB per request
 /// at 10⁹. The memo asserted that waste as an equality and asked whoever fixed it to re-point the
@@ -2775,7 +2815,10 @@ fn viewport_output_is_byte_identical_at_compute_threads_1_and_8_below_the_serial
 #[derive(Default)]
 struct RecordingSink {
     head: Option<tessera_engine::ViewportHead>,
-    counts: Option<(Vec<tessera_engine::TileCount>, Option<Vec<tessera_engine::SubCellCount>>)>,
+    counts: Option<(
+        Vec<tessera_engine::TileCount>,
+        Option<Vec<tessera_engine::SubCellCount>>,
+    )>,
     artifacts: Option<Vec<tessera_engine::ArtifactOut>>,
     chunks: Vec<tessera_engine::PointColumns>,
     /// When `Some(n)`, the nth callback overall refuses with `SinkClosed`.

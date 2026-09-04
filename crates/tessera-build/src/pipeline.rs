@@ -70,6 +70,17 @@
 //! nondeterministically-scheduled sort still has exactly one output. The equivalence suite's
 //! byte-identity assertion is the oracle that keeps this true.
 //!
+//! The other parallel shape here is **one lane per declared column** — the attribute join stages,
+//! scatters and tallies each column on a thread of its own
+//! ([`read_one_attribute_source`]). It participates in no ordering decision either, and for a
+//! stronger reason than the sorts do: the lanes never meet. Each column is its own mapped array
+//! with its own presence bits and its own arena, indexed by entity, so no two lanes can name the
+//! same byte; the only shared state is read-only (the join's answer, the declaration) and the
+//! only shared *result* is the coverage tally, which is returned per lane and folded in
+//! declaration order rather than accumulated across threads. Minting stays where it was — a
+//! serial pre-pass per decoded batch, in file order — so the vocabulary codes a build assigns are
+//! not a function of how the lanes were scheduled.
+//!
 //! ## The two assumptions this construction makes
 //!
 //! **The inputs do not change while the build runs.** The linear build reads each file once;
@@ -137,10 +148,11 @@ use tessera_plugin::{Passthrough, Plugin};
 use tessera_spatial::split32;
 use tessera_spatial::tiler::{ScalarType, ScalarValue};
 use tessera_store::write::{
-    write_columns, write_morton_codes, write_permutation_iter, ScalarColumnData,
+    write_columns, write_morton_codes, write_permutation_iter, ScalarColumn,
 };
 use tessera_types::{EntityId, IdentityKey, SMALL_TERM_THRESHOLD_DEFAULT};
 
+use crate::column::EntityColumn;
 use crate::error::{BuildError, Result};
 use crate::input;
 use crate::observer::{BuildObserver, BuildStage, StageTimer};
@@ -269,6 +281,56 @@ fn term_of(packed_entry: u64) -> u32 {
 /// Rows buffered per [`join_chunk`] flush: 2²⁶ rows × 16 B ≈ 1 GiB of transient, constant in N.
 const JOIN_CHUNK_ROWS: usize = 1 << 26;
 
+/// The attribute join's staging buffer, **in bytes**.
+///
+/// A row count is the wrong unit for this buffer, and at corpus scale it stops being a bound at
+/// all: [`JOIN_CHUNK_ROWS`] is 67,108,864, so a 73,631,092-point corpus staged 91% of itself in one
+/// chunk — a near-complete second copy of every column the source carries, two flushes, and none of
+/// the chunking the sweep is chunked for. Sized in bytes the same buffer is a constant the schema
+/// cannot inflate: a wider schema takes fewer rows per chunk and more chunks, which is what a
+/// staging buffer is supposed to do.
+///
+/// **Chunk boundaries are unobservable in the output**, which is what makes this number free to
+/// choose. Source ids are duplicate-checked before this pass, so no entity is written twice;
+/// [`join_chunk`]'s own contract leaves the order *within* a chunk unspecified; and vocabulary
+/// codes are minted in `scan_attributes`'s per-batch pre-pass, driven by parquet batch order and
+/// not by this. Nothing identity-bearing — entity ids, ordinals, minting order — is a function of
+/// where a chunk ends.
+///
+/// What it bounds is the headers: [`staging_rows`] prices a row at the join key plus each column's
+/// fixed width, and a string's *contents* ride on top of that, so a column of long prose overshoots
+/// this figure by whatever it averages per value. **Since the columns were mapped (`column.rs`)
+/// what it bounds is a file rather than the heap** — page cache the kernel may reclaim, not memory
+/// the machine must have.
+const JOIN_STAGE_BYTES: usize = 256 << 20;
+
+/// How many rows of `attributes` fit in [`JOIN_STAGE_BYTES`], at least one and never more than the
+/// corpus.
+fn staging_rows(attributes: &[&crate::config::Attribute], n: u64) -> usize {
+    // The join key beside each staged row — `(source_id, pos)`, 16 bytes and not the 12 an earlier
+    // comment claimed — the 8 bytes the sweep's answer takes beside it (`(entity, pos)`), and one
+    // typed slot per column. Each column's presence bit adds an eighth of a byte per row on top,
+    // which is left out rather than rounded up to a whole one.
+    let per_row: usize = 24 + attributes.iter().map(|a| staged_width(a.ty)).sum::<usize>();
+    (JOIN_STAGE_BYTES / per_row).clamp(1, n.max(1) as usize)
+}
+
+/// One staged slot's width, as the budget above prices it.
+///
+/// ⊘ **The string families are priced at the 24-byte `String` header they no longer cost** — a
+/// staged string slot is an 8-byte arena offset now, and the characters are the arena's
+/// (`column.rs`). The figure stands where it is: it makes the buffer smaller than the budget rather
+/// than larger, and moving it moves every chunk boundary.
+fn staged_width(ty: ScalarType) -> usize {
+    match ty {
+        ScalarType::Bool | ScalarType::U8 | ScalarType::I8 => 1,
+        ScalarType::U16 | ScalarType::I16 => 2,
+        ScalarType::U32 | ScalarType::I32 | ScalarType::F32 => 4,
+        ScalarType::U64 | ScalarType::I64 | ScalarType::F64 | ScalarType::TimestampUs => 8,
+        ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => std::mem::size_of::<String>(),
+    }
+}
+
 /// Resolve a chunk of `(source_id, payload)` rows to ordinals by sorting the chunk and merging
 /// it against the sorted `source_ids` in one sequential sweep. See the module docs: this is how
 /// every pass maps ids to ordinals without assuming anything about the ids' shape, and without
@@ -287,7 +349,11 @@ fn join_chunk<P: Copy + Send>(
     source_ids: &[u64],
     mut on_row: impl FnMut(Option<u32>, u64, P) -> Result<()>,
 ) -> Result<()> {
-    chunk.par_sort_unstable_by_key(|entry| entry.0);
+    // **Stable**, so rows carrying the same source id resolve in the order the file gave them.
+    // Which of two duplicate rows' values an entity ends up with was previously whichever the
+    // sort happened to place last; the entity-ordered arena fill needs the two sweeps to agree
+    // about it, and a build that answers the same question twice should answer it the same way.
+    chunk.par_sort_by_key(|entry| entry.0);
     let mut i = 0usize;
     for &(id, payload) in chunk.iter() {
         // Both sides ascend, so `i` only ever moves forward; it does not advance past a match,
@@ -320,6 +386,7 @@ fn resolve_pairs_chunk(
     source_ids: &[u64],
     term_keys: &[u64],
     term_ids: &[u32],
+    distinct_of_ordinal: &mut [u32],
     mut emit: impl FnMut(u64) -> Result<()>,
 ) -> Result<()> {
     resolved.clear();
@@ -337,6 +404,19 @@ fn resolve_pairs_chunk(
     // Equal (term, ordinal) tuples are bit-identical, so the parallel unstable sort has one
     // output; the sweep cursor then only moves forward.
     resolved.par_sort_unstable();
+    // **How many distinct terms this chunk gave each ordinal**, counted here because this is the
+    // one place they are sorted and the chunk holds exactly one view's rows (`views.md` §7). The
+    // label-agreement refusal in the batch loop is a count identity over these tallies; the emit
+    // below is deliberately *not* deduplicated, the bucket sweep doing that and the pair total
+    // being checked against the dictionary pass's own row count.
+    let mut previous: Option<(u64, u64)> = None;
+    for &pair in resolved.iter() {
+        if previous != Some(pair) {
+            let slot = &mut distinct_of_ordinal[pair.1 as usize];
+            *slot = slot.saturating_add(1);
+            previous = Some(pair);
+        }
+    }
     let mut i = 0usize;
     for &(source_term, ordinal) in resolved.iter() {
         while i < term_keys.len() && term_keys[i] < source_term {
@@ -433,6 +513,12 @@ impl BucketStore {
 /// Everything the memory budget decides, decided once and printed. See `BuildArgs::batch_items`
 /// for why the batch size is derived deterministically and recorded rather than re-derived.
 struct BuildPlan {
+    /// The memory budget this plan was derived under — the operator's `--memory-budget` or the
+    /// detected one. Carried rather than re-detected, so every stage that sizes itself against the
+    /// budget sizes against the *same* number: `detect_memory_budget` reads `MemAvailable`, which
+    /// falls as the build fills memory, and a second reading late in the run would derive a
+    /// smaller budget from the build's own success at using the first.
+    budget: u64,
     batch_items: u64,
     batches: u64,
     bucket_in_ram: bool,
@@ -453,7 +539,7 @@ struct BuildPlan {
 /// a 4 GiB container on a 48 GiB machine that reads only the first sizes its batches for 38 GiB and
 /// is OOM-killed by the limit that always owned the answer — which is the failure this crate exists
 /// to prevent, arriving through the detector rather than through the batch size.
-fn detect_memory_budget() -> u64 {
+pub(crate) fn detect_memory_budget() -> u64 {
     const FALLBACK: u64 = 24 << 30;
     let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo") else {
         return FALLBACK;
@@ -643,6 +729,11 @@ fn plan_build(
             b
         }
     };
+    // **A stride of at least one item**, so an empty corpus divides. `n = 0` derives a batch of
+    // zero from every arm above (the whole corpus is the whole corpus), and the batch loop below
+    // runs `0..batches` — so the stride only has to be a legal divisor, and the plan it produces
+    // is zero batches over zero items.
+    let batch_items = batch_items.max(1);
     let batches = n.div_ceil(batch_items);
 
     // The RAM backing needs the WHOLE relation beside the resolve scan's own residents.
@@ -675,27 +766,48 @@ fn plan_build(
 
     // Disk pre-flight (fail-closed): the build's transient spills and its outputs coexist in
     // phases; refuse up front, with the arithmetic, rather than dying on ENOSPC hours in. The
-    // three phase peaks, all conservative: buckets full beside the first batch's bands;
-    // bands full beside the postings spool; the spool becoming postings.arrow beside the
-    // segment. (P here is pre-dedup pairs; band/spool bytes-per-pair are stated ceilings for
-    // the varint codec and Roaring postings, not measurements of this corpus.)
+    // four phase peaks, all conservative: buckets full beside the first batch's bands; bands
+    // full beside the postings spool; the declared columns beside the text index's runs; the
+    // spool becoming postings.arrow beside the segment. (P here is pre-dedup pairs; band/spool
+    // bytes-per-pair are stated ceilings for the varint codec and Roaring postings, not
+    // measurements of this corpus.)
+    //
+    // **The column phase is a whole window, not a moment.** Every declared column in entity
+    // order is a mapped file from the attribute join to the release five stages later
+    // (`column.rs`), and the text index spills its runs inside that window — so those bytes are
+    // on the disk together, and they are on it while the geometry maps still are. The other three
+    // phases all end before the attribute join opens it. The column figure is `residency.rs`'s
+    // own, reused rather than re-derived: a second copy of that arithmetic is how this stops
+    // being true again.
     let p = pair_rows as u64;
     let phase_spill = if bucket_in_ram { 0 } else { 8 * p } + (6 * p) / batches.max(1);
     let phase_bands = 6 * p + 4 * p;
-    let phase_assemble = 4 * p + 26 * n;
-    let disk_need = phase_spill.max(phase_bands).max(phase_assemble);
+    // 8 B/item of `x-of-entity`/`y-of-entity`, which outlive the release; 4 B/item of pairs
+    // already written as postings.arrow before the window opened.
+    let phase_columns = tail.mapped() + 8 * n + 4 * p;
+    // The segment write: the spool becoming postings.arrow beside the segment, and the row-order
+    // attribute tail beside both — one mapped file per render column, built here and unlinked with
+    // the record batch that reads it (`residency::render_tail_bytes`).
+    let phase_assemble = 4 * p + 26 * n + crate::residency::render_tail_bytes(&args.schema, n);
+    let disk_need = phase_spill
+        .max(phase_bands)
+        .max(phase_columns)
+        .max(phase_assemble);
     if let Some(free) = available_disk(&args.out) {
         if free < disk_need {
             return Err(BuildError::Invalid(format!(
                 "insufficient disk for this build: ~{disk_need} bytes needed at peak \
-                 (spill phase {phase_spill}, band phase {phase_bands}, assembly phase \
-                 {phase_assemble}; n = {n}, pairs = {p}, batches = {batches}), {free} \
-                 available at the output path; free disk and retry"
+                 (spill phase {phase_spill}, band phase {phase_bands}, column phase \
+                 {phase_columns}, assembly phase {phase_assemble}; n = {n}, pairs = {p}, \
+                 batches = {batches}), {free} available at the output path; free disk and \
+                 retry. Where the column phase's bytes are:{}",
+                tail.describe()
             )));
         }
     }
 
     Ok(BuildPlan {
+        budget,
         batch_items,
         batches,
         bucket_in_ram,
@@ -711,37 +823,37 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     require_decomposable_labelling(&plugin)?;
     let bounds = plugin.declared_bounds();
 
-    // ---- 1. ordinals: the sorted source ids ------------------------------------------
-    // An item's *ordinal* is its index in this array. Ordinal order is source-id order, which is
-    // the order the linear build walks items in — so "first appearance" below, and the
-    // source-id tiebreak in the signature sort, are both expressible as ordinal comparisons.
-    let mut source_ids = read_source_ids(args, None)?;
-    if source_ids.is_empty() {
-        return Err(BuildError::Invalid(
-            "no points selected — a bundle with no items has no expressible entity range".into(),
-        ));
-    }
-    source_ids.sort_unstable();
-    if let Some(w) = source_ids.windows(2).find(|w| w[0] == w[1]) {
-        let _ = w;
-        return Err(BuildError::Invalid(
-            "points file contains duplicate entity_id values".into(),
-        ));
-    }
+    // ---- 1. pass one: entity space, once over every view's points (`views.md` §7) -----
+    // An item's *ordinal* is its index in this array. Ordinal order is source-id order over the
+    // **union** of every view's ids, which is the order the linear build walks items in — so
+    // "first appearance" below, and the source-id tiebreak in the signature sort, are both
+    // expressible as ordinal comparisons, exactly as they were when a build read one file.
+    //
+    // **`n = 0` is a bundle, not a refusal** (decision 0091): a deployment must be able to start
+    // from a bundle with no points, with its frame stated, and take the whole corpus through
+    // `/control/ingest`. Every stage below is walked for that case — empty segments, empty
+    // postings, a dictionary holding only what the declaration mints, `entity_id_high_water = 0`,
+    // every declared column present and empty, every declared layer registered with no artifacts.
+    // What is still refused is `extent = "auto"` over no rows, because a frame cannot be fitted to
+    // nothing (`config::empty_auto_source`) — and that refusal already names the remedy.
+    let (source_ids, view_anchors) = read_source_ids_union(args)?;
     let n = source_ids.len() as u64;
     if n > u32::MAX as u64 {
         return Err(BuildError::Invalid(format!(
             "{n} items exceeds bundle_format 1's 2^32 entity-ID ceiling"
         )));
     }
-    // Anchors for the later passes over this same file (step 5's re-read, step 8's geometry
-    // scan): the re-read used to be verified against nothing, so a points file swapped
-    // mid-build could silently hand every item the wrong external id. An order-independent
-    // mixed sum ([`mix64`]) plus the extrema make that loud instead.
-    let ids_anchor = source_ids
-        .iter()
-        .fold(0u64, |acc, &id| acc.wrapping_add(mix64(id)));
-    let (ids_first, ids_last) = (source_ids[0], *source_ids.last().expect("non-empty"));
+    // The union's extrema, for step 8c's dense fast path. Each view's own anchors — its row count
+    // and an order-independent mixed sum of its ids ([`mix64`]) — are in `view_anchors`, and the
+    // geometry pass below is checked against them: a points file swapped mid-build would
+    // otherwise hand every item of that view another item's position, with nothing to notice.
+    // `(0, 0)` over no items: the only reader is the dense fast path at step 8c, whose test
+    // (`ids_last - ids_first + 1 == source_ids.len()`) is false for an empty union either way, so
+    // the placeholder cannot make a lookup take the wrong branch.
+    let (ids_first, ids_last) = match (source_ids.first(), source_ids.last()) {
+        (Some(&first), Some(&last)) => (first, last),
+        _ => (0, 0),
+    };
 
     timer.end(BuildStage::SourceIds, source_ids.len() as u64);
 
@@ -751,6 +863,9 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // What every source term is called, established before any term id exists — a field-sourced
     // view's sorted vocabulary, or the relation's own integers (`crate::AccessPlan`).
     let access = crate::plan_access(args)?;
+    // Whether the label-agreement identity applies at all: a shared relation is entity space and
+    // is scanned once, so its rows cannot disagree between views (`crate::AccessRoute`).
+    let per_view_labels = !matches!(access.descriptors, crate::input::TermDescriptors::Ids);
     let Dictionary {
         term_keys,
         term_ids,
@@ -808,34 +923,57 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     let mut failure: Option<BuildError> = None;
     let mut chunk: Vec<(u64, u64)> = Vec::with_capacity(JOIN_CHUNK_ROWS.min(pair_rows.max(1)));
     let mut resolved: Vec<(u64, u64)> = Vec::new();
-    let mut resolve =
-        |chunk: &mut Vec<(u64, u64)>, resolved: &mut Vec<(u64, u64)>, sink: &mut BucketSink| {
-            resolve_pairs_chunk(
-                chunk,
-                resolved,
-                &source_ids,
-                &term_keys,
-                &term_ids,
-                |value| {
-                    pushed += 1;
-                    sink.push(value)
-                },
-            )
-        };
-    crate::scan_access(args, &access, |source_id, source_term| {
-        chunk.push((source_id, source_term));
-        if chunk.len() == JOIN_CHUNK_ROWS {
-            if let Err(e) = resolve(&mut chunk, &mut resolved, &mut sink) {
+    // Each view's own distinct contribution per ordinal, summed over the views — the numerator
+    // of the label-agreement identity the batch loop checks (`views.md` §7).
+    let mut distinct_of_ordinal: Vec<u32> = vec![0; n as usize];
+    let mut resolve = |chunk: &mut Vec<(u64, u64)>,
+                       resolved: &mut Vec<(u64, u64)>,
+                       distinct_of_ordinal: &mut [u32],
+                       sink: &mut BucketSink| {
+        resolve_pairs_chunk(
+            chunk,
+            resolved,
+            &source_ids,
+            &term_keys,
+            &term_ids,
+            distinct_of_ordinal,
+            |value| {
+                pushed += 1;
+                sink.push(value)
+            },
+        )
+    };
+    let mut current: Option<(usize, u64)> = None;
+    crate::scan_access(args, &access, |view, source_id, source_term| {
+        // A chunk **never spans two views**, and never splits a row: rows of one view arrive
+        // contiguously (a view holds one row per entity), so the boundary is taken at the change
+        // of view — always — or at the next change of entity once the chunk is full.
+        let changed_view = current.is_some_and(|(previous, _)| previous != view);
+        let changed_row = current != Some((view, source_id));
+        if changed_view || (changed_row && chunk.len() >= JOIN_CHUNK_ROWS) {
+            if let Err(e) = resolve(
+                &mut chunk,
+                &mut resolved,
+                &mut distinct_of_ordinal,
+                &mut sink,
+            ) {
                 failure = Some(e);
                 return ControlFlow::Break(());
             }
         }
+        current = Some((view, source_id));
+        chunk.push((source_id, source_term));
         ControlFlow::Continue(())
     })?;
     if let Some(error) = failure {
         return Err(error);
     }
-    resolve(&mut chunk, &mut resolved, &mut sink)?;
+    resolve(
+        &mut chunk,
+        &mut resolved,
+        &mut distinct_of_ordinal,
+        &mut sink,
+    )?;
     drop(chunk);
     drop(resolved);
     if pushed as usize != pair_rows {
@@ -843,17 +981,16 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
             "the pairs file yielded {pair_rows} rows, then {pushed}"
         )));
     }
-    // ---- 3b. geometry, by ordinal -----------------------------------------------------
-    // **The points file's geometry is read exactly once, and it is read here** — before entity ids
-    // exist, so it lands in *ordinal* space and is permuted into entity space at step 8 rather
-    // than re-read there.
+    // ---- 3b. geometry, by ordinal, once per (item, view) (`views.md` §7) --------------
+    // **Every view's geometry is read exactly once, and it is read here** — before entity ids
+    // exist, so it lands in *ordinal* space. Pass two permutes it into entity space rather than
+    // re-reading a parquet file per view: the transform (project, then quantise against that
+    // view's own frame) runs once per (item, view) and nowhere else.
     //
     // The pass exists because decision 0073 breaks signature ties on the Morton code, so the sort
-    // needs geometry it previously did not. Reading it here rather than adding a fourth pass is
-    // what makes that ruling free: an ordinal is only defined once `source_ids` is sorted, and the
-    // *entity* an item ends up with is not known until the batch loop below has run — so between
-    // those two facts, ordinal space is the only space this can land in, and step 8's scan becomes
-    // a scatter over memory it already has.
+    // needs geometry it previously did not, and decision 0112 says *which* view's: the declared
+    // anchor's, with the first-declared view that holds the item standing in where the anchor
+    // does not.
     //
     // **Mapped rather than heap-allocated**, on step 8's own argument: 4 B per item per axis is
     // 8 GB at 10⁹ of memory the kernel cannot reclaim. See [`spill::MappedU32`] — the bytes become
@@ -863,82 +1000,137 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // The two integrity checks are the ones step 8 used to make, moved with the read: a shrunk file
     // resolves every id it still presents and would otherwise leave the missing items at (0, 0)
     // with no error, and a count alone accepts a repeat that compensates a removal ({1,2,3} become
-    // {2,2,2}), so the multiset of ids must be the first pass's.
-    let mut x_ord_map = spill::MappedU32::zeroed(tmp.path(), "x-of-ordinal.u32", n as usize)?;
-    let mut y_ord_map = spill::MappedU32::zeroed(tmp.path(), "y-of-ordinal.u32", n as usize)?;
-    let x_of_ordinal = x_ord_map.as_mut_slice();
-    let y_of_ordinal = y_ord_map.as_mut_slice();
-    {
-        let mut points_seen = 0u64;
-        let mut geom_anchor = 0u64;
-        let mut chunk: Vec<(u64, (u32, u32))> = Vec::with_capacity(JOIN_CHUNK_ROWS.min(n as usize));
-        let mut failure: Option<BuildError> = None;
-        let resolve = |chunk: &mut Vec<(u64, (u32, u32))>,
-                       xs: &mut [u32],
-                       ys: &mut [u32],
-                       points_seen: &mut u64,
-                       geom_anchor: &mut u64| {
-            join_chunk(chunk, &source_ids, |ordinal, source_id, (x, y)| {
-                let Some(ordinal) = ordinal else {
-                    return Err(input_changed(&format!(
-                        "the points file names entity {source_id}, which its first pass did not"
-                    )));
-                };
-                xs[ordinal as usize] = x;
-                ys[ordinal as usize] = y;
-                *points_seen += 1;
-                *geom_anchor = geom_anchor.wrapping_add(mix64(source_id));
-                Ok(())
-            })
-        };
-        input::scan_points(
-            &args.points,
-            &args.point_fields,
-            &args.extent,
-            args.limit,
-            |point| {
-                chunk.push((point.source_id, (point.qx, point.qy)));
-                if chunk.len() == JOIN_CHUNK_ROWS {
-                    if let Err(e) = resolve(
-                        &mut chunk,
-                        x_of_ordinal,
-                        y_of_ordinal,
-                        &mut points_seen,
-                        &mut geom_anchor,
-                    ) {
-                        failure = Some(e);
-                        return ControlFlow::Break(());
+    // {2,2,2}), so the multiset of ids must be that view's first pass's.
+    let mut geometry: Vec<ViewGeometry> = Vec::with_capacity(args.views.len());
+    // How many of this build's views hold each item — the denominator of the label-agreement
+    // identity below, and the population of each view's permutation.
+    let mut appearances: Vec<u32> = vec![0; n as usize];
+    for (index, view) in args.views.iter().enumerate() {
+        let mut x_map =
+            spill::MappedU32::zeroed(tmp.path(), &format!("x-of-ordinal-{index}.u32"), n as usize)?;
+        let mut y_map =
+            spill::MappedU32::zeroed(tmp.path(), &format!("y-of-ordinal-{index}.u32"), n as usize)?;
+        let mut present: Vec<u64> = vec![0; (n as usize).div_ceil(64)];
+        {
+            let xs = x_map.as_mut_slice();
+            let ys = y_map.as_mut_slice();
+            let mut points_seen = 0u64;
+            let mut geom_anchor = 0u64;
+            let mut chunk: Vec<(u64, (u32, u32))> =
+                Vec::with_capacity(JOIN_CHUNK_ROWS.min(n as usize));
+            let mut failure: Option<BuildError> = None;
+            let resolve = |chunk: &mut Vec<(u64, (u32, u32))>,
+                           xs: &mut [u32],
+                           ys: &mut [u32],
+                           present: &mut [u64],
+                           appearances: &mut [u32],
+                           points_seen: &mut u64,
+                           geom_anchor: &mut u64| {
+                join_chunk(chunk, &source_ids, |ordinal, source_id, (x, y)| {
+                    let Some(ordinal) = ordinal else {
+                        return Err(input_changed(&format!(
+                            "the points file names entity {source_id}, which its first pass did \
+                             not"
+                        )));
+                    };
+                    xs[ordinal as usize] = x;
+                    ys[ordinal as usize] = y;
+                    bit_set(present, ordinal as usize);
+                    appearances[ordinal as usize] += 1;
+                    *points_seen += 1;
+                    *geom_anchor = geom_anchor.wrapping_add(mix64(source_id));
+                    Ok(())
+                })
+            };
+            input::scan_points(
+                &view.points,
+                &view.point_fields,
+                view.projection,
+                &view.extent,
+                args.limit,
+                view.select.as_ref(),
+                |point| {
+                    chunk.push((point.source_id, (point.qx, point.qy)));
+                    if chunk.len() == JOIN_CHUNK_ROWS {
+                        if let Err(e) = resolve(
+                            &mut chunk,
+                            xs,
+                            ys,
+                            &mut present,
+                            &mut appearances,
+                            &mut points_seen,
+                            &mut geom_anchor,
+                        ) {
+                            failure = Some(e);
+                            return ControlFlow::Break(());
+                        }
                     }
-                }
-                ControlFlow::Continue(())
-            },
-        )?;
-        if let Some(error) = failure {
-            return Err(error);
+                    ControlFlow::Continue(())
+                },
+            )?;
+            if let Some(error) = failure {
+                return Err(error);
+            }
+            resolve(
+                &mut chunk,
+                xs,
+                ys,
+                &mut present,
+                &mut appearances,
+                &mut points_seen,
+                &mut geom_anchor,
+            )?;
+            if points_seen != view_anchors[index].rows {
+                return Err(input_changed(&format!(
+                    "view '{}': the points file yielded {points_seen} geometry rows, but its \
+                     first pass selected {}",
+                    view.view_id, view_anchors[index].rows
+                )));
+            }
+            if geom_anchor != view_anchors[index].mixed {
+                return Err(input_changed(&format!(
+                    "view '{}': the points file's geometry pass carries different ids than its \
+                     first pass did (row count unchanged)",
+                    view.view_id
+                )));
+            }
         }
-        resolve(
-            &mut chunk,
-            x_of_ordinal,
-            y_of_ordinal,
-            &mut points_seen,
-            &mut geom_anchor,
-        )?;
-        if points_seen != n {
-            return Err(input_changed(&format!(
-                "the points file yielded {points_seen} geometry rows, but its first pass \
-                 selected {n}"
-            )));
-        }
-        if geom_anchor != ids_anchor {
-            return Err(input_changed(
-                "the points file's geometry pass carries different ids than its first pass did \
-                 (row count unchanged)",
-            ));
+        geometry.push(ViewGeometry {
+            x: x_map,
+            y: y_map,
+            present,
+            rows: view_anchors[index].rows,
+        });
+    }
+    // **The anchor's Morton code, with the declared fallback** (decision 0112): an item absent
+    // from the anchor takes its code in the first-declared view that holds it. Materialised here
+    // rather than chosen inside the sort, so the batch loop reads one array and the choice is
+    // made once per item.
+    let mut anchor_x_map = spill::MappedU32::zeroed(tmp.path(), "x-anchor.u32", n as usize)?;
+    let mut anchor_y_map = spill::MappedU32::zeroed(tmp.path(), "y-anchor.u32", n as usize)?;
+    {
+        let xs = anchor_x_map.as_mut_slice();
+        let ys = anchor_y_map.as_mut_slice();
+        let order: Vec<usize> = std::iter::once(args.anchor)
+            .chain((0..args.views.len()).filter(|&v| v != args.anchor))
+            .collect();
+        for (ordinal, (x, y)) in xs.iter_mut().zip(ys.iter_mut()).enumerate() {
+            let held = order
+                .iter()
+                .copied()
+                .find(|&v| bit_get(&geometry[v].present, ordinal))
+                .expect("the union of the views' ids is where this ordinal came from");
+            *x = geometry[held].x.as_slice()[ordinal];
+            *y = geometry[held].y.as_slice()[ordinal];
         }
     }
+    let x_of_ordinal = anchor_x_map.as_slice();
+    let y_of_ordinal = anchor_y_map.as_slice();
     timer.end(BuildStage::GeometryRead, n);
 
-    drop(source_ids);
+    // `source_ids` is **held** past this point rather than dropped and re-read: pass one unions
+    // several files, so recovering it later would be one re-read per view against anchors that
+    // would each have to be carried anyway. 8 B/item, released at step 8c with the layer join.
     drop(term_keys);
     drop(term_ids);
     drop(row_counts);
@@ -952,17 +1144,6 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // global sort+dedup (a duplicate pair shares its ordinal, hence its batch), and one batch
     // covering everything reproduces the pre-batching assignment exactly.
     let mut entity_of_ordinal: Vec<u32> = vec![0; n as usize];
-    // Geometry in entity order, filled by the assignment walk below rather than by a pass of its
-    // own. Allocated here because that walk is where both indices are in hand: `entity` ascends
-    // with position, so these two writes stream, and the *ordinal* is the random side — a gather
-    // beside the random write into `entity_of_ordinal` this walk already performs, which is the
-    // cheapest place in the build to pay for it. A standalone permute over the same data measured
-    // slower at 25M than the pass it replaced (docs/artifact-delivery.md), because it is serial
-    // where a points-file scan decodes on a worker pool.
-    let mut x_map = spill::MappedU32::zeroed(tmp.path(), "x-of-entity.u32", n as usize)?;
-    let mut y_map = spill::MappedU32::zeroed(tmp.path(), "y-of-entity.u32", n as usize)?;
-    let x_of_entity = x_map.as_mut_slice();
-    let y_of_entity = y_map.as_mut_slice();
     // Exact per-term post-dedup counts, accumulated as bands are emitted; drives the band
     // sweep's offsets. u32 is sound (a term's entities are distinct, so count <= n < 2^32).
     let mut term_counts: Vec<u32> = vec![0; term_count as usize];
@@ -978,6 +1159,20 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     let mut pair_count = 0u64;
     let mut over_bound_items = 0u64;
     let mut entity_base = 0u64;
+    // The entity→term transpose (contracts §2.4), written in the same walk that assigns entity
+    // ids: entities ascend with position within a batch and bases ascend across batches, so this
+    // loop already visits them in the strictly ascending order the writer requires, and each
+    // item's `sig` is already its sorted, deduplicated term list. Writing it here rather than from
+    // the bands costs no second pass and no second relation in memory.
+    let entity_terms_dir = args
+        .out
+        .join(PREFIX)
+        .join("partitions")
+        .join(PHASH)
+        .join(tessera_store::ENTITY_TERMS_DIR);
+    let mut entity_terms = tessera_store::EntityTermsWriter::create(&entity_terms_dir)
+        .map_err(|e| BuildError::Invalid(format!("entity-terms transpose: {e}")))?;
+    let mut sig_terms: Vec<u32> = Vec::new();
     for k in 0..plan.batches {
         let ordinal_lo = k * plan.batch_items;
         let ordinal_hi = ((k + 1) * plan.batch_items).min(n);
@@ -1058,17 +1253,39 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         for (position, rec) in recs.iter().enumerate() {
             let entity = (entity_base + position as u64) as u32;
             entity_of_ordinal[rec.ordinal as usize] = entity;
-            // Geometry into entity order, here rather than in a pass of its own. Every ordinal is
-            // visited exactly once across all batches (they partition ordinal space) and entity is
-            // a fresh position each time, so every slot is written exactly once — the same
-            // bijection the old scan relied on, reached without a traversal.
-            x_of_entity[entity as usize] = x_of_ordinal[rec.ordinal as usize];
-            y_of_entity[entity as usize] = y_of_ordinal[rec.ordinal as usize];
             let local = (rec.ordinal as u64 - ordinal_lo) as usize;
             let sig = &packed[starts[local] as usize..starts[local + 1] as usize];
+            // **The label is the entity's, not the row's** (`views.md` §7): every view holding
+            // this item must have given it the same term set. `sig` is the deduplicated union
+            // over the views, and `distinct_of_ordinal` is the sum of each view's own distinct
+            // count — so the two agree exactly when every view contributed the whole union, and
+            // the identity is a refusal rather than a hash comparison.
+            //
+            // Checked only on the per-view route: a shared relation is entity space already and
+            // is scanned once, so there is nothing for two views to disagree about
+            // (`crate::AccessRoute`).
+            if per_view_labels
+                && distinct_of_ordinal[rec.ordinal as usize] as u64
+                    != sig.len() as u64 * appearances[rec.ordinal as usize] as u64
+            {
+                return Err(BuildError::Invalid(format!(
+                    "entity_id {} carries different access labels in different views. A label is \
+                     the entity's, not the row's (views §7): it is one set wherever the entity \
+                     appears, and a re-label is a delete plus a re-ingest (decision 0047). The \
+                     views this build reads are {}",
+                    source_ids[rec.ordinal as usize],
+                    args.views
+                        .iter()
+                        .map(|v| format!("'{}' ({})", v.view_id, v.points.display()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            }
+            sig_terms.clear();
             for &value in sig {
                 let term = term_of(value);
                 let band = band_los.partition_point(|&lo| lo <= term) - 1;
+                sig_terms.push(term);
                 band_writers[band].push(term, entity)?;
                 term_counts[term as usize] =
                     term_counts[term as usize].checked_add(1).ok_or_else(|| {
@@ -1078,6 +1295,9 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
                         ))
                     })?;
             }
+            entity_terms
+                .push(entity, &sig_terms)
+                .map_err(|e| BuildError::Invalid(format!("entity-terms transpose: {e}")))?;
         }
         entity_base += recs.len() as u64;
         store.delete(k)?;
@@ -1088,12 +1308,12 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
             "batches assigned {entity_base} entities for {n} items"
         )));
     }
-    // The ordinal-space geometry has served its two readers — the sort's Morton tiebreak and the
-    // assignment walk — and is released here rather than at the end of the build. At 10⁹ that is
-    // 8 GB of dirty mapped pages returned before the band sweep and the postings write start
-    // competing for page cache.
-    drop(x_ord_map);
-    drop(y_ord_map);
+    // The anchor's Morton geometry has served its one reader — the sort's tiebreak — and is
+    // released here rather than at the end of the build. At 10⁹ that is 8 GB of dirty mapped
+    // pages returned before the band sweep and the postings write start competing for page
+    // cache. Each view's own geometry stays: pass two is what reads it.
+    drop(anchor_x_map);
+    drop(anchor_y_map);
     let band_receipts: Vec<spill::SpillReceipt> = band_writers
         .into_iter()
         .map(|w| w.finish())
@@ -1106,45 +1326,18 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         );
     }
 
+    let entity_terms_paths = entity_terms
+        .finish()
+        .map_err(|e| BuildError::Invalid(format!("entity-terms transpose: {e}")))?;
+    for path in &entity_terms_paths {
+        fsync_file(path)?;
+    }
+
     let partition_dir = args.out.join(PREFIX).join("partitions").join(PHASH);
     let terms_dir = partition_dir.join("terms");
     let entities_dir = partition_dir.join("entities");
-    let view_dir = partition_dir.join("views").join(&args.view_id);
-    let segment_dir = view_dir.join("segments").join(SEG_ID);
-    for dir in [&terms_dir, &entities_dir, &view_dir, &segment_dir] {
+    for dir in [&terms_dir, &entities_dir] {
         std::fs::create_dir_all(dir).map_err(|e| BuildError::io(dir, e))?;
-    }
-
-    // The source ids are needed twice more (external ids, geometry) and cost 8N to hold across
-    // the sort above; re-reading the points file is cheaper than carrying them through it —
-    // *provided the file has not changed.* The re-read is verified against the first pass's
-    // anchors: row count, order-independent id sum, and (after the sort) the extrema. Without
-    // this, a points file swapped since stage 1 would silently pair every entity with a wrong
-    // external id — the geometry pass's own checks compare the changed file against itself.
-    let mut source_ids = read_source_ids(args, Some(n as usize))?;
-    if source_ids.len() as u64 != n {
-        return Err(input_changed(&format!(
-            "the points file re-read for external ids yielded {} rows, not the {} its first \
-             pass did",
-            source_ids.len(),
-            n
-        )));
-    }
-    if source_ids
-        .iter()
-        .fold(0u64, |acc, &id| acc.wrapping_add(mix64(id)))
-        != ids_anchor
-    {
-        return Err(input_changed(
-            "the points file re-read for external ids carries different ids than its first \
-             pass did (row count unchanged)",
-        ));
-    }
-    source_ids.par_sort_unstable();
-    if source_ids[0] != ids_first || *source_ids.last().expect("non-empty") != ids_last {
-        return Err(input_changed(
-            "the points file's id range changed between its first pass and the re-read",
-        ));
     }
 
     timer.end(BuildStage::Assignment, n);
@@ -1306,12 +1499,46 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // pins; the scan mints into it for every novel key, and its final state — carried past this
     // call — is what step 11 below records into `MANIFEST.vocabularies`.
     let mut minters = args.schema.open_minters();
-    let (attributes_by_entity, coverage) =
-        read_attributes_by_entity(args, n, &source_ids, &entity_of_ordinal, &mut minters)?;
+    // The columns' files live in the same `.build-tmp/` as the spill and band files, so a killed
+    // build leaves them to the next `TmpDir::create` exactly as it leaves those.
+    let scratch = crate::column::ColumnScratch::new(tmp.path());
+    // **Which order the string arenas are filled in, decided here and printed.** The inputs are
+    // Parquet footers and the budget this plan was derived under, both known before a row is
+    // joined; the two orders write the same bundle, so this is a cost decision (`residency.rs`,
+    // [`crate::ArenaOrder`]).
+    let arena = crate::residency::decide_arena_order(args, plan.budget);
+    arena.report();
+    let (attributes_by_entity, coverage) = read_attributes_by_entity(
+        args,
+        n,
+        &source_ids,
+        &entity_of_ordinal,
+        &mut minters,
+        &scratch,
+        arena.order,
+    )?;
     // **Printed here, where the join has just happened and the numbers are the join's own.** The
     // linear build reports the identical figures from its own pass, so the two builds agree about
     // coverage exactly as they agree about bytes.
     crate::report_attribute_coverage(&coverage);
+
+    // ---- 8b. the group-scoped column families (`views.md` §5) --------------------------
+    // Here, beside the attribute tail, because it wants exactly what the tail wants: `source_ids`
+    // and `entity_of_ordinal`, both alive, and entity ids final under I9. One column per view of
+    // the group, in entity space; nothing per row space.
+    let (scoped_paths, scoped_render) = write_scoped_columns(
+        args,
+        &partition_dir,
+        n,
+        &source_ids,
+        &entity_of_ordinal,
+        &mut minters,
+        &scratch,
+    )?;
+    // Which of those columns each view's row space carries (`views.md` §5) — resolved once, here,
+    // rather than per view inside the loop below, so the rule that decides it is stated in one
+    // place and the loop is an index.
+    let scoped_render_targets = scoped_render_targets(args, &scoped_render);
 
     timer.end(BuildStage::AttributeTail, n);
 
@@ -1324,23 +1551,60 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // tables are read whole and the published memberships stay resident, and this ran unattributed
     // inside the attribute tail until the campaign's kills made the distinction worth having
     // (`residency.rs`).
+    let view_ids: Vec<String> = args.views.iter().map(|v| v.view_id.clone()).collect();
+    let view_frames: Vec<tessera_store::derived::ViewFrame> = args
+        .views
+        .iter()
+        .map(|v| tessera_store::derived::ViewFrame::new(&v.view_id, v.projection, v.extent))
+        .collect();
     let mut published_layers = if args.layers.is_empty() {
         crate::layers::PublishedLayers::default()
     } else {
         {
-            let plan = crate::layers::read(&args.layers, &args.layer_inputs)?;
+            let mut plan = crate::layers::read(
+                &args.layers,
+                &args.layer_inputs,
+                &args.scoped_layers,
+                // **A frame per view, never the anchor's for all of them** (decision 0111): a
+                // shape layer is canonicalised in each view it is drawn in, against that view's
+                // own projection and extent, so a layer spanning frames stores a different
+                // canonical form under each view's name.
+                &view_frames,
+                tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
+                // The build's own `.build-tmp/`, which the member spill writes its runs into —
+                // still open here, and swept by the `close` below whether this stage succeeds or
+                // not.
+                tmp.path(),
+                args.memory_budget.unwrap_or_else(detect_memory_budget),
+            )?;
+            crate::report_shapes(&plan.shape_reports);
+            // **A contiguous id range makes the search a subtraction**, and whether it is
+            // contiguous is checked rather than assumed. `source_ids` is sorted and free of
+            // duplicates, so a range spanning exactly its own length can only be
+            // `ids_first + i` at every `i` — the fast path is provably the same answer, not a
+            // convention about how a caller numbers its rows.
+            //
+            // It is worth the branch because this closure runs **once per member entry**: a
+            // lineage list per point at the Overture rung is 3×10⁸ of them, and a binary search
+            // into 74M sorted `u64` is ~27 dependent cache misses where the subtraction is one.
+            let dense = ids_last - ids_first + 1 == source_ids.len() as u64;
             crate::layers::publish(
-                &plan,
+                &mut plan,
                 &|source| {
-                    source_ids
-                        .binary_search(&source)
-                        .ok()
-                        .map(|ordinal| entity_of_ordinal[ordinal] as u64)
+                    let ordinal = if dense {
+                        source
+                            .checked_sub(ids_first)
+                            .filter(|o| (*o as usize) < source_ids.len())
+                            .map(|o| o as usize)
+                    } else {
+                        source_ids.binary_search(&source).ok()
+                    };
+                    ordinal.map(|ordinal| entity_of_ordinal[ordinal] as u64)
                 },
                 n,
                 &args.out.join(crate::PREFIX),
                 crate::PHASH,
-                &args.view_id,
+                &view_ids,
                 &crate::layers::predicate_artifact_keys(
                     &args.layers,
                     &args.schema,
@@ -1352,7 +1616,6 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     };
 
     drop(source_ids);
-    drop(entity_of_ordinal);
 
     crate::write_containment_report(&args.out, &published_layers)?;
 
@@ -1363,11 +1626,24 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // here (stage 5, permanent under I9) and the values have just been read, which are the two
     // things the emit needs. It cannot ride on `PostingsWrite` — that stage runs before the
     // attribute values exist.
-    let filter_paths = write_filter_postings(&partition_dir, &args.schema, &attributes_by_entity)?;
-    // The record blob rides the same stage boundary, for the same two reasons: entity ids are
-    // final (I9) and the attribute values are in hand. Its files join the manifest digest at
-    // step 11 with everything else.
+    let (filter_paths, text_index) = write_filter_postings(
+        &partition_dir,
+        &args.schema,
+        &attributes_by_entity,
+        plan.budget,
+    )?;
+    // The text columns' share, charged out of the block rather than measured beside it — the two
+    // interleave over one column loop, so a boundary in time cannot separate them.
+    timer.charge(BuildStage::TextIndex, text_index.elapsed, text_index.terms);
+    timer.end(BuildStage::FilterPostings, n);
+
+    // The record blob wants the same two things the postings did — entity ids final under I9, and
+    // the attribute values in hand — so it runs here. Its files join the manifest digest at step 11
+    // with everything else. **Its own stage**: it and the postings and the release below were one
+    // number for three jobs, which is why the 615 s this block cost at 7.4×10⁷ points could be
+    // modelled and not read.
     let record_paths = write_record_blob(&partition_dir, &args.schema, &attributes_by_entity)?;
+    timer.end(BuildStage::RecordBlob, n);
     // **Everything past here wants only the render columns**, and the two passes that wanted the
     // rest have just run. `permute_attribute_tail` skips a non-render column outright (its home is
     // entity space, and giving it a slot in every row is the per-row cost §10.3's routing exists to
@@ -1383,188 +1659,246 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         .zip(args.schema.attributes.iter())
     {
         if !attribute.render {
-            *column = EntityColumn::filled(attribute.ty, 0);
+            column.release();
         }
     }
-    timer.end(BuildStage::FilterPostings, n);
+    timer.end(BuildStage::ColumnRelease, n);
 
-    // ---- 9. the tiler: (morton, tessera_id) ascending, no further tiebreak (contracts
-    // §2.6 r6) — `tessera_id` is computed here, BEFORE the sort (2026-07-30 fold, memo §6):
-    // `priority = high16(tessera_id)` is now the sort key, so the identity must exist before
-    // `sort_unstable_by` runs, not be written at the row after it. -------------------------
-    // Indexed parallel map: the collect preserves entity order, and `forward`/`morton_of` are
-    // pure, so this is byte-identical to the serial loop it replaces.
-    let mut rows: Vec<RowRec> = (0..n as usize)
-        .into_par_iter()
-        .map(|entity| {
-            let tessera_id = args
-                .identity_key
-                .forward(args.shard_id, EntityId::new(entity as u64))?;
-            Ok(RowRec {
-                // From the quantised form directly: `split32`'s cell half is by
-                // construction the code `morton_of` would give for the same point.
-                morton: split32(x_of_entity[entity], y_of_entity[entity]).0.raw(),
-                entity: entity as u32,
-                priority: tessera_id.priority(),
-                _pad: 0,
-            })
-        })
-        .collect::<Result<_>>()?;
-    // The comparator is a total order — `(morton, priority, full tessera_id)`, and `forward`
-    // is a bijection per entity — so the parallel unstable sort has exactly one output.
-    // `IdentityKey` is a pure value type; `forward` takes `&self` and is safe to call from
-    // every worker at once, and the tie path's `expect` stays loud through rayon's panic
-    // propagation.
-    rows.par_sort_unstable_by(|a, b| a.cmp(b, &args.identity_key, args.shard_id));
+    // ---- 9/10. pass two: one row space per view (`views.md` §7) ----------------------
+    // **The build below is what it always was, run once per view.** What is not one-view-at-a-
+    // time is everything above: identity, the dictionary, the postings, the external ids and the
+    // attribute columns are entity space and were built once, over the union of every view's
+    // items. Here each view transforms through its own projection, quantises against its own
+    // frame (decision 0040), Morton-sorts and writes its segment, its permutation and its
+    // row→entity file.
+    //
+    // A view holds a **subset** of entity space — its `present` bits — so its permutation is
+    // sentinel wherever it does not, and `row_count` is the view's population rather than `n`.
+    let mut view_files: Vec<PathBuf> = Vec::new();
+    let mut segments: Vec<tessera_store::manifest::SegmentDescriptor> = Vec::new();
+    let mut occupancies: Vec<crate::Occupancy> = Vec::with_capacity(args.views.len());
+    let mut artifact_paths: Vec<PathBuf> = Vec::new();
+    // Accumulated across the views, like the extents beside them: what a scoped layer's artifacts
+    // came to in each view is per view or it says nothing (`views.md` §3.5).
+    let mut artifact_levels: Vec<crate::artifact_pass::LevelLayoutReport> = Vec::new();
+    for (index, view) in args.views.iter().enumerate() {
+        let view_dir = tessera_store::view_path(&partition_dir, &view.view_id);
+        let segment_dir = view_dir.join("segments").join(SEG_ID);
+        std::fs::create_dir_all(&segment_dir).map_err(|e| BuildError::io(&segment_dir, e))?;
 
-    timer.end(BuildStage::TilerSort, n);
-
-    // ---- 10. the segment -------------------------------------------------------------
-    let morton_path = segment_dir.join("morton.u32");
-    // **The resolution this frame actually gave the corpus**, counted off the same sorted codes
-    // that are about to become `morton.u32` — the linear build counts the identical thing at its
-    // own segment write. Nothing is retained: `rows` is already `(morton, tessera_id)` ascending,
-    // so distinct cells is a comparison per row (see `Occupancy::of_sorted_codes`).
-    let occupancy = crate::Occupancy::of_sorted_codes(rows.iter().map(|r| r.morton));
-    write_morton_codes(&morton_path, rows.iter().map(|r| r.morton))
-        .map_err(|e| BuildError::io(&morton_path, e))?;
-
-    let permutation_path = view_dir.join("permutation.bin");
-    write_permutation_iter(
-        &permutation_path,
-        rows.iter().map(|r| EntityId::new(r.entity as u64)),
-        n,
-    )
-    .map_err(|e| BuildError::io(&permutation_path, e))?;
-    fsync_file(&permutation_path)?;
-
-    // The row→entity direction beside it (`tessera_store::row_entity`), from the same sorted rows
-    // the permutation was scattered from.
-    let row_entity_path = view_dir.join(tessera_store::ROW_ENTITY_FILE);
-    // Collected **once** and kept: this is the row→entity permutation, and the attribute tail
-    // below wants the same vector. It used to be gathered here and again there, so 4 B per row was
-    // held twice for the whole segment write — 1 GB at 2.5×10⁸ and 4 GB at 10⁹, for two passes over
-    // `rows` producing identical bytes. Neither copy was dropped before the record batch, which is
-    // the one place the build is asked to hold as little as possible beside it.
-    let entity_row: Vec<u32> = rows.iter().map(|r| r.entity).collect();
-    tessera_store::write_row_entity(&row_entity_path, &entity_row)
-        .map_err(|e| BuildError::io(&row_entity_path, e))?;
-    fsync_file(&row_entity_path)?;
-
-    let columns_path = segment_dir.join("columns.arrow");
-    let mut presence_paths: Vec<PathBuf> = Vec::new();
-    {
-        // Built and released one column at a time: the record batch itself is the largest thing
-        // this build ever holds, so nothing that can be dropped first is kept alongside it.
-        // Indexed parallel gathers — collect preserves row order, so bytes are unchanged; at
-        // 10⁹ rows the serial versions are a billion random 4-byte reads each.
-        // The residual is the low half of the same `split32` whose high half became the row's
-        // Morton code above — one splitting of one fixed-point position, so `columns.arrow` and
-        // `morton.u32` cannot describe different points.
-        let residual_row: Vec<u32> = rows
-            .par_iter()
-            .map(|r| {
-                let entity = r.entity as usize;
-                split32(x_of_entity[entity], y_of_entity[entity]).1
-            })
-            .collect();
-        drop(x_map);
-        drop(y_map);
-        drop(rows);
-        // `forward` is fallible (Important I-1): a checked conversion, never `as u32`. At build
-        // the allocator cap makes the error unreachable, and collecting into a `Result` is what
-        // keeps it that way rather than assuming it. This is the permutation of an identity
-        // vector that already existed before the sort (step 9 above), not its first computation.
-        let tessera_row: Vec<u64> = entity_row
-            .par_iter()
-            .map(|&e| {
-                args.identity_key
-                    .forward(args.shard_id, EntityId::new(e as u64))
-                    .map(|id| id.raw())
-            })
-            .collect::<std::result::Result<_, _>>()
-            .map_err(BuildError::Identity)?;
-        // The declared attribute tail, permuted into the same row order as everything above.
-        //
-        // **Gathered per entity, then permuted — not read in row order.** The attribute pass
-        // visits the points file in *file* order, and `entity_row` is the row-order permutation
-        // of entity ids, so the tail is materialised entity-major first and indexed through
-        // `entity_row` exactly as `residual_row` is. Reading the file a third time in row order
-        // is the alternative, and it is a random-access read of a multi-gigabyte parquet file.
-        //
-        // Held after `x_of_entity`/`y_of_entity` are dropped, so the peak is the record batch plus
-        // one attribute tail rather than both — at the widths §3.6 argues for (1–4 B/row against
-        // geometry's 8) the tail is the smaller term either way.
-        let tail = permute_attribute_tail(&args.schema, attributes_by_entity, &entity_row)?;
-        drop(entity_row);
-        for (column, rows) in tail.presence {
-            if let Some(path) =
-                tessera_store::flush::write_render_presence(&segment_dir, &column, rows, n as u32)
-                    .map_err(|e| BuildError::Invalid(format!("attribute '{column}': {e}")))?
-            {
-                presence_paths.push(path);
+        // The view's geometry, permuted from ordinal into entity space — the one scatter this
+        // costs, against a parquet re-read per view (`views.md` §8's file arithmetic).
+        let mut x_map = spill::MappedU32::zeroed(tmp.path(), "x-of-entity.u32", n as usize)?;
+        let mut y_map = spill::MappedU32::zeroed(tmp.path(), "y-of-entity.u32", n as usize)?;
+        {
+            let xs = x_map.as_mut_slice();
+            let ys = y_map.as_mut_slice();
+            let (view_x, view_y) = (geometry[index].x.as_slice(), geometry[index].y.as_slice());
+            for (ordinal, &entity) in entity_of_ordinal.iter().enumerate() {
+                xs[entity as usize] = view_x[ordinal];
+                ys[entity as usize] = view_y[ordinal];
             }
         }
-        write_columns(&columns_path, tessera_row, residual_row, tail.columns)
-            .map_err(|e| BuildError::io(&columns_path, e))?;
+        // Membership in entity space, from the same permutation of the ordinal-space bits.
+        let mut member: Vec<u64> = vec![0; (n as usize).div_ceil(64)];
+        for (ordinal, &entity) in entity_of_ordinal.iter().enumerate() {
+            if bit_get(&geometry[index].present, ordinal) {
+                bit_set(&mut member, entity as usize);
+            }
+        }
+        let x_of_entity = x_map.as_slice();
+        let y_of_entity = y_map.as_slice();
+
+        // §2.6 r6: `(morton, tessera_id)` ascending, no further tiebreak. `tessera_id` is
+        // computed BEFORE the sort (2026-07-30 fold, memo §6) — `priority = high16(tessera_id)`
+        // is a sort key, so the identity must exist before `sort_unstable_by` runs.
+        let mut rows: Vec<RowRec> = (0..n as usize)
+            .into_par_iter()
+            .filter(|entity| bit_get(&member, *entity))
+            .map(|entity| {
+                let tessera_id = args
+                    .identity_key
+                    .forward(args.shard_id, EntityId::new(entity as u64))?;
+                Ok(RowRec {
+                    // From the quantised form directly: `split32`'s cell half is by
+                    // construction the code `morton_of` would give for the same point.
+                    morton: split32(x_of_entity[entity], y_of_entity[entity]).0.raw(),
+                    entity: entity as u32,
+                    priority: tessera_id.priority(),
+                    _pad: 0,
+                })
+            })
+            .collect::<Result<_>>()?;
+        rows.par_sort_unstable_by(|a, b| a.cmp(b, &args.identity_key, args.shard_id));
+        let rows_in_view = rows.len() as u32;
+        if rows_in_view as u64 != geometry[index].rows {
+            return Err(input_changed(&format!(
+                "view '{}': {rows_in_view} rows in the segment for the {} its points file \
+                 selected",
+                view.view_id, geometry[index].rows
+            )));
+        }
+        timer.end(BuildStage::TilerSort, rows_in_view as u64);
+
+        let morton_path = segment_dir.join("morton.u32");
+        // **The resolution this frame actually gave the corpus**, counted off the same sorted
+        // codes that are about to become `morton.u32`. Nothing is retained: `rows` is already
+        // `(morton, tessera_id)` ascending, so distinct cells is a comparison per row.
+        occupancies.push(crate::Occupancy::of_sorted_codes(
+            rows.iter().map(|r| r.morton),
+        ));
+        write_morton_codes(&morton_path, rows.iter().map(|r| r.morton))
+            .map_err(|e| BuildError::io(&morton_path, e))?;
+
+        // **Bounded by entity space, populated by the view.** An entity this view does not hold
+        // keeps the row-absent sentinel `PermutationWriter::create` laid down, which is exactly
+        // what a sparse view is (`views.md` §8).
+        let permutation_path = view_dir.join("permutation.bin");
+        write_permutation_iter(
+            &permutation_path,
+            rows.iter().map(|r| EntityId::new(r.entity as u64)),
+            n,
+        )
+        .map_err(|e| BuildError::io(&permutation_path, e))?;
+        fsync_file(&permutation_path)?;
+
+        // The row→entity direction beside it (`tessera_store::row_entity`), from the same sorted
+        // rows the permutation was scattered from.
+        let row_entity_path = view_dir.join(tessera_store::ROW_ENTITY_FILE);
+        let entity_row: Vec<u32> = rows.iter().map(|r| r.entity).collect();
+        tessera_store::write_row_entity(&row_entity_path, &entity_row)
+            .map_err(|e| BuildError::io(&row_entity_path, e))?;
+        fsync_file(&row_entity_path)?;
+
+        let columns_path = segment_dir.join("columns.arrow");
+        let mut presence_paths: Vec<PathBuf> = Vec::new();
+        {
+            // The residual is the low half of the same `split32` whose high half became the
+            // row's Morton code above — one splitting of one fixed-point position, so
+            // `columns.arrow` and `morton.u32` cannot describe different points.
+            let residual_row: Vec<u32> = rows
+                .par_iter()
+                .map(|r| {
+                    let entity = r.entity as usize;
+                    split32(x_of_entity[entity], y_of_entity[entity]).1
+                })
+                .collect();
+            drop(rows);
+            // `forward` is fallible (Important I-1): a checked conversion, never `as u32`.
+            let tessera_row: Vec<u64> = entity_row
+                .par_iter()
+                .map(|&e| {
+                    args.identity_key
+                        .forward(args.shard_id, EntityId::new(e as u64))
+                        .map(|id| id.raw())
+                })
+                .collect::<std::result::Result<_, _>>()
+                .map_err(BuildError::Identity)?;
+            // The declared attribute tail, permuted into this view's row order. Gathered per
+            // entity and then permuted — the values are entity space and are shared by every
+            // view, which is the whole of `views.md` §1's factoring.
+            let tail = permute_attribute_tail(
+                &args.schema,
+                &attributes_by_entity,
+                &scoped_render_targets[index]
+                    .iter()
+                    .map(|&c| &scoped_render[c])
+                    .collect::<Vec<_>>(),
+                &entity_row,
+                &scratch,
+            )?;
+            for (column, rows) in tail.presence {
+                if let Some(path) = tessera_store::flush::write_render_presence(
+                    &segment_dir,
+                    &column,
+                    rows,
+                    rows_in_view,
+                )
+                .map_err(|e| BuildError::Invalid(format!("attribute '{column}': {e}")))?
+                {
+                    presence_paths.push(path);
+                }
+            }
+            write_columns(&columns_path, tessera_row, residual_row, tail.columns)
+                .map_err(|e| BuildError::io(&columns_path, e))?;
+        }
+        fsync_file(&columns_path)?;
+        fsync_file(&morton_path)?;
+        drop(x_map);
+        drop(y_map);
+        timer.end(BuildStage::SegmentWrite, rows_in_view as u64);
+
+        // ---- 10b. the post-bundle artifact pass, per view (decision 0094's first half) ----
+        //
+        // **Here and not at step 8c**, where the layers were published: the pick reads where each
+        // membership landed in *row* space, and this view's row space did not exist until the
+        // permutation above.
+        let artifact_store = std::mem::take(&mut published_layers.store);
+        let artifact_pass = crate::artifact_pass::run(
+            &mut published_layers,
+            &artifact_store,
+            &args.out.join(crate::PREFIX),
+            crate::PHASH,
+            &view.view_id,
+            rows_in_view,
+            &plugin.data_plugin_hash(),
+        );
+        published_layers.store = artifact_store;
+        crate::artifact_pass::report(&artifact_pass);
+        artifact_levels.extend(artifact_pass.levels.iter().cloned());
+        // **Accumulated across views, not replaced.** Every artifact extent is keyed by
+        // `(view, layer, level)`, so each view's pass adds its own; assigning would leave the
+        // manifest carrying the last view's alone.
+        published_layers
+            .tile_index_extents
+            .extend(artifact_pass.tile_index_extents.iter().cloned());
+        published_layers
+            .row_column_extents
+            .extend(artifact_pass.row_column_extents.iter().cloned());
+        published_layers
+            .containment_extents
+            .extend(artifact_pass.containment_extents.iter().cloned());
+        published_layers
+            .shape_rows_extents
+            .extend(artifact_pass.shape_rows_extents.iter().cloned());
+        published_layers
+            .shape_held_extents
+            .extend(artifact_pass.shape_held_extents.iter().cloned());
+        artifact_paths.extend(artifact_pass.paths.iter().cloned());
+
+        view_files.push(permutation_path);
+        view_files.push(row_entity_path);
+        view_files.push(columns_path);
+        view_files.push(morton_path);
+        view_files.extend(presence_paths);
+        segments.push(tessera_store::manifest::SegmentDescriptor {
+            view: view.view_id.clone(),
+            // **The declared incarnation** (decision 0115): a build coins each key once.
+            incarnation: tessera_store::manifest::DECLARED_INCARNATION,
+            seg_id: SEG_ID.to_string(),
+            row_count: rows_in_view,
+            entity_lo: 0,
+            entity_hi: n,
+        });
     }
-    fsync_file(&columns_path)?;
-    fsync_file(&morton_path)?;
-    // The spill directory closes **here**, not after the postings write where it used to: the
-    // geometry pass now keeps its entity-major scratch in it too (`spill::MappedU32`), so the
-    // directory's lifetime is the whole of the build's transient on-disk state rather than the
-    // pairs half of it. Both mappings are dropped by this point, so the tree is unbusy.
+    drop(geometry);
+    drop(entity_of_ordinal);
+    // The spill directory closes **here**: every view's ordinal-space geometry and every
+    // entity-space scatter are dropped by this point, so the tree is unbusy.
     tmp.close()?;
 
-    timer.end(BuildStage::SegmentWrite, n);
-
-    // ---- 10b. the post-bundle artifact pass (decision 0094's first half) ---------------
-    //
-    // **Here and not at step 8**, where the layers were published: the pick reads where each
-    // membership landed in *row* space, and row space did not exist until the permutation two
-    // statements above. Before the manifests, so the layouts it records and the extents it writes
-    // ride the write the build was always going to make — see `crate::artifact_pass`.
-    // Taken out of the report so the pass can edit the registered records beside it, and dropped
-    // with this statement's scope: the records are what the manifest carries and the store is only
-    // what the pass observes.
-    let artifact_store = std::mem::take(&mut published_layers.store);
-    let artifact_pass = crate::artifact_pass::run(
-        &mut published_layers,
-        &artifact_store,
-        &args.out.join(crate::PREFIX),
-        crate::PHASH,
-        &args.view_id,
-        n as u32,
-        &plugin.data_plugin_hash(),
-    );
-    drop(artifact_store);
-    crate::artifact_pass::report(&artifact_pass);
-    published_layers
-        .tile_index_extents
-        .clone_from(&artifact_pass.tile_index_extents);
-    published_layers
-        .row_column_extents
-        .clone_from(&artifact_pass.row_column_extents);
-    published_layers
-        .containment_extents
-        .clone_from(&artifact_pass.containment_extents);
-
     // ---- 11. manifests ---------------------------------------------------------------
-    let mut other_paths = vec![
-        postings_path,
-        permutation_path,
-        row_entity_path,
-        columns_path,
-        morton_path,
-    ];
+    let mut other_paths = vec![postings_path];
+    other_paths.extend(entity_terms_paths);
+    other_paths.extend(view_files);
     other_paths.extend(filter_paths);
+    other_paths.extend(scoped_paths);
     other_paths.extend(record_paths);
     other_paths.extend(pairs_path);
     other_paths.extend(ext_locator_path);
-    other_paths.extend(presence_paths);
     other_paths.extend(published_layers.paths.iter().cloned());
-    other_paths.extend(artifact_pass.paths.iter().cloned());
-    let report = write_manifests(
+    other_paths.extend(artifact_paths);
+    let mut report = write_manifests(
         args,
         &BundleFiles {
             dict_paths,
@@ -1579,134 +1913,16 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         plan.recorded_batch_items,
         &minters,
         &published_layers,
-        occupancy,
+        &segments,
+        &occupancies,
     )?;
     // Reported in bytes, not rows: this stage re-reads and SHA-256s every byte the build wrote,
     // so it scales with bundle size rather than with item count.
     timer.end(BuildStage::Manifests, report.bundle_bytes);
+    report.attribute_coverage = coverage;
+    report.arena_order = arena.order;
+    report.artifact_levels = artifact_levels;
     Ok(report)
-}
-
-/// One attribute's values in entity order: a typed column, with presence beside it.
-///
-/// **This replaced a `Vec<ScalarValue>` per column, and the difference is the whole reason a build
-/// above 10⁸ items completes.** `ScalarValue` carries a `Utf8(String)` variant, so every slot costs
-/// 32 bytes whatever the column declared — a `u8` column pays for a pointer, a length, a capacity
-/// and a tag. One such vector per column is allocated *and written* for every entity before the
-/// attribute pass reads its first row, so the cost is paid in full even by a build that fails
-/// immediately after. At 2,422,486 items it is a rounding error beside the geometry pass's 28N; at
-/// 250,000,000 items across five columns it is 40 GB, and the build is OOM-killed having produced
-/// nothing but the postings of the pass before it. `filter-index` §4 priced this as "outside the
-/// memory plan regardless" — typed, the same five columns are the schema's declared 12 B/row, and
-/// the ceiling that paragraph describes is no longer where the plan runs out.
-///
-/// **Presence is a bit rather than a value, because a typed column has no spare one.**
-/// `ScalarValue::Null` gave the old intermediate an absent representation for free; a `Vec<u8>` has
-/// no `u8` to reserve. So absence is carried alongside, which is also the shape the output already
-/// wanted — the presence bitmaps written beside each render column are exactly this. It costs an
-/// eighth of a byte per entity: 31 MB at 250,000,000, against the gigabytes the typing saves.
-///
-/// A slot whose value is absent keeps its type's zero. That is what every consumer of an absent
-/// value already reads — the reserved code 0 for a category, the render placeholder elsewhere — so
-/// no consumer distinguishes "absent" by the payload, only by this bit.
-pub(crate) struct EntityColumn {
-    data: ScalarColumnData,
-    present: Vec<u64>,
-}
-
-impl EntityColumn {
-    pub(crate) fn filled(ty: ScalarType, n: usize) -> Self {
-        Self {
-            data: ScalarColumnData::filled(ty, n),
-            present: vec![0u64; n.div_ceil(64)],
-        }
-    }
-
-    /// Collect an entity-ordered sequence into a typed column, for a caller that already holds the
-    /// values in entity order rather than discovering them in file order.
-    /// `ExactSizeIterator` rather than `IntoIterator`, so the length is known without collecting:
-    /// buffering into a `Vec<ScalarValue>` first would rebuild, for one moment, exactly the
-    /// 32-B-per-value intermediate this type exists to avoid.
-    pub(crate) fn from_values<I>(ty: ScalarType, values: I, name: &str) -> std::io::Result<Self>
-    where
-        I: IntoIterator<Item = ScalarValue>,
-        I::IntoIter: ExactSizeIterator,
-    {
-        let values = values.into_iter();
-        let mut column = Self::filled(ty, values.len());
-        for (entity, value) in values.enumerate() {
-            column.set(entity, value, name)?;
-        }
-        Ok(column)
-    }
-
-    pub(crate) fn set(
-        &mut self,
-        entity: usize,
-        value: ScalarValue,
-        name: &str,
-    ) -> std::io::Result<()> {
-        // Absent: the zero stands, and the bit is *cleared* to say so rather than merely left
-        // alone. Clearing matters where slots are reused — the staging buffer in
-        // [`read_attributes_by_entity`] writes a fresh chunk over the last one, and a bit left set
-        // by a previous row would make this row's absence read as that row's value.
-        if matches!(value, ScalarValue::Null) {
-            self.present[entity / 64] &= !(1u64 << (entity % 64));
-            return Ok(());
-        }
-        self.present[entity / 64] |= 1u64 << (entity % 64);
-        self.data.set(entity, value, name)
-    }
-
-    pub(crate) fn is_present(&self, entity: usize) -> bool {
-        self.present[entity / 64] >> (entity % 64) & 1 == 1
-    }
-
-    pub(crate) fn value_at(&self, entity: usize) -> ScalarValue {
-        if self.is_present(entity) {
-            self.data.get(entity)
-        } else {
-            ScalarValue::Null
-        }
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.data.len()
-    }
-
-    /// The column in entity order. Yields **owned** values, where the `Vec<ScalarValue>` this
-    /// replaced yielded references: a fixed-width value is a copy either way, and a `Utf8` one
-    /// clones a string the caller previously cloned itself at the point of use.
-    pub(crate) fn iter(&self) -> impl Iterator<Item = ScalarValue> + '_ {
-        (0..self.len()).map(|entity| self.value_at(entity))
-    }
-
-    /// Borrow a string value, or `None` where the entity has none. For the readers that only scan
-    /// the column — the keyword dictionary and the text index — where [`Self::iter`]'s clone would
-    /// be a second copy of every string in the corpus.
-    pub(crate) fn str_at(&self, entity: usize) -> Option<&str> {
-        self.is_present(entity)
-            .then(|| self.data.str_at(entity))
-            .flatten()
-    }
-
-    /// Move one value across from a staging column, leaving the source slot absent. Used to land a
-    /// resolved chunk into entity order without going through [`Self::value_at`], whose `Utf8` arm
-    /// would clone every string in the chunk.
-    pub(crate) fn take_from(
-        &mut self,
-        entity: usize,
-        src: &mut EntityColumn,
-        pos: usize,
-        name: &str,
-    ) -> std::io::Result<()> {
-        if !src.is_present(pos) {
-            return Ok(());
-        }
-        src.present[pos / 64] &= !(1u64 << (pos % 64));
-        let value = src.data.take(pos);
-        self.set(entity, value, name)
-    }
 }
 
 /// Read the declared attribute columns into **entity-major** vectors, one per declared attribute,
@@ -1728,12 +1944,15 @@ impl EntityColumn {
 /// how many rows named entities this build never loaded, are counted per source and printed:
 /// a source covering a subset is a column that is simply absent for the rest, and a source
 /// covering a superset is the ordinary shape of a table that lives elsewhere.
+#[allow(clippy::too_many_arguments)]
 fn read_attributes_by_entity(
     args: &BuildArgs,
     n: u64,
     source_ids: &[u64],
     entity_of_ordinal: &[u32],
     minters: &mut std::collections::HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
+    scratch: &crate::column::ColumnScratch,
+    arena_order: crate::ArenaOrder,
 ) -> Result<(Vec<EntityColumn>, Vec<crate::AttributeCoverage>)> {
     if args.schema.is_empty() {
         return Ok((Vec::new(), Vec::new()));
@@ -1743,13 +1962,31 @@ fn read_attributes_by_entity(
     // the `ScalarValue` vector it reads like, and what that costs at 10⁸ items and above.
     let mut by_entity: Vec<EntityColumn> = attributes
         .iter()
-        .map(|a| EntityColumn::filled(a.ty, n as usize))
-        .collect();
+        .map(|a| EntityColumn::filled(scratch, a.ty, n as usize))
+        .collect::<Result<_>>()?;
+    let two_pass = arena_order == crate::ArenaOrder::Entity;
     // **One sweep per source, not one over a single corpus file.** Each declared attribute names
     // the file it is read from, so the groups are the passes; a build whose columns sit in three
     // files reads three files, and each one joins on the identity column its own group declared.
+    //
+    // **A group's string columns are laid out and placed before the next group is read**, not at
+    // the end: an attribute is read from exactly one source, so this group's lengths are final the
+    // moment its own measuring sweep is, and holding the per-entity length arrays of every group
+    // at once would cost 4 bytes an entity per string column for no reason.
     let mut coverage = Vec::with_capacity(args.attribute_sources.len());
     for group in &args.attribute_sources {
+        let strings: Vec<usize> = group
+            .attributes
+            .iter()
+            .copied()
+            .filter(|&i| is_string_column(attributes[i].ty))
+            .collect();
+        let measuring = two_pass && !strings.is_empty();
+        if measuring {
+            for &i in &strings {
+                by_entity[i].begin_measuring(scratch)?;
+            }
+        }
         read_one_attribute_source(
             args,
             group,
@@ -1757,11 +1994,67 @@ fn read_attributes_by_entity(
             source_ids,
             entity_of_ordinal,
             minters,
+            scratch,
             &mut by_entity,
             &mut coverage,
+            if measuring {
+                JoinPass::Measure
+            } else {
+                JoinPass::Single
+            },
         )?;
+        if measuring {
+            let mut reserved = 0u64;
+            for &i in &strings {
+                reserved += by_entity[i].reserve_arena()?;
+            }
+            println!(
+                "attributes: source '{}' — {} string column(s) laid out in entity order, \
+                 {} MiB of arena; decoding the source's prose a second time to fill it",
+                group.name,
+                strings.len(),
+                reserved >> 20
+            );
+            read_one_attribute_source(
+                args,
+                group,
+                n,
+                source_ids,
+                entity_of_ordinal,
+                minters,
+                scratch,
+                &mut by_entity,
+                &mut coverage,
+                JoinPass::Place,
+            )?;
+            for &i in &strings {
+                by_entity[i].seal_arena();
+            }
+        }
     }
     Ok((by_entity, coverage))
+}
+
+/// Whether a declared type's values live in the arena — the columns the two-pass fill is about.
+fn is_string_column(ty: ScalarType) -> bool {
+    matches!(
+        ty,
+        ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text
+    )
+}
+
+/// Which of the attribute join's sweeps this is (`column.rs`, [`crate::ArenaOrder`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JoinPass {
+    /// The whole join in one sweep, filling every column as it goes — the arrival-order fill.
+    Single,
+    /// Pass one of the entity-ordered fill: identical to [`Self::Single`] except that a string
+    /// column keeps each entity's length instead of writing its bytes.
+    Measure,
+    /// Pass two: the same sweep again over the string columns alone, writing each value at the
+    /// offset the layout gave it. Counts nothing — [`Self::Measure`] already reported coverage,
+    /// and this sweep meets exactly the same rows.
+    Place,
 }
 
 /// One attribute source's merge sweep into the entity-major columns.
@@ -1773,11 +2066,24 @@ fn read_one_attribute_source(
     source_ids: &[u64],
     entity_of_ordinal: &[u32],
     minters: &mut std::collections::HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
+    scratch: &crate::column::ColumnScratch,
     by_entity: &mut [EntityColumn],
     coverage: &mut Vec<crate::AttributeCoverage>,
+    pass: JoinPass,
 ) -> Result<()> {
-    let columns: Vec<&crate::config::Attribute> = group
-        .attributes
+    // **Pass two reads the string columns and nothing else** — the fixed-width columns and every
+    // presence bit were filled by pass one, and re-filling them would be a second decode of
+    // exactly the data the second decode is being paid to avoid.
+    let filled: Vec<usize> = match pass {
+        JoinPass::Place => group
+            .attributes
+            .iter()
+            .copied()
+            .filter(|&i| is_string_column(args.schema.attributes[i].ty))
+            .collect(),
+        _ => group.attributes.clone(),
+    };
+    let columns: Vec<&crate::config::Attribute> = filled
         .iter()
         .map(|&i| &args.schema.attributes[i])
         .collect();
@@ -1789,11 +2095,6 @@ fn read_one_attribute_source(
     // that matter: an absent attribute matches fewer points in a filter, and an absent access
     // label leaves a point visible to nobody.
     let mut unknown_rows = 0u64;
-    // A value whose tag is not its column's is a build defect, not an input one, and `set` is the
-    // only place that can see it. Captured rather than unwrapped: the scan's callback cannot fail,
-    // and a panic here would report the row rather than the column that is wrong.
-    let mut mistyped: Option<String> = None;
-    let mut failure: Option<BuildError> = None;
 
     // **[`join_chunk`]'s merge sweep, not a probe per row.** This pass used a `binary_search` into
     // `source_ids` for every row, on the reasoning that it is "per-row work over a handful of
@@ -1812,15 +2113,36 @@ fn read_one_attribute_source(
     // not — but a tenth of what was asserted.
     //
     // Chunked, both sides ascend and the sweep is sequential, which is the same trade the geometry
-    // pass makes for the same reason. The cost is a staging buffer: `chunk` at 12 B/row plus one
-    // typed row per column, ~1.6 GB at `JOIN_CHUNK_ROWS` — transient, freed here, and bounded by
-    // the corpus only through the `min` below.
-    let staged_rows = JOIN_CHUNK_ROWS.min(n as usize).max(1);
+    // pass makes for the same reason. The cost is a staging buffer, and **it is sized in bytes**:
+    // see [`JOIN_STAGE_BYTES`] for why a row count is the wrong unit here.
+    //
+    // **At least one whole decoded batch**, because a batch is staged as a unit: the flush below
+    // happens between batches, so the buffer has to hold the largest one whatever the byte budget
+    // works out at. On a corpus smaller than a batch that is the only term that matters, and it is
+    // a few hundred kilobytes of file per column.
+    // **Sized from the whole group in both passes, not from the columns this one fills.** The
+    // buffer's size is what decides where a chunk ends, and a chunk boundary decides which rows
+    // are sorted together in [`join_chunk`] — so a pass two with its own boundaries could resolve
+    // two rows carrying one entity in the other order from pass one. The layout that pass one
+    // reserved would then be filled by the wrong one of them. A few unused staged slots is the
+    // whole price of the two passes agreeing.
+    let whole_group: Vec<&crate::config::Attribute> = group
+        .attributes
+        .iter()
+        .map(|&i| &args.schema.attributes[i])
+        .collect();
+    let staged_rows = staging_rows(&whole_group, n).max(input::ATTRIBUTE_BATCH_ROWS);
     let mut staged: Vec<EntityColumn> = attributes
         .iter()
-        .map(|a| EntityColumn::filled(a.ty, staged_rows))
-        .collect();
+        .map(|a| EntityColumn::filled(scratch, a.ty, staged_rows))
+        .collect::<Result<_>>()?;
     let mut chunk: Vec<(u64, u32)> = Vec::with_capacity(staged_rows);
+    // The join's answer, held apart from the scatter that consumes it: `(entity, staged position)`
+    // for every row of the chunk that resolved, in the sweep's order. **This is what makes the
+    // scatter divisible** — the columns can then be walked independently over one shared,
+    // read-only list, where the old shape did every column's write inside the sweep's own callback
+    // and so did all of them on the sweep's thread.
+    let mut resolved: Vec<(u32, u32)> = Vec::with_capacity(staged_rows);
 
     // How many entities came away with a value in each of this group's columns — counted where the
     // value is moved across, which is the only place presence is known without a second scan.
@@ -1828,89 +2150,163 @@ fn read_one_attribute_source(
 
     // Everything mutable is a parameter rather than a capture, so the scan's callback and this can
     // both hold it — the shape the geometry pass's `resolve` uses, and for the same borrow reason.
-    let resolve = |chunk: &mut Vec<(u64, u32)>,
-                   staged: &mut [EntityColumn],
-                   by_entity: &mut [EntityColumn],
-                   matched: &mut u64,
-                   unknown: &mut u64,
-                   present: &mut [u64]| {
+    let flush = |chunk: &mut Vec<(u64, u32)>,
+                 resolved: &mut Vec<(u32, u32)>,
+                 staged: &mut [EntityColumn],
+                 by_entity: &mut [EntityColumn],
+                 matched: &mut u64,
+                 unknown: &mut u64,
+                 present: &mut [u64]|
+     -> Result<()> {
+        resolved.clear();
         join_chunk(chunk, source_ids, |ordinal, _source_id, pos| {
-            let Some(ordinal) = ordinal else {
-                *unknown += 1;
-                return Ok(());
-            };
-            let entity = entity_of_ordinal[ordinal as usize] as usize;
-            *matched += 1;
+            match ordinal {
+                None => *unknown += 1,
+                Some(ordinal) => {
+                    *matched += 1;
+                    resolved.push((entity_of_ordinal[ordinal as usize], pos));
+                }
+            }
+            Ok(())
+        })?;
+        // **Ascending in the entity, so every lane's scatter is a forward sweep.** The sweep's own
+        // answer arrives in source-id order, and entity ids are signature-then-Morton order, so
+        // without this each lane writes its column at a uniformly random index — free while the
+        // column fits in the page cache and not free otherwise. It is the entity-ordered arena's
+        // pass two that makes it matter: that pass writes a whole record where the others write a
+        // slot, so its random walk is over the arena rather than over an offset array. Measured on
+        // the 10⁷ MedCPT sample under `MemoryMax=4G`: **347,009 major faults and 480 GB read for a
+        // 10.4 GiB arena, 1,335 s into a stage that costs 68 s in arrival order and had not
+        // finished** — against a chunk that ascends, where the pass is one forward sweep of the
+        // arena per chunk and there are six of them.
+        //
+        // **Stable**, because which of two rows carrying one entity is written last is the answer
+        // pass one recorded the length of.
+        resolved.par_sort_by_key(|&(entity, _)| entity);
+        {
+            // **One lane per column, and the columns share nothing.** Each entity-order column is
+            // its own mapped array with its own presence bits, so a chunk's scatter splits across
+            // them with no synchronisation at all: `resolved` is read-only, and every write a lane
+            // makes — the value, the presence bit, the arena append, its own share of `present` —
+            // lands in storage no other lane can name.
+            //
             // **Indexed rather than zipped**, because a group's columns are a subsequence of the
             // declaration: the staged buffer is this group's, and each of its columns lands in the
             // slot the declaration gave that attribute.
-            for ((&column, src), count) in group
-                .attributes
+            let mut homes: Vec<Option<&mut EntityColumn>> =
+                by_entity.iter_mut().map(Some).collect();
+            let mut lanes: Vec<(usize, &mut EntityColumn, &mut EntityColumn)> = filled
                 .iter()
                 .zip(staged.iter_mut())
-                .zip(present.iter_mut())
-            {
-                if src.is_present(pos as usize) {
-                    *count += 1;
-                }
-                let name = &args.schema.attributes[column].name;
-                by_entity[column]
-                    .take_from(entity, src, pos as usize, name)
-                    .map_err(|e| BuildError::Invalid(format!("attribute '{name}': {e}")))?;
+                .map(|(&column, src)| {
+                    let home = homes[column].take().expect(
+                        "an attribute is read from exactly one source, so one lane owns it",
+                    );
+                    (column, src, home)
+                })
+                .collect();
+            // Collected per lane and folded in lane order, so a build that fails here fails with
+            // the same column's message every time: which lane finished first is a scheduling
+            // detail, and a build error that moves with it cannot be reproduced from its report.
+            let counted: Vec<Result<u64>> = lanes
+                .par_iter_mut()
+                .map(|(column, src, home)| {
+                    let name = &args.schema.attributes[*column].name;
+                    let mut count = 0u64;
+                    for &(entity, pos) in resolved.iter() {
+                        if src.is_present(pos as usize) {
+                            count += 1;
+                        }
+                        // Not wrapped with the column's name: every error this can raise already
+                        // carries it (`column.rs`) or names the file it could not write.
+                        home.take_from(entity as usize, src, pos as usize, name)?;
+                    }
+                    Ok(count)
+                })
+                .collect();
+            for (slot, lane) in present.iter_mut().zip(counted) {
+                *slot += lane?;
             }
-            Ok(())
-        })
+        }
+        // Every string in the chunk has been moved across, so the staging arena starts the next
+        // chunk empty rather than growing to the whole source's payload — the buffer is reused and
+        // its bytes are appended (`column.rs`).
+        for column in staged.iter_mut() {
+            column.reset_staging();
+        }
+        Ok(())
     };
 
     input::scan_attributes(
         &group.path,
         &group.fields,
-        &args.schema,
         attributes,
         minters,
         args.limit,
-        |source_id, values| {
-            let pos = chunk.len();
-            for ((column, value), attribute) in staged.iter_mut().zip(values).zip(attributes.iter())
-            {
-                if let Err(e) = column.set(pos, value.clone(), &attribute.name) {
-                    mistyped.get_or_insert_with(|| e.to_string());
-                }
-            }
-            chunk.push((source_id, pos as u32));
-            if chunk.len() == staged_rows && failure.is_none() {
-                if let Err(e) = resolve(
+        // An attribute source is entity space: one value per entity, in a file of its own, with
+        // no view to select (`views.md` §5).
+        None,
+        |batch| {
+            // Flushed **before** the batch rather than after a row count is reached, because a
+            // batch is staged as a unit. Chunk boundaries are unobservable in the output — see
+            // [`JOIN_STAGE_BYTES`] — so where one falls is free to be whatever keeps the buffer
+            // bounded.
+            if !chunk.is_empty() && chunk.len() + batch.rows.len() > staged_rows {
+                flush(
                     &mut chunk,
+                    &mut resolved,
                     &mut staged,
                     by_entity,
                     &mut matched_rows,
                     &mut unknown_rows,
                     &mut present,
-                ) {
-                    failure = Some(e);
-                }
+                )?;
             }
+            let base = chunk.len();
+            for (offset, &row) in batch.rows.iter().enumerate() {
+                chunk.push((batch.ids[row as usize], (base + offset) as u32));
+            }
+            // The same lane-per-column split the scatter makes, over the same argument: resolving
+            // a row's value and staging it are per column, and the staging columns share nothing.
+            // This is where the pass spent most of its time — ~11 s of GeoNames' 17.6 s, against
+            // 1.6 s in the Parquet reader (`input::scan_attributes`).
+            let filled: Vec<Result<()>> = staged
+                .par_iter_mut()
+                .zip(batch.decoded.par_iter())
+                .zip(attributes.par_iter())
+                .map(|((dst, decoded), attribute)| {
+                    for (offset, &row) in batch.rows.iter().enumerate() {
+                        let value = decoded.value(row as usize, attribute, &args.schema)?;
+                        dst.set(base + offset, value, &attribute.name)?;
+                    }
+                    Ok(())
+                })
+                .collect();
+            // Folded in declaration order, for the reason the scatter's tally is.
+            for lane in filled {
+                lane?;
+            }
+            Ok(())
         },
     )?;
-    if !chunk.is_empty() && failure.is_none() {
-        if let Err(e) = resolve(
+    if !chunk.is_empty() {
+        flush(
             &mut chunk,
+            &mut resolved,
             &mut staged,
             by_entity,
             &mut matched_rows,
             &mut unknown_rows,
             &mut present,
-        ) {
-            failure = Some(e);
-        }
+        )?;
     }
     drop(staged);
     drop(chunk);
-    if let Some(error) = failure {
-        return Err(error);
-    }
-    if let Some(message) = mistyped {
-        return Err(BuildError::Invalid(message));
+    drop(resolved);
+    if pass == JoinPass::Place {
+        // Pass one already reported this source: the two sweeps meet the same rows, and a second
+        // entry would say the join happened twice.
+        return Ok(());
     }
     coverage.push(crate::AttributeCoverage {
         source: group.name.clone(),
@@ -1924,6 +2320,418 @@ fn read_one_attribute_source(
             .collect(),
     });
     Ok(())
+}
+
+/// **The group-scoped attribute column families** (`views.md` §5): one entity-space column per
+/// view of the group, each with its own presence bitmap, under `attrs/<column>/<group>/<key>/`.
+///
+/// **Entity space, one column per view, and nothing per row space** — which is what keeps a scoped
+/// attribute inside I2's argument: every value is indexed by entity, so a predicate over it would
+/// answer a bitmap in entity space and meet the mask there, before any permutation.
+///
+/// The values are each view's own: the column is read from the view's points file, under that
+/// view's selection where a group's views share one file (`views.md` §3.1's form B). An entity the
+/// view does not hold, and one whose row carries a null, are the same state — absent, the presence
+/// bitmap's ordinary case (decision 0064).
+///
+/// **The family's record is `MANIFEST.groups[..].scoped_scalars`** (contracts §2.2), written from
+/// [`BuildArgs::scoped_attributes`] beside these files: `MANIFEST.declared_scalars` is one flat
+/// bundle-wide list with no slot for a family, so the group — which is what a pin resolves
+/// against — is where the declaration is recorded. Every family is a filter operand from there,
+/// one column per view, resolved by the request's view or by a pinned leaf.
+///
+/// **What each family owes per view is what its entity-scoped counterpart owes bundle-wide**: a
+/// numeric or keyword column owes values, presence and — for a keyword — its dictionary; a
+/// **category** owes those and the keyed per-value postings a filter and `/v1/categories`' value
+/// list are both answered from; a **text** column owes no value column at all and owes instead a
+/// token dictionary and the positional postings over it. One writer per family, the same one the
+/// entity-scoped pass calls, pointed at this view's directory.
+///
+/// **`render = true` is carried into the hot tail of each view of the group** (`views.md` §5,
+/// built 2026-08-31), and of any group sharing those views via `members`. The values are entity
+/// space like every other column here; what the scope decides is *which* row spaces they are
+/// permuted into, which is the rule `per-point-attributes.md` §3.9 gives `render_in` with the view
+/// set derived from the scope instead of listed. So a render family's columns are **retained** rather than
+/// written and dropped — returned to pass two, exactly as the entity-scoped render columns are
+/// held across it — and every other family's are released with the file they wrote.
+#[allow(clippy::too_many_arguments)]
+fn write_scoped_columns(
+    args: &BuildArgs,
+    partition_dir: &Path,
+    n: u64,
+    source_ids: &[u64],
+    entity_of_ordinal: &[u32],
+    minters: &mut std::collections::HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
+    scratch: &crate::column::ColumnScratch,
+) -> Result<(Vec<PathBuf>, Vec<ScopedRenderColumn>)> {
+    let mut paths = Vec::new();
+    let mut render_columns: Vec<ScopedRenderColumn> = Vec::new();
+    // The text pass's budget, derived once for the build rather than per column, exactly as the
+    // entity-scoped pass derives it: the plan bounds the transient a tokenise holds, and it is a
+    // function of the machine rather than of which column is being indexed.
+    let text_plan =
+        TextIndexPlan::for_budget(args.memory_budget.unwrap_or_else(detect_memory_budget));
+    for family in &args.scoped_attributes {
+        let attribute = &family.attribute;
+        // **What `render` buys, and the one place it still does not reach.** The build's own
+        // views of the group get the column in their row tails below, and a view created while
+        // the service runs gets one at the first flush that covers it (`views.md` §5, r24) — so
+        // the rebuild this once warned about is no longer owed. What is left is the views of a
+        // group that only *shares* this family's: they render the column and no batch into one
+        // may carry a value, the column being the owner's. Printed once per family, where an
+        // operator can act on it.
+        if attribute.render
+            && args
+                .groups
+                .iter()
+                .any(|g| g.members_of.as_deref() == Some(family.group.as_str()))
+        {
+            eprintln!(
+                "attribute '{}': `render` is carried in the hot row tail of every view of group \
+                 '{}' and of every group sharing its views; ⊘ a batch into a sharing group's view \
+                 may not carry a value — send it to '{}'s own view of the key, where it is entity \
+                 space and reaches both (views §5)",
+                attribute.name, family.group, family.group
+            );
+        }
+        for &index in &family.views {
+            let view = &args.views[index];
+            let column = read_scoped_column(
+                args,
+                family,
+                view,
+                n,
+                source_ids,
+                entity_of_ordinal,
+                minters,
+                scratch,
+            )?;
+            // `attrs/<column>/<group>/<key>/` — the view id's own path components, through the
+            // one place a view id becomes a path (`tessera_store::view_path`).
+            let mut column_dir = partition_dir.join("attrs").join(&attribute.name);
+            for component in tessera_store::view_path_components(&view.view_id) {
+                column_dir.push(component);
+            }
+            std::fs::create_dir_all(&column_dir).map_err(|e| BuildError::io(&column_dir, e))?;
+            // **A text column has no value column**, per view exactly as bundle-wide: its
+            // entity-space artefacts are the token dictionary and the postings over it, and there
+            // is no per-entity slot for a scan to read. It leaves before the value column below is
+            // written rather than writing one nothing opens.
+            //
+            // ⊘ Its prose has **no blob row per view**, which is the one thing the entity-scoped
+            // family has that this one does not: the record blob is bundle-wide and addressed by a
+            // column's position in `declared_scalars`, which a family has none of. So a scoped
+            // text column answers `match` and is returned by no drill-down — the same restriction
+            // `render` has here, and for the same reason.
+            if attribute.ty == ScalarType::Text {
+                // **And it therefore writes no row lane**, which is only sound because `render`
+                // on `text` is refused at the declaration (`config::compile_attributes`'s
+                // "`render` on `text` is refused" arm). A `BuildArgs` assembled programmatically
+                // could still carry one, and it would publish `render: true` on `/v1/meta` while
+                // no view's tail ever held the column — the one shape serving reads as ordinary
+                // absence and could not tell from a build that failed. Fenced here rather than
+                // trusted from the parser.
+                debug_assert!(
+                    !attribute.render,
+                    "attribute '{}': `render` on a scoped `text` family — refused at the \
+                     declaration, and this pass writes no row lane for it (views §5)",
+                    attribute.name
+                );
+                // `index = false` is refused at the declaration for exactly this reason — with no
+                // blob row and no index the prose would have no home at all — so the guard here is
+                // against a `Schema` built programmatically rather than parsed.
+                if attribute.index {
+                    let written =
+                        write_text_index(&column_dir, attribute, &column.values, text_plan)?;
+                    paths.extend(written.paths);
+                }
+                report_scoped_coverage(attribute, view, column.present, n);
+                continue;
+            }
+            let values_path = column_dir.join("values.arrow");
+            let presence_path = column_dir.join("presence.roaring");
+            let written = write_column_values(
+                &column_dir,
+                &values_path,
+                &presence_path,
+                attribute,
+                &column.values,
+            )?;
+            fsync_file(&values_path)?;
+            paths.push(values_path);
+            if let Some(dict_path) = written.dict {
+                fsync_file(&dict_path)?;
+                paths.push(dict_path);
+            }
+            if written.presence {
+                fsync_file(&presence_path)?;
+                paths.push(presence_path);
+            }
+            // **A category's postings, per view** — the same keyed file the entity-scoped pass
+            // writes, in this view's own directory, and owed on the same predicate: an indexed
+            // category is answered from them, and a `derived` vocabulary's membership is derived
+            // from them whatever `index` says (`filter-index.md` §2.3). Written after the values,
+            // which are the artefact of record, so a build interrupted between the two leaves the
+            // record without its accelerator rather than the reverse.
+            if scoped_postings_are_owed(attribute) {
+                let path = column_dir.join("postings.arrow");
+                write_category_postings(
+                    &path,
+                    &attribute.name,
+                    &column.values,
+                    POSTINGS_BAND_ROWS,
+                )?;
+                fsync_file(&path)?;
+                paths.push(path);
+            }
+            report_scoped_coverage(attribute, view, column.present, n);
+            // **Retained for pass two, and only for a render family.** Everything else is on disc
+            // and the values are dead — releasing here is what the entity-scoped pass does to its
+            // own non-render columns before the row spaces are written.
+            match attribute.render {
+                true => render_columns.push(ScopedRenderColumn {
+                    name: attribute.name.clone(),
+                    ty: attribute.ty,
+                    group: family.group.clone(),
+                    key: key_of(&view.view_id).to_string(),
+                    values: column.values,
+                }),
+                false => drop(column.values),
+            }
+        }
+    }
+    Ok((paths, render_columns))
+}
+
+/// One view's column of a **rendered** group-scoped attribute, held from the pass that read it
+/// until the row space that renders it is written (`views.md` §5).
+///
+/// Addressed by `(group, key)` rather than by a view index because the row spaces it reaches are
+/// not only the owning group's: a group declaring `members` of it shares the same keys under its
+/// own view ids, and its views render the family too.
+struct ScopedRenderColumn {
+    name: String,
+    ty: ScalarType,
+    group: String,
+    key: String,
+    values: EntityColumn,
+}
+
+/// Which retained scoped render columns each view's row space carries — one entry per
+/// [`BuildArgs::views`], holding indices into `columns` (`views.md` §5).
+///
+/// **The view set is the scope's**, which is the whole of what `render` on a scoped attribute
+/// means: a view of the family's own group renders it, so does a view of a group declaring
+/// `members` of that group — the keys being the owner's by construction (`views.md` §3.3) — and
+/// no other view gets a slot for it at all.
+///
+/// **This is `viewport::owning_key_of`'s rule, asked of the build's own arguments**, and the two
+/// must agree: a column written into a row space no request reads it from is a silent nothing, and
+/// one a request reads from a row space no build wrote is served as absence. It is stated twice
+/// rather than shared because the serving side's inputs are a manifest and this side's are
+/// `BuildArgs`, in a crate that does not depend on the engine. What keeps the one case where they
+/// could differ unreachable is a **declaration refusal**: `scope` naming a group that declares
+/// `members` is refused at parse (`config::compile_scope`), so a family is always the owner
+/// group's and `members_of` is only ever followed in one direction.
+fn scoped_render_targets(args: &BuildArgs, columns: &[ScopedRenderColumn]) -> Vec<Vec<usize>> {
+    args.views
+        .iter()
+        .map(|view| {
+            let Some((group, key)) = view.view_id.split_once(tessera_store::GROUP_SEPARATOR) else {
+                // A plain view is in no group, so no scope reaches it.
+                return Vec::new();
+            };
+            let owner = args
+                .groups
+                .iter()
+                .find(|g| g.name == group)
+                .and_then(|g| g.members_of.as_deref())
+                .unwrap_or(group);
+            columns
+                .iter()
+                .enumerate()
+                .filter(|(_, column)| column.group == owner && column.key == key)
+                .map(|(index, _)| index)
+                .collect()
+        })
+        .collect()
+}
+
+/// Does this view's column of a scoped **category** family owe its keyed postings?
+///
+/// [`postings_are_owed`]'s question, asked of a family: the postings are what an `eq` or an `in`
+/// is answered from on a `public` vocabulary, and what `/v1/categories` derives value visibility
+/// from on a `derived` one. Non-categories owe none — a number's values are near-unique and a
+/// keyword's are a dictionary, so for either a posting per value is a second copy of the column
+/// (this module's [`write_filter_postings`]).
+///
+/// **The family's filter admission is the whole condition** — `index` or `render`, the engine's
+/// `filter::scoped_is_filterable` (2026-08-31) — where the entity-scoped rule is `index` *or* a
+/// `derived` vocabulary. The difference is that a scoped family's admission decides both surfaces
+/// at once: a family on no filter surface has no `/v1/categories` answer either, so postings
+/// written for one would be read by nothing. It must agree with the engine's
+/// `filter::scoped_owes_postings`, or the open demands a file no pass wrote.
+///
+/// **So it is one predicate, called from both** — `manifest::ScopedScalar::licence_of`, over the
+/// four facts a declaration and a manifest record both carry. It lives at the record rather than
+/// in the engine because `check-layers.sh` denies this crate the engine. The two used to agree by
+/// argument: this pass spelled the licence `index || render` and the engine spelled it with the
+/// `text` arm the declaration refuses anyway, and either could have been edited alone.
+fn scoped_postings_are_owed(attribute: &crate::config::Attribute) -> bool {
+    attribute.vocabulary.is_some()
+        && tessera_store::manifest::ScopedScalar::licence_of(
+            attribute.ty,
+            attribute.vocabulary.is_some(),
+            attribute.index,
+            attribute.render,
+        )
+}
+
+/// Printed per column of the family, where an entity-scoped column's coverage is printed: a scoped
+/// column covers the view's own rows, so *fewer than the corpus* is its ordinary state rather than
+/// a symptom.
+fn report_scoped_coverage(
+    attribute: &crate::config::Attribute,
+    view: &crate::ViewArgs,
+    present: u64,
+    n: u64,
+) {
+    eprintln!(
+        "attribute '{}' in view '{}': {} of {} entities have a value",
+        attribute.name,
+        view.view_id,
+        crate::thousands(present),
+        crate::thousands(n)
+    );
+}
+
+/// The key half of a view id — `2026-Q3` of `quarter:2026-Q3`.
+///
+/// A view of a group always carries the joined form, so the split always finds a separator; a
+/// plain view's id is returned whole, which is the answer that names nothing in a group's roster
+/// and is therefore selected by no row.
+fn key_of(view_id: &str) -> &str {
+    view_id
+        .split_once(tessera_store::GROUP_SEPARATOR)
+        .map_or(view_id, |(_, key)| key)
+}
+
+/// One view's column of a group-scoped attribute, in entity space ([`write_scoped_columns`]).
+struct ScopedColumn {
+    values: EntityColumn,
+    present: u64,
+}
+
+/// Read one view's values of a group-scoped attribute — out of that view's points file, or out of
+/// the attribute's own source under that view's key.
+///
+/// **Two files, one selector.** Where the family declares no source of its own the view's points
+/// file is the file, under the view's own selection where a form B group shares one. Where it
+/// declares one, that file carries one row per `(entity, view)` and this view's rows are the ones
+/// whose `fields.view` discriminator is this view's key — the same [`ViewSelector`] a form B
+/// roster and a scoped layer are read through, so a value naming a key the roster does not carry
+/// is the refusal that names both, and a view with no rows in the file simply has no values.
+///
+/// The same resolution every other attribute pass makes — `source_ids` → ordinal →
+/// `entity_of_ordinal` — because entity ids are assigned in signature-sorted order (§11.1) and a
+/// source id is not its own entity id. A row naming an entity this build did not load is counted
+/// nowhere and refused nowhere: it is the join's ordinary case, exactly as it is for an
+/// entity-scoped source.
+#[allow(clippy::too_many_arguments)]
+fn read_scoped_column(
+    args: &BuildArgs,
+    family: &crate::ScopedColumnFamily,
+    view: &crate::ViewArgs,
+    n: u64,
+    source_ids: &[u64],
+    entity_of_ordinal: &[u32],
+    minters: &mut std::collections::HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
+    scratch: &crate::column::ColumnScratch,
+) -> Result<ScopedColumn> {
+    let attribute = &family.attribute;
+    // Which file, and which of its rows. The keys a stray discriminator is refused against are the
+    // family's own views' — the group's roster, by construction — derived here rather than carried
+    // beside the source, so the two cannot come to disagree.
+    let own_source = family.source.as_ref().map(|source| {
+        let mut keys: Vec<String> = family
+            .views
+            .iter()
+            .map(|&index| key_of(&args.views[index].view_id).to_string())
+            .collect();
+        keys.sort();
+        keys.dedup();
+        let select = crate::config::ViewSelector {
+            column: source.view_field.clone(),
+            value: key_of(&view.view_id).to_string(),
+            keys,
+            view_id: view.view_id.clone(),
+        };
+        let fields = crate::config::Fields::moved(
+            format!("attribute '{}'", attribute.name),
+            [(
+                crate::config::ENTITY_ID.to_string(),
+                source.entity_id.clone(),
+            )],
+        );
+        (source.path.clone(), fields, select)
+    });
+    let (points, point_fields, select) = match &own_source {
+        Some((path, fields, select)) => (path, fields, Some(select)),
+        None => (&view.points, &view.point_fields, view.select.as_ref()),
+    };
+    let mut values = EntityColumn::filled(scratch, attribute.ty, n as usize)?;
+    let columns = [attribute];
+    let staged_rows = staging_rows(&columns, n).max(input::ATTRIBUTE_BATCH_ROWS);
+    let mut staged = EntityColumn::filled(scratch, attribute.ty, staged_rows)?;
+    let mut chunk: Vec<(u64, u32)> = Vec::with_capacity(staged_rows);
+    let mut present = 0u64;
+    // The merge sweep the entity-scoped pass uses, over one column: both sides ascend, so the
+    // join is sequential rather than a probe into `source_ids` per row.
+    let flush = |chunk: &mut Vec<(u64, u32)>,
+                 staged: &mut EntityColumn,
+                 values: &mut EntityColumn,
+                 present: &mut u64|
+     -> Result<()> {
+        let mut moved: Vec<(u32, u32)> = Vec::with_capacity(chunk.len());
+        join_chunk(chunk, source_ids, |ordinal, _source_id, pos| {
+            if let Some(ordinal) = ordinal {
+                moved.push((entity_of_ordinal[ordinal as usize], pos));
+            }
+            Ok(())
+        })?;
+        for (entity, pos) in moved {
+            if staged.is_present(pos as usize) {
+                *present += 1;
+            }
+            values.take_from(entity as usize, staged, pos as usize, &attribute.name)?;
+        }
+        staged.reset_staging();
+        Ok(())
+    };
+    input::scan_attributes(
+        points,
+        point_fields,
+        &columns,
+        minters,
+        args.limit,
+        select,
+        |batch| {
+            if !chunk.is_empty() && chunk.len() + batch.rows.len() > staged_rows {
+                flush(&mut chunk, &mut staged, &mut values, &mut present)?;
+            }
+            let base = chunk.len();
+            for (offset, &row) in batch.rows.iter().enumerate() {
+                chunk.push((batch.ids[row as usize], (base + offset) as u32));
+                let value = batch.decoded[0].value(row as usize, attribute, &args.schema)?;
+                staged.set(base + offset, value, &attribute.name)?;
+            }
+            Ok(())
+        },
+    )?;
+    if !chunk.is_empty() {
+        flush(&mut chunk, &mut staged, &mut values, &mut present)?;
+    }
+    Ok(ScopedColumn { values, present })
 }
 
 /// Write the entity-space filter postings for every column declared `index = true`, and
@@ -1961,16 +2769,36 @@ fn read_one_attribute_source(
 /// out by prefix sums. Bands partition ascending code space, so [`KeyedPostingsSpool`]'s
 /// ascending-key check holds across them unchanged.
 ///
-/// What the banding does *not* bound is the attribute tail this reads from: `by_entity` is already
-/// a `Vec<ScalarValue>` per column at ~24 B per value, which filter-index §4 prices as outside the
-/// memory plan at 10⁹ regardless. That is the reader's ceiling, stated where it is paid; this pass
-/// no longer adds a second copy of the column to it.
+/// What the banding does *not* bound is the attribute tail this reads from — but that tail is no
+/// longer memory: `by_entity` is mapped (`column.rs`), so what this pass reads is page cache the
+/// kernel may reclaim, and the band budget bounds the only anonymous buffer left in the emit. This
+/// pass adds no second copy of the column to either.
 pub(crate) fn write_filter_postings(
     partition_dir: &Path,
     schema: &crate::config::Schema,
     by_entity: &[EntityColumn],
-) -> Result<Vec<PathBuf>> {
-    write_filter_postings_banded(partition_dir, schema, by_entity, POSTINGS_BAND_ROWS)
+    memory_budget: u64,
+) -> Result<(Vec<PathBuf>, TextIndexCost)> {
+    write_filter_postings_banded(
+        partition_dir,
+        schema,
+        by_entity,
+        POSTINGS_BAND_ROWS,
+        TextIndexPlan::for_budget(memory_budget),
+    )
+}
+
+/// What the text columns cost inside [`write_filter_postings`]'s loop: the wall time and the terms
+/// written, for [`BuildStage::TextIndex`].
+///
+/// **Measured here rather than at a stage boundary** because the loop visits a text column and a
+/// category column in whatever order the schema declares them, and the two are different code paths
+/// at different costs — a tokenise and a dictionary against a fixed-width scan. One number over
+/// both is what a reader cannot act on.
+#[derive(Default)]
+pub(crate) struct TextIndexCost {
+    pub(crate) elapsed: std::time::Duration,
+    pub(crate) terms: u64,
 }
 
 /// Entity ids the postings emit holds in flight — the shared emit's own constant, so the build and
@@ -1982,8 +2810,10 @@ fn write_filter_postings_banded(
     schema: &crate::config::Schema,
     by_entity: &[EntityColumn],
     band_rows: usize,
-) -> Result<Vec<PathBuf>> {
+    text_plan: TextIndexPlan,
+) -> Result<(Vec<PathBuf>, TextIndexCost)> {
     let mut paths = Vec::new();
+    let mut text = TextIndexCost::default();
     for (attribute, values) in schema.attributes.iter().zip(by_entity) {
         if !postings_are_owed(schema, attribute) {
             continue;
@@ -1995,7 +2825,11 @@ fn write_filter_postings_banded(
         // entity-space artefact is the token dictionary and the postings over it; the values
         // themselves are in the record blob, which no scan reads (records §4.4).
         if attribute.ty == ScalarType::Text {
-            paths.extend(write_text_index(&column_dir, attribute, values)?);
+            let started = std::time::Instant::now();
+            let written = write_text_index(&column_dir, attribute, values, text_plan)?;
+            text.elapsed += started.elapsed();
+            text.terms += written.terms;
+            paths.extend(written.paths);
             continue;
         }
 
@@ -2037,7 +2871,7 @@ fn write_filter_postings_banded(
         fsync_file(&path)?;
         paths.push(path);
     }
-    Ok(paths)
+    Ok((paths, text))
 }
 
 /// Write the record blob — `attrs/record/{blocks.bin,hasrow.roaring,directory.arrow}` — for every
@@ -2062,6 +2896,17 @@ fn write_filter_postings_banded(
 /// The field tag is the column's position among `declared_scalars` — the same positional identity
 /// the hot column's tail and the ingest row vector already rely on — so drill-down resolves it
 /// against the manifest without any name table in the artefact.
+///
+/// ⊘ **This walk reaches a string arena at a random offset per row, and that is not fixed.** It is
+/// the defect the text index no longer has: entity order and the arena's arrival order are
+/// unrelated (`column.rs`), so a blob row's characters are a page fault into a file that may be far
+/// larger than the machine. The text index answered it by walking the arena instead; this stage
+/// cannot, because the blob's rows must be *written* in ascending entity order and the directory
+/// beside them is built from that. Invisible while the arena fits — 74 s either way at 10⁷ — and
+/// **> 285 s against 74 s under a 4 GB cap** at ~120 major faults a second
+/// (`probes/2026-09-03-text-arena-streaming/`). What would answer it is an entity-ordered arena,
+/// built at the join from a second pass over the source's text column, which is a decision about
+/// the join rather than about this stage.
 pub(crate) fn write_record_blob(
     partition_dir: &Path,
     schema: &crate::config::Schema,
@@ -2115,8 +2960,7 @@ pub(crate) fn write_record_blob(
         fields.clear();
         for &column in &blob_columns {
             let attribute = &schema.attributes[column];
-            let Some(value) = record_value_of(&by_entity[column].value_at(entity), attribute)?
-            else {
+            let Some(value) = record_value_of(&by_entity[column], entity, attribute)? else {
                 continue;
             };
             let tag = u16::try_from(column).map_err(|_| {
@@ -2146,12 +2990,18 @@ pub(crate) fn write_record_blob(
 
 /// One staged value as the blob row carries it, or `None` where the entity carries nothing in
 /// this column — the per-family absence rule `write_record_blob`'s doc states.
+///
+/// **The column and the entity, not the value**, so that the string arm can borrow: reading through
+/// `EntityColumn::value_at` clones the `String` and [`RecordValue::Utf8`] then owns a second copy,
+/// which over a text column is two allocations and two copies of every value in the corpus. One
+/// clone remains and is unavoidable — the record value owns its bytes.
 fn record_value_of(
-    value: &ScalarValue,
+    values: &EntityColumn,
+    entity: usize,
     attribute: &crate::config::Attribute,
 ) -> Result<Option<RecordValue>> {
     if attribute.vocabulary.is_some() {
-        let code = category_code(value, &attribute.name)?;
+        let code = category_code(&values.value_at(entity), &attribute.name)?;
         if code == tessera_store::vocabulary::ABSENT_CODE {
             return Ok(None);
         }
@@ -2164,21 +3014,27 @@ fn record_value_of(
             _ => RecordValue::U32(code),
         }));
     }
-    Ok(match value {
+    // The string families first, borrowed. `str_at` answers `None` for an absent entity and for a
+    // column that is not string-backed, and the match below then reads the same absence out of
+    // `value_at` — so the two agree without either having to know which family it is looking at.
+    if let Some(text) = values.str_at(entity) {
+        return Ok(Some(RecordValue::Utf8(text.to_string())));
+    }
+    Ok(match values.value_at(entity) {
         ScalarValue::Null => None,
-        ScalarValue::Bool(v) => Some(RecordValue::Bool(*v)),
-        ScalarValue::U8(v) => Some(RecordValue::U8(*v)),
-        ScalarValue::U16(v) => Some(RecordValue::U16(*v)),
-        ScalarValue::U32(v) => Some(RecordValue::U32(*v)),
-        ScalarValue::U64(v) => Some(RecordValue::U64(*v)),
-        ScalarValue::I8(v) => Some(RecordValue::I8(*v)),
-        ScalarValue::I16(v) => Some(RecordValue::I16(*v)),
-        ScalarValue::I32(v) => Some(RecordValue::I32(*v)),
-        ScalarValue::I64(v) => Some(RecordValue::I64(*v)),
-        ScalarValue::F32(v) => Some(RecordValue::F32(*v)),
-        ScalarValue::F64(v) => Some(RecordValue::F64(*v)),
-        ScalarValue::TimestampUs(v) => Some(RecordValue::TimestampUs(*v)),
-        ScalarValue::Utf8(v) => Some(RecordValue::Utf8(v.clone())),
+        ScalarValue::Bool(v) => Some(RecordValue::Bool(v)),
+        ScalarValue::U8(v) => Some(RecordValue::U8(v)),
+        ScalarValue::U16(v) => Some(RecordValue::U16(v)),
+        ScalarValue::U32(v) => Some(RecordValue::U32(v)),
+        ScalarValue::U64(v) => Some(RecordValue::U64(v)),
+        ScalarValue::I8(v) => Some(RecordValue::I8(v)),
+        ScalarValue::I16(v) => Some(RecordValue::I16(v)),
+        ScalarValue::I32(v) => Some(RecordValue::I32(v)),
+        ScalarValue::I64(v) => Some(RecordValue::I64(v)),
+        ScalarValue::F32(v) => Some(RecordValue::F32(v)),
+        ScalarValue::F64(v) => Some(RecordValue::F64(v)),
+        ScalarValue::TimestampUs(v) => Some(RecordValue::TimestampUs(v)),
+        ScalarValue::Utf8(v) => Some(RecordValue::Utf8(v)),
     })
 }
 
@@ -2263,8 +3119,7 @@ fn write_column_values(
     attribute: &crate::config::Attribute,
     values: &EntityColumn,
 ) -> Result<WrittenColumn> {
-    let mut present = croaring::Bitmap::new();
-    let mut universal = true;
+    let mut presence = Presence::default();
     let mut dict = None;
 
     let mut writer = ValueColumnWriter::create(values_path, presence_path, column_kind(attribute))
@@ -2283,7 +3138,7 @@ fn write_column_values(
     // spend — the empty string is one a corpus may legitimately hold — so absence arrives as
     // `ScalarValue::Null` and the empty string arrives as itself.
     if attribute.ty == ScalarType::Keyword {
-        let present_values = keyword_values(attribute, values, &mut present, &mut universal)?;
+        let present_values = keyword_values(attribute, values, &mut presence)?;
         // The distinct key set, sorted — the dictionary's contents and, by position, the ordinals
         // the column stores. `sort_unstable` is sound where a stable sort would not be, because
         // the elements compared are the keys themselves: equal elements are indistinguishable, and
@@ -2323,10 +3178,9 @@ fn write_column_values(
         for (entity, value) in values.iter().enumerate() {
             let code = category_code(&value, &attribute.name)?;
             if code == tessera_store::vocabulary::ABSENT_CODE {
-                universal = false;
                 continue;
             }
-            present.add(entity as u32);
+            presence.present(entity as u32);
             held.push(code);
             if held.len() >= VALUE_CHUNK {
                 push!(category_chunk(attribute.ty, &held));
@@ -2347,27 +3201,82 @@ fn write_column_values(
         // Reached only where the source said so: `BatchColumn::value` returns `ScalarValue::Null`
         // for a null slot and the values buffer's zero otherwise, which is the distinction that
         // used to be dropped at decode.
-        for (entity, value) in values.iter().enumerate() {
-            if matches!(value, ScalarValue::Null) {
-                universal = false;
-            } else {
-                present.add(entity as u32);
-            }
+        //
+        // The presence bit *is* that distinction — a slot is null exactly where the bit is clear,
+        // whatever the family — so this walks the bits and skips an absent run 64 at a time rather
+        // than materialising a `ScalarValue` per entity to ask it the same question.
+        for entity in values.present_entities() {
+            presence.present(entity as u32);
         }
         push_numeric_chunks(&mut writer, values_path, attribute, values)?;
     }
-    let presence = (!universal).then_some(&present);
+    let presence = presence.written(values.len());
     writer
         .finish(presence)
         .map_err(|e| BuildError::io(values_path, e))?;
     Ok(WrittenColumn {
-        presence: !universal,
+        presence: presence.is_some(),
         dict,
     })
 }
 
-/// One keyword column's present values, in entity order, with `present` and `universal` updated as
-/// the string families update them.
+/// The presence bitmap a column may or may not owe, **populated only once an absence proves it
+/// will be written**.
+///
+/// A column every entity carries a value in gets no bitmap at all ([`write_column_values`] on why
+/// that is the fast path and not an omission), and the pass that discovers this used to build the
+/// bitmap anyway: 7.4×10⁷ `add` calls per column, thrown away at the last line. Here the sweep
+/// reports only the entities that carry a value, ascending; absence is inferred from the gaps and
+/// from the tail, and the bitmap is materialised at the first gap by replaying the run before it.
+///
+/// **The replay is a loop of `add`, not an `add_range`**, so the bitmap receives exactly the call
+/// sequence the eager version made — same entities, same ascending order, same container
+/// promotions, and so the same serialised bytes. A range insert may produce a run container where
+/// individual inserts produce an array one, which is a different file for the same set.
+#[derive(Default)]
+struct Presence {
+    bitmap: croaring::Bitmap,
+    /// The entity after the last one reported present, while no gap has been seen.
+    run: u32,
+    materialised: bool,
+}
+
+impl Presence {
+    /// Report that `entity` carries a value. Entities must arrive ascending.
+    fn present(&mut self, entity: u32) {
+        if !self.materialised {
+            if entity == self.run {
+                self.run = entity + 1;
+                return;
+            }
+            self.materialise();
+        }
+        self.bitmap.add(entity);
+        self.run = entity + 1;
+    }
+
+    /// The bitmap to write, or `None` where the column is universal — every entity of `len`
+    /// present, which is the case the file set states by leaving the bitmap out.
+    fn written(&mut self, len: usize) -> Option<&croaring::Bitmap> {
+        if !self.materialised {
+            if self.run as usize == len {
+                return None;
+            }
+            self.materialise();
+        }
+        Some(&self.bitmap)
+    }
+
+    fn materialise(&mut self) {
+        for entity in 0..self.run {
+            self.bitmap.add(entity);
+        }
+        self.materialised = true;
+    }
+}
+
+/// One keyword column's present values, in entity order, with `presence` told which entities carry
+/// one.
 ///
 /// Separate from the ordinal emit so that the pass which decides *presence* is the pass which
 /// decides *slots*: the k-th set bit's value is at slot k (filter-index §2.1), and the vector this
@@ -2385,15 +3294,12 @@ fn write_column_values(
 fn keyword_values<'a>(
     attribute: &crate::config::Attribute,
     values: &'a EntityColumn,
-    present: &mut croaring::Bitmap,
-    universal: &mut bool,
+    presence: &mut Presence,
 ) -> Result<Vec<&'a str>> {
     let mut out = Vec::new();
-    for entity in 0..values.len() {
-        if !values.is_present(entity) {
-            *universal = false;
-            continue;
-        }
+    // Absent runs are skipped a word at a time; absence itself is what [`Presence`] reads out of
+    // the gaps this leaves.
+    for entity in values.present_entities() {
         // Borrowed, not read through `value_at`: this collects one `&str` per entity across the
         // whole column, so cloning here would be a second copy of every keyword in the corpus.
         let Some(text) = values.str_at(entity) else {
@@ -2411,7 +3317,7 @@ fn keyword_values<'a>(
                 attribute.name
             )));
         }
-        present.add(entity as u32);
+        presence.present(entity as u32);
         out.push(text);
     }
     Ok(out)
@@ -2540,35 +3446,182 @@ fn push_numeric_chunks(
     Ok(())
 }
 
-/// Does this column owe a postings file?
+/// How the text index's chunk pass is sized: the entities one chunk covers, and the bytes one
+/// worker may accumulate before it spills a run.
 ///
-/// Two independent reasons, and the second is the one a reader will not expect.
+/// **Both are needed, and neither would do alone.** The chunk count is what the pass parallelises
+/// over, so it follows the machine; the byte budget is what bounds a worker's residency, and it
+/// has to hold whatever the documents turn out to be. A column of short names and a column of
+/// abstracts differ by two orders of magnitude in terms per entity, so a plan that sized chunks
+/// alone would be a memory bound only for the corpus it was measured on.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TextIndexPlan {
+    chunks: usize,
+    worker_bytes: usize,
+    merge_slice_cap: usize,
+}
+
+/// The share of the build's memory budget the text pass may hold across all its workers.
 ///
-/// **`index = true`** is the obvious one: the column is declared filterable, and postings are
-/// how a broad-coverage filter stays inside its latency budget (filter-index §2.3).
+/// A sixteenth, and capped: the pass runs inside the entity-order tail `residency.rs` models —
+/// every declared column is resident beside it — so this is a transient on top of the build's
+/// largest resident set, not a stage with the machine to itself. A sixteenth of an auto-derived
+/// budget on a 48 GB box is the 2 GiB cap.
 ///
-/// **`visibility = "derived"`** is the other, and it is *not* optional. That control gates the
-/// existence of a value name, and the gate is membership-derived: a value is offered only if the
-/// principal can see an item carrying it (per-point-attributes §3.3). Deriving that needs the
-/// per-`(column, code)` member sets, which are exactly these postings. Without them `/v1/categories`
-/// would have to derive membership by scanning the value column per request — which is inside a
-/// *filter's* latency budget but not inside this endpoint's, and would make contracts §3.2's
-/// compute-admission justification ("no mask composition, no projection, no file IO") false.
+/// **It is a ceiling and not a working set.** What the pass actually holds is `threads` live
+/// workers' accumulators, and a worker reaches the budget only on a corpus whose documents are
+/// long enough to fill it: 7.4×10⁷ Overture names over 96 chunks on twelve threads spilled one run
+/// per chunk and 555 MB of run in total, so no worker came near it. The budget's job is to bound
+/// the corpus that *would* exceed it, not to describe the one that does not.
 ///
-/// So a `derived` category gets postings whatever its `index` says. This is the one place the
-/// postings stop being an optional accelerator: everywhere else a deployment that builds them and one
-/// that does not answer identically and differ only in latency, but here a disclosure control depends
-/// on them existing.
+/// ⊘ This term is deliberately **not** added to `residency.rs`'s model. It is a sixteenth of the
+/// same budget the model is checked against, which is inside the factor of two that module states
+/// as its own error bar, and adding it would turn builds that fit today into refusals.
+const TEXT_BUDGET_SHARE: u64 = 16;
+const TEXT_BUDGET_MAX: u64 = 2 << 30;
+const TEXT_BUDGET_MIN: u64 = 128 << 20;
+
+/// The floor on a worker's byte budget, so a tiny `--memory-budget` cannot derive a plan that
+/// spills a run per document.
+const TEXT_MIN_WORKER_BYTES: usize = 8 << 20;
+
+/// What one distinct term costs the accumulator beyond its characters: the hash table's slot for
+/// a `Box<[u8]>` and a `Vec<u32>`, the allocator's rounding on both, and the load factor the table
+/// keeps. **A conservative estimate, not a measurement** — it is the input to a memory bound, so
+/// erring high spills a run early and erring low is the failure the bound exists to prevent. The
+/// characters are charged at twice their length for the same reason (malloc rounding on a short
+/// key is most of the key).
+const TEXT_TERM_ENTRY_BYTES: usize = 80;
+
+/// What one posting costs: four bytes of `u32` charged at eight, because a `Vec` grows by doubling
+/// and is on average half empty.
+const TEXT_POSTING_BYTES: usize = 8;
+
+/// Entities held as a `u32` slice for one merged term before the encode switches to Roaring.
+///
+/// **This is the merge's only unbounded term, and this is what bounds it.** A term carried by a
+/// quarter of the corpus is 10⁸ entities at 10⁹ items, which as a `Vec<u32>` is 400 MB for one
+/// record — the residency `tessera_authz::postings::encode_posting_bitmap` was added to remove
+/// from compaction's fold, for exactly this reason. Above the cap the merge accumulates into a
+/// `Bitmap` instead and encodes from that; the two encoders are byte-identical over the same set
+/// (pinned by `postings::the_bitmap_and_slice_encoders_agree_byte_for_byte`), so the cap is a
+/// memory knob and not a format decision. 16 MB, which no vocabulary reaches by accident.
+const TEXT_MERGE_SLICE_CAP: usize = 1 << 22;
+
+impl TextIndexPlan {
+    /// The plan a build's memory budget derives.
+    pub(crate) fn for_budget(budget: u64) -> TextIndexPlan {
+        let threads = rayon::current_num_threads().max(1);
+        let allowance = (budget / TEXT_BUDGET_SHARE).clamp(TEXT_BUDGET_MIN, TEXT_BUDGET_MAX);
+        let worker_bytes = (allowance as usize / threads).max(TEXT_MIN_WORKER_BYTES);
+        // **Eight chunks a thread, and the number is measured rather than chosen.** A
+        // segmentation's cost per entity varies by an order of magnitude with the script — the
+        // dictionary-backed scripts against the rule-based ones — and entity space is *sorted by
+        // access term*, which for a geographic corpus means sorted by country. So the slow scripts
+        // are contiguous, not spread. At two chunks a thread over 7.4×10⁷ Overture names, 23 of
+        // the 24 chunks finished within 25 s of each other and the twenty-fourth ran alone for a
+        // further 90 s: the stage's wall time was one chunk's. Splitting finer costs a little more
+        // spill (a term repeated in more runs) and buys most of that tail back, and it costs
+        // no memory at all — the budget below is per *worker*, and only `threads` of them are ever
+        // live, however many chunks there are. At eight the same column's chunk pass finished in
+        // ~80 s against ~115 s, and the stage in 96.35 s against 148.00 s.
+        //
+        // ⊘ **The tail is smaller, not gone.** Four of the 96 chunks still ran ~60 s after the
+        // other 92 had finished, so most of the chunk pass is still one region's segmentation.
+        // Splitting finer again would need the fan-in raised with it, and is worth about a
+        // further 30 s on this corpus — measured, not modelled, and not taken.
+        //
+        // **The chunks are arena windows now, not entity ranges** (`column.rs`), so the number is
+        // a target and the arena's own record marks decide how close to it the split lands. Eight
+        // a thread carries over unchanged: what it balances — a segmentation cost that varies by
+        // an order of magnitude with the script — is a property of the documents, and the windows
+        // hold the same documents the entity ranges did.
+        TextIndexPlan {
+            chunks: (threads * 8).max(1),
+            worker_bytes,
+            merge_slice_cap: TEXT_MERGE_SLICE_CAP,
+        }
+    }
+
+    /// An explicit plan, for the tests that must force several chunks and several runs a chunk out
+    /// of a corpus small enough to assert over.
+    #[cfg(test)]
+    fn explicit(chunks: usize, worker_bytes: usize, merge_slice_cap: usize) -> TextIndexPlan {
+        TextIndexPlan {
+            chunks: chunks.max(1),
+            worker_bytes: worker_bytes.max(1),
+            merge_slice_cap,
+        }
+    }
+}
+
 /// One text column's entity-space index: the per-layer token dictionary and the postings over it.
 ///
 /// **The dictionary's ordinals are positions in the sorted distinct term set**, exactly as a
 /// keyword's are in its key set, and the postings are written in that same order — so posting *i*
-/// belongs to the *i*-th key the dictionary holds. A `BTreeMap` is what keeps those two in step
-/// without a second sort to get wrong: its iteration order *is* the dictionary's order.
+/// belongs to the *i*-th key the dictionary holds. Both files are produced by one pass over one
+/// sorted term stream, so an ordinal cannot drift between them: the ordinal a term gets is the one
+/// [`tessera_filter::SortedDictWriter::push`] returns, and the record encoded against it is
+/// appended to the postings spool before the next term is read.
+///
+/// # The shape: chunk, spill, merge
+///
+/// **The accumulator used to be one `HashMap` over the whole corpus, and that was a memory cost
+/// with no ceiling.** Every distinct term in the corpus and every posting of every term were live
+/// at once, then copied whole into a `Vec` for the sort before a byte was written — a function of
+/// corpus size with nothing to bound it, in the same file whose category emit bands its own
+/// transient to a constant the caller chooses. It was also entirely serial, over the most
+/// expensive per-entity work the build does.
+///
+/// So the pass is now three steps:
+///
+/// 1. **Chunk.** Entity space is split into contiguous ascending ranges ([`TextIndexPlan`]) and the
+///    ranges are indexed in parallel. Each worker accumulates its own `(term → entities)` map.
+/// 2. **Spill.** A worker writes its map out as a **sorted run** ([`crate::spill::TextRunWriter`])
+///    when its tracked footprint reaches the plan's per-worker budget, and again at the end of its
+///    chunk. So a worker's residency is the budget whatever the documents are, and the run count
+///    grows instead of the peak.
+/// 3. **Cascade**, where there are more runs than one merge may hold file descriptors for
+///    ([`TEXT_MERGE_FAN_IN`]). Groups of runs are merged into intermediate runs, in order, until
+///    what is left fits in one merge. Nothing but a very large corpus reaches this.
+/// 4. **Merge.** The runs are merged k-way on the term, and each merged term's entity lists are
+///    concatenated in run order. That is what makes the entity lists ascending *for free*: chunks
+///    partition entity space ascending, a worker's runs are emitted in the order it walked its
+///    chunk, and the run list is held in that same order — so concatenation is already sorted and
+///    no per-term sort exists anywhere in the pass.
+///
+/// **The output is a function of the corpus alone, never of the plan.** The dictionary is the
+/// sorted distinct term set and a posting is the set of entities carrying its term; neither
+/// depends on where a chunk boundary fell or how often a worker spilled.
+/// [`tests::chunking_the_text_index_does_not_change_its_bytes`] is the assertion, over a corpus
+/// whose entity count straddles the chunk sizes it is emitted under — a boundary that split a
+/// term's postings between two runs and lost one half would otherwise be invisible.
+///
+/// # What each step costs, and what bounds it
+///
+/// * The chunk pass holds `threads × worker_bytes`, which is [`TEXT_BUDGET_SHARE`] of the build's
+///   memory budget. Nothing in it scales with the corpus.
+/// * The merge holds one open reader per run — a read buffer and the head *term*, never the head's
+///   entities, which is why [`crate::spill::TextRunReader`] decodes a record's postings only when
+///   they are asked for. The run count is capped by the cascade, so this is a constant too.
+/// * One merged term's entity list is capped at [`TEXT_MERGE_SLICE_CAP`], above which it
+///   accumulates into a Roaring bitmap and encodes through the byte-identical bitmap encoder.
+///
+/// # The pieces that did not change
+///
+/// **A term's first sighting is the only one that allocates.** The analyser hands back borrowed
+/// tokens ([`tessera_analyse::Analyser::for_each_token`]) and the lookup is by `&[u8]`, so a term
+/// already in the map costs no allocation.
+///
+/// **The postings stream through [`tessera_authz::postings::PostingsSpool`]** rather than being
+/// collected, and the dictionary through [`tessera_filter::SortedDictWriter`]: neither file is
+/// ever held whole in memory.
 ///
 /// **A term repeated within one document contributes one posting entry.** The analyser keeps
 /// duplicates and order because the positional payload upgrade (§4.5) needs both; a posting is a
-/// set, so the duplicate collapses here rather than in the analyser.
+/// set, so the duplicate collapses here rather than in the analyser. Entities reach a worker
+/// ascending, so the duplicate is always the accumulator's last entry — the same `last()` test as
+/// before, and it stays correct because a chunk is an ascending range and never a scattered set.
 ///
 /// The singleton encoding is `tessera-authz`'s, unchanged: a term carried by few enough entities is
 /// a bare `u32` array rather than a serialised bitmap, which is what the string-storage campaign
@@ -2578,7 +3631,8 @@ fn write_text_index(
     column_dir: &Path,
     attribute: &crate::config::Attribute,
     values: &EntityColumn,
-) -> Result<Vec<PathBuf>> {
+    plan: TextIndexPlan,
+) -> Result<WrittenTextIndex> {
     // The identity was resolved at the schema parse; the name is its first component. Resolving it
     // again here rather than threading an `Analyser` down keeps the build's contract with the
     // manifest one-directional: what is recorded is what indexed.
@@ -2606,52 +3660,522 @@ fn write_text_index(
             ))
         })?;
 
-    let mut terms: std::collections::BTreeMap<String, Vec<u32>> = std::collections::BTreeMap::new();
-    for entity in 0..values.len() {
-        // Absence is `Null`, and the empty string is a value a corpus may hold — the same
-        // out-of-band rule the string families share. Neither yields a term.
-        if !values.is_present(entity) {
-            continue;
-        }
-        // Borrowed: this walks every string in the corpus, and a clone per entity would be a
-        // second copy of the column for the duration of the tokenise.
-        let Some(prose) = values.str_at(entity) else {
-            return Err(BuildError::Invalid(format!(
-                "attribute '{}': a text column's value must be a string, got {:?}",
-                attribute.name,
-                values.value_at(entity)
-            )));
-        };
-        let entity = entity as u32;
-        for token in analyser.tokens(prose) {
-            let postings = terms.entry(token).or_default();
-            // Entities arrive ascending, so the duplicate a repeated term produces is always the
-            // last entry — no sort and no set needed to collapse it.
-            if postings.last() != Some(&entity) {
-                postings.push(entity);
-            }
-        }
+    // ---- 1. the chunk pass, in parallel, spilling sorted runs -------------------------------
+    //
+    // **Windows of the arena, not ranges of entity space.** Entity order is signature-then-Morton
+    // order and the arena is in arrival order, so an entity range's documents are scattered
+    // through the arena: at 1.02×10⁸ abstracts that is one major fault per document over a file
+    // two and a half times the size of the box, and the pass did not finish in four hours
+    // (`probes/2026-09-03-text-arena-streaming/`). Each worker now reads one contiguous stretch of
+    // the arena front to back and releases it behind itself, and what that costs is the two steps
+    // below: a sort at the spill and a merge rather than a concatenation at the fan-in.
+    let chunks = values.arena_windows(plan.chunks);
+    // The join wrote every one of those bytes through the mapping, so they are all in this
+    // process's page tables and no `fadvise` would release them. See `MappedArena::unmap_pages`.
+    values.unmap_arena_pages();
+    // **One analyser, shared.** Its construction deserialises the segmenter's dictionary data —
+    // the cost the type exists to amortise — and it holds no per-document state, so it is `Sync`
+    // and the workers borrow it. What each worker does hold of its own is the normalisation
+    // scratch, which is per document by nature.
+    let receipts: Vec<Vec<spill::SpillReceipt>> = chunks
+        .par_iter()
+        .enumerate()
+        .map(|(chunk, &(lo, hi))| {
+            index_text_chunk(
+                column_dir,
+                chunk,
+                lo,
+                hi,
+                values,
+                attribute,
+                &analyser,
+                plan.worker_bytes,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    // Flattened in chunk order, and each chunk's own runs in the order it wrote them: the merge
+    // concatenates a term's entity lists in exactly this order, and it is ascending in entity only
+    // because this order is.
+    let receipts: Vec<spill::SpillReceipt> = receipts.into_iter().flatten().collect();
+
+    // ---- 2. the cascade, where a corpus produced more runs than one merge may hold open ------
+    let receipts = cascade_text_runs(column_dir, receipts)?;
+
+    // ---- 3. the merge: one sorted term stream into both files -------------------------------
+    let dict_path = column_dir.join(tessera_filter::DICT_FILE);
+    let postings_path = column_dir.join("postings.arrow");
+    // Beside the file it assembles, and removed by `finish` — the spool-then-assemble discipline
+    // this repo applies to every file whose records are sized as they are written. A build that
+    // fails here leaves the spool behind with the rest of the half-written partition.
+    let spool_path = postings_path.with_extension("spool");
+    let terms = merge_text_runs(
+        &dict_path,
+        &postings_path,
+        &spool_path,
+        &receipts,
+        plan.merge_slice_cap,
+    )?;
+    fsync_file(&dict_path)?;
+    fsync_file(&postings_path)?;
+    for receipt in &receipts {
+        std::fs::remove_file(&receipt.path).map_err(|e| BuildError::io(&receipt.path, e))?;
     }
 
-    let dict_path = column_dir.join(tessera_filter::DICT_FILE);
-    tessera_filter::write_sorted_dict(&dict_path, terms.keys().map(String::as_str))
-        .map_err(|e| BuildError::io(&dict_path, std::io::Error::from(e)))?;
-    fsync_file(&dict_path)?;
-
-    let per_term: Vec<Vec<u32>> = terms.into_values().collect();
-    let postings_path = column_dir.join("postings.arrow");
-    tessera_authz::postings::write_postings(
-        &postings_path,
-        &per_term,
-        SMALL_TERM_THRESHOLD_DEFAULT,
-    )
-    .map_err(|e| BuildError::io(&postings_path, e))?;
-    fsync_file(&postings_path)?;
-
-    Ok(vec![dict_path, postings_path])
+    Ok(WrittenTextIndex {
+        paths: vec![dict_path, postings_path],
+        terms,
+    })
 }
 
-fn postings_are_owed(schema: &crate::config::Schema, attribute: &crate::config::Attribute) -> bool {
+/// Index one contiguous **arena window**, spilling one or more sorted runs.
+///
+/// The worker's whole residency is `terms` and the window's read buffer, and the budget bounds the
+/// first: the tracked figure is an estimate ([`TEXT_TERM_ENTRY_BYTES`]) rather than an allocator
+/// reading, so it is deliberately generous. A run is spilled the moment the estimate reaches the
+/// budget — mid document is not possible, because the check sits between documents, so the true
+/// overshoot is one document's terms.
+///
+/// A window yields the same `(entity, value)` pairs the entity walk did, in arena order rather
+/// than ascending: what is *not* a window's business is which entities they belong to, and the two
+/// places that used to get entity ordering for free — the duplicate collapse and the merge — pay
+/// for it at [`spill_text_run`] and [`TextRunMerge::drain`] instead.
+#[allow(clippy::too_many_arguments)]
+fn index_text_chunk(
+    column_dir: &Path,
+    chunk: usize,
+    lo: u64,
+    hi: u64,
+    values: &EntityColumn,
+    _attribute: &crate::config::Attribute,
+    analyser: &tessera_analyse::Analyser,
+    worker_bytes: usize,
+) -> Result<Vec<spill::SpillReceipt>> {
+    let mut receipts = Vec::new();
+    let mut terms: std::collections::HashMap<Box<[u8]>, Vec<u32>> =
+        std::collections::HashMap::new();
+    let mut bytes = 0usize;
+    let mut seq = 0usize;
+    // The analyser's normalisation buffer, held across the whole chunk rather than per document.
+    let mut scratch = tessera_analyse::TokenScratch::default();
+    values.for_each_record_in(lo, hi, &mut |entity, prose| {
+        let entity = entity as u32;
+        analyser.for_each_token(prose, &mut scratch, &mut |token| {
+            // Looked up before it is owned: a term already seen costs no allocation, which over a
+            // corpus is every occurrence but the first of every word.
+            if let Some(postings) = terms.get_mut(token.as_bytes()) {
+                // A term repeated *within one document* is still the last entry, because a
+                // document is one record: that is the duplicate a posting-as-a-set has to
+                // collapse, and it is the only one — an entity appears in exactly one live arena
+                // record, so no two documents in this window carry the same entity.
+                if postings.last() != Some(&entity) {
+                    postings.push(entity);
+                    bytes += TEXT_POSTING_BYTES;
+                }
+            } else {
+                terms.insert(token.as_bytes().into(), vec![entity]);
+                bytes += TEXT_TERM_ENTRY_BYTES + 2 * token.len() + TEXT_POSTING_BYTES;
+            }
+        });
+        if bytes >= worker_bytes {
+            spill_text_run(column_dir, chunk, &mut seq, &mut terms, &mut receipts)?;
+            bytes = 0;
+        }
+        Ok(())
+    })?;
+    spill_text_run(column_dir, chunk, &mut seq, &mut terms, &mut receipts)?;
+    Ok(receipts)
+}
+
+/// Sort a worker's accumulator by term and write it out as one run, leaving the accumulator empty.
+///
+/// The sort is over **borrowed keys**: a `Vec<(Box<[u8]>, Vec<u32>)>` of the map's contents would
+/// be the same second copy of every term the whole-corpus accumulator paid at its one sort, only
+/// per run. Replacing the map rather than clearing it is what makes the byte budget mean
+/// something — a cleared table keeps its capacity, so the next fill would count from zero against
+/// memory that was never released.
+fn spill_text_run(
+    column_dir: &Path,
+    chunk: usize,
+    seq: &mut usize,
+    terms: &mut std::collections::HashMap<Box<[u8]>, Vec<u32>>,
+    receipts: &mut Vec<spill::SpillReceipt>,
+) -> Result<()> {
+    if terms.is_empty() {
+        return Ok(());
+    }
+    let path = column_dir.join(format!("text-run-{chunk:05}-{seq:04}.spill"));
+    let mut writer = spill::TextRunWriter::create(&path)?;
+    {
+        // **Sorted here, because the window walked the arena and not entity space.** A run's
+        // entities must ascend strictly within a term (`spill::TextRunWriter::push_entity`
+        // refuses otherwise), and they arrive in the order the documents sit in the arena. The
+        // sort is over one worker's accumulator, which the byte budget bounds, so it is a bounded
+        // cost per run rather than a term-sized one at the merge.
+        for postings in terms.values_mut() {
+            postings.sort_unstable();
+        }
+        let mut order: Vec<&[u8]> = terms.keys().map(|key| &**key).collect();
+        order.sort_unstable();
+        for term in order {
+            writer.push(term, &terms[term])?;
+        }
+    }
+    receipts.push(writer.finish()?);
+    *terms = std::collections::HashMap::new();
+    *seq += 1;
+    Ok(())
+}
+
+/// A k-way merge over open run cursors, yielding each distinct term once with its entities in
+/// ascending order.
+///
+/// The heap holds **run indices**, and the comparison reaches into the readers — so a term is
+/// never copied into the heap and the merge allocates nothing per record.
+///
+/// **The entities are merged, not concatenated.** They used to be concatenated: chunks partitioned
+/// entity space ascending, the run list was held in chunk order, and a term's list was therefore
+/// sorted for free. The chunk pass divides the *arena* now (`column.rs`), so a run holds entities
+/// from all over entity space and two runs' lists interleave — [`Self::drain`] compares their
+/// heads. What that costs is a comparison per posting against a copy per posting; what it buys is
+/// a sequential read of a file larger than the machine.
+struct TextRunMerge {
+    cursors: Vec<spill::TextRunReader>,
+    heap: Vec<usize>,
+    /// The selected term. Held as bytes because that is what the cursors compare on, and because
+    /// the caller needs it after the runs carrying it have left the heap.
+    term: Vec<u8>,
+    /// The runs whose head is the selected term, ascending — drained in this order.
+    selected: Vec<usize>,
+    /// Entities the selected term carries across all of them.
+    postings: u64,
+    /// The selected runs' unconsumed heads, `(entity, run)`, smallest first. Held on the merge
+    /// rather than built per term so a corpus's whole vocabulary costs one allocation.
+    heads: std::collections::BinaryHeap<std::cmp::Reverse<(u32, usize)>>,
+}
+
+impl TextRunMerge {
+    fn open(receipts: &[spill::SpillReceipt]) -> Result<TextRunMerge> {
+        let mut cursors: Vec<spill::TextRunReader> = Vec::with_capacity(receipts.len());
+        let mut heap: Vec<usize> = Vec::with_capacity(receipts.len());
+        for receipt in receipts {
+            let mut reader = spill::TextRunReader::open(receipt)?;
+            // A run with no terms at all — an empty chunk — verifies its receipt here and takes no
+            // place in the heap.
+            if reader.advance()? {
+                heap.push(cursors.len());
+            }
+            cursors.push(reader);
+        }
+        for root in (0..heap.len() / 2).rev() {
+            text_heap_sift_down(&mut heap, &cursors, root);
+        }
+        Ok(TextRunMerge {
+            cursors,
+            heap,
+            term: Vec::new(),
+            selected: Vec::new(),
+            postings: 0,
+            heads: std::collections::BinaryHeap::new(),
+        })
+    }
+
+    /// Select the next distinct term, or `false` when every run is exhausted. The previous term's
+    /// runs are advanced here rather than by the caller, so a caller that took fewer entities than
+    /// the term carried still leaves the stream where the next record starts.
+    fn next_term(&mut self) -> Result<bool> {
+        for &run in &self.selected {
+            if self.cursors[run].advance()? {
+                text_heap_push(&mut self.heap, &self.cursors, run);
+            }
+        }
+        self.selected.clear();
+        self.postings = 0;
+        let Some(&first) = self.heap.first() else {
+            return Ok(false);
+        };
+        self.term.clear();
+        self.term.extend_from_slice(self.cursors[first].term());
+        while self
+            .heap
+            .first()
+            .is_some_and(|&top| self.cursors[top].term() == self.term.as_slice())
+        {
+            let top = text_heap_pop(&mut self.heap, &self.cursors);
+            self.postings += self.cursors[top].pending() as u64;
+            self.selected.push(top);
+        }
+        Ok(true)
+    }
+
+    fn term(&self) -> &[u8] {
+        &self.term
+    }
+
+    /// How many entities the selected term carries. Known before a single one is decoded, which is
+    /// what lets the caller choose an encoder without buffering to find out.
+    fn postings(&self) -> u64 {
+        self.postings
+    }
+
+    /// Feed the selected term's entities to `sink`, ascending, checking the ascent as it goes.
+    ///
+    /// The check is over the *merged* list, not each run's: a run's own ascent is the writer's
+    /// business, and what could go wrong here is the merge. It is also what catches an entity
+    /// carried by two runs — which cannot happen, because an entity has exactly one live arena
+    /// record and one window holds it, and is exactly the failure a silent `>=` would hide.
+    /// `encode_posting` re-checks the slice path, but the bitmap path has no such check to make —
+    /// a `Bitmap` is a set — which is why the test lives here rather than there.
+    fn drain(&mut self, sink: &mut impl FnMut(u32) -> Result<()>) -> Result<()> {
+        self.heads.clear();
+        for i in 0..self.selected.len() {
+            let run = self.selected[i];
+            if let Some(entity) = self.cursors[run].next_entity()? {
+                self.heads.push(std::cmp::Reverse((entity, run)));
+            }
+        }
+        let mut last: Option<u32> = None;
+        while let Some(std::cmp::Reverse((entity, run))) = self.heads.pop() {
+            if let Some(previous) = last {
+                if entity <= previous {
+                    return Err(BuildError::Invalid(format!(
+                        "text run merge: entity {entity} does not ascend past {previous} — one \
+                         entity's document reached two runs"
+                    )));
+                }
+            }
+            last = Some(entity);
+            sink(entity)?;
+            if let Some(next) = self.cursors[run].next_entity()? {
+                self.heads.push(std::cmp::Reverse((next, run)));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Runs opened at once by one merge.
+///
+/// **A merge holds a file descriptor per run, and the run count is a function of the corpus.** A
+/// worker spills whenever its budget fills, so a corpus far larger than memory produces far more
+/// runs than a process may hold open — which would be `EMFILE` at hour two on exactly the corpus
+/// this whole shape exists to make buildable. Above the cap the runs are merged in passes: groups
+/// of [`TEXT_MERGE_FAN_IN`] into one intermediate run each, until what is left fits in one merge.
+/// An intermediate run is written by the same writer as a worker's, so the cascade adds a pass and
+/// not a format.
+///
+/// A hundred and twenty-eight, which is comfortably under the 1,024 soft limit a Linux process
+/// ordinarily starts with and above the run count an ordinary corpus produces — 7.4×10⁷ Overture
+/// names at eight chunks a thread on twelve cores is 96 runs, one merge and no cascade. The passes
+/// are sequential: the cascade is I/O and the final merge is sequential anyway, so running the
+/// groups in parallel would buy a fraction of a rare path at the cost of multiplying the very
+/// descriptor count the cap exists to hold down — `threads × fan-in` is not a number this can
+/// bound on a machine whose core count it does not know.
+const TEXT_MERGE_FAN_IN: usize = 128;
+
+/// Reduce `receipts` to at most [`TEXT_MERGE_FAN_IN`] runs, deleting each pass's inputs as it goes.
+///
+/// Groups are taken in order and each group merges in order, so the entity ordering the final
+/// merge relies on survives every pass.
+fn cascade_text_runs(
+    column_dir: &Path,
+    mut receipts: Vec<spill::SpillReceipt>,
+) -> Result<Vec<spill::SpillReceipt>> {
+    let mut pass = 0usize;
+    while receipts.len() > TEXT_MERGE_FAN_IN {
+        let mut merged = Vec::with_capacity(receipts.len().div_ceil(TEXT_MERGE_FAN_IN));
+        for (group, runs) in receipts.chunks(TEXT_MERGE_FAN_IN).enumerate() {
+            let path = column_dir.join(format!("text-merge-{pass:02}-{group:05}.spill"));
+            let mut merge = TextRunMerge::open(runs)?;
+            let mut writer = spill::TextRunWriter::create(&path)?;
+            while merge.next_term()? {
+                let count = u32::try_from(merge.postings()).map_err(|_| {
+                    BuildError::Invalid(format!(
+                        "text run merge: term {:?} carries more entities than a u32 can count",
+                        String::from_utf8_lossy(merge.term())
+                    ))
+                })?;
+                writer.begin(merge.term(), count)?;
+                merge.drain(&mut |entity| writer.push_entity(entity))?;
+            }
+            merged.push(writer.finish()?);
+            // Deleted per group rather than per pass: a corpus that reaches the cascade at all is
+            // one whose runs are large, and holding a whole pass's inputs beside a whole pass's
+            // outputs would double the spill's peak on disk for no reason.
+            for receipt in runs {
+                std::fs::remove_file(&receipt.path)
+                    .map_err(|e| BuildError::io(&receipt.path, e))?;
+            }
+        }
+        receipts = merged;
+        pass += 1;
+    }
+    Ok(receipts)
+}
+
+/// Merge the sorted runs into the dictionary and the postings, and return the term count.
+fn merge_text_runs(
+    dict_path: &Path,
+    postings_path: &Path,
+    spool_path: &Path,
+    receipts: &[spill::SpillReceipt],
+    merge_slice_cap: usize,
+) -> Result<u64> {
+    let mut merge = TextRunMerge::open(receipts)?;
+
+    let dict_file = std::fs::File::create(dict_path).map_err(|e| BuildError::io(dict_path, e))?;
+    let mut dict = tessera_filter::SortedDictWriter::new(std::io::BufWriter::new(dict_file))
+        .map_err(|e| BuildError::io(dict_path, std::io::Error::from(e)))?;
+    let mut spool = tessera_authz::postings::PostingsSpool::create(spool_path)
+        .map_err(|e| BuildError::io(spool_path, e))?;
+
+    let mut entities: Vec<u32> = Vec::new();
+    let mut staged: Vec<u32> = Vec::new();
+    let mut written = 0u64;
+
+    while merge.next_term()? {
+        let term = std::str::from_utf8(merge.term()).map_err(|e| {
+            BuildError::Invalid(format!(
+                "text run merge: a term is not UTF-8 ({e}) — the analyser emits `&str`, so this \
+                 is a corrupted run rather than a corpus value"
+            ))
+        })?;
+        let ordinal = dict
+            .push(term)
+            .map_err(|e| BuildError::io(dict_path, std::io::Error::from(e)))?;
+
+        let record = if merge.postings() <= merge_slice_cap as u64 {
+            entities.clear();
+            merge.drain(&mut |entity| {
+                entities.push(entity);
+                Ok(())
+            })?;
+            tessera_authz::postings::encode_posting(
+                ordinal as usize,
+                &entities,
+                SMALL_TERM_THRESHOLD_DEFAULT,
+            )
+            .map_err(|e| BuildError::io(postings_path, e))?
+        } else {
+            // The cap's other side: a term this large is one record, and holding it as `u32`s
+            // would be the only term in the pass whose residency the plan does not bound.
+            let mut bitmap = croaring::Bitmap::new();
+            staged.clear();
+            merge.drain(&mut |entity| {
+                staged.push(entity);
+                if staged.len() >= TEXT_MERGE_STAGE_ENTITIES {
+                    bitmap.add_many(&staged);
+                    staged.clear();
+                }
+                Ok(())
+            })?;
+            if !staged.is_empty() {
+                bitmap.add_many(&staged);
+                staged.clear();
+            }
+            tessera_authz::postings::encode_posting_bitmap(&bitmap, SMALL_TERM_THRESHOLD_DEFAULT)
+                .map_err(|e| BuildError::io(postings_path, e))?
+        };
+        spool
+            .append(&record)
+            .map_err(|e| BuildError::io(spool_path, e))?;
+        written += 1;
+    }
+
+    dict.finish()
+        .map_err(|e| BuildError::io(dict_path, std::io::Error::from(e)))?;
+    spool
+        .finish(postings_path)
+        .map_err(|e| BuildError::io(postings_path, e))?;
+    Ok(written)
+}
+
+/// Entities staged before each hand-off to croaring in the merge's bitmap arm — the same batching
+/// `tessera_roaring` uses, and for the same reason: `add_many` amortises over a run of values.
+const TEXT_MERGE_STAGE_ENTITIES: usize = 1 << 16;
+
+/// Order two runs by their head term, ties broken by run index so that equal terms leave the heap
+/// in ascending entity order.
+fn text_run_before(cursors: &[spill::TextRunReader], a: usize, b: usize) -> bool {
+    match cursors[a].term().cmp(cursors[b].term()) {
+        std::cmp::Ordering::Less => true,
+        std::cmp::Ordering::Greater => false,
+        std::cmp::Ordering::Equal => a < b,
+    }
+}
+
+fn text_heap_sift_down(heap: &mut [usize], cursors: &[spill::TextRunReader], mut node: usize) {
+    loop {
+        let left = node * 2 + 1;
+        if left >= heap.len() {
+            return;
+        }
+        let right = left + 1;
+        let child = if right < heap.len() && text_run_before(cursors, heap[right], heap[left]) {
+            right
+        } else {
+            left
+        };
+        if !text_run_before(cursors, heap[child], heap[node]) {
+            return;
+        }
+        heap.swap(node, child);
+        node = child;
+    }
+}
+
+fn text_heap_push(heap: &mut Vec<usize>, cursors: &[spill::TextRunReader], run: usize) {
+    heap.push(run);
+    let mut node = heap.len() - 1;
+    while node > 0 {
+        let parent = (node - 1) / 2;
+        if !text_run_before(cursors, heap[node], heap[parent]) {
+            return;
+        }
+        heap.swap(node, parent);
+        node = parent;
+    }
+}
+
+fn text_heap_pop(heap: &mut Vec<usize>, cursors: &[spill::TextRunReader]) -> usize {
+    let top = heap[0];
+    let last = heap.pop().expect("the heap is not empty");
+    if !heap.is_empty() {
+        heap[0] = last;
+        text_heap_sift_down(heap, cursors, 0);
+    }
+    top
+}
+
+/// One text column's index: the files written, and the term count [`BuildStage::TextIndex`]
+/// reports.
+struct WrittenTextIndex {
+    paths: Vec<PathBuf>,
+    terms: u64,
+}
+
+/// Does this column owe a postings file?
+///
+/// Two independent reasons, and the second is the one a reader will not expect.
+///
+/// **`index = true`** is the obvious one: the column is declared filterable, and postings are
+/// how a broad-coverage filter stays inside its latency budget (filter-index §2.3).
+///
+/// **`visibility = "derived"`** is the other, and it is *not* optional. That control gates the
+/// existence of a value name, and the gate is membership-derived: a value is offered only if the
+/// principal can see an item carrying it (per-point-attributes §3.3). Deriving that needs the
+/// per-`(column, code)` member sets, which are exactly these postings. Without them `/v1/categories`
+/// would have to derive membership by scanning the value column per request — which is inside a
+/// *filter's* latency budget but not inside this endpoint's, and would make contracts §3.2's
+/// compute-admission justification ("no mask composition, no projection, no file IO") false.
+///
+/// So a `derived` category gets postings whatever its `index` says. This is the one place the
+/// postings stop being an optional accelerator: everywhere else a deployment that builds them and one
+/// that does not answer identically and differ only in latency, but here a disclosure control depends
+/// on them existing.
+pub(crate) fn postings_are_owed(
+    schema: &crate::config::Schema,
+    attribute: &crate::config::Attribute,
+) -> bool {
     if attribute.index {
         return true;
     }
@@ -2672,6 +4196,14 @@ fn category_code(value: &ScalarValue, column: &str) -> Result<u32> {
         ScalarValue::U8(c) => Ok(*c as u32),
         ScalarValue::U16(c) => Ok(*c as u32),
         ScalarValue::U32(c) => Ok(*c),
+        // **An entity the column never reached is absent, which for this family is code 0.** The
+        // presence bitmap is what a partially covered column spells absence with, and a category's
+        // absence is the reserved code out of the value space (decision 0064,
+        // `per-point-attributes.md` §3.6) — so the two spellings meet here, and both mean *no
+        // posting and no value*. Reached by every column of a group-scoped family, where covering
+        // fewer than every entity is the ordinary state rather than a symptom: a view holds its own
+        // rows (`views.md` §5).
+        ScalarValue::Null => Ok(tessera_store::vocabulary::ABSENT_CODE),
         other => Err(BuildError::Invalid(format!(
             "attribute '{column}' is declared for filtering but carries {other:?}, which is not a \
              category code"
@@ -2687,39 +4219,58 @@ fn category_code(value: &ScalarValue, column: &str) -> Result<u32> {
 /// geometry, identity and attributes cannot come from different items.
 fn permute_attribute_tail(
     schema: &crate::config::Schema,
-    by_entity: Vec<EntityColumn>,
+    by_entity: &[EntityColumn],
+    scoped: &[&ScopedRenderColumn],
     entity_row: &[u32],
+    scratch: &crate::column::ColumnScratch,
 ) -> Result<AttributeTail> {
+    // **One lane per render column.** The columns are independent all the way down — each is
+    // permuted from its own entity-order column into its own mapped file, and neither the gather
+    // nor the presence sweep touches anything another lane can name — so the loop over them is the
+    // split, exactly as it is in the attribute join. `collect` over an indexed parallel iterator
+    // preserves declared order, which the tail's column order is.
+    //
+    // **Borrowed, not consumed**: the values are entity space and every view's row space is a
+    // permutation of the same columns (`views.md` §1), so pass two calls this once per view.
+    let lanes: Vec<Result<Option<Lane>>> = schema
+        .attributes
+        .par_iter()
+        .zip(by_entity.par_iter())
+        .map(|(attribute, values)| {
+            // **The tail is exactly the render columns.** An `index`-only column is entity-space
+            // and has already been written there; including it here would give it a slot in every
+            // row as well, which is the per-row cost §10.3's routing exists to avoid and — for a
+            // `utf8` column — the one `render` on `utf8` is refused for outright.
+            if !attribute.render {
+                return Ok(None);
+            }
+            render_lane(&attribute.name, attribute.ty, values, entity_row, scratch).map(Some)
+        })
+        .collect();
+    // **The scoped render columns, after the declared ones** (`views.md` §5). Their order in the
+    // file decides nothing — every reader resolves a tail column by name — but appending keeps a
+    // view outside every scope writing byte-identical bytes to the build that declared no family.
+    let scoped_lanes: Vec<Result<Option<Lane>>> = scoped
+        .par_iter()
+        .map(|column| {
+            render_lane(
+                &column.name,
+                column.ty,
+                &column.values,
+                entity_row,
+                scratch,
+            )
+            .map(Some)
+        })
+        .collect();
     let mut presence = Vec::new();
-    let mut out = Vec::with_capacity(by_entity.len());
-    for (attribute, values) in schema.attributes.iter().zip(by_entity) {
-        // **The tail is exactly the render columns.** An `index`-only column is entity-space and
-        // has already been written there; including it here would give it a slot in every row as
-        // well, which is the per-row cost §10.3's routing exists to avoid and — for a `utf8`
-        // column — the one `render` on `utf8` is refused for outright.
-        if !attribute.render {
-            continue;
+    let mut out = Vec::with_capacity(schema.attributes.len() + scoped.len());
+    for lane in lanes.into_iter().chain(scoped_lanes) {
+        let Some(lane) = lane? else { continue };
+        if let Some(rows) = lane.presence {
+            presence.push((lane.name.clone(), rows));
         }
-        // Taken before the substitution below, which is what erases the distinction: the column
-        // itself stays non-nullable (contracts R4) and an absent value is written as the type's
-        // zero, and this is what says that zero means nothing.
-        if let Some(rows) =
-            render_presence_of(entity_row.iter().map(|&e| values.is_present(e as usize)))
-        {
-            presence.push((attribute.name.clone(), rows));
-        }
-        let mut column = ScalarColumnData::of(attribute.ty, entity_row.len());
-        for &entity in entity_row {
-            column
-                .push(
-                    values
-                        .value_at(entity as usize)
-                        .or_render_placeholder(attribute.ty),
-                    &attribute.name,
-                )
-                .map_err(|e| BuildError::Invalid(format!("attribute '{}': {e}", attribute.name)))?;
-        }
-        out.push((attribute.name.clone(), column));
+        out.push((lane.name, lane.values));
     }
     Ok(AttributeTail {
         columns: out,
@@ -2727,10 +4278,50 @@ fn permute_attribute_tail(
     })
 }
 
+/// One render column's lane: an entity-space column permuted into this view's row order, with the
+/// bitmap that says which of those rows carry a value.
+///
+/// **One body for both kinds of render column** — a declared entity-scoped one and a group-scoped
+/// family's column for this view — because the difference between them is which file the values
+/// were read from and nothing about how a row's slot is filled.
+///
+/// **The absent slot is left as the mapping's zero, which *is* the render placeholder.** The
+/// column is non-nullable on the wire (contracts R4), so an absent value has to be written as
+/// something; `ScalarValue::or_render_placeholder` gives the type's zero for every renderable
+/// type, and a fresh mapping reads as zeros. Writing the placeholder explicitly would store the
+/// same bytes and lose the presence bit that says the zero means nothing — which is the bitmap
+/// beside it. `the_render_placeholder_is_the_zero_a_mapping_reads_as` holds the two together.
+fn render_lane(
+    name: &str,
+    ty: ScalarType,
+    values: &EntityColumn,
+    entity_row: &[u32],
+    scratch: &crate::column::ColumnScratch,
+) -> Result<Lane> {
+    let mut column = EntityColumn::filled(scratch, ty, entity_row.len())?;
+    for (row, &entity) in entity_row.iter().enumerate() {
+        column.set(row, values.value_at(entity as usize), name)?;
+    }
+    let presence = render_presence_of((0..entity_row.len()).map(|row| column.is_present(row)));
+    Ok(Lane {
+        name: name.to_string(),
+        presence,
+        values: column.into_values(scratch, name)?,
+    })
+}
+
+/// One render column, built by the lane that owns it.
+struct Lane {
+    name: String,
+    /// `None` where every row carries a value — the case that writes no file (decision 0064).
+    presence: Option<Bitmap>,
+    values: ScalarColumn,
+}
+
 /// A segment's attribute tail: the columns `write_columns` takes, and the presence bitmaps that go
 /// beside them (decision 0064) — one per render column that has an absence, in row order.
 struct AttributeTail {
-    columns: Vec<(String, ScalarColumnData)>,
+    columns: Vec<(String, ScalarColumn)>,
     presence: Vec<(String, Bitmap)>,
 }
 
@@ -2770,19 +4361,21 @@ pub(crate) fn render_presence_of(
 /// Counted first and then read: letting a `Vec` double its way to 8 GB would peak at three times
 /// the final size during the last reallocation, which is precisely the kind of transient this
 /// build exists to avoid.
-fn read_source_ids(args: &BuildArgs, known_count: Option<usize>) -> Result<Vec<u64>> {
-    let count = match known_count {
-        Some(count) => count,
-        // No limit ⇒ every row is selected ⇒ the metadata row count is exact and the counting
-        // decode is a whole pass over the file for nothing.
-        None if args.limit.is_none() => input::count_point_rows(&args.points)? as usize,
-        None => {
+fn read_source_ids(args: &BuildArgs, view: &crate::ViewArgs) -> Result<Vec<u64>> {
+    let count = match args.limit {
+        // No limit and no selection ⇒ every row is selected ⇒ the metadata row count is exact and
+        // the counting decode is a whole pass over the file for nothing. A form B source's rows
+        // are several views', so the count there is data-dependent like a limit's.
+        None if view.select.is_none() => input::count_point_rows(&view.points)? as usize,
+        _ => {
             let mut count = 0usize;
             input::scan_points(
-                &args.points,
-                &args.point_fields,
-                &args.extent,
+                &view.points,
+                &view.point_fields,
+                view.projection,
+                &view.extent,
                 args.limit,
+                view.select.as_ref(),
                 |_| {
                     count += 1;
                     ControlFlow::Continue(())
@@ -2793,16 +4386,73 @@ fn read_source_ids(args: &BuildArgs, known_count: Option<usize>) -> Result<Vec<u
     };
     let mut ids = Vec::with_capacity(count);
     input::scan_points(
-        &args.points,
-        &args.point_fields,
-        &args.extent,
+        &view.points,
+        &view.point_fields,
+        view.projection,
+        &view.extent,
         args.limit,
+        view.select.as_ref(),
         |point| {
             ids.push(point.source_id);
             ControlFlow::Continue(())
         },
     )?;
     Ok(ids)
+}
+
+/// One view's geometry in **ordinal** space, read once in pass one and permuted into entity
+/// space in pass two (`views.md` §7).
+struct ViewGeometry {
+    x: spill::MappedU32,
+    y: spill::MappedU32,
+    /// Which ordinals this view holds a row for — the view's population, and what makes its
+    /// permutation sentinel wherever it does not.
+    present: Vec<u64>,
+    rows: u64,
+}
+
+/// What one view's points file said about itself, for the later passes over it to be checked
+/// against ([`read_source_ids_union`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ViewIdAnchor {
+    rows: u64,
+    /// An order-independent mixed sum of the ids, so a file swapped mid-build is loud rather
+    /// than silently repairing its own row count.
+    mixed: u64,
+}
+
+/// **Pass one's entity space** (`views.md` §7): every view's point source, unioned by
+/// `external_id`.
+///
+/// A row is unique per `(external_id, view)` — an id repeated *within* one view's file is the
+/// old duplicate refusal, unchanged, while the same id in two views is the ordinary case and is
+/// what makes an entity's identity, label and attributes shared across the row spaces.
+fn read_source_ids_union(args: &BuildArgs) -> Result<(Vec<u64>, Vec<ViewIdAnchor>)> {
+    let mut union: Vec<u64> = Vec::new();
+    let mut anchors = Vec::with_capacity(args.views.len());
+    for view in &args.views {
+        let mut ids = read_source_ids(args, view)?;
+        anchors.push(ViewIdAnchor {
+            rows: ids.len() as u64,
+            mixed: ids
+                .iter()
+                .fold(0u64, |acc, &id| acc.wrapping_add(mix64(id))),
+        });
+        ids.par_sort_unstable();
+        if ids.windows(2).any(|w| w[0] == w[1]) {
+            return Err(BuildError::Invalid(format!(
+                "view '{}': {} contains duplicate entity_id values. A row is unique per (entity, \
+                 view) — the same entity in several views is the ordinary case and is several \
+                 files, never several rows of one (views §4)",
+                view.view_id,
+                view.points.display()
+            )));
+        }
+        union.extend_from_slice(&ids);
+    }
+    union.par_sort_unstable();
+    union.dedup();
+    Ok((union, anchors))
 }
 
 /// Refuse to run unless the configured plugin labels items the way this pipeline assumes.
@@ -2920,7 +4570,7 @@ fn build_dictionary(
         })
     };
     let mut failure: Option<BuildError> = None;
-    let fill = crate::scan_access(args, access, |source_id, source_term| {
+    let fill = crate::scan_access(args, access, |_view, source_id, source_term| {
         pair_rows += 1;
         chunk.push((source_id, source_term));
         if chunk.len() == JOIN_CHUNK_ROWS {
@@ -3194,6 +4844,8 @@ mod tests {
     /// refused the declaration — the caller declared a column and the corpus silently dropped it.
     #[test]
     fn a_category_is_blob_resident_exactly_when_it_has_no_entity_space_home() {
+        let scratch_dir = tempfile::tempdir().expect("tempdir");
+        let scratch = crate::column::ColumnScratch::new(scratch_dir.path());
         let category = crate::config::Attribute {
             name: "department".to_string(),
             field: None,
@@ -3243,9 +4895,10 @@ mod tests {
         };
         // One entity; values are per column, in declaration order.
         let by_entity = vec![
-            EntityColumn::from_values(ScalarType::U16, [ScalarValue::U16(7)], "colour")
+            EntityColumn::from_values(&scratch, ScalarType::U16, [ScalarValue::U16(7)], "colour")
                 .expect("typed column"),
             EntityColumn::from_values(
+                &scratch,
                 ScalarType::Utf8,
                 [ScalarValue::Utf8("kept".to_string())],
                 "note",
@@ -3279,8 +4932,13 @@ mod tests {
         };
         let only_category =
             [
-                EntityColumn::from_values(ScalarType::U16, [ScalarValue::U16(7)], "colour")
-                    .expect("typed column"),
+                EntityColumn::from_values(
+                    &scratch,
+                    ScalarType::U16,
+                    [ScalarValue::U16(7)],
+                    "colour",
+                )
+                .expect("typed column"),
             ];
         let written =
             write_record_blob(dir.path(), &schema, &only_category).expect("blob stage accepts");
@@ -3295,8 +4953,13 @@ mod tests {
         };
         let only_category =
             [
-                EntityColumn::from_values(ScalarType::U16, [ScalarValue::U16(7)], "colour")
-                    .expect("typed column"),
+                EntityColumn::from_values(
+                    &scratch,
+                    ScalarType::U16,
+                    [ScalarValue::U16(7)],
+                    "colour",
+                )
+                .expect("typed column"),
             ];
         let written =
             write_record_blob(dir.path(), &schema, &only_category).expect("blob stage writes");
@@ -3322,16 +4985,218 @@ mod tests {
         );
     }
 
+    /// **The chunking must not be observable in the artefact.** A chunk boundary is a place one
+    /// worker's accumulator ends and another's begins, and a run boundary is a place one worker
+    /// spills mid-chunk — so a column emitted in one chunk and the same column emitted in chunks
+    /// of seven have to be the same two files. That is what makes the plan a memory knob rather
+    /// than a format decision, and it is the assertion an off-by-one at a boundary fails: a term
+    /// whose postings split across two runs and lost half of them changes only the bytes.
+    ///
+    /// The plans below straddle deliberately. `1` and `7` do not divide the corpus and do not
+    /// align to the 64-entity words presence is stored in; `64` and `128` align exactly; `4_096`
+    /// is one chunk for the whole column. The byte budgets force between one and dozens of runs a
+    /// chunk, and the merge-slice caps put the same corpus through both posting encoders — a term
+    /// carried by every entity goes through the `u32` slice under the large cap and through
+    /// Roaring under the small one, and the two must agree byte for byte.
+    #[test]
+    fn chunking_the_text_index_does_not_change_its_bytes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let scratch_dir = tempfile::tempdir().expect("tempdir");
+        let scratch = crate::column::ColumnScratch::new(scratch_dir.path());
+        let attribute = text_fixture_attribute();
+        let values = EntityColumn::from_values(
+            &scratch,
+            ScalarType::Text,
+            (0..N_TEXT).map(text_fixture_prose),
+            "abstract",
+        )
+        .expect("typed column");
+
+        let mut files: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        for (k, plan) in [
+            TextIndexPlan::explicit(4_096, 1 << 30, 1 << 22),
+            TextIndexPlan::explicit(1, 1 << 30, 1 << 22),
+            TextIndexPlan::explicit(7, 1 << 30, 1 << 22),
+            TextIndexPlan::explicit(64, 1 << 30, 1 << 22),
+            TextIndexPlan::explicit(128, 1 << 30, 1 << 22),
+            TextIndexPlan::explicit(999, 1 << 30, 1 << 22),
+            // The byte budget, forcing several runs inside one chunk — including one small
+            // enough that every document spills.
+            TextIndexPlan::explicit(4_096, 1, 1 << 22),
+            TextIndexPlan::explicit(4_096, 4_096, 1 << 22),
+            TextIndexPlan::explicit(1_000, 4_096, 1 << 22),
+            // The merge's other encoder: a cap of 1 sends every term above one posting through
+            // the Roaring arm.
+            TextIndexPlan::explicit(4_096, 1 << 30, 1),
+            TextIndexPlan::explicit(7, 1, 1),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let column_dir = dir.path().join(format!("plan-{k}"));
+            std::fs::create_dir_all(&column_dir).expect("column dir");
+            let written =
+                write_text_index(&column_dir, &attribute, &values, plan).expect("text index");
+            assert_eq!(
+                written.terms,
+                expected_text_postings().len() as u64,
+                "plan {k} wrote the wrong term count"
+            );
+            // Nothing but the two artefacts is left behind: every run this plan spilled is gone.
+            let left: Vec<String> = std::fs::read_dir(&column_dir)
+                .expect("read dir")
+                .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+                .filter(|name| name.ends_with(".spill"))
+                .collect();
+            assert!(left.is_empty(), "plan {k} left {left:?} behind");
+            files.push((
+                std::fs::read(column_dir.join(tessera_filter::DICT_FILE)).expect("dict"),
+                std::fs::read(column_dir.join("postings.arrow")).expect("postings"),
+            ));
+        }
+        let (dict, postings) = files.first().expect("at least one plan").clone();
+        for (k, emitted) in files.iter().enumerate().skip(1) {
+            assert_eq!(emitted.0, dict, "plan {k}'s dictionary differs");
+            assert_eq!(emitted.1, postings, "plan {k}'s postings differ");
+        }
+    }
+
+    /// And the index says what the column says: every term the analyser produces is a key, and its
+    /// posting is exactly the entities whose prose carries it — read back through the readers that
+    /// will serve it, over a plan of many chunks and many runs apiece, so what is asserted is the
+    /// merge's output and not one worker's accumulator.
+    #[test]
+    fn the_merged_text_index_holds_every_term_and_the_entities_carrying_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let scratch_dir = tempfile::tempdir().expect("tempdir");
+        let scratch = crate::column::ColumnScratch::new(scratch_dir.path());
+        let values = EntityColumn::from_values(
+            &scratch,
+            ScalarType::Text,
+            (0..N_TEXT).map(text_fixture_prose),
+            "abstract",
+        )
+        .expect("typed column");
+        write_text_index(
+            dir.path(),
+            &text_fixture_attribute(),
+            &values,
+            TextIndexPlan::explicit(97, 2_048, 1 << 22),
+        )
+        .expect("text index");
+
+        let dict = tessera_filter::SortedDict::open(
+            &dir.path().join(tessera_filter::DICT_FILE),
+            tessera_filter::Access::Read,
+        )
+        .expect("the token dictionary opens");
+        let postings = tessera_authz::postings::PostingsReader::open(
+            &dir.path().join("postings.arrow"),
+            false,
+        )
+        .expect("the postings open");
+
+        let expected = expected_text_postings();
+        assert_eq!(dict.len() as usize, expected.len());
+        assert_eq!(postings.term_count() as usize, expected.len());
+        for (ordinal, (term, entities)) in expected.iter().enumerate() {
+            assert_eq!(
+                dict.resolve(term).expect("a readable dictionary"),
+                Some(ordinal as u32),
+                "term {term:?} is at the wrong ordinal"
+            );
+            let posting = postings
+                .posting_at(ordinal as u32)
+                .expect("a readable posting")
+                .expect("every term in the dictionary has a posting");
+            let got: Vec<u32> = match posting {
+                tessera_authz::postings::PostingRef::Array(bytes) => bytes
+                    .chunks_exact(4)
+                    .map(|c| u32::from_le_bytes(c.try_into().expect("four bytes")))
+                    .collect(),
+                tessera_authz::postings::PostingRef::Roaring(view) => view.iter().collect(),
+            };
+            assert_eq!(&got, entities, "term {term:?} carries the wrong entities");
+        }
+    }
+
+    /// The corpus both text tests read. 4,096 entities, and every shape the emit has to survive:
+    /// a term carried by every entity (well past the Roaring threshold and past a 64-entity
+    /// presence word), terms carried by exactly one, a term repeated inside one document, mixed
+    /// scripts, whole absent runs longer than a presence word, and the empty string — which is a
+    /// legal value that yields no term, and is not absence.
+    const N_TEXT: usize = 4_096;
+
+    fn text_fixture_attribute() -> crate::config::Attribute {
+        crate::config::Attribute {
+            name: "abstract".to_string(),
+            field: None,
+            title: None,
+            ty: ScalarType::Text,
+            analyser: Some(
+                tessera_analyse::analyser(tessera_analyse::UNICODE)
+                    .expect("the unicode analyser ships")
+                    .identity(),
+            ),
+            vocabulary: None,
+            value_set: None,
+            index: true,
+            render: false,
+        }
+    }
+
+    fn text_fixture_prose(entity: usize) -> ScalarValue {
+        // A 64-entity absent run, word-aligned, and a second one that is not.
+        if (256..320).contains(&entity) || (1_001..1_101).contains(&entity) {
+            return ScalarValue::Null;
+        }
+        if entity.is_multiple_of(313) {
+            return ScalarValue::Utf8(String::new());
+        }
+        let mut prose = format!("common item{entity}");
+        match entity % 5 {
+            0 => prose.push_str(" quick brown fox"),
+            1 => prose.push_str(" quick quick silver"),
+            2 => prose.push_str(" 日本語のテキスト quick"),
+            3 => prose.push_str(" Ω STRASSE ﬁle"),
+            _ => prose.push_str(" brown bear"),
+        }
+        ScalarValue::Utf8(prose)
+    }
+
+    /// The expected `(term, entities)` set, derived from the fixture through the analyser itself —
+    /// the same route `tessera tokenise` gives the conformance oracle, so this asserts the index
+    /// against the analyser rather than against a second tokeniser that could drift.
+    fn expected_text_postings() -> Vec<(String, Vec<u32>)> {
+        let analyser = tessera_analyse::analyser(tessera_analyse::UNICODE).expect("the analyser");
+        let mut terms: std::collections::BTreeMap<String, Vec<u32>> = Default::default();
+        for entity in 0..N_TEXT {
+            let ScalarValue::Utf8(prose) = text_fixture_prose(entity) else {
+                continue;
+            };
+            for token in analyser.tokens(&prose) {
+                let postings = terms.entry(token).or_default();
+                if postings.last() != Some(&(entity as u32)) {
+                    postings.push(entity as u32);
+                }
+            }
+        }
+        terms.into_iter().collect()
+    }
+
     /// **The band count must not be observable in the artefact.** A band boundary is a place the
     /// scatter restarts and the ascending-key check spans, so a column emitted in one band and the
     /// same column emitted in a band per code have to be the same file — which is also what makes
     /// the band budget a memory knob rather than a format decision.
     #[test]
     fn banding_the_postings_emit_does_not_change_its_bytes() {
+        let scratch_dir = tempfile::tempdir().expect("tempdir");
+        let scratch = crate::column::ColumnScratch::new(scratch_dir.path());
         let dir = tempfile::tempdir().expect("tempdir");
         // Codes scattered across a 32-bit space, as `vocabulary` mints them, with one code held
         // heavily enough to cross the Roaring threshold and code 0 (absent) carried too.
         let values = EntityColumn::from_values(
+            &scratch,
             ScalarType::U32,
             (0..5_000u32).map(|e| {
                 ScalarValue::U32(match e % 7 {

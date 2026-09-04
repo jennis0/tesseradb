@@ -22,6 +22,19 @@
 //! Dropping half the nodes gives a wrong map rather than half a map: the regions behind the dropped
 //! nodes read as empty, which is the one thing a density map must never say by accident.
 //!
+//! ## The cut is taken over the viewer's tree
+//!
+//! **A withheld node is not in the viewer's tree** ([decision 0117](../../../docs/decisions/0117-a-child-may-name-several-parents.md) E,
+//! `dag-hierarchies.md` §6). The structure a cut is taken over is the passing nodes, with an edge
+//! wherever one passing node is the nearest passing ancestor of another on some path, and depth
+//! counted in passing nodes only. A node the viewer may not see occupies no rung and the climb
+//! passes through it, so the served set at every depth is identical to the world in which that
+//! node never existed — which is what C29 promises. A cut that counted withheld nodes would let a
+//! viewer sweeping budgets learn that a coarser artifact sits between two they were served.
+//!
+//! The stored lineage still holds every node of the level, because it is a property of the level
+//! and not of the viewer; the per-request plan is what reads only the passing ones.
+//!
 //! ## One depth for the whole tree
 //!
 //! ⊘ **A budget resolves to one depth across every branch, and the general case is unspecified.**
@@ -33,33 +46,45 @@
 //! given a depth, so an artifact served under a shallow cut and a deep one is the same artifact
 //! with the same masked count — a client that widens its budget mid-pan never sees a node change
 //! its meaning, only nodes appear beside it.
+//!
+//! ## A child may name several parents
+//!
+//! A `dag` layer's lineage is a directed acyclic graph (`dag-hierarchies.md` §3), and this module
+//! reads it as one: parents are a list per node, **depth is the longest path from a root** (§5),
+//! and the cut's rule is the tree rule with *its lineage* read as *each of its lineages* (§6). The
+//! served count is then not monotone in depth — two parents at depth 1 are replaced by their one
+//! shared child at depth 2 — so a budget on a DAG reads every depth's count rather than bisecting.
 
-/// One treed level's lineage, as the cut needs it: a parent per ordinal.
+/// One treed level's lineage, as the cut needs it: the parents of each ordinal.
 ///
-/// **Built from the parent pointers alone**, which is the only durable direction — the child
-/// direction is this relation read the other way and is derived here, per request, rather than
+/// **Built from the parent lists alone**, which is the only durable direction — the child
+/// direction is this relation read the other way and is derived here, per generation, rather than
 /// stored. That is what keeps a deletion from having to rewrite two copies of one fact.
 ///
 /// **Indexed by ordinal, because that is how a level is stored.** A level is a dense vector with
-/// holes, so the lineage is one too: building it is a linear fill with a single allocation, and a
-/// lookup is an index rather than a tree descent. This is on the request path for every treed
-/// layer, beside a per-artifact loop that already walks the whole level — so it has to cost a
-/// fraction of that loop rather than a multiple of it, which a per-node map insert would have been.
+/// holes, so the lineage is one too: both directions are CSR over the ordinal space, building
+/// them is a counting sort with a handful of allocations, and a lookup is an index rather than a
+/// tree descent. This is on the request path for every treed layer, beside a per-artifact loop
+/// that already walks the whole level — so it has to cost a fraction of that loop rather than a
+/// multiple of it, which a per-node map insert would have been.
 #[derive(Debug)]
 pub struct Lineage {
-    /// `parent[ordinal]`, `None` at a root and at an ordinal the level does not hold.
-    parent: Vec<Option<u32>>,
-    /// `depth[ordinal]`, the root being 0 — resolved once for the whole level when the lineage is
-    /// built, rather than per request.
+    /// The parent direction — see [`Parents`]. Spans every ordinal that names a parent or is
+    /// named as one; an ordinal past its end has no parents.
+    parents: Parents,
+    /// `depth[ordinal]`: **the longest path from a root**, the root being 0 (`dag-hierarchies.md`
+    /// §5) — resolved once for the whole level when the lineage is built, rather than per request.
     ///
-    /// **Depth is a property of the tree and not of the viewer**, so a request that recomputes it
-    /// is redoing generation work. It was measured at ~57 ms of the cut's ~240 at a 10⁷-artifact
-    /// level, and it belongs here for the same reason the parent map does — which is also why the
-    /// lineage itself wants holding per generation rather than rebuilding on every request, the
-    /// larger version of the same observation.
+    /// Longest rather than shortest because it is the only choice under which every edge descends:
+    /// `depth(parent) < depth(child)` for each parent. That is what makes it a topological order,
+    /// and the topological order is what the cut's plan sweeps in. **It is not the depth the cut
+    /// serves at** — that one is counted in passing nodes, per request — but a request that
+    /// recomputed the order would be redoing generation work: it was measured at ~57 ms of the
+    /// cut's ~240 at a 10⁷-artifact level, which is why the lineage itself is held per generation
+    /// rather than rebuilt on every request, the larger version of the same observation.
     depth: Vec<u32>,
-    /// How many ordinals name a parent. **The cycle bound**, and tighter than the vector's length:
-    /// a chain cannot be longer than the number of edges that exist.
+    /// How many edges the level holds. **The cycle bound** for the walks that count steps rather
+    /// than marking nodes: a chain cannot be longer than the number of edges that exist.
     edges: usize,
     /// The child direction, as a CSR: `children[child_at[u]..child_at[u + 1]]`.
     ///
@@ -74,83 +99,219 @@ pub struct Lineage {
     /// never touches, which measured as a regression from 107 ms to 241 ms before this was made
     /// lazy.
     child_index: std::sync::OnceLock<(Vec<u32>, Vec<u32>)>,
-    /// The ordinals with no parent, ascending — where the downward walk starts.
+    /// The ordinals with no parent, ascending — where the downward walk starts. An ordinal a child
+    /// names that the level does not hold is a root here too: the walk requires every root to
+    /// pass, and such a phantom never does, so the walk declines rather than answering over a
+    /// lineage it cannot reach downward.
     roots: Vec<u32>,
-    /// Whether every named parent is itself an ordinal this lineage holds.
-    ///
-    /// **A node whose parent sits outside the table cannot be reached downward at all**, so a walk
-    /// from the roots would silently miss it while the sweep, which climbs, would not. The two
-    /// directions are not interchangeable over a malformed tree, and the downward route declines
-    /// rather than answering differently.
-    walkable: bool,
+    /// Whether this is a `dag` layer's lineage — a declaration, never inferred from the edges
+    /// ([decision 0087](../../../docs/decisions/0087-cross-level-edges-are-information-not-rollup.md)).
+    /// The downward walk declines on one, and the budget search reads every depth's count.
+    dag: bool,
 }
 
+/// The parent direction, in the shape the kind needs.
+///
+/// **A tree keeps one `u32` per ordinal**, because that is what the cut's cost rests on: every
+/// sweep in [`Plan::new`] reads a node's parents, and at a level of ten million a CSR read — two
+/// offsets and a bounds check — in place of one word measured as +55% on the whole cut and 2.5×
+/// on the lineage build. A DAG pays the CSR, which is the shape its lists need; a tree does not
+/// pay for a shape it never uses.
+#[derive(Debug)]
+enum Parents {
+    /// `parent[ordinal]`, [`NO_PARENT`] at a root.
+    Tree(Vec<u32>),
+    /// `list[at[u]..at[u + 1]]`, ascending and without duplicates — a duplicate edge is one
+    /// edge, whichever spelling stated it (`dag-hierarchies.md` §4).
+    Dag { at: Vec<u32>, list: Vec<u32> },
+}
+
+/// A tree's slot at a root.
+const NO_PARENT: u32 = u32::MAX;
+
 impl Lineage {
-    /// Build from `(ordinal, parent)` pairs — every artifact of the level, not only the passing
-    /// ones. **An ancestor that failed its own criterion is still an ancestor**: it cannot be
-    /// served, but a cut that did not know it was there would mistake its two children for
-    /// siblings of a different parent and keep both when one covers the other.
-    pub fn new(pairs: impl IntoIterator<Item = (u32, Option<u32>)>) -> Self {
-        let mut parent: Vec<Option<u32>> = Vec::new();
-        let mut edges = 0;
+    /// Build a **tree's** lineage from `(ordinal, parents)` pairs — every artifact of the level,
+    /// not only the passing ones, since the level's edges are a property of the level. A parent
+    /// list is anything that iterates ordinals: an `Option<u32>` is a list of at most one.
+    ///
+    /// The plan reads only the passing nodes through this (see the module doc); the whole level
+    /// is held so that one lineage serves every viewer.
+    pub fn new<P>(pairs: impl IntoIterator<Item = (u32, P)>) -> Self
+    where
+        P: IntoIterator<Item = u32>,
+    {
+        Self::build(pairs, false)
+    }
+
+    /// Build a **`dag`** layer's lineage: the same shape, with a child free to name several
+    /// parents and the flag the walks read.
+    pub fn dag<P>(pairs: impl IntoIterator<Item = (u32, P)>) -> Self
+    where
+        P: IntoIterator<Item = u32>,
+    {
+        Self::build(pairs, true)
+    }
+
+    fn build<P>(pairs: impl IntoIterator<Item = (u32, P)>, dag: bool) -> Self
+    where
+        P: IntoIterator<Item = u32>,
+    {
+        if !dag {
+            return Self::build_tree(pairs);
+        }
+        // The edge list, `(child, parent)`, then a counting sort into the CSR. A self-edge is
+        // refused at both entry points (`dag-hierarchies.md` §4); one arriving anyway is dropped
+        // here rather than read as a cycle of length one.
+        let mut edge_list: Vec<(u32, u32)> = Vec::new();
+        let mut span = 0usize;
         for (ordinal, of) in pairs {
-            if of.is_none() {
-                continue;
-            }
-            let idx = ordinal as usize;
-            if parent.len() <= idx {
-                parent.resize(idx + 1, None);
-            }
-            parent[idx] = of;
-            edges += 1;
-        }
-        let depth = Self::depths(&parent, edges);
-        let mut roots = Vec::new();
-        let mut walkable = true;
-        for (ordinal, of) in parent.iter().enumerate() {
-            match of {
-                Some(up) if (*up as usize) < parent.len() => {}
-                Some(_) => walkable = false,
-                None => roots.push(ordinal as u32),
+            for parent in of {
+                if parent == ordinal {
+                    continue;
+                }
+                span = span.max(ordinal as usize + 1).max(parent as usize + 1);
+                edge_list.push((ordinal, parent));
             }
         }
+        let mut parent_at = vec![0u32; span + 1];
+        for &(child, _) in &edge_list {
+            parent_at[child as usize + 1] += 1;
+        }
+        for slot in 1..=span {
+            parent_at[slot] += parent_at[slot - 1];
+        }
+        let mut cursor = parent_at.clone();
+        let mut parents = vec![0u32; edge_list.len()];
+        for &(child, parent) in &edge_list {
+            parents[cursor[child as usize] as usize] = parent;
+            cursor[child as usize] += 1;
+        }
+        drop(edge_list);
+        // Ascending and deduplicated per node. The lists are one long on a tree and a handful on
+        // a DAG, so this is a pass over the edges and not a sort of them.
+        let mut edges = 0usize;
+        let mut write = 0usize;
+        let mut read_at = vec![0u32; span + 1];
+        for node in 0..span {
+            let (lo, hi) = (parent_at[node] as usize, parent_at[node + 1] as usize);
+            parents[lo..hi].sort_unstable();
+            read_at[node] = write as u32;
+            let mut last: Option<u32> = None;
+            for i in lo..hi {
+                let p = parents[i];
+                if last != Some(p) {
+                    parents[write] = p;
+                    write += 1;
+                    edges += 1;
+                    last = Some(p);
+                }
+            }
+        }
+        read_at[span] = write as u32;
+        parents.truncate(write);
+        let parent_at = read_at;
+
+        let depth = Self::dag_depths(&parent_at, &parents);
+        let roots = (0..span as u32)
+            .filter(|&n| parent_at[n as usize] == parent_at[n as usize + 1])
+            .collect();
         Lineage {
-            parent,
+            parents: Parents::Dag {
+                at: parent_at,
+                list: parents,
+            },
             depth,
             edges,
             child_index: std::sync::OnceLock::new(),
             roots,
-            walkable,
+            dag,
         }
     }
 
-    /// The child direction as a CSR, and the roots — one counting pass and one fill.
-    ///
-    /// An ordinal the level does not hold is a root here, which is what it is everywhere else in
-    /// this module: a parent it cannot name is a parent it does not have.
-    fn children_of(parent: &[Option<u32>]) -> (Vec<u32>, Vec<u32>) {
-        let span = parent.len();
-        let mut counts = vec![0u32; span + 1];
-        for up in parent.iter().flatten() {
-            if (*up as usize) < span {
-                counts[*up as usize] += 1;
+    /// A tree's build: one linear fill of a word per ordinal. A list longer than one on a tree
+    /// is refused at both entry points; one arriving anyway keeps its last entry, so the table
+    /// stays a tree and the walks stay bounded.
+    fn build_tree<P>(pairs: impl IntoIterator<Item = (u32, P)>) -> Self
+    where
+        P: IntoIterator<Item = u32>,
+    {
+        let mut parent: Vec<u32> = Vec::new();
+        let mut edges = 0usize;
+        for (ordinal, of) in pairs {
+            for up in of {
+                if up == ordinal {
+                    continue;
+                }
+                let need = (ordinal as usize).max(up as usize) + 1;
+                if parent.len() < need {
+                    parent.resize(need, NO_PARENT);
+                }
+                if parent[ordinal as usize] == NO_PARENT {
+                    edges += 1;
+                }
+                parent[ordinal as usize] = up;
             }
         }
-        let mut child_at = vec![0u32; span + 1];
-        let mut running = 0u32;
-        for (slot, n) in counts.iter().take(span).enumerate() {
-            child_at[slot] = running;
-            running += n;
+        let depth = Self::tree_depths(&parent, edges);
+        let roots = (0..parent.len() as u32)
+            .filter(|&n| parent[n as usize] == NO_PARENT)
+            .collect();
+        Lineage {
+            parents: Parents::Tree(parent),
+            depth,
+            edges,
+            child_index: std::sync::OnceLock::new(),
+            roots,
+            dag: false,
         }
-        child_at[span] = running;
-        let mut cursor = child_at.clone();
-        let mut children = vec![0u32; running as usize];
-        for (ordinal, of) in parent.iter().enumerate() {
-            if let Some(up) = of {
-                if (*up as usize) < span {
-                    children[cursor[*up as usize] as usize] = ordinal as u32;
-                    cursor[*up as usize] += 1;
+    }
+
+    /// How many ordinals the parent table spans — every ordinal that names or is named as a
+    /// parent. An ordinal at or past this has no parents and no children.
+    fn span(&self) -> usize {
+        match &self.parents {
+            Parents::Tree(parent) => parent.len(),
+            Parents::Dag { at, .. } => at.len() - 1,
+        }
+    }
+
+    /// The parents of `ordinal`, ascending; empty at a root and at an ordinal this level does
+    /// not hold. On a tree this is the one word's slot, borrowed, and never a list built.
+    #[inline]
+    pub fn parents_of(&self, ordinal: u32) -> &[u32] {
+        let at = ordinal as usize;
+        match &self.parents {
+            Parents::Tree(parent) => match parent.get(at) {
+                Some(up) if *up != NO_PARENT => std::slice::from_ref(up),
+                _ => &[],
+            },
+            Parents::Dag { at: offsets, list } => {
+                if at + 1 >= offsets.len() {
+                    return &[];
                 }
+                &list[offsets[at] as usize..offsets[at + 1] as usize]
+            }
+        }
+    }
+
+    /// The child direction as a CSR — one counting pass and one fill over the parent direction.
+    fn children_of(&self) -> (Vec<u32>, Vec<u32>) {
+        let span = self.span();
+        let mut child_at = vec![0u32; span + 1];
+        for node in 0..span as u32 {
+            for &up in self.parents_of(node) {
+                child_at[up as usize + 1] += 1;
+            }
+        }
+        for slot in 1..=span {
+            child_at[slot] += child_at[slot - 1];
+        }
+        let mut cursor = child_at.clone();
+        let mut children = vec![0u32; self.edges];
+        for node in 0..span as u32 {
+            for &up in self.parents_of(node) {
+                children[cursor[up as usize] as usize] = node;
+                cursor[up as usize] += 1;
             }
         }
         (child_at, children)
@@ -158,9 +319,7 @@ impl Lineage {
 
     /// The children of `ordinal`, ascending — building the index on the first call.
     fn children_of_node(&self, ordinal: u32) -> &[u32] {
-        let (child_at, children) = self
-            .child_index
-            .get_or_init(|| Self::children_of(&self.parent));
+        let (child_at, children) = self.child_index.get_or_init(|| self.children_of());
         let at = ordinal as usize;
         if at + 1 >= child_at.len() {
             return &[];
@@ -168,13 +327,15 @@ impl Lineage {
         &children[child_at[at] as usize..child_at[at + 1] as usize]
     }
 
-    /// Every ordinal's depth, resolved in one pass with the ancestors memoised.
+    /// A tree's depths, resolved in one pass with the ancestors memoised.
     ///
     /// **Ancestors are shared, so depth is the quantity most worth memoising.** A balanced tree's
     /// lineages all pass through the same handful of nodes near the root, and computing each node's
     /// depth by walking to the root would re-walk that spine once per descendant — the depth of the
-    /// tree multiplied by the number of nodes, for an answer that never changes.
-    fn depths(parent: &[Option<u32>], edges: usize) -> Vec<u32> {
+    /// tree multiplied by the number of nodes, for an answer that never changes. The cycle guard
+    /// is the edge count: the build and the mint refuse a cycle, and a hand-written WAL is not a
+    /// build.
+    fn tree_depths(parent: &[u32], edges: usize) -> Vec<u32> {
         const UNKNOWN: u32 = u32::MAX;
         let mut known = vec![UNKNOWN; parent.len()];
         let mut stack: Vec<u32> = Vec::new();
@@ -184,31 +345,22 @@ impl Lineage {
             }
             stack.clear();
             let mut at = node;
-            // Climb to the first node whose depth is already known, or to a root. The cycle guard
-            // is the edge count, as everywhere else here: the build refuses a cycle, and a
-            // hand-written WAL is not a build.
+            // Climb to the first node whose depth is already known, or to a root.
             let base = loop {
-                match parent.get(at as usize).copied().flatten() {
-                    None => {
-                        known[at as usize] = 0;
-                        break 0;
-                    }
-                    Some(up) => {
-                        if stack.len() > edges {
-                            known[at as usize] = 0;
-                            break 0;
-                        }
-                        stack.push(at);
-                        if known.get(up as usize).copied().unwrap_or(UNKNOWN) != UNKNOWN {
-                            break known[up as usize];
-                        }
-                        if up as usize >= known.len() {
-                            known[at as usize] = 0;
-                            break 0;
-                        }
-                        at = up;
-                    }
+                let up = parent[at as usize];
+                if up == NO_PARENT {
+                    known[at as usize] = 0;
+                    break 0;
                 }
+                if stack.len() > edges {
+                    known[at as usize] = 0;
+                    break 0;
+                }
+                stack.push(at);
+                if known[up as usize] != UNKNOWN {
+                    break known[up as usize];
+                }
+                at = up;
             };
             // Unwind, deepest last: each node is one below the one above it.
             let mut d = base;
@@ -220,9 +372,91 @@ impl Lineage {
         known
     }
 
-    /// The parent of `ordinal`, or `None` at a root and at an ordinal this level does not hold.
-    fn parent_of(&self, ordinal: u32) -> Option<u32> {
-        self.parent.get(ordinal as usize).copied().flatten()
+    /// A DAG's depths — the longest path from a root — in one depth-first pass over the parent
+    /// lists, iterative so a ten-million-node chain does not recurse ten million deep. The cycle
+    /// guard is the in-progress mark: a parent still in progress when its child is resolved
+    /// contributes nothing rather than looping.
+    fn dag_depths(parent_at: &[u32], parents: &[u32]) -> Vec<u32> {
+        const UNKNOWN: u32 = u32::MAX;
+        const PENDING: u32 = u32::MAX - 1;
+        let span = parent_at.len() - 1;
+        let parents_of =
+            |node: usize| &parents[parent_at[node] as usize..parent_at[node + 1] as usize];
+        let mut known = vec![UNKNOWN; span];
+        let mut stack: Vec<u32> = Vec::new();
+        for node in 0..span as u32 {
+            if known[node as usize] != UNKNOWN {
+                continue;
+            }
+            stack.push(node);
+            while let Some(&at) = stack.last() {
+                let a = at as usize;
+                match known[a] {
+                    UNKNOWN => {
+                        known[a] = PENDING;
+                        for &up in parents_of(a) {
+                            if known[up as usize] == UNKNOWN {
+                                stack.push(up);
+                            }
+                        }
+                    }
+                    PENDING => {
+                        // Every parent pushed above this node has been resolved and popped; one
+                        // still pending is beneath it on the stack, which is a cycle.
+                        let mut d = 0u32;
+                        for &up in parents_of(a) {
+                            let k = known[up as usize];
+                            if k < PENDING {
+                                d = d.max(k + 1);
+                            }
+                        }
+                        known[a] = d;
+                        stack.pop();
+                    }
+                    _ => {
+                        stack.pop();
+                    }
+                }
+            }
+        }
+        known
+    }
+
+    /// The ancestor-or-self of `ordinal` with the greatest `key`, among those `key` holds for —
+    /// the search the per-point membership column makes from a point's leaf for the **deepest
+    /// served** artifact above it, then the lowest identifier (`client-components.md` §5.10,
+    /// `dag-hierarchies.md` §6). Every path is searched, so on a DAG a served ancestor on a
+    /// second path is found; on a tree the search is the chain.
+    ///
+    /// `scratch` is the caller's buffer, so a resolver asking once per point allocates once. It
+    /// doubles as the visited set — the ancestor set of one node is small, and a linear
+    /// membership test over it is cheaper than a marker over the level — which is also what
+    /// terminates the search over a malformed level's cycle.
+    pub fn select_ancestor<K: Ord>(
+        &self,
+        ordinal: u32,
+        scratch: &mut Vec<u32>,
+        key: impl Fn(u32) -> Option<K>,
+    ) -> Option<(u32, K)> {
+        scratch.clear();
+        scratch.push(ordinal);
+        let mut best: Option<(u32, K)> = None;
+        let mut next = 0usize;
+        while next < scratch.len() {
+            let at = scratch[next];
+            next += 1;
+            if let Some(k) = key(at) {
+                if best.as_ref().is_none_or(|(_, held)| k > *held) {
+                    best = Some((at, k));
+                }
+            }
+            for &up in self.parents_of(at) {
+                if !scratch.contains(&up) {
+                    scratch.push(up);
+                }
+            }
+        }
+        best
     }
 
     /// True where no artifact of the level names a parent — the flat case, which every layer
@@ -231,7 +465,8 @@ impl Lineage {
         self.edges == 0
     }
 
-    /// The depth of `ordinal`, the root being 0. A lookup: see [`Lineage::depth`].
+    /// The depth of `ordinal` — the longest path from a root, the root being 0. A lookup: see
+    /// [`Lineage::depth`].
     ///
     /// An ordinal the level does not hold is a root, which is what it is in every other reading
     /// here too.
@@ -239,24 +474,9 @@ impl Lineage {
         self.depth.get(ordinal as usize).copied().unwrap_or(0)
     }
 
-    /// `node` and every ancestor of it, nearest first. Bounded for a cycle's sake.
-    ///
-    /// **Only the reference implementation uses this now.** The serving path climbs without
-    /// materialising a chain per node — allocating one was the cost the plan was rewritten to
-    /// remove — but the obvious form the plan is checked against is written with it, and reads the
-    /// way the rule is stated.
-    #[cfg(test)]
-    fn chain(&self, node: u32) -> Vec<u32> {
-        let mut chain = vec![node];
-        let mut at = node;
-        while let Some(parent) = self.parent_of(at) {
-            if chain.len() > self.edges {
-                break;
-            }
-            chain.push(parent);
-            at = parent;
-        }
-        chain
+    /// Whether this is a `dag` layer's lineage.
+    pub fn is_dag(&self) -> bool {
+        self.dag
     }
 }
 
@@ -366,13 +586,18 @@ impl Lineages {
 /// and each node on it is the pick over one interval and never again. Taking the union across the
 /// lineages that share a node leaves an interval, because they share its lower end.
 ///
-/// So the plan is one interval per servable node — `[from, until)` — computed in two sweeps of the
-/// level, and every question the budget search asks is answered from it:
+/// **Depth here is counted in passing nodes** (decision 0117 E): a node's rung is the longest
+/// path to it through the passing nodes alone, so a withheld ancestor occupies no rung and the
+/// climb passes through it to the nearest passing ancestor on each path. The stored depth is read
+/// only as the order the sweeps run in.
+///
+/// So the plan is one interval per passing node — `[from, until)` — computed in three sweeps of
+/// the on-chain nodes, and every question the budget search asks is answered from it:
 ///
 /// - **how many does depth *d* serve** is a lookup in a per-depth count, accumulated from the
-///   intervals with a difference array. The bisection needs no evaluation at all.
-/// - **which artifacts does depth *d* serve** is one filtered pass, in ascending ordinal order by
-///   construction — so the result needs no sort and no dedup.
+///   intervals with a difference array. The search needs no evaluation at all.
+/// - **which artifacts does depth *d* serve** is one filtered pass over the passing nodes of
+///   rung at most *d*, and never over the level.
 ///
 /// **This replaces materialising a lineage per frontier node**, which was the shape that made the
 /// cut the largest term in a whole-corpus request. At a 10⁷-artifact level with everything passing
@@ -382,32 +607,39 @@ impl Lineages {
 /// frontier walk of 12 ms and side tables of 2 ms, so the storage was the whole cost and not the
 /// arithmetic.
 struct Plan {
-    /// The on-chain nodes of each depth, ascending within a depth — so a cut at depth *d* reads
-    /// `by_depth[0..=d]` and never touches the rest of the level.
+    /// The passing nodes bucketed by **rung** — passing-depth — as a CSR, ascending within a
+    /// rung: `by_rung[rung_at[r]..rung_at[r + 1]]`. A cut at depth *d* reads the first *d + 1*
+    /// buckets and never touches the rest of the level.
     ///
     /// **This is what keeps the answer proportional to itself.** A budget forces a shallow cut, so
     /// the served set is the top of the tree: 729 artifacts out of ten million in the measured case.
     /// An earlier revision built one interval per *servable* node — three arrays of ten million,
     /// 120 MB — and then scanned all of them to pick those 729, which was 83 ms of the cut's 262.
-    by_depth: Vec<Vec<u32>>,
+    ///
+    /// A counting sort rather than a vector per rung — the counts fall out of the rung sweep and
+    /// the placement out of the `until` sweep, where growing seven million entries through
+    /// per-bucket reallocation in a pass of their own measured 62 ms of the plan's 209. Placed in
+    /// sweep order, not ordinal order, which is why [`Plan::serve_at`] sorts what it serves.
+    rung_at: Vec<u32>,
+    by_rung: Vec<u32>,
+    /// The heads, ascending — the answer at the deepest rung and at every depth past it, which
+    /// is the unbudgeted cut. Held so that answer is a copy rather than a read of every bucket
+    /// and a sort of the level's frontier.
+    heads: Vec<u32>,
     /// Per ordinal, the first depth at which it is **no longer** served, because a passing node
     /// beneath it has become reachable in some lineage that was picking it. `u32::MAX` for a
     /// frontier node, which is picked at every depth from its own downward.
     until: Vec<u32>,
-    /// Per ordinal, whether it is passing **and** on some lineage — the two conditions for being
-    /// servable at any depth at all.
-    servable: Vec<bool>,
-    /// `(depth, ordinal)` for each node with **no passing ancestor at all**.
-    ///
-    /// **They are their lineage's fallback**, served at every depth shallower than their own — which
-    /// is the rule that keeps a branch whose ancestors were suppressed, deleted or below their bar
-    /// on the map rather than blanking its region. A cut at depth *d* reads `by_depth[0..=d]`, so it
-    /// would miss exactly the fallbacks sitting deeper than *d*; the depth is carried here so that
-    /// test is a comparison rather than a search.
-    fallbacks: Vec<(u32, u32)>,
     /// `counts[d]` is `serve_at(d).len()`, for `d` in `0..=deepest`.
     counts: Vec<u32>,
 }
+
+/// A node's rung slot while no passing ancestor has been found on any path. **Zero, so the table
+/// is zero-initialised**: a `vec![0; span]` of forty megabytes is a lazily-mapped allocation,
+/// where any other fill value is a write of every page before the first sweep — most of the
+/// difference at a level where a few thousand pass and every array is the level's size. Rungs
+/// are therefore stored one above their value in this table.
+const NO_PASSING_ABOVE: u32 = 0;
 
 impl Plan {
     /// `prune` is the layer's `prune_children`: with it, only the frontier contributes — where a
@@ -437,40 +669,62 @@ impl Plan {
 
         // **Ordinal-indexed side tables, not sorted lookups.** A level is a dense ordinal space, so
         // every question this pass asks of a node — is it passing, is it covered, what is its
-        // depth — is an array index.
-        let span = sorted
-            .last()
-            .copied()
-            .unwrap_or(0)
-            .max(lineage.parent.len().saturating_sub(1) as u32) as usize
-            + 1;
+        // rung — is an array index.
+        let span = (sorted.last().map_or(0, |&n| n as usize + 1)).max(lineage.span());
         let mut is_passing = vec![false; span];
         for &n in sorted {
             is_passing[n as usize] = true;
         }
 
         // The frontier: a passing node is covered exactly when some *other* passing node names it
-        // among its ancestors. Walking up from each passing node marks that in one pass — and the
-        // walk **stops at the first node an earlier walk already climbed through**, because
-        // everything above it was marked then. That is what keeps the total linear in the passing
-        // set rather than multiplying it by the depth: sibling lineages share a spine, and without
-        // the memo every one of them re-walks it to the root.
+        // among its ancestors. Climbing from each passing node marks that in one pass — and the
+        // climb **expands each node's parents once**, because everything above a node an earlier
+        // climb reached was marked then. That is what keeps the total linear in the edges rather
+        // than multiplying the passing set by the depth: sibling lineages share a spine, and
+        // without the memo every one of them re-walks it to the root. On a DAG the climb is a
+        // search over every path, which the same memo bounds — and which needs no cycle guard,
+        // since a node is expanded at most once.
         let mut covered = vec![false; span];
         let mut climbed = vec![false; span];
-        for &node in sorted {
-            let mut at = node;
-            for _ in 0..=lineage.edges {
-                let Some(parent) = lineage.parent_of(at) else {
-                    break;
-                };
-                if is_passing[parent as usize] {
-                    covered[parent as usize] = true;
+        match &lineage.parents {
+            // A tree's climb is the chain, one word per step.
+            Parents::Tree(parent) => {
+                for &node in sorted {
+                    let mut at = node;
+                    loop {
+                        let up = parent.get(at as usize).copied().unwrap_or(NO_PARENT);
+                        if up == NO_PARENT {
+                            break;
+                        }
+                        let u = up as usize;
+                        if is_passing[u] {
+                            covered[u] = true;
+                        }
+                        if climbed[u] {
+                            break;
+                        }
+                        climbed[u] = true;
+                        at = up;
+                    }
                 }
-                if climbed[parent as usize] {
-                    break;
+            }
+            Parents::Dag { .. } => {
+                let mut stack: Vec<u32> = Vec::new();
+                for &node in sorted {
+                    stack.push(node);
+                    while let Some(at) = stack.pop() {
+                        for &up in lineage.parents_of(at) {
+                            let u = up as usize;
+                            if is_passing[u] {
+                                covered[u] = true;
+                            }
+                            if !climbed[u] {
+                                climbed[u] = true;
+                                stack.push(up);
+                            }
+                        }
+                    }
                 }
-                climbed[parent as usize] = true;
-                at = parent;
             }
         }
 
@@ -480,10 +734,14 @@ impl Plan {
         // **Marked, not collected.** Materialising them cost 34 ms of the pass at a level of ten
         // million: six and a half million ordinals into a 27 MB vector, to answer a question that
         // is one array read wherever it is asked.
+        //
+        // The heads are also collected here, ascending — see [`Plan::heads`].
         let mut is_head = vec![false; span];
+        let mut heads: Vec<u32> = Vec::new();
         for &n in sorted {
             if !prune || !covered[n as usize] {
                 is_head[n as usize] = true;
+                heads.push(n);
             }
         }
 
@@ -502,23 +760,22 @@ impl Plan {
             on_chain[n as usize] = true;
         }
 
-        // Depths, and the on-chain nodes bucketed by depth in the same pass — a counting sort,
-        // since a level's depth is small and bounded by its own edge count. Both sweeps below need
-        // one order or the other.
+        // The on-chain nodes bucketed by **stored** depth — the topological order the two sweeps
+        // below run in, since the longest-path depth increases strictly along every edge
+        // (`dag-hierarchies.md` §5). A counting sort, since a level's depth is small and bounded
+        // by its own edge count. The deepest head bounds it: an on-chain node is an
+        // ancestor-or-self of a head and so no deeper than one.
+        //
+        // ⊘ **Pre-sizing the buckets was tried and reverted.** A counting pass ahead of the fill
+        // removes the reallocation, and measured *worse*: 193 ms against 198 at full passing, and
+        // 32 ms against 23 at a level where only a few thousand pass, because the second sequential
+        // scan of ten million costs more than the growth it avoids.
         let mut deepest = 0u32;
         for &n in sorted {
             if is_head[n as usize] {
                 deepest = deepest.max(lineage.depth(n));
             }
         }
-
-        // The on-chain nodes bucketed by depth — a counting sort, since a level's depth is small and
-        // bounded by its own edge count. Both sweeps below need one order or the other.
-        //
-        // ⊘ **Pre-sizing the buckets was tried and reverted.** A counting pass ahead of the fill
-        // removes the reallocation, and measured *worse*: 193 ms against 198 at full passing, and
-        // 32 ms against 23 at a level where only a few thousand pass, because the second sequential
-        // scan of ten million costs more than the growth it avoids.
         let mut by_depth: Vec<Vec<u32>> = vec![Vec::new(); deepest as usize + 1];
         for node in 0..span as u32 {
             if on_chain[node as usize] {
@@ -529,85 +786,136 @@ impl Plan {
             }
         }
 
-        // **Deepest first: when does a node stop being anybody's pick?** When a passing node
-        // beneath it becomes reachable — so the answer is the *latest* such depth over the lineages
-        // running through it, which is a max accumulated into the parent.
-        let mut until = vec![0u32; span];
-        for depth in (0..by_depth.len()).rev() {
-            for &node in &by_depth[depth] {
-                let contribution = if is_passing[node as usize] {
-                    lineage.depth(node)
-                } else {
-                    until[node as usize]
-                };
-                if let Some(parent) = lineage.parent_of(node) {
-                    let at = &mut until[parent as usize];
-                    *at = (*at).max(contribution);
-                }
-            }
-        }
-
-        // **Shallowest first: does this node have a passing ancestor at all?** Where it has none it
-        // is its lineage's fallback, so it is served from depth zero rather than from its own.
+        // **Shallowest first: how deep is this node in the viewer's tree?** One slot per node
+        // carries, for a passing node, its rung — one more than the deepest rung among the
+        // nearest passing ancestors on any path, or zero where there is none on any path — and,
+        // for a withheld node, that same maximum handed through unchanged, which is what makes a
+        // withheld node occupy no rung. A node with no passing ancestor on any path is a root of
+        // the viewer's tree and served from depth zero: that is the fallback rule of
+        // `annotations.md` §6, and under this counting it is not a special case.
+        // `rung[n]` holds the rung **plus one** (see [`NO_PASSING_ABOVE`]). The passing nodes per
+        // rung are counted here, where the rung is in hand, so the bucketing below is one fill.
         //
-        // The per-depth counts are accumulated in the same sweep, into a difference array — so the
-        // budget search is answered without materialising a single cut, and without an array over
-        // the ordinal space to scan for it afterwards.
-        let mut has_passing_ancestor = vec![false; span];
-        let mut servable = vec![false; span];
-        let mut fallbacks: Vec<(u32, u32)> = Vec::new();
-        let mut delta = vec![0i64; deepest as usize + 2];
-        for (depth, level) in by_depth.iter().enumerate() {
+        // **The two sweeps read the parent direction in its own shape.** On a tree that is one
+        // word per node; going through the slice `parents_of` returns costs a discriminant test
+        // and a bounds check per node in the two hottest loops here, which measured as the
+        // difference between the old plan and this one at a level of ten million.
+        let tree: Option<&[u32]> = match &lineage.parents {
+            Parents::Tree(parent) => Some(parent),
+            Parents::Dag { .. } => None,
+        };
+        let mut rung = vec![NO_PASSING_ABOVE; span];
+        let mut per_rung: Vec<u32> = Vec::new();
+        for level in &by_depth {
             for &node in level {
-                if let Some(parent) = lineage.parent_of(node) {
-                    has_passing_ancestor[node as usize] =
-                        is_passing[parent as usize] || has_passing_ancestor[parent as usize];
+                let n = node as usize;
+                let mut above = NO_PASSING_ABOVE;
+                match tree {
+                    Some(parent) => {
+                        let up = parent.get(n).copied().unwrap_or(NO_PARENT);
+                        if up != NO_PARENT {
+                            above = rung[up as usize];
+                        }
+                    }
+                    None => {
+                        for &up in lineage.parents_of(node) {
+                            above = above.max(rung[up as usize]);
+                        }
+                    }
                 }
-                if !is_passing[node as usize] {
-                    continue;
-                }
-                let lo = if has_passing_ancestor[node as usize] {
-                    depth as u32
+                rung[n] = if is_passing[n] {
+                    // A root of the viewer's tree is rung 0, stored as 1; a child is one deeper
+                    // than the deepest rung above it.
+                    if per_rung.len() <= above as usize {
+                        per_rung.resize(above as usize + 1, 0);
+                    }
+                    per_rung[above as usize] += 1;
+                    above + 1
                 } else {
-                    0
+                    above
                 };
-                // A head is picked at every depth from its own downward, so its interval is open at
-                // the top. Written into `until` rather than carried beside it, because the sweep
-                // that filled `until` has already run and nothing below reads the old value.
-                if is_head[node as usize] {
-                    until[node as usize] = u32::MAX;
-                }
-                let hi = until[node as usize];
-                if lo >= hi {
-                    continue;
-                }
-                servable[node as usize] = true;
-                if lo == 0 && depth > 0 {
-                    fallbacks.push((depth as u32, node));
-                }
-                delta[lo as usize] += 1;
-                if (hi as usize) < delta.len() {
-                    delta[hi as usize] -= 1;
+            }
+        }
+        let deepest_rung = per_rung.len().saturating_sub(1) as u32;
+
+        // **Deepest first: when does a node stop being anybody's pick?** When a passing node
+        // beneath it becomes reachable — so the answer is the *latest* such rung over the lineages
+        // running through it, which is a max accumulated into every parent. A withheld node hands
+        // its own maximum upward, so the next passing node below is found through it.
+        //
+        // **A node's `until` is final when this sweep reaches it** — every child is deeper and
+        // was visited first — so its interval is closed in the same visit: the node is placed in
+        // its rung's bucket and the per-depth counts take its `[from, until)` into a difference
+        // array, so the budget search is answered without materialising a single cut and there
+        // is no third sweep. A head is picked at every depth from its own downward, so its
+        // interval is open at the top; written into `until` rather than carried beside it,
+        // because the parents read a passing node's rung and never its `until`.
+        let mut rung_at = vec![0u32; deepest_rung as usize + 2];
+        for (r, &n) in per_rung.iter().enumerate() {
+            rung_at[r + 1] = rung_at[r] + n;
+        }
+        let mut cursor = rung_at.clone();
+        let mut by_rung = vec![0u32; rung_at[deepest_rung as usize + 1] as usize];
+        let mut delta = vec![0i64; deepest_rung as usize + 2];
+        let mut until = vec![0u32; span];
+        for level in by_depth.iter().rev() {
+            for &node in level {
+                let n = node as usize;
+                let contribution = if is_passing[n] {
+                    let lo = rung[n] - 1;
+                    if is_head[n] {
+                        until[n] = u32::MAX;
+                    }
+                    let hi = until[n];
+                    by_rung[cursor[lo as usize] as usize] = node;
+                    cursor[lo as usize] += 1;
+                    // A passing node beneath another sits at a deeper rung, so `lo < hi` holds
+                    // by construction; the guard is for a malformed level's cycle, whose node
+                    // is placed and never served.
+                    if lo < hi {
+                        delta[lo as usize] += 1;
+                        if (hi as usize) < delta.len() {
+                            delta[hi as usize] -= 1;
+                        }
+                    }
+                    lo
+                } else {
+                    until[n]
+                };
+                match tree {
+                    Some(parent) => {
+                        let up = parent.get(n).copied().unwrap_or(NO_PARENT);
+                        if up != NO_PARENT {
+                            let at = &mut until[up as usize];
+                            *at = (*at).max(contribution);
+                        }
+                    }
+                    None => {
+                        for &up in lineage.parents_of(node) {
+                            let at = &mut until[up as usize];
+                            *at = (*at).max(contribution);
+                        }
+                    }
                 }
             }
         }
-        let mut counts = Vec::with_capacity(deepest as usize + 1);
+        let mut counts = Vec::with_capacity(deepest_rung as usize + 1);
         let mut running = 0i64;
-        for step in delta.iter().take(deepest as usize + 1) {
+        for step in delta.iter().take(deepest_rung as usize + 1) {
             running += step;
             counts.push(running as u32);
         }
 
         Plan {
-            by_depth,
+            rung_at,
+            by_rung,
+            heads,
             until,
-            servable,
-            fallbacks,
             counts,
         }
     }
 
-    /// The deepest depth any lineage reaches — the top of the budget search's range.
+    /// The deepest rung any passing node sits at — the top of the budget search's range.
     fn deepest(&self) -> u32 {
         self.counts.len().saturating_sub(1) as u32
     }
@@ -620,42 +928,33 @@ impl Plan {
 
     /// The artifacts a cut at `depth` serves.
     ///
-    /// Each lineage contributes the deepest passing node at or above `depth`. **A node with no
-    /// passing ancestor shallow enough contributes itself**, which is what keeps a branch whose
-    /// ancestors were all suppressed, deleted or below their own bar on the map rather than
-    /// blanking its region — and it is why `from` is zero for such a node rather than its depth.
+    /// Each lineage contributes the deepest passing node at or above `depth`. A node with no
+    /// passing ancestor on any path sits at rung zero, so it is served at every depth until a
+    /// passing descendant takes over — which is what keeps a branch whose ancestors were all
+    /// suppressed, deleted or below their own bar on the map rather than blanking its region.
     ///
-    /// **Ascending and deduplicated by construction**: `nodes` is built by an ordinal scan, so no
-    /// sort runs here at all.
+    /// **Ascending and deduplicated by construction** — see [`cut_at`] for why that is a
+    /// contract: the buckets are read shallow-first, so the merge happens here, over the served
+    /// set the budget bounds and never over the level.
     fn serve_at(&self, depth: u32) -> Vec<u32> {
         // Clamped, as [`Plan::count_at`] is: an unbounded depth means *the deepest cut there is*,
         // and a head's interval is open at the top. Comparing against `u32::MAX` itself would
         // exclude exactly the nodes an unbounded depth is meant to serve.
         let depth = depth.min(self.deepest());
-        // **Only the depths a cut here can reach.** Every node served at `depth` either sits at or
-        // above it — where its own depth is what it is served from — or has no passing ancestor at
-        // all, and those are carried separately. Nothing below `depth` contributes, so the deeper
-        // buckets are never read: at a budget that settles on depth six over a ten-million-artifact
-        // level, that is a thousand nodes examined rather than ten million.
-        let mut served: Vec<u32> = Vec::new();
-        for level in self.by_depth.iter().take(depth as usize + 1) {
-            for &node in level {
-                if self.servable[node as usize] && depth < self.until[node as usize] {
-                    served.push(node);
-                }
-            }
+        if depth == self.deepest() {
+            // Every head is served at the deepest rung and nothing else is, so the unbudgeted
+            // cut is the frontier itself — already ascending, and no bucket is read for it.
+            return self.heads.clone();
         }
-        // The lineages whose every ancestor failed, where they sit deeper than this cut — the
-        // shallower ones are already in the buckets above, which is what `> depth` avoids
-        // double-counting.
-        for &(at, node) in &self.fallbacks {
-            if at > depth && depth < self.until[node as usize] {
-                served.push(node);
-            }
-        }
-        // Ascending is a contract (see [`cut_at`]), and the buckets are read shallow-first rather
-        // than in ordinal order, so the merge happens here — over the served set, which the budget
-        // bounds, and never over the level.
+        // **Only the rungs a cut here can reach.** Every node served at `depth` sits at or above
+        // it, so the deeper buckets are never read: at a budget that settles on depth six over a
+        // ten-million-artifact level, that is a thousand nodes examined rather than ten million.
+        let end = self.rung_at[depth as usize + 1] as usize;
+        let mut served: Vec<u32> = self.by_rung[..end]
+            .iter()
+            .copied()
+            .filter(|&node| depth < self.until[node as usize])
+            .collect();
         served.sort_unstable();
         served
     }
@@ -682,7 +981,9 @@ impl Plan {
 ///
 /// So the served set is exactly *the nodes at that depth*, and the count is how many there are.
 /// Under `prune_children = false` every passing node is its own lineage's deepest entry, so the
-/// served set is instead everything at or above the cut — the other branch below.
+/// served set is instead everything at or above the cut — the other branch below. And with every
+/// node above the cut passing, the stored depth and the rung in the viewer's tree agree there, so
+/// counting depth in passing nodes changes nothing this walk reads.
 ///
 /// **This is the whole-corpus principal's case**, which is the one that bounds the system: a viewer
 /// who can see everything passes everything, so nothing above the cut fails and the walk never
@@ -690,15 +991,19 @@ impl Plan {
 /// proportional to the little they can see. What the guard gives up on is a mask that is broad
 /// **and** fragmented — many artifacts passing, with failures scattered near the top — and there
 /// the answer is the sweep, at the cost it has always had.
+///
+/// **It declines on a `dag` lineage** (`dag-hierarchies.md` §6): the walk reasons in depths and a
+/// node with two parents is reached twice, and the sweep is the general route with no case yet for
+/// teaching the walk the graph.
 fn cut_top_down(lineage: &Lineage, passing: &[u32], budget: u32, prune: bool) -> Option<Vec<u32>> {
-    if !lineage.walkable {
+    if lineage.dag {
         return None;
     }
     // **Attempted only where it can succeed.** The walk needs every node above the cut to pass, so
     // a level most of which fails will decline at its first step — after paying to build the child
     // index. Half is a heuristic and nothing rests on it: both routes return the same cut, and this
     // only decides which one runs.
-    if (passing.len() as u64) * 2 < lineage.parent.len() as u64 {
+    if (passing.len() as u64) * 2 < lineage.span() as u64 {
         return None;
     }
     let holds = |n: u32| passing.binary_search(&n).is_ok();
@@ -711,7 +1016,7 @@ fn cut_top_down(lineage: &Lineage, passing: &[u32], budget: u32, prune: bool) ->
 
     // Depth zero is every ordinal with no parent — which includes the tail above the parent table,
     // since an ordinal it does not mention has no parent to name.
-    let named = lineage.parent.len() as u32;
+    let named = lineage.span() as u32;
     let span = passing.last().map_or(named, |&n| n + 1).max(named);
     let mut roots = lineage.roots.clone();
     roots.extend(named..span);
@@ -781,16 +1086,19 @@ fn finish(mut served: Vec<u32>) -> Vec<u32> {
 /// The artifacts of `passing` that a cut at `depth` serves.
 ///
 /// Each node of the frontier — a passing node with no passing node beneath it — is replaced by the
-/// **deepest passing node at or above `depth` in its own lineage**. Where a parent and a child both
-/// passed, that rule keeps the child at a deep cut and the parent at a shallow one; where only the
-/// child passed, it keeps the child at every cut.
+/// **deepest passing node at or above `depth` on each of its root paths** through the passing
+/// nodes, depth counted in passing nodes (`dag-hierarchies.md` §6). Where a parent and a child
+/// both passed, that rule keeps the child at a deep cut and the parent at a shallow one; where
+/// only the child passed, it keeps the child at every cut, since the parent occupies no rung.
 ///
-/// **A node with no passing ancestor to climb to is served where it stands.** That is not a
-/// relaxation of the budget, it is the whole reason the climb is expressed over *passing* nodes
-/// rather than over depths: a lineage's ancestors are suppressed, deleted or below their own bar
-/// often enough that a depth-shaped climb would blank the region under every one of them and call
-/// it a smaller map. Serving more than the budget asked is a client's problem; serving nothing
-/// where the viewer is entitled to something is the failure the budget exists around.
+/// **A node with no passing ancestor to climb to is a root of the viewer's tree and served where
+/// it stands.** That is not a relaxation of the budget, it is the whole reason the climb is
+/// expressed over *passing* nodes rather than over stored depths: a lineage's ancestors are
+/// suppressed, deleted or below their own bar often enough that a depth-shaped climb would blank
+/// the region under every one of them and call it a smaller map. Serving more than the budget
+/// asked is a client's problem; serving nothing where the viewer is entitled to something is the
+/// failure the budget exists around.
+///
 /// **The result is ascending and deduplicated**, on every path including the flat short circuit.
 /// That is a contract rather than an accident: the serving path tests each candidate against the
 /// served set by binary search, and a caller that passed its ordinals in some other order would
@@ -815,13 +1123,20 @@ fn ascending(passing: &[u32]) -> Vec<u32> {
 ///
 /// **The search is over depths and never over artifacts.** Taking the deepest cut that fits is what
 /// makes the budget a resolution knob rather than a selection: every node the cut returns is one
-/// the viewer may see, and the ones it does not return are covered by an ancestor it did.
+/// the viewer may see, and the ones it does not return are covered by an ancestor it did on at
+/// least one path.
 ///
-/// **The search is a bisection, which the count's monotonicity licenses.** A deeper cut moves each
-/// frontier node's representative down its own lineage and never up, and two nodes that shared a
-/// representative can only separate — so the served count is non-decreasing in depth and the
-/// deepest depth that fits can be found in `log(depth)` evaluations rather than by walking every
-/// depth. That property is worth stating because the bisection is wrong without it.
+/// **On a tree the search is a bisection, which the count's monotonicity licenses.** A deeper cut
+/// moves each frontier node's representative down its own lineage and never up, and two nodes
+/// that shared a representative can only separate — so the served count is non-decreasing in
+/// depth and the deepest depth that fits can be found in `log(depth)` evaluations rather than by
+/// walking every depth. That property is worth stating because the bisection is wrong without it.
+///
+/// **On a DAG it is a scan, because the count is not monotone**: two parents at depth 1 are
+/// replaced by their one shared child at depth 2, so the counts run 1, 2, 1. Every depth's count
+/// is already in the plan, so the scan is one array read per depth over the graph's longest path
+/// — 17 on MeSH — and *deepest that fits* stays the right knob, the depth-2 cut above being
+/// strictly finer than the depth-1 cut and fitting where it did not (`dag-hierarchies.md` §6).
 ///
 /// **A budget that not even the roots fit is served anyway**, at depth 0. The alternative is
 /// dropping nodes to reach the number, which is the sampling decision 0083 forbids: a map missing
@@ -846,28 +1161,36 @@ pub fn cut(lineage: &Lineage, passing: &[u32], budget: Option<u32>, prune: bool)
         return plan.serve_at(u32::MAX);
     }
     // **The search evaluates a count, not a cut.** Every depth's served total is already in the
-    // plan, so the bisection is a handful of array reads and only the depth it settles on is ever
-    // built. The bisection itself stays, rather than a scan, because the monotonicity argument
-    // above is what licenses either and the search range is the level's depth.
-    let mut best = 0;
-    let (mut lo, mut hi) = (0u32, plan.deepest());
-    while lo <= hi {
-        let mid = lo + (hi - lo) / 2;
-        if plan.count_at(mid) <= budget {
-            best = mid;
-            lo = mid + 1;
-        } else if mid == 0 {
-            break;
-        } else {
-            hi = mid - 1;
+    // plan, so either search is a handful of array reads and only the depth it settles on is ever
+    // built.
+    let best = if lineage.dag {
+        (0..=plan.deepest())
+            .rev()
+            .find(|&d| plan.count_at(d) <= budget)
+            .unwrap_or(0)
+    } else {
+        let mut best = 0;
+        let (mut lo, mut hi) = (0u32, plan.deepest());
+        while lo <= hi {
+            let mid = lo + (hi - lo) / 2;
+            if plan.count_at(mid) <= budget {
+                best = mid;
+                lo = mid + 1;
+            } else if mid == 0 {
+                break;
+            } else {
+                hi = mid - 1;
+            }
         }
-    }
+        best
+    };
     plan.serve_at(best)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{BTreeMap, BTreeSet};
 
     /// A three-deep chain off one root, plus a second child of the root:
     ///
@@ -1008,9 +1331,11 @@ mod tests {
         );
     }
 
-    /// Depth is measured from the root, and a node whose ancestors all failed still knows its own.
+    /// The stored depth is the longest path from the root over every node of the level — the
+    /// order the sweeps run in — and a node whose ancestors all failed still knows its own. What
+    /// the cut serves at is a different number: see the withheld-node tests below.
     #[test]
-    fn depth_is_measured_through_failing_ancestors() {
+    fn stored_depth_is_measured_over_every_node() {
         let lineage = chain();
         assert_eq!(lineage.depth(0), 0);
         assert_eq!(lineage.depth(1), 1);
@@ -1019,61 +1344,271 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------------------
+    // A withheld node is not in the viewer's tree (decision 0117 E)
+    // ---------------------------------------------------------------------------------------
+
+    /// **The design's example.** `R → X → {C1, C2}` and `R → D`, with `X` withheld. Counted over
+    /// every node the depths run 1, 2, 3 and a budget of 2 serves `{R, D}`; counted over the
+    /// passing nodes they run 1, 3 and it serves `{R}` — which is what the world without `X`
+    /// serves, so a viewer sweeping budgets learns nothing about `X`.
+    #[test]
+    fn a_withheld_node_occupies_no_rung() {
+        const R: u32 = 0;
+        const X: u32 = 1;
+        const C1: u32 = 2;
+        const C2: u32 = 3;
+        const D: u32 = 4;
+        let with_x = Lineage::new([
+            (R, None),
+            (X, Some(R)),
+            (C1, Some(X)),
+            (C2, Some(X)),
+            (D, Some(R)),
+        ]);
+        let passing = [R, C1, C2, D];
+        assert_eq!(cut(&with_x, &passing, Some(2), true), vec![R]);
+        assert_eq!(cut_at(&with_x, &passing, 0, true), vec![R]);
+        assert_eq!(cut_at(&with_x, &passing, 1, true), vec![C1, C2, D]);
+        assert_eq!(cut_at(&with_x, &passing, 2, true), vec![C1, C2, D]);
+
+        // The same, on the level where X never existed.
+        let without_x = Lineage::new([(R, None), (C1, Some(R)), (C2, Some(R)), (D, Some(R))]);
+        for budget in 1..=5u32 {
+            assert_eq!(
+                cut(&with_x, &passing, Some(budget), true),
+                cut(&without_x, &passing, Some(budget), true),
+                "budget {budget}"
+            );
+        }
+    }
+
+    /// A DAG widens the same channel two ways — a withheld sibling path, and a longest-path depth
+    /// that counts withheld nodes on the longer path — and the rule closes both: `R → A → C` and
+    /// `R → X → Y → C`, `X` and `Y` withheld, must cut exactly as the viewer's tree does, which
+    /// is `R → A → C` with the withheld path contracted to the edge `R → C` — `R` being the
+    /// nearest passing ancestor of `C` on that path, and containing everything `Y` did.
+    #[test]
+    fn a_withheld_path_does_not_deepen_a_dag_node() {
+        const R: u32 = 0;
+        const A: u32 = 1;
+        const X: u32 = 2;
+        const Y: u32 = 3;
+        const C: u32 = 4;
+        let dag = Lineage::dag([
+            (R, vec![]),
+            (A, vec![R]),
+            (X, vec![R]),
+            (Y, vec![X]),
+            (C, vec![A, Y]),
+        ]);
+        assert_eq!(dag.depth(C), 3, "the stored depth is the longest path");
+        let passing = [R, A, C];
+        let contracted = Lineage::dag([(R, vec![]), (A, vec![R]), (C, vec![A, R])]);
+        for depth in 0..4u32 {
+            assert_eq!(
+                cut_at(&dag, &passing, depth, true),
+                cut_at(&contracted, &passing, depth, true),
+                "depth {depth}"
+            );
+        }
+        // C sits at rung 2 in the viewer's tree, not 3: a cut at 2 already reaches it. At 1 the
+        // path through A picks A and the contracted path picks R.
+        assert_eq!(cut_at(&dag, &passing, 2, true), vec![C]);
+        assert_eq!(cut_at(&dag, &passing, 1, true), vec![R, A]);
+        assert_eq!(cut_at(&dag, &passing, 0, true), vec![R]);
+    }
+
+    /// **The served set at every depth is the served set over the level with the withheld nodes
+    /// removed** — the rule stated as an equality and swept over random trees and random DAGs,
+    /// every depth and every budget, both pruning modes. The level without the withheld nodes is
+    /// built with an edge wherever one passing node is the nearest passing ancestor of another on
+    /// some path, which is the viewer's tree by its definition.
+    #[test]
+    fn the_cut_is_the_cut_over_the_level_without_the_withheld_nodes() {
+        for (seed, dag) in [(0x0E17u64, false), (0xDA6Du64, true)] {
+            let mut next = stream(seed);
+            for case in 0..300 {
+                let n = 1 + (next() % 40) as u32;
+                let (lineage, parents) = random_lineage(&mut next, n, dag);
+                let passing: Vec<u32> = (0..n).filter(|_| !next().is_multiple_of(3)).collect();
+                if passing.is_empty() {
+                    continue;
+                }
+                let is_passing = |o: u32| passing.binary_search(&o).is_ok();
+                let induced = induced_parents(&parents, &is_passing);
+                let pairs = passing
+                    .iter()
+                    .map(|&o| (o, induced[&o].iter().copied().collect::<Vec<u32>>()));
+                let without = if dag {
+                    Lineage::dag(pairs)
+                } else {
+                    Lineage::new(pairs)
+                };
+                for prune in [true, false] {
+                    for depth in 0..8u32 {
+                        assert_eq!(
+                            cut_at(&lineage, &passing, depth, prune),
+                            cut_at(&without, &passing, depth, prune),
+                            "case {case} (dag {dag}, prune {prune}): depth {depth} differs from \
+                             the level without the withheld nodes"
+                        );
+                    }
+                    for budget in 1..=8u32 {
+                        assert_eq!(
+                            cut(&lineage, &passing, Some(budget), prune),
+                            cut(&without, &passing, Some(budget), prune),
+                            "case {case} (dag {dag}, prune {prune}): budget {budget} differs \
+                             from the level without the withheld nodes"
+                        );
+                    }
+                    assert_eq!(
+                        cut(&lineage, &passing, None, prune),
+                        cut(&without, &passing, None, prune),
+                        "case {case} (dag {dag}, prune {prune}): the unbudgeted cuts differ"
+                    );
+                }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
     // The optimised plan against an obviously-correct reference
     // ---------------------------------------------------------------------------------------
 
-    /// The cut, written the slow, obvious way: quadratic frontier, linear membership, a walk per
-    /// lookup. **It is the specification of what [`Plan`] computes**, and it exists because the
-    /// fast form's structure — a prebuilt chain per frontier node, a binary search per depth, a
-    /// bisection over depths — is far enough from the rule it implements that reading it is not a
-    /// proof.
-    fn reference_cut_at(lineage: &Lineage, passing: &[u32], depth: u32) -> Vec<u32> {
-        if lineage.is_flat() {
-            return passing.to_vec();
+    /// The parents each node has as a list, the form the reference reads.
+    type Parents = BTreeMap<u32, Vec<u32>>;
+
+    /// The nearest passing ancestors of every passing node, on every path: the edges of the
+    /// viewer's tree. Recursion through withheld nodes, memoised over them.
+    fn induced_parents(
+        parents: &Parents,
+        is_passing: &dyn Fn(u32) -> bool,
+    ) -> BTreeMap<u32, BTreeSet<u32>> {
+        fn above(
+            node: u32,
+            parents: &Parents,
+            is_passing: &dyn Fn(u32) -> bool,
+            memo: &mut BTreeMap<u32, BTreeSet<u32>>,
+        ) -> BTreeSet<u32> {
+            if let Some(known) = memo.get(&node) {
+                return known.clone();
+            }
+            let mut out = BTreeSet::new();
+            for &up in parents.get(&node).map_or(&[][..], Vec::as_slice) {
+                if is_passing(up) {
+                    out.insert(up);
+                } else {
+                    out.extend(above(up, parents, is_passing, memo));
+                }
+            }
+            memo.insert(node, out.clone());
+            out
         }
-        let is_ancestor =
-            |ancestor: u32, node: u32| lineage.chain(node).iter().skip(1).any(|&n| n == ancestor);
-        let mut served: Vec<u32> = passing
-            .iter()
+        let mut memo = BTreeMap::new();
+        parents
+            .keys()
             .copied()
-            .filter(|&a| !passing.iter().any(|&b| b != a && is_ancestor(a, b)))
-            .map(|a| {
-                let chain = lineage.chain(a);
-                chain
-                    .iter()
-                    .copied()
-                    .find(|&n| passing.contains(&n) && lineage.depth(n) <= depth)
-                    .unwrap_or_else(|| {
-                        chain
-                            .iter()
-                            .copied()
-                            .rfind(|n| passing.contains(n))
-                            .unwrap_or(a)
-                    })
+            .filter(|&o| is_passing(o))
+            .map(|o| {
+                let set = above(o, parents, is_passing, &mut memo);
+                (o, set)
             })
-            .collect();
-        served.sort_unstable();
-        served.dedup();
-        served
+            .collect()
     }
 
-    /// The budget search, walked rather than bisected.
-    fn reference_cut(lineage: &Lineage, passing: &[u32], budget: Option<u32>) -> Vec<u32> {
-        let full = reference_cut_at(lineage, passing, u32::MAX);
+    /// The cut, written the slow, obvious way, straight from `dag-hierarchies.md` §6: a frontier
+    /// node is represented at depth *d* by the deepest passing node at or above *d* on **each of
+    /// its root paths** through the passing nodes, depth counted in passing nodes, and the served
+    /// set is the union. **It is the specification of what [`Plan`] computes**, and it exists
+    /// because the fast form's structure — three sweeps in stored-depth order, a difference
+    /// array, a search over counts — is far enough from the rule it implements that reading it is
+    /// not a proof. Exponential in the paths, which is fine at forty nodes.
+    fn reference_cut_at(parents: &Parents, passing: &[u32], depth: u32, prune: bool) -> Vec<u32> {
+        let is_passing = |o: u32| passing.contains(&o);
+        let induced = induced_parents(parents, &is_passing);
+        // Rung: the longest path to the node through the passing nodes.
+        fn rung(node: u32, induced: &BTreeMap<u32, BTreeSet<u32>>) -> u32 {
+            induced[&node]
+                .iter()
+                .map(|&up| rung(up, induced) + 1)
+                .max()
+                .unwrap_or(0)
+        }
+        // Every root path of a node, as lists ending at the node.
+        fn paths(node: u32, induced: &BTreeMap<u32, BTreeSet<u32>>) -> Vec<Vec<u32>> {
+            let ups = &induced[&node];
+            if ups.is_empty() {
+                return vec![vec![node]];
+            }
+            let mut out = Vec::new();
+            for &up in ups {
+                for mut path in paths(up, induced) {
+                    path.push(node);
+                    out.push(path);
+                }
+            }
+            out
+        }
+        let has_passing_descendant = |node: u32| {
+            passing
+                .iter()
+                .any(|&o| o != node && induced_ancestors(o, &induced).contains(&node))
+        };
+        let heads: Vec<u32> = passing
+            .iter()
+            .copied()
+            .filter(|&o| !prune || !has_passing_descendant(o))
+            .collect();
+        let mut served = BTreeSet::new();
+        for head in heads {
+            for path in paths(head, &induced) {
+                let pick = path
+                    .iter()
+                    .copied()
+                    .filter(|&o| rung(o, &induced) <= depth)
+                    .max_by_key(|&o| rung(o, &induced))
+                    .expect("a root sits at rung 0");
+                served.insert(pick);
+            }
+        }
+        served.into_iter().collect()
+    }
+
+    /// Every ancestor of `node` in the viewer's tree.
+    fn induced_ancestors(node: u32, induced: &BTreeMap<u32, BTreeSet<u32>>) -> BTreeSet<u32> {
+        let mut out = BTreeSet::new();
+        let mut stack = vec![node];
+        while let Some(at) = stack.pop() {
+            for &up in &induced[&at] {
+                if out.insert(up) {
+                    stack.push(up);
+                }
+            }
+        }
+        out
+    }
+
+    /// The budget search, walked rather than bisected: the deepest depth whose count fits.
+    fn reference_cut(
+        parents: &Parents,
+        passing: &[u32],
+        budget: Option<u32>,
+        prune: bool,
+    ) -> Vec<u32> {
+        let full = reference_cut_at(parents, passing, u32::MAX, prune);
         let Some(budget) = budget else {
             return full;
         };
         if full.len() as u32 <= budget {
             return full;
         }
-        let deepest = passing.iter().map(|&a| lineage.depth(a)).max().unwrap_or(0);
-        for depth in (0..deepest).rev() {
-            let candidate = reference_cut_at(lineage, passing, depth);
+        for depth in (0..passing.len() as u32).rev() {
+            let candidate = reference_cut_at(parents, passing, depth, prune);
             if candidate.len() as u32 <= budget {
                 return candidate;
             }
         }
-        reference_cut_at(lineage, passing, 0)
+        reference_cut_at(parents, passing, 0, prune)
     }
 
     /// A deterministic pseudo-random stream — SplitMix64, the same finaliser the corpus generator
@@ -1092,18 +1627,30 @@ mod tests {
     /// A random forest over `n` ordinals: each node's parent is drawn from the nodes before it, or
     /// it is a root. Ordinal order therefore agrees with lineage order, which is what a level
     /// published in one batch produces, and roots occur at every position rather than only at
-    /// zero.
-    fn random_lineage(next: &mut impl FnMut() -> u64, n: u32) -> Lineage {
-        let pairs: Vec<(u32, Option<u32>)> = (0..n)
+    /// zero. With `dag`, a node may draw a second parent the same way, and the two may coincide —
+    /// a duplicate edge is one edge.
+    fn random_lineage(next: &mut impl FnMut() -> u64, n: u32, dag: bool) -> (Lineage, Parents) {
+        let parents: Parents = (0..n)
             .map(|ordinal| {
-                if ordinal == 0 || next().is_multiple_of(4) {
-                    (ordinal, None)
-                } else {
-                    (ordinal, Some((next() % ordinal as u64) as u32))
+                let mut ups = Vec::new();
+                if ordinal > 0 && !next().is_multiple_of(4) {
+                    ups.push((next() % ordinal as u64) as u32);
+                    if dag && next().is_multiple_of(2) {
+                        ups.push((next() % ordinal as u64) as u32);
+                    }
                 }
+                ups.sort_unstable();
+                ups.dedup();
+                (ordinal, ups)
             })
             .collect();
-        Lineage::new(pairs)
+        let pairs = parents.iter().map(|(&o, ups)| (o, ups.clone()));
+        let lineage = if dag {
+            Lineage::dag(pairs)
+        } else {
+            Lineage::new(pairs)
+        };
+        (lineage, parents)
     }
 
     /// **The fast plan and the obvious rule agree, over random trees, at every depth and every
@@ -1114,7 +1661,7 @@ mod tests {
         let mut next = stream(0x5EED);
         for case in 0..200 {
             let n = 1 + (next() % 40) as u32;
-            let lineage = random_lineage(&mut next, n);
+            let (lineage, parents) = random_lineage(&mut next, n, false);
             let passing: Vec<u32> = (0..n).filter(|_| !next().is_multiple_of(3)).collect();
             if passing.is_empty() {
                 continue;
@@ -1122,23 +1669,104 @@ mod tests {
             for depth in 0..8u32 {
                 assert_eq!(
                     cut_at(&lineage, &passing, depth, true),
-                    reference_cut_at(&lineage, &passing, depth),
+                    reference_cut_at(&parents, &passing, depth, true),
                     "case {case}: the plan and the rule disagree at depth {depth}"
                 );
             }
             for budget in 1..=8u32 {
                 assert_eq!(
                     cut(&lineage, &passing, Some(budget), true),
-                    reference_cut(&lineage, &passing, Some(budget)),
+                    reference_cut(&parents, &passing, Some(budget), true),
                     "case {case}: the bisection and the walk disagree at budget {budget}"
                 );
             }
             assert_eq!(
                 cut(&lineage, &passing, None, true),
-                reference_cut(&lineage, &passing, None),
+                reference_cut(&parents, &passing, None, true),
                 "case {case}: the unbudgeted cuts disagree"
             );
         }
+    }
+
+    /// **And over random DAGs**, where the rule is stated over every root path and the budget
+    /// search reads every depth: the plan's one pass in stored-depth order against the path
+    /// enumeration, both pruning modes.
+    #[test]
+    fn the_plan_agrees_with_the_obvious_rule_over_random_dags() {
+        let mut next = stream(0xDA6);
+        let mut multi_parented = 0usize;
+        for case in 0..200 {
+            let n = 1 + (next() % 30) as u32;
+            let (lineage, parents) = random_lineage(&mut next, n, true);
+            multi_parented += parents.values().filter(|ups| ups.len() > 1).count();
+            let passing: Vec<u32> = (0..n).filter(|_| !next().is_multiple_of(3)).collect();
+            if passing.is_empty() {
+                continue;
+            }
+            for prune in [true, false] {
+                for depth in 0..8u32 {
+                    assert_eq!(
+                        cut_at(&lineage, &passing, depth, prune),
+                        reference_cut_at(&parents, &passing, depth, prune),
+                        "case {case} (prune {prune}): the plan and the rule disagree at depth {depth}"
+                    );
+                }
+                for budget in 1..=8u32 {
+                    assert_eq!(
+                        cut(&lineage, &passing, Some(budget), prune),
+                        reference_cut(&parents, &passing, Some(budget), prune),
+                        "case {case} (prune {prune}): the scan and the walk disagree at budget {budget}"
+                    );
+                }
+                assert_eq!(
+                    cut(&lineage, &passing, None, prune),
+                    reference_cut(&parents, &passing, None, prune),
+                    "case {case} (prune {prune}): the unbudgeted cuts disagree"
+                );
+            }
+        }
+        assert!(
+            multi_parented > 200,
+            "only {multi_parented} nodes drew two parents, so the DAG cases are nearly trees"
+        );
+    }
+
+    /// **On a DAG the served count is not monotone in depth** — two parents at depth 1 replaced by
+    /// their one shared child at depth 2 — which is why the budget search reads every depth
+    /// rather than bisecting. The design's counts, 1, 2, 1, on the design's shape.
+    #[test]
+    fn a_dag_budget_takes_the_deepest_depth_that_fits_by_reading_every_count() {
+        // 0 → {1, 2} → 3
+        let diamond = Lineage::dag([(0, vec![]), (1, vec![0]), (2, vec![0]), (3, vec![1, 2])]);
+        let passing = [0, 1, 2, 3];
+        assert_eq!(cut_at(&diamond, &passing, 0, true), vec![0]);
+        assert_eq!(cut_at(&diamond, &passing, 1, true), vec![1, 2]);
+        assert_eq!(cut_at(&diamond, &passing, 2, true), vec![3]);
+        // A budget of 1 fits at depth 0 and at depth 2; the deepest that fits is 2, which is
+        // strictly finer. A bisection over 1, 2, 1 could settle on 0.
+        assert_eq!(cut(&diamond, &passing, Some(1), true), vec![3]);
+        assert_eq!(cut(&diamond, &passing, Some(2), true), vec![3]);
+        assert!(
+            cut_top_down(&diamond, &passing, 2, true).is_none(),
+            "the downward walk declines on a dag lineage"
+        );
+    }
+
+    /// A duplicate edge is one edge and a self-edge is none (`dag-hierarchies.md` §4): neither
+    /// changes a depth or a cut.
+    #[test]
+    fn a_duplicate_edge_is_one_edge_and_a_self_edge_is_none() {
+        let clean = Lineage::dag([(0, vec![]), (1, vec![0]), (2, vec![0, 1])]);
+        let noisy = Lineage::dag([(0, vec![0]), (1, vec![0, 0]), (2, vec![1, 0, 1])]);
+        assert_eq!(noisy.edges, clean.edges);
+        assert_eq!(noisy.parents_of(2), &[0, 1]);
+        for o in 0..3 {
+            assert_eq!(noisy.depth(o), clean.depth(o));
+        }
+        assert_eq!(
+            cut(&noisy, &[0, 1, 2], Some(1), true),
+            cut(&clean, &[0, 1, 2], Some(1), true)
+        );
     }
 
     /// **The downward walk is actually taken**, which the tests above do not establish: they assert
@@ -1149,7 +1777,7 @@ mod tests {
         let mut taken = 0;
         for case in 0..200 {
             let n = 1 + (next() % 40) as u32;
-            let lineage = random_lineage(&mut next, n);
+            let (lineage, parents) = random_lineage(&mut next, n, false);
             // Every artifact passes — the whole-corpus principal, and the case that bounds the
             // system, since a viewer who can see everything withholds nothing from the cut.
             let passing: Vec<u32> = (0..n).collect();
@@ -1159,7 +1787,7 @@ mod tests {
                     taken += 1;
                     assert_eq!(
                         served,
-                        reference_cut(&lineage, &passing, Some(budget)),
+                        reference_cut(&parents, &passing, Some(budget), true),
                         "case {case}: the walk and the rule disagree at budget {budget}"
                     );
                 }
@@ -1172,8 +1800,8 @@ mod tests {
     }
 
     /// **And it declines rather than answering differently.** A mask that fails artifacts near the
-    /// top puts every node below them into the general rule — each may be its own lineage's
-    /// fallback — which the walk does not implement and must not guess at.
+    /// top puts every node below them into the general rule — each may be a root of the viewer's
+    /// tree — which the walk does not implement and must not guess at.
     #[test]
     fn the_downward_walk_declines_a_fragmented_mask() {
         let wide = Lineage::new([
@@ -1185,6 +1813,17 @@ mod tests {
             (5, Some(2)),
             (6, Some(2)),
         ]);
+        let parents: Parents = [
+            (0, vec![]),
+            (1, vec![0]),
+            (2, vec![0]),
+            (3, vec![1]),
+            (4, vec![1]),
+            (5, vec![2]),
+            (6, vec![2]),
+        ]
+        .into_iter()
+        .collect();
         // The root passes and one of its children does not, so a subtree below the failure has no
         // passing ancestor and is served where it stands at every cut.
         let fragmented = [0u32, 2, 3, 4, 5, 6];
@@ -1195,7 +1834,7 @@ mod tests {
         // And the answer that comes back is still the rule's.
         assert_eq!(
             cut(&wide, &fragmented, Some(2), true),
-            reference_cut(&wide, &fragmented, Some(2))
+            reference_cut(&parents, &fragmented, Some(2), true)
         );
 
         // A failing **root** is the same story one level up.
@@ -1203,7 +1842,7 @@ mod tests {
         assert!(cut_top_down(&wide, &no_root, 2, true).is_none());
         assert_eq!(
             cut(&wide, &no_root, Some(2), true),
-            reference_cut(&wide, &no_root, Some(2))
+            reference_cut(&parents, &no_root, Some(2), true)
         );
     }
 
@@ -1222,6 +1861,15 @@ mod tests {
             (3, Some(2)),
             (4, Some(2)),
         ]);
+        let parents: Parents = [
+            (0, vec![]),
+            (1, vec![0]),
+            (2, vec![0]),
+            (3, vec![2]),
+            (4, vec![2]),
+        ]
+        .into_iter()
+        .collect();
         let all = [0u32, 1, 2, 3, 4];
         let served = cut_top_down(&lopsided, &all, 3, true).expect("every artifact passes");
         assert_eq!(
@@ -1229,18 +1877,19 @@ mod tests {
             vec![1, 3, 4],
             "the depth-1 leaf stays beside the depth-2 pair"
         );
-        assert_eq!(served, reference_cut(&lopsided, &all, Some(3)));
+        assert_eq!(served, reference_cut(&parents, &all, Some(3), true));
     }
 
-    /// **The served count does not decrease with depth**, which is the property the budget's
-    /// bisection rests on and is false for any rule that let a deeper cut merge two nodes into
-    /// one. Asserted over the same random trees rather than argued.
+    /// **On a tree the served count does not decrease with depth**, which is the property the
+    /// budget's bisection rests on and is false for any rule that let a deeper cut merge two nodes
+    /// into one. Asserted over random trees rather than argued; on a DAG it is false by the
+    /// shape, which is the diamond test above.
     #[test]
-    fn the_served_count_is_monotone_in_depth() {
+    fn the_served_count_is_monotone_in_depth_on_a_tree() {
         let mut next = stream(0xC0FFEE);
         for case in 0..200 {
             let n = 1 + (next() % 40) as u32;
-            let lineage = random_lineage(&mut next, n);
+            let (lineage, _) = random_lineage(&mut next, n, false);
             let passing: Vec<u32> = (0..n).filter(|_| !next().is_multiple_of(3)).collect();
             if passing.is_empty() {
                 continue;
@@ -1250,7 +1899,8 @@ mod tests {
                 let count = cut_at(&lineage, &passing, depth, true).len();
                 assert!(
                     count >= previous,
-                    "case {case}: the count fell from {previous} to {count} at depth {depth}, so                      the budget's bisection would settle on the wrong cut"
+                    "case {case}: the count fell from {previous} to {count} at depth {depth}, so \
+                     the budget's bisection would settle on the wrong cut"
                 );
                 previous = count;
             }
@@ -1258,28 +1908,30 @@ mod tests {
     }
 
     /// Every artifact a cut serves is one that passed — the property that makes the whole module
-    /// unable to disclose, whatever it gets wrong about which node to draw.
+    /// unable to disclose, whatever it gets wrong about which node to draw. Trees and DAGs alike.
     #[test]
     fn a_cut_never_serves_an_artifact_that_did_not_pass() {
-        let mut next = stream(0xBEEF);
-        for _ in 0..200 {
-            let n = 1 + (next() % 40) as u32;
-            let lineage = random_lineage(&mut next, n);
-            let passing: Vec<u32> = (0..n).filter(|_| !next().is_multiple_of(3)).collect();
-            if passing.is_empty() {
-                continue;
-            }
-            for budget in [None, Some(1), Some(3), Some(10)] {
-                for served in cut(&lineage, &passing, budget, true) {
-                    assert!(
-                        passing.contains(&served),
-                        "the cut served {served}, which never passed its own criterion"
-                    );
+        for dag in [false, true] {
+            let mut next = stream(0xBEEF);
+            for _ in 0..200 {
+                let n = 1 + (next() % 40) as u32;
+                let (lineage, _) = random_lineage(&mut next, n, dag);
+                let passing: Vec<u32> = (0..n).filter(|_| !next().is_multiple_of(3)).collect();
+                if passing.is_empty() {
+                    continue;
                 }
+                for budget in [None, Some(1), Some(3), Some(10)] {
+                    for served in cut(&lineage, &passing, budget, true) {
+                        assert!(
+                            passing.contains(&served),
+                            "the cut served {served}, which never passed its own criterion"
+                        );
+                    }
+                }
+                // And a cut is never empty while something passed: a blank map is the failure
+                // mode the climb-to-a-passing-ancestor rule exists to prevent.
+                assert!(!cut(&lineage, &passing, Some(1), true).is_empty());
             }
-            // And a cut is never empty while something passed: a blank map is the failure mode
-            // the climb-to-a-passing-ancestor rule exists to prevent.
-            assert!(!cut(&lineage, &passing, Some(1), true).is_empty());
         }
     }
 
@@ -1301,6 +1953,36 @@ mod tests {
                 "a cut came back out of order or with a duplicate: {served:?}"
             );
         }
+    }
+
+    /// The search from a leaf for the best-keyed ancestor-or-self visits every path of a DAG and
+    /// picks by the key: the deepest, then the lowest identifier, as the membership column asks.
+    #[test]
+    fn select_ancestor_searches_every_path_and_picks_by_key() {
+        // 0 → 1 → 3, 0 → 2 → 3; 4 a leaf under 3.
+        let dag = Lineage::dag([
+            (0, vec![]),
+            (1, vec![0]),
+            (2, vec![0]),
+            (3, vec![1, 2]),
+            (4, vec![3]),
+        ]);
+        let mut scratch = Vec::new();
+        // Served: 1 and 2 at the same depth — the lower identifier wins; 4 is not served.
+        let ids: BTreeMap<u32, u64> = [(1, 90), (2, 40), (0, 5)].into_iter().collect();
+        let key = |o: u32| ids.get(&o).map(|&id| (dag.depth(o), std::cmp::Reverse(id)));
+        let (picked, _) = dag.select_ancestor(4, &mut scratch, key).unwrap();
+        assert_eq!(picked, 2, "deepest served, then the lowest identifier");
+        assert_eq!(
+            dag.select_ancestor(4, &mut scratch, |o| ids.get(&o).filter(|_| o == 0).copied()),
+            Some((0, 5))
+        );
+        assert_eq!(dag.select_ancestor(4, &mut scratch, |_| None::<u32>), None);
+        // Self is a candidate.
+        assert_eq!(
+            dag.select_ancestor(2, &mut scratch, key).map(|(o, _)| o),
+            Some(2)
+        );
     }
 
     // ---------------------------------------------------------------------------------------
@@ -1338,13 +2020,14 @@ mod tests {
         assert_eq!(cut(&lineage, &passing, Some(3), false), vec![0, 1, 2]);
     }
 
-    /// The unpruned cut is monotone in depth too, which the budget's bisection needs in both modes.
+    /// The unpruned cut is monotone in depth on a tree too, which the budget's bisection needs in
+    /// both modes.
     #[test]
-    fn the_unpruned_count_is_monotone_in_depth() {
+    fn the_unpruned_count_is_monotone_in_depth_on_a_tree() {
         let mut next = stream(0xD00D);
         for case in 0..200 {
             let n = 1 + (next() % 40) as u32;
-            let lineage = random_lineage(&mut next, n);
+            let (lineage, _) = random_lineage(&mut next, n, false);
             let passing: Vec<u32> = (0..n).filter(|_| !next().is_multiple_of(3)).collect();
             if passing.is_empty() {
                 continue;
@@ -1373,23 +2056,25 @@ mod tests {
     /// questions.
     #[test]
     fn at_one_depth_pruning_serves_a_subset_of_not_pruning() {
-        let mut next = stream(0xFEED);
-        for case in 0..200 {
-            let n = 1 + (next() % 40) as u32;
-            let lineage = random_lineage(&mut next, n);
-            let passing: Vec<u32> = (0..n).filter(|_| !next().is_multiple_of(3)).collect();
-            if passing.is_empty() {
-                continue;
-            }
-            for depth in [0u32, 1, 3, u32::MAX] {
-                let pruned = cut_at(&lineage, &passing, depth, true);
-                let whole = cut_at(&lineage, &passing, depth, false);
-                for served in &pruned {
-                    assert!(
-                        whole.contains(served),
-                        "case {case}: at depth {depth} pruning served {served}, which the \
-                         unpruned cut did not"
-                    );
+        for dag in [false, true] {
+            let mut next = stream(0xFEED);
+            for case in 0..200 {
+                let n = 1 + (next() % 40) as u32;
+                let (lineage, _) = random_lineage(&mut next, n, dag);
+                let passing: Vec<u32> = (0..n).filter(|_| !next().is_multiple_of(3)).collect();
+                if passing.is_empty() {
+                    continue;
+                }
+                for depth in [0u32, 1, 3, u32::MAX] {
+                    let pruned = cut_at(&lineage, &passing, depth, true);
+                    let whole = cut_at(&lineage, &passing, depth, false);
+                    for served in &pruned {
+                        assert!(
+                            whole.contains(served),
+                            "case {case} (dag {dag}): at depth {depth} pruning served {served}, \
+                             which the unpruned cut did not"
+                        );
+                    }
                 }
             }
         }

@@ -167,15 +167,57 @@ pub enum WalScalar {
 /// revised, not once a published segment depends on it. The handler resolves it against the
 /// bundle's declared views and refuses anything else; nothing defaults it, because a defaulted
 /// view is how a row silently joins the wrong row space.
+///
+/// `x`/`y` are `f64`, the width the whole coordinate path carries (`projections.md` §6) — the wire
+/// reads it, this record stores it and the flush quantises it. Postcard encodes a float at its
+/// declared width, so the width is on-disk format: this field's change from `f32` is what
+/// `WAL_VERSION` 16 existed for, and a log at 15 is refused rather than read eight bytes at a time
+/// out of four. The current version is **17**, for [`WalRow::scoped`] below — postcard is
+/// positional, so a 16 record read at 17 takes the next record's leading bytes for the list it
+/// does not carry — and both older versions are refused for that one reason: their records are
+/// the ones a current reader would find *plausible*.
+///
+/// **They are the view's frame coordinates, never longitude and latitude** (`projections.md` §3).
+/// A projected view's transform runs once, at the wire boundary, before the record is framed — so
+/// **replay reproduces the positions the original write produced rather than re-running the
+/// transform**. Nothing in recovery calls `Projection::forward`, and a platform's `log` and `tan`
+/// are therefore not part of it: Web Mercator is not bit-exact across C libraries (§11), and a log
+/// holding degrees would let a node come back up with points in different cells from the ones it
+/// acked.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WalRow {
     pub external_id: Option<Vec<u8>>,
     pub entity_id: EntityId,
     pub view: String,
+    /// **This row joined an existing entity to a second view** (`views.md` §4): geometry, and
+    /// nothing else. `descriptors` is empty on such a row and stays empty — the entity's label is
+    /// the one it already has, and a join that carried terms would be a re-label with no overlay
+    /// entry, which decision 0047 makes a delete plus a re-ingest instead.
+    ///
+    /// Durable rather than derived, because the whole difference between a first row and a join is
+    /// what the *rest of the write path* may do with it: a join contributes no postings and no
+    /// filter-column value, and replay has to reproduce that decision rather than re-take it
+    /// against a live map that has moved on.
+    pub join: bool,
     pub descriptors: Vec<Vec<u8>>,
-    pub x: f32,
-    pub y: f32,
+    pub x: f64,
+    pub y: f64,
     pub scalars: Vec<WalScalar>,
+    /// This row's values for the **group-scoped** attribute families of the group that owns
+    /// [`Self::view`], positionally against `MANIFEST.groups[..].scoped_scalars` in manifest order
+    /// (`views.md` §5). Empty for a plain view and for a group that owns no family.
+    ///
+    /// **A second list rather than more slots in [`Self::scalars`]**, because the two are indexed
+    /// against different declarations. `scalars` is positional against the one flat, bundle-wide
+    /// `MANIFEST.declared_scalars`, which a family is deliberately absent from — it has no slot
+    /// there, no whole-corpus column and no record-blob field tag. A family's columns are the
+    /// group's, one per view, so the list a row carries them in is the group's too.
+    ///
+    /// **A join row may carry these and only these** (`views.md` §4): the entity, its label and
+    /// its entity-scoped attributes are already decided, and a scoped value belongs to the
+    /// `(entity, view)` the join is creating rather than to the entity — which is what makes it
+    /// the one thing a second view's row legitimately brings with it.
+    pub scoped: Vec<WalScalar>,
 }
 
 /// The disposition change carried by a [`WalRecord::ChangeByEntity`] record. The two removal rules
@@ -316,6 +358,41 @@ pub enum WalRecord {
         /// exactly one entry — its level 0.
         runs: Vec<ReservedRuns>,
     },
+    /// A view of a group **created while the service runs** (`views.md` §3.2), carrying the whole
+    /// roster record: the key, the ordinal it was given, its gate and its typed metadata.
+    ///
+    /// **This record is for replay, and the segments manifest is the durable home.** Rotation
+    /// reclaims WAL records, so a roster that lived only here is lost at the first rotation — and
+    /// the roster then serves a group as though nothing had ever been added to it.
+    /// `SegmentsManifest::views` is where it survives; this is what puts it back between a
+    /// publication and a restart, in the order it happened.
+    ///
+    /// **The incarnation is recorded, never re-derived** (decision 0115). Replay applies what was
+    /// decided: a re-derivation would hand a key created again the incarnation its predecessor's
+    /// segments, columns and derived structures already carry, and the new view would serve them.
+    ///
+    /// **It names the owner group only.** Groups sharing these views (`members`, `views.md` §3.3)
+    /// take their copies from this one record, because the key and the ordinal are the owner's.
+    ViewCreate {
+        view: tessera_types::view::CreatedView,
+    },
+    /// An accepted view drop. **The key is freed and the incarnation dies** (decision 0115): a
+    /// key is a name the caller chose, so it may be created again, and what must not come back is
+    /// the predecessor's artifacts. `LayerDrop` still tombstones, and the difference is deliberate
+    /// — a layer name travels in bookmarks, edges and suppressions, where a view key addresses a
+    /// row space and nothing else.
+    ///
+    /// **The incarnation travels with it**, which is what makes the record self-sufficient under
+    /// rotation: a death that did not say which incarnation died could not be told apart from a
+    /// death of the one created after it.
+    ///
+    /// **This record removes no entity.** An entity whose only view was dropped still exists, with
+    /// its label, its attributes and its memberships, in no view; `delete_dangling` submits
+    /// ordinary deletions through the deny lane and is not a second retirement route
+    /// (`views.md` §3.4, write-path §5.4).
+    ViewDrop {
+        view: tessera_types::view::DeadIncarnation,
+    },
     /// An accepted layer drop. **The name is tombstoned, not freed**: it is refused on recreation
     /// for ever, because bookmarks, edges and suppressions all travel by it and a name that once
     /// meant something must not come to mean something else.
@@ -415,17 +492,19 @@ pub struct PublishedArtifact {
     /// key, and replay applies the address that was decided rather than re-resolving a key
     /// whose target may since have been dropped.
     pub attached_to: Option<PublishedAttachment>,
-    /// The artifact's declared bounding box, `[min_x, min_y, max_x, max_y]`, on a layer whose
-    /// `shape` declares one.
+    /// The artifact's canonical shapes, one per view, on a layer whose `shape` declares a kind.
     ///
-    /// **An array rather than the typed `Bbox`**, so the durable shape is four numbers in a stated
-    /// order and the type's own refusals — non-finite, inverted — stay where publication makes
-    /// them. A record replayed from here is checked again by the same constructor, so a log that
-    /// somehow carried an inverted box restores an artifact with no shape rather than one whose
-    /// membership is a region nobody wrote.
-    pub shape: Option<[f64; 4]>,
-    /// This artifact's parent in its layer's hierarchy — resolved from the key the caller named,
-    /// on `attached_to`'s argument.
+    /// **Canonical rather than as written**, so the log carries what the store holds: the
+    /// caller's coordinates were quantised against each view's frame at publication and reported
+    /// then, and a replay re-applies the stored form rather than re-deriving it against a frame
+    /// that may since have moved. The bytes are the engine's (`polygon-membership.md` §6.6) and
+    /// this crate holds them opaquely, as it holds the membership's.
+    pub shape: Option<crate::membership::ArtifactShapes>,
+    /// This artifact's parents in its layer's hierarchy — resolved from the keys the caller named,
+    /// on `attached_to`'s argument. **Ascending by `(level, ordinal)` and deduplicated**: empty at
+    /// a root, one entry on a `nested` or `tiered` layer, and on a `dag` layer as many as the
+    /// child sits beneath (`dag-hierarchies.md` §4, decision 0117). A duplicate edge is one edge,
+    /// whichever spelling stated it and however many rows did.
     ///
     /// **Only the parent direction is durable.** The child direction is the same relation read the
     /// other way, and a level's child index is built from these at open exactly as its row-space
@@ -441,13 +520,14 @@ pub struct PublishedArtifact {
     /// **No layer qualifier and no entity.** An edge relates two artifacts of one *layer*, so the
     /// layer is the reader's own; and unlike an attachment this is not a visibility term — a
     /// node's verdict is its own (decision 0080) — so there is no target entity to test.
-    pub parent: Option<ParentRef>,
+    pub parents: Vec<ParentRef>,
 }
 
-/// The resolved parent of an artifact, inside its own layer.
+/// One resolved parent of an artifact, inside its own layer.
 ///
-/// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// On-disk format: field order is positional under postcard — see [`WalRow`]'s note. The derived
+/// order is `(level, ordinal)`, which is the order a record's list is kept in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ParentRef {
     pub level: u32,
     pub ordinal: u32,
@@ -579,8 +659,16 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 /// [`WalRecord::ArtifactGrow`], appended so no existing discriminant moves — and the bump is the
 /// guard, because a version-14 reader meeting one would decode a growth as whatever it thinks that
 /// index means, which is nothing: the members that joined would be silently absent from the
-/// artifact a caller was acked for.
-const WAL_VERSION: u16 = 15;
+/// artifact a caller was acked for. Version 16 widens [`WalRow`]'s `x`/`y` to `f64`
+/// (`projections.md` §6) — a *field's type*, not a new variant or a new field, so nothing about a
+/// version-15 log looks wrong to a version-16 reader: the record's length is right, the CRC is
+/// right, and four of the eight bytes it takes for a coordinate come out of whatever field follows.
+/// A row read that way lands somewhere on the grid rather than failing, which is the whole reason
+/// the version is the guard and there is no migration.
+// **17**: `WalRow` gained `scoped` — a row's values for the group-scoped attribute families of
+// its view's group (`views.md` §5). Postcard is positional, so the field is on-disk format and a
+// log at 16 is refused rather than read one list short.
+const WAL_VERSION: u16 = 18;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts
@@ -747,6 +835,14 @@ pub struct Wal {
     state: WalState,
     /// Where each record `open` replayed sits in the sequence — see [`Wal::replayed_positions`].
     replayed_positions: Vec<u64>,
+    /// The pause sites armed on this handle. **The one `#[cfg]` inside the durability primitive**,
+    /// and it is here because the ordering it holds is decided here: see
+    /// [`Wal::sync_data`] and [`crate::faults::PauseSite::BeforeSyncData`]. Every other fault
+    /// switch rides on [`ExecutorWal`] precisely so that `Wal` compiles identically in test and in
+    /// production; this field is that rule's single exception, and it changes no behaviour of a
+    /// build that never arms a site.
+    #[cfg(feature = "fault-injection")]
+    faults: Option<std::sync::Arc<crate::faults::FaultSwitchboard>>,
 }
 
 /// The on-disk size of a framed record whose postcard body is `body_len` bytes.
@@ -1013,6 +1109,8 @@ impl Wal {
                     active,
                     state: WalState::Healthy,
                     replayed_positions: Vec::new(),
+                    #[cfg(feature = "fault-injection")]
+                    faults: None,
                 },
                 Vec::new(),
             ));
@@ -1101,6 +1199,8 @@ impl Wal {
                 active: active.expect("the last member is always the active one"),
                 state: WalState::Healthy,
                 replayed_positions,
+                #[cfg(feature = "fault-injection")]
+                faults: None,
             },
             records,
         ))
@@ -1451,7 +1551,7 @@ impl Wal {
     /// The two arms are separate states rather than one poison because they are separately
     /// repairable — see [`Wal::retry_durability`].
     fn sync_and_publish(&mut self) -> Result<u64> {
-        if let Err(e) = self.active.file.sync_data() {
+        if let Err(e) = self.sync_data() {
             self.state = WalState::Unsynced;
             return Err(WalError::Io(e));
         }
@@ -1467,6 +1567,32 @@ impl Wal {
                 Err(WalError::Io(e))
             }
         }
+    }
+
+    /// Make the appended bytes durable — the first half of [`Wal::sync_and_publish`], and the half
+    /// whose *completion* the published offset is a claim about.
+    ///
+    /// A function rather than the bare call it wraps, because
+    /// [`crate::faults::PauseSite::BeforeSyncData`] is armed inside it. The site's whole
+    /// discrimination is that it travels with the sync: a build that publishes the offset first
+    /// parks here with the sidecar already naming bytes nothing has synced, and a build that drops
+    /// the sync drops this arrival with it. Sited at the call site instead, the point would say
+    /// only where a line used to be.
+    fn sync_data(&mut self) -> std::io::Result<()> {
+        #[cfg(feature = "fault-injection")]
+        if let Some(faults) = self.faults.clone() {
+            faults.pause_point(crate::faults::PauseSite::BeforeSyncData);
+        }
+        self.active.file.sync_data()
+    }
+
+    /// Arm this handle's pause sites. Fault-injection builds only.
+    ///
+    /// [`ExecutorWal::with_faults`] calls this, so an executor-driven test arms one switchboard and
+    /// reaches both layers; a test that drives a bare `Wal` calls it directly.
+    #[cfg(feature = "fault-injection")]
+    pub fn attach_faults(&mut self, faults: std::sync::Arc<crate::faults::FaultSwitchboard>) {
+        self.faults = Some(faults);
     }
 }
 
@@ -1484,7 +1610,10 @@ impl Wal {
 /// - **The fault switches**, which must not exist in a shipped binary at all (see
 ///   [`crate::faults`]). Putting a `#[cfg]` inside the durability primitive would mean the type
 ///   the whole fail-closed story rests on compiles differently in test and in production. Wrapping
-///   it means `Wal` is byte-for-byte the same type either way.
+///   it keeps `Wal` the same type either way — with **one exception, argued at its own site**:
+///   [`Wal::sync_data`] carries the [`crate::faults::PauseSite::BeforeSyncData`] point, because
+///   the ordering that point discriminates is decided inside `Wal` and is not observable from out
+///   here. A site in this wrapper would return before `Wal::fsync` was entered.
 ///
 /// ## Poisoning is mirrored, never remembered
 ///
@@ -1545,6 +1674,7 @@ impl ExecutorWal {
     /// Arm this handle with a fault switchboard. Test builds only.
     #[cfg(feature = "fault-injection")]
     pub fn with_faults(mut self, faults: std::sync::Arc<crate::faults::FaultSwitchboard>) -> Self {
+        self.wal.attach_faults(std::sync::Arc::clone(&faults));
         self.faults = Some(faults);
         self
     }
@@ -1754,12 +1884,14 @@ mod tests {
                 external_id: None,
                 entity_id: EntityId::new(1),
                 view: "s0".to_string(),
+                join: false,
                 descriptors: Vec::new(),
                 x: 0.5,
                 y: 0.5,
                 // The row carries the **code**, resolved once at the close and persisted — a
                 // random draw is precisely what replay cannot re-derive.
                 scalars: vec![WalScalar::U32(31_337)],
+                scoped: Vec::new(),
             }],
         };
 
@@ -1793,6 +1925,7 @@ mod tests {
 
         let create = WalRecord::LayerCreate {
             declaration: Box::new(LayerDeclaration {
+                scope: Default::default(),
                 name: "boundaries/uk-2026".into(),
                 title: Some("UK administrative boundaries".into()),
                 views: vec!["geographic".into()],
@@ -1888,7 +2021,7 @@ mod tests {
                     members: serialise_members(&first),
                     contents: Vec::new(),
                     attached_to: None,
-                    parent: None,
+                    parents: Vec::new(),
                     shape: None,
                 },
                 // An artifact whose members have all been deleted is a real state, and an
@@ -1912,20 +2045,31 @@ mod tests {
                         ordinal: 17,
                         entity: EntityId::new(4_294_901_759),
                     }),
-                    // The fourth optional field, and the one that decodes *after* the attachment
+                    // The fourth field, a list, and the one that decodes *after* the attachment
                     // — so a shape that lost a byte in the attachment would land here and read a
                     // parent out of the wrong offset. Set on the artifact that also carries the
                     // attachment, which is where the two can be told apart, and with a **level
                     // that is not this artifact's own**: a cross-level parent is the shape whose
-                    // two words could be read in either order without either looking wrong.
-                    parent: Some(ParentRef {
-                        level: 2,
-                        ordinal: 65_535,
-                    }),
+                    // two words could be read in either order without either looking wrong. Two
+                    // of them, because a `dag` layer's child names several (decision 0117) and a
+                    // list of one would round-trip through a reader that still held one.
+                    parents: vec![
+                        ParentRef {
+                            level: 2,
+                            ordinal: 65_535,
+                        },
+                        ParentRef {
+                            level: 2,
+                            ordinal: 65_536,
+                        },
+                    ],
                     // The fifth optional field, and the last one — set here so the round-trip
                     // covers a record carrying every optional at once, which is the arrangement a
                     // positional decoder misreads first.
-                    shape: Some([-1.5, 0.0, 2.5, 4.0]),
+                    shape: crate::membership::ArtifactShapes::new(vec![(
+                        "s0".into(),
+                        vec![1, 2, 3],
+                    )]),
                 },
             ],
         };

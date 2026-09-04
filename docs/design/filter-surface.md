@@ -13,9 +13,9 @@ three lenses (Appendix R).
 [`conformance.md`](conformance.md) §3–§4; decisions
 [0008](../decisions/0008-candidate-list-route-declined.md),
 [0041](../decisions/0041-pins-become-a-staleness-stamp.md),
-[0044](../decisions/0044-invisible-means-stale-serve-plus-background-refresh.md),
-[0064](../decisions/0064-an-absent-number-is-a-presence-bitmap-beside-the-column.md),
-[0068](../decisions/0068-a-row-space-operand-bounded-by-the-requests-domain-is-admitted.md).
+0044,
+0064,
+0068.
 **Citation convention:** unprefixed §n is the architecture design; this document's own sections are
 cited as **surface §n**. The companion write-side design is
 [`filter-index.md`](filter-index.md), cited as **index §n**.
@@ -57,9 +57,10 @@ Three things decide the design, and none of them is the index.
 
 ## 2. The operand
 
-**Every filter returns a set the composition can intersect, and there are exactly two kinds**
-(decision 0068). New filter forms add operands rather than changing the shape of the call, which is
-what keeps the retrieval surface enumerable — and Appendix C is exhaustive *because* the surface is.
+**Every filter returns a set the composition can intersect, and there are exactly three kinds**
+(decision 0068; `architecture.md` §8.2's third, admitted 2026-08-29). New filter forms add operands
+rather than changing the shape of the call, which is what keeps the retrieval surface enumerable —
+and Appendix C is exhaustive *because* the surface is.
 
 ```rust
 fn resolve(op: &FilterOperand, idx: &FilterIndex, candidates: Option<&Bitmap>)
@@ -73,6 +74,18 @@ wider — not a general row-space operand, and never a route a statistic chooses
 kinds evaluates its entity-space sub-tree, crosses once by §4's measured rule, evaluates the
 row-space leaves over the crossing's domain and combines there (records §6.2). Both kinds carry §5.1's
 rule unchanged: the set they are evaluated against is the **composed verdict**, never a raw fragment.
+
+The third kind is the **`region` leaf** ([`selection-operand.md`](selection-operand.md), built
+2026-08-29): a row-space set over the **whole view** — a drawn shape decomposed against the Morton
+grid, or a published shape's held membership — exact for the shape against every point's stored
+position, and the one leaf that carries no authorisation, which is why its decomposition is cached
+per generation across principals while its boundary rows are tested under each request's own
+composed mask, masked first. It composes under 0068's crossing rule as the second kind does and
+differs in covering every tile rather than the request's: a tree of region leaves and projected
+entity verdicts answers over the whole view, and a render-column leaf beside it bounds the answer to
+the request's domain. `none_of` over it is the complement within that scope, every rowed entity
+carrying a position. Its verdict — exact, or a cover past the deployment's cell budget — is a
+function of the shape and the grid alone and rides as a response header.
 
 The four rules §8.2 places on the signature above:
 
@@ -465,7 +478,7 @@ per-tile is a property of a lean schema, not a constant.
 
 **Filtering may relax no disclosure control, and that half is settled.** §8.4 governs which cluster
 labels are shown. The **existence criterion** — §7.5's threshold, declared per layer and nowhere
-else ([decision 0085](../decisions/0085-the-existence-criterion-has-no-deployment-wide-form.md)) —
+else (decision 0085) —
 is evaluated against **`M_auth`** and never `M_sel`, per node and independently of any other node, which
 is the operational form of **I12**: *a filter may move the frontier up, never down.*
 
@@ -663,15 +676,15 @@ section rather than changing the design)*. Taken clause by clause, what is true 
   deleted `min_visible_members` key used to name badly.
 - **The frontier is withdrawn, not missing.** Every artifact is tested on its own and the root-down descent
   is gone (decisions [0080](../decisions/0080-the-frontier-is-a-per-artifact-test.md),
-  [0082](../decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md),
-  [0083](../decisions/0083-the-frontier-is-a-request-time-budget.md)); the depth that remains is a
+  0082,
+  0083); the depth that remains is a
   request-time budget, which is not a disclosure control. So there is no frontier *depth* for a filter to
   move, and a test of one would be a test of a withdrawn mechanism.
 - **What was called the label service is built, under another name.** Labels are artifact content: a layer's
   artifacts carry ranked contents, each with its generating set, and a viewer is served the first content
   whose set they contain entire. Containment is evaluated on every route that serves an artifact. What is
   still absent from the older conception is the *ladder's* choosing — the service resolves a caller-supplied
-  ordering and takes no opinion (decision [0078](../decisions/0078-the-service-takes-no-opinion-on-which-variation.md)) — and search's containment gate, which is unruled.
+  ordering and takes no opinion (decision 0078) — and search's containment gate, which is unruled.
 
 So the frontier half of I12 and the whole of I3 are **coverable and untested**, not blocked. This design does
 not build them and does not claim them; naming them absent, now that they are not, would understate the
@@ -710,148 +723,3 @@ needs and the arm as declared does not carry:
   measure.
 
 ---
-
-## Appendix R — review trail
-
-**2026-08-19 (r5) — §9 said three things were absent and two of them are built.** A correction, not a
-design change: nothing in §1–§8 moves and no filter behaviour changes. §9's sentence — *"there is no
-label service, no frontier and no `min_visible_members` in the tree"* — was true when written and each
-of its three clauses now needs a different answer. The **existence criterion** is built and enforced,
-and is what the deleted key named. The **frontier** is withdrawn as a concept rather than missing
-(decisions 0080, 0082, 0083), so its depth is not a thing a filter could move. And the **labels**
-themselves are built, as artifact content gated on generating-set containment. The frontier half of
-I12 and the whole of I3 are therefore *coverable and untested* rather than blocked, and §9's row says
-so. This design still does not build them, and still claims neither.
-
-**2026-08-16 — §5.2's display threshold is withdrawn with §7.5's descent** (architecture r43,
-decisions [0080](../decisions/0080-the-frontier-is-a-per-artifact-test.md),
-[0082](../decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md),
-[0083](../decisions/0083-the-frontier-is-a-request-time-budget.md)). Nodes are tested individually
-against `M_auth`, so the second bar this section described — evaluated against `M_sel` inside the
-walk — has no walk to sit in. **The disclosure half is unchanged and is the half this design owns**:
-containment and the existence criterion never see `M_sel`, which is **I12**'s operational form. What
-a filter does to artifact display is ⊘ open and is named as such rather than left reading as
-specified. §9's coverage claim is untouched — the frontier half of **I12** was already blocked on
-machinery this design does not build, and still is.
-
-**2026-08-12 — the second operand kind lands** (decision 0068). §2 gains the row-space set bounded by
-the request's own domain, which a rendered column's leaf resolves to, and §6 records what `/v1/meta`
-therefore publishes: the columns declared `index = true`, plus every **rendered category**. §5.1's
-composed-verdict rule binds the new leaf exactly as it binds a scan, and is stated at §2 so the
-route that would be convenient to exempt is not. Nothing else moved — a rendered *number* is not an
-operand at all. A rendered number is an operand — 0064's presence bitmap makes its row scan able to distinguish absence from the type's zero — and only the *wire* half of 0064, how a client is told a rendered value is absent, is still deferred.
-
-**2026-08-08 (r3, third pass) — §5–§8 re-read against the artefact, and two registered channels
-withdrawn.** §5.1's *rule* survives — a filter is applied above composition, per range, never folded into
-the base — but both its mechanism and its central argument moved. The mechanism gains §4's two routes, so
-a broad result is tested per tile rather than projected. The argument is the more important change: it had
-run "the operand is evaluated unmasked, so compose the result afterwards"; masked evaluation moves the
-obligation **earlier**, to "the candidate a filter scans under must be the composed verdict, not a raw
-fragment". That is simpler and stricter, because a result that was never scanned cannot be forgotten to be
-composed. §5.2 and §5.3 are untouched: `M_auth` anchoring, the frontier direction and containment binding
-are properties of the mask, not of how a value is stored. §6 likewise — it describes served sets.
-
-Two leak-register rows are **withdrawn rather than accepted**, and kept in the table as the record of
-controls that were ruled on and then removed by construction: operand latency over a gated value, which a
-masked scan makes value-independent (*measured*: 0.000 ms for both a valueless and a 250M-member hidden
-value); and shared-cache eviction cadence, which goes with the shared cache. A third row gains a note
-rather than changing: masked range bounds and histograms are cheap to honour now that a range is a scan,
-which is also why index §3 declines zone maps outright rather than deferring them — a precomputed unmasked
-structure is exactly the thing that would put the channel back.
-
-**2026-08-08 (r3, second pass) — §4's cache is superseded by a measured rule, not merely suspended.**
-With the filter-latency budget ruled at 0.5–1 s (`filter-index.md` §2.2), the binding term moved from
-finding the matching entities to getting them into row space — so that step was measured rather than
-reasoned about (arm 3). A projection costs ~27 ns per set bit and scales with the *result*; a per-tile
-membership test costs ~6–22 ns per viewport row and scales with the *viewport*, which the drawn-mark
-budget already bounds. At 10⁹ a 10⁸-entity result costs 2,779 ms projected against 6.49 ms tested —
-and 2,779 ms is more than the 730 ms scan that produced the result, so for any broad filter the
-projection had been the dominant cost all along.
-
-That replaces §4's machinery with one line — project below ~a quarter of the viewport's rows, test per
-tile above it — and removes the cache's justification independently of the premise failure recorded
-below: the expensive projections are the broad ones, and the per-tile route never performs them. One
-negative result recorded so it is not mistaken for a settled constant: this arm's results are
-*contiguous*, the cheap end for a gather, so ~27 ns/set-bit is a floor. The corpus's 127 ns point is
-~4.7× it. **The per-bit constant is shape-dependent; no design may quote a flat one.**
-
-**2026-08-08 (r3) — revised where `filter-index.md` r4 changed the artefact underneath it.** That
-document's organising rule became the flat value column as the artefact of record, with the mask pushed
-in as the scan's candidate. Three consequences here, two of which *remove* mechanism rather than adding
-it.
-
-**§2.1's supersession of per-point-attributes §3.8 is withdrawn.** r2 ruled work-indistinguishability a
-preference rather than a bar, because an inverted-postings operand evaluated unmasked could not achieve
-it without giving up shared projection. A masked scan's work is a function of `(candidate, column)` and
-never of the value, so the property holds structurally; for a category's derived posting it is measured
-— a value with no members and a hidden value with 250M members both intersect in 0.000 ms at 10⁹ and 25%
-coverage. §3.8 stands as written and no amendment is owed against it. One narrow case is named unmeasured
-rather than covered.
-
-**§3.2's registered timing channel is withdrawn rather than bounded.** It existed only in unmasked
-evaluation, which no longer occurs. The section is kept, marked, because a control accepted by owner
-ruling should be recorded as retired rather than vanish.
-
-**§4's shared projection cache is suspended.** Its premise — that an operand result is
-principal-independent and therefore shareable — was a consequence of unmasked evaluation. A masked scan
-returns `M_sel`, which is principal-specific. The problem it addressed survives; the solution does not,
-and §4.3's canonical level-tree node identities address a structure that no longer exists. Retained
-unedited as the record of a reviewed design whose premise moved, with an explicit instruction not to
-implement it without re-deriving that premise.
-
-**2026-08-08 (r2) — reviewed under three lenses.** The document survived its security argument and failed
-on cost and on seams.
-
-The finding that changed the most: **§4 used only the top and bottom rungs of a ladder the corpus has
-measured three rungs of.** r1 said a flush extends and "only a merge or a fold forces a rebuild" — but
-merges run at minutes cadence under steady ingest, so that rule rebuilds every cached operand every few
-minutes, the churn the extension rule exists to avoid. `rebase_extents` is *measured* at 44.6 ms against
-the 4,550 ms rebuild; §4.1 now carries all three rungs, the clone as the extension's real cost, and the
-boundary-segment-ID comparison as the safety argument — because a flush and a merge are indistinguishable
-in the cache key, and extending across a merge names different entities' rows.
-
-Two more that changed a mechanism. **§4.2's admission rule had an unbounded corner**: reuse and result size
-are independent, so a broad operand below the threshold puts a ~12.7 s inline projection on a request — and
-the reuse counter, if kept per key, resets every publication and deletes the amortisation entirely. It is
-now two-axis, counted on the operand identity across versions, with the miss path answering by push-down
-rather than by a 429, since shedding a population-wide build would stall every principal. And **§5.1 now
-says where a filter meets the composed mask** — above it, per range, never folded into its base — which r1
-left to inference; the construction inference invites re-opens the suppressed-row question §5 exists to
-close.
-
-**§5.3 acquired the composition rule that §5 already had.** r1 required the *selection* result to compose
-with the deny state and then said counts are "an `and_cardinality` inside `M_auth`", which an implementer
-reads as the fragment — over-reporting every facet count by the suppressed members carrying that value, and
-differencing that against a computable count yields a per-value tally of suppressed items. The rule is
-restated at the count site because that is where it is elided.
-
-**The accepted timing channel's bound was wrong in both directions** (§3.2): a prober manufactures the cold
-path by supplying its own reuse, and eviction re-colds on demand, while a publication does *not* re-cold at
-all under §4.1's rule. The channel is still accepted; the registered residual is now the true one, and the
-admission threshold counts distinct authorisation fingerprints so a single principal cannot cross it alone.
-Eviction cadence joins the register as an accepted activity channel.
-
-Three claims were scoped down. **I12 becomes coverable only in its mask half** — the frontier half and I3
-stayed blocked on the label service at the time *(superseded at r5: that machinery is built)*, and a test row
-for absent machinery is what decision 0013 forbids. The
-**conformance relation carries values, not ordinals**, or the oracle reproduces the engine's key encodings
-and stops being a second implementation. And **§5.3's range-summary machinery is marked ⊘** with its
-placement stated, since no route serves a summary — the register entry is earned, the mechanism was
-designed for an affordance nobody asked this document to serve.
-
-Also added: **§6 defines the two layers** rather than naming them, since the differential compares served
-sets and the cap interaction and broad-filter anchor were undefined; **§7 states where `overlay_pass` comes
-from** and that it is principal-dependent, which per-point-attributes §3.3's "once per generation" phrasing
-obscures; and three normative contradictions are now named — per-point-attributes §3.8's "and in work"
-(§2.1), architecture §8.5's cache row keyed on partition and invalidated by ingest (§4), and contracts
-§3.2's classification of `/v1/categories` as admission-free (§7).
-
-**2026-08-08 (r1) — drafted**, after a three-lens review of the plan it was written from. What shaped it:
-mode assignment is driven by disclosure rather than cost, and the owner then ruled the resulting timing
-channel *accepted* rather than closed; the shared projection amortises across principals, not keystrokes;
-bit slicing belongs in shared mode; the draft's proposed sublinearity benchmark gate was withdrawn as the
-negation of the cost model rather than its operational form. Owner corrections at the same time: **strings
-are not categories**, so `listing` has nothing to govern on one and prefix keeps its operand while losing
-an autocomplete surface it should never have had.
-
-[#44]: https://github.com/jennis0/tessera-index/issues/44

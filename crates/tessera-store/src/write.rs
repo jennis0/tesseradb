@@ -47,10 +47,18 @@ use tessera_spatial::split32;
 use tessera_spatial::tiler::{ScalarType, ScalarValue, TilerItem};
 use tessera_types::{EntityId, TesseraId};
 
+use crate::permutation::{
+    pages_for, payload_start, PAGE_ABSENT, PAGE_BYTES, PAGE_ENTRIES, PAGE_SHIFT,
+};
+
 const PERMUTATION_MAGIC: &[u8; 4] = b"TSPM";
-const PERMUTATION_VERSION: u16 = 1;
-const PERMUTATION_RESERVED: u16 = 0;
+/// Version 2 is the paged form; version 1 was the flat array it replaced, and a reader refuses it
+/// on this field alone (`crate::permutation`).
+const PERMUTATION_VERSION: u16 = 2;
 const PERMUTATION_ABSENT: u32 = 0xFFFF_FFFF;
+
+/// The header's width, from the one module that defines the layout.
+const PERMUTATION_HEADER_BYTES: usize = crate::permutation::HEADER_LEN;
 
 /// The largest satisfiable `permutation.bin` bound: entity ids must fit `u32` in
 /// `bundle_format = 1` (R1), so the highest addressable id is `2^32 - 1` and the bound — one past
@@ -738,7 +746,7 @@ pub fn write_morton_codes<I: IntoIterator<Item = u32>>(path: &Path, codes: I) ->
 /// Write `columns.arrow` from columns that are already in row order — the fixed two columns of
 /// contracts §2.6, no declared scalars.
 ///
-/// Takes each column **by value** so the `Vec`s become the Arrow buffers with no copy. This
+/// Takes each column **by value** so its bytes become the Arrow buffers with no copy. This
 /// record batch is the largest single structure the batch build materialises (at 10^9 rows,
 /// 8+4 bytes per row), so a copy here would be another twelve gigabytes. Produces
 /// byte-for-byte what [`write_segment`] writes for the same rows and no scalars. Since the
@@ -748,7 +756,7 @@ pub fn write_columns(
     path: &Path,
     tessera_id: Vec<u64>,
     residual: Vec<u32>,
-    scalars: Vec<(String, ScalarColumnData)>,
+    scalars: Vec<(String, ScalarColumn)>,
 ) -> io::Result<()> {
     let rows = tessera_id.len();
     if residual.len() != rows {
@@ -761,14 +769,14 @@ pub fn write_columns(
         ));
     }
     for (name, column) in &scalars {
-        if column.len() != rows {
+        if column.rows() != rows {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
                     "write_columns: declared scalar '{name}' has {} rows, tessera_id has {rows}. \
                      A short column is not a partial write — arrow refuses the batch, and a long \
                      one would put values under the wrong identities",
-                    column.len()
+                    column.rows()
                 ),
             ));
         }
@@ -801,7 +809,7 @@ pub fn write_columns(
     ];
     for (name, column) in scalars {
         fields.push(Field::new(&name, column.arrow_type(), false));
-        columns.push(column.into_array(rows, &name)?);
+        columns.push(column.into_array(&name)?);
     }
     let schema = Arc::new(Schema::new(fields));
     let batch = RecordBatch::try_new(schema.clone(), columns)
@@ -809,37 +817,59 @@ pub fn write_columns(
     write_single_batch(path, &schema, &batch)
 }
 
-/// One declared scalar's values, column-major and already in row order.
+/// One declared scalar's values, column-major, already in row order, and already laid out as the
+/// **Arrow values buffer they will become** — taken without copying.
 ///
 /// **The column-major counterpart to [`SegmentRow`]'s row-major `scalars`**, and both exist
 /// because the two producers genuinely hold their data differently: a merge or a flush walks rows
-/// and has one row's values at a time, while the tiered batch build permutes whole columns and
-/// would have to transpose 10⁹ rows into per-row vectors to use the other shape. Each `Vec`
-/// *becomes* the Arrow values buffer with no copy.
+/// and has one row's values at a time, while the batch build permutes whole columns and would have
+/// to transpose 10⁹ rows into per-row vectors to use the other shape.
+///
+/// **Bytes rather than a `Vec` per column, because the build's are a file.** This was
+/// `ScalarColumnData`, a `Vec` per declared type filled by `push`: at 7.4×10⁷ rows and eight render
+/// columns that is ~2.4 GB of anonymous memory allocated immediately after the build moved its
+/// entity-order columns off the heap. The build fills a mapped file under `.build-tmp/` and hands
+/// the mapping over ([`crate::write::ScalarColumn::of`]); the buffer *becomes* the record batch's
+/// values buffer, so the record batch costs address space rather than memory, and a conversion
+/// here would give the memory back at exactly the wrong moment.
+///
+/// **Every member is fixed-width, because every render column is.** `render` is refused at the
+/// declaration for `keyword` and for `text`, and `utf8` is not a declarable type at all — the hot
+/// column is a fixed-width slot in every row and prose is not one (per-point-attributes §4.3). So
+/// the string family is not a variant here with an unreachable arm behind it; it is refused by
+/// [`Self::of`], which is the one place a caller could name it.
 #[derive(Debug)]
-pub enum ScalarColumnData {
-    Bool(Vec<bool>),
-    U8(Vec<u8>),
-    U16(Vec<u16>),
-    U32(Vec<u32>),
-    U64(Vec<u64>),
-    I8(Vec<i8>),
-    I16(Vec<i16>),
-    I32(Vec<i32>),
-    I64(Vec<i64>),
-    F32(Vec<f32>),
-    F64(Vec<f64>),
-    TimestampUs(Vec<i64>),
-    Utf8(Vec<String>),
+pub struct ScalarColumn {
+    rows: usize,
+    values: ScalarColumnValues,
+}
+
+/// The declared width behind a [`ScalarColumn`], and what each buffer holds.
+#[derive(Debug)]
+enum ScalarColumnValues {
+    /// **Bit-packed**, `rows` bits from the buffer's first byte, least significant bit first —
+    /// Arrow's own boolean layout, and the one member that is not a flat array of itself.
+    Bool(Buffer),
+    U8(Buffer),
+    U16(Buffer),
+    U32(Buffer),
+    U64(Buffer),
+    I8(Buffer),
+    I16(Buffer),
+    I32(Buffer),
+    I64(Buffer),
+    F32(Buffer),
+    F64(Buffer),
+    TimestampUs(Buffer),
 }
 
 /// The fixed-width members, each with its variant, Arrow array type and Arrow type.
 ///
-/// **Generated rather than written out, because there are eleven of them and five methods.** The
-/// hand-written form was fifty near-identical arms whose only failure mode is a type appearing in
+/// **Generated rather than written out, because there are eleven of them and three methods.** The
+/// hand-written form was thirty near-identical arms whose only failure mode is a type appearing in
 /// ten of them — a column silently taking another's width or another's values, which is a defect
-/// no aggregate check sees. `Bool` and `Utf8` are excluded and written by hand: neither is a flat
-/// slice of itself, which is exactly what the uniform arms assume.
+/// no aggregate check sees. `Bool` is excluded and written by hand: it is not a flat slice of
+/// itself, which is exactly what the uniform arms assume.
 macro_rules! fixed_width_columns {
     ($mac:ident) => {
         $mac! {
@@ -859,191 +889,89 @@ macro_rules! fixed_width_columns {
     };
 }
 
-impl ScalarColumnData {
-    /// An empty column of the given type — what a build allocates before filling it.
-    pub fn of(ty: ScalarType, capacity: usize) -> Self {
+impl ScalarColumn {
+    /// A column of `rows` values of `ty`, over bytes already in Arrow's layout for it: `rows`
+    /// little-endian values for a fixed-width type, `rows` bits for a `bool`.
+    ///
+    /// **Refuses the string family**, which is the only way a caller could ask for a column the
+    /// hot column cannot hold — see the type docs. The length and alignment are checked where the
+    /// array is built ([`typed_column`]), not here, so one place decides what a buffer must be.
+    pub fn of(ty: ScalarType, rows: usize, values: Buffer) -> io::Result<Self> {
         macro_rules! arms {
             ($(($v:ident, $arr:ident, $dt:expr)),* $(,)?) => {
                 match ty {
-                    $(ScalarType::$v => ScalarColumnData::$v(Vec::with_capacity(capacity)),)*
-                    ScalarType::Bool => ScalarColumnData::Bool(Vec::with_capacity(capacity)),
-                    // A keyword renders as its bytes if it ever renders at all — see
-                    // `arrow_type_of`, which this must agree with.
+                    $(ScalarType::$v => ScalarColumnValues::$v(values),)*
+                    ScalarType::Bool => ScalarColumnValues::Bool(values),
                     ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => {
-                        ScalarColumnData::Utf8(Vec::with_capacity(capacity))
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!(
+                                "write_columns: a render column is a fixed-width slot in every \
+                                 row and {ty:?} is not one. `render` is refused at the \
+                                 declaration for every string type (per-point-attributes §4.3), \
+                                 so reaching here is a build defect and not a declaration"
+                            ),
+                        ))
                     }
                 }
             };
         }
-        fixed_width_columns!(arms)
+        Ok(ScalarColumn {
+            rows,
+            values: fixed_width_columns!(arms),
+        })
     }
 
-    pub fn len(&self) -> usize {
-        macro_rules! arms {
-            ($(($v:ident, $arr:ident, $dt:expr)),* $(,)?) => {
-                match self {
-                    $(ScalarColumnData::$v(v) => v.len(),)*
-                    ScalarColumnData::Bool(v) => v.len(),
-                    ScalarColumnData::Utf8(v) => v.len(),
-                }
-            };
-        }
-        fixed_width_columns!(arms)
+    pub fn rows(&self) -> usize {
+        self.rows
     }
 
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// Append one value, refusing a tag that is not this column's type — [`ColumnSpool::append`]'s
-    /// rule and its reasoning: a coerced or dropped value shifts every later row of the column
-    /// into another row's place, with every value present and none against its own identity.
-    pub fn push(&mut self, value: ScalarValue, name: &str) -> io::Result<()> {
-        let expected = self.arrow_type();
-        macro_rules! arms {
-            ($(($v:ident, $arr:ident, $dt:expr)),* $(,)?) => {
-                match (self, value) {
-                    $((ScalarColumnData::$v(col), ScalarValue::$v(x)) => col.push(x),)*
-                    (ScalarColumnData::Bool(col), ScalarValue::Bool(x)) => col.push(x),
-                    (ScalarColumnData::Utf8(col), ScalarValue::Utf8(x)) => col.push(x),
-                    (_, got) => {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!("write_columns: scalar '{name}' is {expected:?}, got {got:?}"),
-                        ))
-                    }
-                }
-            };
-        }
-        fixed_width_columns!(arms);
-        Ok(())
-    }
-
-    /// A column pre-sized to `len` values of the type's zero, for a pass that fills by **index**
-    /// rather than by appending.
-    ///
-    /// The build's attribute pass reads the points file in file order and writes each value into
-    /// its entity's slot, so it cannot push. Holding that intermediate as `Vec<ScalarValue>` — as
-    /// it did — costs **32 bytes per value whatever the column declared**: `ScalarValue` carries a
-    /// `Utf8(String)` variant, so a `u8` slot still pays for a pointer, a length, a capacity and a
-    /// tag. At 2,422,486 items that is invisible against everything else the build holds; at
-    /// 250,000,000 across five columns it is 40 GB, allocated and written before the pass reads its
-    /// first row, and the build is OOM-killed having produced nothing. Typed, the same five columns
-    /// are the schema's declared 12 B/row.
-    ///
-    /// **The zero is not the absent value.** A typed column has no spare representation for "no
-    /// value at all", which `ScalarValue::Null` gave the old intermediate for free, so a caller
-    /// filling by index must carry presence alongside — see the build's `EntityColumn`.
-    pub fn filled(ty: ScalarType, len: usize) -> Self {
-        macro_rules! arms {
-            ($(($v:ident, $arr:ident, $dt:expr)),* $(,)?) => {
-                match ty {
-                    $(ScalarType::$v => ScalarColumnData::$v(vec![Default::default(); len]),)*
-                    ScalarType::Bool => ScalarColumnData::Bool(vec![false; len]),
-                    ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => {
-                        ScalarColumnData::Utf8(vec![String::new(); len])
-                    }
-                }
-            };
-        }
-        fixed_width_columns!(arms)
-    }
-
-    /// Write one value at `index`, refusing a tag that is not this column's type — [`Self::push`]'s
-    /// rule and the same reasoning: a coerced value gives one row another row's identity, with
-    /// every value present and none its own.
-    pub fn set(&mut self, index: usize, value: ScalarValue, name: &str) -> io::Result<()> {
-        let expected = self.arrow_type();
-        macro_rules! arms {
-            ($(($v:ident, $arr:ident, $dt:expr)),* $(,)?) => {
-                match (self, value) {
-                    $((ScalarColumnData::$v(col), ScalarValue::$v(x)) => col[index] = x,)*
-                    (ScalarColumnData::Bool(col), ScalarValue::Bool(x)) => col[index] = x,
-                    (ScalarColumnData::Utf8(col), ScalarValue::Utf8(x)) => col[index] = x,
-                    (_, got) => {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!("write_columns: scalar '{name}' is {expected:?}, got {got:?}"),
-                        ))
-                    }
-                }
-            };
-        }
-        fixed_width_columns!(arms);
-        Ok(())
-    }
-
-    /// Borrow one string value, for the callers that only read it — the keyword dictionary and the
-    /// text index both collect `&str` across the whole column, and [`Self::get`]'s clone would turn
-    /// that into a second copy of every string in the corpus.
-    ///
-    /// `None` when this column is not string-typed, which is a caller error rather than an absence:
-    /// absence is the caller's presence bit, not a variant here.
-    pub fn str_at(&self, index: usize) -> Option<&str> {
-        match self {
-            ScalarColumnData::Utf8(col) => Some(col[index].as_str()),
-            _ => None,
-        }
-    }
-
-    /// Move one value out, leaving the type's zero behind. The `Utf8` arm takes the `String`
-    /// rather than cloning it, which is what makes landing a staged chunk into entity order cost
-    /// a pointer move per row instead of a copy of every string in the chunk.
-    pub fn take(&mut self, index: usize) -> ScalarValue {
-        macro_rules! arms {
-            ($(($v:ident, $arr:ident, $dt:expr)),* $(,)?) => {
-                match self {
-                    $(ScalarColumnData::$v(col) => ScalarValue::$v(col[index]),)*
-                    ScalarColumnData::Bool(col) => ScalarValue::Bool(col[index]),
-                    ScalarColumnData::Utf8(col) => {
-                        ScalarValue::Utf8(std::mem::take(&mut col[index]))
-                    }
-                }
-            };
-        }
-        fixed_width_columns!(arms)
-    }
-
-    /// Read one value back out. `Utf8` clones — which is what a caller holding the old
-    /// `Vec<ScalarValue>` intermediate already did at every use, so no path gains an allocation.
-    pub fn get(&self, index: usize) -> ScalarValue {
-        macro_rules! arms {
-            ($(($v:ident, $arr:ident, $dt:expr)),* $(,)?) => {
-                match self {
-                    $(ScalarColumnData::$v(col) => ScalarValue::$v(col[index]),)*
-                    ScalarColumnData::Bool(col) => ScalarValue::Bool(col[index]),
-                    ScalarColumnData::Utf8(col) => ScalarValue::Utf8(col[index].clone()),
-                }
-            };
-        }
-        fixed_width_columns!(arms)
+        self.rows == 0
     }
 
     fn arrow_type(&self) -> DataType {
         macro_rules! arms {
             ($(($v:ident, $arr:ident, $dt:expr)),* $(,)?) => {
-                match self {
-                    $(ScalarColumnData::$v(_) => $dt,)*
-                    ScalarColumnData::Bool(_) => DataType::Boolean,
-                    ScalarColumnData::Utf8(_) => DataType::Utf8,
+                match &self.values {
+                    $(ScalarColumnValues::$v(_) => $dt,)*
+                    ScalarColumnValues::Bool(_) => DataType::Boolean,
                 }
             };
         }
         fixed_width_columns!(arms)
     }
 
-    fn into_array(self, rows: usize, name: &str) -> io::Result<ArrayRef> {
+    fn into_array(self, name: &str) -> io::Result<ArrayRef> {
+        let rows = self.rows;
         macro_rules! arms {
             ($(($v:ident, $arr:ident, $dt:expr)),* $(,)?) => {
-                match self {
-                    $(ScalarColumnData::$v(v) => Arc::new($arr::new(
-                        typed_column(name, Buffer::from_vec(v), rows)?,
+                match self.values {
+                    $(ScalarColumnValues::$v(values) => Arc::new($arr::new(
+                        typed_column(name, values, rows)?,
                         None,
                     )) as ArrayRef,)*
-                    // The two that own an allocation this shape does not carry — a bitmap and an
-                    // offset table — so both are built rather than adopted.
-                    ScalarColumnData::Bool(v) => Arc::new(BooleanArray::from(v)),
-                    ScalarColumnData::Utf8(v) => Arc::new(StringArray::from_iter_values(v.iter())),
+                    // The bit-packed member: a boolean array's values buffer is `rows` bits, so
+                    // the length check the others get from `typed_column` is made here against
+                    // the same rule — a short buffer is an `InvalidInput` error, never a panic
+                    // from inside arrow.
+                    ScalarColumnValues::Bool(bits) => {
+                        let needed = rows.div_ceil(8);
+                        if bits.len() < needed {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                format!(
+                                    "write_columns: column '{name}' has {} bytes, {rows} rows of \
+                                     packed bits need {needed}",
+                                    bits.len()
+                                ),
+                            ));
+                        }
+                        Arc::new(BooleanArray::new(
+                            arrow::buffer::BooleanBuffer::new(bits, 0, rows),
+                            None,
+                        ))
+                    }
                 }
             };
         }
@@ -1116,6 +1044,15 @@ fn typed_column<T: ArrowNativeType>(
             ),
         ));
     }
+    // **No rows, no elements to align.** A zero-row column's values buffer legitimately has no
+    // allocation behind it — an empty `Buffer`, or a mapping of a file with nothing in it — and its
+    // pointer is then dangling rather than aligned. There is nothing to address, so the buffer is
+    // replaced with an empty one of the right type: the array is the same array either way, and the
+    // record batch it goes into is byte-identical to the one `write_columns` writes for an empty
+    // `Vec`. A build over no points (decision 0091) writes every declared column this way.
+    if rows == 0 {
+        return Ok(ScalarBuffer::from(Vec::<T>::new()));
+    }
     let align = std::mem::align_of::<T>();
     if buffer.as_ptr().align_offset(align) != 0 {
         return Err(io::Error::new(
@@ -1129,15 +1066,16 @@ fn typed_column<T: ArrowNativeType>(
     Ok(ScalarBuffer::new(buffer, 0, rows))
 }
 
-/// Write `permutation.bin` (R4): `"TSPM"` ‖ u16 version=1 ‖ u16 reserved=0 ‖ u64 `bound` ‖
-/// `bound` little-endian `u32` slots, one per entity ID in `[0, bound)`. `items_in_row_order[i]`
-/// is the entity occupying row `i`; its slot gets `i`. Every other slot (entity IDs never
-/// assigned a row in this segment) reads the row-absent sentinel `0xFFFF_FFFF`.
+/// Write `permutation.bin` (R4), the two-level paged entity→row map — see
+/// [`crate::permutation`] for the byte layout and for why it is paged.
+/// `items_in_row_order[i]` is the entity occupying row `i`; its slot gets `i`. Every other slot in
+/// a page some entity does occupy reads the row-absent sentinel `0xFFFF_FFFF`, and a page no
+/// entity occupies is not written at all.
 ///
 /// Returns an error — never panics — if `bound` exceeds `2^32` (entity IDs are `u64` in general
 /// but must fit `u32` in `bundle_format = 1`, R1, so no larger bound is satisfiable) or if any
-/// entity ID is `>= bound`. The bound is checked before the slot array is allocated, so an
-/// unsatisfiable bound costs nothing; see [`PermutationWriter::create`].
+/// entity ID is `>= bound`. The bound is checked before anything is allocated or opened, so an
+/// unsatisfiable bound costs nothing; see [`PagePlan::new`].
 pub fn write_permutation(
     path: &Path,
     items_in_row_order: &[EntityId],
@@ -1147,15 +1085,24 @@ pub fn write_permutation(
 }
 
 /// [`write_permutation`] over an iterator of entities in row order, so a caller holding its row
-/// order in a packed form need not materialise a `Vec<EntityId>` (8 bytes per row) alongside the
-/// slot array. Byte-for-byte identical output — it is [`PermutationWriter`]'s second producer.
-pub fn write_permutation_iter<I: IntoIterator<Item = EntityId>>(
-    path: &Path,
-    items_in_row_order: I,
-    bound: u64,
-) -> io::Result<()> {
-    let mut writer = PermutationWriter::create(path, bound)?;
-    for (row, entity_id) in items_in_row_order.into_iter().enumerate() {
+/// order in a packed form need not materialise a `Vec<EntityId>` (8 bytes per row) alongside it.
+/// Byte-for-byte identical output — it is [`PermutationWriter`]'s second producer.
+///
+/// **The iterator is walked twice, which is why it must be `Clone`.** The first pass learns which
+/// pages the view occupies; only then can the file be sized to them. The alternative — size for
+/// every page, then compact — is what [`PermutationWriter::create`] does for the scatter producer
+/// that cannot know its pages up front, and it costs a `bound × 4`-byte fill that this path
+/// avoids entirely. Every caller here holds its row order in a `Vec` or derives it from a range,
+/// so the second walk is a re-read of memory already in hand and nothing is buffered to enable it.
+pub fn write_permutation_iter<I>(path: &Path, items_in_row_order: I, bound: u64) -> io::Result<()>
+where
+    I: IntoIterator<Item = EntityId>,
+    I::IntoIter: Clone,
+{
+    let items = items_in_row_order.into_iter();
+    let plan = PagePlan::of_entities(bound, items.clone())?;
+    let mut writer = PermutationWriter::create_planned(path, &plan)?;
+    for (row, entity_id) in items.enumerate() {
         let row = u32::try_from(row).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -1167,68 +1114,156 @@ pub fn write_permutation_iter<I: IntoIterator<Item = EntityId>>(
     writer.finish()
 }
 
-/// `permutation.bin`'s header: `"TSPM"` ‖ u16 version=1 ‖ u16 reserved=0 ‖ u64 `bound` (R4).
-const PERMUTATION_HEADER_BYTES: usize = 16;
+/// Which pages of entity space a view occupies — everything [`PermutationWriter::create_planned`]
+/// needs to lay the file out before a single row is scattered into it.
+///
+/// One `bool` per page: 64 KB at the `u32` entity ceiling, and a few bytes for the views that
+/// motivate the paging.
+#[derive(Debug, Clone)]
+pub struct PagePlan {
+    bound: u64,
+    present: Vec<bool>,
+}
+
+impl PagePlan {
+    /// An empty plan over `[0, bound)`.
+    ///
+    /// **The bound ceiling is checked here, before any file exists.** A caller deriving a bound
+    /// from a corrupt `entity_id_high_water` gets a refusal from a `Vec` allocation, not from a
+    /// filled volume.
+    pub fn new(bound: u64) -> io::Result<Self> {
+        check_bound(bound)?;
+        let pages = usize::try_from(pages_for(bound)).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("write_permutation: bound {bound} does not fit in usize"),
+            )
+        })?;
+        Ok(PagePlan {
+            bound,
+            present: vec![false; pages],
+        })
+    }
+
+    /// Declare that `entity` will be given a row.
+    pub fn insert(&mut self, entity: EntityId) -> io::Result<()> {
+        let raw = entity.raw();
+        if raw >= self.bound {
+            return Err(out_of_bound(raw, self.bound));
+        }
+        self.present[(raw >> PAGE_SHIFT) as usize] = true;
+        Ok(())
+    }
+
+    /// The plan for a view whose entities are `entities`, in any order.
+    pub fn of_entities<I: IntoIterator<Item = EntityId>>(
+        bound: u64,
+        entities: I,
+    ) -> io::Result<Self> {
+        let mut plan = PagePlan::new(bound)?;
+        for entity in entities {
+            plan.insert(entity)?;
+        }
+        Ok(plan)
+    }
+
+    /// How many pages carry slots.
+    pub fn present_pages(&self) -> usize {
+        self.present.iter().filter(|&&p| p).count()
+    }
+}
 
 /// Writes `permutation.bin` **through a mapping**, scattering `perm[entity] = row` in any order.
 ///
-/// The slot array is `bound` `u32`s — 4 GB at 10⁹ entities — and that is inherent to the format,
-/// which R4 defines as a dense entity-indexed array. What is *not* inherent is where those bytes
-/// live. Built as a `Vec` they are anonymous memory the kernel can only swap; written through a
-/// mapping they are page cache, which can be written back under pressure and which
-/// `Permutation::load` already treats the same way at read. Compaction's pass 1 scatters this over
-/// the whole entity space while four other corpus-scale things are in flight (compaction §3), so
-/// the difference is the fold's pre-flight budget passing or failing.
+/// **Scatter order is free, which is why this is a writer and not an iterator.** The compaction
+/// fold's pass 1 emits rows in `(morton, tessera_id)` order and learns `perm[entity]` in that
+/// order, which is *not* entity order — a sequential writer would have to buffer the whole
+/// mapping to reorder, which is the cost this avoids. Bytes live in a mapping rather than in a
+/// `Vec` for the same reason: anonymous memory the kernel can only swap, against page cache it can
+/// write back, and `Permutation::load` treats the file the same way at read.
 ///
-/// **Scatter order is free, which is why this is a writer and not an iterator.** Pass 1 emits rows
-/// in `(morton, tessera_id)` order and learns `perm[entity]` in that order, which is *not* entity
-/// order — a sequential writer would have to buffer the whole array to reorder, which is the cost
-/// this avoids.
+/// # Two constructors, one output
+///
+/// [`Self::create_planned`] is for a producer that knows its pages up front — the build, which
+/// holds its row order in memory — and writes only those pages. [`Self::create`] is for the fold,
+/// which does not: it lays out **every** page of `[0, bound)`, scatters into them, and compacts
+/// the present ones down at [`Self::finish`]. The compaction moves each present page to its
+/// canonical slot, which is never above where it already sits, so it is one forward `copy_within`
+/// pass and a truncation.
+///
+/// The two produce **the same bytes for the same mapping** — the encoding is canonical, so there
+/// is nothing left for them to disagree about, and
+/// `segment_roundtrip::a_scattered_permutation_is_byte_identical_to_a_sequential_one` pins it.
+/// What differs is what the write costs: the scatter path still writes `page_count × 256 KiB` of
+/// sentinel before the first row lands (4 GB at a 10⁹-entity bound), and the artifact is small
+/// only after the truncation. **The paging shrinks what a sparse view stores and maps, not what
+/// the fold's scatter transiently dirties** — that is the same figure compaction §3's pre-flight
+/// budget already carries.
 pub struct PermutationWriter {
+    file: File,
     map: memmap2::MmapMut,
     bound: u64,
+    payload_start: usize,
+    /// Where each page's slots live in the payload, or [`PAGE_ABSENT`] — one entry per page of
+    /// `[0, bound)`, so this is also the page count. In the scatter layout it is the identity
+    /// until [`Self::finish`] compacts it.
+    slot_of_page: Vec<u32>,
+    /// Scatter layout only: which pages a `set` has landed in. `None` is the planned layout, whose
+    /// present set is fixed at construction.
+    touched: Option<Vec<bool>>,
 }
 
 impl PermutationWriter {
-    /// Create `path` sized for `bound` entities, every slot the row-absent sentinel.
+    /// Create `path` holding every page of `[0, bound)`, every slot the row-absent sentinel,
+    /// compacted to the pages actually written at [`Self::finish`].
     ///
     /// **The fill is not optional and not free.** A freshly extended file reads as zeros, and zero
     /// is row 0 — a real row belonging to a real entity — so an unfilled slot would serve one
     /// entity's coordinates under every id that never got a row. The sentinel is `0xFFFF_FFFF`, so
-    /// this writes `bound × 4` bytes of `0xFF` up front.
+    /// this writes the whole payload as `0xFF` up front.
     ///
     /// **The bound ceiling is checked before the file is opened, and that ordering is the point.**
     /// The fill above is proportional to `bound`, so validating it afterwards means writing
     /// `bound × 4` bytes to disk in order to discover the caller asked for something no entity
     /// could ever occupy — 32 GB for a bound of `2^33`, paid in full before the error is raised.
-    /// A caller deriving a bound from a corrupt `entity_id_high_water` gets a refusal here, not a
-    /// filled volume.
     pub fn create(path: &Path, bound: u64) -> io::Result<Self> {
-        if bound > PERMUTATION_MAX_BOUND {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "write_permutation: bound {bound} exceeds the largest satisfiable bound \
-                     {PERMUTATION_MAX_BOUND} (entity ids must fit u32 in bundle_format = 1)"
-                ),
-            ));
+        let plan = PagePlan::new(bound)?;
+        let page_count = plan.present.len();
+        let mut writer = Self::open(path, bound, page_count, page_count)?;
+        // The identity: page `p` scatters into slot `p`, and `finish` moves it down to the slot
+        // its rank among the touched pages gives it.
+        for (page, slot) in writer.slot_of_page.iter_mut().enumerate() {
+            *slot = page as u32;
         }
-        let slots_bytes = usize::try_from(bound)
-            .ok()
-            .and_then(|b| b.checked_mul(4))
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("write_permutation: bound {bound} does not fit in usize"),
-                )
-            })?;
+        writer.touched = Some(vec![false; page_count]);
+        Ok(writer)
+    }
+
+    /// Create `path` holding exactly the pages `plan` declares, every slot the row-absent
+    /// sentinel. A [`Self::set`] for an entity in an undeclared page is an error, not a silent
+    /// drop.
+    pub fn create_planned(path: &Path, plan: &PagePlan) -> io::Result<Self> {
+        let mut writer = Self::open(path, plan.bound, plan.present.len(), plan.present_pages())?;
+        let mut next: u32 = 0;
+        for (page, present) in plan.present.iter().enumerate() {
+            if *present {
+                writer.slot_of_page[page] = next;
+                next += 1;
+            }
+        }
+        Ok(writer)
+    }
+
+    fn open(path: &Path, bound: u64, page_count: usize, payload_pages: usize) -> io::Result<Self> {
+        let payload_start = payload_start(page_count);
+        let len = payload_start + payload_pages * PAGE_BYTES;
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(true)
             .open(path)?;
-        file.set_len((PERMUTATION_HEADER_BYTES + slots_bytes) as u64)?;
+        file.set_len(len as u64)?;
 
         // SAFETY: this process created and sized the file two statements ago and holds the only
         // handle to it; nothing else maps or truncates it for the writer's lifetime. The
@@ -1237,30 +1272,35 @@ impl PermutationWriter {
         let mut map = unsafe { memmap2::MmapMut::map_mut(&file) }?;
         map[..4].copy_from_slice(PERMUTATION_MAGIC);
         map[4..6].copy_from_slice(&PERMUTATION_VERSION.to_le_bytes());
-        map[6..8].copy_from_slice(&PERMUTATION_RESERVED.to_le_bytes());
+        map[6..8].copy_from_slice(&(PAGE_SHIFT as u16).to_le_bytes());
         map[8..16].copy_from_slice(&bound.to_le_bytes());
-        map[PERMUTATION_HEADER_BYTES..].fill(0xFF);
+        map[16..20].copy_from_slice(&(page_count as u32).to_le_bytes());
+        // `present_count` and the directory are written at `finish`, when the scatter layout knows
+        // them. The header's remaining bytes and the padding stay zero, which is what the reader
+        // requires of the padding.
+        map[payload_start..].fill(0xFF);
 
-        Ok(PermutationWriter { map, bound })
+        Ok(PermutationWriter {
+            file,
+            map,
+            bound,
+            payload_start,
+            slot_of_page: vec![PAGE_ABSENT; page_count],
+            touched: None,
+        })
     }
 
     /// Record that `entity` occupies `row`. Every check [`write_permutation_iter`] made is made
     /// here, at the same cost — the duplicate test is a slot read the scatter was doing anyway.
     ///
     /// **R1's "entity ids fit `u32`" is enforced by the bound, not by a second test here.**
-    /// [`Self::create`] refuses any bound above `2^32`, so `raw < self.bound` already implies
+    /// The constructors refuse any bound above `2^32`, so `raw < self.bound` already implies
     /// `raw < 2^32` and a separate u32-fit check could never fire. Reinstating one would read as
     /// live defence against a case the constructor has already made unreachable.
     pub fn set(&mut self, entity: EntityId, row: u32) -> io::Result<()> {
         let raw = entity.raw();
         if raw >= self.bound {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "write_permutation: entity id {raw} is out of bound (bound = {})",
-                    self.bound
-                ),
-            ));
+            return Err(out_of_bound(raw, self.bound));
         }
         // Closes a format ambiguity permanently: a row index equal to the row-absent sentinel
         // would be indistinguishable on disk from "entity has no row".
@@ -1273,7 +1313,23 @@ impl PermutationWriter {
                 ),
             ));
         }
-        let at = PERMUTATION_HEADER_BYTES + (raw as usize) * 4;
+        let page = (raw >> PAGE_SHIFT) as usize;
+        let slot = self.slot_of_page[page];
+        if slot == PAGE_ABSENT {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "write_permutation: entity id {raw} falls in page {page}, which the page plan \
+                     does not hold"
+                ),
+            ));
+        }
+        if let Some(touched) = self.touched.as_mut() {
+            touched[page] = true;
+        }
+        let at = self.payload_start
+            + slot as usize * PAGE_BYTES
+            + ((raw as usize) & (PAGE_ENTRIES - 1)) * 4;
         let existing = u32::from_le_bytes(
             self.map[at..at + 4]
                 .try_into()
@@ -1294,7 +1350,65 @@ impl PermutationWriter {
         Ok(())
     }
 
-    pub fn finish(self) -> io::Result<()> {
-        self.map.flush()
+    /// Compact the scatter layout, write the directory, and flush.
+    pub fn finish(mut self) -> io::Result<()> {
+        if let Some(touched) = self.touched.take() {
+            // Each present page moves to the slot its rank gives it, which is at or below where it
+            // sits — so a forward pass never overwrites a page it has yet to move.
+            let mut next: u32 = 0;
+            for (page, written) in touched.iter().enumerate() {
+                if !written {
+                    self.slot_of_page[page] = PAGE_ABSENT;
+                    continue;
+                }
+                let from = self.payload_start + page * PAGE_BYTES;
+                let to = self.payload_start + next as usize * PAGE_BYTES;
+                if from != to {
+                    self.map.copy_within(from..from + PAGE_BYTES, to);
+                }
+                self.slot_of_page[page] = next;
+                next += 1;
+            }
+        }
+        let present: u32 = self
+            .slot_of_page
+            .iter()
+            .filter(|&&slot| slot != PAGE_ABSENT)
+            .count() as u32;
+        self.map[20..24].copy_from_slice(&present.to_le_bytes());
+        for (page, &slot) in self.slot_of_page.iter().enumerate() {
+            let at = PERMUTATION_HEADER_BYTES + page * 4;
+            self.map[at..at + 4].copy_from_slice(&slot.to_le_bytes());
+        }
+        let len = self.payload_start + present as usize * PAGE_BYTES;
+
+        let PermutationWriter { map, file, .. } = self;
+        map.flush()?;
+        // The mapping is dropped before the file shrinks: reading through a mapping past a
+        // truncation is a fault, not an error, and the scatter layout always shrinks unless every
+        // page was written.
+        drop(map);
+        file.set_len(len as u64)?;
+        Ok(())
     }
+}
+
+fn check_bound(bound: u64) -> io::Result<()> {
+    if bound > PERMUTATION_MAX_BOUND {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "write_permutation: bound {bound} exceeds the largest satisfiable bound \
+                 {PERMUTATION_MAX_BOUND} (entity ids must fit u32 in bundle_format = 1)"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn out_of_bound(raw: u64, bound: u64) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!("write_permutation: entity id {raw} is out of bound (bound = {bound})"),
+    )
 }

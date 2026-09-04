@@ -1,7 +1,8 @@
-import {BandCache, bandSplitter, type Band, type Resolved} from './bands.js';
+import {BandBudget, BandCache, bandSplitter, type Band, type Resolved} from './bands.js';
+import type {SessionArtifactTable} from './artifactTable.js';
 import {rectArea, type TileRect} from './rects.js';
 import {rectToRequestBbox, tileXY} from './coords.js';
-import type {Quantisation, ViewportResponse} from './types.js';
+import type {Quantisation, TileCounts, ViewportPart, ViewportResponse, RegionVerdict} from './types.js';
 
 /**
  * Layer 1: the read-through replica.
@@ -19,10 +20,20 @@ import type {Quantisation, ViewportResponse} from './types.js';
  * affordable at all.
  */
 
+/** The byte budget for held bands, absent another. `caching.md` §5 sizes C1 at 512 MB–1 GB. */
+export const DEFAULT_CACHE_BYTES = 512 * 1024 * 1024;
+
 export type ReplicaOptions = {
   view: string;
   /** The byte budget for held bands. `caching.md` §5 sizes C1 at 512 MB–1 GB. */
   cacheBytes?: number;
+  /**
+   * The budget to account this replica's bands against, shared with every other view's replica
+   * (`view-switching.md` §3) — one number bounds the total and eviction may take a band from any
+   * of them. Absent, the replica has {@link cacheBytes} to itself, which is what a consumer
+   * holding one view has.
+   */
+  budget?: BandBudget;
   /**
    * When false the store holds nothing: every ask becomes a request and the wire traffic is
    * byte-for-byte what a client without a replica produces. The A/B for the novelty-rate
@@ -43,6 +54,8 @@ export type ReplicaOptions = {
    */
   revalidateAfterMs?: number;
   now?: () => number;
+  /** The session artifact table the bands' membership is named through (design §5.10). */
+  table?: SessionArtifactTable;
   /**
    * Observability hook: how long a named phase inside the replica took, and over how many items.
    *
@@ -118,7 +131,73 @@ const MAX_TILES_PER_REQUEST = 25_000;
 const ABSORB_SLICE_MS = 6;
 
 /** A macrotask, which is what lets a pending `requestAnimationFrame` run. A microtask would not. */
+/**
+ * A frame's worth of yield. **Measured, twice**: with `setTimeout(0)` between slices, and again
+ * with `scheduler.yield()`, no animation frame ran while a million-point response was split —
+ * the thread was never idle long enough for the frame to win, the composed slices sat behind a
+ * tick that could not fire, and the first marks painted only after the last slice. So when a
+ * frame is overdue (nothing has drawn for a frame's time), the loop waits for the next animation
+ * frame and continues in a macrotask *after* it — the frame paints what the slices so far
+ * composed — and otherwise yields a macrotask as before. One frame per overdue slice costs
+ * throughput, which is the point: slow-while-loading is accepted, and a map that shows its first
+ * response as it lands is the design's claim (§5.10).
+ */
+const FRAME_MS = 16;
+/** The most an absorb slice waits for a frame before continuing anyway. */
+const FRAME_WAIT_MAX_MS = 300;
+/** How long after the last slice the frame pulse keeps listening, so a quiet page runs no loop. */
+const PULSE_MS = 500;
+let lastFrameAt = 0;
+let lastFrameGap = 0;
+let pulseUntil = 0;
+let pulsing = false;
+/**
+ * A frame slower than this is a renderer that cannot afford a paint per slice — software GL
+ * draws a million marks in seconds — so the slices are stored without presenting and the
+ * response paints once, as it did before slices could paint at all.
+ */
+const SLOW_FRAME_MS = 250;
+function framesFlowing(): boolean {
+  if (typeof requestAnimationFrame === 'undefined') return true;
+  // The last gap, and the current one: a frame overdue by more than the threshold is a slow
+  // renderer mid-paint, however quick the frames before it were.
+  return pulsing && lastFrameGap > 0 && lastFrameGap < SLOW_FRAME_MS && performance.now() - lastFrameAt < SLOW_FRAME_MS;
+}
+/** Note each animation frame's time while an absorb is running; stops itself when none is. */
+function pulse(): void {
+  if (pulsing || typeof requestAnimationFrame === 'undefined') return;
+  pulsing = true;
+  const note = () => {
+    const now = performance.now();
+    lastFrameGap = lastFrameAt > 0 ? now - lastFrameAt : 0;
+    lastFrameAt = now;
+    if (lastFrameAt < pulseUntil) requestAnimationFrame(note);
+    else pulsing = false;
+  };
+  requestAnimationFrame(note);
+}
 function yieldToFrame(): Promise<void> {
+  if (typeof requestAnimationFrame !== 'undefined') {
+    const now = performance.now();
+    pulseUntil = now + PULSE_MS;
+    pulse();
+    if (now - lastFrameAt > FRAME_MS) {
+      // Bounded: under software GL a frame can take seconds, and an absorb paced one slice per
+      // frame would take minutes — so the wait is for a frame *or* {@link FRAME_WAIT_MAX_MS},
+      // whichever comes first. Folds coalesce on the presenter (the newest wins), so a slow
+      // renderer paints what has landed when it can.
+      return new Promise((resolve) => {
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          resolve();
+        };
+        requestAnimationFrame(() => setTimeout(finish, 0));
+        setTimeout(finish, FRAME_WAIT_MAX_MS);
+      });
+    }
+  }
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
@@ -139,6 +218,7 @@ export class Replica {
   private readonly now: () => number;
   private identityKey = '';
   private contentKey = '';
+  private regionVerdict: RegionVerdict | null = null;
   private validatedAt = Number.NEGATIVE_INFINITY;
 
   constructor(
@@ -152,12 +232,20 @@ export class Replica {
       },
       signal?: AbortSignal,
       /** Speculative work rides its own decode lane — see `Decoder.decode`. */
-      background?: boolean
+      background?: boolean,
+      /**
+       * Take each points frame as it lands — see `TesseraClient.viewport`.
+       *
+       * The response this resolves to then carries **no points**: they were all handed over
+       * here. A transport that cannot stream is free to ignore it and answer whole, in which
+       * case the response carries everything as it always did.
+       */
+      onPart?: (part: ViewportPart) => void | Promise<void>
     ) => Promise<ViewportResponse>,
     private readonly quantisation: Quantisation,
     private readonly opts: ReplicaOptions
   ) {
-    this.cache = new BandCache(opts.cacheBytes ?? 512 * 1024 * 1024);
+    this.cache = new BandCache(opts.budget ?? opts.cacheBytes ?? DEFAULT_CACHE_BYTES, opts.table ?? null);
     this.now = opts.now ?? (() => performance.now());
   }
 
@@ -170,11 +258,35 @@ export class Replica {
     this.cache.dropIdentity();
     this.identityKey = '';
     this.contentKey = '';
+    this.regionVerdict = null;
     this.validatedAt = Number.NEGATIVE_INFINITY;
   }
 
+  /**
+   * The `x-tessera-region` verdict the last response observed carried — `null` where it carried
+   * none (`selection-operand.md` §6). A frame derived from held bands has no response of its
+   * own, so the store reads the verdict here rather than off the frame; a `reset` forgets it,
+   * since what follows answers a different question.
+   */
+  get lastRegionVerdict(): RegionVerdict | null {
+    return this.regionVerdict;
+  }
+
+  /**
+   * Bytes held across every view sharing this replica's budget — the figure the budget bounds, and
+   * therefore the one a look-ahead sizes its ring against (`view-switching.md` §3). Identical to
+   * this view's own held bytes where the budget has one member.
+   *
+   * **The ring's fullness is measured across every view**, not this one alone (`ringMargin`): the
+   * budget a second view's bands are spending is not room this view's anticipation may buy with.
+   */
   get bytes(): number {
-    return this.cache.bytes;
+    return this.cache.sharedBytes;
+  }
+
+  /** How many views hold any band — the `replica` projection's `views`. */
+  get heldViews(): number {
+    return this.cache.heldViews;
   }
 
   /** Points held, and over how many bands — see {@link BandCache.points}. */
@@ -189,6 +301,11 @@ export class Replica {
   /** See {@link BandCache.exactIn} — the fast half of a frame, for folding an arrival into one. */
   exactIn(want: TileRect, depth: number): Band[] {
     return this.cache.exactIn(want, depth);
+  }
+
+  /** See {@link BandCache.retract} — the colour-stale refetch's first half; the caller reschedules. */
+  retract(bands: readonly Band[]): void {
+    this.cache.retract(bands);
   }
 
   /** See {@link BandCache.version} — the store's change counter, for reusing a derived frame. */
@@ -206,9 +323,27 @@ export class Replica {
     return this.cache.planRegion(want, depth, this.contentKey, k).novel;
   }
 
+  /**
+   * A region's per-tile masked counts, without its marks — `k = 0`, the tiles frame and the
+   * validator alone, for the price of the counting stage.
+   *
+   * **Nothing is stored.** A counts-only response carries no points, so absorbing it would put
+   * empty bands in the store and let a later plan subtract ground whose marks never arrived; the
+   * response's coordinates are observed (the validator is worth having) and the counts are handed
+   * back for the caller to keep. It is the same request {@link fetchRegion}'s revalidation makes,
+   * asked for a different reason: there, to bound staleness on a view answered entirely from the
+   * store; here, to know what the ground holds before paying for marks over it.
+   */
+  async counts(want: TileRect, depth: number, signal?: AbortSignal): Promise<TileCounts[]> {
+    const bbox = rectToRequestBbox(want, depth, this.quantisation);
+    const response = await this.fetchViewport({view: this.opts.view, zoom: depth, bbox, k: 0}, signal);
+    this.observe(response);
+    return response.result.tiles;
+  }
+
   /** The byte budget the store was given, so a caller can size its look-ahead against it. */
   get budgetBytes(): number {
-    return this.opts.cacheBytes ?? 512 * 1024 * 1024;
+    return this.cache.budgetBytes;
   }
 
   /** The content coordinate last observed, for a caller that wants to stale-mark against it. */
@@ -347,25 +482,60 @@ export class Replica {
         const eb = (b.y0 + b.y1) / 2 - cy;
         return da * da + ea * ea - (db * db + eb * eb);
       });
+    // **A piece lands band by band, not all at once.** Its points frames are absorbed as the wire
+    // delivers them (`streamed-serving.md` §2; `TesseraClient.viewport`'s part sink), so the first
+    // tiles of a hundred-megabyte answer are stored — and drawable — while the rest is still being
+    // received. What the promise resolves to is then the piece's coordinates and its byte count,
+    // never its points.
     const request = (rect: TileRect) => {
       const bbox = rectToRequestBbox(rect, depth, this.quantisation);
-      const fetching = this.fetchViewport({view: this.opts.view, zoom: depth, bbox, k}, signal, background);
+      const piece = {landed: [] as Band[], parts: 0, startedAt: 0, fetching: null as unknown as Promise<ViewportResponse>};
+      // One touch time for the whole piece, so eviction sees its bands as one arrival and not as
+      // a sequence in which the first rows to land are the oldest (`EvictionFocus.protect`).
+      const startedAt = this.now();
+      piece.startedAt = startedAt;
+      piece.fetching = this.fetchViewport(
+        {view: this.opts.view, zoom: depth, bbox, k},
+        signal,
+        background,
+        async (part) => {
+          piece.parts += 1;
+          for (const band of await this.absorb(part, depth, k, startedAt)) piece.landed.push(band);
+        }
+      );
       // The loop below may throw out of an earlier piece (an abort, a shed request) while this one
       // is still flying; its refusal is then nobody's answer and must not surface as unhandled.
-      fetching.catch(() => {});
-      return fetching;
+      piece.fetching.catch(() => {});
+      return piece;
     };
     let issued = 0;
     let responseBytes = 0;
     let pending = pieces.length > 0 ? request(pieces[0]!) : null;
     for (let i = 0; i < pieces.length; i++) {
-      response = await pending!;
+      const piece = pending!;
+      response = await piece.fetching;
       issued += 1;
       responseBytes += response.bytes;
       pending = i + 1 < pieces.length ? request(pieces[i + 1]!) : null;
-      fetched = fetched.concat(await this.absorb(response, depth, k));
+      // **The sink is authoritative where it was used.** A streamed piece has already stored its
+      // points and the response it resolves to carries none, so all that is left of it is the
+      // coordinates — re-observed, so the validator's clock restarts from a complete answer. A
+      // transport that answered whole never called the sink, and its response is absorbed here as
+      // it always was.
+      if (piece.parts === 0) {
+        for (const band of await this.absorb(response, depth, k, piece.startedAt)) piece.landed.push(band);
+      } else {
+        this.observe(response);
+      }
+      fetched = fetched.concat(piece.landed);
+      // **Once per response, never once per part.** A pass over the budget sorts every held band,
+      // which at 10^5 of them is not something to do a hundred times for one answer.
+      if (this.opts.cache !== false && piece.landed.length > 0) {
+        this.cache.evict({depth, prefix: piece.landed[0]!.prefix, protect: {depth, rect: render}});
+      }
       // Marked only after the bands are in. A region marked covered before its points are held
-      // would let the next plan subtract ground whose data never arrived.
+      // would let the next plan subtract ground whose data never arrived. An aborted or truncated
+      // piece never reaches here, so what it did land stays as bands and its ground stays novel.
       if (this.opts.cache !== false && k > 0) {
         this.cache.markCovered(pieces[i]!, depth, this.contentKey, k);
       }
@@ -431,46 +601,66 @@ export class Replica {
    * the token. That is the belt to `reset`'s braces: the partition key comes from the server, so a
    * client cannot hold one principal's bands under another's by forgetting to call anything.
    */
-  private observe(response: ViewportResponse): void {
-    if (response.identityKey !== this.identityKey) {
+  private observe(from: {identityKey: string; contentKey: string; region?: RegionVerdict | null}): void {
+    if (from.identityKey !== this.identityKey) {
       this.cache.dropIdentity();
-      this.identityKey = response.identityKey;
+      this.identityKey = from.identityKey;
     }
-    this.contentKey = response.contentKey;
+    this.contentKey = from.contentKey;
     this.validatedAt = this.now();
+    if (from.region !== undefined) this.regionVerdict = from.region;
   }
 
   /**
-   * Split a response into bands and store them — in slices, so a frame can paint in between.
+   * Split an arrival into bands and store them — in slices, so a frame can paint in between.
+   *
+   * **An arrival is one points frame or one whole response, and the two are the same shape.** The
+   * server flushes at whole tiles, so a frame's counts and points line up exactly as a response's
+   * do, and this is why landing a response piecemeal needed no second splitter.
    *
    * Splitting was the last big block of per-response main-thread work: 18.5 ms mean, 49 ms max,
    * landing in the same frame as deriving and uploading — which is where the p95 frame time lived.
    * The work cannot leave this thread (bands must be copies, and 10^4 of them will not transfer to
    * a worker cheaply), but nothing requires it to happen in one frame: each slice runs for
-   * {@link ABSORB_SLICE_MS}, then yields a macrotask so a queued animation frame draws.
+   * {@link ABSORB_SLICE_MS}, then yields a macrotask so a queued animation frame draws. With the
+   * response arriving frame by frame the lane now sees a trickle rather than a wall, so the slice
+   * budget usually binds on the first slice of a part and not at all on the rest; the `slice`
+   * instrument is per arrival, and its maximum over a response is what it always was.
    *
-   * The coverage invariant is unchanged: the caller marks a region covered only after this
-   * resolves, so a redraw between slices sees the arriving bands as extra exact ground and the rest
-   * still answered by stand-ins — never a hole.
+   * The coverage invariant is unchanged: the caller marks a region covered only after every part
+   * has been taken and the response has completed, so a redraw between slices — or between parts —
+   * sees the arriving bands as extra exact ground and the rest still answered by stand-ins, never
+   * a hole.
    */
-  private async absorb(response: ViewportResponse, depth: number, k: number): Promise<Band[]> {
-    this.observe(response);
+  private async absorb(
+    arrival: {result: ViewportResponse['result']; identityKey: string; contentKey: string},
+    depth: number,
+    k: number,
+    /** The touch time every band of one piece shares — the piece's start, whichever part it landed in. */
+    at: number = this.now()
+  ): Promise<Band[]> {
+    this.observe(arrival);
     const contentKey = this.contentKey;
 
-    const splitter = bandSplitter(response.result, depth, {
+    const splitter = bandSplitter(arrival.result, depth, {
       identityKey: this.identityKey,
       contentKey,
       capUsed: k,
-      now: this.now()
+      now: at,
+      table: this.opts.table,
+      onRemap: (ms) => this.opts.onPhase?.('remap', ms, arrival.result.ids.length)
     });
     const bands: Band[] = [];
     let splitMs = 0;
     let storeMs = 0;
     let slices = 0;
+    let longestSliceMs = 0;
     while (!splitter.done()) {
       const started = performance.now();
       const slice = splitter.step(started + ABSORB_SLICE_MS);
-      splitMs += performance.now() - started;
+      const took = performance.now() - started;
+      splitMs += took;
+      if (took > longestSliceMs) longestSliceMs = took;
       // Stored slice by slice: a redraw between slices then draws what has arrived so far, which
       // is strictly more picture, not less.
       const stored = performance.now();
@@ -480,14 +670,15 @@ export class Replica {
       for (const band of slice) bands.push(band);
       storeMs += performance.now() - stored;
       slices++;
+      // Each slice is drawable the moment it is stored: the consumer may present between slices,
+      // so the first marks of a large response are on screen while the rest is still being split.
+      if (framesFlowing()) this.opts.onPhase?.('piece', took, slice.length);
       if (!splitter.done()) await yieldToFrame();
     }
     this.opts.onPhase?.('split', splitMs, bands.length);
     this.opts.onPhase?.('store', storeMs, slices);
-
-    if (this.opts.cache !== false && bands.length > 0) {
-      this.cache.evict({depth, prefix: bands[0]!.prefix});
-    }
+    // The longest single slice: the one figure that says whether the budget held the thread.
+    this.opts.onPhase?.('slice', longestSliceMs, slices);
     return bands;
   }
 

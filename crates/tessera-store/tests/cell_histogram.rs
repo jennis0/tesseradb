@@ -111,13 +111,19 @@ fn build_bundle(root: &Path) {
         entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
         layers: Vec::new(),
         layer_tombstones: Vec::new(),
+        views: Vec::new(),
+        scoped_columns: Vec::new(),
+        dead_view_incarnations: Vec::new(),
         membership_extents: Vec::new(),
         level_versions: Vec::new(),
         containment_extents: Vec::new(),
         tile_index_extents: Vec::new(),
         row_column_extents: Vec::new(),
+        shape_rows_extents: Vec::new(),
+        shape_held_extents: Vec::new(),
         artifact_record_extents: Vec::new(),
         segments: vec![SegmentDescriptor {
+            incarnation: 0,
             view: "main".to_string(),
             seg_id: "seg0".to_string(),
             row_count: items.len() as u32,
@@ -128,6 +134,7 @@ fn build_bundle(root: &Path) {
         dict_extents: vec![],
         attr_extents: Vec::new(),
         record_extents: Vec::new(),
+        entity_terms_extents: Vec::new(),
         text_extents: Vec::new(),
         external_id_runs: vec![],
         locator_extents: vec![],
@@ -140,19 +147,13 @@ fn build_bundle(root: &Path) {
     fs::write(partition_dir.join("SEGMENTS-0.json"), &segments_bytes).expect("write SEGMENTS-0");
 
     let manifest = Manifest {
-        bundle_format: 3,
+        bundle_format: 5,
         created_at: "2026-07-31T00:00:00Z".to_string(),
         data_plugin_hash: tessera_plugin::Passthrough::new().data_plugin_hash(),
         declared_bounds: serde_json::json!({}),
         declared_scalars: vec![],
         vocabularies: vec![],
         small_term_threshold: 32,
-        quantisation: Quantisation {
-            x_min: extent.x_min,
-            x_max: extent.x_max,
-            y_min: extent.y_min,
-            y_max: extent.y_max,
-        },
         entity_id_high_water: n,
         identity: IdentityDescriptor {
             construction: IDENTITY_CONSTRUCTION.to_string(),
@@ -161,9 +162,20 @@ fn build_bundle(root: &Path) {
             shard_id: 0,
             idset: 1,
         },
+        groups: Vec::new(),
         views: vec![ViewDescriptor {
+            incarnation: 0,
+            visibility: None,
             id: "main".to_string(),
             display_name: "Main".to_string(),
+            // The frame is the view's, not the bundle's (decision 0040).
+            quantisation: Quantisation {
+                x_min: extent.x_min,
+                x_max: extent.x_max,
+                y_min: extent.y_min,
+                y_max: extent.y_max,
+            },
+            projection: tessera_spatial::Projection::None,
         }],
         partitions: vec![PartitionDescriptor {
             phash: "default".to_string(),

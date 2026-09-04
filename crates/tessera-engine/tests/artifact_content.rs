@@ -10,6 +10,9 @@
 
 mod common;
 
+#[path = "common/ring.rs"]
+mod ring;
+
 use common::*;
 use tessera_engine::derived::DerivedContent;
 use tessera_engine::{ArtifactOut, Engine, ViewportRequest};
@@ -26,6 +29,7 @@ const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 
 fn declaration(name: &str, derived: &[&str]) -> LayerDeclaration {
     LayerDeclaration {
+        scope: Default::default(),
         name: name.into(),
         title: Some(format!("{name} (title)")),
         views: vec!["s0".into()],
@@ -208,7 +212,7 @@ fn the_box_and_the_hull_are_drawn_from_visible_members_alone() {
 
     let narrow = artifacts_of(&engine, &subset_credential());
     let bbox = narrow[0].derived.bbox.expect("declared");
-    let hull = narrow[0].derived.hull.clone().expect("declared");
+    let hull = narrow[0].derived.shape.clone().expect("declared");
 
     let visible: Vec<[u32; 2]> = visible_to_subset(sources.iter().copied())
         .into_iter()
@@ -222,9 +226,9 @@ fn the_box_and_the_hull_are_drawn_from_visible_members_alone() {
     ];
     assert_eq!(bbox, want, "the box bounds the visible members exactly");
 
-    // Every hull vertex is a visible member's position. A vertex that is not is a position this
-    // principal was never entitled to, arriving as geometry.
-    for vertex in &hull {
+    // Every hull vertex, in every ring, is a visible member's position. A vertex that is not is a
+    // position this principal was never entitled to, arriving as geometry.
+    for vertex in hull.iter().flatten().flatten() {
         assert!(
             visible.contains(vertex),
             "{vertex:?} is not the position of any member this principal can see"
@@ -232,7 +236,7 @@ fn the_box_and_the_hull_are_drawn_from_visible_members_alone() {
     }
     // A hull with a vertex outside the box would be incoherent; a hull *inside* the box's corners
     // is ordinary, since the corners need not be occupied.
-    for vertex in &hull {
+    for vertex in hull.iter().flatten().flatten() {
         assert!(vertex[0] >= want[0] && vertex[0] <= want[2]);
         assert!(vertex[1] >= want[1] && vertex[1] <= want[3]);
     }
@@ -249,6 +253,50 @@ fn the_box_and_the_hull_are_drawn_from_visible_members_alone() {
         "the broad box {broad_box:?} must contain the narrow one {want:?}"
     );
     assert_ne!(broad_box, want, "and must not be the same box");
+}
+
+/// **The served hull is a concave shape and not the convex wrap it replaced.** It is tighter than
+/// the wrap over the very same visible members, and it still holds every one of them — the two
+/// halves of what a hull is for. Both are checked against a wrap computed here, from the fixture's
+/// own generator arithmetic, so neither rests on the engine agreeing with itself.
+#[test]
+fn the_served_hull_is_tighter_than_its_wrap_and_holds_every_visible_member() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(declaration("clusters/a", &["hull"]))
+        .unwrap();
+    let sources: Vec<u64> = (0..300).collect();
+    publish(&engine, "clusters/a", &fx, sources.iter().copied());
+
+    for credential in [subset_credential(), full_coverage_credential()] {
+        let served = artifacts_of(&engine, &credential);
+        let hull = served[0].derived.shape.clone().expect("declared");
+        let visible: Vec<[u32; 2]> = if credential == subset_credential() {
+            visible_to_subset(sources.iter().copied())
+                .into_iter()
+                .map(grid_position)
+                .collect()
+        } else {
+            sources.iter().copied().map(grid_position).collect()
+        };
+
+        for member in &visible {
+            assert!(
+                hull.iter().flatten().any(|r| ring::contains(r, *member)),
+                "{member:?} is a member this principal sees and it fell outside every ring of its hull"
+            );
+        }
+        let wrap = ring::convex_hull(&visible);
+        assert!(
+            hull.iter()
+                .flatten()
+                .map(|r| ring::double_area(r))
+                .sum::<i128>()
+                < ring::double_area(&wrap),
+            "the served hull is the convex wrap, not a shape that follows the members"
+        );
+    }
 }
 
 /// A layer that declares nothing gets nothing — and pays nothing. The count is intrinsic and is
@@ -281,7 +329,7 @@ fn only_the_declared_properties_are_computed() {
     let served = artifacts_of(&engine, &full_coverage_credential());
     assert!(served[0].derived.centroid.is_some());
     assert!(served[0].derived.bbox.is_none(), "not declared");
-    assert!(served[0].derived.hull.is_none(), "not declared");
+    assert!(served[0].derived.shape.is_none(), "not declared");
 }
 
 /// **The drill-down computes the same geometry as the viewport**, because both call the same code
@@ -300,7 +348,13 @@ fn the_drill_down_agrees_with_the_viewport_on_derived_content() {
     let from_viewport = artifacts_of(&engine, &subset_credential());
     let idset = engine.generation().bundle.manifest.identity.idset;
     let drilled = engine
-        .artifact(&session, from_viewport[0].tessera_id, Some(idset), "s0")
+        .artifact(
+            &session,
+            from_viewport[0].tessera_id,
+            Some(idset),
+            "s0",
+            None,
+        )
         .unwrap()
         .expect("the identifier the viewport just issued");
 
@@ -588,7 +642,19 @@ fn two_publications_of_content_both_survive_the_loss_of_the_whole_log() {
     );
 }
 
-/// The four ways a batch can disagree with what its layer declared, each refused at publication.
+/// The four ways a batch can disagree with what its layer declared, each refused at publication —
+/// and each refused by **its own** rule, which is why the assertions read the message rather than
+/// the `is_err()` beneath it.
+///
+/// Three of the four go to `topics/a`, a layer no successful publication here exercises. A bare
+/// `is_err()` on those is satisfied by any refusal at all — a layer that failed to register usably
+/// would pass three of them, and the closing emptiness check is consistent with that too.
+///
+/// **Mutations this kills:** a rule silently subsumed by an earlier check, or two of the four
+/// collapsed onto one refusal path — any change that leaves the batch refused for the wrong reason.
+/// The fourth case is the one to watch: an empty generating set on corpus-derived content is what
+/// keeps `a_permissive_layer_shrinks_the_generating_set_at_the_fold_and_serves_again`'s
+/// empty-set condition out at the front door, and its identity was pinned by nothing.
 #[test]
 fn content_that_disagrees_with_the_declaration_is_refused() {
     let fx = fixture();
@@ -600,53 +666,234 @@ fn content_that_disagrees_with_the_declaration_is_refused() {
         .register_layer(declaration("clusters/plain", &[]))
         .unwrap();
 
-    let publish = |layer: &str, artifact: IncomingArtifact| {
-        engine.publish_artifacts(layer.into(), 0, vec![artifact])
+    // The refusal a batch draws, as an operator would read it. An accepted batch is itself the
+    // failure: a declaration rule that admits its own violation.
+    let refusal = |layer: &str, rule: &str, artifact: IncomingArtifact| -> String {
+        match engine.publish_artifacts(layer.into(), 0, vec![artifact]) {
+            Ok(_) => panic!("{rule}: the batch was published rather than refused"),
+            Err(error) => error.to_string(),
+        }
     };
 
     // Content on a layer that declares none.
-    assert!(publish(
+    let undeclared = refusal(
         "clusters/plain",
+        "content under no declared kind",
         IncomingArtifact::with_content(
             Some("c0".into()),
             fx.members(0..10),
             vec![content("a label", &fx, 0..10)],
         ),
-    )
-    .is_err());
+    );
+    assert!(
+        undeclared.contains("carries supplied content, and this layer declares none"),
+        "content on a layer declaring none must be refused by that rule and not by another: \
+         {undeclared}"
+    );
 
     // No content on a layer that declares some.
-    assert!(publish(
+    let missing = refusal(
         "topics/a",
+        "a declared kind left unsupplied",
         IncomingArtifact::from_entities(Some("t1".into()), fx.members(0..10)),
-    )
-    .is_err());
+    );
+    assert!(
+        missing.contains("carries no supplied content, and this layer declares 1 kind(s)"),
+        "an artifact short of a kind its layer declares must be refused by that rule, naming the \
+         count it fell short of: {missing}"
+    );
 
     // A content supplying the wrong number of values.
-    assert!(publish(
+    let arity = refusal(
         "topics/a",
+        "a content of the wrong arity",
         IncomingArtifact::with_content(
             Some("t2".into()),
             fx.members(0..10),
             vec![IncomingContent::new(
                 vec!["a".into(), "b".into()],
-                fx.members(0..10)
+                fx.members(0..10),
             )],
         ),
-    )
-    .is_err());
+    );
+    assert!(
+        arity.contains("supplies 2 value(s) for 1 declared kind(s)"),
+        "a content that is not a whole description must be refused on its arity, naming both \
+         sides of it: {arity}"
+    );
 
     // No generating set on corpus-derived content — the one that would otherwise serve to everyone.
-    assert!(publish(
+    let vacuous = refusal(
         "topics/a",
+        "corpus-derived content with no generating set",
         IncomingArtifact::with_content(
             Some("t3".into()),
             fx.members(0..10),
             vec![IncomingContent::new(vec!["a label".into()], [])],
         ),
-    )
-    .is_err());
+    );
+    assert!(
+        vacuous.contains("contents[0] declares no generating set"),
+        "an empty generating set under a requirement that every member be visible must be refused \
+         as such — the refusal that keeps a set satisfied by everyone off a corpus-derived layer: \
+         {vacuous}"
+    );
+
+    // Four rules, four refusals: a change collapsing any two onto one path moves this.
+    let distinct: std::collections::BTreeSet<&String> = [&undeclared, &missing, &arity, &vacuous]
+        .into_iter()
+        .collect();
+    assert_eq!(
+        distinct.len(),
+        4,
+        "each rule refuses in its own words, so an operator can tell which one they broke"
+    );
 
     // Every batch was refused whole, so nothing landed under any of those keys.
     assert!(artifacts_of(&engine, &full_coverage_credential()).is_empty());
+}
+
+/// Publish `labels.len()` artifacts, each with its own key and its own text, wait for the content
+/// to reach a record extent, and then take the log away — so every later read of these labels comes
+/// from the blob rather than from the publication's own copy in the write store.
+///
+/// The keys are `t0…`, and the *n*th artifact's members are the *n*th hundred of source ids, which
+/// keeps each generating set inside what the full-coverage principal can see.
+fn published_and_log_free(fx: &Fixture, labels: &[&str]) {
+    {
+        let engine = fx.open();
+        engine
+            .register_layer(label_layer("topics/a", true))
+            .unwrap();
+        let batch: Vec<IncomingArtifact> = labels
+            .iter()
+            .enumerate()
+            .map(|(n, label)| {
+                let members = (n as u64) * 20..(n as u64 + 1) * 20;
+                IncomingArtifact::with_content(
+                    Some(format!("t{n}")),
+                    fx.members(members.clone()),
+                    vec![content(label, fx, members)],
+                )
+            })
+            .collect();
+        engine
+            .publish_artifacts("topics/a".into(), 0, batch)
+            .unwrap();
+        content_extents(fx, 1);
+    }
+    remove_the_whole_log(fx);
+}
+
+/// **Every artifact keeps its own text when the level is read a level at a time.**
+///
+/// The viewport reads a level's supplied content in one pass over the record blob and answers each
+/// served artifact from it (`crate::artifact_content`), where it once read a zstd block per
+/// artifact. The failure that pass makes possible is an addressing one — a table keyed a row out
+/// would serve every artifact its neighbour's name, which is a wrong answer that looks entirely
+/// well-formed — so what is asserted is the *pairing* of key to text, artifact by artifact, and not
+/// merely that text arrived.
+#[test]
+fn every_artifact_keeps_its_own_content_when_the_level_is_read_from_the_blob() {
+    let fx = fixture();
+    let labels = [
+        "the first label",
+        "the second label",
+        "the third label",
+        "the fourth label",
+        "the fifth label",
+        "the sixth label",
+    ];
+    published_and_log_free(&fx, &labels);
+
+    let engine = fx.open();
+    let served = artifacts_of(&engine, &full_coverage_credential());
+    assert_eq!(served.len(), labels.len(), "{served:?}");
+    for artifact in &served {
+        let key = artifact.key.as_deref().expect("each artifact kept its key");
+        let n: usize = key.trim_start_matches('t').parse().expect("a t<n> key");
+        assert_eq!(
+            artifact.content,
+            vec![labels[n].to_string()],
+            "{key} was served its own text"
+        );
+    }
+
+    // The drill-down reads the one entity's row directly rather than the level's table, and the
+    // two routes must serve one string: a table that disagreed with the row it was built from
+    // would show up here and nowhere else.
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let idset = engine.generation().bundle.manifest.identity.idset;
+    for artifact in &served {
+        let drilled = engine
+            .artifact(&session, artifact.tessera_id, Some(idset), "s0", None)
+            .unwrap()
+            .expect("the identifier the viewport just issued");
+        assert_eq!(drilled.content, artifact.content);
+    }
+}
+
+/// **A publication after the table is built is reflected in the next response**, because the level's
+/// version is half the key it is held under.
+///
+/// The counter is what is asserted, not just the content: a table rebuilt on every request would
+/// serve the right names and lose the whole point of holding one, and a table that outlived its
+/// level would serve the level as it was — names that are all still names, which no assertion on
+/// the text alone would catch.
+#[test]
+fn a_publication_after_the_table_is_built_rebuilds_it() {
+    let fx = fixture();
+    published_and_log_free(&fx, &["the first label", "the second label"]);
+
+    let engine = fx.open();
+    // **One, at open, and not on a request** — `Engine::warm_artifact_projections` reads every
+    // level's contents beside its row form, because neither depends on a mask or a principal and a
+    // request that built one would be doing generation work. What this test is about is what moves
+    // the count *after* that: the level's version.
+    let stats = engine.artifact_content_cache_stats();
+    assert_eq!(stats.builds, 1, "the level's contents were read at open");
+    assert_eq!(stats.held, 1, "one table, for the one level there is");
+    assert_eq!(stats.artifacts, 2);
+
+    let first = artifacts_of(&engine, &full_coverage_credential());
+    assert_eq!(first.len(), 2);
+    assert_eq!(
+        engine.artifact_content_cache_stats().builds,
+        1,
+        "the request read the table the open built"
+    );
+
+    // A second request at the same level version reads nothing.
+    assert_eq!(artifacts_of(&engine, &full_coverage_credential()).len(), 2);
+    assert_eq!(engine.artifact_content_cache_stats().builds, 1);
+
+    engine
+        .publish_artifacts(
+            "topics/a".into(),
+            0,
+            vec![IncomingArtifact::with_content(
+                Some("t2".into()),
+                fx.members(200..220),
+                vec![content("the third label", &fx, 200..220)],
+            )],
+        )
+        .unwrap();
+
+    let after = artifacts_of(&engine, &full_coverage_credential());
+    assert_eq!(after.len(), 3);
+    let mut labels: Vec<&str> = after
+        .iter()
+        .map(|a| a.content.first().expect("content survived").as_str())
+        .collect();
+    labels.sort_unstable();
+    assert_eq!(
+        labels,
+        vec!["the first label", "the second label", "the third label"],
+        "the two blob-resident labels came back beside the one still held in the write store"
+    );
+    assert_eq!(
+        engine.artifact_content_cache_stats().builds,
+        2,
+        "the publication moved the level's version, so the table was read again"
+    );
 }

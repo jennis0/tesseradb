@@ -340,11 +340,12 @@
       ]
     }
   ],
+  "groups": [],
   "idset": 1,
   "layers": [
     {
       "depends_on": [],
-      "derived_content": [],
+      "computed_content": [],
       "hierarchy": {
         "kind": "flat",
         "prune_children": false
@@ -360,12 +361,6 @@
       "version": 1
     }
   ],
-  "quantisation": {
-    "x_max": 65536,
-    "x_min": 0,
-    "y_max": 65536,
-    "y_min": 0
-  },
   "selection": {
     "k_max_marks": 500,
     "k_min": 2,
@@ -378,7 +373,16 @@
   "views": [
     {
       "display_name": "s0",
-      "id": "s0"
+      "group": null,
+      "id": "s0",
+      "key": null,
+      "metadata": null,
+      "quantisation": {
+        "x_max": 65536,
+        "x_min": 0,
+        "y_max": 65536,
+        "y_min": 0
+      }
     }
   ]
 }

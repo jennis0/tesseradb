@@ -148,7 +148,14 @@ pub fn run(ctx: &Context, ops: &[String], checkpoints: &[u64], seed: u64) -> Res
         }
 
         let bundle = open_bundle(&fixture.root)?;
-        let q = bundle.manifest.quantisation;
+        // The frame is the view's (decision 0040); a built bundle declares one, and this harness
+        // measures against it.
+        let q = bundle
+            .manifest
+            .views
+            .first()
+            .expect("a built bundle declares a view")
+            .quantisation;
         let full_bbox = [q.x_min, q.y_min, q.x_max, q.y_max];
         let view_id = bundle
             .partitions

@@ -10,7 +10,7 @@ mod common;
 
 use std::sync::Arc;
 
-use arrow::array::{BinaryArray, Float32Array, StringArray};
+use arrow::array::{BinaryArray, Float32Array, Float64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
@@ -50,6 +50,46 @@ fn build_ingest_batch(rows: &[(u64, f32, f32, &str)]) -> Vec<u8> {
     )
     .unwrap();
 
+    let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
+    writer.write(&batch).unwrap();
+    writer.into_inner().unwrap()
+}
+
+/// [`build_ingest_batch`] with the coordinate columns at the **wider** width.
+///
+/// Contracts §3.4: an ingest batch's `x`/`y` are `float32` **or** `float64` and the narrower is
+/// widened, which is the rule a points file's coordinate columns are read by — so a corpus
+/// buildable at either width is ingestable at either width (decision 0091). Every other builder
+/// here writes `float32`, which is what keeps that half of the schema exercised too.
+fn build_ingest_batch_f64(rows: &[(u64, f64, f64, &str)]) -> Vec<u8> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("external_id", DataType::Binary, false),
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+        Field::new("access", DataType::Utf8, false),
+    ]));
+    let ext: Vec<Vec<u8>> = rows
+        .iter()
+        .map(|(id, _, _, _)| external_id_of(*id))
+        .collect();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(BinaryArray::from_iter_values(
+                ext.iter().map(|v| v.as_slice()),
+            )),
+            Arc::new(Float64Array::from_iter_values(
+                rows.iter().map(|(_, x, _, _)| *x),
+            )),
+            Arc::new(Float64Array::from_iter_values(
+                rows.iter().map(|(_, _, y, _)| *y),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|(_, _, _, a)| *a),
+            )),
+        ],
+    )
+    .unwrap();
     let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
     writer.write(&batch).unwrap();
     writer.into_inner().unwrap()
@@ -705,11 +745,13 @@ fn concurrent_ingest_and_change_both_survive() {
         let row = tessera_lifecycle::UnallocatedRow {
             external_id: Some(new_external_id.clone()),
             view: "s0".to_string(),
+            join: None,
             descriptors: vec![b"0".to_vec()],
             x: 5.0,
             y: 5.0,
             scalars: Vec::new(),
             terms: engine_b.resolve_terms(std::slice::from_ref(&b"0".to_vec())),
+            scoped: Vec::new(),
         };
         barrier_b.wait();
         engine_b
@@ -1773,6 +1815,13 @@ impl tessera_plugin::Plugin for ParkingPlugin {
         self.inner.terms_of_auth(auth_data)
     }
 
+    fn present_terms(
+        &self,
+        descriptors: &[tessera_plugin::Descriptor],
+    ) -> Result<Vec<String>, tessera_plugin::PluginError> {
+        self.inner.present_terms(descriptors)
+    }
+
     fn declared_bounds(&self) -> tessera_plugin::DeclaredBounds {
         self.inner.declared_bounds()
     }
@@ -2063,6 +2112,72 @@ async fn an_out_of_extent_ingest_is_refused_and_leaves_no_wal_record() {
     // posture the endpoint enters.
     let (status, _) = post_ingest(&server, "fine", &[(9_000_002, 5.0, 5.0, "0")], true).await;
     assert_eq!(status, 200);
+}
+
+/// **An ingest body carries its coordinates at either float width, and the wider one is not
+/// narrowed** (contracts §3.4; `projections.md` §6).
+///
+/// Acceptance alone would pass against an accessor that read a `float64` column and rounded every
+/// value, so the discriminating case is a coordinate whose *width decides whether it has a cell at
+/// all*. The fixture's extent is `0..1000`; one `f32` step there is 6.1 × 10⁻⁵, and
+/// `1000.00002` is inside half of one — so it rounds to exactly `1000.0`, which
+/// `Quantisation::contains` admits as the inclusive maximum. Read at the width the caller sent it,
+/// the same value is outside the extent and has no cell.
+///
+/// A narrowing wire therefore does not merely lose precision here: it acks a row that is outside
+/// the declared extent, and the flush places it on the grid's edge with nothing left to notice.
+#[tokio::test]
+async fn an_ingest_body_carries_its_coordinates_at_either_float_width() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    let post = |batch_id: &'static str, rows: Vec<(u64, f64, f64, &'static str)>| {
+        let body = build_ingest_batch_f64(&rows);
+        let client = server.client.clone();
+        let url = server.control_url("/control/ingest");
+        async move {
+            client
+                .post(url)
+                .header("x-tessera-batch-id", batch_id)
+                .header("content-type", "application/octet-stream")
+                .bearer_auth(OPERATOR_CREDENTIAL)
+                .body(body)
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .as_u16()
+        }
+    };
+
+    assert_eq!(
+        post("wide", vec![(9_100_001, 12.5, 33.25, "0")]).await,
+        200,
+        "a float64 coordinate column is part of the schema, not a contract error"
+    );
+
+    let outside = 1_000.000_02_f64;
+    assert_eq!(
+        outside as f32, 1000.0_f32,
+        "the fixture value must round to the extent maximum, or this case discriminates nothing"
+    );
+    assert_eq!(
+        post("wide-outside", vec![(9_100_002, outside, 33.25, "0")]).await,
+        422,
+        "a coordinate outside the extent at the width it was sent has no cell, whatever it would \
+         have rounded to"
+    );
 }
 
 /// `POST /control/flush` is **accepted at any time and executed at the next tick** (contracts
@@ -4290,7 +4405,18 @@ async fn a_deleted_holder_does_not_block_reingest_but_a_suppressed_one_does() {
 /// seven types by a downcast chain while the schema declared fourteen, so a `bool`, `i8`, `i16`,
 /// `i32`, `f64` or `timestamp_us` column was declarable, buildable and un-ingestable.
 const SCALAR_TAIL_TYPES: [&str; 12] = [
-    "bool", "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "timestamp_us",
+    "bool",
+    "u8",
+    "u16",
+    "u32",
+    "u64",
+    "i8",
+    "i16",
+    "i32",
+    "i64",
+    "f32",
+    "f64",
+    "timestamp_us",
 ];
 
 /// One `index = true` column per declarable type, named `c_<type>` so the schema, the points file,
@@ -4344,26 +4470,51 @@ fn scalar_tail_base_column(ty: &str, n: usize) -> Arc<dyn arrow::array::Array> {
 /// An Arrow column of `n` rows for `c_<ty>`, at the type's wire form. `planted` is the JSON value
 /// [`scalar_tail_planted`] chose (so the batch builder and the filter loop cannot disagree about
 /// what was ingested), or `Null` for the base value.
-fn scalar_tail_column(ty: &str, planted: serde_json::Value, n: usize) -> Arc<dyn arrow::array::Array> {
+fn scalar_tail_column(
+    ty: &str,
+    planted: serde_json::Value,
+    n: usize,
+) -> Arc<dyn arrow::array::Array> {
     use arrow::array::{
         BooleanArray, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array,
         TimestampMicrosecondArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
     };
     let int = |base: i64| -> Vec<i64> {
-        let v = planted.as_i64().or_else(|| planted.as_u64().map(|u| u as i64));
+        let v = planted
+            .as_i64()
+            .or_else(|| planted.as_u64().map(|u| u as i64));
         vec![v.unwrap_or(base); n]
     };
     match ty {
-        "bool" => Arc::new(BooleanArray::from(vec![planted.as_bool().unwrap_or(false); n])),
-        "u8" => Arc::new(UInt8Array::from_iter_values(int(1).iter().map(|&v| v as u8))),
-        "u16" => Arc::new(UInt16Array::from_iter_values(int(1).iter().map(|&v| v as u16))),
-        "u32" => Arc::new(UInt32Array::from_iter_values(int(1).iter().map(|&v| v as u32))),
-        "u64" => Arc::new(UInt64Array::from_iter_values(int(1).iter().map(|&v| v as u64))),
+        "bool" => Arc::new(BooleanArray::from(vec![
+            planted.as_bool().unwrap_or(false);
+            n
+        ])),
+        "u8" => Arc::new(UInt8Array::from_iter_values(
+            int(1).iter().map(|&v| v as u8),
+        )),
+        "u16" => Arc::new(UInt16Array::from_iter_values(
+            int(1).iter().map(|&v| v as u16),
+        )),
+        "u32" => Arc::new(UInt32Array::from_iter_values(
+            int(1).iter().map(|&v| v as u32),
+        )),
+        "u64" => Arc::new(UInt64Array::from_iter_values(
+            int(1).iter().map(|&v| v as u64),
+        )),
         "i8" => Arc::new(Int8Array::from_iter_values(int(1).iter().map(|&v| v as i8))),
-        "i16" => Arc::new(Int16Array::from_iter_values(int(1).iter().map(|&v| v as i16))),
-        "i32" => Arc::new(Int32Array::from_iter_values(int(1).iter().map(|&v| v as i32))),
+        "i16" => Arc::new(Int16Array::from_iter_values(
+            int(1).iter().map(|&v| v as i16),
+        )),
+        "i32" => Arc::new(Int32Array::from_iter_values(
+            int(1).iter().map(|&v| v as i32),
+        )),
         "i64" => Arc::new(Int64Array::from_iter_values(int(1))),
-        "f32" => Arc::new(Float32Array::from(vec![planted.as_f64().unwrap_or(1.0) as f32; n])),
+        "f32" => Arc::new(Float32Array::from(vec![
+            planted.as_f64().unwrap_or(1.0)
+                as f32;
+            n
+        ])),
         "f64" => Arc::new(Float64Array::from(vec![planted.as_f64().unwrap_or(1.0); n])),
         "timestamp_us" => Arc::new(TimestampMicrosecondArray::from(int(1_000))),
         other => unreachable!("no column builder for '{other}'"),
@@ -4384,7 +4535,9 @@ fn build_scalar_tail_fixture(out: &std::path::Path, tmp: &std::path::Path) {
         Field::new("y", DataType::Float64, false),
     ];
     let mut columns: Vec<Arc<dyn arrow::array::Array>> = vec![
-        Arc::new(arrow::array::UInt64Array::from_iter_values(0..SCALAR_TAIL_N)),
+        Arc::new(arrow::array::UInt64Array::from_iter_values(
+            0..SCALAR_TAIL_N,
+        )),
         Arc::new(arrow::array::Float64Array::from_iter_values(
             (0..SCALAR_TAIL_N).map(|e| ((e * 37) % 1000) as f64),
         )),
@@ -4394,12 +4547,17 @@ fn build_scalar_tail_fixture(out: &std::path::Path, tmp: &std::path::Path) {
     ];
     for ty in SCALAR_TAIL_TYPES {
         let column = scalar_tail_base_column(ty, n);
-        fields.push(Field::new(format!("c_{ty}"), column.data_type().clone(), false));
+        fields.push(Field::new(
+            format!("c_{ty}"),
+            column.data_type().clone(),
+            false,
+        ));
         columns.push(column);
     }
     let schema = Arc::new(Schema::new(fields));
     let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(&points).unwrap(), schema, None).unwrap();
+    let mut w =
+        ArrowWriter::try_new(std::fs::File::create(&points).unwrap(), schema, None).unwrap();
     w.write(&batch).unwrap();
     w.close().unwrap();
     write_pairs_n(&pairs, SCALAR_TAIL_N);
@@ -4410,13 +4568,22 @@ fn build_scalar_tail_fixture(out: &std::path::Path, tmp: &std::path::Path) {
         .unwrap()
         .schema;
     let args = BuildArgs {
-        point_fields: Default::default(),
+        arena_order: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: points.clone(),
+            point_fields: Default::default(),
+            select: None,
+            access: tessera_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
-        points,
-        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.to_path_buf(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -4424,6 +4591,7 @@ fn build_scalar_tail_fixture(out: &std::path::Path, tmp: &std::path::Path) {
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
         mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
@@ -4453,7 +4621,11 @@ fn build_scalar_tail_ingest_batch() -> Vec<u8> {
     ];
     for ty in SCALAR_TAIL_TYPES {
         let column = scalar_tail_column(ty, scalar_tail_planted(ty), 1);
-        fields.push(Field::new(format!("c_{ty}"), column.data_type().clone(), false));
+        fields.push(Field::new(
+            format!("c_{ty}"),
+            column.data_type().clone(),
+            false,
+        ));
         columns.push(column);
     }
     let schema = Arc::new(Schema::new(fields));
@@ -4556,7 +4728,9 @@ async fn every_declarable_scalar_type_round_trips_ingest_to_filter() {
             format!("c_{ty}"),
             serde_json::json!({ "eq": scalar_tail_planted(ty) }),
         );
-        let resp = viewport(Some(serde_json::Value::Object(filters))).await.unwrap();
+        let resp = viewport(Some(serde_json::Value::Object(filters)))
+            .await
+            .unwrap();
         assert_eq!(
             resp.status().as_u16(),
             200,

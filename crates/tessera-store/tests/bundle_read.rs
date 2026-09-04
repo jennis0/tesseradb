@@ -116,13 +116,19 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
         entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
         layers: Vec::new(),
         layer_tombstones: Vec::new(),
+        views: Vec::new(),
+        scoped_columns: Vec::new(),
+        dead_view_incarnations: Vec::new(),
         membership_extents: Vec::new(),
         level_versions: Vec::new(),
         containment_extents: Vec::new(),
         tile_index_extents: Vec::new(),
         row_column_extents: Vec::new(),
+        shape_rows_extents: Vec::new(),
+        shape_held_extents: Vec::new(),
         artifact_record_extents: Vec::new(),
         segments: vec![SegmentDescriptor {
+            incarnation: 0,
             view: "main".to_string(),
             seg_id: "seg0".to_string(),
             row_count: items.len() as u32,
@@ -133,6 +139,7 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
         dict_extents: vec![],
         attr_extents: Vec::new(),
         record_extents: Vec::new(),
+        entity_terms_extents: Vec::new(),
         text_extents: Vec::new(),
         external_id_runs: vec![],
         locator_extents: vec![],
@@ -145,19 +152,13 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
     fs::write(partition_dir.join("SEGMENTS-0.json"), &segments_bytes).expect("write SEGMENTS-0");
 
     let manifest = Manifest {
-        bundle_format: 3,
+        bundle_format: 5,
         created_at: "2026-07-28T00:00:00Z".to_string(),
         data_plugin_hash: tessera_plugin::Passthrough::new().data_plugin_hash(),
         declared_bounds: serde_json::json!({}),
         declared_scalars: vec![],
         vocabularies: vec![],
         small_term_threshold: 32,
-        quantisation: Quantisation {
-            x_min: extent.x_min,
-            x_max: extent.x_max,
-            y_min: extent.y_min,
-            y_max: extent.y_max,
-        },
         entity_id_high_water: n,
         identity: IdentityDescriptor {
             construction: IDENTITY_CONSTRUCTION.to_string(),
@@ -166,9 +167,20 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
             shard_id: 0,
             idset: 1,
         },
+        groups: Vec::new(),
         views: vec![ViewDescriptor {
+            incarnation: 0,
+            visibility: None,
             id: "main".to_string(),
             display_name: "Main".to_string(),
+            // The frame is the view's, not the bundle's (decision 0040).
+            quantisation: Quantisation {
+                x_min: extent.x_min,
+                x_max: extent.x_max,
+                y_min: extent.y_min,
+                y_max: extent.y_max,
+            },
+            projection: tessera_spatial::Projection::None,
         }],
         partitions: vec![PartitionDescriptor {
             phash: "default".to_string(),
@@ -199,7 +211,7 @@ fn open_bundle_loads_segments_and_columns_round_trip() {
     let (items, codes) = build_bundle(dir.path(), 200);
 
     let bundle = open_bundle(dir.path()).expect("open_bundle");
-    assert_eq!(bundle.manifest.bundle_format, 3);
+    assert_eq!(bundle.manifest.bundle_format, 5);
 
     let partition = bundle.partitions.get("default").expect("default partition");
     assert_eq!(partition.segments_n, 0);
@@ -669,6 +681,136 @@ fn a_manifest_with_no_unhonourable_state_opens_at_the_highest_n() {
     );
 }
 
+/// **A bundle at the previous number refuses at open on the number alone** (`bundle_format` 5,
+/// `dag-hierarchies.md` §7).
+///
+/// Format 4's artifact record carried a one-byte parent tag where 5 carries a two-byte parent
+/// count, so a bundle at 4 whose manifest parses cleanly would open and read parents out of the
+/// bytes that follow — the misread the number exists to stop. The manifest here is exactly the
+/// one the writer at 5 produced with the number turned back, so nothing but the number can be what
+/// refuses.
+#[test]
+fn a_bundle_at_the_previous_number_is_refused_on_the_number_alone() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    build_bundle(dir.path(), 20);
+
+    let manifest_path = dir.path().join("v00000/MANIFEST.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("read MANIFEST.json"))
+            .expect("parse MANIFEST.json");
+    value["bundle_format"] = serde_json::json!(4);
+    let bytes = serde_json::to_vec_pretty(&value).expect("serialise");
+    fs::write(&manifest_path, &bytes).expect("rewrite MANIFEST.json");
+    let current = CurrentPointer {
+        prefix: "v00000".to_string(),
+        manifest_digest: hex_sha256(&bytes),
+    };
+    fs::write(
+        dir.path().join("CURRENT"),
+        serde_json::to_vec_pretty(&current).expect("serialise CURRENT"),
+    )
+    .expect("rewrite CURRENT");
+
+    let err = open_bundle(dir.path()).expect_err("a bundle at another format must not open");
+    match err {
+        StoreError::UnsupportedBundleFormat { found, supported } => {
+            assert_eq!((found, supported), (4, 5));
+        }
+        other => panic!("refused for the wrong reason: {other}"),
+    }
+}
+
+/// **A bundle written before `views[..].projection` existed refuses at open** (`bundle_format`
+/// 4, `projections.md` §3).
+///
+/// The frame does not imply the projection — this fixture's `[0, 1]` extent is a legal frame for
+/// a view with no projection at all — so a manifest at 3 read as unprojected is not a partial
+/// read but a wrong one: the write path would quantise a degree as though it were a frame
+/// coordinate and nothing downstream could see that it had. `#[serde(default)]` on the field is
+/// exactly that misread, which is why the key is required and why this test asserts a refusal
+/// rather than a default.
+#[test]
+fn a_bundle_at_the_previous_format_is_refused_at_open() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    build_bundle(dir.path(), 20);
+
+    // The manifest as the writer at `bundle_format` 3 produced it: no `projection` on any view.
+    let manifest_path = dir.path().join("v00000/MANIFEST.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("read MANIFEST.json"))
+            .expect("parse MANIFEST.json");
+    value["bundle_format"] = serde_json::json!(3);
+    for view in value["views"].as_array_mut().expect("views is an array") {
+        view.as_object_mut()
+            .expect("a view is an object")
+            .remove("projection")
+            .expect("the writer at 4 emitted one to remove");
+    }
+    let bytes = serde_json::to_vec_pretty(&value).expect("serialise");
+    fs::write(&manifest_path, &bytes).expect("rewrite MANIFEST.json");
+    // Re-digest, so the refusal is the format's and not `CURRENT`'s.
+    let current = CurrentPointer {
+        prefix: "v00000".to_string(),
+        manifest_digest: hex_sha256(&bytes),
+    };
+    fs::write(
+        dir.path().join("CURRENT"),
+        serde_json::to_vec_pretty(&current).expect("serialise CURRENT"),
+    )
+    .expect("rewrite CURRENT");
+
+    let err = open_bundle(dir.path())
+        .expect_err("a bundle that cannot say what projected its positions must not open");
+    match err {
+        StoreError::Json { source, .. } => {
+            let detail = source.to_string();
+            assert!(
+                detail.contains("projection"),
+                "the refusal must name the missing key, got: {detail}"
+            );
+        }
+        other => panic!("expected a manifest parse refusal naming `projection`, got: {other}"),
+    }
+}
+
+/// **A projection name outside the set refuses the whole manifest**, rather than the one field.
+///
+/// A reader that cannot resolve the name cannot invert a stored position, and resolving it to
+/// `none` is the same misread the field exists to stop.
+#[test]
+fn a_manifest_naming_a_projection_outside_the_set_is_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    build_bundle(dir.path(), 20);
+
+    let manifest_path = dir.path().join("v00000/MANIFEST.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("read MANIFEST.json"))
+            .expect("parse MANIFEST.json");
+    value["views"][0]["projection"] = serde_json::json!("lambert_cylindrical_equal_area");
+    let bytes = serde_json::to_vec_pretty(&value).expect("serialise");
+    fs::write(&manifest_path, &bytes).expect("rewrite MANIFEST.json");
+    let current = CurrentPointer {
+        prefix: "v00000".to_string(),
+        manifest_digest: hex_sha256(&bytes),
+    };
+    fs::write(
+        dir.path().join("CURRENT"),
+        serde_json::to_vec_pretty(&current).expect("serialise CURRENT"),
+    )
+    .expect("rewrite CURRENT");
+
+    match open_bundle(dir.path()).expect_err("an unresolvable projection must not open") {
+        StoreError::Json { source, .. } => {
+            let detail = source.to_string();
+            assert!(
+                detail.contains("lambert_cylindrical_equal_area"),
+                "the refusal must name what it could not resolve, got: {detail}"
+            );
+        }
+        other => panic!("expected a manifest parse refusal, got: {other}"),
+    }
+}
+
 #[test]
 fn open_bundle_fails_closed_on_a_corrupted_columns_arrow_byte() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -752,11 +894,13 @@ fn open_bundle_rejects_a_permutation_slot_pointing_past_row_count() {
         .join("v00000/partitions/default/views/main/permutation.bin");
     let mut bytes = fs::read(&perm_path).expect("read permutation.bin");
 
-    // Header is 16 bytes (magic + version + reserved + bound); slot 0 starts right after.
-    // Overwrite it with a row index far past this segment's row_count (60) — still a
-    // structurally valid `u32`, not the sentinel, just out of range.
+    // The bound is 60, so the file holds one page and the payload starts at the first 4 KiB
+    // boundary past the 24-byte header and its one-entry directory
+    // (`tessera_store::permutation`). Overwrite entity 0's slot with a row index far past this
+    // segment's row_count (60) — still a structurally valid `u32`, not the sentinel, just out of
+    // range.
     let corrupt_slot = 9_999u32.to_le_bytes();
-    bytes[16..20].copy_from_slice(&corrupt_slot);
+    bytes[4096..4100].copy_from_slice(&corrupt_slot);
     fs::write(&perm_path, &bytes).expect("rewrite corrupted permutation.bin");
 
     // Recompute the digest so this reaches content validation (`Permutation::validate_rows`)
@@ -1016,4 +1160,152 @@ fn a_just_written_prefix_still_refuses_a_manifest_that_disagrees_with_its_own_fi
         matches!(err, StoreError::MalformedBundle { .. }),
         "expected MalformedBundle, got: {err}"
     );
+}
+
+// -------------------------------------------------------------------------------------------
+// Non-canonical `SEGMENTS-<n>.json` names (contracts §2.1).
+//
+// `n` is unpadded decimal. A reader that parses `SEGMENTS-01.json` to `n = 1` and then
+// reconstructs `SEGMENTS-1.json` to read from discovers a manifest and then reads from an absent
+// path — which the candidate walk steps silently past, carrying the reader past a manifest that
+// may hold a `deny`. §2.1: "Parsing leniently and reconstructing canonically is the combination
+// that hides it."
+// -------------------------------------------------------------------------------------------
+
+/// Copy `SEGMENTS-0.json` to a literal `name` in the same partition directory, setting
+/// `segments_version` to `version` and applying `edit`. Unlike [`add_segments_manifest`] the
+/// name is not derived from the number, which is the whole point: these fixtures write names
+/// the writer cannot produce, because the file has to arrive from outside it — an operator
+/// copy, a partial object-store sync, another implementation.
+fn add_segments_manifest_named(
+    root: &Path,
+    name: &str,
+    version: u64,
+    edit: impl FnOnce(&mut serde_json::Value),
+) {
+    let dir = root.join("v00000/partitions/default");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("SEGMENTS-0.json")).expect("read SEGMENTS-0"))
+            .expect("parse SEGMENTS-0.json");
+    value["segments_version"] = serde_json::json!(version);
+    edit(&mut value);
+    fs::write(
+        dir.join(name),
+        serde_json::to_vec_pretty(&value).expect("serialise"),
+    )
+    .expect("write the named manifest");
+}
+
+/// **The disclosure this refusal exists to close.** A zero-padded `SEGMENTS-01.json` carrying an
+/// accepted suppression is present in the prefix. A reader that parses it to `n = 1` reads
+/// `SEGMENTS-1.json`, which does not exist, records an I/O error and steps down to a
+/// `SEGMENTS-0.json` that verifies perfectly — in which entity 17 is visible again. Not an error
+/// of the wrong type: an `Ok` that serves the pre-suppression state, indistinguishable from a
+/// prefix that never carried the deny at all.
+///
+/// The refusal converts that step-past into a loud, typed error naming the file.
+///
+/// Mutations this kills: dropping the canonical-spelling check in
+/// `list_segments_manifests` (a bare `rest.parse::<u64>()`, or a `continue`/skip in place of the
+/// refusal) — the padded deny is then stepped past and `open_bundle` returns the suppressed
+/// entity; and typing the refusal as `NoVerifyingSegmentsManifest`, which is the "absent
+/// manifest" report this must never be confused with.
+#[test]
+fn a_padded_manifest_carrying_a_deny_is_refused_never_stepped_past() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    build_bundle(dir.path(), 50);
+
+    add_segments_manifest_named(dir.path(), "SEGMENTS-01.json", 1, |value| {
+        value["deny"] = serde_json::json!([{"entity_id": 17, "cause": "suppress"}]);
+    });
+
+    match open_bundle(dir.path()).expect_err(
+        "a padded candidate must be refused by name; parsing it and reading the unpadded name \
+         steps past a manifest carrying an accepted suppression",
+    ) {
+        StoreError::NonCanonicalManifestName { name, .. } => {
+            assert_eq!(name, "SEGMENTS-01.json");
+        }
+        other => panic!(
+            "expected NonCanonicalManifestName — anything else leaves the padded deny \
+             indistinguishable from an absent manifest. Got: {other}"
+        ),
+    }
+}
+
+/// The refusal is by *name*, before any read: a padded candidate is refused whether or not it
+/// carries a deny, because the reader cannot know which it is without opening it, and opening it
+/// is what the canonical reconstruction prevents.
+#[test]
+fn a_padded_manifest_is_refused_even_carrying_nothing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    build_bundle(dir.path(), 50);
+
+    add_segments_manifest_named(dir.path(), "SEGMENTS-007.json", 7, |_| {});
+
+    match open_bundle(dir.path()).expect_err("a padded candidate is refused by name") {
+        StoreError::NonCanonicalManifestName { name, .. } => {
+            assert_eq!(name, "SEGMENTS-007.json")
+        }
+        other => panic!("expected NonCanonicalManifestName, got: {other}"),
+    }
+}
+
+/// A candidate whose numeric part is not a decimal number at all is non-canonical for the same
+/// reason and refused the same way — an empty part, a sign, whitespace, or a value past `u64`.
+/// None of these is a spelling of a number this reader could re-render, so none can be admitted
+/// without inventing a name the format does not define.
+#[test]
+fn other_non_canonical_numeric_parts_are_refused_too() {
+    for name in [
+        "SEGMENTS-.json",
+        "SEGMENTS-+1.json",
+        "SEGMENTS- 1.json",
+        "SEGMENTS-1 .json",
+        "SEGMENTS-latest.json",
+        "SEGMENTS-99999999999999999999.json",
+    ] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        build_bundle(dir.path(), 50);
+        add_segments_manifest_named(dir.path(), name, 1, |_| {});
+
+        match open_bundle(dir.path())
+            .expect_err(&format!("'{name}' is not a canonical SEGMENTS-<n>.json"))
+        {
+            StoreError::NonCanonicalManifestName { name: got, .. } => assert_eq!(got, name),
+            other => panic!("expected NonCanonicalManifestName for '{name}', got: {other}"),
+        }
+    }
+}
+
+/// **The control.** `SEGMENTS-0.json` is canonical — a rule that refuses a legitimate zero is
+/// worse than the gap it closes — and so is a multi-digit `n`. Both open, and the walk still
+/// serves the highest.
+#[test]
+fn canonical_zero_and_multi_digit_names_still_open() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    build_bundle(dir.path(), 50);
+    add_segments_manifest(dir.path(), 11, |_| {});
+
+    let bundle = open_bundle(dir.path()).expect("canonical names open");
+    assert_eq!(
+        bundle.partitions["default"].segments_n, 11,
+        "SEGMENTS-11.json is canonical and is the highest candidate"
+    );
+}
+
+/// A file that is not a `SEGMENTS-<n>.json` candidate at all is not swept up by the refusal. The
+/// `.json.tmp` orphan a crashed manifest write leaves behind (`manifest_write`) is the case that
+/// matters: it is expected residue, not a manifest, and turning it into a hard partition failure
+/// would refuse a bundle that is entirely well-formed.
+#[test]
+fn a_crashed_write_orphan_is_not_a_candidate() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    build_bundle(dir.path(), 50);
+    let partition = dir.path().join("v00000/partitions/default");
+    fs::write(partition.join("SEGMENTS-1.json.tmp"), b"{}").expect("write orphan");
+    fs::write(partition.join("notes.txt"), b"hello").expect("write stray");
+
+    let bundle = open_bundle(dir.path()).expect("a .json.tmp orphan is not a manifest candidate");
+    assert_eq!(bundle.partitions["default"].segments_n, 0);
 }

@@ -7,7 +7,12 @@ one operator — or a combinator, `all_of` / `any_of`, over sub-expressions. A c
 mixed; a `keyword` leaf — the one string family — takes `eq`, `in`, `prefix` and `contains`
 against the value the item carries. Empty combinators are their operators' identities and differ: `all_of: []` matches the whole
 candidate, `any_of: []` matches nothing. `match` is specified and unbuilt, so this module refuses it
-the way the server does — by raising, never by evaluating a guess.
+the way the server does — by raising, never by evaluating a guess. The `region` leaf
+(`selection-operand.md`, stage 4 of the shape work) is a shape — a polygon or a box in the view's
+own coordinates — or a published artifact named by its `tessera_id`, evaluated here as an even-odd
+walk over the entity's **stored** position on the quantised grid with a point on an edge inside
+([`RegionColumn`]), and by artifact through the fixture's own membership; `none_of` over it is the
+complement within the rowed entities, every one of which carries a position.
 
 ## What makes this a second implementation rather than a transcription
 
@@ -169,13 +174,148 @@ class KeywordColumn:
         return _string_matches(held, operator, operand, "keyword")
 
 
+@dataclass(frozen=True)
+class RegionColumn:
+    """The `region` leaf's definition (`selection-operand.md` §5; `polygon-membership.md` §8),
+    from the fixture's own inputs: each entity's **stored** position — the source coordinate
+    quantised through the build's `fixed32`, which is what membership is of — and, for the leaf
+    by artifact, each published shape's member set as the fixture computed it.
+
+    `positions` maps entity id → `(qx, qy)` on the 32-bit grid; an entity absent here has no
+    row (buffered, or in no view) and matches neither the region nor its negation, which is
+    `filter-index.md` §5's ruling applied without exception. `artifacts` maps a `tessera_id`
+    (as its decimal string) → the member entities of the artifact **this principal is served**;
+    an id absent here is an empty operand — for an unknown id, a suppressed artifact, one
+    withheld by criterion, exactly as the server answers. `quantise` is the build's `fixed32`
+    over the fixture's extent.
+    """
+
+    positions: dict[int, tuple[int, int]]
+    artifacts: dict[str, set[int]]
+    quantise: "callable"
+
+    def matches(self, entity: int, operand: dict) -> bool:
+        """Is `entity`'s stored position inside the shape, or `entity` a member of the artifact?"""
+        held = self.positions.get(entity)
+        if held is None:
+            return False
+        if "artifact" in operand:
+            return entity in self.artifacts.get(str(operand["artifact"]), set())
+        px, py = held
+        if "bbox" in operand:
+            x0, y0, x1, y1 = operand["bbox"]
+            return self.quantise(x0) <= px <= self.quantise(x1) and self.quantise(y0) <= py <= self.quantise(y1)
+        if "polygon" in operand:
+            return _inside_polygon(px, py, [[(x, y) for x, y in operand["polygon"]]], self.quantise)
+        if "circle" in operand or "ellipse" in operand:
+            raise UnbuiltOperator("the oracle evaluates a region's polygon, bbox and artifact spellings")
+        raise ValueError(f"a region leaf is one of polygon, bbox, circle, ellipse or artifact: {operand!r}")
+
+
+@dataclass(frozen=True)
+class MemberOfColumn:
+    """The `member_of` leaf's definition (`highlight-and-hierarchy.md` §3), from the fixture's own
+    member file: one artifact of one layer, resolved to `membership ∩ M_auth`.
+
+    `members` maps `(layer, tessera_id as a decimal string)` → the member entities of the artifact
+    **this principal is served**. A pair absent here is an **empty operand** — an identifier that
+    names nothing, one of another layer, one suppressed, one below this principal's own existence
+    criterion — exactly as the server answers, and never a refusal: a `422` there would make the
+    leaf an existence oracle over what the criterion withholds.
+
+    `rowed` is every entity that has a row in this view; one absent from it matches neither the
+    leaf nor its negation, on `RegionColumn`'s rule and for the same reason.
+
+    **An unknown *layer* is not modelled here.** It is a `422` at the wire and the differential
+    asserts it against the server directly; a column object that could answer it would be a second
+    statement of a refusal rule.
+    """
+
+    members: dict[tuple[str, str], set[int]]
+    rowed: set[int]
+
+    def matches(self, entity: int, operand: dict) -> bool:
+        if entity not in self.rowed:
+            return False
+        if not isinstance(operand, dict) or set(operand) != {"layer", "artifact"}:
+            raise ValueError(f"a member_of leaf is {{layer, artifact}}: {operand!r}")
+        key = (str(operand["layer"]), str(operand["artifact"]))
+        return entity in self.members.get(key, set())
+
+
+@dataclass(frozen=True)
+class NumericColumn:
+    """One numeric column as the fixture planted it: per-entity values, absent entities missing.
+    `eq`, `in` and `range` — the last a bounds object of `gte`/`gt`/`lte`/`lt`, each side at most
+    one — compared as Python numbers, which is IEEE's own comparison for the floats and exact for
+    the integers, so a NaN satisfies no bound and no equality without a branch saying so."""
+
+    values: dict[int, "int | float"]
+
+    def matches(self, entity: int, operator: str, operand) -> bool:
+        held = self.values.get(entity)
+        if held is None:
+            return False
+        if operator == "eq":
+            return held == operand
+        if operator == "in":
+            return any(held == v for v in operand)
+        if operator == "range":
+            if not isinstance(operand, dict) or not operand:
+                raise ValueError("a range carries at least one bound")
+            if "gte" in operand and not held >= operand["gte"]:
+                return False
+            if "gt" in operand and not held > operand["gt"]:
+                return False
+            if "lte" in operand and not held <= operand["lte"]:
+                return False
+            if "lt" in operand and not held < operand["lt"]:
+                return False
+            return True
+        raise UnbuiltOperator(f"numeric operator {operator!r}")
+
+
+def _on_segment(px, py, ax, ay, bx, by) -> bool:
+    if (bx - ax) * (py - ay) - (by - ay) * (px - ax) != 0:
+        return False
+    return min(ax, bx) <= px <= max(ax, bx) and min(ay, by) <= py <= max(ay, by)
+
+
+def _inside_polygon(px: int, py: int, rings, quantise) -> bool:
+    """Even-odd over every ring, a point on an edge inside, vertices quantised as the build
+    quantises them; integer arithmetic throughout. The half-open ray: an edge counts where
+    exactly one end is above the ray. The same walk `conformance/tests/test_shape_membership.py`
+    keeps for published shapes, restated here for the drawn one."""
+    parity = False
+    for ring in rings:
+        qr = [(quantise(x), quantise(y)) for x, y in ring]
+        n = len(qr)
+        for i in range(n):
+            ax, ay = qr[i]
+            bx, by = qr[(i + 1) % n]
+            if _on_segment(px, py, ax, ay, bx, by):
+                return True
+            if (ay > py) != (by > py):
+                lhs = (bx - ax) * (py - ay)
+                rhs = (px - ax) * (by - ay)
+                if (lhs > rhs) if (by - ay) > 0 else (lhs < rhs):
+                    parity = not parity
+    return parity
+
+
 def _carries_a_value(column, entity: int) -> bool:
     """Does `entity` hold any value in this column at all?
 
     **The predicate `none_of` rests on** (decision 0066). Every column kind records absence the
     same way here — the entity is simply not in `values` — which mirrors the artefact, where a
     category spends its reserved code 0 and every other family is left out of the presence bitmap.
+    A region is total over rowed entities — every one carries a position — so its presence is
+    the entity having a row at all (`selection-operand.md` §5).
     """
+    if isinstance(column, RegionColumn):
+        return entity in column.positions
+    if isinstance(column, MemberOfColumn):
+        return entity in column.rowed
     return entity in column.values
 
 
@@ -199,7 +339,18 @@ def _leaf_matches(column, operator: str, operand, entity: int) -> bool:
         raise UnbuiltOperator(f"category operator {operator!r}")
     if isinstance(column, KeywordColumn):
         return column.matches(entity, operator, operand)
+    if isinstance(column, NumericColumn):
+        return column.matches(entity, operator, operand)
     raise TypeError(f"not a filter column: {column!r}")
+
+
+def _region_matches(column, body: dict, entity: int) -> bool:
+    """The `region` leaf against one entity — its body is the shape, not an operator."""
+    if not isinstance(column, RegionColumn):
+        raise UnknownColumn("region")
+    if not isinstance(body, dict):
+        raise ValueError(f"a region leaf is an object: {body!r}")
+    return column.matches(entity, body)
 
 
 def matches(expr: dict, columns: dict, entity: int) -> bool:
@@ -238,6 +389,16 @@ def matches(expr: dict, columns: dict, entity: int) -> bool:
         return not any(matches(sub, columns, entity) for sub in body)
     if name not in columns:
         raise UnknownColumn(name)
+    if name == "region":
+        # The reserved word: a shape, or a published artifact, as one leaf (selection-operand §2).
+        return _region_matches(columns[name], body, entity)
+    if name == "member_of":
+        # The second reserved word: one artifact of one layer, whose body is the pair naming it
+        # rather than an operator (`highlight-and-hierarchy.md` §3).
+        column = columns[name]
+        if not isinstance(column, MemberOfColumn):
+            raise UnknownColumn("member_of")
+        return column.matches(entity, body)
     if not isinstance(body, dict) or len(body) != 1:
         raise ValueError(f"a leaf maps one column to one operator: {expr!r}")
     (operator, operand), = body.items()

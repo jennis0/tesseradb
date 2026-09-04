@@ -315,8 +315,8 @@ fn zoom_sweep(engine: &Engine, session: &Session) -> Vec<(u8, Duration, usize)> 
 struct Planted {
     entity: EntityId,
     external_id: String,
-    x: f32,
-    y: f32,
+    x: f64,
+    y: f64,
     /// Whether this row carries `SUBSET_TERM` — see [`carries_subset`]. Kept so the deny case can
     /// choose a row *outside* the sparse principal's set deliberately rather than by index
     /// arithmetic, and assert that suppressing it moves that principal's total by nothing.
@@ -328,9 +328,9 @@ struct Planted {
 /// Rounds are spread across the extent rather than stacked, so that the merge's inputs interleave
 /// in Morton order instead of concatenating — the property `tests/merge.rs` had to be rebuilt to
 /// obtain, and which a layout of "round r occupies band r" would quietly lose.
-fn position_of(round: usize, i: usize) -> (f32, f32) {
-    let x = ((i * 7 + round * 3) % 1000) as f32;
-    let y = ((i * 13 + round * 101) % 1000) as f32;
+fn position_of(round: usize, i: usize) -> (f64, f64) {
+    let x = ((i * 7 + round * 3) % 1000) as f64;
+    let y = ((i * 13 + round * 101) % 1000) as f64;
     (x, y)
 }
 
@@ -394,11 +394,13 @@ fn ingest_round(engine: &Engine, round: usize, batch: usize) -> (Vec<Planted>, R
             rows.push(UnallocatedRow {
                 external_id: Some(external_id.as_bytes().to_vec()),
                 view: "s0".to_string(),
+                join: None,
                 x,
                 y,
                 scalars: Vec::new(),
                 terms: engine.resolve_terms(&descriptors),
                 descriptors,
+                scoped: Vec::new(),
             });
             meta.push((external_id, x, y, i));
         }
@@ -480,7 +482,7 @@ fn probe_codes(
         let tessera_id = engine
             .tessera_id_of(probe.entity)
             .expect("a planted entity has a wire identity");
-        let (x, y) = (probe.x as f64, probe.y as f64);
+        let (x, y) = (probe.x, probe.y);
         let bbox = [
             x - PROBE_HALF_WIDTH,
             y - PROBE_HALF_WIDTH,
@@ -775,7 +777,7 @@ fn millions_of_ingested_rows_become_correctly_queryable() {
         "and it moves the sparse principal's total by nothing — the suppressed row was never in \
          its set, so a deny that reached a different entity shows up here"
     );
-    let (sx, sy) = (suppressed.x as f64, suppressed.y as f64);
+    let (sx, sy) = (suppressed.x, suppressed.y);
     let bbox = [
         sx - PROBE_HALF_WIDTH,
         sy - PROBE_HALF_WIDTH,
@@ -1070,11 +1072,13 @@ fn ingest_rows(engine: &Engine, round: usize, batch: usize) {
             rows.push(UnallocatedRow {
                 external_id: Some(format!("p{round}-i{i}").into_bytes()),
                 view: "s0".to_string(),
+                join: None,
                 x,
                 y,
                 scalars: Vec::new(),
                 terms: engine.resolve_terms(&descriptors),
                 descriptors,
+                scoped: Vec::new(),
             });
         }
         // A body hash distinct from `ingest_round`'s, so a probe reusing this helper alongside the
@@ -1978,11 +1982,13 @@ fn ingest_returning_ids(engine: &Engine, round: usize, batch: usize, keep: usize
             rows.push(UnallocatedRow {
                 external_id: Some(format!("p{round}-i{i}").into_bytes()),
                 view: "s0".to_string(),
+                join: None,
                 x,
                 y,
                 scalars: Vec::new(),
                 terms: engine.resolve_terms(&descriptors),
                 descriptors,
+                scoped: Vec::new(),
             });
         }
         let mut key = [0u8; 32];

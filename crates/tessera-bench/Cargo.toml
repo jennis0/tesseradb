@@ -16,7 +16,13 @@ publish = false
 
 [features]
 default = ["bench-timing"]
-bench-timing = ["tessera-engine/bench-timing", "tessera-server/bench-timing"]
+bench-timing = [
+    "tessera-engine/bench-timing",
+    "tessera-server/bench-timing",
+    # `suggest_walk --decomp` prices `ColumnPostings::intersects` a stage at a time.
+    "tessera-filter/bench-timing",
+    "tessera-authz/bench-timing",
+]
 
 [dependencies]
 tessera-types = { path = "../tessera-types" }
@@ -41,6 +47,9 @@ tessera-server = { path = "../tessera-server" }
 # nothing there constrains this crate, which already sits above every other.
 tessera-filter = { path = "../tessera-filter" }
 tessera-filter-write = { path = "../tessera-filter-write" }
+# `suggest_walk` folds its synthetic keys and queries with the shipped fold, so the entry strings
+# it indexes are the ones a real vocabulary would produce.
+tessera-analyse = { path = "../tessera-analyse" }
 
 croaring = { workspace = true }
 # Calibration task: the load arm decodes just enough of a 200 response's tiles frame to sum the
@@ -56,6 +65,10 @@ arrow = { workspace = true }
 # two sides of that comparison would differ by their string algorithm as well as by their format.
 # `tessera-filter` already takes this exact version for that scan.
 memchr = "2"
+# `browse_cost` builds its own synthetic bundle: neither ladder corpus declares a render-only
+# column, so the whole-view scan it prices is unreachable on them (its module doc says so).
+parquet = { workspace = true }
+tempfile = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -70,6 +83,7 @@ rayon = { workspace = true }
 rustc-hash = "1"
 toml = "0.8"
 libc = "0.2"
+# `suggest_walk` writes its synthetic index and postings somewhere the run cleans up after itself.
 tokio = { version = "1", features = ["full"] }
 # `blocking` for the campaign's ingest arm: a driver that posts one batch and reads its answer
 # before building the next has no use for a runtime, and the async arms beside it are unaffected.

@@ -58,15 +58,17 @@ fn engine_at(tmp: &std::path::Path, root: &std::path::Path, wal: &str, tick_secs
     engine
 }
 
-fn ingest(engine: &Engine, external_id: &str, x: f32, y: f32) {
+fn ingest(engine: &Engine, external_id: &str, x: f64, y: f64) {
     let row = UnallocatedRow {
         external_id: Some(external_id.as_bytes().to_vec()),
         view: "s0".to_string(),
+        join: None,
         descriptors: vec![b"0".to_vec()],
         x,
         y,
         scalars: Vec::new(),
         terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
     };
     engine
         .accept_ingest(vec![row], external_id.to_string(), [0u8; 32])
@@ -172,7 +174,7 @@ fn consecutive_flushes_each_refresh_from_the_one_before() {
     engine.viewport(&session, whole_extent()).unwrap();
 
     for flush in 1..=3u64 {
-        ingest(&engine, &format!("ext-{flush}"), 5.0 * flush as f32, 5.0);
+        ingest(&engine, &format!("ext-{flush}"), 5.0 * flush as f64, 5.0);
         wait_until("the next flush", || {
             engine.write_executor_stats().flushes >= flush
         });

@@ -111,6 +111,11 @@ pub struct FoldRowSpaceSpec<'a> {
     pub identity_key: &'a IdentityKey,
     pub shard_id: u32,
     pub scalar_schema: &'a [(String, ScalarType)],
+    /// Where [`Self::scalar_schema`]'s **group-scoped** render suffix begins (`views.md` §5) — the
+    /// index from which a column the input segment lacks is the ordinary absence rather than a
+    /// malformed bundle. `scalar_schema.len()` for a view outside every scope, which is the
+    /// refuse-everything reading and the one every caller had before families existed.
+    pub scoped_from: usize,
     /// `D₀` — the fold plan's tombstone clone (compaction §5), entity ids as a Roaring bitmap
     /// (matching `tessera_lifecycle::Overlay::deleted`'s representation). A row whose entity is a
     /// member is dropped: not appended to the output segment, not scattered into
@@ -270,7 +275,14 @@ pub fn fold_row_space(
             continue;
         }
 
-        let scalars = gather_scalars(&cursor.columns, spec.scalar_schema, row, &cursor.seg_id, OP)?;
+        let scalars = gather_scalars(
+            &cursor.columns,
+            spec.scalar_schema,
+            spec.scoped_from,
+            row,
+            &cursor.seg_id,
+            OP,
+        )?;
         writer
             .append(SegmentRow {
                 tessera_id,
@@ -354,7 +366,7 @@ mod tests {
 
     /// One input segment, laid out along x alone so that Morton order is x order — which is what
     /// lets the fixtures below say exactly which row each surviving item lands at.
-    fn segment(dir: &Path, seg_id: &str, rows: &[(u64, f32, ScalarValue)]) -> FoldSegmentInput {
+    fn segment(dir: &Path, seg_id: &str, rows: &[(u64, f64, ScalarValue)]) -> FoldSegmentInput {
         let flush_rows: Vec<FlushRow> = rows
             .iter()
             .map(|(entity, x, score)| FlushRow {
@@ -370,6 +382,7 @@ mod tests {
             "p",
             "s",
             FlushInput {
+                incarnation: 0,
                 seg_id,
                 rows: flush_rows,
                 quantisation: Quantisation {
@@ -403,6 +416,7 @@ mod tests {
                 identity_key: &key(),
                 shard_id: 0,
                 scalar_schema: &schema(),
+                scoped_from: schema().len(),
                 tombstones,
                 permutation_bound: 8,
             },

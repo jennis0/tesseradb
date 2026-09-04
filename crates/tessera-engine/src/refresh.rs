@@ -320,9 +320,9 @@ mod tests {
     use std::collections::{BTreeMap, HashMap};
 
     use tessera_lifecycle::{IngestBuffer, Overlay};
-    use tessera_store::manifest::{IdentityDescriptor, Manifest, Quantisation};
-    use tessera_store::Bundle;
     use tessera_plugin::Plugin;
+    use tessera_store::manifest::{IdentityDescriptor, Manifest};
+    use tessera_store::Bundle;
 
     use super::*;
 
@@ -344,12 +344,6 @@ mod tests {
             declared_scalars: vec![],
             vocabularies: vec![],
             small_term_threshold: 32,
-            quantisation: Quantisation {
-                x_min: 0.0,
-                x_max: 1.0,
-                y_min: 0.0,
-                y_max: 1.0,
-            },
             entity_id_high_water: 0,
             identity: IdentityDescriptor {
                 construction: "siphash-2-4".to_string(),
@@ -358,6 +352,7 @@ mod tests {
                 shard_id: 0,
                 idset: 1,
             },
+            groups: Vec::new(),
             views: vec![],
             partitions: vec![],
             provenance: serde_json::json!({}),
@@ -367,6 +362,8 @@ mod tests {
         Generation {
             // A test fixture's schema declares nothing filterable, so there is nothing to open.
             filter_columns: Arc::new(crate::filter::FilterColumns::default()),
+            // And nothing categorical, so no vocabulary has an index.
+            suggest: Arc::new(crate::suggest::SuggestIndexes::default()),
             prefix: prefix.to_string(),
             vocabularies: Arc::new(tessera_store::vocabulary::Vocabularies::default()),
             segments_version,

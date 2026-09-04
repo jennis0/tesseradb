@@ -263,6 +263,25 @@ fn as_u32(entity: EntityId) -> u32 {
 ///   still carry change records above the point the snapshot was taken at. Starting *at* the
 ///   snapshot would skip them — which looks like an optimisation and is a silent un-deny.
 ///
+/// The `view_ids_of_key` a caller with **no manifest** passes [`replay`]: the owner's id alone.
+///
+/// Correct exactly where there is no `members` relation to expand — the unit tests here, and a
+/// bundle whose groups share nothing. `Engine::open` passes `Manifest::view_ids_for_key` instead,
+/// which is the definition (`views.md` §3.3, decision 0115); this is not a second one, it is the
+/// same expansion over an empty relation.
+pub fn owner_id_only(group: &str, key: &str) -> Vec<String> {
+    vec![format!(
+        "{group}{}{key}",
+        tessera_types::view::GROUP_SEPARATOR
+    )]
+}
+
+/// `view_ids_of_key` turns a `ViewDrop`'s `(owner group, key)` into every view id it names — the
+/// owner's and every sharing group's (`views.md` §3.3). It is a parameter rather than a derivation
+/// because the `members` relation lives in the bundle manifest and this crate does not depend on
+/// `tessera-store`; `Engine::open` supplies `Manifest::view_ids_for_key`, and a caller with no
+/// manifest supplies the owner's id alone.
+///
 /// Returns, alongside the overlay and buffer, the `external_id -> entity_id` map this replay
 /// established from `IngestBatch` rows, and the `DescriptorResolver` in its final state — both
 /// borrowed from `dict` for exactly as long as this call. `Engine::open` immediately
@@ -276,6 +295,7 @@ pub fn replay<'a>(
     records: &[WalRecord],
     dict: &'a Dict,
     seed: Overlay,
+    view_ids_of_key: &dyn Fn(&str, &str) -> Vec<String>,
 ) -> (
     Overlay,
     IngestBuffer,
@@ -340,10 +360,43 @@ pub fn replay<'a>(
             // An artifact's own entity is an ordinary entity here too, on the same argument: its
             // suppression arrives as a `ChangeByEntity`. The membership the record carries belongs
             // to the artifact store, rebuilt in that same second pass.
+            // **A drop discards the rows the buffer held for the view, here as on the live
+            // path** (`views.md` §3.4, `Executor::publish_roster`). They name a coordinate system
+            // that no longer exists, so nothing will ever give them geometry — and since a
+            // dropped key may be created again (decision 0115), a replay that left them would
+            // land the *predecessor's* rows in the new view. That is the reason a buffered row
+            // needs no incarnation of its own: replay is ordered, so the drop is met between the
+            // rows it discards and the rows the recreate takes, and it is the one and only place
+            // the two sets can be told apart.
+            //
+            // **Dropping a view still deletes no entity** (`views.md` §3.4).
+            // `delete_dangling`'s deletions arrive here as the ordinary `ChangeByEntity` records
+            // the arm above applies, which is what keeps the drop from being a second retirement
+            // route.
+            WalRecord::ViewDrop { view } => {
+                // **Every id the key resolves to, not just the owner's.** A key is one view of the
+                // group that owns it *and* one of every group sharing its views (`views.md` §3.3),
+                // and the record names the owner — so a prune built from the record alone would
+                // leave the sharing group's buffered rows to be flushed into whatever takes the
+                // key next. The expansion is `Manifest::view_ids_for_key`'s, passed in because
+                // this crate holds no manifest.
+                let ids = view_ids_of_key(&view.group, &view.key);
+                let orphaned: Vec<(EntityId, String)> = buffer
+                    .rows()
+                    .filter(|(_, item)| ids.iter().any(|id| id == &item.view))
+                    .map(|(entity, item)| (*entity, item.view.clone()))
+                    .collect();
+                for (entity, view) in orphaned {
+                    buffer.remove_in_view(entity, &view);
+                }
+            }
+            // A view create is the roster's, rebuilt by the caller in that same second pass, and
+            // names no entity.
             WalRecord::LayerCreate { .. }
             | WalRecord::LayerDrop { .. }
             | WalRecord::ArtifactPublish { .. }
-            | WalRecord::ArtifactGrow { .. } => {}
+            | WalRecord::ArtifactGrow { .. }
+            | WalRecord::ViewCreate { .. } => {}
         }
     }
 
@@ -509,10 +562,18 @@ mod tests {
             op: ChangeOp::Suppress,
         };
 
-        let (once, _, established_once, _) =
-            replay(std::slice::from_ref(&suppress), &dict, Overlay::new());
-        let (twice, _, established_twice, _) =
-            replay(&[suppress.clone(), suppress], &dict, Overlay::new());
+        let (once, _, established_once, _) = replay(
+            std::slice::from_ref(&suppress),
+            &dict,
+            Overlay::new(),
+            &owner_id_only,
+        );
+        let (twice, _, established_twice, _) = replay(
+            &[suppress.clone(), suppress],
+            &dict,
+            Overlay::new(),
+            &owner_id_only,
+        );
 
         assert_eq!(
             once.is_suppressed(entity),
@@ -552,24 +613,29 @@ mod tests {
                     external_id: None,
                     entity_id: EntityId::new(100),
                     view: "default".to_string(),
+                    join: false,
                     descriptors: Vec::new(),
                     x: 0.0,
                     y: 0.0,
                     scalars: Vec::new(),
+                    scoped: Vec::new(),
                 },
                 crate::wal::WalRow {
                     external_id: None,
                     entity_id: EntityId::new(101),
                     view: "default".to_string(),
+                    join: false,
                     descriptors: Vec::new(),
                     x: 0.0,
                     y: 0.0,
                     scalars: Vec::new(),
+                    scoped: Vec::new(),
                 },
             ],
         }];
 
-        let (_overlay, buffer, established, _resolver) = replay(&records, &dict, Overlay::new());
+        let (_overlay, buffer, established, _resolver) =
+            replay(&records, &dict, Overlay::new(), &owner_id_only);
 
         assert!(
             established.is_empty(),

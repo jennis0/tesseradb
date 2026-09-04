@@ -51,19 +51,19 @@
 //! artifacts and members, the publication order, and the hierarchy checks that need every artifact
 //! in hand.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use arrow::array::{
-    Array, FixedSizeListArray, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array,
-    ListArray, StringArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+    Array, FixedSizeListArray, Int16Array, Int32Array, Int64Array, Int8Array, ListArray,
+    StringArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use tessera_lifecycle::alloc::Allocator;
 use tessera_lifecycle::membership::{
-    ArtifactStore, Bbox, IncomingArtifact, IncomingAttachment, IncomingContent,
+    ArtifactShapes, ArtifactStore, IncomingArtifact, IncomingAttachment, IncomingContent,
 };
 use tessera_lifecycle::LayerRegistry;
 use tessera_store::manifest::{MembershipExtent, RecordExtent};
@@ -71,21 +71,39 @@ use tessera_types::layer::RegisteredLayer;
 use tessera_types::layer::{parent_edges, LayerDeclaration, ListMeaning, ValueSet};
 use tessera_types::EntityId;
 
+use rayon::prelude::*;
+
 use crate::config::{ArtifactSource, Fields, InlineArtifact, LayerSources};
 use crate::error::{BuildError, Result};
+use crate::shapes::{
+    inline_shape, shape_declared, space_at, space_column, ShapeColumns, ShapeContext,
+    ShapeLayerReport, ShapeReader,
+};
+use crate::spill;
+use tessera_store::derived::authored_shape_input;
 
 /// One artifact as the build inputs describe it, before any id has been resolved.
 #[derive(Debug, Default)]
 struct PlannedArtifact {
+    /// The key of the view this artifact belongs to, on a layer scoped to a group
+    /// (`views.md` §3.5); `None` on an unscoped layer, whose one artifact set is drawn on every
+    /// view it names.
+    view_key: Option<String>,
     membership: PlannedMembership,
     /// Indexed by rank, dense — a gap would silently renumber the caller's ranking.
     contents: Vec<PlannedContent>,
     attached_to: Option<IncomingAttachment>,
-    /// Parent artifact in a hierarchy, named by the parent's own key.
-    parent_key: Option<String>,
-    /// The artifact's declared bounding box, on a layer whose `shape` declares one — which *is* its
-    /// membership there, so `membership` stays empty beside it.
-    shape: Option<Bbox>,
+    /// Parent artifacts in a hierarchy, each named by the parent's own key — one on a tree, and on
+    /// a `dag` layer as many as the artifact sits beneath (`dag-hierarchies.md` §4). Each key once.
+    parent_keys: Vec<String>,
+    /// The artifact's canonical shapes, one per view, on a layer whose `shape` declares one —
+    /// which *is* its membership there, so `membership` stays empty beside it.
+    shape: Option<ArtifactShapes>,
+    /// The row's own `space`, as it was written, overriding the table's `default_space`
+    /// (`polygon-membership.md` §4.3). Kept past the membership shape because the row's authored
+    /// shape content is read in the same space, and is read in a second pass once every row of the
+    /// layer is in hand.
+    space: Option<String>,
 }
 
 /// How a source spelled one artifact's membership.
@@ -98,21 +116,17 @@ struct PlannedArtifact {
 /// type below this one that can carry the spelling, so no serving path can learn it and none can
 /// evaluate a complement against a viewer's mask, which would disclose the existence of items
 /// outside it (`annotation-write-cycle.md` §6.1).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 enum PlannedMembership {
-    /// Rows from a `[layer.members]` source, accumulated — and the empty membership of an artifact
-    /// no source named.
-    Rows(Vec<u64>),
+    /// Rows from a `[layer.members]` source — **accumulated in [`MemberSpill`] and not here**, so
+    /// an artifact a hundred million rows name costs the plan nothing. Also the membership of an
+    /// artifact no source named at all, which is the empty one.
+    #[default]
+    Rows,
     /// The artifact row's own `members` list.
     Included(Vec<u64>),
     /// The artifact row's `excluding` list: the entities the membership leaves out.
     Excluded(Vec<u64>),
-}
-
-impl Default for PlannedMembership {
-    fn default() -> Self {
-        PlannedMembership::Rows(Vec::new())
-    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -125,19 +139,55 @@ struct PlannedContent {
 /// membership materialised — the complement included.
 #[derive(Debug)]
 struct ResolvedArtifact {
-    members: Vec<EntityId>,
+    members: ResolvedMembers,
     contents: Vec<IncomingContent>,
     attached_to: Option<IncomingAttachment>,
-    parent_key: Option<String>,
-    shape: Option<Bbox>,
+    parent_keys: Vec<String>,
+    shape: Option<ArtifactShapes>,
+}
+
+/// Where an artifact's members are by the time anything wants to read them.
+///
+/// **The two spellings have different sizes and are held differently, and that is the whole of the
+/// distinction.** A membership from a `[layer.members]` source is one row per member, so a corpus
+/// of 5×10⁸ member rows has 5×10⁸ of them and no build may hold them; it goes through the spill
+/// and lives in the merged [`spill::MemberTable`], read back one artifact at a time. A membership
+/// spelled on the artifact's *own row* is one list per artifact in a file an author wrote, so it
+/// is held where it was read.
+///
+/// The members are raw entity ids rather than [`EntityId`] because a source id and the entity it
+/// resolves to are both `u64`, so the inline case is rewritten in place rather than copied. The
+/// newtype goes back on at [`incoming_artifact`], the one place these leave this module.
+#[derive(Debug)]
+enum ResolvedMembers {
+    /// At this artifact's extent of the merged member table.
+    Table,
+    /// Materialised here: the artifact row's `members`, or the complement of its `excluding`.
+    Inline(Vec<u64>),
 }
 
 /// What the build reads: declarations, and the artifacts to publish into them.
 pub struct LayerPlan {
     declarations: Vec<LayerDeclaration>,
+    /// Per shape layer, what its geometry is (`polygon-membership.md` §6.5) — printed by the
+    /// build beside the layer, and completed by the artifact pass with the resolution's cost.
+    pub shape_reports: Vec<ShapeLayerReport>,
     /// Keyed `(layer, level, key)`, which is also the publication order — see the module doc on
-    /// determinism.
-    artifacts: BTreeMap<(String, u32, String), PlannedArtifact>,
+    /// determinism. **The value is an index into [`Self::bodies`], not the artifact itself**: the
+    /// per-point path resolves a key to that index once and then writes through it, where holding
+    /// the artifact here made every member entry a `BTreeMap` probe whose key comparison walks two
+    /// heap `String`s. At the Overture rung that was three probes and two allocations per entry
+    /// over 3×10⁸ entries.
+    ///
+    /// The map is still what publication order is read off, so ordinals — which are identity under
+    /// I9 — remain a function of the keys and never of arena order.
+    artifacts: BTreeMap<(String, u32, String), usize>,
+    /// The artifacts themselves, named by the index [`Self::artifacts`] carries. Append-only: an
+    /// index handed out stays valid for the whole read.
+    bodies: Vec<PlannedArtifact>,
+    /// The address of each body, at the same index — so a resolved key can be carried as one
+    /// `usize` and still name itself when a refusal has to quote it.
+    addresses: Vec<Address>,
     /// Member rows whose key said *this point is in no artifact*, per source.
     unclustered: Vec<UnclusteredRows>,
     /// How many artifacts each layer's member source **created** — a key the artifacts source did
@@ -146,6 +196,171 @@ pub struct LayerPlan {
     /// knowingly, and the mitigation is that the number is printed. The wire says the same thing in
     /// its own 200.
     minted: BTreeMap<String, u64>,
+    /// Every member row's `(artifact, source)` pair, on its way to disk.
+    members: MemberSpill,
+}
+
+/// What one `(artifact, source)` pair is charged against the accumulator's budget: eight bytes of
+/// `u64` at sixteen, because a `Vec` grows by doubling and is on average half empty. The text
+/// index charges its postings on the same rule and for the same reason.
+const MEMBER_ENTRY_BYTES: usize = 16;
+
+/// What one artifact costs the accumulator beyond its members: the hash table's slot, the `Vec`
+/// header, the allocator's rounding on both and the table's load factor. **An estimate erring
+/// high**, which spills a run early; erring low is the failure a memory bound exists to prevent.
+const MEMBER_ARTIFACT_BYTES: usize = 80;
+
+/// The share of the build's memory budget the member accumulator may hold, and its floor and
+/// ceiling. Sixteenth, floor and ceiling all follow the text index's, which is the other pass in
+/// this build that spills sorted runs — one rule rather than two constants to keep in step.
+///
+/// ⊘ Deliberately **not** added to `residency.rs`'s model, for that pass's reason: it is a
+/// sixteenth of the same budget the model is checked against, inside the factor of two that module
+/// states as its own error bar, and adding it would turn builds that fit today into refusals.
+const MEMBER_BUDGET_SHARE: u64 = 16;
+const MEMBER_BUDGET_MIN: u64 = 64 << 20;
+const MEMBER_BUDGET_MAX: u64 = 1 << 30;
+
+/// The most runs one merge opens at once. A run is a file descriptor and a 4 MiB read buffer, so
+/// this is what the merge's own residency is a function of. The text index's number, for the same
+/// reason it has one.
+const MEMBER_MERGE_FAN_IN: usize = 128;
+
+/// Every layer's member rows, accumulated as `(artifact, source)` pairs and spilled as **sorted
+/// runs** once the accumulator reaches its budget.
+///
+/// **The plan used to hold all of them, and that was the build's largest single term.** One
+/// `Vec<u64>` per artifact, grown a member at a time as the member table was read, all of them
+/// live from the first row of the first source until the last level was published — 4 GB at the
+/// Overture rung, and linear in the corpus with nothing to bound it. Halving the constant (the
+/// resolution now rewrites in place rather than copying) left it linear.
+///
+/// So the pairs go to disk instead, on the shape the text index proved: accumulate to a budget,
+/// spill a sorted run, and merge the runs into per-artifact contiguity at the point of use. What
+/// is resident here is the budget, whatever the corpus is; the run count grows instead of the
+/// peak.
+///
+/// **Sorted by artifact, and within an artifact by source.** The artifact order is what the merge
+/// needs. The source order is what makes a run small — a membership's sources are dense in the
+/// corpus's id space, so their deltas are overwhelmingly one byte where an absolute id is five to
+/// ten — and it costs one sort of a slice that is usually already ascending, the member tables
+/// this reads being written in entity order.
+///
+/// **Duplicates survive.** The same document named twice for one artifact is two member entries,
+/// and the containment report counts entries; a spill that deduplicated would silently change a
+/// number an operator is given.
+struct MemberSpill {
+    /// `.build-tmp/`, the build's own transient directory — so a killed build leaves nothing for
+    /// the next one to trip over. `TmpDir` deletes a stale directory at creation and its own on
+    /// drop.
+    dir: PathBuf,
+    budget: usize,
+    bytes: usize,
+    /// The open window: artifact index → the sources this window has seen for it. Replaced rather
+    /// than cleared at each spill, because a cleared table keeps its capacity and the next fill
+    /// would count from zero against memory that was never released.
+    open: rustc_hash::FxHashMap<u32, Vec<u64>>,
+    receipts: Vec<spill::SpillReceipt>,
+    seq: usize,
+    /// Every pair ever pushed, across every run — what the merge checks itself against and what
+    /// the stage reports.
+    entries: u64,
+}
+
+impl MemberSpill {
+    fn new(dir: &Path, budget: u64) -> MemberSpill {
+        let budget = budget / MEMBER_BUDGET_SHARE;
+        MemberSpill {
+            dir: dir.to_path_buf(),
+            budget: budget.clamp(MEMBER_BUDGET_MIN, MEMBER_BUDGET_MAX) as usize,
+            bytes: 0,
+            open: rustc_hash::FxHashMap::default(),
+            receipts: Vec::new(),
+            seq: 0,
+            entries: 0,
+        }
+    }
+
+    fn push(&mut self, index: usize, source: u64) -> Result<()> {
+        // Entity space is `u32` by I9 and an artifact is an entity, so an index this cannot hold
+        // is a plan no build could publish anyway — refused here, where the number is still in
+        // hand, rather than as a truncation on disk.
+        let index = u32::try_from(index).map_err(|_| {
+            BuildError::Invalid(format!(
+                "this build planned more than {} artifacts, which is more than an entity space \
+                 can address",
+                u32::MAX
+            ))
+        })?;
+        match self.open.entry(index) {
+            std::collections::hash_map::Entry::Occupied(mut e) => {
+                e.get_mut().push(source);
+                self.bytes += MEMBER_ENTRY_BYTES;
+            }
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(vec![source]);
+                self.bytes += MEMBER_ARTIFACT_BYTES + MEMBER_ENTRY_BYTES;
+            }
+        }
+        self.entries += 1;
+        if self.bytes >= self.budget {
+            self.spill()?;
+        }
+        Ok(())
+    }
+
+    /// Write the open window out as one sorted run, leaving the accumulator empty.
+    fn spill(&mut self) -> Result<()> {
+        if self.open.is_empty() {
+            return Ok(());
+        }
+        let path = self.dir.join(format!("member-run-{:04}.spill", self.seq));
+        let mut writer = spill::MemberRunWriter::create(&path)?;
+        let mut order: Vec<u32> = self.open.keys().copied().collect();
+        order.sort_unstable();
+        for index in order {
+            let sources = self
+                .open
+                .get_mut(&index)
+                .expect("every index came from the map a statement ago");
+            sources.sort_unstable();
+            writer.push(index, sources)?;
+        }
+        self.receipts.push(writer.finish()?);
+        self.open = rustc_hash::FxHashMap::default();
+        self.bytes = 0;
+        self.seq += 1;
+        Ok(())
+    }
+
+    /// Spill the tail and hand over every run — the accumulator is empty afterwards.
+    fn finish(&mut self) -> Result<Vec<spill::SpillReceipt>> {
+        self.spill()?;
+        Ok(std::mem::take(&mut self.receipts))
+    }
+}
+
+impl LayerPlan {
+    /// The index of `address`, minting an empty artifact for it if the plan does not hold one.
+    ///
+    /// **Minted into the plan, never over it**: an address already present keeps the artifact it
+    /// has, members and all.
+    fn intern(&mut self, address: Address) -> usize {
+        let next = self.bodies.len();
+        match self.artifacts.entry(address.clone()) {
+            std::collections::btree_map::Entry::Occupied(e) => *e.get(),
+            std::collections::btree_map::Entry::Vacant(e) => {
+                e.insert(next);
+                self.bodies.push(PlannedArtifact::default());
+                self.addresses.push(address);
+                next
+            }
+        }
+    }
+
+    fn address_of(&self, index: usize) -> &Address {
+        &self.addresses[index]
+    }
 }
 
 /// How many rows of one member source named no artifact.
@@ -208,13 +423,42 @@ pub struct SplitCoverage {
     pub stray_members: u64,
 }
 
+/// One treed level's shape as a graph — decision 0092's report, for the edges: what the cut will
+/// climb, and on a `dag` layer how far it is from a tree (`dag-hierarchies.md` §3). Rung 3's MeSH
+/// layer has 30% of its descriptors under more than one parent, and an operator reading a budget's
+/// behaviour there needs that number beside the layer, not in a probe.
+///
+/// It decides nothing. Reported for every layer whose kind carries edges — a tree's line reads
+/// `0 under more than one parent`, which is the cheap way of saying it is one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HierarchyShape {
+    pub layer: String,
+    pub level: u32,
+    pub kind: String,
+    pub artifacts: u64,
+    /// Parent edges, each once.
+    pub edges: u64,
+    /// Artifacts naming no parent.
+    pub roots: u64,
+    /// Artifacts naming more than one parent — nonzero only on a `dag` layer.
+    pub multi_parent: u64,
+    /// The most parents any artifact names.
+    pub max_parents: u64,
+}
+
 /// What a build's layer pass produced, for the manifest and for the digest map.
 pub struct PublishedLayers {
+    /// For a layer scoped to a group, which view's artifact set each published artifact belongs
+    /// to: layer → `(level, ordinal)` → the view's key (`views.md` §3.5). Empty for every
+    /// unscoped layer, whose one set is drawn on every view it names.
+    pub artifact_views: BTreeMap<String, BTreeMap<(u32, u32), String>>,
     pub layers: Vec<RegisteredLayer>,
     /// Edges whose child escapes its parent's membership — reported, never acted on.
     pub containment_violations: Vec<ContainmentViolation>,
     /// Per-parent coverage: how much of each split its children hold between them.
     pub split_coverage: Vec<SplitCoverage>,
+    /// Per treed level, its edges as a graph — reported beside the layer and in `containment.json`.
+    pub hierarchy_shapes: Vec<HierarchyShape>,
     /// One past the lowest entity the layers and their artifacts claimed. **The mark that must
     /// reach the manifest**: the WAL carries the same one in its records and rotation reclaims
     /// those, so a mark that lived only there is lost at the first rotation and the next
@@ -250,26 +494,34 @@ pub struct PublishedLayers {
     ///
     /// The pass has to observe where each membership *landed in row space*, and row space does not
     /// exist yet at this stage — the tiler sort is two stages away. So the records travel to the end
-    /// of the build rather than being read back off the extents this just wrote, which would parse
-    /// every membership a second time to reach a structure that is already in hand.
+    /// of the build rather than being rebuilt from the extents this just wrote, which would decode
+    /// every key, content and attachment a second time to reach a structure already in hand.
     ///
-    /// It is carried across the build's residency peak, and that is a real cost stated rather than
-    /// hidden: the memberships are one bitmap per artifact over the corpus, tens of megabytes at
-    /// the campaign's 10⁵ artifacts against a peak measured in gigabytes.
+    /// It is carried across the build's residency peak, and **what it carries there is a mapping**
+    /// (2026-09-02). Each record's membership is read back through the packed extent
+    /// `write_membership_extents` has just written and fsynced, so what travels these four stages
+    /// is a Roaring container's descriptor per container and page cache for the members
+    /// themselves. Held as heap bitmaps it was +1.2 GB of anonymous memory at the 10⁷ MedCPT
+    /// sample with 471,778,374 closed MeSH member rows, and ~47 GB extrapolated at 10⁸
+    /// (`probes/2026-09-02-mapped-memberships/README.md`).
     pub store: ArtifactStore,
     /// The derived structures the post-bundle pass wrote, for `SEGMENTS-0.json`. Empty until it
     /// runs.
     pub tile_index_extents: Vec<tessera_store::manifest::TileIndexExtent>,
     pub row_column_extents: Vec<tessera_store::manifest::RowColumnExtent>,
     pub containment_extents: Vec<tessera_store::manifest::ContainmentExtent>,
+    pub shape_rows_extents: Vec<tessera_store::manifest::ShapeRowsExtent>,
+    pub shape_held_extents: Vec<tessera_store::manifest::ShapeHeldExtent>,
 }
 
 impl Default for PublishedLayers {
     fn default() -> Self {
         PublishedLayers {
             layers: Vec::new(),
+            artifact_views: BTreeMap::new(),
             containment_violations: Vec::new(),
             split_coverage: Vec::new(),
+            hierarchy_shapes: Vec::new(),
             low_water: tessera_types::layer::ROWLESS_CEILING,
             membership_extents: Vec::new(),
             level_versions: Vec::new(),
@@ -280,6 +532,8 @@ impl Default for PublishedLayers {
             store: ArtifactStore::new(),
             tile_index_extents: Vec::new(),
             row_column_extents: Vec::new(),
+            shape_rows_extents: Vec::new(),
+            shape_held_extents: Vec::new(),
             containment_extents: Vec::new(),
         }
     }
@@ -291,12 +545,31 @@ impl Default for PublishedLayers {
 /// own, which is what retires the discriminator column: there is no second layer's rows in the
 /// file to tell apart, no filter to configure, and no way for a layer to ingest another's rows
 /// (`annotation-write-cycle.md` §6.1).
-pub fn read(declarations: &[LayerDeclaration], inputs: &[LayerSources]) -> Result<LayerPlan> {
+// The eighth argument is which layers are scoped, and it belongs beside the declarations it
+// qualifies: a struct around the seven would be a second spelling of `BuildArgs`' layer half.
+#[allow(clippy::too_many_arguments)]
+pub fn read(
+    declarations: &[LayerDeclaration],
+    inputs: &[LayerSources],
+    // Which layers are scoped to a group, by name (`views.md` §3.5).
+    scoped: &BTreeMap<String, crate::ScopedLayer>,
+    // **Every view this build materialises, each with its own frame** (decision 0111): a shape
+    // layer is canonicalised against the frame of each view it is drawn in, and a layer spanning
+    // views whose frames differ therefore stores a different canonical form under each name.
+    frames: &[tessera_store::derived::ViewFrame],
+    max_shape_vertices: u64,
+    scratch: &Path,
+    memory_budget: u64,
+) -> Result<LayerPlan> {
     let mut plan = LayerPlan {
+        bodies: Vec::new(),
+        addresses: Vec::new(),
         declarations: declarations.to_vec(),
+        shape_reports: Vec::new(),
         artifacts: BTreeMap::new(),
         unclustered: Vec::new(),
         minted: BTreeMap::new(),
+        members: MemberSpill::new(scratch, memory_budget),
     };
     for input in inputs {
         // An artifact source names artifacts *in a layer*, and a layer this build does not
@@ -312,11 +585,72 @@ pub fn read(declarations: &[LayerDeclaration], inputs: &[LayerSources]) -> Resul
         };
         let enumerated =
             declaration.membership == tessera_types::layer::MembershipSource::Enumerated;
+        // **A shape layer's rows are canonicalised as they are read** — against the frame the
+        // points are quantised in and for every view the layer is drawn in — and what that did is
+        // reported beside the layer, never refused (`crate::shapes`).
+        // **The table's `default_space` is the layer's, not the membership shape's** (§4.3): it is
+        // the fallback for every geometry the rows declare, so the authored shape content below
+        // resolves against the same value the membership shape does.
+        let default_space = match &input.artifacts {
+            Some(ArtifactSource::File { default_space, .. }) => *default_space,
+            _ => tessera_store::derived::ShapeSpace::View,
+        };
+        // **This layer's own views, each with its own frame** — never the build's first, which a
+        // layer need not be drawn on at all. A view the layer names and this build does not
+        // materialise is absent here, and the layer is canonicalised for the views that exist.
+        let layer_frames: Vec<tessera_store::derived::ViewFrame> = declaration
+            .views
+            .iter()
+            .filter_map(|name| frames.iter().find(|f| &f.view == name))
+            .cloned()
+            .collect();
+        // Decision 0111's layer-level rule, at the declaration and before a row is read: a mix of
+        // projected and unprojected row spaces is a refusal naming the layer and the views.
+        if shape_declared(declaration).is_some() {
+            tessera_store::derived::check_shape_span(
+                &layer_frames,
+                tessera_store::derived::ShapeSpace::Wgs84,
+            )
+            .map_err(|e| BuildError::Invalid(format!("layer '{}': {e}", input.name)))?;
+        }
+        let mut shapes = shape_declared(declaration).map(|kind| {
+            ShapeReader::new(
+                &input.name,
+                kind,
+                ShapeContext {
+                    views: layer_frames.clone(),
+                    max_vertices: max_shape_vertices,
+                },
+                default_space,
+            )
+        });
         match &input.artifacts {
-            Some(ArtifactSource::File { path, fields }) => {
-                read_artifacts(&input.name, path, fields, enumerated, &mut plan)?
+            Some(ArtifactSource::File { path, fields, .. }) => read_artifacts(
+                &input.name,
+                path,
+                fields,
+                enumerated,
+                scoped.get(&input.name),
+                &mut plan,
+                shapes.as_mut(),
+            )?,
+            Some(ArtifactSource::Inline(rows)) => {
+                // **A scoped layer's artifacts are read from a file**, because the view each
+                // belongs to is a column of it (`views.md` §3.5). The inline spelling has no such
+                // column, and taking every row for every view would draw one quarter's clusters on
+                // all four.
+                if let Some(scope) = scoped.get(&input.name) {
+                    return Err(BuildError::Invalid(format!(
+                        "layer '{}': `scope = {{ group = \"{}\" }}` with the artifacts written \
+                         inline. A scoped layer's rows say which view each artifact belongs to, \
+                         under `fields.view`, and an inline row carries no such column (views \
+                         §3.5) — write the artifacts to a file, or drop the scope for one set \
+                         drawn on every view named",
+                        input.name, scope.group
+                    )));
+                }
+                plan_inline(&input.name, rows, &mut plan, shapes.as_mut())?
             }
-            Some(ArtifactSource::Inline(rows)) => plan_inline(&input.name, rows, &mut plan)?,
             // **Which artifacts exist is the layer's own artifact source's to say** — while the
             // layer's value set is closed. Without one a member source would be both the roster and
             // the population, and a mistyped key would publish an artifact rather than fail to find
@@ -338,6 +672,79 @@ pub fn read(declarations: &[LayerDeclaration], inputs: &[LayerSources]) -> Resul
                     }
                 }
             }
+        }
+        // The layer's rows are all read, so the reader's report — counts, canonicalisation and
+        // the children whose bounds escape their parents (§6.2) — is complete for this layer.
+        if let Some(reader) = shapes {
+            let parents: Vec<(String, String)> = plan
+                .artifacts
+                .iter()
+                .filter(|((layer, _, _), _)| layer == &input.name)
+                .flat_map(|((_, _, key), index)| {
+                    plan.bodies[*index]
+                        .parent_keys
+                        .iter()
+                        .map(|parent| (key.clone(), parent.clone()))
+                })
+                .collect();
+            plan.shape_reports.push(reader.finish(parents));
+        }
+        // **The authored shape content is read as a membership shape is** (`polygon-membership.md`
+        // §6.1, ruling (h)): where the declaration's supplied content names a `polygon`, `circle`
+        // or `ellipse` kind, that slot of every ranked content — WKT, or the numbers of the kind's
+        // row field — goes through the same reader, the same canonicalisation for every view, the
+        // same report, the same vertex cap and **the same space** — the table's `default_space`
+        // and the row's own `space`, resolved against the view's projection exactly as a
+        // membership shape's is (§4.3) — and the slot then carries the canonical bytes in their
+        // content spelling for the blob. The serve reads them back into `shape_x`/`shape_y`; the
+        // client is never handed the string.
+        if let Some((slot, kind)) = declaration.authored_shape() {
+            let content_name = declaration.content.supplied[slot].name.clone();
+            let mut reader = ShapeReader::new(
+                &format!(
+                    "{} (authored `{}` content '{content_name}')",
+                    input.name,
+                    kind.as_str()
+                ),
+                kind,
+                ShapeContext {
+                    views: layer_frames.clone(),
+                    max_vertices: max_shape_vertices,
+                },
+                default_space,
+            );
+            let mine: Vec<(String, usize)> = plan
+                .artifacts
+                .iter()
+                .filter(|((layer, _, _), _)| layer == &input.name)
+                .map(|((_, _, key), index)| (key.clone(), *index))
+                .collect();
+            for (key, index) in mine {
+                let space = plan.bodies[index].space.clone();
+                for content in &mut plan.bodies[index].contents {
+                    let Some(text) = content.values.get_mut(slot) else {
+                        // Short of a value: refused where every content is checked for width.
+                        continue;
+                    };
+                    let shape = authored_shape_input(kind, text).map_err(|e| {
+                        BuildError::Invalid(format!(
+                            "layer '{}': artifact {key}: the authored `{}` content '{content_name}': {e}",
+                            input.name,
+                            kind.as_str()
+                        ))
+                    })?;
+                    let Some(canonical) = reader.row(&key, Some(shape), space.as_deref())? else {
+                        return Err(BuildError::Invalid(format!(
+                            "layer '{}': artifact {key}: the authored `{}` content '{content_name}' \
+                             canonicalised to no view",
+                            input.name,
+                            kind.as_str()
+                        )));
+                    };
+                    *text = canonical.content_text();
+                }
+            }
+            plan.shape_reports.push(reader.finish(Vec::new()));
         }
         if let Some(members) = &input.members {
             let before = plan.artifacts.len();
@@ -394,16 +801,46 @@ pub fn read(declarations: &[LayerDeclaration], inputs: &[LayerSources]) -> Resul
 /// disagreement rather than detecting it. What one row per artifact *does* admit is the same
 /// artifact written twice, which is refused below: two rows for one key are two artifacts as far
 /// as the file is concerned, and taking either would be taking the file's row order for an answer.
+#[allow(clippy::too_many_arguments)]
 fn read_artifacts(
     layer: &str,
     path: &Path,
     fields: &Fields,
     enumerated: bool,
+    scoped: Option<&crate::ScopedLayer>,
     plan: &mut LayerPlan,
+    mut shapes: Option<&mut ShapeReader>,
 ) -> Result<()> {
     for batch in batches(path)? {
         let batch = batch?;
         let key = key_column(path, &batch, fields, "key")?;
+        // **Which view each artifact belongs to**, on a layer scoped to a group (`views.md`
+        // §3.5). Required where the scope is declared: a row that names no view belongs to no
+        // artifact set, and every view's own selection would pass it over.
+        let view: Option<&StringArray> = match scoped {
+            None => None,
+            Some(scope) => {
+                let array = batch.column_by_name(&scope.column).ok_or_else(|| {
+                    BuildError::Invalid(format!(
+                        "{}: layer '{layer}' is scoped to group '{}' and reads the view each \
+                         artifact belongs to from a column named '{}', which this file does not \
+                         carry. Its columns are: {}",
+                        path.display(),
+                        scope.group,
+                        scope.column,
+                        column_names(&batch)
+                    ))
+                })?;
+                Some(typed(path, array, &scope.column)?)
+            }
+        };
+        let shape_columns = match shapes.as_ref() {
+            Some(reader) => Some(ShapeColumns::open(path, &batch, fields, reader.kind())?),
+            None => None,
+        };
+        // Read whether or not the layer declares a membership shape: the same column is the space
+        // of the row's authored shape content, which the second pass below reads (§6.1).
+        let spaces = space_column(path, &batch, fields)?;
         let level = optional_u32(path, &batch, LEVEL)?;
         let contents = optional_ranked_values(path, &batch, fields, "contents")?;
         let members = optional_u64_list(path, &batch, fields, "members")?;
@@ -411,13 +848,7 @@ fn read_artifacts(
         let target_layer = optional_utf8(path, &batch, fields, "attached_layer")?;
         let target_level = optional_u32(path, &batch, ATTACHED_LEVEL)?;
         let target_key = optional_utf8(path, &batch, fields, "attached_key")?;
-        let parent = optional_utf8(path, &batch, fields, "parent")?;
-        let bounds = [
-            optional_f64(path, &batch, fields, "min_x")?,
-            optional_f64(path, &batch, fields, "min_y")?,
-            optional_f64(path, &batch, fields, "max_x")?,
-            optional_f64(path, &batch, fields, "max_y")?,
-        ];
+        let parent = parent_column(path, &batch, fields)?;
 
         // **A stored membership on a layer whose members are computed is a refusal**, not a
         // column read anyway: `membership` decides what a write invalidates, and a spatial or
@@ -493,19 +924,55 @@ fn read_artifacts(
                 }
                 (None, None) => PlannedMembership::default(),
             };
-            plan.artifacts.insert(
-                address.clone(),
-                PlannedArtifact {
-                    membership,
-                    contents: match contents.as_ref() {
-                        None => Vec::new(),
-                        Some(column) => ranked_at(path, column, row, &address.2)?,
-                    },
-                    attached_to: attachment,
-                    parent_key: parent.as_ref().and_then(|c| value_at(c, row)),
-                    shape: bbox_at(path, &bounds, row, &address.2)?,
+            let view_key = match (scoped, view) {
+                (Some(scope), Some(column)) => {
+                    let named = value_at(column, row).ok_or_else(|| {
+                        BuildError::Invalid(format!(
+                            "{}: artifact {} carries no '{}', and this layer's artifacts are a \
+                             different set per view of '{}' (views §3.5) — a row naming no view \
+                             is in no artifact set",
+                            path.display(),
+                            address.2,
+                            scope.column,
+                            scope.group
+                        ))
+                    })?;
+                    if scope.keys.binary_search(&named).is_err() {
+                        return Err(BuildError::Invalid(format!(
+                            "{}: artifact {} names view '{named}', which group '{}' has no such \
+                             key for. Its keys are: {}. An artifact belongs to one view and its \
+                             keys are unique per (layer, view), so a key nobody declared is a \
+                             refusal rather than an artifact drawn nowhere (views §3.5)",
+                            path.display(),
+                            address.2,
+                            scope.group,
+                            scope.keys.join(", ")
+                        )));
+                    }
+                    Some(named)
+                }
+                _ => None,
+            };
+            let index = plan.intern(address.clone());
+            plan.bodies[index] = PlannedArtifact {
+                view_key,
+                membership,
+                contents: match contents.as_ref() {
+                    None => Vec::new(),
+                    Some(column) => ranked_at(path, column, row, &address.2)?,
                 },
-            );
+                attached_to: attachment,
+                parent_keys: parents_at(path, parent.as_ref(), row)?,
+                shape: match (shapes.as_deref_mut(), shape_columns.as_ref()) {
+                    (Some(reader), Some(columns)) => reader.row(
+                        &address.2,
+                        columns.at(path, row, &address.2)?,
+                        space_at(spaces, row),
+                    )?,
+                    _ => None,
+                },
+                space: space_at(spaces, row).map(str::to_string),
+            };
         }
     }
     Ok(())
@@ -517,7 +984,12 @@ fn read_artifacts(
 /// from the same rows, which is what makes an authored layer and a generated one byte-identical in
 /// the bundle — the inline route exists so a handful of curated sets need no Parquet file
 /// (`annotation-write-cycle.md` §6.1).
-fn plan_inline(layer: &str, rows: &[InlineArtifact], plan: &mut LayerPlan) -> Result<()> {
+fn plan_inline(
+    layer: &str,
+    rows: &[InlineArtifact],
+    plan: &mut LayerPlan,
+    mut shapes: Option<&mut ShapeReader>,
+) -> Result<()> {
     for row in rows {
         let address = (layer.to_string(), row.level, row.key.clone());
         if plan.artifacts.contains_key(&address) {
@@ -542,59 +1014,58 @@ fn plan_inline(layer: &str, rows: &[InlineArtifact], plan: &mut LayerPlan) -> Re
                 )))
             }
         };
-        plan.artifacts.insert(
-            address,
-            PlannedArtifact {
-                membership: match (&row.members, &row.excluding) {
-                    // Both is refused at parse, where the declaration can name the artifact.
-                    (Some(members), _) => PlannedMembership::Included(members.clone()),
-                    (_, Some(excluding)) => PlannedMembership::Excluded(excluding.clone()),
-                    (None, None) => PlannedMembership::default(),
-                },
-                contents: row
-                    .contents
-                    .iter()
-                    .map(|values| PlannedContent {
-                        values: values.clone(),
-                        generated_from: Vec::new(),
-                    })
-                    .collect(),
-                attached_to,
-                parent_key: row.parent.clone(),
-                shape: inline_bbox(layer, &row.key, row.bbox.as_deref())?,
+        let index = plan.intern(address);
+        plan.bodies[index] = PlannedArtifact {
+            // An inline artifact is on an unscoped layer: the scoped spelling is refused where
+            // the source is chosen, having no column to name a view with.
+            view_key: None,
+            membership: match (&row.members, &row.excluding) {
+                // Both is refused at parse, where the declaration can name the artifact.
+                (Some(members), _) => PlannedMembership::Included(members.clone()),
+                (_, Some(excluding)) => PlannedMembership::Excluded(excluding.clone()),
+                (None, None) => PlannedMembership::default(),
             },
-        );
+            contents: row
+                .contents
+                .iter()
+                .map(|values| PlannedContent {
+                    values: values.clone(),
+                    generated_from: Vec::new(),
+                })
+                .collect(),
+            attached_to,
+            parent_keys: {
+                let mut keys = row.parent.clone();
+                dedup_keys(&mut keys);
+                keys
+            },
+            shape: match shapes.as_deref_mut() {
+                Some(reader) => {
+                    let input = inline_shape(row, reader.kind())
+                        .map_err(|e| BuildError::Invalid(format!("layer '{layer}': {e}")))?;
+                    reader.row(&row.key, input, row.space.as_deref())?
+                }
+                None => {
+                    if row.bbox.is_some()
+                        || row.circle.is_some()
+                        || row.ellipse.is_some()
+                        || row.wkt.is_some()
+                    {
+                        return Err(BuildError::Invalid(format!(
+                            "layer '{layer}': artifact {} carries a shape, and the layer \
+                                 declares no `[layer.shape]`. Its members come from the stored \
+                                 set its membership names, so a shape beside them is a region \
+                                 nothing evaluates",
+                            row.key
+                        )));
+                    }
+                    None
+                }
+            },
+            space: row.space.clone(),
+        };
     }
     Ok(())
-}
-
-/// `bbox = [min_x, min_y, max_x, max_y]` on an inline artifact.
-///
-/// **Four values in a stated order, and a transposition is a refusal rather than a correction.**
-/// Swapping an inverted box silently would publish a membership the author did not write — the
-/// tiles covering the corrected box, over a region they may not have meant to name at all — so the
-/// constructor that refuses it is the one the WAL decode also goes through.
-fn inline_bbox(layer: &str, key: &str, bbox: Option<&[f64]>) -> Result<Option<Bbox>> {
-    let Some(values) = bbox else {
-        return Ok(None);
-    };
-    let [min_x, min_y, max_x, max_y] = values else {
-        return Err(BuildError::Invalid(format!(
-            "layer '{layer}': artifact {key} declares a `bbox` of {} value(s); it is exactly four \
-             — [min_x, min_y, max_x, max_y]",
-            values.len()
-        )));
-    };
-    Bbox::new(*min_x, *min_y, *max_x, *max_y)
-        .map(Some)
-        .ok_or_else(|| {
-            BuildError::Invalid(format!(
-                "layer '{layer}': artifact {key} declares `bbox = [{min_x}, {min_y}, {max_x}, \
-                 {max_y}]`, which is not a box this build will store — every bound must be finite \
-                 and each maximum at or above its minimum. A transposed box is refused rather than \
-                 swapped: correcting it would publish a membership over a region nobody wrote"
-            ))
-        })
 }
 
 /// One row per `(artifact, entity)`: the memberships, and the generating sets beside them.
@@ -613,9 +1084,10 @@ fn inline_bbox(layer: &str, key: &str, bbox: Option<&[f64]>) -> Result<Option<Bb
 /// **A list key column is one row per `(artifact, entity)` as well** — several of them
 /// (`artifacts-from-points.md` §4). A hierarchical clusterer emits a list per point, and what the
 /// list means is the hierarchy kind the layer already declares: one entry per level for `stacked`
-/// and `tiered`, a lineage for `nested`. The entries name the artifacts the point belongs to,
-/// exactly as a scalar names the one, and `tiered` and `nested` read their **edges** from the
-/// adjacency the list itself carries.
+/// and `tiered`, a lineage for `nested`, and a set in no order for `flat` and `dag`. The entries
+/// name the artifacts the point belongs to, exactly as a scalar names the one, and `tiered` and
+/// `nested` read their **edges** from the adjacency the list itself carries. A `dag` layer's edges
+/// are spelled on its artifact rows' `parent` list and never here (decision 0125).
 ///
 /// Returns the rows that named no artifact, and the rows read — the numerator and the denominator
 /// the caller prints.
@@ -630,15 +1102,17 @@ fn read_members(
     let (mut unclustered, mut read) = (0u64, 0u64);
     // Built on the first integer batch and not before: a text-keyed layer never pays for it, and a
     // layer of 10⁷ artifacts pays once rather than per point.
-    let mut roster: Option<IntegerRoster> = None;
-    // The edges a list column declared, child address → parent key. **One entry per child, not one
+    let mut roster: Option<KeyRoster> = None;
+    // The edges a list column declared, child address → parents. **One entry per child, not one
     // per row**: a cluster of a hundred thousand points states its parent a hundred thousand times,
     // and the second statement onward is a comparison rather than an insertion. Applied once the
-    // whole source has been read, so a conflict is found wherever in the file it sits.
-    let mut lineage: BTreeMap<Address, String> = BTreeMap::new();
+    // whole source has been read, so a conflict is found wherever in the file it sits. Only a
+    // `nested` or `tiered` list declares edges; a `dag` list is memberships and never reaches
+    // this map (`ListMeaning`, decision 0125).
+    let mut lineage: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     // Reused across rows rather than allocated per point: one slot per position in the row's list,
     // `None` where the entry named no artifact.
-    let mut entries: Vec<Option<Member>> = Vec::new();
+    let mut entries: Vec<Option<usize>> = Vec::new();
     let mut said_level_is_ignored = false;
     for batch in batches(path)? {
         let batch = batch?;
@@ -679,18 +1153,18 @@ fn read_members(
                         unclustered += 1;
                         continue;
                     };
-                    let address = member.address(&roster);
+                    let name = plan.address_of(member).2.clone();
                     // **A null `entity` is a refusal, not entity zero.** Arrow's `value` reads the
                     // values buffer whatever the validity bitmap says, and a Parquet writer leaves
                     // a zero there — so a producer whose join missed a row would publish the
                     // corpus's lowest-numbered document into the cluster, moving its masked count
                     // for every viewer who can see that one document.
                     if entity.is_null(row) {
-                        return Err(null_entity(path, &address.2));
+                        return Err(null_entity(path, &name));
                     }
                     attach_member(
                         plan,
-                        address,
+                        member,
                         path,
                         entity.value(row),
                         rank.as_ref().and_then(|c| value_index(c, row)),
@@ -727,10 +1201,10 @@ fn read_members(
                         continue;
                     }
                     for member in entries.iter().flatten() {
-                        attach_member(plan, member.address(&roster), path, source, rank)?;
+                        attach_member(plan, *member, path, source, rank)?;
                     }
                     if listed.meaning.declares_edges() {
-                        record_lineage(&entries, &roster, &mut lineage, path)?;
+                        record_lineage(&entries, plan, &mut lineage, path)?;
                     }
                 }
             }
@@ -760,25 +1234,32 @@ fn resolve_member(
     value_set: ValueSet,
     path: &Path,
     plan: &mut LayerPlan,
-    roster: &mut Option<IntegerRoster>,
-) -> Result<Option<Member>> {
+    roster: &mut Option<KeyRoster>,
+) -> Result<Option<usize>> {
     Ok(match read {
         KeyRead::Unclustered => None,
         KeyRead::Named(name) => {
-            let address = (layer.to_string(), level, name.to_string());
-            if !plan.artifacts.contains_key(&address) {
-                if value_set == ValueSet::Closed {
-                    return Err(undeclared_key(path, &address));
+            // **Interned exactly as an integer key is**, and for the same reason: the address is
+            // built once per artifact rather than once per point. Building it here allocated the
+            // layer name and the key on every member entry and then probed a `BTreeMap` whose
+            // comparison walks both — three times over, counting `attach_member` and the lineage.
+            let roster = roster.get_or_insert_with(|| KeyRoster::of_layer(layer, plan));
+            match roster.text(level, name) {
+                Some(index) => Some(index),
+                None => {
+                    let address = (layer.to_string(), level, name.to_string());
+                    if value_set == ValueSet::Closed {
+                        return Err(undeclared_key(path, &address));
+                    }
+                    let index = plan.intern(address.clone());
+                    Some(roster.insert_text(level, name, address, index))
                 }
-                plan.artifacts
-                    .insert(address.clone(), PlannedArtifact::default());
             }
-            Some(Member::Named(address))
         }
         KeyRead::Numbered(value) => {
-            let roster = roster.get_or_insert_with(|| IntegerRoster::of_layer(layer, plan));
+            let roster = roster.get_or_insert_with(|| KeyRoster::of_layer(layer, plan));
             match roster.get(level, value) {
-                Some(index) => Some(Member::Interned(index)),
+                Some(index) => Some(index),
                 None => {
                     // The one decimal string an integer key ever costs: once per artifact minted,
                     // never once per point. The spelling is the one
@@ -792,8 +1273,8 @@ fn resolve_member(
                     // from the plan — the roster is built once and indexes only the keys that spell
                     // an integer exactly — so an insert here would replace an artifact that already
                     // holds members with an empty one.
-                    plan.artifacts.entry(address.clone()).or_default();
-                    Some(Member::Interned(roster.insert(level, value, address)))
+                    let index = plan.intern(address.clone());
+                    Some(roster.insert(level, value, address, index))
                 }
             }
         }
@@ -803,18 +1284,29 @@ fn resolve_member(
 /// Put one source entity into an artifact — its membership, or the generating set of one rank.
 fn attach_member(
     plan: &mut LayerPlan,
-    address: &Address,
+    index: usize,
     path: &Path,
     source: u64,
     rank: Option<u32>,
 ) -> Result<()> {
-    let entry = plan
-        .artifacts
-        .get_mut(address)
-        .expect("resolved against the plan, or minted into it");
+    // **One index, not a probe.** The key was resolved to this once when the artifact was first
+    // met; every member entry after that writes straight through it.
+    //
+    // **The key is read only where the refusal fires.** Naming it up front cloned a heap `String`
+    // per member entry and dropped it unread — 5×10⁸ times at the Overture rung. The plan is taken
+    // apart by field so the refusal can still name it while the body is mutably borrowed.
+    let LayerPlan {
+        bodies,
+        addresses,
+        members,
+        ..
+    } = plan;
+    let entry = &mut bodies[index];
     match rank {
-        None => match &mut entry.membership {
-            PlannedMembership::Rows(members) => members.push(source),
+        // **Straight to the spill, never into the plan.** This is the one call the whole member
+        // path funnels through, so it is the one place the corpus's memberships could accumulate.
+        None => match &entry.membership {
+            PlannedMembership::Rows => members.push(index, source)?,
             // **Two answers to what an artifact's members are.** The config refuses the two
             // declarations together; this is the same rule for a caller who bound the sources by
             // hand, and it is fail-closed either way — taking one would make a masked count, and
@@ -826,11 +1318,15 @@ fn attach_member(
                      They are two shapes of one thing, so which one a masked count divides by \
                      would be the order the sources were read",
                     path.display(),
-                    address.2
+                    addresses[index].2
                 )))
             }
         },
-        Some(index) => content_at_rank(entry, index).generated_from.push(source),
+        // ⊘ **A generating set is still held in the plan.** It is one list per ranked content per
+        // artifact rather than one per member row, so it is not the term this spill exists to
+        // bound — but a member source carrying a `rank` column over a corpus-sized generating set
+        // would accumulate here exactly as memberships used to.
+        Some(rank) => content_at_rank(entry, rank).generated_from.push(source),
     }
     Ok(())
 }
@@ -843,66 +1339,89 @@ fn null_entity(path: &Path, what: &str) -> BuildError {
     ))
 }
 
-/// The edges one row's list declares, folded into the map of what each child's parent is.
+/// The edges one row's list declares, folded into the map of what each child's parents are.
 ///
 /// The adjacency itself is [`parent_edges`]'s — the wire reads the same rule off the same function
 /// — and what is added here is the conflict: **one entry per child, not one per row**, so a cluster
 /// of a hundred thousand points states its parent a hundred thousand times and the second statement
 /// onward is a comparison rather than an insertion.
 fn record_lineage(
-    entries: &[Option<Member>],
-    roster: &Option<IntegerRoster>,
-    lineage: &mut BTreeMap<Address, String>,
+    entries: &[Option<usize>],
+    plan: &LayerPlan,
+    lineage: &mut BTreeMap<usize, Vec<usize>>,
     path: &Path,
 ) -> Result<()> {
     for (parent, child) in parent_edges(entries) {
-        let parent = parent.address(roster).2.as_str();
-        let child = child.address(roster);
-        match lineage.get(child) {
-            Some(first) if first != parent => return Err(two_parents(path, child, first, parent)),
-            Some(_) => {}
-            None => {
-                lineage.insert(child.clone(), parent.to_string());
+        let named = lineage.entry(*child).or_default();
+        if named.contains(parent) {
+            continue;
+        }
+        if !named.is_empty() {
+            return Err(two_parents(
+                path,
+                plan.address_of(*child),
+                &plan.address_of(named[0]).2,
+                &plan.address_of(*parent).2,
+            ));
+        }
+        named.push(*parent);
+    }
+    Ok(())
+}
+
+/// Hang every child the column named under the parents it named.
+///
+/// **A parent already on the artifact row must be the same one**: a `parent` column and a lineage
+/// column are two spellings of one edge, and an artifact holding a different parent in each is the
+/// same conflict as two points disagreeing. A duplicate edge is one edge whichever spelling stated
+/// it.
+fn apply_lineage(
+    plan: &mut LayerPlan,
+    lineage: BTreeMap<usize, Vec<usize>>,
+    path: &Path,
+) -> Result<()> {
+    // **Applied in address order, not arena order.** The conflict below is a refusal, and which of
+    // several a corpus carries is reported must not depend on the order keys happened to be met —
+    // it is the order they sort in, which is what it has always been. One sort of at most one entry
+    // per child, against one probe per member row.
+    let mut in_order: Vec<(usize, Vec<usize>)> = lineage.into_iter().collect();
+    in_order.sort_by(|a, b| plan.address_of(a.0).cmp(plan.address_of(b.0)));
+    for (child, parents) in in_order {
+        let address = plan.address_of(child).clone();
+        for parent in parents {
+            let parent_key = plan.address_of(parent).2.clone();
+            let artifact = &mut plan.bodies[child];
+            if artifact.parent_keys.contains(&parent_key) {
+                continue;
             }
+            if let Some(declared) = artifact.parent_keys.first() {
+                return Err(two_parents(path, &address, declared, &parent_key));
+            }
+            artifact.parent_keys.push(parent_key);
         }
     }
     Ok(())
 }
 
-/// Hang every child the column named under the parent it named.
-///
-/// **A parent already on the artifact row must be the same one**: a `parent` column and a lineage
-/// column are two spellings of one edge, and an artifact holding a different parent in each is the
-/// same conflict as two points disagreeing.
-fn apply_lineage(
-    plan: &mut LayerPlan,
-    lineage: BTreeMap<Address, String>,
-    path: &Path,
-) -> Result<()> {
-    for (child, parent) in lineage {
-        let artifact = plan
-            .artifacts
-            .get_mut(&child)
-            .expect("a child of the lineage was resolved against the plan, or minted into it");
-        match &artifact.parent_key {
-            Some(declared) if *declared != parent => {
-                return Err(two_parents(path, &child, declared, &parent))
-            }
-            _ => artifact.parent_key = Some(parent),
-        }
-    }
-    Ok(())
+/// Each key once, in order of first appearance: a duplicate edge is one edge
+/// (`dag-hierarchies.md` §4).
+fn dedup_keys(keys: &mut Vec<String>) {
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    keys.retain(|key| seen.insert(key.clone()));
 }
 
 /// **A child naming two different parents is refused** (`artifacts-from-points.md` §4). The data is
 /// not the tree the layer declared: there is no correct output, and choosing a parent would publish
-/// a hierarchy the caller did not write.
+/// a hierarchy the caller did not write. A `dag` layer never reaches this: its list column is
+/// memberships and declares no edges, and its several parents are spelled on the artifact row
+/// (`dag-hierarchies.md` §4, decision 0125).
 fn two_parents(path: &Path, child: &Address, first: &str, second: &str) -> BuildError {
     BuildError::Invalid(format!(
         "{}: {} in level {} of {} is named as a child of both {first} and {second}. A list key \
          column declares the edges, so two rows naming different parents for one artifact are two \
          hierarchies — and which of them was published would be the file's row order rather than \
-         anything the caller wrote",
+         anything the caller wrote. A child under several parents is a `dag` layer, whose edges \
+         are spelled on the artifact row's `parent` list",
         path.display(),
         child.2,
         child.1,
@@ -935,12 +1454,12 @@ fn content_at_rank(artifact: &mut PlannedArtifact, index: u32) -> &mut PlannedCo
 /// meet unnoticed.
 #[allow(clippy::too_many_arguments)]
 pub fn publish(
-    plan: &LayerPlan,
-    resolve: &dyn Fn(u64) -> Option<u64>,
+    plan: &mut LayerPlan,
+    resolve: &(dyn Fn(u64) -> Option<u64> + Sync),
     high_water: u64,
     prefix_dir: &Path,
     partition: &str,
-    view: &str,
+    views: &[String],
     derived: &BTreeMap<String, Vec<String>>,
 ) -> Result<PublishedLayers> {
     let mut registry = LayerRegistry::new();
@@ -953,11 +1472,16 @@ pub fn publish(
         // appears only in the views it declares, so a mistyped view name would produce a bundle
         // whose layer is registered, reachable, and serves nothing — indistinguishable, from every
         // client, from a layer whose artifacts all failed their existence criterion.
-        if let Some(unknown) = declaration.views.iter().find(|s| s.as_str() != view) {
+        if let Some(unknown) = declaration
+            .views
+            .iter()
+            .find(|declared| !views.contains(declared))
+        {
             return Err(BuildError::Invalid(format!(
-                "layer {name} declares view {unknown}, and this build writes view {view}. A layer \
+                "layer {name} declares view {unknown}, and this build writes {}. A layer \
                  in a view this build does not write is registered, reachable and empty, which no \
-                 client can tell from one whose artifacts were all withheld"
+                 client can tell from one whose artifacts were all withheld",
+                views.join(", ")
             )));
         }
         let record = registry
@@ -1003,23 +1527,56 @@ pub fn publish(
     // declared by exclusion is complemented against the entity space this build assigned, once, so
     // the hierarchy checks below and the store beneath them see the same set an inclusion would
     // have written — and no later stage has a spelling left to learn.
-    let mut resolved: BTreeMap<Address, ResolvedArtifact> = BTreeMap::new();
-    for ((layer, level, key), artifact) in &plan.artifacts {
-        resolved.insert(
-            (layer.clone(), *level, key.clone()),
-            resolve_artifact(layer, *level, key, artifact, resolve, high_water)?,
-        );
-    }
+    //
+    // **The member runs are merged into per-artifact contiguity first**, which is where every
+    // member row's source id meets `resolve` and where the memberships stop being a stream and
+    // become a membership. Nothing before this point held more than the spill's own budget of
+    // them, and nothing after this point holds more than one artifact's.
+    let receipts = plan.members.finish()?;
+    let table = merge_member_runs(&receipts, plan, resolve)?;
+
+    // **Resolved in parallel, in place.** Each artifact's resolution reads only its own planned
+    // body and the `resolve` closure, which is a lookup into two immutable arrays — so there is no
+    // cross-artifact state and nothing to order. The publication order is read off `plan.artifacts`
+    // below and is therefore the keys', never the scheduler's, which is what keeps ordinals a
+    // function of the artifacts under I9.
+    //
+    // What is left here is the artifacts' own rows: the contents, the attachment, the lineage, and
+    // the two membership spellings a row carries itself. The member sources' rows went through the
+    // merge above.
+    //
+    // **Indexed by body, not keyed by address.** The plan already holds the `(layer, level, key)`
+    // order in `artifacts`, so a second `BTreeMap` keyed on the same addresses bought nothing and
+    // cost two heap `String`s per artifact — 930,000 allocations at the GeoNames rung.
+    let addresses = &plan.addresses;
+    let mut resolved: Vec<ResolvedArtifact> = plan
+        .bodies
+        .par_iter_mut()
+        .enumerate()
+        .map(|(index, body)| {
+            let (layer, level, key) = &addresses[index];
+            resolve_artifact(layer, *level, key, body, resolve, high_water)
+        })
+        .collect::<Result<_>>()?;
+
+    // **The hierarchy checks run before a single entity is allocated**, which is both the cheaper
+    // and the more useful order: they read `declarations` and `resolved` and touch neither the
+    // registry nor the store, and a structural fault in the edges is worth refusing before the
+    // publication that assigns permanent ids rather than after it. It is also the last reader of a
+    // membership before the publication takes it — the memberships are the largest thing this stage
+    // holds, and nothing after this point needs them whole.
+    let (violations, coverage, hierarchy_shapes) =
+        verify_hierarchies(&plan.declarations, &plan.artifacts, &resolved, &table)?;
 
     // Grouped by `(layer, level)`, each level's artifacts in key order — so a level's
     // ordinals, and therefore its entities, are a function of the artifacts and never of the file's
-    // row order.
-    let mut batched: BTreeMap<(&str, u32), Vec<(&str, &ResolvedArtifact)>> = BTreeMap::new();
-    for ((layer, level, key), artifact) in &resolved {
+    // row order. The plan's own map is already in that order, so this is a walk rather than a sort.
+    let mut batched: BTreeMap<(&str, u32), Vec<(&str, usize)>> = BTreeMap::new();
+    for ((layer, level, key), index) in &plan.artifacts {
         batched
             .entry((layer.as_str(), *level))
             .or_default()
-            .push((key.as_str(), artifact));
+            .push((key.as_str(), *index));
     }
 
     // **Published in declaration order, which is the order that honours `depends_on`.** An
@@ -1032,14 +1589,26 @@ pub fn publish(
         order.extend(batched.keys().filter(|(layer, _)| *layer == name).copied());
     }
 
+    // One artifact's bytes and one artifact's entities, reused across every level — what makes the
+    // publication's residency a level of Roaring bitmaps plus the largest single artifact, rather
+    // than a level of entity vectors beside them.
+    let mut scratch: Vec<u8> = Vec::new();
+    let mut buf: Vec<u64> = Vec::new();
     for address in order {
         let (layer, level) = address;
         let artifacts = batched
             .remove(&address)
             .expect("every address came from the map a statement ago");
         let mut incoming = Vec::with_capacity(artifacts.len());
-        for (key, artifact) in artifacts {
-            incoming.push(incoming_artifact(key, artifact));
+        for (key, index) in artifacts {
+            incoming.push(incoming_artifact(
+                key,
+                &mut resolved[index],
+                index,
+                &table,
+                &mut scratch,
+                &mut buf,
+            )?);
         }
         let record = registry
             .prepare_publish(
@@ -1051,6 +1620,10 @@ pub fn publish(
                 &tessera_lifecycle::no_pending,
             )
             .map_err(|e| BuildError::Invalid(format!("publishing into {layer}: {e}")))?;
+        // The record carries its own copy of every membership, so the bitmaps this built are dead
+        // the moment `prepare_publish` returns — a level's worth of them, held to the end of the
+        // loop for nothing.
+        drop(incoming);
         registry.apply(&record);
         let refused = store.apply(&record, 0);
         if refused > 0 {
@@ -1071,12 +1644,39 @@ pub fn publish(
         }
     }
 
-    let (violations, coverage) = verify_hierarchies(&plan.declarations, &resolved)?;
+    // **Which view's set each published artifact belongs to**, on a layer scoped to a group
+    // (`views.md` §3.5). Taken here, where the plan's keys and the store's ordinals are both in
+    // hand: the artifact pass draws an artifact in its own view and in no other, and an ordinal is
+    // what it has to say that with.
+    let mut wanted: BTreeMap<(&str, u32), BTreeMap<&str, &str>> = BTreeMap::new();
+    for ((layer, level, key), index) in &plan.artifacts {
+        if let Some(view) = &plan.bodies[*index].view_key {
+            wanted
+                .entry((layer.as_str(), *level))
+                .or_default()
+                .insert(key.as_str(), view.as_str());
+        }
+    }
+    let mut artifact_views: BTreeMap<String, BTreeMap<(u32, u32), String>> = BTreeMap::new();
+    for ((layer, level), keys) in wanted {
+        for (ordinal, record) in store.level(layer, level) {
+            let Some(view) = record.key.as_deref().and_then(|key| keys.get(key)) else {
+                continue;
+            };
+            artifact_views
+                .entry(layer.to_string())
+                .or_default()
+                .insert((level, ordinal), (*view).to_string());
+        }
+    }
+
     let (layers, _tombstones) = registry.snapshot();
     let mut published = PublishedLayers {
         layers,
+        artifact_views,
         containment_violations: violations,
         split_coverage: coverage,
+        hierarchy_shapes,
         low_water: alloc.low_water(),
         unclustered: plan.unclustered.clone(),
         minted: plan.minted.clone(),
@@ -1092,10 +1692,208 @@ pub fn publish(
             },
         )
         .collect();
-    write_membership_extents(&store, prefix_dir, partition, &mut published)?;
+    write_membership_extents(&mut store, prefix_dir, partition, &mut published)?;
     write_content_extent(&store, prefix_dir, partition, &mut published)?;
     published.store = store;
     Ok(published)
+}
+
+/// Merge every member run into one **member table**: each artifact's members contiguous, resolved
+/// to the entities this build assigned, and ascending.
+///
+/// **This is where the member rows meet `resolve`**, and it is the only place they do. The
+/// resolution used to run per artifact over a vector the plan held; the vector is the merge's
+/// output now, one artifact at a time, so what is resident is the largest single artifact's
+/// members and not the corpus's — **once**, the sources being rewritten into their entities rather
+/// than read into a second vector.
+///
+/// ⊘ **The sort is per artifact and it is why the largest one is the bound.** A source id's entity
+/// is not a monotone function of it — a build assigns entities in signature-sorted order — so the
+/// merge's ascending *sources* come out as unordered *entities*, and the membership has to be in
+/// hand to be put in order. The largest artifact at the Overture rung holds 16.3×10⁶ pairs — one
+/// division, 5.5% of `members-divisions.parquet`'s 294.1×10⁶ — which is 130 MB for the one
+/// artifact that has them, and 130 MB is what the rewrite above stops holding twice.
+///
+/// ⊘ **The largest *key* in that corpus is not an artifact, and a pair count taken from the
+/// column says it is.** `members-taxonomy.parquet`'s key column is a list per row, and 228.8×10⁶
+/// of its 441.8×10⁶ entries — 51.8% — are **null**: a point in no artifact at that level, counted
+/// as unclustered and never pushed to the spill ([`read_members`]). Flattening the column and
+/// counting values reads as one artifact holding half the corpus, and there is no such artifact;
+/// that ladder's real contribution is 213.0×10⁶ pairs across 2,097 keys, and the corpus's whole
+/// spill is 5.07×10⁸.
+fn merge_member_runs(
+    receipts: &[spill::SpillReceipt],
+    plan: &LayerPlan,
+    resolve: &(dyn Fn(u64) -> Option<u64> + Sync),
+) -> Result<spill::MemberTable> {
+    if receipts.is_empty() {
+        return Ok(spill::MemberTable::empty(plan.bodies.len()));
+    }
+    let receipts = cascade_member_runs(receipts, &plan.members.dir)?;
+    let path = plan.members.dir.join("member-table.spill");
+    let mut writer = spill::MemberTableWriter::create(&path, plan.bodies.len())?;
+    let mut merge = MemberRunMerge::open(&receipts)?;
+    let mut pairs = 0u64;
+    while merge.next_artifact()? {
+        let index = merge.index() as usize;
+        let (layer, level, key) = &plan.addresses[index];
+        // **Resolved in place, in the merge's own buffer.** A source id and the entity it resolves
+        // to are both `u64`, so the artifact's sources *become* its entities; a second vector held
+        // the largest single membership of the corpus twice, which at the Overture rung is
+        // 16.3×10⁶ pairs and 130 MB apiece.
+        let entities = merge.sources_mut();
+        for slot in entities.iter_mut() {
+            let source = *slot;
+            *slot = resolve(source).ok_or_else(|| {
+                BuildError::Invalid(format!(
+                    "{layer} level {level} artifact {key}: membership names entity {source}, \
+                     which this build did not assign — the batch is refused rather than published \
+                     without it, a dropped member moving both the count a viewer is shown and the \
+                     size a proportional criterion divides by"
+                ))
+            })?;
+        }
+        entities.sort_unstable();
+        pairs += entities.len() as u64;
+        writer.push(index, entities)?;
+    }
+    // **Every pair that went in came back out.** Each run verifies its own count and anchor as it
+    // ends, so what this adds is the one thing no single run can see: that the *set* of runs is
+    // whole. A run file lost between the spill and the merge would otherwise be a membership
+    // quietly short by however much it held, which is the failure mode the receipts exist for.
+    if pairs != plan.members.entries {
+        return Err(BuildError::Invalid(format!(
+            "the member merge yielded {pairs} member entries where the sources held {} — a run \
+             file is missing or was not merged, and a short membership moves every masked count \
+             the artifact feeds",
+            plan.members.entries
+        )));
+    }
+    drop(merge);
+    for receipt in &receipts {
+        let _ = std::fs::remove_file(&receipt.path);
+    }
+    writer.finish()
+}
+
+/// Reduce `receipts` to at most [`MEMBER_MERGE_FAN_IN`] runs, deleting each pass's inputs as it
+/// goes — so a build's transient disk is the runs at one level of the cascade and not all of them.
+///
+/// ⊘ **Unreached by anything measured.** At the accumulator's ceiling a run holds 67×10⁶ pairs, and
+/// GeoNames' 68.4×10⁶ spilled **two**. It exists because a small `--memory-budget` over a large
+/// corpus is the caller's to choose: the budget is a sixteenth of that flag, so it is the flag and
+/// not the corpus that decides whether a cascade happens at all.
+fn cascade_member_runs(
+    receipts: &[spill::SpillReceipt],
+    dir: &Path,
+) -> Result<Vec<spill::SpillReceipt>> {
+    let mut receipts = receipts.to_vec();
+    let mut pass = 0usize;
+    while receipts.len() > MEMBER_MERGE_FAN_IN {
+        let mut merged = Vec::with_capacity(receipts.len().div_ceil(MEMBER_MERGE_FAN_IN));
+        for (group, runs) in receipts.chunks(MEMBER_MERGE_FAN_IN).enumerate() {
+            let path = dir.join(format!("member-cascade-{pass}-{group:04}.spill"));
+            let mut writer = spill::MemberRunWriter::create(&path)?;
+            let mut merge = MemberRunMerge::open(runs)?;
+            while merge.next_artifact()? {
+                // The concatenation of several runs' records for one artifact is not itself
+                // ascending, and a run that is not ascending cannot be delta-encoded — so the
+                // intermediate is sorted where the final table would have sorted by entity anyway.
+                merge.sort_sources();
+                writer.push(merge.index(), merge.sources())?;
+            }
+            merged.push(writer.finish()?);
+            drop(merge);
+            for run in runs {
+                let _ = std::fs::remove_file(&run.path);
+            }
+        }
+        receipts = merged;
+        pass += 1;
+    }
+    Ok(receipts)
+}
+
+/// A k-way merge over open run cursors, yielding each artifact once with every source id any run
+/// holds for it.
+///
+/// The heap holds `(head artifact, run)` pairs — an artifact index is four bytes, so unlike the
+/// text index's merge there is nothing to be gained by reaching into the cursors to compare. Ties
+/// break by run index, which makes the concatenation order a function of the run list and not of
+/// the heap's internals; the sort that follows makes it unobservable either way.
+struct MemberRunMerge {
+    cursors: Vec<spill::MemberRunReader>,
+    heap: std::collections::BinaryHeap<std::cmp::Reverse<(u32, usize)>>,
+    index: u32,
+    /// Every source the selected artifact carries, across all the runs holding it.
+    sources: Vec<u64>,
+}
+
+impl MemberRunMerge {
+    fn open(receipts: &[spill::SpillReceipt]) -> Result<MemberRunMerge> {
+        let mut cursors = Vec::with_capacity(receipts.len());
+        let mut heap = std::collections::BinaryHeap::with_capacity(receipts.len());
+        for receipt in receipts {
+            let mut reader = spill::MemberRunReader::open(receipt)?;
+            // A run with no artifacts at all verifies its receipt here and takes no place in the
+            // heap. The spill never writes one, but a receipt is a receipt.
+            if reader.advance()? {
+                heap.push(std::cmp::Reverse((reader.index(), cursors.len())));
+            }
+            cursors.push(reader);
+        }
+        Ok(MemberRunMerge {
+            cursors,
+            heap,
+            index: 0,
+            sources: Vec::new(),
+        })
+    }
+
+    /// Select the next artifact, or `false` when every run is exhausted.
+    fn next_artifact(&mut self) -> Result<bool> {
+        let Some(&std::cmp::Reverse((index, _))) = self.heap.peek() else {
+            return Ok(false);
+        };
+        self.index = index;
+        self.sources.clear();
+        while let Some(std::cmp::Reverse((head, run))) = self.heap.peek().copied() {
+            if head != index {
+                break;
+            }
+            self.heap.pop();
+            let cursor = &mut self.cursors[run];
+            let sources = &mut self.sources;
+            cursor.take_sources(&mut |source| {
+                sources.push(source);
+                Ok(())
+            })?;
+            if cursor.advance()? {
+                let next = cursor.index();
+                self.heap.push(std::cmp::Reverse((next, run)));
+            }
+        }
+        Ok(true)
+    }
+
+    fn index(&self) -> u32 {
+        self.index
+    }
+
+    fn sources(&self) -> &[u64] {
+        &self.sources
+    }
+
+    /// The same buffer, to be **rewritten in place** — a source id and the entity it resolves to
+    /// are both `u64`, so the resolution is a rewrite and not a second vector. See
+    /// [`merge_member_runs`], the one caller.
+    fn sources_mut(&mut self) -> &mut [u64] {
+        &mut self.sources
+    }
+
+    fn sort_sources(&mut self) {
+        self.sources.sort_unstable();
+    }
 }
 
 /// **The artifacts a `membership = { attribute = f }` layer holds**, keyed by layer name — one per
@@ -1191,11 +1989,11 @@ fn verify_dependencies(plan: &LayerPlan) -> Result<()> {
         .iter()
         .map(|d| (d.name.as_str(), d.depends_on.as_slice()))
         .collect();
-    for ((layer, _, key), artifact) in &plan.artifacts {
+    for ((layer, _, key), index) in &plan.artifacts {
         let Some(depends_on) = declared.get(layer.as_str()) else {
             continue;
         };
-        match &artifact.attached_to {
+        match &plan.bodies[*index].attached_to {
             None if !depends_on.is_empty() => {
                 return Err(BuildError::Invalid(format!(
                     "layer '{layer}' declares depends_on {depends_on:?}, so every artifact it \
@@ -1235,17 +2033,26 @@ type Address = (String, u32, String);
 
 fn verify_hierarchies(
     declarations: &[LayerDeclaration],
-    artifacts: &BTreeMap<Address, ResolvedArtifact>,
-) -> Result<(Vec<ContainmentViolation>, Vec<SplitCoverage>)> {
+    index_of: &BTreeMap<Address, usize>,
+    resolved: &[ResolvedArtifact],
+    table: &spill::MemberTable,
+) -> Result<(
+    Vec<ContainmentViolation>,
+    Vec<SplitCoverage>,
+    Vec<HierarchyShape>,
+)> {
     // Which parent has claimed each child, so a second claim is a refusal rather than a silent
     // reparenting: a child with two parents has two lineages, and which one a cut walks would
-    // depend on iteration order.
+    // depend on iteration order. **A `dag` layer's child holds several, and never enters this
+    // map** (`dag-hierarchies.md` §4); its containment and coverage are per edge below, exactly as
+    // a tree's are.
     let mut claimed: BTreeMap<(&str, u32, &str), &str> = BTreeMap::new();
     // Children grouped under their parent, so containment and coverage are one pass over each
     // parent's membership rather than one per edge. **Each child by its full address**, because an
     // tiered layer's child sits at a different level from its parent and a bare key would
-    // then be looked up in the wrong one.
-    let mut children_of: BTreeMap<Address, Vec<Address>> = BTreeMap::new();
+    // then be looked up in the wrong one — borrowed from the plan's own keys, so an edge costs a
+    // pointer rather than the two heap `String`s an owned address did.
+    let mut children_of: BTreeMap<&Address, Vec<&Address>> = BTreeMap::new();
 
     // Which shape each layer's edges have, from its declaration and never from the edges
     // themselves. A layer that declares no lineage may carry none; a nested layer's edges stay
@@ -1256,109 +2063,197 @@ fn verify_hierarchies(
         .map(|d| (d.name.as_str(), d.hierarchy.kind))
         .collect();
 
-    for ((layer, level, key), artifact) in artifacts {
-        let Some(parent_key) = artifact.parent_key.as_deref() else {
-            continue;
-        };
-        let kind = kind_of
-            .get(layer.as_str())
-            .copied()
-            .unwrap_or(tessera_types::layer::HierarchyKind::Flat);
-        let cross_level = matches!(kind, tessera_types::layer::HierarchyKind::Tiered);
-        if !cross_level && !matches!(kind, tessera_types::layer::HierarchyKind::Nested) {
-            return Err(BuildError::Invalid(format!(
+    // The graph per treed level, counted as the edges are walked: every artifact of such a level
+    // counts once, its parents each once.
+    let mut shapes: BTreeMap<(&str, u32), HierarchyShape> = BTreeMap::new();
+    for (address, index) in index_of {
+        let (layer, level, key) = address;
+        if let Some(kind) = kind_of.get(layer.as_str()).filter(|k| {
+            !matches!(
+                k,
+                tessera_types::layer::HierarchyKind::Flat
+                    | tessera_types::layer::HierarchyKind::Stacked
+            )
+        }) {
+            let named = resolved[*index].parent_keys.len() as u64;
+            let shape = shapes
+                .entry((layer.as_str(), *level))
+                .or_insert_with(|| HierarchyShape {
+                    layer: layer.clone(),
+                    level: *level,
+                    kind: format!("{kind:?}").to_lowercase(),
+                    artifacts: 0,
+                    edges: 0,
+                    roots: 0,
+                    multi_parent: 0,
+                    max_parents: 0,
+                });
+            shape.artifacts += 1;
+            shape.edges += named;
+            shape.roots += u64::from(named == 0);
+            shape.multi_parent += u64::from(named > 1);
+            shape.max_parents = shape.max_parents.max(named);
+        }
+        // Each parent an artifact names is one edge, checked on its own; the keys are already each
+        // once, so a repeated edge cannot reach here.
+        for parent_key in resolved[*index].parent_keys.iter().map(String::as_str) {
+            let kind = kind_of
+                .get(layer.as_str())
+                .copied()
+                .unwrap_or(tessera_types::layer::HierarchyKind::Flat);
+            let cross_level = matches!(kind, tessera_types::layer::HierarchyKind::Tiered);
+            let several = matches!(kind, tessera_types::layer::HierarchyKind::Dag);
+            if !cross_level
+                && !several
+                && !matches!(kind, tessera_types::layer::HierarchyKind::Nested)
+            {
+                return Err(BuildError::Invalid(format!(
                 "{layer} is declared {kind:?} and so has no lineage, but {key} names a parent — \
                  declare it nested if its edges run within a level, or tiered if they run between \
                  levels"
             )));
-        }
+            }
 
-        // **Where to look for the parent is the declared shape's to say.** A layer may not mix the
-        // two directions, which is what makes an edge's meaning independent of the data: an
-        // tiered layer's parent is in a strictly coarser level, and a key that resolves
-        // only at this level or a finer one is an edge running against the resolution — refused
-        // rather than reinterpreted.
-        let parent_address = if cross_level {
-            let mut found = None;
-            for coarser in 0..*level {
-                let candidate = (layer.clone(), coarser, parent_key.to_string());
-                if artifacts.contains_key(&candidate) {
-                    if found.is_some() {
-                        return Err(BuildError::Invalid(format!(
+            // **Where to look for the parent is the declared shape's to say.** A layer may not mix the
+            // two directions, which is what makes an edge's meaning independent of the data: an
+            // tiered layer's parent is in a strictly coarser level, and a key that resolves
+            // only at this level or a finer one is an edge running against the resolution — refused
+            // rather than reinterpreted.
+            let parent_address = if cross_level {
+                let mut found = None;
+                for coarser in 0..*level {
+                    let candidate = (layer.clone(), coarser, parent_key.to_string());
+                    if let Some((stored, _)) = index_of.get_key_value(&candidate) {
+                        if found.is_some() {
+                            return Err(BuildError::Invalid(format!(
                             "{layer} artifact {key} names parent {parent_key}, which exists in \
                              more than one coarser level; which level the edge meant would depend \
                              on the search order, so it is refused rather than resolved"
                         )));
+                        }
+                        found = Some(stored);
                     }
-                    found = Some(candidate);
                 }
-            }
-            match found {
-                Some(address) => address,
-                None => {
-                    return Err(BuildError::Invalid(format!(
+                match found {
+                    Some(address) => address,
+                    None => {
+                        return Err(BuildError::Invalid(format!(
                         "{layer} level {level} artifact {key} names parent {parent_key}, which no \
                          coarser level declares — a tiered layer's edges run from a coarser \
                          level to a finer one, so a parent at this level or below is an \
                          edge running against the resolution"
                     )))
+                    }
+                }
+            } else {
+                let candidate = (layer.clone(), *level, parent_key.to_string());
+                match index_of.get_key_value(&candidate) {
+                    Some((stored, _)) => stored,
+                    None => {
+                        return Err(BuildError::Invalid(format!(
+                        "{layer} level {level} artifact {key} names parent {parent_key}, which \
+                         this level does not declare — a nested layer's edges relate two artifacts \
+                         of one level, and a parent that does not exist would leave the child a \
+                         root of a tree nobody wrote"
+                    )))
+                    }
+                }
+            };
+            // **Only a within-level edge can name itself.** A key is unique per `(layer,
+            // level)`, so a levelled taxonomy legitimately carries the same key at two levels — an
+            // arXiv archive with no subclass is `hep-ph` at both, and the level-1 artifact's parent is
+            // the level-0 one of the same name.
+            if !cross_level && parent_key == key {
+                return Err(BuildError::Invalid(format!(
+                "{layer} level {level} artifact {key} names itself as its parent — the edges hold \
+                 a cycle of length one"
+            )));
+            }
+            if !several {
+                if let Some(first) = claimed.insert((layer, *level, key), parent_key) {
+                    return Err(BuildError::Invalid(format!(
+                        "{layer} level {level} artifact {key} is claimed by both {first} and \
+                     {parent_key}; a child has one lineage or the cut that walks it depends on \
+                     iteration order. Declare `kind = \"dag\"` if a child may sit under several \
+                     parents"
+                    )));
                 }
             }
-        } else {
-            let address = (layer.clone(), *level, parent_key.to_string());
-            if !artifacts.contains_key(&address) {
-                return Err(BuildError::Invalid(format!(
-                    "{layer} level {level} artifact {key} names parent {parent_key}, which this \
-                     level does not declare — a nested layer's edges relate two artifacts of one \
-                     level, and a parent that does not exist would leave the child a root of a \
-                     tree nobody wrote"
-                )));
-            }
-            address
-        };
-        // **Only a within-level edge can name itself.** A key is unique per `(layer,
-        // level)`, so a levelled taxonomy legitimately carries the same key at two levels — an
-        // arXiv archive with no subclass is `hep-ph` at both, and the level-1 artifact's parent is
-        // the level-0 one of the same name.
-        if !cross_level && parent_key == key {
-            return Err(BuildError::Invalid(format!(
-                "{layer} level {level} artifact {key} names itself as its parent"
-            )));
+            children_of.entry(parent_address).or_default().push(address);
         }
-        if let Some(first) = claimed.insert((layer, *level, key), parent_key) {
-            return Err(BuildError::Invalid(format!(
-                "{layer} level {level} artifact {key} is claimed by both {first} and {parent_key}; \
-                 a child has one lineage or the cut that walks it depends on iteration order"
-            )));
-        }
-        children_of
-            .entry(parent_address)
-            .or_default()
-            .push((layer.clone(), *level, key.clone()));
     }
 
     let mut violations = Vec::new();
     let mut coverage = Vec::new();
+    // **Two memberships resident, and never more**: the parent whose children are being walked,
+    // and the child being walked. Both are read from the merged table into buffers this loop owns
+    // and reuses, so a pass over a hierarchy of 10⁵ artifacts allocates a handful of times.
+    let mut parent_bytes: Vec<u8> = Vec::new();
+    let mut parent_buf: Vec<u64> = Vec::new();
+    let mut child_bytes: Vec<u8> = Vec::new();
+    let mut child_buf: Vec<u64> = Vec::new();
     for (address, children) in &children_of {
-        let (layer, level, parent_key) = address;
-        let parent = &artifacts[address];
-        // **A set per parent, not a scan per member.** The membership test is the inner loop of
-        // both checks below, and a linear `contains` over a parent holding the whole corpus makes
-        // this pass quadratic in the level's largest artifact.
-        let held: std::collections::HashSet<u64> = parent.members.iter().map(|e| e.raw()).collect();
-        let mut covered: std::collections::HashSet<u64> =
-            std::collections::HashSet::with_capacity(held.len());
+        let (layer, level, parent_key) = *address;
+        let parent_index = index_of[*address];
+        load_members(
+            &resolved[parent_index],
+            parent_index,
+            table,
+            &mut parent_bytes,
+            &mut parent_buf,
+        )?;
+        // **The parent's distinct members, in order** — the merge sorted them, so this is a
+        // run-skip rather than a sort. It replaces a `HashSet<u64>` per parent, which for a
+        // country-level division holding 2×10⁷ points was a ~300 MB table built and torn down, with
+        // a second one beside it for what the children covered. The dedup is in place because the
+        // buffer is this loop's own: nothing else is reading it, and the largest membership at the
+        // Overture rung is 73.6×10⁶ entries, which a copy would be 589 MB of.
+        parent_buf.dedup();
+        let held: &[u64] = &parent_buf;
+        // One bit per distinct member, so `covered.len()` becomes a popcount: 2.5 MB where the
+        // second `HashSet` was 300 MB, and the counts it feeds are identical by construction.
+        let mut covered = vec![0u64; held.len().div_ceil(64)];
+        let mut covered_count = 0u64;
 
         for child_address in children {
-            let child = &artifacts[child_address];
-            let (_, child_level, child_key) = child_address;
+            let child_index = index_of[*child_address];
+            load_members(
+                &resolved[child_index],
+                child_index,
+                table,
+                &mut child_bytes,
+                &mut child_buf,
+            )?;
+            let (_, child_level, child_key) = *child_address;
             let mut escaping = 0u64;
-            for member in child.members.iter().map(|e| e.raw()) {
-                if held.contains(&member) {
-                    covered.insert(member);
-                } else {
+            // **Galloping from a cursor**, both sides being sorted: a child whose members sit in
+            // one region of the parent's finds them in a few probes each rather than a full
+            // binary search, and the walk is cache-resident where the hash table was not.
+            let mut cursor = 0usize;
+            for member in child_buf.iter().copied() {
+                if cursor < held.len() && held[cursor] > member {
+                    cursor = 0;
+                }
+                let mut step = 1usize;
+                while cursor + step < held.len() && held[cursor + step] <= member {
+                    step *= 2;
+                }
+                let hi = (cursor + step).min(held.len());
+                match held[cursor..hi].binary_search(&member) {
+                    Ok(offset) => {
+                        let at = cursor + offset;
+                        cursor = at;
+                        let (word, bit) = (at / 64, at % 64);
+                        if covered[word] >> bit & 1 == 0 {
+                            covered[word] |= 1u64 << bit;
+                            covered_count += 1;
+                        }
+                    }
                     // Reported, not refused: the tree is real, its rollup guarantee is not.
-                    escaping += 1;
+                    Err(offset) => {
+                        cursor = (cursor + offset).min(held.len().saturating_sub(1));
+                        escaping += 1;
+                    }
                 }
             }
             if escaping > 0 {
@@ -1380,20 +2275,22 @@ fn verify_hierarchies(
             parent: parent_key.clone(),
             children: children.len() as u32,
             members: held.len() as u64,
-            stray_members: (held.len() - covered.len()) as u64,
+            stray_members: held.len() as u64 - covered_count,
         });
     }
 
-    detect_cycles(artifacts, &kind_of)?;
-    Ok((violations, coverage))
+    detect_cycles(index_of, resolved, &kind_of)?;
+    Ok((violations, coverage, shapes.into_values().collect()))
 }
 
-/// Refuse a hierarchy holding a cycle, which is not a tree and has no root to descend from.
+/// Refuse a hierarchy holding a cycle, which is neither a tree nor a DAG and has no root to descend
+/// from.
 ///
-/// Walks each artifact's ancestry to the root, bounded by the level's own artifact count — a chain
-/// longer than that has revisited a node, whatever the shape of the loop.
+/// A depth-first search over each artifact's parent lists, in key order, colouring each node once
+/// it is known to reach a root; a node met while still on the chain being walked is the cycle
+/// (`dag-hierarchies.md` §4). A self-edge is refused before this by `verify_hierarchies`.
 ///
-/// **Only a nested layer can hold one, and only its edges are walked.** A tiered layer's
+/// **Only a nested or dag layer can hold one, and only their edges are walked.** A tiered layer's
 /// edges each step to a strictly coarser level, and the levels are finite and bounded below by
 /// zero, so a cycle is not expressible there.
 ///
@@ -1403,40 +2300,96 @@ fn verify_hierarchies(
 /// taxonomy as a cycle. That is exactly what it did before this guard existed, and the demo corpus
 /// is what found it.
 fn detect_cycles(
-    artifacts: &BTreeMap<Address, ResolvedArtifact>,
+    index_of: &BTreeMap<Address, usize>,
+    resolved: &[ResolvedArtifact],
     kind_of: &BTreeMap<&str, tessera_types::layer::HierarchyKind>,
 ) -> Result<()> {
-    for (layer, level, key) in artifacts.keys() {
+    // One `key → parent` map per nested level, in key order. The walk below reads nothing else, so
+    // building this once is what lets it borrow rather than clone an `Address` at every step — the
+    // per-artifact walk allocated three `String`s per step and ran a step per ancestor.
+    //
+    // A `BTreeMap` at both levels, because the order artifacts are visited in is the order this
+    // reports a cycle in, and that order must stay `artifacts.keys()`'s.
+    let mut levels: BTreeMap<(&str, u32), BTreeMap<&str, &[String]>> = BTreeMap::new();
+    for ((layer, level, key), index) in index_of {
         if !matches!(
             kind_of.get(layer.as_str()),
-            Some(tessera_types::layer::HierarchyKind::Nested)
+            Some(
+                tessera_types::layer::HierarchyKind::Nested
+                    | tessera_types::layer::HierarchyKind::Dag
+            )
         ) {
             continue;
         }
-        let bound = artifacts
-            .keys()
-            .filter(|(l, v, _)| l == layer && v == level)
-            .count();
-        let mut node = key.clone();
-        for _ in 0..=bound {
-            let Some(artifact) = artifacts.get(&(layer.clone(), *level, node.clone())) else {
-                break;
-            };
-            match artifact.parent_key.as_deref() {
-                None => break,
-                Some(parent) => node = parent.to_string(),
+        levels
+            .entry((layer.as_str(), *level))
+            .or_default()
+            .insert(key.as_str(), resolved[*index].parent_keys.as_slice());
+    }
+
+    // **One visit per artifact, not one walk per artifact.** Each node is coloured once it is known
+    // to reach a root, so a chain already proved good is left the moment it is re-entered — and a
+    // node met while still on the current chain *is* the cycle, which is what the count bound was
+    // standing in for. The bound it replaces was derived by scanning the whole map per artifact,
+    // O(A²), and a `nested` layer puts every artifact at level 0 (`configuration.md`, the
+    // hierarchy kinds): 600,000 artifacts at the Overture rung, 3.6×10¹¹ key visits, and the whole
+    // of that build's layers stage. It also removes a latent hang — a corpus that genuinely held a
+    // cycle ran the bound's full length for every artifact whose lineage reached it.
+    //
+    // **The artifact reported is the same one**: the walks start in key order and the first start
+    // whose lineage reaches a cycle is the first artifact the counted walk would have failed on.
+    // Over parent lists the walk is a depth-first search with an explicit stack of
+    // `(node, next parent to try)`; on a tree every list has one entry and it is the chain walk
+    // it replaces.
+    for ((layer, level), parents) in &levels {
+        // 0 unvisited · 1 on the chain being walked · 2 known to reach a root
+        let mut state: std::collections::HashMap<&str, u8> =
+            std::collections::HashMap::with_capacity(parents.len());
+        for start in parents.keys() {
+            if state.get(*start).copied().unwrap_or(0) == 2 {
+                continue;
             }
-        }
-        if artifacts
-            .get(&(layer.clone(), *level, node.clone()))
-            .and_then(|a| a.parent_key.as_deref())
-            .is_some()
-        {
-            return Err(BuildError::Invalid(format!(
-                "{layer} level {level}: the lineage above {key} does not reach a root within the \
-                 level's own artifact count, so the edges hold a cycle — a tree has a root to \
-                 descend a cut from and a cycle has none"
-            )));
+            let mut chain: Vec<(&str, usize)> = vec![(*start, 0)];
+            state.insert(*start, 1);
+            while let Some((node, next)) = chain.last_mut() {
+                let node = *node;
+                let Some(parent) = parents[node].get(*next) else {
+                    state.insert(node, 2);
+                    chain.pop();
+                    continue;
+                };
+                *next += 1;
+                let parent = parent.as_str();
+                // A parent this level does not hold ends that path: what sits above a key this
+                // level never declared is not this level's to call a cycle.
+                if !parents.contains_key(parent) {
+                    continue;
+                }
+                match state.get(parent).copied().unwrap_or(0) {
+                    2 => {}
+                    1 => {
+                        let from = chain
+                            .iter()
+                            .position(|(n, _)| *n == parent)
+                            .expect("a node on the chain is in it");
+                        let path: Vec<&str> = chain[from..]
+                            .iter()
+                            .map(|(n, _)| *n)
+                            .chain(std::iter::once(parent))
+                            .collect();
+                        return Err(BuildError::Invalid(format!(
+                            "{layer} level {level}: the lineage above {start} does not reach a \
+                             root, so the edges hold a cycle — {} — and a hierarchy has a root \
+                             to descend a cut from where a cycle has none",
+                            path.join(" → ")
+                        )));
+                    }
+                    _ => {
+                        state.insert(parent, 1);
+                        chain.push((parent, 0));
+                    }
+                }
+            }
         }
     }
     Ok(())
@@ -1457,96 +2410,174 @@ fn resolve_artifact(
     layer: &str,
     level: u32,
     key: &str,
-    artifact: &PlannedArtifact,
-    resolve: &dyn Fn(u64) -> Option<u64>,
+    artifact: &mut PlannedArtifact,
+    resolve: &(dyn Fn(u64) -> Option<u64> + Sync),
     high_water: u64,
 ) -> Result<ResolvedArtifact> {
-    let entities = |ids: &[u64], what: &str| -> Result<Vec<EntityId>> {
-        ids.iter()
-            .map(|&source| {
-                resolve(source).map(EntityId::new).ok_or_else(|| {
-                    BuildError::Invalid(format!(
-                        "{layer} level {level} artifact {key}: {what} names entity {source}, which \
-                         this build did not assign — the batch is refused rather than published \
-                         without it, a dropped member moving both the count a viewer is shown and \
-                         the size a proportional criterion divides by"
-                    ))
-                })
-            })
-            .collect()
+    let refuse = |source: u64, what: &str| -> BuildError {
+        BuildError::Invalid(format!(
+            "{layer} level {level} artifact {key}: {what} names entity {source}, which this build \
+             did not assign — the batch is refused rather than published without it, a dropped \
+             member moving both the count a viewer is shown and the size a proportional criterion \
+             divides by"
+        ))
+    };
+    // **Rewritten where they sit.** A source id and the entity it resolves to are both `u64`, so
+    // the plan's vector is the resolved one and no second allocation of the corpus's whole
+    // membership exists to hold beside it.
+    let in_place = |ids: &mut Vec<u64>, what: &str| -> Result<()> {
+        for id in ids.iter_mut() {
+            let source = *id;
+            *id = resolve(source).ok_or_else(|| refuse(source, what))?;
+        }
+        Ok(())
     };
 
-    let members = match &artifact.membership {
-        PlannedMembership::Rows(ids) => entities(ids, "membership")?,
-        PlannedMembership::Included(ids) => entities(ids, "membership")?,
+    let members = match std::mem::take(&mut artifact.membership) {
+        // The member sources' rows are in the merged table by now, resolved and sorted by the
+        // merge — there is nothing here to do for them and nothing here to hold.
+        PlannedMembership::Rows => ResolvedMembers::Table,
+        PlannedMembership::Included(mut ids) => {
+            in_place(&mut ids, "membership")?;
+            // **Sorted here, once, and not deduped.** Two readers want it in order — the
+            // containment pass, which walks parent and child together instead of hashing a set per
+            // parent, and `bitmap_of_entities`, which sorts before its bulk add. Deduping would be
+            // wrong: a containment violation counts member *entries* that escape, duplicates
+            // included, and that is the number an operator is given.
+            ids.sort_unstable();
+            ResolvedMembers::Inline(ids)
+        }
         // **An excluded id this build did not assign refuses the build**, on the same rule an
         // unknown member does and for a sharper reason: an exclusion that resolves to nothing
         // silently *widens* the membership by the item it was meant to keep out.
-        PlannedMembership::Excluded(ids) => {
-            let excluded: std::collections::HashSet<u64> = entities(ids, "exclusion")?
-                .into_iter()
-                .map(|e| e.raw())
-                .collect();
-            (0..high_water)
-                .filter(|entity| !excluded.contains(entity))
-                .map(EntityId::new)
-                .collect()
+        //
+        // ⊘ **The complement is materialised in memory, and it is the one membership that still
+        // is.** It is `high_water` entities minus a handful, so a corpus's worth of them could not
+        // be held whichever side of the disk they sat — an `excluding` spelling is an authored one,
+        // one row per artifact in a file somebody wrote, and the corpora that reach the spill do
+        // not use it.
+        PlannedMembership::Excluded(mut ids) => {
+            in_place(&mut ids, "exclusion")?;
+            let excluded: std::collections::HashSet<u64> = ids.into_iter().collect();
+            ResolvedMembers::Inline(
+                (0..high_water)
+                    .filter(|entity| !excluded.contains(entity))
+                    .collect(),
+            )
         }
     };
 
     let mut contents = Vec::with_capacity(artifact.contents.len());
-    for (rank, content) in artifact.contents.iter().enumerate() {
+    for (rank, content) in artifact.contents.iter_mut().enumerate() {
         if content.values.is_empty() && content.generated_from.is_empty() {
             return Err(BuildError::Invalid(format!(
                 "{layer} level {level} artifact {key}: contents[{rank}] is empty, so the ranking \
                  above it names a description that was never supplied"
             )));
         }
+        in_place(&mut content.generated_from, &format!("contents[{rank}]"))?;
         contents.push(IncomingContent::new(
-            content.values.clone(),
-            entities(&content.generated_from, &format!("contents[{rank}]"))?,
+            std::mem::take(&mut content.values),
+            std::mem::take(&mut content.generated_from)
+                .into_iter()
+                .map(EntityId::new),
         ));
     }
 
     Ok(ResolvedArtifact {
         members,
         contents,
-        attached_to: artifact.attached_to.clone(),
-        parent_key: artifact.parent_key.clone(),
-        shape: artifact.shape,
+        attached_to: artifact.attached_to.take(),
+        parent_keys: std::mem::take(&mut artifact.parent_keys),
+        shape: artifact.shape.take(),
     })
 }
 
 /// The same artifact as the registry takes it. A membership is a list of entities by this point,
 /// so there is nothing here to decide.
-fn incoming_artifact(key: &str, artifact: &ResolvedArtifact) -> IncomingArtifact {
-    let mut result = match artifact.attached_to.clone() {
-        None => IncomingArtifact::with_content(
-            Some(key.to_string()),
-            artifact.members.iter().copied(),
-            artifact.contents.clone(),
-        ),
-        Some(attached_to) => IncomingArtifact::attached(
-            Some(key.to_string()),
-            artifact.members.iter().copied(),
-            artifact.contents.clone(),
-            attached_to,
-        ),
+///
+/// **The members are read into `buf` and turned into a bitmap here**, which is what keeps a level's
+/// publication holding a level of *bitmaps* and never a level of entity vectors: the vector is one
+/// artifact's, reused, and the `EntityId` newtype goes back on the raw ids at the one boundary that
+/// leaves this module.
+fn incoming_artifact(
+    key: &str,
+    artifact: &mut ResolvedArtifact,
+    index: usize,
+    table: &spill::MemberTable,
+    scratch: &mut Vec<u8>,
+    buf: &mut Vec<u64>,
+) -> Result<IncomingArtifact> {
+    load_members(artifact, index, table, scratch, buf)?;
+    let members = buf.iter().copied().map(EntityId::new);
+    let contents = std::mem::take(&mut artifact.contents);
+    let mut result = match artifact.attached_to.take() {
+        None => IncomingArtifact::with_content(Some(key.to_string()), members, contents),
+        Some(attached_to) => {
+            IncomingArtifact::attached(Some(key.to_string()), members, contents, attached_to)
+        }
     };
-    result.parent_key = artifact.parent_key.clone();
-    result.shape = artifact.shape;
-    result
+    result.parent_keys = std::mem::take(&mut artifact.parent_keys);
+    result.shape = artifact.shape.take();
+    Ok(result)
 }
 
-/// Pack every level's memberships into one extent and fsync it — the same format, one file per
-/// level, that a control-plane publication writes.
+/// One artifact's members into `buf`, from wherever [`ResolvedMembers`] says they are — ascending,
+/// duplicates kept.
+///
+/// `scratch` is the caller's byte buffer for the table's extent, reused across artifacts so a pass
+/// over a level costs one allocation and not one per artifact.
+fn load_members(
+    artifact: &ResolvedArtifact,
+    index: usize,
+    table: &spill::MemberTable,
+    scratch: &mut Vec<u8>,
+    buf: &mut Vec<u64>,
+) -> Result<()> {
+    match &artifact.members {
+        ResolvedMembers::Table => table.read_into(index, scratch, buf),
+        ResolvedMembers::Inline(ids) => {
+            buf.clear();
+            buf.extend_from_slice(ids);
+            Ok(())
+        }
+    }
+}
+
+/// Pack every level's memberships into one extent, fsync it, and **read the store's copies back
+/// through the mapped file** — the same format, one file per level, that a control-plane
+/// publication writes.
+///
+/// **A blob at a time, into the file.** The store answers a level's ordinal *range*
+/// (`pending_ranges`) and encodes an artifact's record where it stands (`encode_pending`), so what
+/// is resident here is one blob and one extent's offset table at 8 bytes an artifact. Asking for
+/// the blobs instead — which is what the online publication does, under a lock it may not hold
+/// across an fsync — encodes every unpublished level of the corpus before the first byte is
+/// written, and then `pack` concatenates each level again: two more copies of every membership in
+/// the bundle, at the stage that is already the build's peak.
+///
+/// **And a mapping at a time, back out of it.** The store is carried from here to the artifact
+/// pass, four stages later ([`PublishedLayers::store`]), holding one Roaring bitmap per artifact
+/// over the corpus: **+1.2 GB of anonymous memory** at the 10⁷ MedCPT sample with 471,778,374
+/// closed MeSH member rows, carried across the build's peak
+/// (`probes/2026-09-02-mapped-memberships/README.md`). The bytes have just been written and
+/// fsynced, so each record's bitmap is replaced by a view over the extent's own bytes
+/// ([`tessera_lifecycle::Members::mapped`]) — one write, no second format, and what stays on the
+/// heap is a container descriptor rather than the members.
+///
+/// ⊘ **A rehousing that does not take is reported and not refused.** Every failure route leaves
+/// the heap bitmap the store already holds, which is the same membership answering the same
+/// questions at the cost this exists to avoid — recoverable and disclosing nothing, so the build
+/// prints the number and carries on (`CLAUDE.md`, *what the strictness is for*). The check that
+/// *is* fail-closed is inside `rehouse_members`: a view whose cardinality differs from the bitmap
+/// it would replace is refused, because a short membership is an artifact served as absent.
 fn write_membership_extents(
-    store: &ArtifactStore,
+    store: &mut ArtifactStore,
     prefix_dir: &Path,
     partition: &str,
     published: &mut PublishedLayers,
 ) -> Result<()> {
-    let (ready, skipped) = store.unpublished();
+    let (ready, skipped) = store.pending_ranges();
     if let Some((layer, level)) = skipped.first() {
         // Unreachable from a build: every artifact of a level is published in one batch, so a
         // level cannot have a hole below its high-water. A refusal rather than an alarm, because a
@@ -1565,14 +2596,30 @@ fn write_membership_extents(
         .join(partition)
         .join("members");
     std::fs::create_dir_all(&dir).map_err(|e| BuildError::io(&dir, e))?;
-    for (index, (layer, level, ordinal_lo, blobs)) in ready.into_iter().enumerate() {
+    let mut rehoused = 0u64;
+    let mut kept = 0u64;
+    for (index, (layer, level, ordinal_lo, count)) in ready.into_iter().enumerate() {
         // **The layer name never reaches the filename.** It is path-shaped — `clusters/a` — so a
         // name-derived path would escape the directory, or collide after escaping.
         let name = format!("members-000000-{index:03}.tsmb");
-        let count = blobs.len() as u32;
-        let bytes = tessera_store::membership::pack(ordinal_lo, &blobs);
         let path = dir.join(&name);
-        tessera_store::write_and_fsync(&path, &bytes).map_err(BuildError::Store)?;
+        let mut writer = tessera_store::membership::PackWriter::create(&path, ordinal_lo, count)
+            .map_err(BuildError::Store)?;
+        for blob in store.encode_pending(&layer, level, ordinal_lo, count) {
+            // Unreachable: `pending_ranges` reports a level with a hole as skipped above rather
+            // than as a range. A refusal rather than an assertion because the alternative is an
+            // extent one blob short of the range it addresses, which serves every ordinal above
+            // the hole as another artifact's membership.
+            let blob = blob.ok_or_else(|| {
+                BuildError::Invalid(format!(
+                    "{layer} level {level} has no record at an ordinal inside the range it \
+                     reported as ready to pack"
+                ))
+            })?;
+            writer.push(&blob).map_err(BuildError::Store)?;
+        }
+        writer.finish().map_err(BuildError::Store)?;
+        rehoused += map_level_memberships(store, &path, &layer, level, &mut kept)?;
         published.paths.push(path);
         published.membership_extents.push(MembershipExtent {
             path: format!("partitions/{partition}/members/{name}"),
@@ -1583,7 +2630,51 @@ fn write_membership_extents(
         });
     }
     tessera_store::fsync_dir(&dir).map_err(BuildError::Store)?;
+    if kept > 0 {
+        eprintln!(
+            "layers: {kept} of {} membership(s) stayed on the heap rather than being read back \
+             through the extent this build just wrote; every answer is unchanged and the build \
+             holds those bitmaps to the end of its run",
+            kept + rehoused
+        );
+    }
     Ok(())
+}
+
+/// One extent's memberships, read back through the mapped file and put into the store in place of
+/// the bitmaps they were encoded from. Returns how many took; `kept` counts the rest.
+///
+/// The pack is held by every view it hands out — an `Arc` per extent, cloned into each `Members` —
+/// so the mapping outlives the store exactly as far as the store's records reach.
+fn map_level_memberships(
+    store: &mut ArtifactStore,
+    path: &Path,
+    layer: &str,
+    level: u32,
+    kept: &mut u64,
+) -> Result<u64> {
+    let pack = std::sync::Arc::new(
+        tessera_store::membership::MembershipPack::open(path).map_err(BuildError::Store)?,
+    );
+    let owner: std::sync::Arc<dyn std::any::Any + Send + Sync> = pack.clone();
+    let mut rehoused = 0;
+    for (ordinal, blob) in pack.iter() {
+        // SAFETY: `blob` is a slice of `pack`'s read-only mapping, `owner` is that same pack, and
+        // the `Members` this produces holds `owner` for as long as it holds the view. The file is
+        // written, fsynced and closed for writing before this runs, and nothing in the build
+        // reopens it for writing.
+        let mapped = tessera_lifecycle::membership::members_bytes(blob)
+            .and_then(|bytes| unsafe { tessera_lifecycle::Members::mapped(bytes, owner.clone()) });
+        let took = match mapped {
+            Some(members) => store.rehouse_members(layer, level, ordinal, members),
+            None => false,
+        };
+        match took {
+            true => rehoused += 1,
+            false => *kept += 1,
+        }
+    }
+    Ok(rehoused)
 }
 
 /// Write every artifact's supplied content as one record-blob extent — the store points use, in an
@@ -1680,7 +2771,7 @@ fn write_content_extent(
 const LEVEL: &str = "level";
 const ATTACHED_LEVEL: &str = "attached_level";
 
-fn batches(
+pub(crate) fn batches(
     path: &Path,
 ) -> Result<impl Iterator<Item = Result<arrow::record_batch::RecordBatch>> + '_> {
     let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
@@ -1832,62 +2923,6 @@ fn optional_ranked_values<'a>(
     optional_list(path, batch, fields, canonical)
 }
 
-/// One bound of an artifact's bounding box, under the canonical name the `fields` map may move.
-///
-/// `Float64Array` only, and a `Float32` column is a refusal rather than a widening: a box read at
-/// single precision covers different tiles at the deep end of the Morton space from the one the
-/// author wrote, and the tiles *are* the membership.
-fn optional_f64<'a>(
-    path: &Path,
-    batch: &'a arrow::record_batch::RecordBatch,
-    fields: &Fields,
-    canonical: &str,
-) -> Result<Option<&'a Float64Array>> {
-    match optional(path, batch, fields, canonical)? {
-        None => Ok(None),
-        Some(array) => typed(path, array, fields.of(canonical)).map(Some),
-    }
-}
-
-/// The four bounds on one artifact row, or `None` where the row declares none.
-///
-/// **All four or none**, and a row carrying some is a refusal: a box assembled from two present
-/// bounds and two defaults is a region nobody wrote, and on a spatial layer that region *is* the
-/// membership.
-fn bbox_at(
-    path: &Path,
-    columns: &[Option<&Float64Array>; 4],
-    row: usize,
-    key: &str,
-) -> Result<Option<Bbox>> {
-    let present: Vec<Option<f64>> = columns
-        .iter()
-        .map(|column| column.filter(|c| !c.is_null(row)).map(|c| c.value(row)))
-        .collect();
-    if present.iter().all(Option::is_none) {
-        return Ok(None);
-    }
-    let [Some(min_x), Some(min_y), Some(max_x), Some(max_y)] = present[..] else {
-        return Err(BuildError::Invalid(format!(
-            "{}: artifact {key} declares some of min_x/min_y/max_x/max_y and not all four. A box \
-             assembled from the ones that are there is a region nobody wrote, and on a layer whose \
-             `shape` declares one that region is the membership",
-            path.display()
-        )));
-    };
-    Bbox::new(min_x, min_y, max_x, max_y)
-        .map(Some)
-        .ok_or_else(|| {
-            BuildError::Invalid(format!(
-                "{}: artifact {key} declares the box [{min_x}, {min_y}, {max_x}, {max_y}], which \
-                 is not one this build will store — every bound must be finite and each maximum at \
-                 or above its minimum. A transposed box is refused rather than swapped: correcting \
-                 it would publish a membership over a region nobody wrote",
-                path.display()
-            ))
-        })
-}
-
 fn value_at(column: &StringArray, row: usize) -> Option<String> {
     (!column.is_null(row)).then(|| column.value(row).to_string())
 }
@@ -2031,12 +3066,12 @@ fn strings_at(path: &Path, column: &ListArray, row: usize, key: &str) -> Result<
 /// row's key costs ~54 s at 10⁹ against ~15 s for an integer hash and ~0.5 s where the value is
 /// already an interned code (measured, 10⁵ distinct ids, single-threaded), and cluster ids are
 /// integers, so the common case would pay the worst of the three. The member pass therefore
-/// converts the **roster** once into [`IntegerRoster`] and looks each point up by the integer it
+/// converts the **roster** once into [`KeyRoster`] and looks each point up by the key it
 /// already has: a point whose cluster is on the roster formats nothing and allocates nothing, and
 /// the only decimal string an open layer writes is the one it mints an artifact under, once per
 /// cluster.
 #[derive(Clone, Copy)]
-enum KeyColumn<'a> {
+pub(crate) enum KeyColumn<'a> {
     Text(&'a StringArray),
     I8(&'a Int8Array),
     I16(&'a Int16Array),
@@ -2117,7 +3152,7 @@ impl<'a> KeyColumn<'a> {
     }
 }
 
-fn key_column<'a>(
+pub(crate) fn key_column<'a>(
     path: &Path,
     batch: &'a arrow::record_batch::RecordBatch,
     fields: &Fields,
@@ -2160,6 +3195,93 @@ fn scalar_key_column<'a>(
 }
 
 // ---------------------------------------------------------------------------------------------
+// The artifact row's `parent`: one key, or a list of them
+// ---------------------------------------------------------------------------------------------
+
+/// An artifact row's `parent` column: a scalar key, or a list of keys — `list<utf8>` or
+/// `list<int>` on the rule an integer key already takes — which a `dag` layer's child needs and
+/// every kind accepts, a scalar being a list of one (`dag-hierarchies.md` §4). The row's grain
+/// stays one row per artifact: several parents are several entries in one cell, and the one-row
+/// refusal in [`read_artifacts`] stands.
+pub(crate) enum ParentColumn<'a> {
+    Scalar(KeyColumn<'a>),
+    Listed(ListShape<'a>, KeyColumn<'a>),
+}
+
+pub(crate) fn parent_column<'a>(
+    path: &Path,
+    batch: &'a arrow::record_batch::RecordBatch,
+    fields: &Fields,
+) -> Result<Option<ParentColumn<'a>>> {
+    let Some(array) = optional(path, batch, fields, "parent")? else {
+        return Ok(None);
+    };
+    let name = fields.of("parent");
+    Ok(Some(match array.data_type() {
+        arrow::datatypes::DataType::List(_) => {
+            let list: &ListArray = typed(path, array, name)?;
+            ParentColumn::Listed(
+                ListShape::Variable(list),
+                scalar_key_column(path, list.values(), name, "the elements of")?,
+            )
+        }
+        arrow::datatypes::DataType::FixedSizeList(..) => {
+            let list: &FixedSizeListArray = typed(path, array, name)?;
+            ParentColumn::Listed(
+                ListShape::Fixed(list),
+                scalar_key_column(path, list.values(), name, "the elements of")?,
+            )
+        }
+        _ => ParentColumn::Scalar(scalar_key_column(path, array, name, "column")?),
+    }))
+}
+
+/// One row's parents, each key once in the order written; empty where the cell is null, which is
+/// a root. An integer is its decimal spelling, as a key is everywhere.
+pub(crate) fn parents_at(
+    path: &Path,
+    column: Option<&ParentColumn<'_>>,
+    row: usize,
+) -> Result<Vec<String>> {
+    let mut keys = match column {
+        None => Vec::new(),
+        Some(ParentColumn::Scalar(key)) => key.key_at(row).into_iter().collect(),
+        Some(ParentColumn::Listed(shape, values)) => {
+            let range = match shape {
+                ListShape::Variable(list) => {
+                    if list.is_null(row) {
+                        return Ok(Vec::new());
+                    }
+                    let offsets = list.value_offsets();
+                    offsets[row] as usize..offsets[row + 1] as usize
+                }
+                ListShape::Fixed(list) => {
+                    if list.is_null(row) {
+                        return Ok(Vec::new());
+                    }
+                    let width = list.value_length() as usize;
+                    row * width..(row + 1) * width
+                }
+            };
+            range
+                .map(|index| {
+                    values.key_at(index).ok_or_else(|| {
+                        BuildError::Invalid(format!(
+                            "{}: row {row}'s parent list holds a null entry; a parent is named \
+                             or the entry is left out, and a null here would be an edge to \
+                             nothing",
+                            path.display()
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<String>>>()?
+        }
+    };
+    dedup_keys(&mut keys);
+    Ok(keys)
+}
+
+// ---------------------------------------------------------------------------------------------
 // A list key column: the artifacts a point belongs to, and the edges between them
 // ---------------------------------------------------------------------------------------------
 
@@ -2183,7 +3305,7 @@ struct ListedKeys<'a> {
     meaning: ListMeaning,
 }
 
-enum ListShape<'a> {
+pub(crate) enum ListShape<'a> {
     /// A `List`: its rows may differ in length, which is what a lineage is.
     Variable(&'a ListArray),
     /// A `FixedSizeList`: every row has the arity the type states.
@@ -2302,68 +3424,77 @@ fn member_keys<'a>(
     }))
 }
 
-/// One member row's key, resolved to the artifact it names.
-///
-/// **An integer key resolves to an index and never to a string.** The roster is converted once per
-/// layer ([`IntegerRoster`]) and a point's key is looked up as the integer it already is, so a
-/// point whose cluster is known formats nothing and allocates nothing — which is the whole reason
-/// the reader takes an integer column at all. A text key allocates its address exactly as it always
-/// has, there being nothing to intern it against.
-enum Member {
-    Interned(usize),
-    Named(Address),
-}
-
-impl Member {
-    fn address<'a>(&'a self, roster: &'a Option<IntegerRoster>) -> &'a Address {
-        match self {
-            Member::Named(address) => address,
-            Member::Interned(index) => roster
-                .as_ref()
-                .expect("an interned member came from the roster it is read against")
-                .address(*index),
-        }
-    }
-}
-
-/// The layer's artifacts, indexed by the integer their keys spell.
+/// The layer's artifacts, indexed by what their keys spell — the integer, and the text.
 ///
 /// **Built once, before the first member row is read**, which is what keeps the per-point path free
-/// of formatting: a point's integer key is looked up as an integer, and the address it finds is the
-/// one the roster was planned under. The addresses sit in an arena and are named by index, so a
-/// row's several keys can be held at once without cloning one of them.
-struct IntegerRoster {
-    by_key: BTreeMap<(u32, i128), usize>,
-    addresses: Vec<Address>,
+/// of formatting *and* of allocation. A point's integer key is looked up as the integer it already
+/// is; a text key is looked up as a borrowed `&str`. Either way the answer is an index into the
+/// plan's own arena, so a row's several keys are held at once as `usize`s and the artifact they
+/// name is written through without a second lookup.
+///
+/// **The text half is why the Overture rung's layers stage was what it was.** Before it, every
+/// member entry built `(layer.to_string(), level, key.to_string())` and probed a `BTreeMap` whose
+/// comparison walks two heap `String`s — three times over, counting the membership write and the
+/// lineage — at 3×10⁸ entries.
+struct KeyRoster {
+    by_integer: BTreeMap<(u32, i128), usize>,
+    /// `level → key → plan index`, nested so the lookup borrows: a `HashMap<Box<str>, _>` answers
+    /// a `&str`, where a `(u32, String)` tuple key would allocate on every probe — which is the
+    /// whole point of interning the text path.
+    ///
+    /// **`FxHashMap`, because this is probed once per member entry** and the standard hasher is
+    /// SipHash — a keyed hash whose HashDoS resistance buys nothing over an artifact roster that
+    /// came out of the caller's own file. The map is probed and never iterated, so the weaker
+    /// hasher's ordering is unobservable.
+    by_text: BTreeMap<u32, rustc_hash::FxHashMap<Box<str>, usize>>,
 }
 
-impl IntegerRoster {
-    fn of_layer(layer: &str, plan: &LayerPlan) -> IntegerRoster {
-        let mut roster = IntegerRoster {
-            by_key: BTreeMap::new(),
-            addresses: Vec::new(),
+impl KeyRoster {
+    /// **Built once, over the layer's whole planned roster**, integer and text keys alike.
+    fn of_layer(layer: &str, plan: &LayerPlan) -> KeyRoster {
+        let mut roster = KeyRoster {
+            by_integer: BTreeMap::new(),
+            by_text: BTreeMap::new(),
         };
-        for address in plan.artifacts.keys().filter(|a| a.0 == layer) {
+        for (address, index) in plan.artifacts.iter().filter(|(a, _)| a.0 == layer) {
             if let Some(value) = canonical_integer(&address.2) {
-                roster.insert(address.1, value, address.clone());
+                roster.by_integer.insert((address.1, value), *index);
             }
+            roster
+                .by_text
+                .entry(address.1)
+                .or_default()
+                .insert(address.2.as_str().into(), *index);
         }
         roster
     }
 
     fn get(&self, level: u32, value: i128) -> Option<usize> {
-        self.by_key.get(&(level, value)).copied()
+        self.by_integer.get(&(level, value)).copied()
     }
 
-    fn insert(&mut self, level: u32, value: i128, address: Address) -> usize {
-        let index = self.addresses.len();
-        self.addresses.push(address);
-        self.by_key.insert((level, value), index);
+    fn text(&self, level: u32, key: &str) -> Option<usize> {
+        self.by_text.get(&level)?.get(key).copied()
+    }
+
+    fn insert(&mut self, level: u32, value: i128, address: Address, index: usize) -> usize {
+        self.by_integer.insert((level, value), index);
+        self.by_text
+            .entry(level)
+            .or_default()
+            .insert(address.2.as_str().into(), index);
         index
     }
 
-    fn address(&self, index: usize) -> &Address {
-        &self.addresses[index]
+    fn insert_text(&mut self, level: u32, key: &str, address: Address, index: usize) -> usize {
+        if let Some(value) = canonical_integer(&address.2) {
+            self.by_integer.insert((level, value), index);
+        }
+        self.by_text
+            .entry(level)
+            .or_default()
+            .insert(key.into(), index);
+        index
     }
 }
 
@@ -2396,6 +3527,12 @@ fn undeclared_key(path: &Path, address: &Address) -> BuildError {
 /// **A key is required**, and its absence is a refusal rather than a generated name: an artifact
 /// published without one can be named by no edge and matched by no later build, and the caller is
 /// the only party who knows what it should be called.
+/// The key at `row`, or its row number where the row names none — for the check's report, where
+/// a nameless row is reported rather than refused.
+pub(crate) fn key_at(key: &KeyColumn, row: usize) -> String {
+    key.key_at(row).unwrap_or_else(|| format!("row {row}"))
+}
+
 fn address(
     path: &Path,
     layer: &str,
@@ -2415,4 +3552,435 @@ fn address(
         level.map_or(0, |c| number_at(c, row)),
         key,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{ArtifactSource, InlineArtifact, LayerSources};
+    use tessera_lifecycle::membership::ArtifactShapes;
+    use tessera_spatial::{AlignedSquare, Bounds, Projection};
+    use tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES;
+
+    /// A triangle whose diagonal is straight in the longitude/latitude plane and a curve in the
+    /// frame — 8°W 50°N → 2°E 58°N → 8°W 58°N, the fixture `projected_build.rs` measures the two
+    /// readings apart on. It is in degrees, so on a projected view it is a `wgs84` declaration or
+    /// nothing: read as frame coordinates it falls wholly outside the `[0, 1]` unit square.
+    const UK: &str = "POLYGON ((-8 50, 2 58, -8 58, -8 50))";
+
+    /// A layer whose membership *is* the polygon, and one that merely draws it, declared as alike
+    /// as the two can be: one view, one polygon, one key, one space.
+    fn two_layers(space: Option<&str>) -> (Vec<LayerDeclaration>, Vec<LayerSources>) {
+        let common = serde_json::json!({
+            "views": ["world"],
+            "visibility": null,
+            "artifact_visibility": { "field": null, "default": "inherited" },
+            "require_member_visibility": null,
+            "hierarchy": { "kind": "flat", "prune_children": false },
+        });
+        let mut selects = common.clone();
+        selects["name"] = serde_json::json!("regions/selects");
+        selects["membership"] = serde_json::json!("spatial");
+        selects["shape"] = serde_json::json!({ "kind": "polygon" });
+        let mut draws = common;
+        draws["name"] = serde_json::json!("regions/draws");
+        draws["membership"] = serde_json::json!("enumerated");
+        draws["content"] = serde_json::json!({
+            "computed": [],
+            "supplied": [{
+                "name": "outline",
+                "type": "polygon",
+                "require_member_visibility": "inherited"
+            }],
+            "withdraw_on_member_deletion": true
+        });
+        let declarations = [selects, draws]
+            .into_iter()
+            .map(|d| serde_json::from_value(d).expect("the fixture declaration is well-formed"))
+            .collect();
+
+        let row = |shape: serde_json::Value| -> InlineArtifact {
+            let mut row = serde_json::json!({ "key": "uk", "space": space });
+            for (k, v) in shape.as_object().unwrap() {
+                row[k] = v.clone();
+            }
+            serde_json::from_value(row).expect("the fixture row is well-formed")
+        };
+        let sources = vec![
+            LayerSources {
+                name: "regions/selects".to_string(),
+                artifacts: Some(ArtifactSource::Inline(vec![row(
+                    serde_json::json!({ "wkt": UK }),
+                )])),
+                members: None,
+            },
+            LayerSources {
+                name: "regions/draws".to_string(),
+                artifacts: Some(ArtifactSource::Inline(vec![row(
+                    serde_json::json!({ "contents": [[UK]] }),
+                )])),
+                members: None,
+            },
+        ];
+        (declarations, sources)
+    }
+
+    /// The frame coordinates each layer's `uk` ended up on: the membership shape's canonical
+    /// bytes, and the authored content's read back out of the slot it was written into.
+    fn canonical_pair(
+        space: Option<&str>,
+        projection: Projection,
+        extent: Bounds,
+    ) -> Result<(Vec<u8>, Vec<u8>)> {
+        let (declarations, sources) = two_layers(space);
+        // These fixtures exercise the shape path and never reach the member spill; the scratch
+        // directory and budget are what `read` needs to construct one at all.
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let plan = read(
+            &declarations,
+            &sources,
+            &BTreeMap::new(),
+            &[tessera_store::derived::ViewFrame::new(
+                "world", projection, extent,
+            )],
+            DEFAULT_MAX_SHAPE_VERTICES,
+            scratch.path(),
+            1 << 30,
+        )?;
+        let body = |layer: &str| -> &PlannedArtifact {
+            let index = plan.artifacts[&(layer.to_string(), 0, "uk".to_string())];
+            &plan.bodies[index]
+        };
+        let selects = body("regions/selects")
+            .shape
+            .as_ref()
+            .expect("the membership shape")
+            .for_view("world")
+            .expect("the one view")
+            .to_vec();
+        let draws = ArtifactShapes::from_content_text(&body("regions/draws").contents[0].values[0])
+            .expect("the authored slot holds canonical bytes, not the caller's WKT")
+            .for_view("world")
+            .expect("the one view")
+            .to_vec();
+        Ok((selects, draws))
+    }
+
+    fn world() -> Bounds {
+        AlignedSquare::WORLD.bounds()
+    }
+
+    fn unprojected() -> Bounds {
+        Bounds {
+            x_min: 0.0,
+            x_max: 1000.0,
+            y_min: 0.0,
+            y_max: 1000.0,
+        }
+    }
+
+    /// **An authored shape is read in the space its row declares, exactly as the membership shape
+    /// beside it is** (`polygon-membership.md` §6.1): the same degrees in through both, the same
+    /// canonical bytes out. A drawing and the membership it came from are written in one
+    /// coordinate system by one producer, so a build that projected the second and not the first
+    /// would place a ±180 × ±90 outline in a corner of the `[0, 1]` frame — refusing nothing and
+    /// reporting nothing, R12's degrees-looking report being blind on a projected view.
+    #[test]
+    fn an_authored_shape_is_read_in_the_space_its_row_declares() {
+        let (selects, draws) = canonical_pair(Some("wgs84"), Projection::WebMercator, world())
+            .expect("a `wgs84` polygon canonicalises on a projected view");
+        assert_eq!(selects, draws);
+        // And both reached the frame: read as view coordinates these degrees are wholly outside
+        // the unit square, and the equality above would hold with the pair collapsed to nothing.
+        assert!(
+            selects.len() > 64,
+            "the densified triangle is {} bytes; it did not reach the frame",
+            selects.len()
+        );
+    }
+
+    /// **A shape in view space is what it has always been**, whichever kind declares it — the
+    /// regression guard on every authored shape written before a space could be declared at all.
+    /// It holds under either reading of the space, which is the point: it is what must not move.
+    #[test]
+    fn an_authored_shape_in_view_space_is_unchanged() {
+        let (selects, draws) = canonical_pair(None, Projection::None, unprojected())
+            .expect("a view-space polygon canonicalises on any view");
+        assert_eq!(selects, draws);
+        // `space = "view"` written out is the same declaration as none written at all.
+        let (_, spelled) = canonical_pair(Some("view"), Projection::None, unprojected())
+            .expect("the default spelled out");
+        assert_eq!(draws, spelled);
+    }
+
+    /// **A published membership is read back through the extent this build has just written**, and
+    /// answers exactly what the heap bitmap it replaced did.
+    ///
+    /// The guard that matters is the *equality*: a view over the wrong bytes would be a membership
+    /// whose masked count is low for every viewer, which the existence criterion renders as absent
+    /// with nothing anywhere to notice. The `is_mapped` assertion is the second half — without it
+    /// the rehousing could quietly stop taking and only a memory measurement would ever say so.
+    #[test]
+    fn a_published_membership_is_read_back_through_the_extent_it_was_written_to() {
+        let declaration: LayerDeclaration = serde_json::from_value(serde_json::json!({
+            "name": "clusters/a",
+            "views": ["world"],
+            "visibility": null,
+            "artifact_visibility": { "field": null, "default": "inherited" },
+            "require_member_visibility": null,
+            "hierarchy": { "kind": "flat", "prune_children": false },
+            "membership": "enumerated",
+        }))
+        .expect("the fixture declaration is well-formed");
+        let row = |key: &str, members: &[u64]| -> InlineArtifact {
+            serde_json::from_value(serde_json::json!({ "key": key, "members": members }))
+                .expect("the fixture row is well-formed")
+        };
+        let sources = vec![LayerSources {
+            name: "clusters/a".to_string(),
+            artifacts: Some(ArtifactSource::Inline(vec![
+                row("a", &[1, 2, 3, 900]),
+                row("b", &[4, 5]),
+            ])),
+            members: None,
+        }];
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let prefix = tempfile::tempdir().expect("a prefix directory");
+        let mut plan = read(
+            std::slice::from_ref(&declaration),
+            &sources,
+            &BTreeMap::new(),
+            &[tessera_store::derived::ViewFrame::new(
+                "world",
+                Projection::None,
+                AlignedSquare::WORLD.bounds(),
+            )],
+            DEFAULT_MAX_SHAPE_VERTICES,
+            scratch.path(),
+            1 << 30,
+        )
+        .expect("an enumerated layer with two inline artifacts reads");
+        let published = publish(
+            &mut plan,
+            &|source| Some(source),
+            1_000,
+            prefix.path(),
+            "default",
+            &["world".to_string()],
+            &BTreeMap::new(),
+        )
+        .expect("two artifacts publish");
+
+        let members: Vec<(u32, Vec<u32>, bool)> = published
+            .store
+            .level("clusters/a", 0)
+            .map(|(ordinal, record)| {
+                (
+                    ordinal,
+                    record.members.iter().collect(),
+                    record.members.is_mapped(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            members,
+            vec![(0, vec![1, 2, 3, 900], true), (1, vec![4, 5], true),],
+            "each membership must be the set it was published with, read through the mapping"
+        );
+    }
+
+    /// The drawing layer on its own, so that a refusal below is the authored path's own and not
+    /// the membership shape beside it reaching the same check first.
+    /// **The mix of a projected view and an embedding is refused at the layer's declaration**
+    /// (decision 0111), before a row is read — so the message names the layer and both views and
+    /// not a key nobody asked about.
+    #[test]
+    fn a_shape_layer_over_a_projected_and_an_unprojected_view_is_refused_by_name() {
+        let (mut declarations, sources) = two_layers(Some("wgs84"));
+        for declaration in &mut declarations {
+            declaration.views = vec!["world".to_string(), "embedding".to_string()];
+        }
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let error = read(
+            &declarations,
+            &sources,
+            &BTreeMap::new(),
+            &[
+                tessera_store::derived::ViewFrame::new(
+                    "world",
+                    Projection::WebMercator,
+                    AlignedSquare::WORLD.bounds(),
+                ),
+                tessera_store::derived::ViewFrame::new(
+                    "embedding",
+                    Projection::None,
+                    Bounds {
+                        x_min: -40.0,
+                        x_max: 40.0,
+                        y_min: -40.0,
+                        y_max: 40.0,
+                    },
+                ),
+            ],
+            DEFAULT_MAX_SHAPE_VERTICES,
+            scratch.path(),
+            1 << 30,
+        )
+        .err()
+        .expect("no geometry spans the two kinds of space");
+        let message = error.to_string();
+        assert!(message.contains("regions/selects"), "{message}");
+        assert!(message.contains("'world'"), "{message}");
+        assert!(message.contains("'embedding'"), "{message}");
+    }
+
+    fn draws_only(wkt: &str, projection: Projection, extent: Bounds) -> BuildError {
+        let (declarations, mut sources) = two_layers(Some("wgs84"));
+        sources.retain(|s| s.name == "regions/draws");
+        sources[0].artifacts = Some(ArtifactSource::Inline(vec![serde_json::from_value(
+            serde_json::json!({ "key": "uk", "space": "wgs84", "contents": [[wkt]] }),
+        )
+        .expect("the fixture row is well-formed")]));
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        read(
+            &declarations,
+            &sources,
+            &BTreeMap::new(),
+            &[tessera_store::derived::ViewFrame::new(
+                "world", projection, extent,
+            )],
+            DEFAULT_MAX_SHAPE_VERTICES,
+            scratch.path(),
+            1 << 30,
+        )
+        .err()
+        .expect("the declaration is refused")
+    }
+
+    /// A `wgs84` authored shape on a view with no projection is refused naming the view's own
+    /// declaration: such a view has one space and nothing to convert a degree from
+    /// (`polygon-membership.md` §4.3). The refusal is the membership path's, reached because the
+    /// space now reaches it.
+    #[test]
+    fn an_authored_wgs84_shape_on_an_unprojected_view_is_refused() {
+        let message = draws_only(UK, Projection::None, unprojected()).to_string();
+        assert!(message.contains("`projection` is `none`"), "{message}");
+        assert!(message.contains("regions/draws"), "{message}");
+    }
+
+    /// A `wgs84` coordinate outside ±180 × ±90 is not a coordinate, and is refused where the
+    /// authored shape is read (`projections.md` §2) — not clamped to the frame as a view-space
+    /// coordinate would be.
+    #[test]
+    fn an_authored_wgs84_coordinate_outside_the_range_is_refused() {
+        let outside = "POLYGON ((-8 50, 2 91, -8 91, -8 50))";
+        let message = draws_only(outside, Projection::WebMercator, world()).to_string();
+        assert!(message.contains("not a coordinate"), "{message}");
+    }
+
+    /// One run from a list of `(artifact, sources)` records.
+    fn run(dir: &Path, seq: usize, records: &[(u32, Vec<u64>)]) -> spill::SpillReceipt {
+        let mut writer =
+            spill::MemberRunWriter::create(&dir.join(format!("run-{seq:04}.spill"))).unwrap();
+        for (index, sources) in records {
+            writer.push(*index, sources).unwrap();
+        }
+        writer.finish().unwrap()
+    }
+
+    /// Drain a merge into `(artifact, sources)` records, sorting each artifact's sources — which
+    /// is what both callers do, one before writing an intermediate run and one after resolving.
+    fn drain(receipts: &[spill::SpillReceipt]) -> Vec<(u32, Vec<u64>)> {
+        let mut merge = MemberRunMerge::open(receipts).unwrap();
+        let mut out = Vec::new();
+        while merge.next_artifact().unwrap() {
+            merge.sort_sources();
+            out.push((merge.index(), merge.sources().to_vec()));
+        }
+        out
+    }
+
+    /// **An artifact is yielded once, with every run's sources for it, and duplicates survive.**
+    /// The merge is what makes a membership out of a stream, so a pair it drops is a masked count
+    /// short and a pair it collapses is a containment report that disagrees with the operator's
+    /// own file.
+    #[test]
+    fn the_merge_gathers_an_artifact_from_every_run_that_holds_it() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let receipts = vec![
+            run(
+                temp.path(),
+                0,
+                &[(0, vec![5, 9]), (2, vec![1]), (7, vec![4])],
+            ),
+            run(temp.path(), 1, &[(0, vec![3]), (7, vec![4, 6])]),
+            run(temp.path(), 2, &[(1, vec![8])]),
+        ];
+        assert_eq!(
+            drain(&receipts),
+            vec![
+                (0, vec![3, 5, 9]),
+                (1, vec![8]),
+                (2, vec![1]),
+                // Named by both runs, and the pair is two member entries rather than one.
+                (7, vec![4, 4, 6]),
+            ]
+        );
+    }
+
+    /// **The merge's output is a function of the runs' contents and not of their order.** A k-way
+    /// merge is where an ordering assumption gets made implicitly, and an ordinal that moved with
+    /// one would be a corpus whose ids depend on how the spill happened to window — which I9 does
+    /// not allow.
+    #[test]
+    fn the_merge_yields_the_same_membership_whatever_order_the_runs_are_in() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let records: Vec<Vec<(u32, Vec<u64>)>> = vec![
+            vec![(0, vec![5, 9]), (3, vec![1, 1])],
+            vec![(0, vec![3]), (1, vec![7]), (3, vec![2])],
+            vec![(1, vec![0]), (3, vec![4])],
+        ];
+        let forward: Vec<spill::SpillReceipt> = records
+            .iter()
+            .enumerate()
+            .map(|(seq, r)| run(temp.path(), seq, r))
+            .collect();
+        let reversed: Vec<spill::SpillReceipt> = records
+            .iter()
+            .rev()
+            .enumerate()
+            .map(|(seq, r)| run(temp.path(), 10 + seq, r))
+            .collect();
+        assert_eq!(drain(&forward), drain(&reversed));
+    }
+
+    /// **The cascade is the same merge, and it holds every pair across a reduction.** Nothing
+    /// measured reaches it — GeoNames spills two runs against a fan-in of 128 — so the only
+    /// exercise it gets is this one, and it feeds the memberships every masked count divides by.
+    #[test]
+    fn a_cascade_reduces_the_runs_and_loses_no_pair() {
+        let temp = tempfile::TempDir::new().unwrap();
+        // Two full passes' worth: each run names three artifacts drawn from a space small enough
+        // that every artifact is in most runs, which is the case a cascade has to gather.
+        let runs = MEMBER_MERGE_FAN_IN * 2 + 3;
+        let receipts: Vec<spill::SpillReceipt> = (0..runs)
+            .map(|seq| {
+                let records: Vec<(u32, Vec<u64>)> = (0..3)
+                    .map(|i| ((seq as u32 + i) % 5, vec![seq as u64, seq as u64]))
+                    .collect::<std::collections::BTreeMap<u32, Vec<u64>>>()
+                    .into_iter()
+                    .collect();
+                run(temp.path(), seq, &records)
+            })
+            .collect();
+        let direct = drain(&receipts);
+        let cascaded = cascade_member_runs(&receipts, temp.path()).unwrap();
+        assert!(cascaded.len() <= MEMBER_MERGE_FAN_IN, "the cascade reduces");
+        assert_eq!(drain(&cascaded), direct);
+        assert_eq!(
+            direct.iter().map(|(_, s)| s.len() as u64).sum::<u64>(),
+            receipts.iter().map(|r| r.count).sum::<u64>(),
+            "every pair the runs held came out of the cascade"
+        );
+    }
 }

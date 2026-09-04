@@ -155,9 +155,30 @@ impl<'a> DescriptorResolver<'a> {
 pub struct BufferedItem {
     pub terms: Vec<TermId>,
     pub view: String,
-    pub x: f32,
-    pub y: f32,
+    /// **This row joined an entity that already exists to a second view** (`views.md` §4) — it
+    /// carries geometry and nothing else.
+    ///
+    /// The entity, its label and its entity-scoped attributes are the ones it already had, so a
+    /// join carries no descriptors, contributes no postings and no filter-column value, and is
+    /// invisible to every entity-space walk over this buffer ([`IngestBuffer::get`] and
+    /// [`IngestBuffer::iter`] answer with the entity's *own* row). That is structural rather than
+    /// disciplinary: a join that contributed terms would be a re-label with no overlay entry —
+    /// exactly what decision 0047 makes a delete plus a re-ingest — and the shape here is what
+    /// makes it unreachable.
+    pub join: bool,
+    pub x: f64,
+    pub y: f64,
     pub scalars: Vec<WalScalar>,
+    /// This row's values for the **group-scoped** attribute families of its view's group
+    /// ([`WalRow::scoped`], `views.md` §5) — positional against
+    /// `MANIFEST.groups[..].scoped_scalars` in manifest order, and empty everywhere no family is
+    /// in scope.
+    ///
+    /// **Held per `(entity, view)`, which this buffer already is.** A scoped value belongs to the
+    /// pair and not to the entity, so an entity buffered in two views of one group carries each
+    /// view's own value here — including on a **join** row, the one thing a second view's row
+    /// brings with it beyond geometry (`views.md` §4).
+    pub scoped: Vec<WalScalar>,
     /// The caller-supplied external id, or `None` for an item ingested without one (contracts
     /// §3.4 r6) — carried because the **flush** is what writes it into the bundle's external-id
     /// extent and locator, and the flush reads the buffer rather than the WAL.
@@ -206,13 +227,24 @@ pub struct IngestBuffer {
     ///
     /// This does **not** remove the O(buffered) term — the hash table itself is still copied per
     /// close. It removes the per-item deep copy, which is what the measurement says dominates it.
-    items: FxHashMap<EntityId, Arc<BufferedItem>>,
+    /// **Keyed by entity, one entry per view that entity has a row in** — usually exactly one.
+    ///
+    /// An entity may hold a row in several views at once (`views.md` §4: the same point in two
+    /// views is two batches and one `external_id`), and both of them may be awaiting the same
+    /// flush. A map keyed by entity alone would have let the second overwrite the first, losing an
+    /// acked row silently; keyed by `(entity, view)` alone, every entity-space reader here would
+    /// have had to dedupe. The entity's own row — the one that carries its terms — is the first
+    /// element, which is what makes [`IngestBuffer::get`] a lookup rather than a scan.
+    items: FxHashMap<EntityId, Vec<Arc<BufferedItem>>>,
+    /// Rows, not entities: what the occupancy bound counts and what a flush consumes.
+    rows: usize,
 }
 
 impl IngestBuffer {
     pub fn new() -> Self {
         IngestBuffer {
             items: FxHashMap::default(),
+            rows: 0,
         }
     }
 
@@ -231,27 +263,46 @@ impl IngestBuffer {
     /// live-accept path that resolved descriptors once up front); production replay should
     /// normally go through [`Self::insert_row`].
     pub fn insert_row_with_terms(&mut self, row: &WalRow, terms: Vec<TermId>) {
-        self.items.insert(
-            row.entity_id,
-            Arc::new(BufferedItem {
-                terms,
-                external_id: row.external_id.clone(),
-                view: row.view.clone(),
-                x: row.x,
-                y: row.y,
-                scalars: row.scalars.clone(),
-                wal_pos: None,
-            }),
-        );
+        let item = Arc::new(BufferedItem {
+            terms,
+            external_id: row.external_id.clone(),
+            view: row.view.clone(),
+            join: row.join,
+            x: row.x,
+            y: row.y,
+            scalars: row.scalars.clone(),
+            scoped: row.scoped.clone(),
+            wal_pos: None,
+        });
+        let rows = self.items.entry(row.entity_id).or_default();
+        // **One row per (entity, view), and a repeat replaces rather than accumulates.** The
+        // ingest join refuses a second row in a view the entity is already in — that is the arm
+        // the permutation *and* this buffer are both consulted for — so a replacement here is
+        // replay meeting a row it has already seen, never two acked rows for one position.
+        if let Some(existing) = rows.iter_mut().find(|held| held.view == row.view) {
+            *existing = item;
+            return;
+        }
+        // The entity's own row goes first, a join after it, so `get` answers with the row that
+        // carries the entity's terms whatever order the two arrived in.
+        if row.join {
+            rows.push(item);
+        } else {
+            rows.insert(0, item);
+        }
+        self.rows += 1;
     }
 
     /// Record which WAL position `entity`'s row arrived at. No-op if the entity is not buffered,
     /// which is the ordinary case for a stamp arriving after a flush has consumed the row.
-    pub fn set_wal_pos(&mut self, entity: EntityId, wal_pos: u64) {
-        if let Some(item) = self.items.get_mut(&entity) {
-            // Copies only if a published generation still shares this item; at the call site it is
-            // stamped immediately after insert, where the refcount is one and this is in place.
-            Arc::make_mut(item).wal_pos = Some(wal_pos);
+    pub fn set_wal_pos(&mut self, entity: EntityId, view: &str, wal_pos: u64) {
+        if let Some(rows) = self.items.get_mut(&entity) {
+            if let Some(item) = rows.iter_mut().find(|item| item.view == view) {
+                // Copies only if a published generation still shares this item; at the call site it
+                // is stamped immediately after insert, where the refcount is one and this is in
+                // place.
+                Arc::make_mut(item).wal_pos = Some(wal_pos);
+            }
         }
     }
 
@@ -272,6 +323,7 @@ impl IngestBuffer {
         Some(
             self.items
                 .values()
+                .flatten()
                 .try_fold(u64::MAX, |acc, item| item.wal_pos.map(|p| acc.min(p))),
         )
     }
@@ -283,23 +335,97 @@ impl IngestBuffer {
     /// so a range spanning the consumed ids would also take the rows that arrived meanwhile, which
     /// have no geometry and would be lost from both the buffer and every segment.
     pub fn remove(&mut self, entity: EntityId) {
-        self.items.remove(&entity);
+        if let Some(rows) = self.items.remove(&entity) {
+            self.rows -= rows.len();
+        }
     }
 
+    /// Remove one **(entity, view)** row — what a flush's publication does with exactly the rows
+    /// it consumed, and what a dropped view does with the rows that named it.
+    ///
+    /// A flush consumes one view at a time, so removing the entity outright would take a row of
+    /// another view with it — a row that has no geometry, is in no segment, and would be lost from
+    /// both.
+    pub fn remove_in_view(&mut self, entity: EntityId, view: &str) {
+        let Some(rows) = self.items.get_mut(&entity) else {
+            return;
+        };
+        let before = rows.len();
+        rows.retain(|item| item.view != view);
+        self.rows -= before - rows.len();
+        if rows.is_empty() {
+            self.items.remove(&entity);
+        }
+    }
+
+    /// The entity's **own** row — the one carrying its terms, its external id and its scalars —
+    /// or `None` where every buffered row for it is a join (`views.md` §4).
+    ///
+    /// **A join is not an answer here, and that is what keeps a second view out of the
+    /// authorisation path.** A join carries no terms, so returning one would put an entity whose
+    /// label lives in a segment through the buffer's rule and judge it by an empty term set —
+    /// invisible to everyone until the next flush. `None` means "the buffer has no opinion", which
+    /// sends the caller to the fragment that does.
     pub fn get(&self, entity: EntityId) -> Option<&BufferedItem> {
-        self.items.get(&entity).map(|item| &**item)
+        self.items
+            .get(&entity)
+            .and_then(|rows| rows.iter().find(|item| !item.join))
+            .map(|item| &**item)
     }
 
+    /// Every buffered row this entity holds, in **any** view — joins included.
+    ///
+    /// **The scoped cell arm's source** (`views.md` §5, decision 0116). A scoped value is addressed
+    /// by `(entity, attribute, key)`, so the question "does this deployment already hold a value
+    /// for the cell this row names" is asked of every row of the entity whose view resolves to the
+    /// same key, not of the entity's own row alone — which is what [`Self::get`] answers and is a
+    /// different question, about labels.
+    pub fn rows_of(&self, entity: EntityId) -> impl Iterator<Item = &BufferedItem> {
+        self.items
+            .get(&entity)
+            .into_iter()
+            .flat_map(|rows| rows.iter().map(|item| &**item))
+    }
+
+    /// Does this entity hold **any** buffered row?
     pub fn contains(&self, entity: EntityId) -> bool {
         self.items.contains_key(&entity)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&EntityId, &BufferedItem)> {
-        self.items.iter().map(|(entity, item)| (entity, &**item))
+    /// Does this entity hold a buffered row **in this view**? — the commit-window half of the join
+    /// rule's "already in the view" arm (`views.md` §4). A row accepted but not yet flushed is in
+    /// no permutation, and a check that missed it would let two batches in one window hand flush
+    /// two rows for one entity in one view.
+    pub fn contains_in_view(&self, entity: EntityId, view: &str) -> bool {
+        self.items
+            .get(&entity)
+            .is_some_and(|rows| rows.iter().any(|item| item.view == view))
     }
 
+    /// Every entity the buffer has an **opinion** about, with its own row — the entity-space walk
+    /// (`compose`, `filter`), which is about labels and dispositions rather than about geometry.
+    /// An entity whose only buffered rows are joins is absent, exactly as [`Self::get`] is `None`
+    /// for it.
+    pub fn iter(&self) -> impl Iterator<Item = (&EntityId, &BufferedItem)> {
+        self.items.iter().filter_map(|(entity, rows)| {
+            rows.iter()
+                .find(|item| !item.join)
+                .map(|item| (entity, &**item))
+        })
+    }
+
+    /// Every buffered **row**, joins included — the flush's walk, which is about geometry and is
+    /// scoped to one view.
+    pub fn rows(&self) -> impl Iterator<Item = (&EntityId, &BufferedItem)> {
+        self.items
+            .iter()
+            .flat_map(|(entity, rows)| rows.iter().map(move |item| (entity, &**item)))
+    }
+
+    /// **Rows, not entities.** The occupancy bound is about what a flush has to write and what a
+    /// window's clone has to copy, and both are per row.
     pub fn len(&self) -> usize {
-        self.items.len()
+        self.rows
     }
 
     pub fn is_empty(&self) -> bool {

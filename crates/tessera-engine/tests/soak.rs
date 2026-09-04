@@ -106,11 +106,13 @@ fn sustained_ingest_leaves_every_axis_bounded_and_every_item_visible() {
         let row = UnallocatedRow {
             external_id: Some(external_id.as_bytes().to_vec()),
             view: "s0".to_string(),
+            join: None,
             descriptors: descriptors.clone(),
-            x: 3.0 * (round as f32 + 1.0),
+            x: 3.0 * (round as f64 + 1.0),
             y: 7.0,
             scalars: Vec::new(),
             terms: engine.resolve_terms(&descriptors),
+            scoped: Vec::new(),
         };
         let entity = engine
             .accept_ingest(vec![row], external_id.clone(), [round as u8; 32])
@@ -269,11 +271,13 @@ fn without_maintenance_every_axis_grows_one_per_flush() {
         let row = UnallocatedRow {
             external_id: Some(external_id.as_bytes().to_vec()),
             view: "s0".to_string(),
+            join: None,
             descriptors: descriptors.clone(),
-            x: 3.0 * (round as f32 + 1.0),
+            x: 3.0 * (round as f64 + 1.0),
             y: 7.0,
             scalars: Vec::new(),
             terms: engine.resolve_terms(&descriptors),
+            scoped: Vec::new(),
         };
         engine
             .accept_ingest(vec![row], external_id, [round as u8; 32])

@@ -103,13 +103,22 @@ fn flushed_bundle(root: &Path) {
     write_points(&points);
     write_pairs(&pairs);
     let args = BuildArgs {
-        point_fields: Default::default(),
+        arena_order: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points,
+            point_fields: Default::default(),
+            select: None,
+            access: tessera_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: Vec::new(),
-        points,
-        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.clone(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -117,6 +126,7 @@ fn flushed_bundle(root: &Path) {
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
         mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
@@ -178,9 +188,12 @@ fn flushed_bundle(root: &Path) {
         "default",
         "s0",
         FlushInput {
+            incarnation: 0,
             seg_id: "flush-1",
             rows,
-            quantisation: manifest.quantisation,
+            quantisation: manifest
+                .quantisation_of("s0")
+                .expect("the built manifest declares view 's0'"),
             identity_key: &key,
             shard_id: 0,
             scalar_schema: &[],
@@ -217,17 +230,23 @@ fn flushed_bundle(root: &Path) {
         entity_id_low_water: seg0.entity_id_low_water,
         layers: seg0.layers.clone(),
         layer_tombstones: seg0.layer_tombstones.clone(),
+        views: Vec::new(),
+        scoped_columns: Vec::new(),
+        dead_view_incarnations: Vec::new(),
         membership_extents: Vec::new(),
         level_versions: Vec::new(),
         containment_extents: Vec::new(),
         tile_index_extents: Vec::new(),
         row_column_extents: Vec::new(),
+        shape_rows_extents: Vec::new(),
+        shape_held_extents: Vec::new(),
         artifact_record_extents: Vec::new(),
         segments,
         deltas: vec![delta_rel],
         dict_extents: seg0.dict_extents.clone(),
         attr_extents: Vec::new(),
         record_extents: Vec::new(),
+        entity_terms_extents: Vec::new(),
         text_extents: Vec::new(),
         external_id_runs,
         locator_extents: vec![flush.locator_extent.clone()],
@@ -578,6 +597,59 @@ fn a_pairs_file_missing_a_base_pair_is_refused() {
     expect_refusal(&root, "pairs.parquet");
 }
 
+/// §11's other half — **the permutation covers exactly the rows the segments claim** — in its
+/// refusal direction. One entity's slot in `permutation.bin` is overwritten with the row-absent
+/// sentinel, so its row in `columns.arrow` is addressable by no entity at all.
+///
+/// The damage is deliberately the *surjective* one, because it is the only half nothing else
+/// holds: the mapping stays injective and in range, so `Permutation::load`'s header and length
+/// checks and `validate_rows`' aliasing sweep on the read path both still accept the bundle, and
+/// `open_bundle` hands the verifier a row space it is happy with. What is left is a row the
+/// segments count and the row space does not claim.
+///
+/// **The needle is the count check specifically**, and not merely any refusal. The identity
+/// sweep's per-row companion (*"no entity claims this row"*) also meets this damage, so a test
+/// content with an error of any kind would pass with the count check deleted; pinning the message
+/// keeps §11's own clause — the row space claims exactly the rows the segments hold — the thing
+/// under test.
+///
+/// Mutations this kills: dropping or weakening the `claimed != total_rows` refusal — under
+/// `let _ = claimed;` the count check is silent and the refusal comes from the companion instead.
+#[test]
+fn a_permutation_leaving_a_row_unclaimed_is_refused() {
+    let temp = tempfile::TempDir::new().unwrap();
+    flushed_bundle(temp.path());
+    let root = bundle_root(&temp);
+    let rel = "partitions/default/views/s0/permutation.bin";
+    let path = root.join("v00000").join(rel);
+
+    // `permutation.bin` is a 24-byte header, a `u32` per page of directory, zero padding to a
+    // 4 KiB boundary, then the present pages of 2¹⁶ slots each (contracts R4;
+    // `tessera_store::permutation`). The fixture's bound is well under one page, so entity
+    // `ORPHANED`'s slot sits at the payload's start.
+    const PAYLOAD: usize = 4096;
+    const ROW_ABSENT: [u8; 4] = [0xff; 4];
+    const ORPHANED: usize = 3;
+    let mut bytes = fs::read(&path).unwrap();
+    let slot = PAYLOAD + ORPHANED * 4;
+    assert_eq!(
+        u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+        N_ITEMS,
+        "the fixture's base permutation must cover the built entities"
+    );
+    assert_ne!(
+        bytes[slot..slot + 4],
+        ROW_ABSENT,
+        "entity {ORPHANED} must hold a row before this test takes it away, or the damage is no \
+         damage"
+    );
+    bytes[slot..slot + 4].copy_from_slice(&ROW_ABSENT);
+    fs::write(&path, &bytes).unwrap();
+    refresh_digest(&root, rel);
+
+    expect_refusal(&root, "the row space claims");
+}
+
 /// The source binding is specified (correctness-suite §11.1) but its manifest field is not: a
 /// request to check it must refuse loudly, never pretend the binding was checked.
 #[test]
@@ -635,4 +707,195 @@ fn append_dict_extent_repeating_first_descriptor(root: &Path, k: usize) {
         serde_json::to_vec_pretty(&segments).unwrap(),
     )
     .unwrap();
+}
+
+/// **A rendered group-scoped family's lane is verified per (build segment, view)** (`views.md`
+/// §5). The lane is the placement `render` buys, and it is the one artefact whose absence is
+/// *silent*: a segment that does not hold the column is served as a row with no value, which is a
+/// legitimate state for a flushed segment and indistinguishable, at the wire, from a build that
+/// wrote no lane at all. Nothing else in either pass would notice — the digests match, the row
+/// space is a bijection, the identity column is untouched.
+///
+/// Both directions, on one fixture: the intact bundle verifies and counts the lanes it checked,
+/// and the same bundle with one view's column dropped out of `columns.arrow` is refused by name.
+#[test]
+fn a_missing_scoped_render_lane_is_refused_and_an_intact_one_is_counted() {
+    use arrow::array::{Float32Array, StringArray};
+    use tessera_spatial::tiler::ScalarType;
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path();
+    // One points file, a `quarter` discriminator, one value column: the group's two views are two
+    // selections of it (`views.md` §3.1's form B).
+    let points = dir.join("quarters.parquet");
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("quarter", DataType::Utf8, false),
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+        Field::new("heat", DataType::Float32, true),
+    ]));
+    let (mut ids, mut keys) = (Vec::new(), Vec::new());
+    let (mut xs, mut ys, mut heat) = (Vec::new(), Vec::new(), Vec::new());
+    for (slot, key) in ["2026-Q1", "2026-Q2"].into_iter().enumerate() {
+        for e in 0..N_ITEMS {
+            ids.push(e);
+            keys.push(key.to_string());
+            xs.push(((e * 37) % 1000) as f64);
+            ys.push(((e * 53 + slot as u64 * 7) % 1000) as f64);
+            heat.push((e % 3 != 0).then_some(e as f32 + slot as f32));
+        }
+    }
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(ids)),
+            Arc::new(StringArray::from(keys)),
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(Float32Array::from(heat)),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(File::create(&points).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+    let pairs = dir.join("pairs.parquet");
+    write_pairs(&pairs);
+
+    let view = |key: &str| tessera_build::ViewArgs {
+        visibility: None,
+        view_id: format!("quarter:{key}"),
+        projection: tessera_spatial::Projection::None,
+        extent: extent(),
+        points: points.clone(),
+        point_fields: Default::default(),
+        select: Some(tessera_build::config::ViewSelector {
+            column: "quarter".to_string(),
+            value: key.to_string(),
+            keys: vec!["2026-Q1".to_string(), "2026-Q2".to_string()],
+            view_id: format!("quarter:{key}"),
+        }),
+        access: tessera_build::config::AccessInput::relation(pairs.clone()),
+    };
+    let out = dir.join("bundle");
+    build(&BuildArgs {
+        arena_order: Default::default(),
+        views: vec![view("2026-Q1"), view("2026-Q2")],
+        anchor: 0,
+        groups: vec![tessera_build::GroupDescriptor {
+            title: None,
+            visibility: None,
+            name: "quarter".to_string(),
+            members_of: None,
+            views: ["2026-Q1", "2026-Q2"]
+                .into_iter()
+                .map(|key| tessera_build::GroupViewDescriptor {
+                    key: key.to_string(),
+                    visibility: None,
+                    metadata: Default::default(),
+                })
+                .collect(),
+            quantisation: tessera_build::Quantisation {
+                x_min: extent().x_min,
+                x_max: extent().x_max,
+                y_min: extent().y_min,
+                y_max: extent().y_max,
+            },
+            projection: tessera_spatial::Projection::None,
+            metadata: Vec::new(),
+            scoped_scalars: Vec::new(),
+        }],
+        scoped_attributes: vec![tessera_build::ScopedColumnFamily {
+            attribute: tessera_build::config::Attribute {
+                name: "heat".to_string(),
+                title: None,
+                field: None,
+                ty: ScalarType::F32,
+                analyser: None,
+                vocabulary: None,
+                value_set: None,
+                index: false,
+                render: true,
+            },
+            group: "quarter".to_string(),
+            views: vec![0, 1],
+            source: None,
+        }],
+        attribute_sources: Vec::new(),
+        out: out.clone(),
+        limit: None,
+        identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        idset: 1,
+        shard_id: 0,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
+        mint_external_ids: false,
+        emit_oracle_pairs: false,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema: Default::default(),
+    })
+    .expect("a rendered scoped family builds");
+
+    let report = verify_deep(&out, &VerifyOpts::default()).expect("the intact bundle verifies");
+    assert_eq!(
+        report.scoped_render_lanes, 2,
+        "one lane per (build segment, view of the group)"
+    );
+
+    // The damage: the same rows, the same identities, the same row count — with the family's
+    // column dropped out of one view's tail.
+    let rel = "partitions/default/views/quarter/2026-Q1/segments/seg-0/columns.arrow";
+    let path = out.join("v00000").join(rel);
+    let reader = arrow::ipc::reader::FileReader::try_new(File::open(&path).unwrap(), None).unwrap();
+    let batches: Vec<RecordBatch> = reader.map(|b| b.unwrap()).collect();
+    assert_eq!(batches.len(), 1);
+    let held = batches[0].schema();
+    let keep: Vec<usize> = held
+        .fields()
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f.name() != "heat")
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(keep.len(), held.fields().len() - 1, "the lane was there");
+    let stripped = Arc::new(Schema::new(
+        keep.iter()
+            .map(|&i| held.field(i).clone())
+            .collect::<Vec<_>>(),
+    ));
+    let columns = keep
+        .iter()
+        .map(|&i| batches[0].column(i).clone())
+        .collect::<Vec<_>>();
+    let without = RecordBatch::try_new(stripped.clone(), columns).unwrap();
+    let mut writer =
+        arrow::ipc::writer::FileWriter::try_new(File::create(&path).unwrap(), &stripped).unwrap();
+    writer.write(&without).unwrap();
+    writer.finish().unwrap();
+
+    // The digest follows the damage, so what refuses is the missing lane and not the hash.
+    let bytes = fs::read(&path).unwrap();
+    let manifest_path = out.join("v00000").join("MANIFEST.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["files"][rel] =
+        serde_json::json!({ "size": bytes.len(), "sha256": hex_sha256(&bytes) });
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest).unwrap();
+    fs::write(&manifest_path, &manifest_bytes).unwrap();
+    fs::write(
+        out.join("CURRENT"),
+        serde_json::to_vec_pretty(&CurrentPointer {
+            prefix: "v00000".to_string(),
+            manifest_digest: hex_sha256(&manifest_bytes),
+        })
+        .unwrap(),
+    )
+    .unwrap();
+
+    expect_refusal(&out, "does not hold it");
 }

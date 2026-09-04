@@ -1,0 +1,25 @@
+warning: vocabulary 'type': `visibility = "public"` with `value_set = "open"` publishes data-derived value names on nobody's authority (per-point-attributes §3.8, relaxed from a refusal to a warning by owner ruling 2026-08-07). Confirm this is intended
+view 'knn': quantising against x [-18.047295265197754, 20.4786421585083], y [-18.525674991607666, 20.00026243209839]
+        the data spans x [-17.66958999633789, 20.100936889648438], y [-13.0900297164917, 14.564617156982422] — 64252 x 47044 of the 65536 x 65536 cells
+        102117343 point(s) placed, none on the frame's edge
+schema: 6 column(s), 5.12 B/row against the 12 B fixed row (+43%)
+        4.77 GiB per 10^9 items — unalterable without rewriting the corpus
+        every column materialises in EVERY view — including ones whose items carry no value for it (§3.9). Per-view columns need contracts §2.6's per-view enumeration
+stage       source_ids      2.26s  rows=102117343    peak=  1584 MiB
+stage       dictionary     18.13s  rows=12           peak=  1832 MiB
+stage    geometry_read     18.89s  rows=102117343    peak=  4186 MiB
+stage       pairs_pack      0.00s  rows=102117343    peak=  4186 MiB
+stage   signature_sort      3.96s  rows=102117343    peak=  5890 MiB
+stage       assignment     41.01s  rows=102117343    peak=  6274 MiB
+stage       assignment      0.46s  rows=102117343    peak=  6274 MiB
+stage   postings_write      3.10s  rows=102117343    peak=  6274 MiB
+stage     external_ids      0.00s  rows=0            peak=  6274 MiB
+attribute 'publication_year': 98,894,561 of 102,117,343 entities have a value
+attribute 'type': 102,117,343 of 102,117,343 entities have a value
+attribute 'is_oa': 98,925,699 of 102,117,343 entities have a value
+attribute 'openalex_id': 102,117,343 of 102,117,343 entities have a value
+attribute 'title': 102,117,343 of 102,117,343 entities have a value
+attribute 'abstract': 102,117,343 of 102,117,343 entities have a value
+        0 source row(s) named entities this build did not load
+stage   attribute_tail    759.58s  rows=102117343    peak= 24409 MiB
+stage           layers     84.50s  rows=2            peak= 24409 MiB

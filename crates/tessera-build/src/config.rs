@@ -100,9 +100,15 @@
 //! A coordinate is quantised across the view's extent into 32 bits, and quantisation **clamps** —
 //! so two bundles built from one corpus under different extents place the same point in different
 //! cells and both are well-formed. That is why it is declared here and not passed at invocation.
-//! [`Extent::Auto`] is the one value this module cannot resolve on its own: [`resolve_extent`]
-//! reads the view's points source to fit the box, which is legitimate precisely because the
-//! alternative is an operator guessing a frame their data has already decided.
+//! [`Extent::Auto`] and [`Extent::AutoLonLat`] are the values this module cannot resolve on its
+//! own: [`frame_view`] reads the view's points source to fit the box, which is legitimate precisely
+//! because the alternative is an operator guessing a frame their data has already decided.
+//!
+//! **The view's `projection` decides which spellings its `extent` and its `fields` take**
+//! (`projections.md` §2). Under the default, `none`, both are what they have always been. Under a
+//! projection the coordinate columns are `lon`/`lat` and the frame is a box in degrees, snapped
+//! outward to the enclosing aligned square — the two sets do not overlap, and each refusal names
+//! the set the view's own projection admits.
 //!
 //! **A `fields` map says *where*, never *whether*.** The object's own keys assert that a field
 //! exists — `hierarchy` that there are parent edges, `depends_on` that there are attachment edges,
@@ -146,8 +152,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use tessera_plugin::Plugin;
+use tessera_spatial::frame::{snap_outward, Snap};
 use tessera_spatial::tiler::ScalarType;
-use tessera_spatial::{cell, Bounds};
+use tessera_spatial::{cell, Bounds, Projection};
 use tessera_store::vocabulary::VocabularyMinter;
 use tessera_types::layer::{
     ArtifactVisibility, ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind,
@@ -199,6 +207,12 @@ struct ConfigFile {
     defaults: Option<DefaultsBlock>,
     #[serde(default)]
     view: Vec<ViewBlock>,
+    /// `[[view_group]]` — a set of views that share every setting and differ by a key
+    /// (`views.md` §3.1). Beside `[[view]]` rather than inside it: a group is not a view, it
+    /// cannot be named on a viewer verb, and its roster is a key set a plain view has no shape
+    /// for.
+    #[serde(default)]
+    view_group: Vec<ViewGroupBlock>,
     #[serde(default)]
     vocabulary: Vec<VocabularyBlock>,
     #[serde(default)]
@@ -223,6 +237,15 @@ struct DefaultsBlock {
     /// The column an entity id is read from, wherever one is read under the canonical name.
     #[serde(default)]
     entity_id_field: Option<String>,
+    /// The view whose Morton code breaks entity-id ties within a signature group
+    /// ([decision 0112](../decisions/0112-the-anchor-view-orders-a-signature-groups-ids.md)).
+    ///
+    /// Required when the declaration carries more than one view, and **explicit rather than
+    /// positional**: reordering declaration blocks must not silently re-key a rebuild, the ids
+    /// being permanent (I9). A group name is not a view — the anchor is one coordinate system,
+    /// so a group's view is named `<group>:<key>`.
+    #[serde(default)]
+    allocation_view: Option<String>,
 }
 
 /// `[[view]]` — one named coordinate system.
@@ -232,6 +255,12 @@ struct ViewBlock {
     name: String,
     #[serde(default)]
     title: Option<String>,
+    /// The function that turns a place on the Earth into a coordinate in this view's frame
+    /// (`projections.md` §5), from the closed set and defaulting to `none`. Held as a string and
+    /// resolved by [`Projection::from_name`] so a name outside the set is refused listing the
+    /// ones inside it, rather than reported as *no variant matched*.
+    #[serde(default)]
+    projection: Option<String>,
     #[serde(default)]
     source: Option<String>,
     #[serde(default)]
@@ -248,6 +277,74 @@ struct ViewBlock {
     point_visibility: Option<PointVisibilityBlock>,
     #[serde(default)]
     visibility: Option<String>,
+}
+
+/// `[[view_group]]` — a set of views sharing every setting, differing by a key and per-view
+/// metadata (`views.md` §3.1, [decision 0108](../../../docs/decisions/0108-a-view-group-grows-by-its-roster.md)).
+///
+/// **Every `[[view]]` key, with the same meaning, plus the roster.** The roster is the whole of
+/// what a group has and a view does not, and it decides where the points come from: under
+/// `[[view_group.view]]` (form A) each view names its own file and the group names none, exactly
+/// as a layer's file is the layer; under `[view_group.views]` (form B) the group's own `source`
+/// holds every view's points with `fields.view` saying which view each row lands in. Declaring
+/// both is refused, as `source` beside inline `artifacts` is; declaring neither mints the views
+/// from the discriminator's distinct values and carries no metadata.
+///
+/// **`view` is held as `toml::Value` and not as a struct**, because a `[[view_group.view]]` block
+/// mixes a closed key set with the group's declared metadata names — so no derive knows its field
+/// list, and `deny_unknown_fields` cannot be the thing that closes it. `configuration.md` §1's
+/// guarantee is kept by hand in [`compile_roster_view`], against the closed set plus the declared
+/// names, which is the same manual route `extent`'s four spellings already take.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ViewGroupBlock {
+    name: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    projection: Option<String>,
+    /// Form B's points file, one row per `(entity, view)`. **Form A declares none** — the file is
+    /// the view — and `[defaults].source` deliberately does not reach here: a defaulted group
+    /// source would turn a form A declaration into a form B one, or mint views from a
+    /// discriminator column nobody named.
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    fields: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    extent: Option<toml::Value>,
+    #[serde(default)]
+    point_visibility: Option<PointVisibilityBlock>,
+    #[serde(default)]
+    visibility: Option<String>,
+    /// Another group's name: this group's views are that group's (`views.md` §3.3). Chains are
+    /// refused, so the owner of a key set is always one hop away.
+    #[serde(default)]
+    members: Option<String>,
+    /// The per-view values a view carries, `name = type` over the `[[attribute]]` types; a
+    /// category is `{ type = "category", vocabulary = … }`.
+    #[serde(default)]
+    metadata: Option<BTreeMap<String, toml::Value>>,
+    /// `[[view_group.view]]` — form A's roster, one block per view.
+    #[serde(default)]
+    view: Vec<toml::Value>,
+    /// `[view_group.views]` — form B's roster, as a table.
+    #[serde(default)]
+    views: Option<RosterTableBlock>,
+}
+
+/// `[view_group.views]` — the roster as a table beside the group's own points file.
+///
+/// Two keys, and no more: what the table carries is fixed by the group's own declaration — the
+/// canonical `key`, `visibility` and the declared metadata names — so `fields` locates them and
+/// nothing here asserts one into existence (`configuration.md` §8).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RosterTableBlock {
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    fields: Option<BTreeMap<String, String>>,
 }
 
 /// `{ field, default }` or `{ source, default }` — where each point's own label is, and what one
@@ -291,6 +388,11 @@ struct ExtentTable {
     x: Option<[f64; 2]>,
     #[serde(default)]
     y: Option<[f64; 2]>,
+    /// The projected view's spelling, and the only one it takes (`projections.md` §4.2).
+    #[serde(default)]
+    lon: Option<[f64; 2]>,
+    #[serde(default)]
+    lat: Option<[f64; 2]>,
 }
 
 /// `{ field, default }` — where each artifact's own label is, and what one carrying none gets.
@@ -370,6 +472,21 @@ struct AttributeBlock {
     multi: bool,
     #[serde(default)]
     render_in: Option<Vec<String>>,
+    /// `"entity"` (the default) or `{ group = "<view_group>" }` — whether this column is one
+    /// value per entity or one per `(entity, view of the group)` (`views.md` §5,
+    /// [decision 0109](../../../docs/decisions/0109-scope-binds-an-attribute-or-layer-to-a-groups-views.md)).
+    /// Held as a `toml::Value` because the two spellings are a word and a table, and a hand-written
+    /// match names them rather than reporting *no variant matched* ([`compile_scope`]).
+    #[serde(default)]
+    scope: Option<toml::Value>,
+    /// Where this column's own `source` spells the fields it is read by. **One key, `view`**, and
+    /// only a group-scoped column with a `source` of its own has anything to name with it: that
+    /// file carries one row per `(entity, view)`, and the discriminator says which view each row's
+    /// value is for (`views.md` §5). Absent is the column `view`, the same default a scoped
+    /// layer's `fields.view` takes. The entity id is `entity_id_field` beside it rather than a key
+    /// here, which is the spelling every attribute already had.
+    #[serde(default)]
+    fields: Option<BTreeMap<String, String>>,
     /// Which analyser a `text` column's terms are produced by, by name (decision 0070). Absent
     /// means [`tessera_analyse::UNICODE`]; present on a non-`text` column is refused, because an
     /// analyser a column does not use is a setting its author believes is in effect.
@@ -395,6 +512,11 @@ struct LayerBlock {
     labels: Option<LabelsBlock>,
     #[serde(default)]
     views: Option<Vec<String>>,
+    /// `"entity"` (the default) or `{ group = "<view_group>" }` — one artifact set drawn on every
+    /// view the layer names, or a different set per view of the group (`views.md` §3.5,
+    /// decision 0109). The same key an attribute takes, with the same meaning.
+    #[serde(default)]
+    scope: Option<toml::Value>,
     #[serde(default)]
     source: Option<String>,
     #[serde(default)]
@@ -434,25 +556,30 @@ struct LayerBlock {
     levels: Vec<LevelBlock>,
     #[serde(default)]
     content: Option<ContentBlock>,
-    /// `[layer.shape]` — what a `membership = "spatial"` layer's artifacts are shaped like, and
-    /// how deep the tiles that cover them are drawn ([`compile_shape`]).
+    /// `[layer.shape]` — what kind of shape a `membership = "spatial"` layer's artifacts carry
+    /// ([`compile_shape`]).
     #[serde(default)]
     shape: Option<ShapeBlock>,
+    /// The space the layer's artifact table writes its geometry in, where a row carries no `space`
+    /// of its own (`polygon-membership.md` §4.3) — `"view"` if absent. On the layer beside
+    /// `source` and `fields` because it is an acquisition-side fact about the file, on the same
+    /// register those two are. Declarable on a layer carrying either kind of geometry: a
+    /// membership shape, or an authored shape content, which is read in the same space (§6.1).
+    #[serde(default)]
+    default_space: Option<String>,
 }
 
-/// `[layer.shape]` as written. Both keys are optional *here* and neither is optional in the
-/// compiled form: absence is what makes the message name the key rather than reporting *no variant
-/// matched*, which is the same reason `membership` is held as a `toml::Value`.
+/// `[layer.shape]` as written. `kind` is optional *here* and not in the compiled form: absence is
+/// what makes the message name the key rather than reporting *no variant matched*, which is the
+/// same reason `membership` is held as a `toml::Value`. `depth` is held so that one written is
+/// refused naming where it went (`polygon-membership.md` §6.1) rather than as an unknown key.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ShapeBlock {
-    /// ⊘ `"bbox"`, and absent means `"bbox"` — one kind, so a spelling is a courtesy rather than a
-    /// choice, and any other word is refused.
     #[serde(default)]
     kind: Option<String>,
-    /// The Morton depth the shape is covered at. **Required**, because it is the membership.
     #[serde(default)]
-    depth: Option<i64>,
+    depth: Option<toml::Value>,
 }
 
 /// One artifact written into the document itself — `artifacts = [{ key = …, contents = [ … ] }]`.
@@ -480,19 +607,54 @@ pub struct InlineArtifact {
     /// The ranked contents, best first: one entry per rank, each a value per supplied kind.
     #[serde(default)]
     pub contents: Vec<Vec<String>>,
-    /// The artifact's bounding box, `[min_x, min_y, max_x, max_y]` — the shape a
-    /// `membership = "spatial"` layer's membership is drawn from, and refused on every other kind.
+    /// The artifact's shape, in its layer's kind's field and no other (`polygon-membership.md`
+    /// §6.1): `bbox = [min_x, min_y, max_x, max_y]`, `circle = [cx, cy, r]`,
+    /// `ellipse = [cx, cy, a, b, angle]` or `wkt = "POLYGON ((…))"`. Refused on a layer whose
+    /// membership is not `spatial`.
     #[serde(default)]
     pub bbox: Option<Vec<f64>>,
-    /// The parent artifact in a hierarchy, by its key.
     #[serde(default)]
-    pub parent: Option<String>,
+    pub circle: Option<Vec<f64>>,
+    #[serde(default)]
+    pub ellipse: Option<Vec<f64>>,
+    #[serde(default)]
+    pub wkt: Option<String>,
+    /// The space the row's geometry is written in — `"view"` if absent, or `"wgs84"`, which a
+    /// view declaring a projection honours by putting the coordinates through it
+    /// (`polygon-membership.md` §4.3). It governs **every** geometry the row declares: the shape
+    /// above, and the authored shape content in a `contents` cell, which is read in the same
+    /// space as the same producer's membership polygon (§6.1).
+    #[serde(default)]
+    pub space: Option<String>,
+    /// The parent artifacts in a hierarchy, by key — one under `nested` or `tiered`, and under
+    /// `dag` as many as the artifact sits beneath (`dag-hierarchies.md` §4). Written as one string
+    /// or as a list; a scalar is a list of one, exactly as the artifact table's `parent` column is
+    /// read.
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub parent: Vec<String>,
     #[serde(default)]
     pub attached_layer: Option<String>,
     #[serde(default)]
     pub attached_level: u32,
     #[serde(default)]
     pub attached_key: Option<String>,
+}
+
+/// A key written as one string or as a list of them — the two spellings of an artifact row's
+/// `parent` cell, which under `dag` may name several (`dag-hierarchies.md` §4).
+fn one_or_many<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Vec<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match OneOrMany::deserialize(deserializer)? {
+        OneOrMany::One(one) => vec![one],
+        OneOrMany::Many(many) => many,
+    })
 }
 
 /// `[layer.labels]` — a label layer, written where it is used.
@@ -628,6 +790,18 @@ pub struct Config {
     /// group's first attribute was declared. One group is one pass over one file.
     pub attribute_sources: Vec<AttributeSource>,
     pub views: Vec<View>,
+    /// The declared view groups, in declaration order (`views.md` §3).
+    ///
+    /// A build materialises every view of every one of them ([`Config::build_views`]). ⊘ What
+    /// has no build behind it is the *running* half of spec §3.2 — the roster object and the
+    /// create operation — so a group's views are the ones the declaration enumerates and no key
+    /// comes into being after the build.
+    pub view_groups: Vec<ViewGroup>,
+    /// Which attributes and which layers are bound to a group's views (`views.md` §5, §3.5).
+    pub scopes: Scopes,
+    /// The group-scoped attributes, in declaration order — the column families a build writes
+    /// beside the entity-space schema (`views.md` §5).
+    pub scoped_attributes: Vec<ScopedAttribute>,
     /// In declaration order, which is registration order: a layer must be declared after every
     /// layer it names in `depends_on`.
     pub layers: Vec<LayerDeclaration>,
@@ -640,6 +814,12 @@ pub struct Config {
     /// reviewer diffing two builds' disclosure decisions still needs to know that a layer they did
     /// not write appeared because a `[layer.labels]` block asked for it.
     pub label_layers: BTreeMap<String, String>,
+    /// `[defaults].allocation_view` as written, or `None` where the declaration named none.
+    ///
+    /// **The anchor is a view id, resolved against the registry [`Config::build_views`] builds**
+    /// rather than against `[[view]]` alone: a group's view is nameable as `<group>:<key>` and is
+    /// an ordinary candidate ([decision 0112](../decisions/0112-the-anchor-view-orders-a-signature-groups-ids.md)).
+    pub allocation_view: Option<String>,
     /// Each layer's bound sources, parallel to [`Config::layers`] and by the same name.
     ///
     /// **Beside the declarations rather than inside them.** A [`LayerDeclaration`] is exactly what
@@ -714,7 +894,12 @@ pub struct LayerSources {
 #[derive(Debug, Clone)]
 pub enum ArtifactSource {
     /// `[[layer]].source` — one row per artifact, read under the names `fields` resolved.
-    File { path: PathBuf, fields: Fields },
+    /// `default_space` is the space a row's shape is in where the row names none.
+    File {
+        path: PathBuf,
+        fields: Fields,
+        default_space: tessera_store::derived::ShapeSpace,
+    },
     /// `[[layer]].artifacts` — the rows themselves, on the canonical names.
     Inline(Vec<InlineArtifact>),
 }
@@ -734,20 +919,243 @@ pub struct View {
     /// visibility is already decided, so serving it discloses nothing a name does not — but
     /// `MANIFEST.json` carries no slot for one on a view, an attribute or a vocabulary, and adding
     /// three is a contracts change rather than a declaration one. A **level's** title is published
-    /// today, and a **layer's** is.
+    /// today, a **layer's** is, and a **view group's** is (contracts §3.2 r61).
     pub title: Option<String>,
+    /// What turns this view's input coordinates into positions in its frame
+    /// (`projections.md` §5). [`Projection::None`] — the default — transforms nothing, and the
+    /// coordinates keep exactly the meaning they have in the file.
+    pub projection: Projection,
     /// This view's geometry: `entity_id` with either `x`/`y` or `morton`/`residual`. `None` when
     /// the view declares no source, which is legal to *declare* and refused at a build that would
     /// have to read it.
     pub source: Option<PathBuf>,
     /// Where the identity and geometry fields sit in that file. Canonical is `entity_id` with
     /// either `x`/`y` or `morton`/`residual`.
+    ///
+    /// **A projected view's coordinate columns are `lon` and `lat`** (`projections.md` §2), and
+    /// they resolve onto the canonical `x`/`y` here: what differs is the axis's *meaning* before
+    /// the transform, and every reader below this point sees a coordinate pair either way.
     pub fields: Fields,
     /// The frame every position in this view is quantised across (`configuration.md` §1).
-    /// [`Extent::Auto`] still needs the data: [`resolve_extent`] turns it into [`Bounds`].
+    /// The two `auto` spellings still need the data: [`frame_view`] turns them into [`Bounds`],
+    /// and turns a [`Extent::LonLat`] box into the aligned square containing it.
     pub extent: Extent,
+    /// The view's own gate: `None` is `public` (`views.md` §6). ⊘ Nothing evaluates it, so a
+    /// label is refused at parse and this is `None` on every view that compiles — see
+    /// [`compile_view_gate`].
+    pub visibility: Option<String>,
     /// Where each point's own access label is, and what a point carrying none gets.
     pub point_visibility: PointVisibility,
+}
+
+/// One declared view group: the settings its views share, and the roster that says which views
+/// it has (`views.md` §3.1).
+///
+/// **A group is not a view.** It cannot be named on a viewer verb, has no row space and no
+/// permutation; its views are views in every respect below the declaration, each addressed as
+/// `<group>:<key>`. What is held here is the half of a view that is the same for all of them —
+/// projection, extent, point visibility, gate — beside the roster that differs.
+#[derive(Debug, Clone)]
+pub struct ViewGroup {
+    pub name: String,
+    /// The group's human-readable title, published as `MANIFEST.groups[..].title` and served on
+    /// `/v1/meta` as `groups[..].title` (contracts §3.2 r61). Absent is served as `null`.
+    pub title: Option<String>,
+    pub projection: Projection,
+    /// Form B's points file, one row per `(entity, view)`, with [`ViewGroup::fields`]'s `view`
+    /// naming the discriminator. `None` under form A, where each roster view names its own.
+    pub source: Option<PathBuf>,
+    /// Where the identity, geometry and discriminator fields sit. It locates the group's own
+    /// source under form B, and each roster view's source under form A — the two carry the same
+    /// per-point columns, the discriminator excepted, because they are two spellings of one thing.
+    pub fields: Fields,
+    /// The frame every position in every view of this group is quantised against. One frame for
+    /// the group, which is what makes its views comparable and a key set meaningful.
+    pub extent: Extent,
+    pub point_visibility: PointVisibility,
+    /// The group's own gate: `None` is `public`. ⊘ No gate is evaluated (`views.md` §6), so a
+    /// label here is refused at parse rather than recorded — this holds only what a `public`
+    /// declaration compiles to, and exists so the field is the shape the gate will take.
+    pub visibility: Option<String>,
+    /// The group whose views these are, where this group declares `members` (`views.md` §3.3);
+    /// `None` where it owns them. Chains are refused, so this always names an owner.
+    pub members: Option<String>,
+    /// The per-view values a view of this group carries, in declaration order. Empty on a
+    /// `members` group and on one whose views are minted from a discriminator.
+    pub metadata: Vec<ViewMetadata>,
+    pub roster: Roster,
+}
+
+/// One declared per-view metadata name and its type (`views.md` §3.1).
+///
+/// **View metadata is not an attribute** (`views.md` §5): it is one value per view rather than one
+/// per `(entity, view)`, it lives on the roster, it filters nothing, and it is served typed on
+/// `/v1/meta`. The two are kept apart here so that neither grows the other's surface.
+#[derive(Debug, Clone)]
+pub struct ViewMetadata {
+    pub name: String,
+    /// For a category this is the **vocabulary's** width, exactly as an attribute's is.
+    pub ty: ScalarType,
+    /// The vocabulary a category's keys are drawn from; `None` for a plain scalar.
+    pub vocabulary: Option<String>,
+}
+
+/// A metadata value as one roster record carries it, typed against its declaration.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MetadataValue {
+    Bool(bool),
+    /// Every integer width, and a category's key resolved to its code.
+    Int(i64),
+    Float(f64),
+    Text(String),
+    /// Microseconds since the Unix epoch — the one time unit a `timestamp_us` may hold, so a
+    /// declaration and a reader cannot disagree about it (`ScalarType::TimestampUs`).
+    TimestampUs(i64),
+}
+
+/// Which views a group has, and therefore where its points come from (`views.md` §3.1).
+///
+/// **The roster decides the acquisition, not only the enumeration**, which is why the three arms
+/// are one type rather than a roster beside a source: a group in form A has no source of its own
+/// and a group in form B has no per-view source, so a shape admitting both would admit the
+/// declaration that says the points are in two places.
+#[derive(Debug, Clone)]
+pub enum Roster {
+    /// **Form A** — `[[view_group.view]]` blocks, one per view, each naming its own points file.
+    Inline(Vec<RosterView>),
+    /// **Form B** — `[view_group.views]`, the roster as a table beside the group's own points
+    /// file, whose `fields.view` says which view each row lands in.
+    Table(RosterTable),
+    /// **Neither form** — the views are minted from the distinct values of the group's own
+    /// discriminator, and carry no metadata and no gate of their own.
+    Discriminator,
+}
+
+/// One view of a group, declared inline (`views.md` §3.1's form A).
+#[derive(Debug, Clone)]
+pub struct RosterView {
+    /// The caller's own name for the view, required at creation and never reused
+    /// (`views.md` §3.2). `<group>:<key>` is the view id.
+    pub key: String,
+    /// This view's points. `None` is legal and is a view declared and empty, exactly as it is on
+    /// a plain `[[view]]`.
+    pub source: Option<PathBuf>,
+    /// This view's own gate, narrowing the group's; `None` takes the group's. ⊘ As
+    /// [`ViewGroup::visibility`], a label is refused at parse while no gate is evaluated.
+    pub visibility: Option<String>,
+    /// This view's metadata, one entry per declared name.
+    pub metadata: BTreeMap<String, MetadataValue>,
+}
+
+/// The roster as a table (`views.md` §3.1's form B): one row per view, carrying the canonical
+/// `key`, `visibility` and the declared metadata names.
+#[derive(Debug, Clone)]
+pub struct RosterTable {
+    pub source: PathBuf,
+    pub fields: Fields,
+}
+
+/// What an attribute or a layer is bound to (`views.md` §5, §3.5; decision 0109).
+///
+/// **Entity scope is the default and declares nothing**, because there is nothing a declaration
+/// could add: a constant attribute is one value per entity, evaluated in entity space, and
+/// therefore visible under every view. The case that needs declaring is the value that differs by
+/// view of a group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Scope {
+    Entity,
+    /// The group whose views this object is per-view over. Always a group that owns its views: a
+    /// scope naming a `members` group is refused pointing at the owner.
+    Group(String),
+}
+
+/// One attribute whose values are per view of a group (`views.md` §5).
+///
+/// **A family, not a column**: one entity-space column per view of the group, each with its own
+/// presence bitmap (decision 0064), written under `attrs/<column>/<group>/<key>/`. It is held
+/// beside [`Schema::attributes`] rather than in it because the manifest's declared scalars are one
+/// flat bundle-wide list, and a family has no slot there.
+#[derive(Debug, Clone)]
+pub struct ScopedAttribute {
+    pub attribute: Attribute,
+    /// The group that owns the views this column family is over — always the owner, a scope
+    /// naming a `members` group being refused pointing at it.
+    pub group: String,
+    /// The column's **own** `source`, where it declares one (`views.md` §5). `None` — the shape
+    /// Appendix A's `sentiment` and the fixture's declare — reads each view's column from that
+    /// view's own points file, under that view's selection where a group's views share one.
+    pub source: Option<ScopedAttributeFile>,
+}
+
+/// A group-scoped attribute's own source file (`views.md` §5): one row per `(entity, view)`, the
+/// view named by a discriminator column.
+///
+/// **The discriminator is what makes a file of its own admissible at all.** A scoped column's
+/// values are one per `(entity, view)`, so reading such a file as entity space would take one
+/// arbitrary view's values as every view's — silently, and with no error anywhere. The
+/// discriminator is the same mechanism a form B roster and a scoped layer's artifacts already use,
+/// and it is applied here by the same [`ViewSelector`].
+#[derive(Debug, Clone)]
+pub struct ScopedAttributeFile {
+    /// The resolved path of the `[sources]` entry the column named.
+    pub path: PathBuf,
+    /// The column that file spells the entity id in — `entity_id_field`, or the default.
+    pub entity_id: String,
+    /// The discriminator column — the attribute's `fields.view`, resolved; `view` by default.
+    pub view_field: String,
+}
+
+/// Which attributes and which layers carry a group scope, by name.
+///
+/// **Beside the declarations rather than inside them**, on `Config::layer_sources`' precedent and
+/// for a sharper reason: a [`LayerDeclaration`] is exactly what `PUT /control/layers` takes and an
+/// [`Attribute`] is exactly what `MANIFEST.declared_scalars` carries, and neither contract has a
+/// slot for a scope: a scoped attribute's record is `MANIFEST.groups[..].scoped_scalars`
+/// (contracts §2.2) and ⊘ a scoped layer's has no home on the wire at all yet
+/// (`views.md` §11). A scope written into either declaration would be a field no reader knows.
+/// Entity scope — the default —
+/// is absence from these maps rather than an entry, so nothing has to be written to say *the
+/// ordinary thing*.
+#[derive(Debug, Clone, Default)]
+pub struct Scopes {
+    /// Attribute name → the group its column family is over.
+    pub attributes: BTreeMap<String, String>,
+    /// Layer name → the group its artifact sets are per view of.
+    pub layers: BTreeMap<String, String>,
+}
+
+impl Scopes {
+    /// The group `attribute` is scoped to, or `None` for the entity-scoped default.
+    pub fn attribute(&self, attribute: &str) -> Option<&str> {
+        self.attributes.get(attribute).map(String::as_str)
+    }
+
+    /// The group `layer` is scoped to, or `None` for the entity-scoped default.
+    pub fn layer(&self, layer: &str) -> Option<&str> {
+        self.layers.get(layer).map(String::as_str)
+    }
+}
+
+impl ViewGroup {
+    /// The keys this group's views are declared under, where the declaration enumerates them.
+    ///
+    /// **Empty is not *no views*** — under a discriminator, and on a `members` group, the keys are
+    /// the owner's or the data's and are not known from the declaration alone.
+    pub fn declared_keys(&self) -> Vec<&str> {
+        match &self.roster {
+            Roster::Inline(views) => views.iter().map(|v| v.key.as_str()).collect(),
+            Roster::Table(_) | Roster::Discriminator => Vec::new(),
+        }
+    }
+
+    /// Which of the two roster forms was written, for a report to quote back.
+    pub fn form(&self) -> &'static str {
+        match &self.roster {
+            Roster::Inline(_) => "form A, one points file per view",
+            Roster::Table(_) => "form B, one points file and a roster table",
+            Roster::Discriminator => "views minted from the discriminator",
+        }
+    }
 }
 
 /// A view's quantisation frame, as declared (`configuration.md` §1).
@@ -761,11 +1169,52 @@ pub struct View {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Extent {
     /// `"auto"`, or `{ auto = true, margin = f }` — the **square** box around this build's own
-    /// data, with `margin` of the data span added on each side. Resolved by [`resolve_extent`].
+    /// data, with `margin` of the data span added on each side. Resolved by [`frame_view`].
     Auto { margin: f64 },
     /// `{ min, max }` or `{ x = [a, b], y = [c, d] }` — stated outright, and the only form a
     /// corpus that will be written to should rely on.
     Fixed(Bounds),
+    /// `{ lon = [a, b], lat = [c, d] }` — a **projected** view's frame, written where a caller
+    /// can read it off an atlas, and snapped outward to the enclosing aligned square
+    /// (`projections.md` §4.2).
+    LonLat(LonLatBox),
+    /// `"auto"` on a projected view: the same snap over the data's own longitude/latitude box.
+    /// Distinct from [`Extent::Auto`] because a projected frame's headroom is the snap and never
+    /// a fraction of the data span, so there is no margin to carry.
+    AutoLonLat,
+}
+
+/// A box in longitude and latitude, degrees, WGS84 — the only frame spelling a projected view
+/// takes (`projections.md` §4.2).
+///
+/// **Degenerate boxes are legal here and are not legal as a [`Bounds`]**: `lon = [a, a]` states a
+/// meridian, which is a box with no smallest enclosing square, and §4.2 answers it with the offset
+/// cap rather than a refusal. The frame it snaps to is always a proper square.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LonLatBox {
+    pub lon_min: f64,
+    pub lon_max: f64,
+    pub lat_min: f64,
+    pub lat_max: f64,
+}
+
+impl LonLatBox {
+    /// This box's image in the frame the projection produces.
+    ///
+    /// **Every projection in the set is cylindrical** — longitude maps linearly to x and latitude
+    /// monotonically to y — so the image of a longitude/latitude rectangle is a rectangle and its
+    /// corners are its bounds (`projections.md` §4.2). The y axis runs **south**, so the box's
+    /// minimum latitude is its maximum y.
+    pub fn project(&self, projection: Projection) -> Bounds {
+        let (x_min, y_max) = projection.forward(self.lon_min, self.lat_min);
+        let (x_max, y_min) = projection.forward(self.lon_max, self.lat_max);
+        Bounds {
+            x_min,
+            x_max,
+            y_min,
+            y_max,
+        }
+    }
 }
 
 /// `auto`'s margin when none is written: 1% of the data span on each side.
@@ -797,9 +1246,23 @@ pub const CLAMP_REFUSAL_FRACTION: f64 = 0.5;
 /// nineteen-cell corner, and the build silent.
 #[derive(Debug, Clone)]
 pub struct Frame {
-    pub view: String,
-    /// What every stored position in this view is quantised across.
+    /// Whose frame this is, already spelled for a message: `view 'world'`, or
+    /// `view group 'quarter'` where one frame covers every view of a group (`views.md` §3.1).
+    pub subject: String,
+    /// What placed every position in this view, before the frame did (`projections.md` §3).
+    pub projection: Projection,
+    /// What every stored position in this view is quantised across. For a projected view this is
+    /// an aligned square over the unit square rather than anything the caller wrote.
     pub extent: Bounds,
+    /// The box the caller asked for, for a projected view that stated one. `None` under `auto`,
+    /// where the box is the data's own, and for an unprojected view, which states its frame
+    /// directly and has nothing to snap.
+    pub asked: Option<LonLatBox>,
+    /// The aligned square [`Frame::asked`] — or the data's own box — snapped outward to
+    /// (`projections.md` §4.2). `None` for an unprojected view. The difference between the box and
+    /// the square is resolution the corpus does not get, which is why it is carried rather than
+    /// absorbed.
+    pub snap: Option<Snap>,
     /// The data's own box and the frame's effect on it. [`PointSurvey::Quantised`] for a Morton
     /// source, which arrives already placed.
     pub survey: PointSurvey,
@@ -814,18 +1277,50 @@ impl Frame {
         }
     }
 
+    /// Points whose latitude fell outside the projection's own domain, so the transform moved
+    /// them onto the frame's edge and lost the difference (`projections.md` §7).
+    ///
+    /// **Never a clamp, and never counted as one.** A clipped point lands exactly on the edge,
+    /// where the quantisation rule says nothing is clamped, so the clamp counter structurally
+    /// cannot see one however many there are. Zero for an unprojected view, which has no domain.
+    pub fn clipped(&self) -> u64 {
+        self.coordinates().map_or(0, |survey| survey.clipped)
+    }
+
     /// **What the build says about this frame, every time, whether or not anything is wrong.**
-    /// The extent, the data's own bounds beside it, how much of the grid that leaves the data
-    /// occupying, and how many points land on the boundary rather than where they were written.
+    /// The projection that placed the points and the extent they were quantised across; for a
+    /// projected view the box the caller asked for and the square it snapped to; the data's own
+    /// bounds; how much of the grid that leaves the data occupying; how many points land on the
+    /// boundary rather than where they were written; and, on its own line, how many the
+    /// projection clipped at its own domain (`projections.md` §8).
     ///
     /// Reported rather than merely available: the whole defect this closes was a build that had
-    /// every one of these numbers and printed none of them.
+    /// every one of these numbers and printed none of them. **It never refuses** — the refusal
+    /// this frame may earn is [`Frame::refusal`], and clipping is not among its causes (§7).
     pub fn report(&self) -> String {
         let e = &self.extent;
-        let mut out = format!(
-            "view '{}': quantising against x [{}, {}], y [{}, {}]",
-            self.view, e.x_min, e.x_max, e.y_min, e.y_max
-        );
+        // **The projection is named beside the frame, and only where there is one.** Under
+        // `projection = "none"` this is the line every build has always printed, to the word: the
+        // view's coordinates are its file's own, and naming an absent transform would put a word
+        // in front of every existing corpus's frame for nothing.
+        let mut out = match self.projection {
+            Projection::None => format!(
+                "{}: quantising against x [{}, {}], y [{}, {}]",
+                self.subject, e.x_min, e.x_max, e.y_min, e.y_max
+            ),
+            projection => format!(
+                "{}: {}, quantising against x [{}, {}], y [{}, {}]",
+                self.subject,
+                projection.name(),
+                e.x_min,
+                e.x_max,
+                e.y_min,
+                e.y_max
+            ),
+        };
+        if let Some(snap) = &self.snap {
+            out.push_str(&self.snap_line(snap));
+        }
         let Some(survey) = self.coordinates() else {
             out.push_str(
                 "\n        points arrive as Morton codes, already placed in this frame — nothing \
@@ -851,8 +1346,18 @@ impl Frame {
             data.x_min, data.x_max, data.y_min, data.y_max
         ));
         if survey.clamped == 0 {
+            // **The clamp counter alone cannot say the edge is empty.** A clipped point lands
+            // exactly on the edge and is deliberately *not* clamped (`projections.md` §7), so
+            // where anything was clipped this sentence would otherwise assert the opposite of the
+            // clip line two below it. It narrows to the claim the clamp counter can actually
+            // support, and the clip line makes the claim it cannot.
+            let edge = if survey.clipped == 0 {
+                "none on the frame's edge"
+            } else {
+                "none clamped onto the frame's edge"
+            };
             out.push_str(&format!(
-                "\n        {} point(s) placed, none on the frame's edge",
+                "\n        {} point(s) placed, {edge}",
                 survey.rows
             ));
         } else {
@@ -866,7 +1371,74 @@ impl Frame {
                 survey.clamped_y,
             ));
         }
+        // **Clipped points on their own line and in their own field** (`projections.md` §7). A
+        // clipped point is stored on the frame's edge, which is exactly where the clamp rule says
+        // a point is *not* clamped — so the counter above structurally cannot see one, and a
+        // second number on the clamp line would hand a real count to the wrong cause. Printed
+        // whether or not anything was clipped, for the same reason the frame is: silence has to
+        // mean *nothing was clipped* rather than *nobody counted*.
+        //
+        // Exactly where the projection has a domain to fall outside of, which is every entry in
+        // the set and not `none`.
+        if let Some(domain) = self.projection.max_latitude_deg() {
+            if survey.clipped == 0 {
+                out.push_str(&format!(
+                    "\n        none of them outside {}'s ±{domain}° domain, so nothing was clipped",
+                    self.projection.name()
+                ));
+            } else {
+                out.push_str(&format!(
+                    "\n        {} of {} point(s) ({:.1}%) CLIPPED at {}'s ±{domain}° domain — \
+                     stored on the frame's edge, not where they were written. Built anyway at any \
+                     proportion: the domain is the projection's own boundary and no frame moves \
+                     it, so a real tail beyond it is the wrong projection for this corpus rather \
+                     than the wrong frame",
+                    survey.clipped,
+                    survey.rows,
+                    survey.clipped as f64 / survey.rows as f64 * 100.0,
+                    self.projection.name(),
+                ));
+            }
+        }
         out
+    }
+
+    /// The box the caller asked for, the square it snapped to, and whether the offset cap chose
+    /// that square rather than the box (`projections.md` §4.2, §8).
+    ///
+    /// **Both boxes in degrees, at full precision, whether or not the difference is large.** The
+    /// snap is resolution the corpus does not get, and a caller who can see the box beside the
+    /// frame is the one who can judge that; rounding the frame's own corners would print two
+    /// different frames identically at the offsets where a cell is centimetres. The square's
+    /// address is the frame's exact identity either way, and it is the address `tessera check`
+    /// prints from the declaration alone (`crate::check::FramePreview`).
+    fn snap_line(&self, snap: &Snap) -> String {
+        let asked = match &self.asked {
+            Some(b) => format!(
+                "asked for lon [{}, {}], lat [{}, {}]",
+                b.lon_min, b.lon_max, b.lat_min, b.lat_max
+            ),
+            // `auto` on a projected view: the box snapped is the data's own, and the data's box
+            // is the line below this one.
+            None => "`extent = \"auto\"` over the data's own box".to_string(),
+        };
+        let how = if snap.floored {
+            "FLOORED at the offset cap rather than fitted: the square at"
+        } else {
+            "snapped outward to the square at"
+        };
+        // y runs south (`projections.md` §4), so the frame's minimum y is its maximum latitude.
+        let (lon_min, lat_max) = self
+            .projection
+            .inverse(self.extent.x_min, self.extent.y_min);
+        let (lon_max, lat_min) = self
+            .projection
+            .inverse(self.extent.x_max, self.extent.y_max);
+        format!(
+            "\n        {asked} — {how} z{} ({}, {}), lon [{lon_min}, {lon_max}], lat [{lat_min}, \
+             {lat_max}]",
+            snap.square.z, snap.square.x, snap.square.y
+        )
     }
 
     /// The refusal this frame earns, if any: past [`CLAMP_REFUSAL_FRACTION`] the frame is not
@@ -879,13 +1451,13 @@ impl Frame {
         }
         let data = survey.bounds?;
         Some(format!(
-            "view '{}': {} of {} point(s) ({:.1}%) would be stored on the frame's edge rather \
+            "{}: {} of {} point(s) ({:.1}%) would be stored on the frame's edge rather \
              than where they were written. The frame is x [{}, {}], y [{}, {}]; the data spans x \
              [{}, {}], y [{}, {}]. Past half the corpus this is not a tail, it is the wrong frame \
              — quantisation clamps rather than filters, so a bundle built here is well-formed \
              with the geometry wrong. Write `extent = \"auto\"` to fit the data, or state the box \
              the data is actually in; filter the source if the intent was to crop",
-            self.view,
+            self.subject,
             survey.clamped,
             survey.rows,
             survey.clamped_fraction() * 100.0,
@@ -919,34 +1491,119 @@ impl Frame {
 /// [`crate::input::survey_points`], naming the extent to write instead).
 pub fn frame_view(
     view: &str,
+    projection: Projection,
     extent: &Extent,
     points: &Path,
     fields: &Fields,
     limit: Option<u64>,
 ) -> Result<Frame> {
+    frame_of(
+        &format!("view '{view}'"),
+        projection,
+        extent,
+        &[FrameSource {
+            points,
+            fields,
+            select: None,
+        }],
+        limit,
+    )
+}
+
+/// One source a frame is fitted over: a view's points, and the rows of that file which are its
+/// own (`views.md` §3.1's form B).
+#[derive(Debug, Clone, Copy)]
+pub struct FrameSource<'a> {
+    pub points: &'a Path,
+    pub fields: &'a Fields,
+    pub select: Option<&'a ViewSelector>,
+}
+
+/// [`frame_view`] over **several** sources, which is what a group's one frame is fitted to.
+///
+/// **One frame for the group** (`views.md` §3.1): its views differ by a key and by per-view
+/// metadata and by nothing else, which is what makes a Morton prefix mean the same thing in each
+/// of them. So `auto` on a group surveys every view's source and fits the box to the union of
+/// their boxes — never one box per view, which would give each view its own grid under one
+/// declaration — and a stated extent is surveyed against every one of them, so the clamp report
+/// covers the whole group.
+pub fn frame_of(
+    name: &str,
+    projection: Projection,
+    extent: &Extent,
+    sources: &[FrameSource],
+    limit: Option<u64>,
+) -> Result<Frame> {
+    let survey_all = |against: Option<&Bounds>| -> Result<PointSurvey> {
+        let mut surveys = Vec::with_capacity(sources.len());
+        for source in sources {
+            surveys.push(crate::input::survey_points(
+                source.points,
+                source.fields,
+                projection,
+                limit,
+                source.select,
+                against,
+            )?);
+        }
+        union_surveys(name, surveys)
+    };
     let margin = match extent {
         Extent::Fixed(bounds) => {
-            let survey = crate::input::survey_points(points, fields, limit, Some(bounds))?;
+            let survey = survey_all(Some(bounds))?;
             return Ok(Frame {
-                view: view.to_string(),
+                subject: name.to_string(),
+                projection,
                 extent: *bounds,
+                asked: None,
+                snap: None,
                 survey,
+            });
+        }
+        // **A stated longitude/latitude box needs no data to become a frame** — it is projected
+        // and snapped here, and the pass that follows is the clamp survey every frame gets. That
+        // is what lets `tessera check` answer the same question against no file at all
+        // (`crate::check`).
+        Extent::LonLat(asked) => {
+            let snap = snap_lon_lat(projection, asked);
+            let bounds = snap.square.bounds();
+            let survey = survey_all(Some(&bounds))?;
+            return Ok(Frame {
+                subject: name.to_string(),
+                projection,
+                extent: bounds,
+                asked: Some(*asked),
+                snap: Some(snap),
+                survey,
+            });
+        }
+        // The projected `auto`: the same snap, over the data's own box rather than a stated one.
+        // The survey runs in the frame the projection produces, so the box it comes back with is
+        // already the thing to snap — projecting the corners of the degree-space box would give
+        // the same square, every projection in the set being monotone on each axis.
+        Extent::AutoLonLat => {
+            let survey = survey_all(None)?;
+            let PointSurvey::Coordinates(survey) = survey else {
+                unreachable!("survey_points refuses a Morton source when no frame is supplied")
+            };
+            let data = survey.bounds.ok_or_else(|| empty_auto_source(name))?;
+            let snap = snap_outward(&data);
+            return Ok(Frame {
+                subject: name.to_string(),
+                projection,
+                extent: snap.square.bounds(),
+                asked: None,
+                snap: Some(snap),
+                survey: PointSurvey::Coordinates(survey),
             });
         }
         Extent::Auto { margin } => *margin,
     };
-    let survey = crate::input::survey_points(points, fields, limit, None)?;
+    let survey = survey_all(None)?;
     let PointSurvey::Coordinates(survey) = survey else {
         unreachable!("survey_points refuses a Morton source when no frame is supplied")
     };
-    let data = survey.bounds.ok_or_else(|| {
-        declaration_error(format!(
-            "view '{view}': `extent` is `auto` and the points source selects no rows, so there is \
-             no data to fit a box around. Either the source is empty or `--limit` excludes every \
-             row; state the frame instead — `extent = {{ min = <a>, max = <b>}}` — if this corpus \
-             is meant to start empty and be written to"
-        ))
-    })?;
+    let data = survey.bounds.ok_or_else(|| empty_auto_source(name))?;
     // Square, then margin: a circle in the data stays a circle on the grid. `span` is the larger
     // of the two axes, and a corpus whose points are all at one position has no span at all — a
     // unit box is the only non-degenerate frame available, and it is centred on the point.
@@ -971,67 +1628,169 @@ pub fn frame_view(
     };
     bounds.validate().map_err(|detail| {
         declaration_error(format!(
-            "view '{view}': `extent = \"auto\"` fitted no usable box around the data \
+            "{name}: `extent = \"auto\"` fitted no usable box around the data \
              ({detail}). The data spans x [{}, {}], y [{}, {}]; state the frame outright if that \
              is not what this corpus is",
             data.x_min, data.x_max, data.y_min, data.y_max
         ))
     })?;
     Ok(Frame {
-        view: view.to_string(),
+        subject: name.to_string(),
+        projection,
         extent: bounds,
+        asked: None,
+        snap: None,
         survey: PointSurvey::Coordinates(survey),
     })
 }
 
-/// Compile a view's `extent`, in any of `configuration.md` §1's four spellings.
+/// One frame's several sources, folded into the survey the report is printed from.
 ///
-/// Every refusal names all four, because the key has no default and the value an absent line
-/// would supply is a decision about where every stored point lands.
-fn compile_extent(view: &str, value: Option<&toml::Value>) -> Result<Extent> {
+/// Boxes union, and every counter sums: the group's frame is judged against every row it will
+/// place, so a clamp in one view is a clamp in the group's report. A build mixing coordinate and
+/// Morton sources under one frame is refused naming the mixture — the two are quantised in
+/// different places, so a shared frame would mean one thing for some of the group's views and
+/// another for the rest.
+fn union_surveys(name: &str, surveys: Vec<PointSurvey>) -> Result<PointSurvey> {
+    let mut folded: Option<CoordinateSurvey> = None;
+    let mut quantised = false;
+    for survey in surveys {
+        match survey {
+            PointSurvey::Quantised => quantised = true,
+            PointSurvey::Coordinates(one) => {
+                folded = Some(match folded {
+                    None => one,
+                    Some(acc) => CoordinateSurvey {
+                        rows: acc.rows + one.rows,
+                        bounds: match (acc.bounds, one.bounds) {
+                            (Some(a), Some(b)) => Some(Bounds {
+                                x_min: a.x_min.min(b.x_min),
+                                x_max: a.x_max.max(b.x_max),
+                                y_min: a.y_min.min(b.y_min),
+                                y_max: a.y_max.max(b.y_max),
+                            }),
+                            (a, b) => a.or(b),
+                        },
+                        clamped: acc.clamped + one.clamped,
+                        clamped_x: acc.clamped_x + one.clamped_x,
+                        clamped_y: acc.clamped_y + one.clamped_y,
+                        clipped: acc.clipped + one.clipped,
+                    },
+                });
+            }
+        }
+    }
+    match (folded, quantised) {
+        (Some(folded), false) => Ok(PointSurvey::Coordinates(folded)),
+        (None, _) => Ok(PointSurvey::Quantised),
+        (Some(_), true) => Err(declaration_error(format!(
+            "'{name}': one frame is fitted over several sources (views §3.1), and some of them \
+             carry coordinates while others carry Morton codes. A code is already placed in the \
+             grid's own frame and a coordinate is quantised against this one, so the two cannot \
+             share a frame. Give the group's views one geometry shape"
+        ))),
+    }
+}
+
+/// `auto` over a source that selects no rows: there is no data to fit a box around, on either
+/// spelling, so the frame has to be stated (`projections.md` §4.2, `configuration.md` §1).
+fn empty_auto_source(subject: &str) -> BuildError {
+    declaration_error(format!(
+        "{subject}: `extent` is `auto` and the points source selects no rows, so there is no \
+         data to fit a box around. Either the source is empty or `--limit` excludes every row; \
+         state the frame instead — `extent = {{ min = <a>, max = <b> }}`, or `extent = {{ lon = \
+         [<a>, <b>], lat = [<c>, <d>] }}` under a projection — if this corpus is meant to start \
+         empty and be written to"
+    ))
+}
+
+/// A stated longitude/latitude box as a frame: projected, then snapped outward to the smallest
+/// aligned square containing it (`projections.md` §4.2).
+///
+/// **No data is read**, which is what makes the frame a property of the declaration alone and lets
+/// `tessera check` print it in seconds.
+pub fn snap_lon_lat(projection: Projection, asked: &LonLatBox) -> Snap {
+    snap_outward(&asked.project(projection))
+}
+
+/// Compile a view's `extent`, in whichever spellings its projection admits.
+///
+/// **The projection decides the spelling, and the two sets do not overlap.** An unprojected view
+/// takes `configuration.md` §1's four, in the space its file is already in; a projected view takes
+/// `auto` or a box in longitude and latitude, and nothing else (`projections.md` §4.2) — `min`/`max`
+/// and `x`/`y` describe a frame in the space the projection *produces*, which is on the wrong side
+/// of the transform, and `margin` is headroom the snap already supplies. Every refusal names the
+/// spellings the view's own projection admits, because the key has no default and the value an
+/// absent line would supply is a decision about where every stored point lands.
+fn compile_extent(
+    object: &str,
+    projection: Projection,
+    value: Option<&toml::Value>,
+) -> Result<Extent> {
+    let projected = projection != Projection::None;
+    let spellings = if projected {
+        LON_LAT_SPELLINGS
+    } else {
+        EXTENT_SPELLINGS
+    };
     let Some(value) = value else {
         return Err(declaration_error(format!(
-            "view '{view}': `extent` is required and has no default (configuration.md §1). It is \
+            "{object}: `extent` is required and has no default (configuration.md §1). It is \
              the frame every stored position is quantised across, and quantisation clamps — so a \
-             guessed frame is a bundle that is well-formed with the geometry wrong. Four \
-             spellings:{}",
-            EXTENT_SPELLINGS
+             guessed frame is a bundle that is well-formed with the geometry wrong. This view's \
+             spellings:{spellings}"
         )));
     };
     if let Some(word) = value.as_str() {
         if word == "auto" {
-            return Ok(Extent::Auto {
-                margin: DEFAULT_AUTO_MARGIN,
+            return Ok(if projected {
+                Extent::AutoLonLat
+            } else {
+                Extent::Auto {
+                    margin: DEFAULT_AUTO_MARGIN,
+                }
             });
         }
         return Err(declaration_error(format!(
-            "view '{view}': `extent = \"{word}\"` is not a value this key takes. The only word \
-             it takes is `auto`; every other spelling is a table:{}",
-            EXTENT_SPELLINGS
+            "{object}: `extent = \"{word}\"` is not a value this key takes. The only word \
+             it takes is `auto`; every other spelling is a table:{spellings}"
         )));
     }
     let Some(table) = value.as_table() else {
         return Err(declaration_error(format!(
-            "view '{view}': `extent` is neither the word `auto` nor a table:{}",
-            EXTENT_SPELLINGS
+            "{object}: `extent` is neither the word `auto` nor a table:{spellings}"
         )));
     };
     let table: ExtentTable = ExtentTable::deserialize(toml::Value::Table(table.clone()))
-        .map_err(|e| declaration_error(format!("view '{view}': `extent`: {e}")))?;
+        .map_err(|e| declaration_error(format!("{object}: `extent`: {e}")))?;
+
+    if projected {
+        return compile_lon_lat_extent(object, projection, &table);
+    }
+    if table.lon.is_some() || table.lat.is_some() {
+        return Err(declaration_error(format!(
+            "{object}: `extent` is written in longitude and latitude, and this view declares \
+             no projection — so there is nothing to turn a degree into a coordinate and the two \
+             numbers would be quantised as though they were the file's own units \
+             (projections.md §5.3). Declare `projection = \"web_mercator\"` or \
+             `projection = \"equirectangular\"` if these are places on the Earth; otherwise state \
+             the frame in the coordinates the file carries:{EXTENT_SPELLINGS}"
+        )));
+    }
 
     let stated =
         table.min.is_some() || table.max.is_some() || table.x.is_some() || table.y.is_some();
     if let Some(auto) = table.auto {
         if !auto {
             return Err(declaration_error(format!(
-                "view '{view}': `extent = {{ auto = false }}` says what the frame is not. Write \
+                "{object}: `extent = {{ auto = false }}` says what the frame is not. Write \
                  the frame:{}",
                 EXTENT_SPELLINGS
             )));
         }
         if stated {
             return Err(declaration_error(format!(
-                "view '{view}': `extent` declares `auto` and a stated box together. `auto` fits \
+                "{object}: `extent` declares `auto` and a stated box together. `auto` fits \
                  the box to the data this build reads; `min`/`max` and `x`/`y` state it outright. \
                  One or the other:{}",
                 EXTENT_SPELLINGS
@@ -1042,7 +1801,7 @@ fn compile_extent(view: &str, value: Option<&toml::Value>) -> Result<Extent> {
             Some(margin) => {
                 if !margin.is_finite() || margin < 0.0 {
                     return Err(declaration_error(format!(
-                        "view '{view}': `extent.margin = {margin}` is not a fraction of the data \
+                        "{object}: `extent.margin = {margin}` is not a fraction of the data \
                          span. It is headroom added on each side, so it is finite and at least 0 \
                          — a negative margin would shrink the box inside the data and clamp the \
                          points it excluded"
@@ -1055,7 +1814,7 @@ fn compile_extent(view: &str, value: Option<&toml::Value>) -> Result<Extent> {
     }
     if table.margin.is_some() {
         return Err(declaration_error(format!(
-            "view '{view}': `extent.margin` without `auto = true`. A margin is headroom around a \
+            "{object}: `extent.margin` without `auto = true`. A margin is headroom around a \
              box that was fitted to data; a box stated outright already includes whatever headroom \
              its author wanted:{}",
             EXTENT_SPELLINGS
@@ -1076,7 +1835,7 @@ fn compile_extent(view: &str, value: Option<&toml::Value>) -> Result<Extent> {
         },
         (None, None, None, None) => {
             return Err(declaration_error(format!(
-                "view '{view}': `extent` is an empty table, so it declares no frame at all:{}",
+                "{object}: `extent` is an empty table, so it declares no frame at all:{}",
                 EXTENT_SPELLINGS
             )))
         }
@@ -1092,7 +1851,7 @@ fn compile_extent(view: &str, value: Option<&toml::Value>) -> Result<Extent> {
             .collect::<Vec<_>>()
             .join(", ");
             return Err(declaration_error(format!(
-                "view '{view}': `extent` names {named}, which is half a frame. `min` and `max` \
+                "{object}: `extent` names {named}, which is half a frame. `min` and `max` \
                  give one range to both axes and preserve the aspect ratio; `x` and `y` give a \
                  range each, where stretching is meant. Neither half stands alone:{}",
                 EXTENT_SPELLINGS
@@ -1101,9 +1860,104 @@ fn compile_extent(view: &str, value: Option<&toml::Value>) -> Result<Extent> {
     };
     bounds
         .validate()
-        .map_err(|detail| declaration_error(format!("view '{view}': `extent`: {detail}")))?;
+        .map_err(|detail| declaration_error(format!("{object}: `extent`: {detail}")))?;
     Ok(Extent::Fixed(bounds))
 }
+
+/// A projected view's `extent`: `auto`, or the box in longitude and latitude
+/// (`projections.md` §4.2). Every other spelling is refused here, naming this one.
+fn compile_lon_lat_extent(
+    object: &str,
+    projection: Projection,
+    table: &ExtentTable,
+) -> Result<Extent> {
+    let name = projection.name();
+    if table.auto.is_some() || table.margin.is_some() {
+        return Err(declaration_error(format!(
+            "{object}: `extent` declares `auto` as a table, and the view is projected \
+             ({name}). A projected frame's headroom is the outward snap to the enclosing aligned \
+             square, not a fraction of the data span — and a margin inside an aligned square would \
+             only shrink the frame away from the alignment it exists to have \
+             (projections.md §4.2). Write `extent = \"auto\"`, which fits the data's own \
+             longitude/latitude box and snaps it:{LON_LAT_SPELLINGS}"
+        )));
+    }
+    if table.min.is_some() || table.max.is_some() || table.x.is_some() || table.y.is_some() {
+        let named = [
+            table.min.map(|_| "min"),
+            table.max.map(|_| "max"),
+            table.x.map(|_| "x"),
+            table.y.map(|_| "y"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(", ");
+        return Err(declaration_error(format!(
+            "{object}: `extent` names {named}, and this view is projected ({name}). Those \
+             spellings state a frame in the space the projection *produces*, which is the output \
+             of a calculation nobody should do by hand — and getting it wrong misplaces every \
+             stored position. A projected view's frame is written in degrees, where a caller can \
+             read it off an atlas (projections.md §4.2):{LON_LAT_SPELLINGS}"
+        )));
+    }
+    let (Some(lon), Some(lat)) = (table.lon, table.lat) else {
+        let half = match (table.lon, table.lat) {
+            (Some(_), None) => "`lon` without `lat`",
+            (None, Some(_)) => "`lat` without `lon`",
+            _ => "no frame at all",
+        };
+        return Err(declaration_error(format!(
+            "{object}: `extent` is {half}. A projected view's frame is a box in longitude \
+             and latitude and neither half stands alone:{LON_LAT_SPELLINGS}"
+        )));
+    };
+    for (axis, limit, pair) in [("lon", 180.0, lon), ("lat", 90.0, lat)] {
+        for v in pair {
+            if !v.is_finite() || v.abs() > limit {
+                return Err(declaration_error(format!(
+                    "{object}: `extent.{axis}` names {v}, which is not a {}. The accepted \
+                     input coordinate system is WGS84 degrees — longitude within ±180, latitude \
+                     within ±90 (projections.md §2) — and a value outside that is not a \
+                     coordinate. Convert the box to WGS84, or declare `projection = \"none\"` if \
+                     this view's space is not the Earth",
+                    if axis == "lon" {
+                        "longitude"
+                    } else {
+                        "latitude"
+                    }
+                )));
+            }
+        }
+    }
+    if lon[0] > lon[1] {
+        return Err(declaration_error(format!(
+            "{object}: `extent.lon = [{}, {}]` runs west from its own maximum. Read as a box \
+             crossing the antimeridian it cannot be honoured — a frame is one aligned square and \
+             an aligned square does not wrap — and read as an ordinary box it is inverted. Write \
+             the wider box that does not cross: `lon = [{}, {}]`",
+            lon[0], lon[1], lon[1], lon[0]
+        )));
+    }
+    if lat[0] > lat[1] {
+        return Err(declaration_error(format!(
+            "{object}: `extent.lat = [{}, {}]` runs south from its own maximum, so it names \
+             no box. Latitude does not wrap; write `lat = [{}, {}]`",
+            lat[0], lat[1], lat[1], lat[0]
+        )));
+    }
+    Ok(Extent::LonLat(LonLatBox {
+        lon_min: lon[0],
+        lon_max: lon[1],
+        lat_min: lat[0],
+        lat_max: lat[1],
+    }))
+}
+
+/// A projected view's two spellings, appended to every `extent` refusal it earns.
+const LON_LAT_SPELLINGS: &str = "\n  \
+     extent = \"auto\"                                         # the data's own box, snapped\n  \
+     extent = { lon = [-8.6, 1.8], lat = [49.9, 60.9] }      # stated in degrees, snapped outward";
 
 /// The four spellings, appended to every `extent` refusal. A caller who got this key wrong is
 /// choosing between four shapes, not correcting a typo, so the whole set travels with the message.
@@ -1326,10 +2180,24 @@ impl Config {
         let defaults = Defaults::compile(file.defaults.as_ref(), &sources)?;
         let views = compile_views(&file.view, &sources, &defaults)?;
         let vocabularies = compile_vocabularies(&file.vocabulary, &sources)?;
-        let attributes = compile_attributes(&file.attribute, &vocabularies)?;
-        let attribute_sources = compile_attribute_sources(&file.attribute, &sources, &defaults)?;
-        let (layers, layer_sources, label_layers) =
-            compile_layers(&file.layer, &views, &attributes, &sources)?;
+        // Groups after the vocabularies a category's metadata draws on, and after the views whose
+        // names a group may not share; before the attributes and layers whose `scope` names one.
+        let view_groups =
+            compile_view_groups(&file.view_group, &views, &vocabularies, &sources, &defaults)?;
+        // The scopes first: which attributes are entity space and which are a family is what
+        // decides the schema itself (`views.md` §5).
+        let attribute_scopes = compile_attribute_scopes(&file.attribute, &view_groups)?;
+        let (attributes, scoped_attributes) = compile_attributes(
+            &file.attribute,
+            &vocabularies,
+            &attribute_scopes,
+            &sources,
+            &defaults,
+        )?;
+        let attribute_sources =
+            compile_attribute_sources(&file.attribute, &attribute_scopes, &sources, &defaults)?;
+        let (layers, layer_sources, label_layers, layer_scopes) =
+            compile_layers(&file.layer, &views, &view_groups, &attributes, &sources)?;
 
         Ok(Config {
             schema: Schema {
@@ -1338,72 +2206,30 @@ impl Config {
             },
             attribute_sources,
             views,
+            view_groups,
+            scopes: Scopes {
+                attributes: attribute_scopes,
+                layers: layer_scopes,
+            },
+            scoped_attributes,
             layers,
             layer_sources,
             label_layers,
+            allocation_view: defaults.allocation_view.clone(),
         })
     }
 
-    /// The view a build materialises when the invocation names none.
-    ///
-    /// **One declared view is not a default; it is the only answer.** With several, choosing would
-    /// publish a coordinate system nobody asked for — and since two views quantise the same corpus
-    /// differently, the bundle would be well-formed and wrong. With none, there is nothing to
-    /// build at all.
-    pub fn sole_view(&self) -> Result<&str> {
-        match self.views.as_slice() {
-            [only] => Ok(&only.name),
-            [] => Err(declaration_error(
-                "the declaration has no `[[view]]` block, so this build has no coordinate system                  to materialise. A view names the geometry source and the frame it is quantised                  against (configuration.md §1)",
-            )),
-            several => Err(declaration_error(format!(
-                "the declaration has {} views and `--view` names none. A build materialises one                  coordinate system: {}. Two views quantise the same corpus differently, so                  choosing one here would produce a bundle that is well-formed and not the one                  asked for",
-                several.len(),
-                names(several.iter().map(|v| v.name.as_str()))
-            ))),
-        }
-    }
-
-    /// The files this build reads, for the one view it materialises.
+    /// The entity-space files this build reads: the attribute sources and the layers.
     ///
     /// **Where the declaration meets the invocation.** Everything above is route-independent: the
     /// same blocks describe a deployment that never builds (`configuration.md` §2), and a config
     /// declaring no source at all is legal and declares an empty corpus. This is the method that
-    /// asks for the files, so it is where *this* build's absences become refusals — and where the
-    /// two acquisition routes that are specified and not built say so rather than reading nothing.
-    pub fn acquire(&self, view: &str) -> Result<Acquisition> {
-        let declared = self.views.iter().find(|v| v.name == view).ok_or_else(|| {
-            declaration_error(format!(
-                "--view '{view}' names no `[[view]]` block. Declared: {}. The build materialises \
-                 one coordinate system and reads its `source`, so a view it cannot find is a build \
-                 with no geometry rather than a default one",
-                names(self.views.iter().map(|v| v.name.as_str()))
-            ))
-        })?;
-        let points = declared.source.clone().ok_or_else(|| {
-            declaration_error(format!(
-                "view '{view}': `source` is required to build from a file (configuration.md §1). \
-                 It is the path — relative to this config — of this view's geometry: `entity_id` \
-                 with either `x`/`y` or `morton`/`residual`. ⊘ Declaring no source is legal and \
-                 means the view is declared and empty, which is a bundle with no rows in it (§2) \
-                 and is not built"
-            ))
-        })?;
-        let access = AccessInput {
-            source: match (
-                &declared.point_visibility.source,
-                &declared.point_visibility.field,
-            ) {
-                (Some(path), _) => AccessSource::Relation(path.clone()),
-                (None, Some(field)) => AccessSource::Field(field.clone()),
-                // Legal, and the corpus with no permission model: every point takes the default
-                // (§1). *Nowhere* is the decision the `default` key makes, so nothing is refused
-                // here — a build with neither acquisition key reads no relation and writes the one
-                // label the declaration named.
-                (None, None) => AccessSource::Default,
-            },
-            default: declared.point_visibility.default.clone(),
-        };
+    /// asks for the files, so it is where *this* build's absences become refusals.
+    ///
+    /// Each view's own half — its geometry source and its labels — is [`acquire_view`], because a
+    /// view owns everything downstream of the permutation and nothing upstream of it
+    /// (`views.md` §1).
+    pub fn acquire(&self) -> Result<Acquisition> {
         // **Every declared column must have a file by now.** Declaring one with no source is
         // legal (§2) and is the write-path deployment's normal state; a build that would have to
         // read it is where the absence becomes a refusal, naming the columns rather than the block
@@ -1433,32 +2259,69 @@ impl Config {
         }
         Ok(Acquisition {
             attribute_sources: self.attribute_sources.clone(),
-            extent: declared.extent,
-            points,
-            point_fields: declared.fields.clone(),
-            access,
             layers: self.layer_sources.clone(),
         })
     }
+}
+
+/// One view's own inputs: its geometry source and where its points' labels come from.
+///
+/// **Form B's selection travels with the file** (`views.md` §3.1): a view whose points sit in a
+/// shared source carries the discriminator here, and every pass over that file — the id union,
+/// the labels, the geometry, the survey — applies it, so no view ever reads another's rows into
+/// its own row space.
+pub fn acquire_view(view: &BuildView) -> Result<ViewAcquisition> {
+    let points = view.source.clone().ok_or_else(|| {
+        declaration_error(format!(
+            "view '{}': `source` is required to build from a file (configuration.md §1). \
+             It is the path — relative to this config — of this view's geometry: `entity_id` \
+             with either `x`/`y` or `morton`/`residual`. ⊘ Declaring no source is legal and \
+             means the view is declared and empty, which is a bundle with no rows in it (§2) \
+             and is not built",
+            view.id
+        ))
+    })?;
+    Ok(ViewAcquisition {
+        points,
+        point_fields: view.fields.clone(),
+        select: view.select.clone(),
+        access: AccessInput {
+            source: match (&view.point_visibility.source, &view.point_visibility.field) {
+                (Some(path), _) => AccessSource::Relation(path.clone()),
+                (None, Some(field)) => AccessSource::Field(field.clone()),
+                // Legal, and the corpus with no permission model: every point takes the default
+                // (§1). *Nowhere* is the decision the `default` key makes, so nothing is refused
+                // here — a build with neither acquisition key reads no relation and writes the one
+                // label the declaration named.
+                (None, None) => AccessSource::Default,
+            },
+            default: view.point_visibility.default.clone(),
+        },
+    })
+}
+
+/// One view's resolved inputs ([`acquire_view`]).
+#[derive(Debug, Clone)]
+pub struct ViewAcquisition {
+    /// The view's `source`: identity and geometry.
+    pub points: PathBuf,
+    /// Where the view's identity and geometry fields sit in that file.
+    pub point_fields: Fields,
+    /// Which of that file's rows are this view's, where the file holds several views'
+    /// (`views.md` §3.1's form B). `None` where the file is the view.
+    pub select: Option<ViewSelector>,
+    /// Where this view's points get their access terms, and what a point carrying none gets.
+    pub access: AccessInput,
 }
 
 /// The files one build reads, resolved from the config and any `--file` overrides, plus the
 /// frame it quantises against.
 #[derive(Debug, Clone)]
 pub struct Acquisition {
-    /// The built view's `extent`, as declared. [`resolve_extent`] turns [`Extent::Auto`] into
-    /// [`Bounds`] by reading [`Acquisition::points`]; every other spelling is already the answer.
-    pub extent: Extent,
     /// The declared attributes grouped by the file each is read from — one pass per group, joined
-    /// to the view's geometry by the identity column each group names. Empty for an empty schema;
-    /// an attribute with no file to read it from is refused at parse.
+    /// to entity space by the identity column each group names. Empty for an empty schema; an
+    /// attribute with no file to read it from is refused at parse.
     pub attribute_sources: Vec<AttributeSource>,
-    /// The built view's `source`: identity and geometry.
-    pub points: PathBuf,
-    /// Where the view's identity and geometry fields sit in that file.
-    pub point_fields: Fields,
-    /// Where this view's points get their access terms, and what a point carrying none gets.
-    pub access: AccessInput,
     /// Each layer's own artifacts and members, in declaration order. **One source per layer**, so
     /// no row anywhere names the layer it belongs to.
     pub layers: Vec<LayerSources>,
@@ -1663,6 +2526,9 @@ struct Defaults {
     source: Option<String>,
     /// The column an entity id is read from. `entity_id` where the declaration says nothing.
     entity_id_field: String,
+    /// `[defaults].allocation_view` as written. Resolved against the built view registry by
+    /// [`Config::anchor_view`], not here: the groups are compiled after `[defaults]` is.
+    allocation_view: Option<String>,
 }
 
 impl Defaults {
@@ -1671,6 +2537,7 @@ impl Defaults {
             return Ok(Defaults {
                 source: None,
                 entity_id_field: ENTITY_ID.to_string(),
+                allocation_view: None,
             });
         };
         if let Some(source) = &block.source {
@@ -1691,6 +2558,7 @@ impl Defaults {
         Ok(Defaults {
             source: block.source.clone(),
             entity_id_field,
+            allocation_view: block.allocation_view.clone(),
         })
     }
 }
@@ -1702,7 +2570,9 @@ impl Defaults {
 /// and *declared* by whatever key asserts it — and naming an undeclared one is refused rather than
 /// read as the declaration it is not.
 struct KnownField {
-    name: &'static str,
+    /// Owned rather than `&'static str`: a `[view_group.views]` roster's known fields are the
+    /// group's own declared metadata names, which exist only for the length of a parse.
+    name: String,
     /// `None` when this object always has the field; `Some(why)` when it does not have it here,
     /// `why` naming the key that would declare one.
     undeclared: Option<String>,
@@ -1710,18 +2580,18 @@ struct KnownField {
 
 impl KnownField {
     /// A field the object always has.
-    fn always(name: &'static str) -> KnownField {
+    fn always(name: impl Into<String>) -> KnownField {
         KnownField {
-            name,
+            name: name.into(),
             undeclared: None,
         }
     }
 
     /// A field another key asserts the existence of: present when `declared`, and refused with
     /// `why` when it is not.
-    fn asserted_by(name: &'static str, declared: bool, why: &str) -> KnownField {
+    fn asserted_by(name: impl Into<String>, declared: bool, why: &str) -> KnownField {
         KnownField {
-            name,
+            name: name.into(),
             undeclared: (!declared).then(|| why.to_string()),
         }
     }
@@ -1828,12 +2698,12 @@ fn check_fields(
         )));
     }
     for (canonical, actual) in map {
-        let Some(field) = known.iter().find(|f| f.name == canonical.as_str()) else {
+        let Some(field) = known.iter().find(|f| f.name == *canonical) else {
             return Err(declaration_error(format!(
                 "{object}: `fields.{canonical}` is not one of this object's fields. They are: {}. \
                  The map says where a field is and never whether there is one, so a name outside \
                  the set is refused rather than passed to the reader",
-                names(known.iter().map(|f| f.name))
+                names(known.iter().map(|f| f.name.as_str()))
             )));
         };
         if let Some(why) = &field.undeclared {
@@ -1960,6 +2830,11 @@ fn expand_labels(blocks: &[LayerBlock]) -> Result<(Vec<LayerBlock>, BTreeMap<Str
             members: labels.members.clone(),
             labels: None,
             views: parent.views.clone(),
+            // **The parent's scope, for the same reason as its views**: a label is drawn where the
+            // thing it labels is drawn, so a label over a group-scoped layer is per view exactly
+            // as its parent is. The sugar carries no `scope` key of its own — there is nothing a
+            // label could be scoped to that its parent is not.
+            scope: parent.scope.clone(),
             source: labels.source.clone(),
             fields: labels.fields.clone(),
             artifacts: None,
@@ -1985,6 +2860,7 @@ fn expand_labels(blocks: &[LayerBlock]) -> Result<(Vec<LayerBlock>, BTreeMap<Str
             levels: Vec::new(),
             // A label layer's members are its own rows; there is no shape in the sugar's key set.
             shape: None,
+            default_space: None,
             content: Some(ContentBlock {
                 computed: Vec::new(),
                 supplied: vec![SuppliedBlock {
@@ -2021,12 +2897,30 @@ fn expand_labels(blocks: &[LayerBlock]) -> Result<(Vec<LayerBlock>, BTreeMap<Str
 /// positionally, so a group is a subset of the declaration order rather than a reordering of it.
 fn compile_attribute_sources(
     blocks: &[AttributeBlock],
+    scopes: &BTreeMap<String, String>,
     sources: &Sources,
     defaults: &Defaults,
 ) -> Result<Vec<AttributeSource>> {
     let mut groups: Vec<AttributeSource> = Vec::new();
-    for (index, block) in blocks.iter().enumerate() {
+    // **The index recorded is the *schema's*, not the block's.** A group-scoped attribute is a
+    // column family and is not in the schema at all (`views.md` §5), so the two spaces differ the
+    // moment a scoped block is declared ahead of an entity-scoped one — and the scalar tail is
+    // stored positionally, which is what a shifted index would silently rewrite.
+    let mut schema_index = 0usize;
+    for block in blocks {
         let object = format!("attribute '{}'", block.name);
+        let index = schema_index;
+        if !scopes.contains_key(&block.name) {
+            schema_index += 1;
+        }
+        // **`[defaults].source` does not reach a group-scoped attribute** (`views.md` §5). Its
+        // values are one per `(entity, view)` and are read from each view's own points file —
+        // which is what Appendix A's `sentiment` does — and the default, a single whole-corpus
+        // file, is exactly the wrong file. Taking it would group the column against a source
+        // carrying one value per entity and report the column missing from it.
+        if scopes.contains_key(&block.name) {
+            continue;
+        }
         // **An attribute with no source at all is legal to *declare*** (`configuration.md` §2):
         // a deployment that writes through the service declares its columns and acquires nothing,
         // and the empty bundle is what carries the schema. A build that has to read the column is
@@ -2080,9 +2974,7 @@ fn compile_views(
     let mut seen: HashSet<&str> = HashSet::new();
     let mut views = Vec::with_capacity(blocks.len());
     for block in blocks {
-        if block.name.is_empty() {
-            return Err(declaration_error("a view with an empty name"));
-        }
+        check_view_name(&format!("view '{}'", block.name), &block.name)?;
         if !seen.insert(block.name.as_str()) {
             return Err(declaration_error(format!(
                 "view '{}' is declared twice. A view name is an identity that is tombstoned on \
@@ -2103,147 +2995,1167 @@ fn compile_views(
                 None => None,
             },
         };
-        // **The two geometry shapes are mutually exclusive** (§1): a row carries `x`/`y` or
-        // `morton`/`residual`, and a map naming one of each says the file carries both — which the
-        // reader would resolve by preferring one, silently, over a declaration that asked for the
-        // other.
-        let fields = check_fields(
-            &object,
-            source.as_ref(),
-            &[
-                KnownField::always(ENTITY_ID),
-                KnownField::always("x"),
-                KnownField::always("y"),
-                KnownField::always("morton"),
-                KnownField::always("residual"),
-            ],
-            block.fields.as_ref(),
-            &defaults.entity_id_field,
-        )?;
-        if let Some(fields) = &block.fields {
-            let quantised = fields.contains_key("x") || fields.contains_key("y");
-            let coded = fields.contains_key("morton") || fields.contains_key("residual");
-            if quantised && coded {
-                return Err(declaration_error(format!(
-                    "view '{}': `fields` names both an `x`/`y` pair and a `morton` code, and the \
-                     two geometry shapes are mutually exclusive (configuration.md §1). A row \
-                     carries coordinates or a code, so naming both says the source has two \
-                     geometries and leaves the reader to pick",
-                    block.name
-                )));
-            }
-            if fields.contains_key("residual") && !fields.contains_key("morton") {
-                return Err(declaration_error(format!(
-                    "view '{}': `fields.residual` without `fields.morton`. A residual is the \
-                     sub-cell remainder of a Morton code and is read only beside one",
-                    block.name
-                )));
-            }
-        }
-        let extent = compile_extent(&block.name, block.extent.as_ref())?;
-        if block.visibility.is_some() {
-            return Err(declaration_error(format!(
-                "view '{}': `visibility` is specified and not built (views §3 — a view's own \
-                 gate). A bundle has one coordinate system, so nothing evaluates a per-view gate \
-                 yet; accepting it would register a view reachable by everyone under a declaration \
-                 saying otherwise",
-                block.name
-            )));
-        }
-
-        let point = block.point_visibility.as_ref().ok_or_else(|| {
-            declaration_error(format!(
-                "view '{}': `point_visibility` is required and has no default \
-                 (configuration.md §1). Write `point_visibility = {{ field = \"<column>\", \
-                 default = \"<label>\" }}`: `field` says where each point's own access label is, \
-                 and `default` says what a point carrying none gets — `public` reaches every \
-                 principal, any other word is an access label. There is no default because the \
-                 value an absent line would supply is one of those two, and both are decisions",
-                block.name
-            ))
-        })?;
-        if let Some(field) = &point.field {
-            if field.trim().is_empty() {
-                return Err(declaration_error(format!(
-                    "view '{}': `point_visibility.field` is empty. Omit it to say points carry no \
-                     labels of their own",
-                    block.name
-                )));
-            }
-        }
-        // **A point's label comes from a field or from a source, never both** (§1). They are two
-        // shapes of one relation — a list per point, or a row per `(point, term)` — so a view
-        // declaring both has said the labels are in two places and left the build to choose.
-        if point.field.is_some() && point.source.is_some() {
-            return Err(declaration_error(format!(
-                "view '{}': `point_visibility` declares both a `field` and a `source`, and a \
-                 point's label comes from one or the other (configuration.md §1). `field` is a \
-                 column of this view's own source, one value or a list per point; `source` is a \
-                 separate exploded `(entity_id, term_id)` relation. Declaring both leaves which \
-                 one carries a point's terms to the reader",
-                block.name
-            )));
-        }
-        let labels = match &point.source {
-            Some(declared) => Some(sources.path(&format!("{object} point_visibility"), declared)?),
-            None => None,
+        let projection = compile_projection(&object, block.projection.as_deref())?;
+        // **A projected view's coordinate columns are `lon` and `lat`, and it has no other
+        // geometry shape** (`projections.md` §2). An unprojected view keeps the two shapes it has
+        // always had, mutually exclusive: a row carries `x`/`y` or `morton`/`residual`, and a map
+        // naming one of each says the file carries both — which the reader would resolve by
+        // preferring one, silently, over a declaration that asked for the other.
+        let fields = if projection == Projection::None {
+            compile_unprojected_fields(
+                &object,
+                source.as_ref(),
+                block.fields.as_ref(),
+                defaults,
+                Vec::new(),
+            )?
+        } else {
+            compile_projected_fields(
+                &object,
+                source.as_ref(),
+                block.fields.as_ref(),
+                defaults,
+                Vec::new(),
+            )?
         };
-        let default = point.default.as_deref().ok_or_else(|| {
-            declaration_error(format!(
-                "view '{}': `point_visibility.default` is required and has no default. It is what \
-                 a point carrying no label of its own gets — `public` reaches every principal, and \
-                 any other word is an access label. `inherited` is not available here: a point \
-                 carrying no terms is in no posting list and so in no principal's mask, so there \
-                 is nothing to inherit",
-                block.name
-            ))
-        })?;
-        if default == INHERITED {
-            return Err(declaration_error(format!(
-                "view '{}': `point_visibility.default = \"inherited\"` is refused. A container's \
-                 gate narrows rather than widens, and a point carrying no terms is already in no \
-                 principal's mask — so inheriting would have to *add* a term to the point, which \
-                 can only widen it (configuration.md §4). Name the label such a point should carry, \
-                 or `public`",
-                block.name
-            )));
-        }
-        check_label(&block.name, "point_visibility.default", default)?;
+        let extent = compile_extent(&object, projection, block.extent.as_ref())?;
+        let visibility = compile_view_gate(&object, block.visibility.as_deref())?;
+
+        let point_visibility =
+            compile_point_visibility(&object, block.point_visibility.as_ref(), sources)?;
 
         views.push(View {
             name: block.name.clone(),
             title: block.title.clone(),
+            projection,
             source,
             fields,
             extent,
-            point_visibility: PointVisibility {
-                field: point.field.clone(),
-                source: labels,
-                default: default.to_string(),
-            },
+            visibility,
+            point_visibility,
         });
     }
     Ok(views)
 }
 
+/// A view's `projection`, from the closed set of `projections.md` §5 and defaulting to `none`.
+///
+/// **The set is closed and the default is no projection**, so a corpus with no geography is never
+/// asked to name one. A name outside the set is refused listing the set: the arithmetic of a
+/// projection is part of the stored format — geometry is quantised against a declared frame and
+/// the artifact *is* the record — so there is no reading of an unknown name that could be
+/// approximated safely.
+fn compile_projection(object: &str, declared: Option<&str>) -> Result<Projection> {
+    let Some(name) = declared else {
+        return Ok(Projection::None);
+    };
+    Projection::from_name(name).ok_or_else(|| {
+        declaration_error(format!(
+            "{object}: `projection = \"{name}\"` is not one of the projections this service \
+             transforms with. They are: web_mercator, equirectangular, plate_carree, \
+             gall_isographic, none (projections.md §5). The set is closed and stays cylindrical — \
+             a conic or azimuthal entry would stop a longitude/latitude rectangle being a \
+             rectangle, which is what lets an extent be written in degrees — and no datum shift, \
+             national grid or caller-supplied projection is accepted"
+        ))
+    })
+}
+
+/// An unprojected view's or group's `fields`: `entity_id` with either `x`/`y` or
+/// `morton`/`residual` (`configuration.md` §1), plus whatever `extra` its own block declares.
+///
+/// **The two geometry shapes are mutually exclusive**: a row carries coordinates or a code, so a
+/// map naming one of each says the file has two geometries and leaves the reader to pick. The
+/// geographic spellings are refused here rather than reported as unknown fields, because a caller
+/// writing `fields.lon` on a view with no projection has said what their columns hold and been
+/// given a frame that quantises degrees as though they were the file's own units.
+fn compile_unprojected_fields(
+    object: &str,
+    source: Option<&PathBuf>,
+    declared_fields: Option<&BTreeMap<String, String>>,
+    defaults: &Defaults,
+    extra: Vec<KnownField>,
+) -> Result<Fields> {
+    if let Some(declared) = declared_fields {
+        for (geographic, axis) in [("lon", "x"), ("lat", "y")] {
+            if declared.contains_key(geographic) {
+                return Err(declaration_error(format!(
+                    "{object}: `fields.{geographic}` on a view that declares no projection. There \
+                     is nothing to turn a degree into a coordinate, so the column would be \
+                     quantised as though it were the file's own units (projections.md §5.3). \
+                     Declare `projection = \"web_mercator\"` or `projection = \"equirectangular\"` \
+                     if these are places on the Earth; otherwise write `fields.{axis}`"
+                )));
+            }
+        }
+    }
+    let mut known = vec![
+        KnownField::always(ENTITY_ID),
+        KnownField::always("x"),
+        KnownField::always("y"),
+        KnownField::always("morton"),
+        KnownField::always("residual"),
+    ];
+    known.extend(extra);
+    let fields = check_fields(
+        object,
+        source,
+        &known,
+        declared_fields,
+        &defaults.entity_id_field,
+    )?;
+    if let Some(declared) = declared_fields {
+        let quantised = declared.contains_key("x") || declared.contains_key("y");
+        let coded = declared.contains_key("morton") || declared.contains_key("residual");
+        if quantised && coded {
+            return Err(declaration_error(format!(
+                "{object}: `fields` names both an `x`/`y` pair and a `morton` code, and the two \
+                 geometry shapes are mutually exclusive (configuration.md §1). A row carries \
+                 coordinates or a code, so naming both says the source has two geometries and \
+                 leaves the reader to pick"
+            )));
+        }
+        if declared.contains_key("residual") && !declared.contains_key("morton") {
+            return Err(declaration_error(format!(
+                "{object}: `fields.residual` without `fields.morton`. A residual is the sub-cell \
+                 remainder of a Morton code and is read only beside one"
+            )));
+        }
+    }
+    Ok(fields)
+}
+
+/// A projected view's `fields`: `entity_id` with `lon` and `lat`, and nothing else
+/// (`projections.md` §2).
+///
+/// **The resolved map keys the coordinates on the canonical `x`/`y`**, so every reader below this
+/// point sees a coordinate pair and the axis names are a property of the declaration alone. What
+/// `lon`/`lat` buy is at the declaration: longitude-then-latitude is the order GeoJSON and WKT
+/// use and the opposite of the order many sources publish, and a corpus built with the two
+/// exchanged is silently mirrored about the diagonal. Naming the axes for what they hold removes
+/// the ambiguity rather than documenting it.
+fn compile_projected_fields(
+    object: &str,
+    source: Option<&PathBuf>,
+    declared_fields: Option<&BTreeMap<String, String>>,
+    defaults: &Defaults,
+    extra: Vec<KnownField>,
+) -> Result<Fields> {
+    if let Some(declared) = declared_fields {
+        for (axis, geographic) in [("x", "lon"), ("y", "lat")] {
+            if declared.contains_key(axis) {
+                return Err(declaration_error(format!(
+                    "{object}: `fields.{axis}` on a projected view. A projected view's \
+                     coordinate columns are `lon` and `lat` — longitude then latitude, the order \
+                     GeoJSON and WKT use — because a corpus built with the two exchanged is \
+                     silently mirrored about the diagonal (projections.md §2). Write \
+                     `fields.{geographic}` instead"
+                )));
+            }
+        }
+        for coded in ["morton", "residual"] {
+            if declared.contains_key(coded) {
+                return Err(declaration_error(format!(
+                    "{object}: `fields.{coded}` on a projected view. A Morton code is a \
+                     position already placed in a frame, so there is no longitude for a \
+                     projection to transform (projections.md §3). Either declare \
+                     `projection = \"none\"` and read the codes against the grid's own frame, or \
+                     supply `lon`/`lat` columns"
+                )));
+            }
+        }
+    }
+    let mut known = vec![
+        KnownField::always(ENTITY_ID),
+        KnownField::always("lon"),
+        KnownField::always("lat"),
+    ];
+    known.extend(extra);
+    let fields = check_fields(
+        object,
+        source,
+        &known,
+        declared_fields,
+        &defaults.entity_id_field,
+    )?;
+    // `lon` and `lat` become the canonical `x` and `y`, defaulting to their own names — which is
+    // what makes `lon`/`lat` the columns a projected view reads with no `fields` map at all.
+    let mut map = fields.map;
+    for (axis, geographic) in [("x", "lon"), ("y", "lat")] {
+        let column = map
+            .remove(geographic)
+            .unwrap_or_else(|| geographic.to_string());
+        map.insert(axis.to_string(), column);
+    }
+    Ok(Fields {
+        object: fields.object,
+        map,
+    })
+}
+
 /// A word written where an access label goes. `public` is a label and is fine; `inherited` is the
 /// one reserved word occupying such a slot (§4), so it is refused rather than interned.
+///
+/// `object` is the declaration quoted as its own block names it — `view 's0'`, `layer
+/// 'clusters/a'`, `view group 'quarter'` — because the same key is written on four kinds of block
+/// and *which one* is half of the refusal.
 fn check_label(object: &str, key: &str, label: &str) -> Result<()> {
     if label.trim().is_empty() {
         return Err(declaration_error(format!(
-            "'{object}': `{key}` is empty. An access label is a term a principal either holds or \
+            "{object}: `{key}` is empty. An access label is a term a principal either holds or \
              does not; write `public` for the one every principal holds"
         )));
     }
     if label == INHERITED {
         return Err(declaration_error(format!(
-            "'{object}': an access label may not be spelled `inherited` — it is reserved for *the \
+            "{object}: an access label may not be spelled `inherited` — it is reserved for *the \
              container's gate is the whole of it*, and it is the one reserved word occupying a \
              slot that otherwise takes a label (configuration.md §4). `public` is not reserved in \
              this sense: it *is* a label, held by every principal"
         )));
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------------------------
+// View groups
+// ---------------------------------------------------------------------------------------------
+
+/// A name a view id is built out of — a plain view's `name`, or a group's `name` or one of its
+/// keys (`views.md` §3.2).
+///
+/// **The same charset a column name takes**, and for the same reason: a view id addresses a
+/// directory in the bundle (`views/<group>/<key>/`), the `view` in a request body, the
+/// `x-tessera-view` header and the manifest's `files` map, so it has to survive being a path
+/// segment. Two characters are refused ahead of the charset because they are *reserved* rather
+/// than merely outside it: `:` joins a group to its key, and `@` pins a group-scoped attribute to
+/// a view (`views.md` §5). Each
+/// is refused here and again at manifest load, which are the two halves decision 0108 asks for.
+fn check_view_name(object: &str, name: &str) -> Result<()> {
+    // **The charset lives with the roster records** (`tessera_types::view::check_view_key`), so
+    // the declaration and the create operation coin keys under one rule rather than two copies of
+    // it — decision 0091's reading applied to a name.
+    tessera_types::view::check_view_key(name)
+        .map_err(|detail| declaration_error(format!("{object}: {detail}")))
+}
+
+/// A `[[view]]`'s, a `[[view_group]]`'s or a roster record's own `visibility` (`views.md` §6).
+///
+/// **`public` compiles to `None`**, which is what every downstream reader takes as *no gate*: it
+/// is the label every principal holds inside the trust boundary (decision 0088), so storing the
+/// word and storing nothing are the same statement and the shorter one cannot be misread as a
+/// term to look up.
+///
+/// **Any other label is compiled after the plugin has been asked to read it** — the same question
+/// an item's `access` bytes are put through at ingest ([`Plugin::terms_of_label`]), because a view
+/// gate is satisfied by exactly the item-visibility predicate (`views.md` §6) and a label the
+/// plugin cannot parse is one no principal could ever satisfy. Refusing it here is the difference
+/// between a typo an author fixes at the build and a view that is silently reachable by nobody.
+/// A label that parses to **no descriptors at all** is refused for the same reason: its term set
+/// is empty, it intersects nothing, and it gates the view against every principal including the
+/// one who wrote it.
+///
+/// The plugin asked is `builtin:passthrough`, which is the only one a build runs
+/// (`tessera_build::build`); a deployment serving the bundle under a different plugin is a
+/// mismatch the gate fails closed on rather than one this check could anticipate.
+fn compile_view_gate(object: &str, declared: Option<&str>) -> Result<Option<String>> {
+    let Some(label) = declared else {
+        return Ok(None);
+    };
+    if label == PUBLIC {
+        return Ok(None);
+    }
+    check_label(object, "visibility", label)?;
+    let descriptors = tessera_plugin::Passthrough::new()
+        .terms_of_label(label.as_bytes())
+        .map_err(|e| {
+            declaration_error(format!(
+                "{object}: `visibility = \"{label}\"` is not a label the plugin can read ({e}). A \
+                 view's gate is satisfied by the item-visibility predicate (views §6), so a label \
+                 the plugin cannot turn into terms is one no principal could satisfy"
+            ))
+        })?;
+    if descriptors.is_empty() {
+        return Err(declaration_error(format!(
+            "{object}: `visibility = \"{label}\"` names no terms. A gate is satisfied where its \
+             term set meets the principal's, so an empty one is satisfied by nobody and the view \
+             would be reachable by no principal at all — including this build's author. Write \
+             `public`, or a label naming terms"
+        )));
+    }
+    Ok(Some(label.to_string()))
+}
+
+/// Compile every `[[view_group]]` (`views.md` §3, decision 0108).
+///
+/// **Two passes over the blocks**, because `members` may name a group declared after the one
+/// naming it: the first settles the names — charset, duplicates, and the collision with a plain
+/// view — and the second compiles each group against the whole set. Requiring declaration order
+/// would be the alternative, and it would be an ordering nothing else in this surface has: a
+/// layer's `depends_on` is ordered because registration is ordered, and a roster is not registered
+/// at all.
+fn compile_view_groups(
+    blocks: &[ViewGroupBlock],
+    views: &[View],
+    vocabularies: &HashMap<String, Vocabulary>,
+    sources: &Sources,
+    defaults: &Defaults,
+) -> Result<Vec<ViewGroup>> {
+    let mut seen: HashSet<&str> = HashSet::new();
+    for block in blocks {
+        let object = format!("view group '{}'", block.name);
+        check_view_name(&object, &block.name)?;
+        if !seen.insert(block.name.as_str()) {
+            return Err(declaration_error(format!(
+                "{object} is declared twice. A group's name is half of every one of its views' ids \
+                 (`<group>:<key>`), and a key is tombstoned on drop and never reused, so two \
+                 blocks of one name is not a last-one-wins config question"
+            )));
+        }
+        // **One namespace for views and groups.** A layer's `views` list and a `scope`'s `group`
+        // take either word, so one name for both would make each of those mean two things — and a
+        // group is not a view: it has no row space and cannot be named on a viewer verb.
+        if views.iter().any(|v| v.name == block.name) {
+            return Err(declaration_error(format!(
+                "{object} has the name of a `[[view]]` block. A layer's `views` list and an \
+                 attribute's `scope = {{ group = … }}` name either kind, so one word for both is \
+                 ambiguous wherever they meet — and the two are not interchangeable: a group has \
+                 no row space and cannot be named on a viewer verb (views §3.1)"
+            )));
+        }
+    }
+
+    let mut compiled = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        compiled.push(compile_view_group(
+            block,
+            blocks,
+            vocabularies,
+            sources,
+            defaults,
+        )?);
+    }
+    Ok(compiled)
+}
+
+fn compile_view_group(
+    block: &ViewGroupBlock,
+    blocks: &[ViewGroupBlock],
+    vocabularies: &HashMap<String, Vocabulary>,
+    sources: &Sources,
+    defaults: &Defaults,
+) -> Result<ViewGroup> {
+    let object = format!("view group '{}'", block.name);
+    let form_a = !block.view.is_empty();
+    let form_b = block.views.is_some();
+
+    // **The roster is declared once**, and the two forms say different things about where the
+    // points are: form A's file *is* the view, form B's source carries every view's rows behind a
+    // discriminator. A group writing both has said the points are in two places and left the build
+    // to choose — the refusal `source` beside inline `artifacts` earns, for the same reason.
+    if form_a && form_b {
+        return Err(declaration_error(format!(
+            "{object} declares both roster forms — {} `[[view_group.view]]` block(s) and a \
+             `[view_group.views]` table (views §3.1). The roster decides where the points come \
+             from: under `[[view_group.view]]` each view names its own file and the group names \
+             none, and under `[view_group.views]` the group's own `source` holds every view's \
+             points with `fields.view` saying which view each row lands in. Write one of them",
+            block.view.len()
+        )));
+    }
+
+    // **`members` first**, because it decides which of the keys below this group may declare at
+    // all: keys, metadata and each view's own gate belong to the group that owns them.
+    let members = match &block.members {
+        None => None,
+        Some(target) => {
+            if target == &block.name {
+                return Err(declaration_error(format!(
+                    "{object}: `members = \"{target}\"` names the group itself. `members` says \
+                     this group's views are *another* group's (views §3.3), so a group naming \
+                     itself has declared no views at all"
+                )));
+            }
+            let owner = blocks.iter().find(|b| &b.name == target).ok_or_else(|| {
+                declaration_error(format!(
+                    "{object}: `members = \"{target}\"` names no `[[view_group]]` block. \
+                     Declared: {}. A group takes another group's views by naming it, so a name \
+                     nothing declares leaves this group with no views rather than with its own",
+                    names(blocks.iter().map(|b| b.name.as_str()))
+                ))
+            })?;
+            // **Chains are refused, so the owner of a key set is always one hop away** (§3.3).
+            // Two hops would make *which group owns this key* a graph walk, and the owner is what
+            // decides where a create lands and what a drop takes with it.
+            if let Some(further) = &owner.members {
+                return Err(declaration_error(format!(
+                    "{object}: `members = \"{target}\"` names a group that itself declares \
+                     `members = \"{further}\"`, and chains are refused (views §3.3). The owner of \
+                     a key set is always one hop away, so a create and a drop resolve against one \
+                     group rather than walking a graph. Name '{further}' here instead"
+                )));
+            }
+            if block.metadata.is_some() {
+                return Err(declaration_error(format!(
+                    "{object}: `metadata` on a group declaring `members = \"{target}\"`. Keys \
+                     and metadata belong to the group that owns the views, and these are \
+                     '{target}'s (views §3.3) — a second typed value under one key would be a \
+                     second roster for one key set. Declare it on '{target}'"
+                )));
+            }
+            if form_a || form_b {
+                return Err(declaration_error(format!(
+                    "{object}: a roster on a group declaring `members = \"{target}\"`. Its views \
+                     are '{target}'s, so the keys are declared there and a roster here would be a \
+                     second one (views §3.3). Its points come from its own `source`, with \
+                     `fields.view` naming the discriminator; its own `visibility` is the one gate \
+                     it may still declare, a second layout being allowed to be narrower than the \
+                     first"
+                )));
+            }
+            Some(target.clone())
+        }
+    };
+
+    // **Form A declares no group-level `source`, and the other two require one.** `[defaults]`
+    // does not reach here at all: a defaulted group source would turn a form A declaration into a
+    // form B one, or mint views from a discriminator column nobody named — an acquisition nobody
+    // wrote, which is the line `configuration.md` §1 draws around `[defaults].source`.
+    if form_a && block.source.is_some() {
+        return Err(declaration_error(format!(
+            "{object}: `source` beside `[[view_group.view]]` blocks. Under that roster each view's \
+             points are that view's own `source` and the group declares none — the file is the \
+             view, exactly as a layer's file is the layer (views §3.1). Move the file onto the \
+             view whose points it holds, or write the roster as `[view_group.views]` beside one \
+             `source` carrying every view's rows with `fields.view` as the discriminator"
+        )));
+    }
+    if form_b && block.source.is_none() {
+        return Err(declaration_error(format!(
+            "{object}: a `[view_group.views]` roster and no `source`. The two are separate files \
+             and the group needs both: the roster is one row per view, and the group's own \
+             `source` holds every view's points with `fields.view` saying which view each row \
+             lands in (views §3.1). A file per view instead is `[[view_group.view]]`, where the \
+             group declares no `source` at all"
+        )));
+    }
+    if !form_a && block.source.is_none() {
+        return Err(declaration_error(format!(
+            "{object}: no `source` and no `[[view_group.view]]` roster, so this group's points \
+             come from nowhere. Either name a file per view under `[[view_group.view]]`, or name \
+             the group's own `source` whose `fields.view` says which view each row lands in — with \
+             `[view_group.views]` to list the views and their metadata, or without it to mint them \
+             from the discriminator's distinct values (views §3.1). `[defaults].source` \
+             deliberately does not reach a group: which of those two a defaulted file meant is not \
+             something a default can decide"
+        )));
+    }
+
+    let projection = compile_projection(&object, block.projection.as_deref())?;
+    let source = match &block.source {
+        Some(declared) => Some(sources.path(&object, declared)?),
+        None => None,
+    };
+    // **`fields.view` exists only where a discriminator does.** Under form A the file is the view,
+    // so there is nothing for a discriminator to select and a map naming one is a field the group
+    // never declared — `configuration.md` §8's rule, made by [`KnownField::asserted_by`].
+    let discriminator = || {
+        KnownField::asserted_by(
+            "view",
+            !form_a,
+            "under `[[view_group.view]]` the file is the view, so a row carries no discriminator \
+             saying which view it lands in. Move the roster to `[view_group.views]` beside one \
+             `source` if the points are in one file",
+        )
+    };
+    let fields = if projection == Projection::None {
+        compile_unprojected_fields(
+            &object,
+            source.as_ref(),
+            block.fields.as_ref(),
+            defaults,
+            vec![discriminator()],
+        )?
+    } else {
+        compile_projected_fields(
+            &object,
+            source.as_ref(),
+            block.fields.as_ref(),
+            defaults,
+            vec![discriminator()],
+        )?
+    };
+
+    let extent = compile_extent(&object, projection, block.extent.as_ref())?;
+    let visibility = compile_view_gate(&object, block.visibility.as_deref())?;
+    let point_visibility =
+        compile_point_visibility(&object, block.point_visibility.as_ref(), sources)?;
+    // The discriminator's column name, which no metadata name may take — `None` under form A,
+    // where there is no discriminator to collide with.
+    let carries_discriminator = (!form_a).then(|| fields.of("view").to_string());
+    let metadata = compile_metadata_types(
+        &object,
+        block,
+        vocabularies,
+        carries_discriminator.as_deref(),
+    )?;
+
+    let roster = if form_a {
+        let mut roster: Vec<RosterView> = Vec::with_capacity(block.view.len());
+        for entry in &block.view {
+            let view = compile_roster_view(&object, entry, &metadata, sources)?;
+            if roster.iter().any(|v| v.key == view.key) {
+                return Err(declaration_error(format!(
+                    "{object}: view key '{}' is declared twice. A key is the caller's own name for \
+                     one view, tombstoned on drop and never reused, and `<group>:<key>` is the id \
+                     every request and every stored path is written under (views §3.2)",
+                    view.key
+                )));
+            }
+            roster.push(view);
+        }
+        Roster::Inline(roster)
+    } else if let Some(table) = &block.views {
+        Roster::Table(compile_roster_table(
+            &object, table, &metadata, sources, defaults,
+        )?)
+    } else {
+        // **A group declaring neither form carries no metadata**: its views are minted from the
+        // discriminator's distinct values as the points are read, so there is no roster record for
+        // a per-view value to sit on (views §3.1).
+        if block.metadata.is_some() {
+            return Err(declaration_error(format!(
+                "{object}: `metadata` with no roster. The views here are minted from the \
+                 discriminator's distinct values as the points are read, so there is no roster \
+                 record for a per-view value to sit on (views §3.1). Write `[view_group.views]` — \
+                 one row per view, carrying `key` and the metadata names — or drop the `metadata` \
+                 line"
+            )));
+        }
+        Roster::Discriminator
+    };
+
+    Ok(ViewGroup {
+        name: block.name.clone(),
+        title: block.title.clone(),
+        projection,
+        source,
+        fields,
+        extent,
+        point_visibility,
+        visibility,
+        members,
+        metadata,
+        roster,
+    })
+}
+
+/// A `[[view]]`'s or a `[[view_group]]`'s `point_visibility` (`configuration.md` §1).
+///
+/// One routine for both, because the key means exactly the same thing on each: a group's views
+/// share their point-label acquisition as they share their frame, and a second copy of these four
+/// refusals would be a second place for `inherited` to become a label.
+fn compile_point_visibility(
+    object: &str,
+    block: Option<&PointVisibilityBlock>,
+    sources: &Sources,
+) -> Result<PointVisibility> {
+    let point = block.ok_or_else(|| {
+        declaration_error(format!(
+            "{object}: `point_visibility` is required and has no default (configuration.md §1). \
+             Write `point_visibility = {{ field = \"<column>\", default = \"<label>\" }}`: `field` \
+             says where each point's own access label is, and `default` says what a point carrying \
+             none gets — `public` reaches every principal, any other word is an access label. \
+             There is no default because the value an absent line would supply is one of those \
+             two, and both are decisions"
+        ))
+    })?;
+    if let Some(field) = &point.field {
+        if field.trim().is_empty() {
+            return Err(declaration_error(format!(
+                "{object}: `point_visibility.field` is empty. Omit it to say points carry no \
+                 labels of their own"
+            )));
+        }
+    }
+    // **A point's label comes from a field or from a source, never both** (§1). They are two
+    // shapes of one relation — a list per point, or a row per `(point, term)` — so a declaration
+    // naming both has said the labels are in two places and left the build to choose.
+    if point.field.is_some() && point.source.is_some() {
+        return Err(declaration_error(format!(
+            "{object}: `point_visibility` declares both a `field` and a `source`, and a point's \
+             label comes from one or the other (configuration.md §1). `field` is a column of this \
+             view's own source, one value or a list per point; `source` is a separate exploded \
+             `(entity_id, term_id)` relation. Declaring both leaves which one carries a point's \
+             terms to the reader"
+        )));
+    }
+    let labels = match &point.source {
+        Some(declared) => Some(sources.path(&format!("{object} point_visibility"), declared)?),
+        None => None,
+    };
+    let default = point.default.as_deref().ok_or_else(|| {
+        declaration_error(format!(
+            "{object}: `point_visibility.default` is required and has no default. It is what a \
+             point carrying no label of its own gets — `public` reaches every principal, and any \
+             other word is an access label. `inherited` is not available here: a point carrying no \
+             terms is in no posting list and so in no principal's mask, so there is nothing to \
+             inherit"
+        ))
+    })?;
+    if default == INHERITED {
+        return Err(declaration_error(format!(
+            "{object}: `point_visibility.default = \"inherited\"` is refused. A container's gate \
+             narrows rather than widens, and a point carrying no terms is already in no \
+             principal's mask — so inheriting would have to *add* a term to the point, which can \
+             only widen it (configuration.md §4). Name the label such a point should carry, or \
+             `public`"
+        )));
+    }
+    check_label(object, "point_visibility.default", default)?;
+    Ok(PointVisibility {
+        field: point.field.clone(),
+        source: labels,
+        default: default.to_string(),
+    })
+}
+
+/// The roster's own key set, which no metadata name may take (`views.md` §3.2).
+const ROSTER_KEYS: [&str; 3] = ["key", "source", "visibility"];
+
+/// The keys a group declares and a view of it may not (`views.md` §3.1).
+const GROUP_LEVEL_KEYS: [&str; 8] = [
+    "name",
+    "title",
+    "projection",
+    "extent",
+    "point_visibility",
+    "metadata",
+    "members",
+    "fields",
+];
+
+/// The names and types a view of this group carries (`views.md` §3.1).
+///
+/// **Metadata names are bounded by the roster's own keys** (§3.2): `key`, `source`, `visibility`
+/// and, where the group carries one, the discriminator's column name are refused as metadata
+/// names. A `[[view_group.view]]` block mixes the closed set with the declared names, so a name in
+/// both is a key with two readings — and on the roster table it would be one column asked to carry
+/// two things.
+fn compile_metadata_types(
+    object: &str,
+    block: &ViewGroupBlock,
+    vocabularies: &HashMap<String, Vocabulary>,
+    discriminator: Option<&str>,
+) -> Result<Vec<ViewMetadata>> {
+    let Some(declared) = &block.metadata else {
+        return Ok(Vec::new());
+    };
+    let mut metadata = Vec::with_capacity(declared.len());
+    for (name, value) in declared {
+        check_metadata_name(object, name)?;
+        if ROSTER_KEYS.contains(&name.as_str()) {
+            return Err(declaration_error(format!(
+                "{object}: `metadata.{name}` takes a name the roster already uses. `key`, `source` \
+                 and `visibility` are the roster's own keys (views §3.2), and a \
+                 `[[view_group.view]]` block mixes them with the metadata names — so a name in \
+                 both is a key with two readings, on the block and as a column of \
+                 `[view_group.views]`"
+            )));
+        }
+        if discriminator == Some(name.as_str()) {
+            return Err(declaration_error(format!(
+                "{object}: `metadata.{name}` takes the name of this group's discriminator column, \
+                 which `fields.view` puts at '{name}' (views §3.2). One column cannot both say \
+                 which view a row lands in and carry a per-view value"
+            )));
+        }
+        metadata.push(compile_metadata_type(object, name, value, vocabularies)?);
+    }
+    Ok(metadata)
+}
+
+/// A metadata name is a field name on the wire — `/v1/meta` serves it inside each roster entry —
+/// so it takes the column charset, on [`check_column_name`]'s argument.
+fn check_metadata_name(object: &str, name: &str) -> Result<()> {
+    if name.trim().is_empty() {
+        return Err(declaration_error(format!(
+            "{object}: a metadata name is empty. It is the name a view's value is served under"
+        )));
+    }
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return Err(declaration_error(format!(
+            "{object}: `metadata.{name}` is limited to ASCII letters, digits, `_` and `-`. It is a \
+             field name on the wire — `/v1/meta` serves it inside the roster entry for each view — \
+             on the same argument a column name is (contracts §3.2)"
+        )));
+    }
+    Ok(())
+}
+
+/// One metadata declaration: `name = "<type>"`, or `name = { type = "category", vocabulary = … }`.
+fn compile_metadata_type(
+    object: &str,
+    name: &str,
+    value: &toml::Value,
+    vocabularies: &HashMap<String, Vocabulary>,
+) -> Result<ViewMetadata> {
+    let (ty_name, vocabulary) = match value {
+        toml::Value::String(word) => (word.as_str(), None),
+        toml::Value::Table(table) => {
+            for key in table.keys() {
+                if key != "type" && key != "vocabulary" {
+                    return Err(declaration_error(format!(
+                        "{object}: `metadata.{name}.{key}` is not a key of a metadata \
+                         declaration, which takes `type` and — for a category — `vocabulary` \
+                         (views §3.1). A metadata value is one value per view on the roster, so it \
+                         carries none of an attribute's placement or index keys: it filters \
+                         nothing and occupies no column"
+                    )));
+                }
+            }
+            let ty = table
+                .get("type")
+                .and_then(toml::Value::as_str)
+                .ok_or_else(|| {
+                    declaration_error(format!(
+                        "{object}: `metadata.{name}` is a table with no `type`. The table spelling \
+                         is for a category — `{{ type = \"category\", vocabulary = \"<name>\" }}` \
+                         — and every other type is the word alone (views §3.1)"
+                    ))
+                })?;
+            (ty, table.get("vocabulary").and_then(toml::Value::as_str))
+        }
+        other => {
+            return Err(declaration_error(format!(
+                "{object}: `metadata.{name}` is {}, and a metadata declaration is a type name — \
+                 one of the `[[attribute]]` types — or `{{ type = \"category\", vocabulary = … }}` \
+                 (views §3.1)",
+                other.type_str()
+            )))
+        }
+    };
+    if ty_name == "category" {
+        let vocabulary = vocabulary.ok_or_else(|| {
+            declaration_error(format!(
+                "{object}: `metadata.{name}` is a category and names no `vocabulary`. It names a \
+                 `[[vocabulary]]` block, which is where the width, the value set and the \
+                 visibility live — every one of them a decision nobody can make on the author's \
+                 behalf"
+            ))
+        })?;
+        let declared = vocabularies.get(vocabulary).ok_or_else(|| {
+            declaration_error(format!(
+                "{object}: `metadata.{name}` names vocabulary '{vocabulary}', which no \
+                 `[[vocabulary]]` block declares. Declared: {}. A missing block is refused rather \
+                 than minted as an open vocabulary — a typo would otherwise create a value set \
+                 nobody authored, at whatever width and visibility the fall-through picked",
+                declared_names(vocabularies)
+            ))
+        })?;
+        return Ok(ViewMetadata {
+            name: name.to_string(),
+            ty: declared.width,
+            vocabulary: Some(declared.name.clone()),
+        });
+    }
+    if vocabulary.is_some() {
+        return Err(declaration_error(format!(
+            "{object}: `metadata.{name}` is type '{ty_name}', not a category, so `vocabulary` has \
+             no meaning for it. Refused rather than ignored: a value set on a value that has none \
+             is a control its author believes is set"
+        )));
+    }
+    let ty = ScalarType::parse(ty_name)
+        .filter(|ty| *ty != ScalarType::Utf8)
+        .ok_or_else(|| {
+            declaration_error(format!(
+                "{object}: `metadata.{name}` declares unknown type '{ty_name}'. The types are the \
+                 `[[attribute]]` types: bool, u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, \
+                 timestamp_us, keyword, text and category"
+            ))
+        })?;
+    Ok(ViewMetadata {
+        name: name.to_string(),
+        ty,
+        vocabulary: None,
+    })
+}
+
+/// One `[[view_group.view]]` block — form A's roster record (`views.md` §3.1).
+///
+/// **Parsed by hand, and the closure is kept by hand with it.** The block mixes a closed key set
+/// with the group's declared metadata names, so no derive knows its field list and
+/// `deny_unknown_fields` cannot be what refuses an unknown key. This is the manual route the
+/// `extent` spellings already take, and the guarantee `configuration.md` §1 rests on — an unknown
+/// key is refused — is preserved by checking against the closed set *plus* the declared names.
+fn compile_roster_view(
+    group: &str,
+    entry: &toml::Value,
+    metadata: &[ViewMetadata],
+    sources: &Sources,
+) -> Result<RosterView> {
+    let table = entry.as_table().ok_or_else(|| {
+        declaration_error(format!(
+            "{group}: a `[[view_group.view]]` entry is {}, and one view is a table of `key`, \
+             `source`, `visibility` and this group's metadata names (views §3.1)",
+            entry.type_str()
+        ))
+    })?;
+    let key = table
+        .get("key")
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| {
+            declaration_error(format!(
+                "{group}: a `[[view_group.view]]` block declares no `key`. The key is the caller's \
+                 own name for the view and is required at creation — `<group>:<key>` is the id \
+                 every request names and a view's only address (views §3.2)"
+            ))
+        })?;
+    let object = format!("{group}, view '{key}'");
+    check_view_name(&object, key)?;
+
+    for name in table.keys() {
+        if ROSTER_KEYS.contains(&name.as_str()) || metadata.iter().any(|m| &m.name == name) {
+            continue;
+        }
+        // **The group-level keys, named as such.** Each is a setting a group's views share by
+        // definition — one frame, one projection, one point-label rule — so a caller who wrote one
+        // on a view has not mistyped a key: they have asked for a per-view setting the design does
+        // not have, and the message says so rather than reporting an unknown key.
+        if GROUP_LEVEL_KEYS.contains(&name.as_str()) {
+            return Err(declaration_error(format!(
+                "{object}: `{name}` is a group-level key and a view of a group may not declare it \
+                 (views §3.1). A group's views share every setting — projection, extent, point \
+                 visibility, gate — and differ only by a key and per-view metadata; a view needing \
+                 its own frame is a second `[[view_group]]`, or a plain `[[view]]`. Write `{name}` \
+                 on the group"
+            )));
+        }
+        return Err(declaration_error(format!(
+            "{object}: `{name}` is not a key of a `[[view_group.view]]` block. It takes `key`, \
+             `source`, `visibility` and one key per declared metadata name — {}. The key set is \
+             closed exactly as every other block's is (configuration.md §1); a name this group \
+             declares no metadata under is a typed per-view value nobody declared the type of",
+            match metadata.len() {
+                0 => "and this group declares no metadata".to_string(),
+                _ => format!("here: {}", names(metadata.iter().map(|m| m.name.as_str()))),
+            }
+        )));
+    }
+
+    let source = match table.get("source") {
+        None => None,
+        Some(value) => {
+            let declared = value.as_str().ok_or_else(|| {
+                declaration_error(format!(
+                    "{object}: `source` is {}, and it names a key of `[sources]`",
+                    value.type_str()
+                ))
+            })?;
+            Some(sources.path(&object, declared)?)
+        }
+    };
+    let visibility = match table.get("visibility") {
+        None => None,
+        Some(value) => {
+            let declared = value.as_str().ok_or_else(|| {
+                declaration_error(format!(
+                    "{object}: `visibility` is {}, and it is an access label or `public` \
+                     (views §6)",
+                    value.type_str()
+                ))
+            })?;
+            compile_view_gate(&object, Some(declared))?
+        }
+    };
+
+    // **Every declared name, on every view.** A roster record is immutable (decision 0108): a
+    // value left out is not filled in later by an update, it is a view served with a typed field
+    // missing for the whole of its life. The declaration is what an author can still change, so
+    // the absence is refused here rather than served as a hole.
+    let mut values = BTreeMap::new();
+    for declared in metadata {
+        let value = table.get(&declared.name).ok_or_else(|| {
+            declaration_error(format!(
+                "{object}: no `{}`, which this group declares as metadata every view carries \
+                 (views §3.1). A roster record is immutable (decision 0108), so a value left out \
+                 is a view served with that field missing for the whole of its life rather than \
+                 one an update fills in later",
+                declared.name
+            ))
+        })?;
+        values.insert(
+            declared.name.clone(),
+            compile_metadata_value(&object, declared, value)?,
+        );
+    }
+
+    Ok(RosterView {
+        key: key.to_string(),
+        source,
+        visibility,
+        metadata: values,
+    })
+}
+
+/// One metadata value on one roster record, typed against its declaration.
+///
+/// **Typed at the declaration and not at the reader**, because the roster is served on `/v1/meta`
+/// as typed values (`views.md` §3.2): a `starts` written as a string in one block and as a
+/// date-time in the next is one field with two wire types, and the client reading it has no way to
+/// know which it will get.
+fn compile_metadata_value(
+    object: &str,
+    declared: &ViewMetadata,
+    value: &toml::Value,
+) -> Result<MetadataValue> {
+    let name = &declared.name;
+    let wrong = |wanted: &str| {
+        declaration_error(format!(
+            "{object}: `{name}` is {}, and this group declares it '{}' — {wanted}",
+            value.type_str(),
+            declared.ty.arrow_type_name()
+        ))
+    };
+    if let Some(vocabulary) = &declared.vocabulary {
+        let key = value.as_str().ok_or_else(|| {
+            declaration_error(format!(
+                "{object}: `{name}` is {}, and this group declares it a category over vocabulary \
+                 '{vocabulary}' — write the value's key as a string",
+                value.type_str()
+            ))
+        })?;
+        // The key is checked against the vocabulary at the build that reads it, exactly as a
+        // category column's values are: an open vocabulary mints, and a closed one refuses, and
+        // neither is a decision this parse can make for it.
+        return Ok(MetadataValue::Text(key.to_string()));
+    }
+    Ok(match declared.ty {
+        ScalarType::Bool => MetadataValue::Bool(
+            value
+                .as_bool()
+                .ok_or_else(|| wrong("write `true` or `false`"))?,
+        ),
+        ScalarType::F32 | ScalarType::F64 => match value {
+            toml::Value::Float(f) => MetadataValue::Float(*f),
+            // An integer where a float is declared is the value the author wrote rather than a
+            // type error: TOML spells `0` as an integer and there is one reading of it here.
+            toml::Value::Integer(i) => MetadataValue::Float(*i as f64),
+            _ => return Err(wrong("write a number")),
+        },
+        ScalarType::TimestampUs => match value {
+            toml::Value::Datetime(when) => {
+                MetadataValue::TimestampUs(timestamp_us(object, name, when)?)
+            }
+            // The stored representation, for a producer that emits it directly.
+            toml::Value::Integer(us) => MetadataValue::TimestampUs(*us),
+            _ => return Err(wrong(
+                "write an offset date-time (`2026-04-01T00:00:00Z`), or the microseconds since \
+                     the Unix epoch as an integer",
+            )),
+        },
+        ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => MetadataValue::Text(
+            value
+                .as_str()
+                .ok_or_else(|| wrong("write a string"))?
+                .to_string(),
+        ),
+        integer => {
+            let held = value
+                .as_integer()
+                .ok_or_else(|| wrong("write an integer"))?;
+            let (min, max) = integer_range(integer);
+            if held < min || held > max {
+                return Err(declaration_error(format!(
+                    "{object}: `{name}` is {held}, and this group declares it '{}', which holds \
+                     {min} to {max}. The width is part of the declaration, so the value is refused \
+                     rather than narrowed",
+                    integer.arrow_type_name()
+                )));
+            }
+            MetadataValue::Int(held)
+        }
+    })
+}
+
+/// A TOML date-time as microseconds since the Unix epoch.
+///
+/// **An offset is required.** A local date-time names an instant only against a time zone nobody
+/// declared, and a `timestamp_us` is a fixed point on the line — so a local one is refused rather
+/// than read as UTC, which would move a quarter boundary silently by up to a day.
+fn timestamp_us(object: &str, name: &str, when: &toml::value::Datetime) -> Result<i64> {
+    let text = when.to_string();
+    let parsed = chrono::DateTime::parse_from_rfc3339(&text).map_err(|_| {
+        declaration_error(format!(
+            "{object}: `{name} = {text}` is not an instant this can store. A `timestamp_us` is \
+             microseconds since the Unix epoch, so the value needs a date, a time and an offset — \
+             `2026-04-01T00:00:00Z`. A local date-time names an instant only against a time zone \
+             nobody declared here"
+        ))
+    })?;
+    Ok(parsed.timestamp_micros())
+}
+
+/// The inclusive range an integer type holds, for a metadata value to be checked against.
+fn integer_range(ty: ScalarType) -> (i64, i64) {
+    match ty {
+        ScalarType::U8 => (0, u8::MAX as i64),
+        ScalarType::U16 => (0, u16::MAX as i64),
+        ScalarType::U32 => (0, u32::MAX as i64),
+        // `u64`'s upper half is not expressible in TOML's own signed integer, which is where this
+        // value is read from — so the ceiling is the reader's, stated rather than silently wrapped.
+        ScalarType::U64 => (0, i64::MAX),
+        ScalarType::I8 => (i8::MIN as i64, i8::MAX as i64),
+        ScalarType::I16 => (i16::MIN as i64, i16::MAX as i64),
+        ScalarType::I32 => (i32::MIN as i64, i32::MAX as i64),
+        _ => (i64::MIN, i64::MAX),
+    }
+}
+
+/// `[view_group.views]` — form B's roster table (`views.md` §3.1).
+///
+/// **The roster's own file, not the group's.** The group's `source` holds the points, one row per
+/// `(entity, view)`; this holds one row per view — the canonical `key`, each view's `visibility`
+/// and one column per declared metadata name, each defaulting to its own name.
+fn compile_roster_table(
+    group: &str,
+    table: &RosterTableBlock,
+    metadata: &[ViewMetadata],
+    sources: &Sources,
+    defaults: &Defaults,
+) -> Result<RosterTable> {
+    let object = format!("{group} `[view_group.views]`");
+    let source = table.source.as_ref().ok_or_else(|| {
+        declaration_error(format!(
+            "{object}: `source` is required. The table is one row per view — the canonical `key`, \
+             `visibility` and this group's metadata names — and it is the roster's own file, \
+             separate from the group's `source`, which holds the points (views §3.1)"
+        ))
+    })?;
+    let path = sources.path(&object, source)?;
+    let mut known = vec![KnownField::always("key"), KnownField::always("visibility")];
+    known.extend(
+        metadata
+            .iter()
+            .map(|declared| KnownField::always(declared.name.clone())),
+    );
+    let fields = check_fields(
+        &object,
+        Some(&path),
+        &known,
+        table.fields.as_ref(),
+        &defaults.entity_id_field,
+    )?;
+    Ok(RosterTable {
+        source: path,
+        fields,
+    })
+}
+
+/// `scope` on an `[[attribute]]` or a `[[layer]]` (`views.md` §5, §3.5; decision 0109).
+///
+/// **Two spellings, matched by hand.** `"entity"` is the default and declares nothing — a constant
+/// attribute is one value per entity, evaluated in entity space, and therefore visible under every
+/// view. `{ group = "…" }` is the case that needs declaring: a value, or an artifact set, that
+/// differs by view of a group. An untagged enum over the word and the table would report a
+/// mistyped key inside the table as *no variant matched*, which is the same reason `membership`
+/// and `extent` are held as `toml::Value`.
+fn compile_scope(object: &str, value: Option<&toml::Value>, groups: &[ViewGroup]) -> Result<Scope> {
+    let Some(value) = value else {
+        return Ok(Scope::Entity);
+    };
+    let named = match value {
+        toml::Value::String(word) if word == "entity" => return Ok(Scope::Entity),
+        toml::Value::String(word) => {
+            return Err(declaration_error(format!(
+                "{object}: `scope = \"{word}\"` is not a value this key takes. The two spellings \
+                 are `scope = \"entity\"` — the default, one value per entity under every view — \
+                 and `scope = {{ group = \"<view_group>\" }}`, one per view of that group \
+                 (views §5)"
+            )))
+        }
+        toml::Value::Table(table) => {
+            for key in table.keys() {
+                if key != "group" {
+                    return Err(declaration_error(format!(
+                        "{object}: `scope.{key}` is not a key of a scope, which takes `group` \
+                         alone (views §5). A scope names what the value varies by, and the one \
+                         thing it may vary by is a view group"
+                    )));
+                }
+            }
+            table
+                .get("group")
+                .and_then(toml::Value::as_str)
+                .ok_or_else(|| {
+                    declaration_error(format!(
+                        "{object}: `scope` is a table with no `group`. Write \
+                         `scope = {{ group = \"<view_group>\" }}` to say the value differs by view \
+                         of that group, or `scope = \"entity\"` — the default — for one value per \
+                         entity (views §5)"
+                    ))
+                })?
+        }
+        other => {
+            return Err(declaration_error(format!(
+                "{object}: `scope` is {}, and it is either the word `entity` or the table \
+                 `{{ group = \"<view_group>\" }}` (views §5)",
+                other.type_str()
+            )))
+        }
+    };
+    let group = groups.iter().find(|g| g.name == named).ok_or_else(|| {
+        declaration_error(format!(
+            "{object}: `scope = {{ group = \"{named}\" }}` names no `[[view_group]]` block. \
+             Declared: {}. A scope binds a value to a group's views, so a name nothing declares is \
+             a column family with no columns in it",
+            names(groups.iter().map(|g| g.name.as_str()))
+        ))
+    })?;
+    // **The group named is the one that owns the views** (§5). A `members` group's keys are its
+    // owner's, so a scope on it would be a second name for one column family — and the two would
+    // then have to agree about a value neither owns. The refusal points at the owner, where the
+    // declaration belongs and from where it reaches this group anyway.
+    if let Some(owner) = &group.members {
+        return Err(declaration_error(format!(
+            "{object}: `scope = {{ group = \"{named}\" }}` names a group that declares \
+             `members = \"{owner}\"`, so its views are '{owner}'s (views §5). Scope on the group \
+             that owns the views — `scope = {{ group = \"{owner}\" }}` — which applies to every \
+             group sharing them, this one included"
+        )));
+    }
+    Ok(Scope::Group(named.to_string()))
+}
+
+/// Every group that draws on `group`'s key set: the group itself, and every group declaring
+/// `members = "<group>"` (`views.md` §3.3).
+fn groups_sharing<'a>(groups: &'a [ViewGroup], group: &str) -> Vec<&'a str> {
+    groups
+        .iter()
+        .filter(|g| g.name == group || g.members.as_deref() == Some(group))
+        .map(|g| g.name.as_str())
+        .collect()
+}
+
+/// Which attributes are bound to a group's views, by name (`views.md` §5).
+fn compile_attribute_scopes(
+    blocks: &[AttributeBlock],
+    groups: &[ViewGroup],
+) -> Result<BTreeMap<String, String>> {
+    let mut scopes = BTreeMap::new();
+    for block in blocks {
+        let object = format!("attribute '{}'", block.name);
+        // Only the scoped ones are recorded: entity scope is the default and absence says it,
+        // so nothing has to be written to declare the ordinary thing ([`Scopes`]).
+        if let Scope::Group(group) = compile_scope(&object, block.scope.as_ref(), groups)? {
+            scopes.insert(block.name.clone(), group);
+        }
+    }
+    Ok(scopes)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2604,8 +4516,12 @@ fn check_codes(
 fn compile_attributes(
     blocks: &[AttributeBlock],
     vocabularies: &HashMap<String, Vocabulary>,
-) -> Result<Vec<Attribute>> {
+    scopes: &BTreeMap<String, String>,
+    sources: &Sources,
+    defaults: &Defaults,
+) -> Result<(Vec<Attribute>, Vec<ScopedAttribute>)> {
     let mut attributes = Vec::with_capacity(blocks.len());
+    let mut scoped: Vec<ScopedAttribute> = Vec::new();
     let mut seen_names: HashSet<&str> = HashSet::new();
 
     for decl in blocks {
@@ -2626,9 +4542,36 @@ fn compile_attributes(
         if matches!(decl.name.as_str(), "all_of" | "any_of" | "none_of") {
             return Err(declaration_error(format!(
                 "attribute '{}': that name is a filter combinator (decision 0062), and a filter \
-                 expression names columns directly, so a column may not take one. Reserved: \
-                 all_of, any_of, none_of",
-                decl.name
+                 expression names columns directly, so a column may not take one. Reserved: {}",
+                decl.name,
+                RESERVED_COLUMN_NAMES.join(", ")
+            )));
+        }
+        // The two reserved *leaves*, on the same argument: `region` is the spatial one
+        // (selection-operand §2) and `member_of` names one artifact's membership
+        // (`highlight-and-hierarchy.md` §3). A column of either name would make a request mean two
+        // things.
+        if matches!(decl.name.as_str(), "region" | "member_of") {
+            return Err(declaration_error(format!(
+                "attribute '{}': that name is a filter leaf of the request surface \
+                 (`selection-operand.md` §2, `highlight-and-hierarchy.md` §3), and a filter \
+                 expression names columns directly, so a column may not take it. Reserved: {}",
+                decl.name,
+                RESERVED_COLUMN_NAMES.join(", ")
+            )));
+        }
+        // **The frames' own reserved name.** `highlighted` is a column of the *tiles*, *points* and
+        // *artifacts* frames (`highlight-and-hierarchy.md` §2), so a render column of that name
+        // would put two columns of one name on the points frame and a by-name reader would take
+        // the wrong one.
+        if decl.name == "highlighted" {
+            return Err(declaration_error(format!(
+                "attribute '{}': that name is the *points* frame's highlight column \
+                 (`highlight-and-hierarchy.md` §2), so a render column of it would put two \
+                 columns of one name on one frame and a by-name reader would take the wrong one. \
+                 Reserved: {}",
+                decl.name,
+                RESERVED_COLUMN_NAMES.join(", ")
             )));
         }
         // The attribute's own one-field map: `field` locates the column when it differs from the
@@ -2833,9 +4776,127 @@ fn compile_attributes(
                 }
             }
         };
-        attributes.push(attribute);
+        // **A group-scoped column is not one of `MANIFEST.declared_scalars`** (`views.md` §5):
+        // it is a *family* — one entity-space column per view of the group — and the manifest's
+        // list is one flat set of bundle-wide columns. Held apart here rather than filtered at
+        // each consumer, so no pass can forget: a scoped column in the schema would take a slot
+        // in every row's hot tail and a whole-corpus `attrs/<column>/` of its own, both of them
+        // absent for every entity, and both served as if the attribute were entity-scoped.
+        match scopes.get(&decl.name) {
+            None => {
+                // **`fields` names the view discriminator and nothing else**, so an entity-scoped
+                // column has nothing to say with it: its values are one per entity and no column
+                // of its file decides which view they are for. Refused rather than ignored, on
+                // this module's rule for every disclosure-adjacent key — a `fields` map that reads
+                // as a default is a routing its author believes is in effect.
+                if decl.fields.is_some() {
+                    return Err(declaration_error(format!(
+                        "attribute '{}': `fields` names the view discriminator on a group-scoped \
+                         column's own source (views §5), and this column is entity scope — one \
+                         value per entity, under every view — so there is nothing for it to \
+                         choose between. The entity id is `entity_id_field`",
+                        decl.name
+                    )));
+                }
+                attributes.push(attribute)
+            }
+            Some(group) => {
+                // **A scoped attribute's own `source` carries the discriminator** (`views.md`
+                // §5): one row per `(entity, view)`, `fields.view` saying which view each row's
+                // value is for, and the row routed to that view's column. Without the
+                // discriminator the file would be read as entity space, which would take one
+                // arbitrary view's values as every view's — so the column is resolved here, where
+                // the source name and the field spellings are both in hand.
+                // **A scoped `text` column must be indexed, because the index is its only
+                // home.** An entity-scoped text column has two — a token index answering `match`
+                // and a record-blob row answering `entity → value` — and the blob is bundle-wide,
+                // addressed by a column's position in `declared_scalars`, which a family has none
+                // of. So an unindexed scoped text column would be a declared field stored nowhere
+                // at all: acknowledged and then lost. Refused rather than reported, on the rule
+                // that separates a config a build can honour from one it cannot.
+                if attribute.ty == ScalarType::Text && !attribute.index {
+                    return Err(declaration_error(format!(
+                        "attribute '{}': a `text` column scoped to group '{group}' needs \
+                         `index = true`. Its terms are its only home — the record blob is one \
+                         bundle-wide list with no slot for a column family (views §5) — so \
+                         without the index the prose would be read and stored nowhere",
+                        decl.name
+                    )));
+                }
+                let source = compile_scoped_attribute_source(decl, sources, defaults)?;
+                scoped.push(ScopedAttribute {
+                    attribute,
+                    group: group.clone(),
+                    source,
+                });
+            }
+        }
     }
-    Ok(attributes)
+    Ok((attributes, scoped))
+}
+
+/// A group-scoped attribute's own source, where it declares one (`views.md` §5).
+///
+/// **`[defaults].source` does not reach here, and that is deliberate.** The default is a single
+/// whole-corpus file with one row per entity, which is exactly the wrong shape: a scoped column's
+/// values are one per `(entity, view)`. So a scoped column reads from each view's own points file
+/// unless it names a `source` of its own, and naming one is a statement that *this* file carries
+/// the discriminator.
+///
+/// The discriminator column is `fields.view`, defaulting to `view` — the same key and the same
+/// default a scoped layer's artifacts source takes, so one word means one thing across the
+/// declaration. Every other key in the map is refused: `view` is the only field this source
+/// resolves, the entity id being `entity_id_field` beside it.
+fn compile_scoped_attribute_source(
+    decl: &AttributeBlock,
+    sources: &Sources,
+    defaults: &Defaults,
+) -> Result<Option<ScopedAttributeFile>> {
+    let object = format!("attribute '{}'", decl.name);
+    let Some(name) = decl.source.as_deref() else {
+        if decl.fields.is_some() {
+            return Err(declaration_error(format!(
+                "{object}: `fields` names the view discriminator on this column's own `source` \
+                 (views §5), and there is no `source` here — the column is read from each view's \
+                 own points file, where the view is the file rather than a column of it"
+            )));
+        }
+        return Ok(None);
+    };
+    let path = sources.path(&object, name)?;
+    let entity_id = match decl.entity_id_field.as_deref() {
+        None => defaults.entity_id_field.clone(),
+        Some(field) if field.trim().is_empty() => {
+            return Err(declaration_error(format!(
+                "{object}: `entity_id_field` is empty, so it names no column. Omit it to join on \
+                 '{}', which is what this declaration spells the entity id",
+                defaults.entity_id_field
+            )))
+        }
+        Some(field) => field.to_string(),
+    };
+    let mut view_field = "view".to_string();
+    for (key, value) in decl.fields.iter().flatten() {
+        if key != "view" {
+            return Err(declaration_error(format!(
+                "{object}: `fields.{key}` is not a field of a group-scoped attribute's source, \
+                 which resolves `view` alone — the column saying which view each row's value is \
+                 for. The entity id is `entity_id_field`"
+            )));
+        }
+        if value.trim().is_empty() {
+            return Err(declaration_error(format!(
+                "{object}: `fields.view` is empty, so it names no column. Omit it to read the \
+                 discriminator from 'view'"
+            )));
+        }
+        view_field = value.clone();
+    }
+    Ok(Some(ScopedAttributeFile {
+        path,
+        entity_id,
+        view_field,
+    }))
 }
 
 fn declared_names(vocabularies: &HashMap<String, Vocabulary>) -> String {
@@ -2846,6 +4907,25 @@ fn declared_names(vocabularies: &HashMap<String, Vocabulary>) -> String {
     names.sort_unstable();
     names.join(", ")
 }
+
+/// The names an attribute may not take, in the order the refusals list them.
+///
+/// **One list, read by the three refusals above**, so a name added to the request surface is added
+/// here and every message says the same set. `all_of`/`any_of`/`none_of` are the combinators
+/// (decision 0062); `region` is the spatial leaf (`selection-operand.md` §2); `member_of` names
+/// one artifact's membership (`highlight-and-hierarchy.md` §3). A filter expression names columns
+/// directly — there is no wrapper object — so a column of any of these names would make a request
+/// mean two things. `highlighted` is not a leaf but a **frame column**
+/// (`highlight-and-hierarchy.md` §2): a render column of that name would put two columns of one
+/// name on the points frame, and a by-name reader would take the wrong one.
+pub const RESERVED_COLUMN_NAMES: [&str; 6] = [
+    "all_of",
+    "any_of",
+    "none_of",
+    "region",
+    "member_of",
+    "highlighted",
+];
 
 /// A column name that can be written into `columns.arrow`'s schema without colliding with the
 /// fixed columns or with the ingest batch's reserved names.
@@ -2902,18 +4982,20 @@ fn check_column_name(name: &str) -> Result<()> {
 // ---------------------------------------------------------------------------------------------
 
 /// What [`compile_layers`] hands back: the declarations, each layer's bound sources beside them,
-/// and which layers the `[layer.labels]` sugar wrote, by parent — three parallel views of one pass,
-/// kept apart because a [`LayerDeclaration`] is exactly the control-plane payload and must carry
-/// neither of the others.
+/// which layers the `[layer.labels]` sugar wrote, by parent, and which layers are scoped to a view
+/// group — four parallel views of one pass, kept apart because a [`LayerDeclaration`] is exactly
+/// the control-plane payload and must carry none of the others.
 type CompiledLayers = (
     Vec<LayerDeclaration>,
     Vec<LayerSources>,
+    BTreeMap<String, String>,
     BTreeMap<String, String>,
 );
 
 fn compile_layers(
     declared: &[LayerBlock],
     views: &[View],
+    groups: &[ViewGroup],
     attributes: &[Attribute],
     sources: &Sources,
 ) -> Result<CompiledLayers> {
@@ -2921,6 +5003,7 @@ fn compile_layers(
     let (blocks, from_labels) = expand_labels(declared)?;
     let mut layers = Vec::with_capacity(blocks.len());
     let mut per_layer = Vec::with_capacity(blocks.len());
+    let mut scopes: BTreeMap<String, String> = BTreeMap::new();
     let mut seen: HashSet<&str> = HashSet::new();
     for block in &blocks {
         if !seen.insert(block.name.as_str()) {
@@ -2943,23 +5026,45 @@ fn compile_layers(
                 block.name
             ))
         })?;
+        // **A name in `views` is a plain view or a whole group** (`views.md` §2): naming a group
+        // draws the layer on every view of it, present and future, which is what lets a layer
+        // follow a group that grows at ingest rather than being redeclared per quarter.
         for view in declared_views {
-            if !views.iter().any(|v| &v.name == view) {
+            if !views.iter().any(|v| &v.name == view) && !groups.iter().any(|g| &g.name == view) {
                 return Err(declaration_error(format!(
-                    "layer '{}' declares view '{view}', which no `[[view]]` block declares. \
-                     Declared: {}. A layer in a view that does not exist is registered, reachable \
-                     and empty, which no client can tell from one whose artifacts were all withheld",
+                    "layer '{}' declares view '{view}', which no `[[view]]` or `[[view_group]]` \
+                     block declares. Declared: {}. A layer in a view that does not exist is \
+                     registered, reachable and empty, which no client can tell from one whose \
+                     artifacts were all withheld",
                     block.name,
-                    if views.is_empty() {
-                        "none".to_string()
-                    } else {
+                    names(
                         views
                             .iter()
                             .map(|v| v.name.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    }
+                            .chain(groups.iter().map(|g| g.name.as_str()))
+                    )
                 )));
+            }
+        }
+
+        // **A scoped layer is a different artifact set per view of one group** (`views.md` §3.5),
+        // so the views it is drawn on can only be that group's: an artifact belongs to one view,
+        // and a plain view is not one of them. The groups sharing the key set are admitted with
+        // it, since their views *are* the same views.
+        let scope = compile_scope(&object, block.scope.as_ref(), groups)?;
+        if let Scope::Group(group) = &scope {
+            let sharing = groups_sharing(groups, group);
+            for view in declared_views {
+                if !sharing.contains(&view.as_str()) {
+                    return Err(declaration_error(format!(
+                        "{object}: `scope = {{ group = \"{group}\" }}` with `views` naming \
+                         '{view}'. A scoped layer's artifacts belong to one view each and are \
+                         keyed per `(layer, view)`, so the views it is drawn on are that group's \
+                         and no others (views §3.5). Nameable here: {}. Drop the scope for one \
+                         artifact set drawn on every view named, which is the default",
+                        names(sharing.iter().copied())
+                    )));
+                }
             }
         }
 
@@ -2969,7 +5074,7 @@ fn compile_layers(
         let visibility = match block.visibility.as_deref() {
             Some(PUBLIC) => None,
             Some(label) => {
-                check_label(&block.name, "visibility", label)?;
+                check_label(&object, "visibility", label)?;
                 Some(label.to_string())
             }
             None => {
@@ -3021,7 +5126,7 @@ fn compile_layers(
             default: if default == INHERITED {
                 MemberDefault::Inherited
             } else {
-                check_label(&block.name, "artifact_visibility.default", default)?;
+                check_label(&object, "artifact_visibility.default", default)?;
                 MemberDefault::Label(default.to_string())
             },
         };
@@ -3148,11 +5253,176 @@ fn compile_layers(
                 )));
             }
         }
+        let shape = compile_shape(block, &membership)?;
+        let shape_kind = shape.map(|s| s.kind);
+        let kind_is = |kind: ShapeKind| shape_kind == Some(kind);
+        // **A layer has geometry to be in a space if it declares either kind** — a membership
+        // shape in `[layer.shape]`, or an authored shape content, which is read in the space its
+        // row declares exactly as a membership shape is (`polygon-membership.md` §6.1). The two
+        // are never declared together, so at most one of them is what a space governs.
+        let carries_geometry = shape.is_some()
+            || content
+                .supplied
+                .iter()
+                .any(|s| s.authored_shape_kind().is_some());
+        // **A row's geometry sits in its layer's kind's fields and no other** — the box's four
+        // bounds, the circle's three, the ellipse's five, the polygon's WKB `geometry` column
+        // (GeoParquet's own name) — so naming a field of another kind is refused as a field the
+        // layer never declared.
+        // **A shape layer's views need share neither projection nor frame**
+        // ([decision 0111](../../../docs/decisions/0111-a-shape-spans-projected-views-through-wgs84.md),
+        // superseding the 2026-08-29 refusal that stood here): a `wgs84` shape is densified,
+        // projected and quantised through each view's own declaration, once per view. What is
+        // refused is the *mix* of a projected view and a `projection = "none"` one — `wgs84` means
+        // nothing in an embedding — and that check is `check_shape_span`'s, applied at the build's
+        // layer read and at `PUT /control/layers` alike, so there is one implementation of it. A
+        // `view`-space row over unequal frames is refused too, where the row's own space is known.
+        if carries_geometry {
+            let mut named: Vec<(&str, Projection)> = Vec::new();
+            for name in declared_views {
+                if let Some(view) = views.iter().find(|v| &v.name == name) {
+                    named.push((name.as_str(), view.projection));
+                }
+            }
+            let projected = |p: &Projection| *p != Projection::None;
+            if let (Some((a, _)), Some((b, _))) = (
+                named.iter().find(|(_, p)| projected(p)).copied(),
+                named.iter().find(|(_, p)| !projected(p)).copied(),
+            ) {
+                return Err(declaration_error(format!(
+                    "{object}: view '{a}' declares a projection and view '{b}' declares \
+                     `projection = \"none\"`. A `wgs84` coordinate means nothing in an \
+                     embedding, so no geometry spans the two kinds of space (decision 0111); \
+                     draw the layer on one kind or the other"
+                )));
+            }
+        }
+
+        // **A space is honourable only if the views the layer is drawn in can honour it**
+        // (`polygon-membership.md` §4.3): `wgs84` asks the view to project, and a view declaring
+        // `projection = "none"` has one space and nothing to convert a degree from. Refused here,
+        // where the declaration can be pointed at, rather than at the first row read.
+        let honourable =
+            |space: tessera_store::derived::ShapeSpace| -> std::result::Result<(), String> {
+                for name in declared_views {
+                    let Some(view) = views.iter().find(|v| &v.name == name) else {
+                        continue;
+                    };
+                    space.resolve(view.projection).map_err(|e| {
+                        format!(
+                            "view '{name}' declares `projection = \"{}\"`: {e}",
+                            view.projection.name()
+                        )
+                    })?;
+                }
+                Ok(())
+            };
+        let default_space = match block.default_space.as_deref() {
+            None => tessera_store::derived::ShapeSpace::View,
+            Some(word) => {
+                if !carries_geometry {
+                    return Err(declaration_error(format!(
+                        "{object}: `default_space` is declared and the layer declares neither \
+                         `[layer.shape]` nor an authored shape content, so there is no geometry \
+                         for it to be the space of"
+                    )));
+                }
+                let space = tessera_store::derived::ShapeSpace::parse(word)
+                    .map_err(|e| declaration_error(format!("{object}: `default_space`: {e}")))?;
+                honourable(space)
+                    .map_err(|e| declaration_error(format!("{object}: `default_space`: {e}")))?;
+                space
+            }
+        };
+        for artifact in block.artifacts.iter().flatten() {
+            if let Some(word) = artifact.space.as_deref() {
+                let space = tessera_store::derived::ShapeSpace::parse(word).map_err(|e| {
+                    declaration_error(format!(
+                        "{object}: artifact '{}': `space`: {e}",
+                        artifact.key
+                    ))
+                })?;
+                honourable(space).map_err(|e| {
+                    declaration_error(format!(
+                        "{object}: artifact '{}': `space`: {e}",
+                        artifact.key
+                    ))
+                })?;
+            }
+        }
         let artifact_fields = check_fields(
             &object,
             source.as_ref(),
             &[
                 KnownField::always("key"),
+                KnownField::asserted_by(
+                    "min_x",
+                    kind_is(ShapeKind::Bbox),
+                    "`[layer.shape].kind` is not \"bbox\"",
+                ),
+                KnownField::asserted_by(
+                    "min_y",
+                    kind_is(ShapeKind::Bbox),
+                    "`[layer.shape].kind` is not \"bbox\"",
+                ),
+                KnownField::asserted_by(
+                    "max_x",
+                    kind_is(ShapeKind::Bbox),
+                    "`[layer.shape].kind` is not \"bbox\"",
+                ),
+                KnownField::asserted_by(
+                    "max_y",
+                    kind_is(ShapeKind::Bbox),
+                    "`[layer.shape].kind` is not \"bbox\"",
+                ),
+                KnownField::asserted_by(
+                    "cx",
+                    kind_is(ShapeKind::Circle) || kind_is(ShapeKind::Ellipse),
+                    "`[layer.shape].kind` is neither \"circle\" nor \"ellipse\"",
+                ),
+                KnownField::asserted_by(
+                    "cy",
+                    kind_is(ShapeKind::Circle) || kind_is(ShapeKind::Ellipse),
+                    "`[layer.shape].kind` is neither \"circle\" nor \"ellipse\"",
+                ),
+                KnownField::asserted_by(
+                    "r",
+                    kind_is(ShapeKind::Circle),
+                    "`[layer.shape].kind` is not \"circle\"",
+                ),
+                KnownField::asserted_by(
+                    "a",
+                    kind_is(ShapeKind::Ellipse),
+                    "`[layer.shape].kind` is not \"ellipse\"",
+                ),
+                KnownField::asserted_by(
+                    "b",
+                    kind_is(ShapeKind::Ellipse),
+                    "`[layer.shape].kind` is not \"ellipse\"",
+                ),
+                KnownField::asserted_by(
+                    "angle",
+                    kind_is(ShapeKind::Ellipse),
+                    "`[layer.shape].kind` is not \"ellipse\"",
+                ),
+                KnownField::asserted_by(
+                    "geometry",
+                    kind_is(ShapeKind::Polygon),
+                    "`[layer.shape].kind` is not \"polygon\"",
+                ),
+                KnownField::asserted_by(
+                    "view",
+                    matches!(scope, Scope::Group(_)),
+                    "the layer is entity-scoped — one artifact set drawn on every view it names \
+                     — so no row says which view an artifact belongs to. `scope = { group = … }` \
+                     is what declares a set per view (views §3.5)",
+                ),
+                KnownField::asserted_by(
+                    "space",
+                    carries_geometry,
+                    "the layer declares neither `[layer.shape]` nor an authored shape content, so \
+                     its rows carry no geometry to be in a space",
+                ),
                 KnownField::asserted_by(
                     "contents",
                     !content.supplied.is_empty(),
@@ -3163,7 +5433,7 @@ fn compile_layers(
                     "parent",
                     matches!(
                         hierarchy.kind,
-                        HierarchyKind::Nested | HierarchyKind::Tiered
+                        HierarchyKind::Nested | HierarchyKind::Dag | HierarchyKind::Tiered
                     ),
                     "`hierarchy.kind` is `flat` or `stacked`, neither of which has lineage in its \
                      edges",
@@ -3254,6 +5524,7 @@ fn compile_layers(
                 (Some(path), _) => Some(ArtifactSource::File {
                     path,
                     fields: artifact_fields,
+                    default_space,
                 }),
                 (None, Some(rows)) => Some(ArtifactSource::Inline(rows)),
                 // Legal, and the object declared and empty (`configuration.md` §2): a layer with
@@ -3284,8 +5555,14 @@ fn compile_layers(
             })?),
         };
 
-        let shape = compile_shape(block, &membership)?;
         let declaration = LayerDeclaration {
+            // **The scope reaches the manifest on the declaration** (contracts §2.3): it was
+            // compiled into `Scopes` alone, which is a build-time structure, so a bundle carried
+            // no record of which of its layers were per-view (`views.md` §11).
+            scope: match &scope {
+                Scope::Entity => tessera_types::layer::LayerScope::Entity,
+                Scope::Group(group) => tessera_types::layer::LayerScope::Group(group.clone()),
+            },
             name: block.name.clone(),
             title: block.title.clone(),
             views: declared_views.clone(),
@@ -3307,9 +5584,12 @@ fn compile_layers(
         declaration
             .validate()
             .map_err(|e| declaration_error(format!("layer '{}': {e}", declaration.name)))?;
+        if let Scope::Group(group) = &scope {
+            scopes.insert(block.name.clone(), group.clone());
+        }
         layers.push(declaration);
     }
-    Ok((layers, per_layer, from_labels))
+    Ok((layers, per_layer, from_labels, scopes))
 }
 
 /// `membership` — where a layer's artifacts get their members, at its three spellings.
@@ -3441,17 +5721,13 @@ fn compile_membership(block: &LayerBlock, attributes: &[Attribute]) -> Result<Me
     }
 }
 
-/// `[layer.shape]` — what a spatial layer's artifacts are shaped like, and how deep the tiles that
-/// cover them are drawn.
+/// `[layer.shape]` — what kind of shape a spatial layer's artifacts carry
+/// (`polygon-membership.md` §6.1): `bbox`, `circle`, `ellipse` or `polygon`, and nothing else.
 ///
-/// **The depth is the membership rather than a tuning key** (ruling R3: the ranges *are* the
-/// membership, and the polygon is content). A box covered by depth-4 tiles and the same box covered
-/// at depth 8 hold different points, so there is no value for it to default to and none outside the
-/// code space to accept.
-///
-/// ⊘ **`kind = "bbox"` is the whole vocabulary.** Each artifact carries `min_x`, `min_y`, `max_x`,
-/// `max_y` on its own row; a polygon, a radius or a multi-part shape is refused here rather than
-/// covered approximately, an approximate cover being a membership *wider* than the declaration.
+/// **No depth.** Every kind is exact — the members are the rows whose stored position is inside
+/// the shape — so there is nothing for a depth to hold, and one written is refused naming where it
+/// went rather than as an unknown key: a declaration carrying the cover-at-depth form of an
+/// earlier surface should be told what replaced it.
 ///
 /// A layer with no block at all is the state this surface has always had — declared for a shape it
 /// does not yet carry, holding nothing, because publication into it is refused. That stays
@@ -3468,43 +5744,38 @@ fn compile_shape(
         return Err(declaration_error(format!(
             "layer '{}': `[layer.shape]` is declared and `membership` is not \"spatial\", so the \
              shape is a rule nothing evaluates — the members come from the stored set or the \
-             predicate the membership names, and the box beside them would decide nothing",
+             predicate the membership names, and the shape beside them would decide nothing",
+            block.name
+        )));
+    }
+    if declared.depth.is_some() {
+        return Err(declaration_error(format!(
+            "layer '{}': `shape.depth` is not a key. Every shape kind is exact — the members are \
+             the rows inside the shape, tested one by one at the boundary — so there is no depth \
+             to declare and no cover to be drawn at one (`polygon-membership.md` §6.1). Remove \
+             the key",
             block.name
         )));
     }
     let kind = match declared.kind.as_deref() {
-        None | Some("bbox") => ShapeKind::Bbox,
-        Some(other) => {
+        Some(word) => ShapeKind::parse(word).ok_or_else(|| {
+            declaration_error(format!(
+                "layer '{}': `shape.kind = \"{word}\"` is not a shape kind; the kinds are {}. Each \
+                 artifact then carries its geometry in that kind's fields — `bbox`, `circle`, \
+                 `ellipse`, or `wkt` inline and a WKB `geometry` column in a table",
+                block.name,
+                ShapeKind::VOCABULARY.join(", ")
+            ))
+        })?,
+        None => {
             return Err(declaration_error(format!(
-                "layer '{}': `shape.kind = \"{other}\"` is not \"bbox\", which is the only shape \
-                 decoded. ⊘ A polygon or a radius is refused here rather than covered \
-                 approximately: the tiles that cover a shape *are* its membership, so an \
-                 approximate cover is a membership wider than the declaration",
-                block.name
+                "layer '{}': `[layer.shape]` declares no `kind`; the kinds are {}",
+                block.name,
+                ShapeKind::VOCABULARY.join(", ")
             )))
         }
     };
-    let depth = declared
-        .depth
-        .filter(|d| *d > 0 && *d <= i64::from(tessera_types::layer::MAX_SHAPE_DEPTH))
-        .ok_or_else(|| {
-            declaration_error(format!(
-                "layer '{}': `shape.depth` is {}, and it must be an integer between 1 and {}. It \
-                 is the membership rather than a tuning key — a box covered by depth-`d` tiles \
-                 holds different points at a different `d` — so there is no value for it to \
-                 default to",
-                block.name,
-                match declared.depth {
-                    Some(d) => d.to_string(),
-                    None => "absent".to_string(),
-                },
-                tessera_types::layer::MAX_SHAPE_DEPTH
-            ))
-        })?;
-    Ok(Some(ShapeDeclaration {
-        kind,
-        depth: depth as u8,
-    }))
+    Ok(Some(ShapeDeclaration { kind }))
 }
 
 fn compile_hierarchy(block: &LayerBlock) -> Result<Hierarchy> {
@@ -3512,21 +5783,23 @@ fn compile_hierarchy(block: &LayerBlock) -> Result<Hierarchy> {
         declaration_error(format!(
             "layer '{}': `hierarchy` is required — the kind is declared and never inferred from \
              the edges. Write `hierarchy = {{ kind = \"flat\" }}` for one population of artifacts, \
-             \"nested\" for a tree held in the edges, \"stacked\" for independent analyses one per \
-             level, or \"tiered\" for containment edges running coarser → finer between levels. \
-             `prune_children = true` serves only the deepest passing artifact per branch",
+             \"nested\" for a tree held in the edges, \"dag\" for the same with a child under \
+             several parents, \"stacked\" for independent analyses one per level, or \"tiered\" \
+             for containment edges running coarser → finer between levels. `prune_children = \
+             true` serves only the deepest passing artifact per branch",
             block.name
         ))
     })?;
     let kind = match declared.kind.as_deref() {
         Some("flat") => HierarchyKind::Flat,
         Some("nested") => HierarchyKind::Nested,
+        Some("dag") => HierarchyKind::Dag,
         Some("stacked") => HierarchyKind::Stacked,
         Some("tiered") => HierarchyKind::Tiered,
         Some(other) => {
             return Err(declaration_error(format!(
                 "layer '{}': `hierarchy.kind = \"{other}\"` is none of \"flat\", \"nested\", \
-                 \"stacked\" or \"tiered\"",
+                 \"dag\", \"stacked\" or \"tiered\"",
                 block.name
             )));
         }
@@ -3534,8 +5807,9 @@ fn compile_hierarchy(block: &LayerBlock) -> Result<Hierarchy> {
             return Err(declaration_error(format!(
                 "layer '{}': `hierarchy.kind` is required. \"flat\" is one population with no \
                  lineage; \"nested\" is a tree held in the edges, every artifact at level 0; \
-                 \"stacked\" is independent analyses, one per level; \"tiered\" is containment \
-                 edges running coarser → finer between levels",
+                 \"dag\" is the same with a child under several parents; \"stacked\" is \
+                 independent analyses, one per level; \"tiered\" is containment edges running \
+                 coarser → finer between levels",
                 block.name
             )));
         }
@@ -3717,3 +5991,484 @@ fn compile_criterion(
 
 #[cfg(test)]
 mod tests;
+
+// ---------------------------------------------------------------------------------------------
+// The build's view registry (`views.md` §7)
+// ---------------------------------------------------------------------------------------------
+
+/// A view of a group, as the registry records it (`views.md` §3.2).
+#[derive(Debug, Clone)]
+pub struct GroupMembership {
+    /// The group this view belongs to. `<group>:<key>` is the view id.
+    pub group: String,
+    pub key: String,
+    /// The group whose keys these are, where this group declares `members`
+    /// (`views.md` §3.3); `None` where it owns them. Metadata and each view's own gate belong to
+    /// the owner, so a `members` group's views carry none of their own.
+    pub members_of: Option<String>,
+    /// This view's typed metadata, one entry per name the owning group declared.
+    pub metadata: BTreeMap<String, MetadataValue>,
+}
+
+/// How one view's rows are picked out of a shared points file (`views.md` §3.1's form B).
+///
+/// **The roster is what makes the selection checkable.** A row carrying a key the group's roster
+/// does not list belongs to no view, so it is refused naming the key and the roster rather than
+/// dropped: dropping it would build a bundle quietly missing the rows of a view nobody declared,
+/// which is the failure form B's refusal exists to prevent. A listed key with no rows is the
+/// other case entirely, and is an empty view.
+#[derive(Debug, Clone)]
+pub struct ViewSelector {
+    /// The discriminator column — `fields.view` on the group, resolved.
+    pub column: String,
+    /// The value this view's rows carry: the view's key.
+    pub value: String,
+    /// Every key the group's roster carries, sorted, so a row's key is a binary search and an
+    /// unknown one is a refusal that can list the alternatives.
+    pub keys: Vec<String>,
+    /// The view whose rows these are, for the refusal to name.
+    pub view_id: String,
+}
+
+/// One coordinate system a build materialises (`views.md` §7).
+///
+/// **The registry is ordered, and the order is a contract**: it decides which view's Morton code
+/// an item absent from the anchor is tie-broken on (decision 0112), and a group's views keep
+/// their roster order within it. The order is the plain `[[view]]` blocks in declaration
+/// order, then each `[[view_group]]` in declaration order with its views in roster order —
+/// `Config` holds the two block kinds in separate lists, so their interleaving in the document is
+/// not recoverable and is deliberately not part of the order.
+#[derive(Debug, Clone)]
+pub struct BuildView {
+    /// The view id: a plain view's `name`, or a group's view as the joined `group:key` form.
+    pub id: String,
+    /// `None` for a plain view.
+    pub group: Option<GroupMembership>,
+    pub projection: Projection,
+    pub extent: Extent,
+    /// This view's points. `None` is a view declared and empty, which is legal to declare and
+    /// refused at a build that would have to read it.
+    pub source: Option<PathBuf>,
+    pub fields: Fields,
+    pub point_visibility: PointVisibility,
+    /// Form B: how this view's rows are picked out of a shared points file (`views.md` §3.1).
+    /// `None` where the file *is* the view — every plain view, and every view of a form A group.
+    pub select: Option<ViewSelector>,
+    /// This view's own gate; `None` takes its group's. ⊘ No gate is evaluated (`views.md` §6).
+    pub visibility: Option<String>,
+}
+
+/// The roster table's rows as roster records (`views.md` §3.1's form B).
+///
+/// **The same rules the inline block is held to**, applied to a file: the key charset, no key
+/// twice, and each view's own gate through the one gate compiler — so which form a corpus wrote
+/// its roster in changes nothing about what the roster may say.
+fn read_roster(group: &ViewGroup, table: &RosterTable) -> Result<Vec<RosterView>> {
+    let object = format!("view group '{}' `[view_group.views]`", group.name);
+    let rows = crate::input::read_roster_table(&table.source, &table.fields, &group.metadata)?;
+    if rows.is_empty() {
+        return Err(declaration_error(format!(
+            "{object}: {} carries no rows, so this group has no views. A group with none is a \
+             declaration promising coordinate systems the bundle would not carry (views §3.1)",
+            table.source.display()
+        )));
+    }
+    let mut roster: Vec<RosterView> = Vec::with_capacity(rows.len());
+    for row in rows {
+        let view = format!("{object}, view '{}'", row.key);
+        check_view_name(&view, &row.key)?;
+        if roster.iter().any(|v| v.key == row.key) {
+            return Err(declaration_error(format!(
+                "{object}: view key '{}' appears twice. A key is the caller's own name for one \
+                 view, tombstoned on drop and never reused, and `<group>:<key>` is the id every \
+                 request and every stored path is written under (views §3.2)",
+                row.key
+            )));
+        }
+        roster.push(RosterView {
+            key: row.key,
+            // Form B's points are the group's own file, selected by the discriminator: a roster
+            // row names no source of its own.
+            source: None,
+            visibility: compile_view_gate(&view, row.visibility.as_deref())?,
+            metadata: row.metadata,
+        });
+    }
+    Ok(roster)
+}
+
+/// Mint a roster from the distinct values of a group's discriminator (`views.md` §3.1's third
+/// form): one view per distinct value, carrying no metadata and no gate of its own.
+///
+/// **The mint produces ordinary roster records**, which is the whole of the design: everything
+/// below this point — the registry, the manifest's `GroupDescriptor`, the create and drop verbs,
+/// the join rule — sees a roster it cannot tell from a written one. A minted group is a group
+/// whose keys were read from the data rather than typed.
+///
+/// Three rules the declaration does not decide, chosen here as recoverable defaults (architect's
+/// choices, 2026-08-31; `views.md` §3.1 records them):
+///
+/// - **Key-byte sorted order**, so the served order — roster order, since decision 0113 — is a
+///   property of the key set rather than of how the source's rows happen to be arranged.
+/// - **A value that cannot be a key is a refusal**, not a skip and not a mangling: a skipped
+///   value's rows would belong to no view, which is the refusal a stray key already earns.
+/// - **Every minted view takes the group's own gate**, there being no roster record on which a
+///   narrower one could be written.
+///
+/// **`scanned` is the pass's memo of what each file has already said**, keyed by the file and the
+/// column read from it. The mint is a full pass over a *points* file — the largest input a group
+/// has — and it is asked for once per group whose roster is this one: an owner and every `members`
+/// group naming it resolve to the same owner and would each pay for the same scan.
+fn mint_roster(
+    group: &ViewGroup,
+    scanned: &mut HashMap<(PathBuf, String), BTreeSet<String>>,
+) -> Result<Vec<RosterView>> {
+    let object = format!("view group '{}'", group.name);
+    let source = group
+        .source
+        .as_ref()
+        .expect("a group declaring no roster declares a source, or the declaration was refused");
+    let column = group.fields.of("view");
+    let keys = match scanned.entry((source.clone(), column.to_string())) {
+        std::collections::hash_map::Entry::Occupied(held) => held.into_mut(),
+        std::collections::hash_map::Entry::Vacant(empty) => {
+            empty.insert(crate::input::read_discriminator_keys(source, column)?)
+        }
+    };
+    if keys.is_empty() {
+        return Err(declaration_error(format!(
+            "{object}: {} carries no rows, so this group has no views. Its views are the distinct \
+             values of the discriminator column '{column}', and a group with no views is a \
+             declaration promising coordinate systems the bundle would not carry (views §3.1)",
+            source.display()
+        )));
+    }
+    keys.iter()
+        .map(|key| {
+            tessera_types::view::check_view_key(key).map_err(|detail| {
+                declaration_error(format!(
+                    "{object}: the discriminator column '{column}' carries the value '{key}', and \
+                     this group declares no roster, so every distinct value of that column is a \
+                     view key — {detail}. Refused rather than skipped or rewritten: a value this \
+                     build did not mint a view for is one whose rows belong to no view (views \
+                     §3.1, §3.2). Write `[view_group.views]` to name the views instead"
+                ))
+            })?;
+            Ok(RosterView {
+                key: key.clone(),
+                // As form B: the points are the group's own file, selected by the discriminator.
+                source: None,
+                // No roster record, so no gate of its own — the group's is the one it takes,
+                // applied by the registry below.
+                visibility: None,
+                metadata: BTreeMap::new(),
+            })
+        })
+        .collect()
+}
+
+impl Config {
+    /// Every coordinate system a build materialises, in the registry's order
+    /// ([`BuildView`], `views.md` §7).
+    ///
+    /// **A build materialises every declared view and every view of every group.** What it cannot
+    /// yet enumerate is refused rather than silently dropped: a bundle whose declaration promises
+    /// coordinate systems it does not carry is the failure this refusal exists to prevent.
+    pub fn build_views(&self) -> Result<Vec<BuildView>> {
+        // What each points file has already said about its discriminator, so a group's source is
+        // scanned once however many groups mint their roster from it ([`mint_roster`]).
+        let mut scanned: HashMap<(PathBuf, String), BTreeSet<String>> = HashMap::new();
+        let mut registry: Vec<BuildView> = self
+            .views
+            .iter()
+            .map(|view| BuildView {
+                id: view.name.clone(),
+                group: None,
+                projection: view.projection,
+                extent: view.extent,
+                source: view.source.clone(),
+                fields: view.fields.clone(),
+                point_visibility: view.point_visibility.clone(),
+                select: None,
+                visibility: view.visibility.clone(),
+            })
+            .collect();
+        for group in &self.view_groups {
+            let owner = match &group.members {
+                None => group,
+                Some(name) => self
+                    .view_groups
+                    .iter()
+                    .find(|g| &g.name == name)
+                    .ok_or_else(|| {
+                        declaration_error(format!(
+                            "view group '{}': `members = \"{name}\"` names no `[[view_group]]` \
+                             block",
+                            group.name
+                        ))
+                    })?,
+            };
+            // **The roster's rows are views**, whichever form declared them: inline blocks, or
+            // the rows of `[view_group.views].source` read here — before pass two, because the
+            // registry is what pass two iterates and a key the table carries is a coordinate
+            // system this build materialises (`views.md` §3.1, §7).
+            let roster: Vec<RosterView> = match &owner.roster {
+                Roster::Inline(views) => views.clone(),
+                Roster::Table(table) => read_roster(owner, table)?,
+                // A group declaring no roster has its keys minted from the distinct values of
+                // its own discriminator, read here for the reason the table is: the registry is
+                // what pass two iterates, and a minted key is a coordinate system this build
+                // materialises (`views.md` §3.1, §7).
+                Roster::Discriminator => mint_roster(owner, &mut scanned)?,
+            };
+            let discriminator_field = group.fields.of("view").to_string();
+            // Sorted once per group, not once per view: it is the same roster each of its views
+            // checks a stray key against.
+            let mut keys: Vec<String> = roster.iter().map(|v| v.key.clone()).collect();
+            keys.sort();
+            for view in roster.iter() {
+                // Form A gives each view its own file, so there is nothing to select on; a group
+                // carrying its own `source` — form B, and every `members` group — holds every
+                // view's points in one file and selects by key.
+                let id = format!("{}:{}", group.name, view.key);
+                let (source, select) = match (&group.source, &view.source) {
+                    (Some(shared), _) => (
+                        Some(shared.clone()),
+                        Some(ViewSelector {
+                            column: discriminator_field.clone(),
+                            value: view.key.clone(),
+                            keys: keys.clone(),
+                            view_id: id.clone(),
+                        }),
+                    ),
+                    (None, own) => (own.clone(), None),
+                };
+                registry.push(BuildView {
+                    id,
+                    group: Some(GroupMembership {
+                        group: group.name.clone(),
+                        key: view.key.clone(),
+                        members_of: group.members.clone(),
+                        metadata: if group.members.is_some() {
+                            BTreeMap::new()
+                        } else {
+                            view.metadata.clone()
+                        },
+                    }),
+                    projection: group.projection,
+                    extent: group.extent,
+                    source,
+                    fields: group.fields.clone(),
+                    point_visibility: group.point_visibility.clone(),
+                    select,
+                    visibility: if group.members.is_some() {
+                        group.visibility.clone()
+                    } else {
+                        view.visibility.clone().or_else(|| group.visibility.clone())
+                    },
+                });
+            }
+        }
+        if registry.is_empty() {
+            return Err(declaration_error(
+                "the declaration has no `[[view]]` block and no `[[view_group]]`, so this build \
+                 has no coordinate system to materialise. A view names the geometry source and \
+                 the frame it is quantised against (configuration.md §1)",
+            ));
+        }
+        Ok(registry)
+    }
+
+    /// The views a layer is drawn on, expanded against a [`Config::build_views`] registry: a
+    /// plain view under its own name, and **a group under every view of it** (`views.md` §2,
+    /// §3.5).
+    ///
+    /// Naming a group draws the layer on every view of it, which is what lets a layer follow a
+    /// group that grows rather than being redeclared per quarter. A name matching no group is a
+    /// plain view and is kept as written — the declaration refused an unknown one long before
+    /// this.
+    ///
+    /// ⊘ *Present and future* is the ingest half: a view created later gets the layer's artifacts
+    /// at the fold that writes them (spec §3.5).
+    pub fn expand_layer_views(registry: &[BuildView], declared: &[String]) -> Vec<String> {
+        let mut expanded = Vec::with_capacity(declared.len());
+        for name in declared {
+            let of_group: Vec<String> = registry
+                .iter()
+                .filter(|view| view.group.as_ref().is_some_and(|g| &g.group == name))
+                .map(|view| view.id.clone())
+                .collect();
+            match of_group.is_empty() {
+                true => expanded.push(name.clone()),
+                false => expanded.extend(of_group),
+            }
+        }
+        expanded
+    }
+
+    /// The group registry the manifest publishes, derived from a [`Config::build_views`]
+    /// registry (`views.md` §3.2).
+    ///
+    /// **The roster's durable home is the manifest** — one place, carried forward for ever, for
+    /// the reason `entity_id_low_water` and `layer_tombstones` are there (decision 0029).
+    pub fn group_registry(
+        &self,
+        registry: &[BuildView],
+        resolved: &[crate::ViewArgs],
+    ) -> Vec<tessera_store::manifest::GroupDescriptor> {
+        use tessera_store::manifest::{
+            GroupDescriptor, GroupMetadataField, GroupViewDescriptor, ViewMetadataType,
+            ViewMetadataValue,
+        };
+        let mut groups: Vec<GroupDescriptor> = Vec::new();
+        for view in registry {
+            let Some(membership) = &view.group else {
+                continue;
+            };
+            if !groups.iter().any(|g| g.name == membership.group) {
+                // **The group's own settings, published beside the roster** — the frame, the
+                // projection and the declared metadata names. A view created while the service
+                // runs is minted from them (`views.md` §3.2), and a group whose roster is empty
+                // has no view to read them off.
+                let declared = self
+                    .view_groups
+                    .iter()
+                    .find(|g| g.name == membership.group)
+                    .expect("every group in the registry was compiled from a declaration");
+                let owner = match &declared.members {
+                    None => declared,
+                    Some(name) => self
+                        .view_groups
+                        .iter()
+                        .find(|g| &g.name == name)
+                        .expect("a members chain is refused at the declaration"),
+                };
+                let frame = resolved
+                    .iter()
+                    .find(|v| v.view_id == view.id)
+                    .map(|v| v.extent)
+                    .expect("every view in the registry is materialised by this build");
+                groups.push(GroupDescriptor {
+                    name: membership.group.clone(),
+                    // The **declared** group's title, not the owner's, for the reason its gate is
+                    // its own: two groups over one key set are two layouts, and how a layout is
+                    // presented is a fact about the layout (`views.md` §3.3).
+                    title: declared.title.clone(),
+                    members_of: membership.members_of.clone(),
+                    // **The frame as resolved, not as declared**: a group's `auto` extent is
+                    // fitted over every view of it, so the declaration may say `auto` where the
+                    // manifest must say numbers. Every view of a group shares one frame by
+                    // construction (`views.md` §3.1), so any of them answers — and this view is
+                    // one of them.
+                    quantisation: tessera_store::manifest::Quantisation {
+                        x_min: frame.x_min,
+                        x_max: frame.x_max,
+                        y_min: frame.y_min,
+                        y_max: frame.y_max,
+                    },
+                    projection: declared.projection,
+                    // **The group's own gate, the outer bound over every view of it**
+                    // (`views.md` §6). The *declared* group's, not the owner's: two groups sharing
+                    // one key set are two layouts, and which principals may see each layout is a
+                    // fact about the layout (`views.md` §3.3).
+                    visibility: declared.visibility.clone(),
+                    // A `members` group declares none: keys and metadata belong to the
+                    // group that owns the views (`views.md` §3.3), so a create against the owner
+                    // is what supplies them and this group's copies carry none.
+                    metadata: if declared.members.is_some() {
+                        Vec::new()
+                    } else {
+                        owner
+                            .metadata
+                            .iter()
+                            .map(|field| GroupMetadataField {
+                                name: field.name.clone(),
+                                ty: match (field.vocabulary.is_some(), field.ty) {
+                                    (true, _) => ViewMetadataType::Category,
+                                    (false, ScalarType::Bool) => ViewMetadataType::Bool,
+                                    (false, ScalarType::F32) | (false, ScalarType::F64) => {
+                                        ViewMetadataType::Float
+                                    }
+                                    // `text` and `keyword` both hold a string; the served
+                                    // type is what a client renders, and both render as text.
+                                    // The fallthrough to the integer arm they took before was
+                                    // caught by the conformance work (2026-08-31): a build
+                                    // looked right because `/v1/meta` types off the stored
+                                    // value, and what would have bitten is the create
+                                    // operation's type check refusing a text value.
+                                    (false, ScalarType::Utf8)
+                                    | (false, ScalarType::Text)
+                                    | (false, ScalarType::Keyword) => ViewMetadataType::Text,
+                                    (false, ScalarType::TimestampUs) => {
+                                        ViewMetadataType::TimestampUs
+                                    }
+                                    (false, _) => ViewMetadataType::Int,
+                                },
+                                vocabulary: field.vocabulary.clone(),
+                            })
+                            .collect()
+                    },
+                    views: Vec::new(),
+                    // Filled at the manifest write from the declaration's scoped attributes
+                    // (`tessera_build::build`), so the family list has one origin.
+                    scoped_scalars: Vec::new(),
+                });
+            }
+            let group = groups
+                .iter_mut()
+                .find(|g| g.name == membership.group)
+                .expect("just inserted");
+            group.views.push(GroupViewDescriptor {
+                key: membership.key.clone(),
+                visibility: view.visibility.clone(),
+                metadata: membership
+                    .metadata
+                    .iter()
+                    .map(|(name, value)| {
+                        let value = match value {
+                            MetadataValue::Bool(v) => ViewMetadataValue::Bool(*v),
+                            MetadataValue::Int(v) => ViewMetadataValue::Int(*v),
+                            MetadataValue::Float(v) => ViewMetadataValue::Float(*v),
+                            MetadataValue::Text(v) => ViewMetadataValue::Text(v.clone()),
+                            MetadataValue::TimestampUs(v) => ViewMetadataValue::TimestampUs(*v),
+                        };
+                        (name.clone(), value)
+                    })
+                    .collect(),
+            });
+        }
+        groups
+    }
+
+    /// Which of `registry` is the **anchor view** — the one whose Morton code breaks entity-id
+    /// ties within a signature group ([decision 0112](../decisions/0112-the-anchor-view-orders-a-signature-groups-ids.md)).
+    ///
+    /// **Required when more than one view is declared, and refused absent naming the candidates.**
+    /// Entity ids are permanent (I9), so the tie-break is a permanent property of the corpus: a
+    /// positional default would let reordering two declaration blocks silently re-key a rebuild.
+    /// With one view it is that view, and naming it is noise.
+    pub fn anchor_view(&self, registry: &[BuildView]) -> Result<usize> {
+        let candidates = || names(registry.iter().map(|v| v.id.as_str()));
+        match (&self.allocation_view, registry.len()) {
+            (Some(named), _) => registry.iter().position(|v| &v.id == named).ok_or_else(|| {
+                declaration_error(format!(
+                    "[defaults].allocation_view = \"{named}\" names no view this build \
+                         materialises. Declared: {}. The anchor is one coordinate system, so a \
+                         group is named through one of its views — `<group>:<key>` (views §3.2, \
+                         decision 0112)",
+                    candidates()
+                ))
+            }),
+            (None, 1) => Ok(0),
+            (None, _) => Err(declaration_error(format!(
+                "the declaration carries {} views and `[defaults].allocation_view` names none. \
+                 Entity ids are assigned once and are permanent (I9), and within a signature \
+                 group they are ordered by the item's Morton code in the anchor view — so with \
+                 several views the anchor is a declaration rather than a default, or reordering \
+                 two blocks would silently re-key a rebuild (decision 0112). Name one of: {}",
+                registry.len(),
+                candidates()
+            ))),
+        }
+    }
+}

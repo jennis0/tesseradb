@@ -127,13 +127,22 @@ pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64
     write_points_n(points_path, n);
     write_pairs_n(pairs_path, n);
     let args = BuildArgs {
-        point_fields: Default::default(),
-        points: points_path.to_path_buf(),
+        arena_order: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: points_path.to_path_buf(),
+            point_fields: Default::default(),
+            select: None,
+            access: tessera_build::config::AccessInput::relation(pairs_path.to_path_buf()),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: Vec::new(),
-        access: tessera_build::config::AccessInput::relation(pairs_path.to_path_buf()),
         out: out.to_path_buf(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -141,6 +150,7 @@ pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
         mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
@@ -238,7 +248,7 @@ pub async fn spawn_server_with_stream_flush(
         max_k,
         generous_test_gate(),
         generous_ingest_limits(),
-        Vec::new(),
+        CorsOrigins::none(),
         stream_flush_bytes,
         stream_write_stall_ms,
         Arc::new(FaultSwitchboard::new()),
@@ -331,7 +341,7 @@ pub async fn mount_server(engine: Engine, max_k: usize, compute_gate: ComputeGat
         max_k,
         compute_gate,
         generous_ingest_limits(),
-        Vec::new(),
+        CorsOrigins::none(),
     )
     .await
 }
@@ -376,20 +386,63 @@ pub async fn mount_server_with_ingest_limits(
     compute_gate: ComputeGate,
     ingest_limits: IngestLimits,
 ) -> TestServer {
-    mount_server_with(engine, max_k, compute_gate, ingest_limits, Vec::new()).await
+    mount_server_with(
+        engine,
+        max_k,
+        compute_gate,
+        ingest_limits,
+        CorsOrigins::none(),
+    )
+    .await
 }
 
-/// Like [`spawn_server`], but with `serve.dev_cors_origins` set — `tests/cors.rs` only.
+/// The two CORS origin lists, named rather than positional.
+///
+/// Two `Vec<String>` parameters side by side is exactly the shape a caller transposes, and
+/// transposing these two is the bug decision 0102 exists to prevent — the production list reaching
+/// the session plane. Naming them costs a struct and makes the mistake unwriteable.
+#[derive(Default, Clone)]
+pub struct CorsOrigins {
+    /// `serve.dev_cors_origins` — viewer *and* session planes.
+    pub dev: Vec<String>,
+    /// `serve.cors_origins` — viewer plane only.
+    pub production: Vec<String>,
+}
+
+impl CorsOrigins {
+    /// Neither list set: no layer on any plane.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// The development list alone.
+    pub fn dev(origins: &[&str]) -> Self {
+        Self {
+            dev: origins.iter().map(|o| o.to_string()).collect(),
+            production: Vec::new(),
+        }
+    }
+
+    /// The production list alone.
+    pub fn production(origins: &[&str]) -> Self {
+        Self {
+            dev: Vec::new(),
+            production: origins.iter().map(|o| o.to_string()).collect(),
+        }
+    }
+}
+
+/// Like [`spawn_server`], but with the CORS origin lists set — `tests/cors.rs` only.
 ///
 /// A separate entry point rather than a parameter on the existing ones: `Engine` is not `Clone`,
 /// so a test cannot re-mount an already-serving one, and widening `mount_server`'s signature would
-/// churn every call site in `tests/http.rs` and `tests/http_write.rs` for a key none of them care
+/// churn every call site in `tests/http.rs` and `tests/http_write.rs` for keys none of them care
 /// about.
 pub async fn spawn_server_with_cors(
     bundle_root: &Path,
     cache_dir: &Path,
     wal_path: &Path,
-    dev_cors_origins: Vec<String>,
+    cors: CorsOrigins,
 ) -> TestServer {
     let config = default_engine_config();
     let max_k = config.max_k;
@@ -400,14 +453,14 @@ pub async fn spawn_server_with_cors(
         max_k,
         generous_test_gate(),
         generous_ingest_limits(),
-        dev_cors_origins,
+        cors,
     )
     .await
 }
 
 /// The shared body of the three entry points above, with **both** parameter sets explicit.
 ///
-/// The ingest bounds and `serve.dev_cors_origins` each have a parameterised variant of
+/// The ingest bounds and the CORS origin lists each have a parameterised variant of
 /// `mount_server`. Rather than nest one inside the other, both delegate to this: each named entry
 /// point keeps its own defaults, and a test that needs both calls this directly.
 async fn mount_server_with(
@@ -415,14 +468,14 @@ async fn mount_server_with(
     max_k: usize,
     compute_gate: ComputeGate,
     ingest_limits: IngestLimits,
-    dev_cors_origins: Vec<String>,
+    cors: CorsOrigins,
 ) -> TestServer {
     mount_server_with_flush(
         engine,
         max_k,
         compute_gate,
         ingest_limits,
-        dev_cors_origins,
+        cors,
         1 << 20,
         10_000,
         Arc::new(FaultSwitchboard::new()),
@@ -445,7 +498,7 @@ pub async fn mount_server_with_faults(
         max_k,
         compute_gate,
         generous_ingest_limits(),
-        Vec::new(),
+        CorsOrigins::none(),
         1 << 20,
         10_000,
         faults,
@@ -462,7 +515,7 @@ async fn mount_server_with_flush(
     max_k: usize,
     compute_gate: ComputeGate,
     ingest_limits: IngestLimits,
-    dev_cors_origins: Vec<String>,
+    cors: CorsOrigins,
     stream_flush_bytes: usize,
     stream_write_stall_ms: u64,
     faults: Arc<FaultSwitchboard>,
@@ -474,6 +527,22 @@ async fn mount_server_with_flush(
         // Small enough that the fixtures' vocabularies page rather than arriving whole, so the
         // cursor is exercised by an ordinary request rather than only by a contrived one.
         max_category_values: 4,
+        // Small enough that a suggestion fixture's page and walk-budget behaviour are exercised
+        // by an ordinary request rather than only by a contrived one — the same argument as
+        // `max_category_values` above.
+        max_suggestions: 4,
+        max_suggestion_walk: 1_000,
+        // **The probe route, for every principal these tests use**, so a case asserting `more` on
+        // a spent budget cannot be raced by an async sweep landing first (`value-suggestion.md`
+        // §6.3). One is the schema's floor and every test principal sees more than one entity. The
+        // set route is exercised end to end by the engine's own tests and by the conformance
+        // differential, both at the shipped default.
+        max_suggest_set_entities: 1,
+        suggest_admission: tessera_server::state::SuggestAdmission::new(),
+        max_shape_vertices: tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
+        max_region_vertices: 10_000,
+        max_region_cells: tessera_engine::DEFAULT_MAX_REGION_CELLS,
+        max_browse_rows: 200,
         compute_gate,
         ingest_admission: IngestAdmission::new(ingest_limits.admission),
         ingest_max_batch_rows: ingest_limits.max_batch_rows,
@@ -491,7 +560,8 @@ async fn mount_server_with_flush(
         stream_deadline_ms: 60_000,
         session_credential: SESSION_CREDENTIAL.to_string(),
         operator_credential: OPERATOR_CREDENTIAL.to_string(),
-        dev_cors_origins,
+        dev_cors_origins: cors.dev,
+        cors_origins: cors.production,
         faults,
     });
 
@@ -519,19 +589,32 @@ async fn mount_server_with_flush(
     }
 }
 
+/// Authorise a session, **retrying while the admission gate sheds**.
+///
+/// A `429` here is the server behaving as specified under machine load (contracts §3.1) and never
+/// the answer a caller of this helper is asking about — every one of them wants a token. So it is
+/// waited out rather than asserted against, exactly as `views_write.rs`' viewport helper waits out
+/// a shed read. A test that means to observe shedding calls the endpoint itself.
 pub async fn authorise(server: &TestServer, terms: &[&str]) -> serde_json::Value {
     let auth_data = serde_json::json!({ "terms": terms }).to_string();
     let encoded = base64::engine::general_purpose::STANDARD.encode(auth_data);
-    let resp = server
-        .client
-        .post(server.session_url("/session/authorise"))
-        .bearer_auth(SESSION_CREDENTIAL)
-        .json(&serde_json::json!({ "auth_data": encoded }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200, "authorise should succeed");
-    resp.json().await.unwrap()
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let resp = server
+            .client
+            .post(server.session_url("/session/authorise"))
+            .bearer_auth(SESSION_CREDENTIAL)
+            .json(&serde_json::json!({ "auth_data": encoded }))
+            .send()
+            .await
+            .unwrap();
+        if resp.status().as_u16() == 429 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            continue;
+        }
+        assert_eq!(resp.status(), 200, "authorise should succeed");
+        return resp.json().await.unwrap();
+    }
 }
 
 /// `POST /v1/items/{tessera_id}` with no body fields set (no pin, no idset).
@@ -559,10 +642,15 @@ pub struct DecodedViewport {
     pub points: Vec<PointRow>,
     /// `(cell, count)` — `None` when no kind-2 frame was present (underlay unrequested).
     pub sub_cells: Option<Vec<(u64, u64)>>,
-    /// The kind-5 artifacts frame. `None` only if the response carried no artifacts channel at
-    /// all — a served response always carries one, empty or not, so `Some(vec![])` and `None` are
-    /// different facts and a test may assert on either.
+    /// The kind-5 artifacts frame in the full projection. `None` if the response carried no
+    /// artifacts channel at all — a served response always carries one, empty or not, so
+    /// `Some(vec![])` and `None` are different facts and a test may assert on either — and also
+    /// when the frame arrived in the identity projection, which lands in
+    /// [`DecodedViewport::artifacts_identity`] instead.
     pub artifacts: Option<Vec<ArtifactRow>>,
+    /// The kind-5 frame in the identity projection (`artifact_rows: "identity"`) — four columns,
+    /// told apart from the full frame by its schema.
+    pub artifacts_identity: Option<Vec<ArtifactIdentityRow>>,
     /// The kind-4 trailer, parsed. Its key set is asserted here — the one server-authored JSON
     /// region of the body must not quietly acquire a field the comparator never sees
     /// (`streamed-serving.md` §7).
@@ -575,7 +663,7 @@ pub struct DecodedViewport {
     pub deterministic_bytes: Vec<u8>,
 }
 
-/// One row of the kind-5 artifacts frame, as a test reads it back.
+/// One row of the kind-5 artifacts frame, as a test reads it back — either projection.
 ///
 /// `PartialEq` and not `Eq`: a centroid is a mean and travels as `f64`.
 #[derive(Debug, Clone, PartialEq)]
@@ -589,13 +677,32 @@ pub struct ArtifactRow {
     /// is *the layer declares none* and never *withheld*.
     pub centroid: Option<[f64; 2]>,
     pub bbox: Option<[u32; 4]>,
-    pub hull: Option<Vec<[u32; 2]>>,
+    /// The artifact's one drawn geometry — parts, then rings, then vertices. `None` both where
+    /// the trailing shape columns are absent (no served layer declares one) and where they carry
+    /// a per-row null.
+    pub shape: Option<Vec<Vec<Vec<[u32; 2]>>>>,
+    /// The rung this artifact is drawn at — the declared level on a levelled layer, the
+    /// response-local parent-chain depth on a treed one, 0 on a flat one.
+    pub rung: u32,
+    /// Whether a member this principal may see, inside the requested tiles, matched the request's
+    /// filter. `None` where the request carried none.
+    pub matched: Option<bool>,
+    /// The same bit for `all_of[filters, highlight]` (`highlight-and-hierarchy.md` §2).
+    pub highlighted: Option<bool>,
 }
 
-fn str_col(
-    batch: &arrow::record_batch::RecordBatch,
-    i: usize,
-) -> arrow::array::StringArray {
+/// The identity projection's four columns (`artifact_rows: "identity"`), read back by a test.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactIdentityRow {
+    pub layer: String,
+    pub tessera_id: u64,
+    pub rung: u32,
+    pub matched: Option<bool>,
+    /// The same bit for `all_of[filters, highlight]` (`highlight-and-hierarchy.md` §2).
+    pub highlighted: Option<bool>,
+}
+
+fn str_col(batch: &arrow::record_batch::RecordBatch, i: usize) -> arrow::array::StringArray {
     batch
         .column(i)
         .as_any()
@@ -619,7 +726,10 @@ fn u64_col(batch: &arrow::record_batch::RecordBatch, i: usize) -> UInt64Array {
 /// refused (`tessera_wire::split_frames`).
 pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
     let frames = tessera_wire::split_frames(bytes).expect("well-formed frame sequence");
-    assert!(!frames.is_empty(), "a response carries at least tiles + trailer");
+    assert!(
+        !frames.is_empty(),
+        "a response carries at least tiles + trailer"
+    );
     assert_eq!(
         frames.first().unwrap().0,
         tessera_wire::FRAME_TILES,
@@ -636,6 +746,7 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
     let mut points = Vec::new();
     let mut sub_cells: Option<Vec<(u64, u64)>> = None;
     let mut artifacts: Option<Vec<ArtifactRow>> = None;
+    let mut artifacts_identity: Option<Vec<ArtifactIdentityRow>> = None;
     let mut trailer: Option<serde_json::Value> = None;
     let mut point_frames = 0usize;
     let mut deterministic_end = 0usize;
@@ -676,13 +787,71 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                 deterministic_end = at + frame_len;
             }
             tessera_wire::FRAME_ARTIFACTS => {
-                assert!(artifacts.is_none(), "exactly one artifacts frame");
-                let rows = artifacts.get_or_insert_with(Vec::new);
+                assert!(
+                    artifacts.is_none() && artifacts_identity.is_none(),
+                    "exactly one artifacts frame"
+                );
                 let reader = StreamReader::try_new(Cursor::new(payload.to_vec()), None).unwrap();
+                // The projection is read off the schema: the identity frame is exactly five
+                // columns, the full frame's fixed prefix is fifteen with the two hull columns
+                // trailing when any served layer declares one.
+                let identity = reader.schema().fields().len() == 5;
                 for batch in reader {
                     let batch = batch.unwrap();
-                    let layer = str_col(&batch, 0);
+                    // `layer` is dictionary-encoded in both projections (u16 keys over utf8).
+                    let layer_at = |i: usize| -> String {
+                        let column = batch
+                            .column(0)
+                            .as_any()
+                            .downcast_ref::<arrow::array::DictionaryArray<
+                                arrow::datatypes::UInt16Type,
+                            >>()
+                            .expect("`layer` is dictionary-encoded, u16 keys over utf8");
+                        let values = column
+                            .values()
+                            .as_any()
+                            .downcast_ref::<arrow::array::StringArray>()
+                            .unwrap();
+                        values
+                            .value(column.key(i).expect("layer is never null"))
+                            .to_string()
+                    };
                     let tessera_id = u64_col(&batch, 1);
+                    let u32_col_at = |col: usize, name: &str| {
+                        batch
+                            .column(col)
+                            .as_any()
+                            .downcast_ref::<arrow::array::UInt32Array>()
+                            .unwrap_or_else(|| panic!("`{name}` is a UInt32 at column {col}"))
+                            .clone()
+                    };
+                    let bool_at = |col: usize, i: usize, name: &str| {
+                        let column = batch
+                            .column(col)
+                            .as_any()
+                            .downcast_ref::<arrow::array::BooleanArray>()
+                            .unwrap_or_else(|| {
+                                panic!("`{name}` is a nullable Boolean at column {col}")
+                            });
+                        column.is_valid(i).then(|| column.value(i))
+                    };
+                    if identity {
+                        // (layer, tessera_id, rung, matched, highlighted) — positional, the
+                        // positions being contract exactly as the full frame's fixed prefix is.
+                        let rows = artifacts_identity.get_or_insert_with(Vec::new);
+                        let rung = u32_col_at(2, "rung");
+                        for i in 0..batch.num_rows() {
+                            rows.push(ArtifactIdentityRow {
+                                layer: layer_at(i),
+                                tessera_id: tessera_id.value(i),
+                                rung: rung.value(i),
+                                matched: bool_at(3, i, "matched"),
+                                highlighted: bool_at(4, i, "highlighted"),
+                            });
+                        }
+                        continue;
+                    }
+                    let rows = artifacts.get_or_insert_with(Vec::new);
                     let key = str_col(&batch, 2);
                     let masked_count = u64_col(&batch, 3);
                     let f64_at = |col: usize, i: usize| {
@@ -701,35 +870,91 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                             .unwrap();
                         a.is_valid(i).then(|| a.value(i))
                     };
-                    let hull_axis = |col: usize, i: usize| {
+                    // The two shape columns TRAIL the fixed prefix and are present only when a
+                    // served layer declares a drawn geometry — an absent column, distinguishable
+                    // from a null one, so 0076's null rule gains no third reading.
+                    let shapes = batch.num_columns() > 15;
+                    if shapes {
+                        assert_eq!(
+                            batch.num_columns(),
+                            17,
+                            "shape_x and shape_y travel together"
+                        );
+                        assert_eq!(batch.schema().field(15).name(), "shape_x");
+                        assert_eq!(batch.schema().field(16).name(), "shape_y");
+                    }
+                    // One axis of the shape, as **parts of rings**. The three levels are the
+                    // schema's, not a convention: a decoder written against the two-level hull
+                    // shape fails its downcast here rather than reading a part as a ring.
+                    let shape_axis = |col: usize, i: usize| {
                         let a = batch
                             .column(col)
                             .as_any()
                             .downcast_ref::<arrow::array::ListArray>()
                             .unwrap();
                         a.is_valid(i).then(|| {
-                            let values = a.value(i);
-                            let values = values
+                            let parts = a.value(i);
+                            let parts = parts
                                 .as_any()
-                                .downcast_ref::<arrow::array::UInt32Array>()
-                                .unwrap();
-                            (0..values.len()).map(|k| values.value(k)).collect::<Vec<_>>()
+                                .downcast_ref::<arrow::array::ListArray>()
+                                .expect("shape_x/shape_y are a list of parts");
+                            (0..parts.len())
+                                .map(|p| {
+                                    let rings = parts.value(p);
+                                    let rings = rings
+                                        .as_any()
+                                        .downcast_ref::<arrow::array::ListArray>()
+                                        .expect("a part is a list of rings");
+                                    (0..rings.len())
+                                        .map(|r| {
+                                            let values = rings.value(r);
+                                            let values = values
+                                                .as_any()
+                                                .downcast_ref::<arrow::array::UInt32Array>()
+                                                .unwrap();
+                                            (0..values.len())
+                                                .map(|k| values.value(k))
+                                                .collect::<Vec<_>>()
+                                        })
+                                        .collect::<Vec<_>>()
+                                })
+                                .collect::<Vec<_>>()
                         })
                     };
                     for i in 0..batch.num_rows() {
-                        let hull = match (hull_axis(10, i), hull_axis(11, i)) {
-                            (Some(xs), Some(ys)) => {
-                                Some(xs.into_iter().zip(ys).map(|(x, y)| [x, y]).collect())
+                        let shape = if !shapes {
+                            None
+                        } else {
+                            match (shape_axis(15, i), shape_axis(16, i)) {
+                                (Some(xs), Some(ys)) => {
+                                    assert_eq!(xs.len(), ys.len(), "the axes disagree on parts");
+                                    Some(
+                                        xs.into_iter()
+                                            .zip(ys)
+                                            .map(|(px, py)| {
+                                                assert_eq!(px.len(), py.len(), "rings differ");
+                                                px.into_iter()
+                                                    .zip(py)
+                                                    .map(|(rx, ry)| {
+                                                        assert_eq!(rx.len(), ry.len());
+                                                        rx.into_iter()
+                                                            .zip(ry)
+                                                            .map(|(x, y)| [x, y])
+                                                            .collect::<Vec<_>>()
+                                                    })
+                                                    .collect::<Vec<_>>()
+                                            })
+                                            .collect(),
+                                    )
+                                }
+                                (None, None) => None,
+                                _ => panic!("a shape with one axis and not the other"),
                             }
-                            (None, None) => None,
-                            _ => panic!("a hull with one axis and not the other"),
                         };
                         rows.push(ArtifactRow {
-                            layer: layer.value(i).to_string(),
+                            layer: layer_at(i),
                             tessera_id: tessera_id.value(i),
-                            key: key
-                                .is_valid(i)
-                                .then(|| key.value(i).to_string()),
+                            key: key.is_valid(i).then(|| key.value(i).to_string()),
                             masked_count: masked_count.value(i),
                             centroid: f64_at(4, i)
                                 .map(|x| [x, f64_at(5, i).expect("both axes or neither")]),
@@ -741,7 +966,16 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                                     u32_at(9, i).unwrap(),
                                 ]
                             }),
-                            hull,
+                            shape,
+                            // Column 12, after `content` at 10 and `parent_ids` at 11 — read
+                            // positionally here on purpose, because the fixed prefix's positions
+                            // are contract and a test that read by name would not notice a column
+                            // inserted ahead of it.
+                            rung: u32_col_at(12, "rung").value(i),
+                            // Column 13, last of the fixed prefix — positionally for the same
+                            // reason, and nullable: null is *the request carried no filter*.
+                            matched: bool_at(13, i, "matched"),
+                            highlighted: bool_at(14, i, "highlighted"),
                         });
                     }
                 }
@@ -806,6 +1040,7 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
         points,
         sub_cells,
         artifacts,
+        artifacts_identity,
         trailer,
         point_frames,
         deterministic_bytes: bytes[..deterministic_end].to_vec(),

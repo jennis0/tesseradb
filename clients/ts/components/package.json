@@ -1,0 +1,55 @@
+{
+  "name": "@tesseradb/components",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./store": "./src/store-element.ts",
+    "./map": "./src/map.ts",
+    "./status": "./src/status.ts",
+    "./count": "./src/count.ts",
+    "./item-card": "./src/item-card.ts",
+    "./filter": "./src/filter.ts",
+    "./filter-panel": "./src/filter-panel.ts",
+    "./selection": "./src/selection.ts",
+    "./layer-picker": "./src/layer-picker.ts",
+    "./view-picker": "./src/view-picker.ts",
+    "./key-picker": "./src/key-picker.ts",
+    "./artifact-list": "./src/artifact-list.ts",
+    "./artifact-card": "./src/artifact-card.ts",
+    "./hierarchy": "./src/hierarchy.ts",
+    "./legend": "./src/legend.ts",
+    "./explorer": "./src/explorer.ts",
+    "./src/*": "./src/*",
+    "./vite-plugin-decorators": "./vite-plugin-decorators.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "build": "vite build && node scripts/sri.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@lit/context": "^1.1.0",
+    "@tesseradb/client": "*",
+    "@tesseradb/deck": "*"
+  },
+  "peerDependencies": {
+    "@deck.gl/core": "^9.3.7",
+    "@deck.gl/layers": "^9.3.7",
+    "@luma.gl/core": "^9.3.6",
+    "lit": "^3.3.0"
+  },
+  "devDependencies": {
+    "@deck.gl/core": "^9.3.7",
+    "@deck.gl/layers": "^9.3.7",
+    "@luma.gl/core": "^9.3.6",
+    "happy-dom": "^20.0.0",
+    "lit": "^3.3.0",
+    "typescript": "^5.9.0",
+    "vite": "^8.2.0",
+    "vitest": "^3.2.0",
+    "esbuild": "^0.28.0"
+  }
+}

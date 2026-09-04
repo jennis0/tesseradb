@@ -19,16 +19,55 @@
 //!
 //! - the **sorted source ids** and the **ordinal→entity map**, 12 bytes an item, because a member
 //!   and an attribute row are both named by source id and both have to resolve;
-//! - every **declared column in entity order**, which for a fixed-width type is its width and for
-//!   a `text`, `keyword` or `utf8` one is a `String` *per entity* — 24 bytes of header before a
-//!   character is stored — plus a presence bit per column;
-//! - the **layer member tables**, whole: one `Vec<u64>` of source ids per artifact as the plan is
-//!   read, the same rows again as resolved entities, and the published memberships in the store.
+//! - the **published memberships** in the store, as Roaring.
 //!
 //! **None of it is a batch.** The loop's residency shrinks when the stride does; this does not
-//! shrink at all, because a column in entity order is *n* values by construction and a member table
-//! is its own size. So the honest answer is not a smaller batch, it is a refusal that names the
-//! number — which is what this module computes and `plan_build` acts on.
+//! shrink at all, because a member table is its own size. So the honest answer is not a smaller
+//! batch, it is a refusal that names the number — which is what this module computes and
+//! `plan_build` acts on.
+//!
+//! # What moved off the heap, and is still counted
+//!
+//! The **layer member tables** were the third item on that list until 2026-08-30: one `Vec<u64>` of
+//! source ids per artifact as the plan was read, every one of them live from the first member row
+//! to the last level published. They are sorted runs and a merged table under `.build-tmp/` now
+//! (`layers.rs`), read back one artifact at a time, so what the plan holds is a spill budget and
+//! what the disk holds is the corpus.
+//!
+//! Every **declared column in entity order** was the other half of this list and the larger half of
+//! the campaign's kills: a fixed-width type at its own width, a `text`, `keyword` or `utf8` one at a
+//! `String` *per entity* — 24 bytes of header before a character was stored — plus a presence bit
+//! each. They are now files under `.build-tmp/`, mapped rather than held ([`crate::column`]), so
+//! they cost the machine page cache the kernel may evict and not memory it must have.
+//!
+//! The **published memberships** were on that list until 2026-09-02 and were the largest item on it
+//! at a hierarchy rung: one Roaring bitmap per artifact in the store, live from the layers stage to
+//! the artifact pass four stages later, **+1.2 GB of anonymous memory at the 10⁷ MedCPT sample**
+//! with 471,778,374 closed MeSH member rows and ~47 GB extrapolated at 10⁸
+//! (`probes/2026-09-02-mapped-memberships/README.md`). They are read back through the packed
+//! extent `layers.rs` has just written and fsynced — one write, no second format — so what stays on
+//! the heap is a Roaring container's descriptor and the members themselves are page cache. The
+//! publication's own window still holds them ([`BYTES_PER_MEMBER_ROW`]); nothing after it does.
+//!
+//! The segment's **row-order** tail moved the same way and at the same time
+//! ([`crate::pipeline::permute_attribute_tail`]): eight render columns at 7.4×10⁷ rows were ~2.4 GB
+//! of `Vec`, built by `push` immediately after the entity-order columns stopped being heap. ⊘ It
+//! was never a term of this model in either form — it lives in the segment write, not in the
+//! entity-order window this module covers — so what moved is its cost and not its accounting. What
+//! it is now is a mapped file per render column, priced by [`render_tail_bytes`] into the disk
+//! pre-flight's assembly phase.
+//!
+//! They are still modelled, and still printed, as **mapped** terms: an operator whose disk is the
+//! constraint has the same right to see the number as one whose memory is. What changed is that
+//! [`Residency::total`] — the figure `--memory-budget` is compared against — leaves them out. A
+//! model that kept charging them would refuse builds that now fit, which is the failure mode of
+//! carrying a cost model past the thing it modelled.
+//!
+//! **[`Residency::mapped`] is the other half, and the disk pre-flight is its reader.** Those files
+//! are on the disk from the attribute join to the column release, and the text index and the
+//! member spill both write their runs into the same window — a stretch the pre-flight's three
+//! original phase peaks all end before. Its column phase is this figure, taken from here rather
+//! than derived a second time.
 //!
 //! # What the numbers are, and what they are not
 //!
@@ -54,20 +93,29 @@
 
 use tessera_spatial::ScalarType;
 
+use crate::ArenaOrder;
+
 /// The unenumerated transients: decode buffers, a stage's scratch, the allocator's slack. The
 /// batch loop's own model carries a constant of the same size and for the same reason.
 pub(crate) const SLACK: u64 = 64 << 20;
 
-/// A `String` in a `Vec<String>`: pointer, length, capacity. Paid **per entity** by every
-/// variable-width column before a single character is stored, which is what makes a text column at
-/// 2.5×10⁸ items six gigabytes of headers on its own.
-const STRING_HEADER: u64 = 24;
+/// What a string value costs outside its characters: the entity-indexed arena offset in
+/// [`crate::column::EntityColumn`], plus the arena record's own header.
+///
+/// Eight bytes of offset and eight of header — the entity and the length the record carries so the
+/// arena can be read in its own order (`column.rs`). The characters ride in the arena and are
+/// counted as its payload; the `String` header this replaced was 24 bytes per entity, paid before
+/// a character was stored.
+const ARENA_OFFSET: u64 = 8 + 8;
 
 /// One named term of the residency, so a refusal prints where the bytes are rather than a total.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Term {
     pub what: String,
     pub bytes: u64,
+    /// A file under `.build-tmp/` rather than anonymous memory — reported, but not charged against
+    /// the memory budget.
+    pub mapped: bool,
 }
 
 /// The entity-order residency, term by term.
@@ -77,19 +125,43 @@ pub(crate) struct Residency {
 }
 
 impl Residency {
+    /// What the build asks the *machine* for: the anonymous terms only. A mapped term is page cache
+    /// and is reported rather than charged (see the module docs).
     pub fn total(&self) -> u64 {
-        self.terms.iter().map(|t| t.bytes).sum()
+        self.terms
+            .iter()
+            .filter(|t| !t.mapped)
+            .map(|t| t.bytes)
+            .sum()
     }
 
-    /// The terms, largest first, as one line each — the form a refusal prints. Largest first
-    /// because the operator's next move is to drop or narrow whatever is at the top.
+    /// What the build asks the **disk** for: the mapped terms only — the declared columns, their
+    /// arenas and the text index's runs, all files under the build's own scratch. The counterpart
+    /// of [`Self::total`], and the term the disk pre-flight's column phase is built from
+    /// (`pipeline::plan_build`): those files stand from the attribute join to the column release,
+    /// which is a window none of the three phases that pre-flight modelled before touches.
+    pub fn mapped(&self) -> u64 {
+        self.terms
+            .iter()
+            .filter(|t| t.mapped)
+            .map(|t| t.bytes)
+            .sum()
+    }
+
+    /// The terms as one line each — the form a refusal prints. **Charged first, largest first
+    /// within each half**, because the operator's next move is to drop or narrow whatever is at the
+    /// top of what they are being refused for; the mapped terms follow, marked, because they are
+    /// the disk the same build wants.
     pub fn describe(&self) -> String {
         let mut terms = self.terms.clone();
-        terms.sort_by_key(|t| std::cmp::Reverse(t.bytes));
+        terms.sort_by_key(|t| (t.mapped, std::cmp::Reverse(t.bytes)));
         terms
             .iter()
             .filter(|t| t.bytes > 0)
-            .map(|t| format!("\n  {:>9} MiB  {}", t.bytes >> 20, t.what))
+            .map(|t| {
+                let mapped = if t.mapped { " (mapped)" } else { "" };
+                format!("\n  {:>9} MiB{mapped}  {}", t.bytes >> 20, t.what)
+            })
             .collect()
     }
 }
@@ -105,10 +177,13 @@ impl Residency {
 pub(crate) struct ColumnCost {
     pub ty: ScalarType,
     pub payload_bytes: u64,
+    /// Whether this column is the one a text index is built over — which costs the build a second
+    /// set of files beside the column itself, and costs it them at the same time.
+    pub text_index: bool,
 }
 
-/// Whether one entity's value is a `String` in [`crate::pipeline::EntityColumn`]'s storage — which
-/// is what makes the column's characters a term of their own rather than part of its width.
+/// Whether one entity's value lives in [`crate::column::EntityColumn`]'s arena — which is what
+/// makes the column's characters a term of their own rather than part of its width.
 fn is_variable_width(ty: ScalarType) -> bool {
     matches!(
         ty,
@@ -116,9 +191,9 @@ fn is_variable_width(ty: ScalarType) -> bool {
     )
 }
 
-/// The fixed width one entity's value occupies in [`crate::pipeline::EntityColumn`]'s typed
-/// storage. A variable-width type answers [`STRING_HEADER`] here and carries its characters in
-/// [`ColumnCost::payload_bytes`].
+/// The fixed width one entity's value occupies in [`crate::column::EntityColumn`]'s typed
+/// storage. A variable-width type answers [`ARENA_OFFSET`] here — its offset and its record
+/// header — and carries its characters in [`ColumnCost::payload_bytes`].
 fn fixed_width(ty: ScalarType) -> u64 {
     match ty {
         ScalarType::Bool => 1,
@@ -126,24 +201,91 @@ fn fixed_width(ty: ScalarType) -> u64 {
         ScalarType::U16 | ScalarType::I16 => 2,
         ScalarType::U32 | ScalarType::I32 | ScalarType::F32 => 4,
         ScalarType::U64 | ScalarType::I64 | ScalarType::F64 | ScalarType::TimestampUs => 8,
-        ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => STRING_HEADER,
+        ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => ARENA_OFFSET,
     }
 }
 
-/// What one layer member row costs, held **three times over** across the publication:
+/// What one layer member row costs the **machine**: about 4 bytes as Roaring — the store's own
+/// decoded copy, at the ~2 bytes an array container spends on a scattered member and less on a
+/// dense one, and the level being published beside it, whose incoming bitmaps and durable record
+/// bytes are the same membership twice more.
 ///
-/// - 8 bytes as the plan's `Vec<u64>` of source ids, read from the member table and alive until the
-///   publication is over;
-/// - 8 bytes again as the resolved `Vec<EntityId>`, built from the plan rather than replacing it,
-///   because an unresolvable id has to refuse the build with the plan still in hand;
-/// - about 4 more as Roaring — the incoming bitmap, the durable record's bytes and the store's own
-///   decoded copy, at the ~2 bytes an array container spends on a scattered member and less on a
-///   dense one.
+/// It was 12 until 2026-08-30, the other 8 being the plan's `Vec<u64>` of source ids: one vector
+/// per artifact, every one of them live from the first row of the first member source until the
+/// last level was published. Those pairs go to disk now ([`SPILLED_BYTES_PER_MEMBER_ROW`]), so the
+/// plan holds a spill budget rather than the corpus and the term that is left is the published
+/// memberships alone.
+///
+/// **Only the store's copy was corpus-wide, and it is a mapping now** — see
+/// [`MAPPED_BYTES_PER_MEMBER_ROW`]. The store used to carry one heap Roaring bitmap per artifact
+/// from the layers stage to the artifact pass four stages later: **+1.2 GB of anonymous memory at
+/// the 10⁷ MedCPT sample**, 2.7 B per closed member row, measured across the build's peak
+/// (`probes/2026-09-02-mapped-memberships/README.md`). `layers.rs` reads each membership back
+/// through the extent it has just written, so what is left here is the publication's own window and
+/// this constant no longer describes anything the build holds to the end.
 ///
 /// ⊘ **The Roaring figure is the scattered case and is not measured per build.** A dense membership
 /// costs an eighth of it; the model takes the expensive one, because the refusal it feeds is meant
-/// to be wrong in the direction that costs a rerun rather than a kill.
-const BYTES_PER_MEMBER_ROW: u64 = 20;
+/// to be wrong in the direction that costs a rerun rather than a kill. It is loose in one more
+/// direction since the packing was streamed: the constant charges the corpus for terms that are a
+/// level's, and it is left at 4 rather than lowered because a term that errs high refuses a build
+/// that would have fitted, where one that errs low is the kill this module exists to pre-empt.
+const BYTES_PER_MEMBER_ROW: u64 = 4;
+
+/// What one member row costs the **disk**, and the process's page cache, as the packed membership
+/// extent the store then reads through: 2 bytes, an array container's own width.
+///
+/// ⊘ **Measured below that and charged above it.** The 10⁷ MedCPT sample's two extents are
+/// 543,884,239 bytes over 471,778,374 member rows — **1.15 B a row**, because a descriptor whose
+/// members are dense in entity space comes out as a run or a bitset container rather than an
+/// array. The model charges the array case for the reason the constant above does: a term that errs
+/// high costs a rerun and one that errs low is the ENOSPC this pre-flight exists to pre-empt.
+///
+/// **Charged in the column window**, which is where these bytes are: the extents are written at the
+/// layer publication (stage 8c) and mapped from there to the end of the build, and the declared
+/// columns are still on the disk until the release two stages later. They are the bundle's own
+/// bytes and would be needed whether or not the store read them back — what the mapping changes is
+/// that they are also resident, as page cache the kernel may evict.
+const MAPPED_BYTES_PER_MEMBER_ROW: u64 = 2;
+
+/// What one layer member row costs the **disk** while the publication is running: the sorted runs
+/// the member spill writes and the merged member table it reads back, both under `.build-tmp/` and
+/// both alive at once — the runs are deleted only once the whole table is written.
+///
+/// Charged as if a pair cost one raw source id in each file. Both are LEB128 delta encodings over
+/// ascending values, so the true figure is below that wherever a membership is dense in its id
+/// space and at it where the membership is scattered.
+///
+/// ⊘ **Modelled, not measured per build**, and the one corpus with a figure is GeoNames: its two
+/// member files' 26.9×10⁶ Parquet rows carry 68.4×10⁶ `(artifact, source)` pairs, which spilled
+/// 73 MiB of runs beside a 68 MiB table — **140 MiB against the 205 MiB this charges**. Loose in
+/// the direction the whole module is loose in, and loose the other way in its denominator: a
+/// member row's `key` column is a list, so a row is one pair on a flat layer and one per level on
+/// a ladder.
+const SPILLED_BYTES_PER_MEMBER_ROW: u64 = 8;
+
+/// What the segment's **row-order** tail costs on disk: one fixed-width slot per row per render
+/// column, in `.build-tmp/`, for the length of the segment write.
+///
+/// Not a term of [`entity_order_residency`], because it is not in that window: the tail is built
+/// after the release that ends it, and every column it covers is one the release *kept*. It is the
+/// assembly phase's, beside `columns.arrow` and the postings spool.
+///
+/// A `bool` is counted twice over, at a byte a row and again at a bit: the lane fills a byte per
+/// row and packs it into Arrow's bit layout on the way out, and both mappings stand while it does.
+/// Every other render column is its declared width and nothing else — a string one cannot be here,
+/// `render` being refused for the whole family at the declaration.
+pub(crate) fn render_tail_bytes(schema: &crate::config::Schema, n: u64) -> u64 {
+    schema
+        .attributes
+        .iter()
+        .filter(|a| a.render)
+        .map(|a| match a.ty {
+            ScalarType::Bool => n.saturating_add(n.div_ceil(8)),
+            ty => fixed_width(ty).saturating_mul(n),
+        })
+        .sum()
+}
 
 /// The residency of everything the batch loop's model does not cover.
 ///
@@ -159,45 +301,100 @@ pub(crate) fn entity_order_residency(
                 "the sorted source ids, 8 B/item (input.rs; released after the layer publication)"
                     .into(),
             bytes: 8 * n,
+            mapped: false,
         },
         Term {
             what: "the ordinal→entity map, 4 B/item".into(),
             bytes: 4 * n,
+            mapped: false,
         },
     ];
     for (index, column) in columns.iter().enumerate() {
         let width = fixed_width(column.ty);
         let presence = n.div_ceil(8);
+        // **The entity-ordered fill's transient**, charged on every string column rather than on
+        // the ones that take it. Pass one keeps a `u32` length per entity so the prefix sum can
+        // lay the arena out, and gives it back the moment pass two is done — so it stands beside
+        // the column but not beside the stages after the join. It is charged unconditionally
+        // because the order is decided from the budget and this figure feeds the budget, and the
+        // circle is worth less than the four bytes: at 10⁸ it is 400 MB against an arena two
+        // orders of magnitude larger, and it errs in the direction that costs a rerun
+        // (`crate::ArenaOrder`, `column.rs`).
+        let layout = if is_variable_width(column.ty) { 4 * n } else { 0 };
         let bytes = width
             .saturating_mul(n)
             .saturating_add(presence)
-            .saturating_add(column.payload_bytes);
+            .saturating_add(column.payload_bytes)
+            .saturating_add(layout);
         let ty = column.ty.arrow_type_name();
         terms.push(Term {
             what: if column.payload_bytes > 0 {
                 format!(
-                    "declared column {index} ({ty}): {width} B/item of header plus \
-                     {} MiB of characters",
+                    "declared column {index} ({ty}): {width} B/item of offset plus \
+                     {} MiB of characters and 4 B/item of arena layout, in .build-tmp/",
                     column.payload_bytes >> 20
                 )
             } else {
-                format!("declared column {index} ({ty}): {width} B/item")
+                format!("declared column {index} ({ty}): {width} B/item, in .build-tmp/")
             },
             bytes,
+            mapped: true,
         });
+        // The text index's sorted runs, **charged at the column they are tokenised from** rather
+        // than at a constant of their own. The runs spill while the column is resident, so the two
+        // stand on the disk together; and a run spends one varint on a `(term, entity)` pair where
+        // the prose spent the term's whole characters on every occurrence of it, so the column is
+        // a ceiling over them. Charging them the column's arithmetic rather than a second copy of
+        // it is also what keeps the two from drifting apart.
+        //
+        // ⊘ The ceiling is modelled, not measured, and it is loose: the one corpus with a run
+        // figure — 7.4×10⁷ Overture names — spilled 555 MB against the 2.58 GB this charges. The
+        // slack is the payload figure's own, being Parquet's encoded page size for the column
+        // rather than its characters.
+        if column.text_index {
+            terms.push(Term {
+                what: format!(
+                    "the text index's sorted runs over column {index}, charged at the column they \
+                     are tokenised from"
+                ),
+                // The column's own storage, without the arena layout's transient: the layout is
+                // given back at the end of the join and the runs spill three stages later, so the
+                // two never stand on the disk together.
+                bytes: bytes - layout,
+                mapped: true,
+            });
+        }
     }
     if member_rows > 0 {
         terms.push(Term {
             what: format!(
-                "{member_rows} layer member row(s) at {BYTES_PER_MEMBER_ROW} B — the plan, the \
-                 resolved entities and the published memberships, all three resident at once"
+                "{member_rows} layer member row(s) at {BYTES_PER_MEMBER_ROW} B — the publication's \
+                 own Roaring, while the level it is publishing is in flight"
             ),
             bytes: member_rows.saturating_mul(BYTES_PER_MEMBER_ROW),
+            mapped: false,
+        });
+        terms.push(Term {
+            what: format!(
+                "the published memberships the store reads back through the packed extent, at \
+                 {MAPPED_BYTES_PER_MEMBER_ROW} B a member row"
+            ),
+            bytes: member_rows.saturating_mul(MAPPED_BYTES_PER_MEMBER_ROW),
+            mapped: true,
+        });
+        terms.push(Term {
+            what: format!(
+                "the member spill's runs and the table they merge into, at \
+                 {SPILLED_BYTES_PER_MEMBER_ROW} B a member row, in .build-tmp/"
+            ),
+            bytes: member_rows.saturating_mul(SPILLED_BYTES_PER_MEMBER_ROW),
+            mapped: true,
         });
     }
     terms.push(Term {
         what: "slack for decode buffers, stage scratch and the allocator".into(),
         bytes: SLACK,
+        mapped: false,
     });
     Residency { terms }
 }
@@ -233,6 +430,10 @@ pub(crate) fn model(args: &crate::BuildArgs, n: u64) -> Residency {
         .map(|(attribute, payload_bytes)| ColumnCost {
             ty: attribute.ty,
             payload_bytes,
+            // The same test the emit itself makes, called rather than restated: a text column
+            // earns an index exactly where it is owed postings.
+            text_index: attribute.ty == ScalarType::Text
+                && crate::pipeline::postings_are_owed(&args.schema, attribute),
         })
         .collect();
     let member_rows = args
@@ -243,6 +444,117 @@ pub(crate) fn model(args: &crate::BuildArgs, n: u64) -> Residency {
         .map(|metadata| metadata.file_metadata().num_rows().max(0) as u64)
         .sum();
     entity_order_residency(n, &columns, member_rows)
+}
+
+/// The string columns' payload against the memory budget, and the arena order that follows.
+///
+/// **Decided before the join, from Parquet footers alone**, which is what makes it a decision and
+/// not a reaction: [`ColumnCost::payload_bytes`] is known before a row is read, and the two orders
+/// produce the same bundle, so a wrong guess costs time and never correctness.
+#[derive(Debug, Clone)]
+pub(crate) struct ArenaDecision {
+    /// Each declared string column, with the uncompressed bytes its source's footer reports.
+    pub columns: Vec<(String, u64)>,
+    /// Their sum — what the arena will hold, to a footer's accuracy.
+    pub payload_bytes: u64,
+    /// The build's memory budget, as [`crate::pipeline::BuildPlan`] resolved it.
+    pub budget: u64,
+    /// The budget share above which the two-pass fill is taken.
+    pub share: u64,
+    /// The resolved order — never [`ArenaOrder::Auto`].
+    pub order: ArenaOrder,
+    /// Whether the operator named the order rather than `auto` deciding it.
+    pub forced: bool,
+}
+
+/// The share of the memory budget the string payload may take before the arena is filled in
+/// entity order: **one half**.
+///
+/// **Not a share of the machine, and not a tighter one, for two reasons that pull the same way.**
+/// The arena is not alone in the page cache at the join: the entity-order columns, their presence
+/// bitmaps, `at`, the source ids and the ordinal map are all mapped and all live across the same
+/// stages, and the stages that then read the arena — the text index and the record blob — hold
+/// their own spill runs beside it. So an arena at the whole budget is already thrashing, and half
+/// is the point past which the *other* mapped files stop fitting alongside it.
+///
+/// It is not tighter than a half because the two-pass fill is not free: it is a second decode of
+/// the source's prose, measured at 33% of the join at 10⁷ (`docs/ingest-campaign.md` §4a). Paying
+/// that on a corpus whose arena would have sat in the page cache is a real cost for nothing, and
+/// the miss is symmetric — the estimate is a footer's, which under-reads a dictionary-encoded
+/// column rather than over-reading it, so a half already errs towards the two-pass fill.
+///
+/// ⊘ **Modelled, not tuned.** No sweep over the share was run; what was measured is the two
+/// endpoints — 13.2 GB against a 4 GiB cap and against no cap (`probes/2026-09-03-text-arena-streaming/`).
+/// The number to revisit if a build is caught on the wrong side of it is this one.
+const ARENA_BUDGET_SHARE: u64 = 2;
+
+/// Which arena order this build takes, and the numbers behind it.
+pub(crate) fn decide_arena_order(
+    args: &crate::BuildArgs,
+    budget: u64,
+) -> ArenaDecision {
+    let mut columns: Vec<(String, u64)> = Vec::new();
+    for source in &args.attribute_sources {
+        let metadata = footer(&source.path);
+        for &index in &source.attributes {
+            let Some(attribute) = args.schema.attributes.get(index) else {
+                continue;
+            };
+            if !is_variable_width(attribute.ty) {
+                continue;
+            }
+            let bytes = metadata
+                .as_ref()
+                .map_or(0, |m| uncompressed_column_bytes(m, attribute.column()));
+            columns.push((attribute.name.clone(), bytes));
+        }
+    }
+    let payload_bytes: u64 = columns.iter().map(|&(_, bytes)| bytes).sum();
+    let share = budget / ARENA_BUDGET_SHARE;
+    let (order, forced) = match args.arena_order {
+        ArenaOrder::Auto if columns.is_empty() => (ArenaOrder::Arrival, false),
+        ArenaOrder::Auto if payload_bytes > share => (ArenaOrder::Entity, false),
+        ArenaOrder::Auto => (ArenaOrder::Arrival, false),
+        chosen => (chosen, true),
+    };
+    ArenaDecision {
+        columns,
+        payload_bytes,
+        budget,
+        share,
+        order,
+        forced,
+    }
+}
+
+impl ArenaDecision {
+    /// The decision as the join prints it — every number it turned on, so a wall measured under
+    /// one order can be read against the estimate that chose it.
+    pub(crate) fn report(&self) {
+        if self.columns.is_empty() {
+            return;
+        }
+        for (name, bytes) in &self.columns {
+            println!(
+                "  string column '{name}': {} MiB of characters (uncompressed, from the footer)",
+                bytes >> 20
+            );
+        }
+        let how = if self.forced {
+            "named by --arena-order"
+        } else if self.order == ArenaOrder::Entity {
+            "auto: over the share, so the arena is filled in entity order by a second decode"
+        } else {
+            "auto: under the share, so the arena is filled in one pass in arrival order"
+        };
+        println!(
+            "  arena: {} MiB of string payload against a {} MiB budget, share {} MiB (half) — {} ({how})",
+            self.payload_bytes >> 20,
+            self.budget >> 20,
+            self.share >> 20,
+            self.order.as_str(),
+        );
+    }
 }
 
 /// One Parquet file's metadata, or `None` where it cannot be had.
@@ -275,10 +587,74 @@ fn uncompressed_column_bytes(
 mod tests {
     use super::*;
 
+    /// **The switch's rule, from stated inputs**: the string columns' payload against half the
+    /// budget, and an operator's word over both.
+    ///
+    /// Written against the decision function rather than a build, because what is being asserted
+    /// is the *rule* — a build would only show which side of it one corpus fell on.
+    #[test]
+    fn the_arena_order_turns_on_half_the_budget_and_an_operator_overrides_it() {
+        fn decide(payload: u64, budget: u64, asked: ArenaOrder) -> ArenaDecision {
+            // The shape `decide_arena_order` builds from footers, stated directly: a corpus
+            // whose one string column holds `payload` uncompressed bytes.
+            let share = budget / ARENA_BUDGET_SHARE;
+            let (order, forced) = match asked {
+                ArenaOrder::Auto if payload > share => (ArenaOrder::Entity, false),
+                ArenaOrder::Auto => (ArenaOrder::Arrival, false),
+                chosen => (chosen, true),
+            };
+            ArenaDecision {
+                columns: vec![("abstract".into(), payload)],
+                payload_bytes: payload,
+                budget,
+                share,
+                order,
+                forced,
+            }
+        }
+        const GIB: u64 = 1 << 30;
+        // Under half the budget: one pass, and the second decode is not paid for.
+        assert_eq!(decide(3 * GIB, 24 * GIB, ArenaOrder::Auto).order, ArenaOrder::Arrival);
+        // Exactly half is under the rule, which is `>` and not `>=`: a share it just fits in is a
+        // share it fits in.
+        assert_eq!(decide(12 * GIB, 24 * GIB, ArenaOrder::Auto).order, ArenaOrder::Arrival);
+        // Over it: two passes. Rung 4's own numbers — a 119 GB arena against a 24 GiB budget.
+        assert_eq!(decide(119 * GIB, 24 * GIB, ArenaOrder::Auto).order, ArenaOrder::Entity);
+        // The same corpus on a box big enough to hold it stays in one pass.
+        assert_eq!(decide(119 * GIB, 512 * GIB, ArenaOrder::Auto).order, ArenaOrder::Arrival);
+        // And the operator's word beats the estimate in both directions, and says it did.
+        for (asked, payload) in [(ArenaOrder::Arrival, 119 * GIB), (ArenaOrder::Entity, GIB)] {
+            let decision = decide(payload, 24 * GIB, asked);
+            assert_eq!(decision.order, asked);
+            assert!(decision.forced);
+        }
+    }
+
+    /// The decision over a real corpus, with the payload read from the footer it is actually read
+    /// from — the half of the rule the arithmetic above cannot check.
+    #[test]
+    fn the_decision_reads_the_string_columns_payload_from_the_footer() {
+        let (args, _temp) = fixture(20_000);
+        // One declared string column: the fixture's `blurb`.
+        let generous = decide_arena_order(&args, 1 << 40);
+        assert_eq!(
+            generous.columns.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            vec!["blurb"]
+        );
+        assert!(generous.payload_bytes > 0, "the footer gave no payload");
+        assert_eq!(generous.order, ArenaOrder::Arrival);
+        assert!(!generous.forced);
+        // The same corpus against a budget its prose does not fit half of.
+        let tight = decide_arena_order(&args, generous.payload_bytes);
+        assert_eq!(tight.order, ArenaOrder::Entity);
+        assert_eq!(tight.payload_bytes, generous.payload_bytes);
+    }
+
     fn column(ty: ScalarType, payload: u64) -> ColumnCost {
         ColumnCost {
             ty,
             payload_bytes: payload,
+            text_index: false,
         }
     }
 
@@ -304,43 +680,112 @@ mod tests {
     fn the_tail_is_linear_in_the_item_count_and_the_batch_stride_reaches_none_of_it() {
         let small = campaign_residency(10_000_000, 200);
         let large = campaign_residency(50_000_000, 200);
-        // Five times the corpus, five times the residency to within the fixed slack.
-        let ratio = large.total() as f64 / small.total() as f64;
+        // Five times the corpus, five times the residency — exactly, net of the one term that is
+        // not a function of the corpus at all.
+        let ratio = (large.total() - SLACK) as f64 / (small.total() - SLACK) as f64;
         assert!(
-            (4.9..5.1).contains(&ratio),
+            (4.99..5.01).contains(&ratio),
             "the tail should scale with the corpus, got {ratio}"
         );
     }
 
-    /// A `text` column is a `String` per entity **before a character is stored**, and that header
-    /// alone is three times the widest fixed-width column the schema can declare.
+    /// **A declared column is reported and not charged.** The whole of a text column — its
+    /// per-entity offsets, its presence bits and every character of the corpus's prose — is a file
+    /// under `.build-tmp/`, so it appears in the breakdown at its full size and adds nothing to the
+    /// figure `--memory-budget` is compared against.
     #[test]
-    fn a_variable_width_column_costs_a_string_header_per_entity() {
+    fn a_declared_column_is_reported_as_mapped_and_charged_at_nothing() {
         let n = 10_000_000;
-        let bare = entity_order_residency(n, &[], 0).total();
-        let text = entity_order_residency(n, &[column(ScalarType::Text, 0)], 0).total() - bare;
-        let widest = entity_order_residency(n, &[column(ScalarType::U64, 0)], 0).total() - bare;
-        assert_eq!(text, 24 * n + n.div_ceil(8));
+        let bare = entity_order_residency(n, &[], 0);
+        let with_text = entity_order_residency(n, &[column(ScalarType::Text, 400 * n)], 0);
+        assert_eq!(with_text.total(), bare.total());
+        let term = with_text
+            .terms
+            .iter()
+            .find(|t| t.mapped)
+            .expect("the column is a term of its own");
+        // The offsets, the presence bits, the characters, and the 4 B/item the entity-ordered
+        // fill's layout pass holds across the join.
+        assert_eq!(term.bytes, ARENA_OFFSET * n + n.div_ceil(8) + 400 * n + 4 * n);
         assert!(
-            text > 2 * widest,
-            "{text} B of string headers should dwarf {widest} B of the widest fixed column"
+            with_text.describe().contains("(mapped)"),
+            "the breakdown must say which terms are files: {}",
+            with_text.describe()
         );
     }
 
-    /// Member rows are charged three times because they are resident three times, and a build's
-    /// member tables can outweigh its whole attribute tail.
+    /// **A text index costs a second set of files, at the same time as the first.** The runs spill
+    /// while the column they are tokenised from is still resident, so the disk pre-flight's column
+    /// phase has to see both — and neither may reach the memory figure.
     #[test]
-    fn member_rows_are_charged_for_every_copy_that_is_resident() {
+    fn a_text_index_carries_its_runs_beside_the_column() {
         let n = 10_000_000;
+        let plain = ColumnCost {
+            ty: ScalarType::Text,
+            payload_bytes: 400 * n,
+            text_index: false,
+        };
+        let indexed = ColumnCost {
+            text_index: true,
+            ..plain
+        };
+        let column_bytes = ARENA_OFFSET * n + n.div_ceil(8) + 400 * n;
+
+        let without = entity_order_residency(n, &[plain], 0);
+        assert_eq!(without.mapped(), column_bytes + 4 * n);
+
+        // The runs are charged the column's storage and **not** its layout transient, which the
+        // join has already given back by the time they spill.
+        let with = entity_order_residency(n, &[indexed], 0);
+        assert_eq!(with.mapped(), 2 * column_bytes + 4 * n);
+        assert_eq!(
+            with.total(),
+            without.total(),
+            "neither is charged to memory"
+        );
+        assert!(
+            with.describe().contains("sorted runs"),
+            "the runs must be a named term of their own: {}",
+            with.describe()
+        );
+    }
+
+    /// **The publication's Roaring is charged and every file beside it is reported.** A member row
+    /// is a heap bitmap only while its level is being published, a delta in two files under
+    /// `.build-tmp/`, and the packed extent the store then reads it back through — and only the
+    /// first is memory the machine must have. A model that kept charging the others would refuse
+    /// builds that now fit, which is the failure mode of carrying a cost model past the thing it
+    /// modelled.
+    #[test]
+    fn a_member_row_is_charged_where_it_is_resident_and_reported_where_it_is_a_file() {
+        let n = 10_000_000;
+        let rows = 64_000_000;
         let without = entity_order_residency(n, &[], 0);
-        let with = entity_order_residency(n, &[], 64_000_000);
+        let with = entity_order_residency(n, &[], rows);
         assert_eq!(
             with.total() - without.total(),
-            64_000_000 * BYTES_PER_MEMBER_ROW
+            rows * BYTES_PER_MEMBER_ROW,
+            "only the Roaring copies are memory"
+        );
+        assert_eq!(
+            with.mapped() - without.mapped(),
+            rows * (SPILLED_BYTES_PER_MEMBER_ROW + MAPPED_BYTES_PER_MEMBER_ROW),
+            "the runs, the merged table and the extent the store reads through are all disk"
+        );
+        assert!(
+            with.describe().contains("packed extent"),
+            "the mapped memberships must be a named term of their own: {}",
+            with.describe()
+        );
+        assert!(
+            with.describe().contains("member spill"),
+            "the spill must be a named term of its own: {}",
+            with.describe()
         );
     }
 
-    /// The description leads with the largest term, because that is the one the operator acts on.
+    /// The description leads with the largest **charged** term, because that is the one the
+    /// operator is being refused for and the one they can act on.
     #[test]
     fn the_breakdown_leads_with_the_term_worth_acting_on() {
         let described = campaign_residency(50_000_000, 200).describe();
@@ -349,9 +794,10 @@ mod tests {
             .find(|l| !l.trim().is_empty())
             .unwrap_or_default();
         assert!(
-            first.contains("text"),
-            "the text column is the largest term at this schema; got {first}"
+            first.contains("member row"),
+            "the member tables are the largest charged term at this schema; got {first}"
         );
+        assert!(!first.contains("(mapped)"), "got {first}");
     }
 
     /// **The measurement the model is checked against.** Writes a corpus of `N` items with a text
@@ -510,18 +956,27 @@ require_member_visibility = "none"
         std::fs::write(&config_path, &config).unwrap();
         let parsed = crate::config::Config::parse(&config_path, &Default::default()).unwrap();
         let args = crate::BuildArgs {
-            points: points.clone(),
-            point_fields: parsed.views[0].fields.clone(),
+            arena_order: Default::default(),
+            views: vec![crate::ViewArgs {
+                visibility: None,
+                view_id: "s0".into(),
+                projection: parsed.views[0].projection,
+                extent: tessera_spatial::Bounds {
+                    x_min: 0.0,
+                    x_max: 1024.0,
+                    y_min: 0.0,
+                    y_max: 1024.0,
+                },
+                points: points.clone(),
+                point_fields: parsed.views[0].fields.clone(),
+                select: None,
+                access: crate::config::AccessInput::relation(pairs.clone()),
+            }],
+            anchor: 0,
+            groups: Vec::new(),
+            scoped_attributes: Vec::new(),
             attribute_sources: parsed.attribute_sources.clone(),
-            access: crate::config::AccessInput::relation(pairs.clone()),
             out: dir.join("bundle"),
-            extent: tessera_spatial::Bounds {
-                x_min: 0.0,
-                x_max: 1024.0,
-                y_min: 0.0,
-                y_max: 1024.0,
-            },
-            view_id: "s0".into(),
             limit: None,
             identity_key: tessera_types::IdentityKey::from_hex("000102030405060708090a0b0c0d0e0f")
                 .unwrap(),
@@ -530,6 +985,7 @@ require_member_visibility = "none"
             shard_id: 0,
             layers: parsed.layers.clone(),
             layer_inputs: parsed.layer_sources.clone(),
+            scoped_layers: Default::default(),
             mint_external_ids: false,
             emit_oracle_pairs: false,
             batch_items: None,
@@ -582,12 +1038,17 @@ require_member_visibility = "none"
     }
 
     /// And the same build fits under a budget that covers it, so the pre-flight is a bound and not
-    /// a blanket.
+    /// a blanket — and it leaves nothing behind, which is worth an assertion now that the columns
+    /// are files in that directory rather than heap (`column.rs`).
     #[test]
     fn the_same_build_fits_under_a_budget_that_covers_the_tail() {
         let (mut args, _temp) = fixture(20_000);
         args.memory_budget = Some(2 << 30);
         crate::build(&args).expect("2 GiB covers a twenty-thousand-item tail");
+        assert!(
+            !args.out.join(".build-tmp").exists(),
+            "a successful build takes its scratch directory with it"
+        );
     }
 
     #[test]

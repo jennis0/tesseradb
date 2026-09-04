@@ -1,0 +1,51 @@
+t,line
+0.277,"view 'knn': quantising against x [-61.571681365966796, 18.65543685913086], y [-22.400528774261474, 57.82658945083618]"
+0.277,"        the data spans x [-60.78514099121094, 17.868896484375], y [-15.247759819030762, 50.67382049560547] — 64252 x 53852 of the 65536 x 65536 cells"
+0.277,"        10000000 point(s) placed, none on the frame's edge"
+0.277,"schema: 5 column(s), 8.00 B/row against the 12 B fixed row (+67%)"
+0.277,        7.44 GiB per 10^9 items — unalterable without rewriting the corpus
+0.277,        every column materialises in EVERY view — including ones whose items carry no value for it (§3.9). Per-view columns need contracts §2.6's per-view enumeration
+0.466,stage       source_ids      0.19s  rows=10000000     peak=   173 MiB
+7.581,stage       dictionary      7.12s  rows=18           peak=   838 MiB
+7.582,"warning: this build's entity-order stages need at least 1978 MiB against a 3276 MiB budget, and that figure is a lower bound — it counts what the stages hold, not the readers and allocator around them (measured at roughly half the real peak). These stages do not batch. Where the bytes are:"
+7.582,"       1799 MiB  471778374 layer member row(s) at 4 B — the publication's own Roaring, while the level it is publishing is in flight"
+7.583,"         76 MiB  the sorted source ids, 8 B/item (input.rs; released after the layer publication)"
+7.583,"         64 MiB  slack for decode buffers, stage scratch and the allocator"
+7.583,"         38 MiB  the ordinal→entity map, 4 B/item"
+7.583,"       8946 MiB (mapped)  declared column 3 (text): 16 B/item of offset plus 8755 MiB of characters and 4 B/item of arena layout, in .build-tmp/"
+7.583,"       8908 MiB (mapped)  the text index's sorted runs over column 3, charged at the column they are tokenised from"
+7.583,"       3599 MiB (mapped)  the member spill's runs and the table they merge into, at 8 B a member row, in .build-tmp/"
+7.583,"       1111 MiB (mapped)  declared column 1 (text): 16 B/item of offset plus 919 MiB of characters and 4 B/item of arena layout, in .build-tmp/"
+7.583,"       1073 MiB (mapped)  the text index's sorted runs over column 1, charged at the column they are tokenised from"
+7.583,"        899 MiB (mapped)  the published memberships the store reads back through the packed extent, at 2 B a member row"
+7.583,"        717 MiB (mapped)  declared column 2 (text): 16 B/item of offset plus 525 MiB of characters and 4 B/item of arena layout, in .build-tmp/"
+7.583,"        679 MiB (mapped)  the text index's sorted runs over column 2, charged at the column they are tokenised from"
+7.583,"        305 MiB (mapped)  declared column 4 (keyword): 16 B/item of offset plus 113 MiB of characters and 4 B/item of arena layout, in .build-tmp/"
+7.583,"         77 MiB (mapped)  declared column 0 (timestamp_us): 8 B/item, in .build-tmp/"
+13.093,stage    geometry_read      5.51s  rows=10000000     peak=  1934 MiB
+13.093,stage       pairs_pack      0.00s  rows=46017422     peak=  1934 MiB
+14.694,stage   signature_sort      1.60s  rows=10000000     peak=  1934 MiB
+18.966,stage       assignment      4.27s  rows=10000000     peak=  1934 MiB
+19.125,stage       assignment      0.16s  rows=10000000     peak=  1934 MiB
+20.421,stage   postings_write      1.30s  rows=46017422     peak=  1934 MiB
+20.421,stage     external_ids      0.00s  rows=0            peak=  1934 MiB
+152.170,"attribute 'published': 9,992,314 of 10,000,000 entities have a value"
+152.171,"attribute 'title': 9,990,914 of 10,000,000 entities have a value"
+152.171,"attribute 'mesh_major': 8,449,628 of 10,000,000 entities have a value"
+152.171,"attribute 'abstract': 6,893,387 of 10,000,000 entities have a value"
+152.171,"attribute 'pmid': 10,000,000 of 10,000,000 entities have a value"
+152.171,        0 source row(s) named entities this build did not load
+152.171,stage   attribute_tail    131.75s  rows=10000000     peak=  4020 MiB
+258.849,stage           layers    106.68s  rows=2            peak=  4020 MiB
+403.200,stage       text_index    121.41s  rows=3984896      peak=  4020 MiB
+403.200,stage  filter_postings     22.94s  rows=10000000     peak=  4020 MiB
+463.917,stage      record_blob     60.72s  rows=10000000     peak=  4020 MiB
+464.028,stage   column_release      0.11s  rows=10000000     peak=  4020 MiB
+464.373,stage       tiler_sort      0.34s  rows=10000000     peak=  4020 MiB
+465.054,stage    segment_write      0.68s  rows=10000000     peak=  4020 MiB
+505.519,"artifact layouts, chosen from the bundle's own row space (40463 ms):"
+505.519,"  clusters/kmeans level 0 [knn]: 135 artifact(s) with rows, 0.541 everywhere, 5.0 blocks/artifact, disjoint — served rows"
+505.519,"  mesh/descriptors level 0 [knn]: 30119 artifact(s) with rows, 0.988 everywhere, 71.1 blocks/artifact, overlapping — served list"
+505.519,"  wrote 1 tile index(es), 1 row-major column(s), 2 containment partition(s), 0 shape row form(s), 0 decomposition file(s)"
+508.246,stage        manifests     43.19s  rows=7705530732   peak=  4020 MiB
+508.306,view 'knn': 10000000 point(s) landed in 8981578 distinct cell(s) — 89.8% of them have a position of their own

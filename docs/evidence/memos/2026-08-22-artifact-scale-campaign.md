@@ -1,9 +1,9 @@
 # The artifact scale campaign — what the built engine does at scale
 
 **Date:** 2026-08-22 · **Status:** Evidence, not normative. It closes the campaign
-[the plan](2026-08-21-artifact-scale-plan.md) §8 set out, validates
+the plan §8 set out, validates
 [`artifact-serving-at-scale.md`](../../design/artifact-serving-at-scale.md) against the engine that
-now implements it, and reports against [`artifact-delivery.md`](../../artifact-delivery.md)'s
+now implements it, and reports against artifact-delivery.md's
 **Stage 7** check. The raw record is
 [`probes/2026-08-22-artifact-serving-e2e/`](../../../probes/2026-08-22-artifact-serving-e2e/README.md),
 where every figure below has a CSV beside it.
@@ -89,7 +89,7 @@ that size pays for.
 **1. The build records a layout its own report contradicts.** It reports 108.0 and 73.3 blocks per
 artifact at 10⁷ (178.9 and 93.7 at 5×10⁷) — decision 0092's figure — and records `ArtifactMajor` for
 both layers, which is what `layout::choose` returns for neither.
-[0094](../../decisions/0094-the-serving-layout-is-chosen-at-build-and-re-evaluated-at-the-fold.md)
+0094
 says the layout is chosen at the build *and* re-evaluated at every fold; on this evidence only the
 second half happens. The cost of the gap is the 10–11× above, paid by every deployment between its
 build and its first fold. `generator/treed` staying artifact-major is the rule working correctly:

@@ -1,6 +1,6 @@
 # The write path — design
 
-**Date:** 2026-08-03 · **Promoted:** 2026-08-04 · **Revised:** r12, 2026-08-15
+**Date:** 2026-08-03 · **Promoted:** 2026-08-04 · **Revised:** r15, 2026-08-31
 **Status:** **Normative** for the write path. Owner sign-off 2026-08-04; the adversarial review
 ran the same day across three lenses with every finding dispositioned (Appendix R); §13.4's
 rulings landed as decisions 0044 and 0045; §13.3's corrections and §13.1's supersession edits are
@@ -443,12 +443,26 @@ through files the first attempt has mapped:
 | File | What it is |
 |---|---|
 | `morton.u32` | the segment's sorted codes — every flush segment is internally Morton-sorted against the same view bounds, so a tile resolves to one contiguous range per segment through the same binary search |
-| `columns.arrow` | `(tessera_id, residual, …**render** scalars)` in `(morton, tessera_id)` order (contracts §2.6; no `priority` column — decision 0046). A buffered row carries one value per *declared* column, which is what the commit window indexes a category key by, so the flush selects the render subset **by position** before it writes — the tail must match the build's, and a `filter`-only column has no slot in any row (§10.3) |
+| `columns.arrow` | `(tessera_id, residual, …**render** scalars, …**group-scoped render** scalars)` in `(morton, tessera_id)` order (contracts §2.6; no `priority` column — decision 0046). A buffered row carries one value per *declared* column, which is what the commit window indexes a category key by, so the flush selects the render subset **by position** before it writes — the tail must match the build's, and a `filter`-only column has no slot in any row (§10.3). **A second positional list follows it under a view of a group** (`views.md` §5, r24): the row's `scoped` values, positional against the owning group's `scoped_scalars` rather than the flat `declared_scalars` a family has no slot in, and rendered in that view's tail alone. The whole schema — declared render tail then this view's scoped lanes — is one derivation shared by the flush, the merge and the fold, because a rewriter that took the bundle-wide list dropped the lane and served its values as zeros |
 | *(no `permutation.bin`)* | the segment's entity→row extent is built **in memory** and never written: its bounds ride the manifest's `segments` entry, and its row map is **rebuilt at open from the segment's own `tessera_id` column** by inverting the identity key — nothing on disk carries it, deliberately (a per-segment permutation file sized to the bundle's whole entity space is the wrong shape for a few thousand ids at the top of it). *Contracts §2.6's streamed-segment `permutation.bin` was stale and is corrected at r16 — caught by this document's fidelity review after r2 had laundered it* |
 | `delta.arrow` | the **sparse delta postings tier**: term → entities, only for terms present in the flushed set, tagged records as base postings. *(Contracts §2.4 names this `terms/deltas-<n>.arrow`; the built layout is the per-segment path above, with the manifest's `files` map and segment list carrying the truth — a contract correction is proposed, spec §13.3)* |
 | an external-id **run** | the flushed `(external_id, entity)` pairs, sorted by caller key — a run, not an extent: nothing orders two runs against each other (contracts §2.4) |
 | a **locator extent** | entity→ordinal for the flushed range, run-local ordinals — the drill-down direction for flushed entities, without which `/v1/items` would fail for them once their WAL region is reclaimed |
 | a **dictionary extent** | only when the flush promotes (below) |
+
+A **group-scoped family's** column is written the same way, in the view's own directory:
+`partitions/<phash>/attrs/<column>/<group>/<key>/extents/<seg_id>.{arrow,roaring}`, with the
+family's other artefacts beside it where its declaration owes them (`views.md` §5, r24). Two
+things differ from the entity-scoped pass below and only two. A **join** row is in this pass: a
+scoped value belongs to the `(entity, view)` pair the flush is giving a row, not to the entity, so
+a row joining an entity into a second view of the group is exactly the row that carries that
+view's value; a view of a group that only **shares** the family's views renders it and writes it
+not at all, so its lane is written holding absences — every segment of a view holding the same
+columns is what lets that view's own merge and fold read it. And a view the family has no column
+for — one created since the build — acquires an
+**empty base** at the same flush, so what is on disc is what a build would have written for an
+empty view; the pair enters `SEGMENTS-<n>.json`'s `scoped_columns`, which is what a restart derives
+`scoped_scalars[..].views` through.
 
 Two files per filterable column are written **outside** the segment directory, under
 `partitions/<phash>/attrs/<column>/extents/<seg_id>.{arrow,roaring}`: the values of the entities this
@@ -980,6 +994,19 @@ the residual is recorded at contracts §2.3, not closed.
   subsequent change by that external id addresses the new life, and the forgotten one
   accumulates nothing. A *suppressed* holder never enters this path — it still collides.
 - **Two flushes**: impossible — at most one in flight, skips alarmed.
+- **A maintenance pass dispatching against another's snapshot**: excluded, and the boundary is
+  **publication rather than completion**. A merge, a coalesce and compaction's fold each plan
+  against the set of artefacts the live manifest lists, and each changes it, so they exclude one
+  another; but a background job is invisible to a dispatcher reading in-flight flags alone for the
+  whole phase between completing and being published, and the executor's loop straddles exactly
+  that phase — it drains completed jobs at the top of an iteration and dispatches later in the same
+  one. Keyed on "still running", the exclusion let a merge dispatch under a completed, unpublished
+  fold and cost a discarded corpus rewrite at ~3% of runs (compaction §1 carries the measurement).
+  The exclusion is mutual and symmetric, and it cannot wedge: the drain runs before any dispatch on
+  every iteration, so a suspension lasts one pass. **Suspended, not refused** — a pass that does not
+  start is re-decided on the next tick against the corpus as it then is, which is the only treatment
+  that holds, since a plan names specific artefacts and one held across another pass's publication
+  would name a generation that pass has replaced.
 - **⊘ Multi-partition (none exists)**: `write_deny_state` serialises the *global* deny sets into
   whichever partition manifest is written, a flush refreshes only its own partition's manifest,
   and open *unions* every partition's seed — so with two partitions a flush in A could rotate
@@ -1053,14 +1080,15 @@ provided run 0 stays listed first — an invariant with an assertion, not a rewr
 **Merge splits, and only one half publishes** (decision 0044's D2).
 
 **The entity-space half is built and published** (`tessera_engine::coalesce`). It coalesces delta
-tiers, external-id runs with their locator extents, dictionary extents, and **attribute extents**
-— each on its own axis, selected the same way `MergePolicy::select` selects segments: the first
+tiers, external-id runs with their locator extents, dictionary extents, **attribute extents**,
+**record-blob extents**, **text extents** and the **entity→term transpose's extents** — each on
+its own axis, selected the same way `MergePolicy::select` selects segments: the first
 window of `width` (`coalesce_width`, default 8) consecutive entries in one power-of-two size
 class, within an input cap. Size tiering
 is not decoration on any of them: without it the pass re-reads what it produced last round for
 ever, where one size class makes a byte move only as its artefact doubles. It publishes as a
-manifest edit over `deltas`, `external_id_runs`, `locator_extents`, `dict_extents`, `attr_extents`
-and `files`,
+manifest edit over `deltas`, `external_id_runs`, `locator_extents`, `dict_extents`,
+`attr_extents`, `record_extents`, `text_extents`, `entity_terms_extents` and `files`,
 with `n` from the executor's counter and refuse-to-replace standing, **and it bumps no
 `segments_version`** — no row moves, so no projection is stale, no fragment is stale and no cache
 key rotates. Two pieces of live state swap with it, or the bound is only realised at the next
@@ -1069,9 +1097,13 @@ content-preserving, so a request holding the old and one holding the new agree o
 The attribute axis swaps a third: the generation's `FilterColumns`, whose consumed layers are
 **replaced** by the coalesced one — and replacing is not appending, so its correctness condition is
 that the coalesced layer's presence *equals* the union of the layers it replaces (filter-index
-§5.2), where appending's is that the new layer is disjoint from them.
+§5.2), where appending's is that the new layer is disjoint from them. So does the transpose axis:
+its stack is **re-derived from the rebased manifest** at publication rather than patched — the
+form that cannot drift from what a restart would open — and the same equality is checked over it,
+the replacement's entity set against the live one's. Without that swap the manifest names one
+extent while the process keeps probing `width` layers until it restarts.
 
-Four rules make the axes safe, and they are different rules. Tiers are unioned, so their order
+Each axis is safe for a different reason. Tiers are unioned, so their order
 and their division into files are immaterial; what may not change is the set of `(term, entity)`
 pairs. Runs are searched newest-first and a key may sit in several of them (0047's re-binding),
 so the window must be contiguous — a coalesced run at a recency position it did not earn answers
@@ -1082,8 +1114,14 @@ or a session evaluates a term it was not granted. Attribute extents take the tie
 layers are unioned, so their division into files is immaterial — but the selection unit is the
 **column**, over that column's own subsequence of `attr_extents`, and the merge carries its own
 duplicate-entity refusal: once a window collapses into one file an overlap among its inputs is
-internal to a single layer and invisible to the between-layer disjointness check for ever. Across
-all four, **the build's own artefacts are never taken** — rewriting one means a new prefix, and
+internal to a single layer and invisible to the between-layer disjointness check for ever. The
+record blob and the entity→term transpose take that argument in its simplest form — layers
+disjoint in entity space by **I9**, probed by has-row, so their division into files is immaterial
+and the merge is a concatenation with bookkeeping; the transpose's ordinals are dictionary
+positions the dictionary axis already preserves, so nothing is renumbered. **No axis retires
+anything**: none of these merges has a tombstone parameter, and a pending deletion's artefacts are
+carried whole until the fold executes it (Rule S / Rule F, §5.4). Across
+every axis, **the build's own artefacts are never taken** — rewriting one means a new prefix, and
 the base locator's ordinals are positions in the build's runs. **How a build's own artefact is
 recognised differs by axis, and reading it as "whatever `MANIFEST.json` digests" is what let this
 axis grow without bound.** A fold digest-names every file it *carries* into the new prefix, for
@@ -1326,7 +1364,7 @@ decision 0045.
 
 ### 13.4 Decisions that needed an owner ruling — **ruled 2026-08-04**
 
-1. **Decision [0044](../decisions/0044-invisible-means-stale-serve-plus-background-refresh.md)**
+1. **Decision 0044**
    resolves 0043's D1 (zero steady-state via stale-serve plus eager background refresh; a
    bounded 429 residual only for merge-window racers; full builds only at session
    establishment — the owner's streaming-ingest bound is recorded there verbatim), D2 (the
@@ -1336,7 +1374,7 @@ decision 0045.
    refresh (spec §4.6). **P2 refuted the model D4 rested on** — the fragment build is ~200 ms and
    flat in tier count, not the seconds this document assumed — which is why §11.2's incremental
    fragment form is *not built and not being built*.
-2. **Decision [0045](../decisions/0045-inert-config-keys-are-deleted.md)** — `flush_max_items`
+2. **Decision 0045** — `flush_max_items`
    and `commit_window_max_age_ms` are deleted; no key exists without a consumer.
 
 ## 14. What must be proven
@@ -1387,177 +1425,7 @@ rebuilding, the flushed item is not yet drawn, and the staleness ages out within
 (exists — `projection_patch.rs`); 41 a racer inside a **merge's** refresh window is shed 429
 rather than paying the rebuild (exists — `merge.rs`); 42 a merge collapses segments, loses no
 item, moves no point and keeps every binding (exists — `merge.rs`); 43 a merged manifest reopens
-with every item **and every consumed segment's delta tier still listed** (exists — `merge.rs`).
-
-## Appendix R — Review record
-
-**r12 (2026-08-15) — how a build's own artefact is recognised, corrected by measurement.** §7
-said the coalesce never takes the build's own artefacts because "they are the entries
-`MANIFEST.json` digests". That test holds on the tier and run axes and fails on the dictionary: a
-fold digest-names every file it *carries*, for the durability of its hard links, so on the one
-guarded axis a fold does not rebuild into its base, every extent alive at a flip became
-permanently ineligible and the list grew with the fold count rather than the corpus. Recognition
-there is **positional** now — the single extent a builder writes is entry 0, and a fold authors
-none.
-
-Found by the correctness suite's endurance tier, which measured the list ratchet from 6 to 58
-across 24 fold cycles; no shorter run could see it, and the first reading blamed the coalesce's
-window rule, which was the shape rather than the cause. **No mechanism moves**: the eight-
-consecutive window, the fold's verbatim carry-forward and decision 0042's positional extents all
-stand, and §14's obligations 10 and 36 become true rather than changing.
-
-**r11 (2026-08-15) — the merge knobs are live, and the coalesce width gets the key it lacked.**
-§10's `tier_width` and `segment_floor_bytes` rows described keys that were parsed, validated and
-delivered nowhere: the engine hard-coded 4 and 16 MiB, so a configured value changed nothing,
-silently — the inert-key defect decision 0045 forbids, kept (owner-ruled, against 0045's
-delete-by-default) because the correctness suite needs the knobs (correctness-suite §12.3). Both
-now reach the merge policy, and the entity-space coalesce's width — previously a constant with no
-key at all — becomes `coalesce_width`, default 8, for the same suite's reason. One refusal joins
-them: a width below 2 can select nothing (`MergePolicy::select` returns `None`), so 1 is not
-"merge eagerly" but "never merge", and both width keys are refused below 2 at startup — the same
-refuse-rather-than-discover-silently standard as `max_merged_segment_bytes`' base-segment
-relation. Defaults are unchanged, so no configuration that never named the keys moves. §7's
-coalesce width parenthetical now names the key; no mechanism changes.
-
-**r10 (2026-08-14) — a correction: the fold retires, and three sites still said it did not.**
-Rule F's executing fold is built and normative ([`compaction.md`](compaction.md) r11, reviewed
-three times including once against the implementation); it derives its executed set from what its
-publication demonstrably removed and retires against it. So §5.3's overlay table gives `deleted` a
-real remover, §5.4's ruling note stops saying the two rules are indistinguishable, and §10's
-`overlay_soft_limit` stops saying there is no fold to schedule. **No mechanism changes and Rule S
-is untouched.** r9's entry below is left as written, including its "nothing retires yet" — a review
-trail that edits away what it found at the time stops being one.
-
-**r9 (2026-08-06) — Rule F's gaps are closed, and §5.4 stops enumerating them.** The publication
-seam now carries the fold's rewritten postings, the bundle identity and the fragment cache it keys,
-the external-id sidecar and the executed retirement set, in one swap; the prefix directory a
-side-manifest is written into is derived from the publishing generation rather than captured at
-open, which is the fourth gap and the one whose failure loses acked deny state silently; and
-`Overlay::retire` is Rule F's route out of `deleted`, with no sibling for `suppressed`. Nothing
-retires yet — no fold derives an executed set — so §5.4's ⊘ stands with its reason narrowed. §8's
-obligation list drops the seam and keeps everything else. The alternative §5.4 left open, an offline
-fold, is declined by compaction's D1; the mechanism is described at compaction §4 and this section
-stays the boundary statement.
-
-**r8 (2026-08-06) — decision 0048: the evaluate machinery is deleted, not carried.** Tessera has
-no deployment, so "entries arise only from pre-0047 WALs" (r5's reason for keeping the machinery
-dormant) names an empty set. Deleted: the `evaluate` store and its `PredicateChange`; the WAL's
-external-id-keyed `Change` variant, `ChangeOp::Predicate` and the `descriptors` field of
-`ChangeByEntity` and `OverlaySnapshotEntry`, at `WAL_VERSION` 5; the deny window's deferred
-descriptor resolution (§5.2), whose only consumer was an evaluate entry; and the evaluate arm of
-`verdict` and of composition. The fold's evaluate pass was never written, so §12's D4 dissolves
-rather than being answered. Consequences through this document: §5's op list, §5.1 (`access`
-leaves the request shape — it had no remaining consumer), §5.2, §5.3 (three stores → two), §5.4's
-Rule F, §5.5's fold, §5.6, §7 and §12. **What survives is the point**: the overlay stays two
-independent stores of two types, not one map with a disposition field — deleting a store is not
-collapsing the remaining ones — and the `predicate` op keeps its typed 422 at the boundary
-(conformance script 35), so the withdrawal still names the flow. Script 15 loses its evaluate
-half. Replay became infallible with the `Change` variant: it no longer resolves external ids at
-all, that resolution happening once, in the handler, at admission.
-
-**r7 (2026-08-05) — a measured correction to §7, not a design change** (decision 0049). The merge
-size ladder **saturates**: live segment count settles at corpus bytes ÷ the saturation size and
-grows linearly with the corpus — ~152 at 10⁹ — where this document previously implied merge bounded
-the axis outright. Pinned by test. §7 and §10 gain the constant, the reason the cap is not raised
-(the measured memory multiplier, not the cap, is the binding constraint), and the warning that
-widening `tier_width` raises the count. The gauge that would make it observable is ⊘ unbuilt. No
-mechanism changed and no invariant is affected; §8's compaction boundary gains segment count as a
-fold trigger by reference to [`compaction.md`](compaction.md) §9.
-
-
-**r6 (2026-08-04) — promoted to normative, and the mechanism it was gated on is built.** Owner
-sign-off; §13.1's supersession edits **performed** (`flush-and-merge.md` deleted; the lifecycle
-and system-architecture sections reduced to pointers, lifecycle r7 and SA r12); §13.4's rulings
-carried by decisions 0044–0047.
-
-What changed in the document beyond the supersession, all of it because the code moved under it
-on the same day:
-
-- **§4.6 replaced.** The inline projection patch and the per-request fragment rebuild are gone;
-  what runs is stale-serve plus a background refresh over resident keys, with the three-rung
-  ladder and the 429 residual stated. The fragment and the projection are one cache entry, which
-  is how review finding F5's coupling obligation is discharged — structurally, not by discipline.
-- **§7 rewritten.** Both halves of merge publish. The entity-space coalesce bounds three axes
-  without moving a row; the row-space merge bounds segments as its own swap. The "enforced
-  relation" that kept the base segment out of selection is **retired**: selection runs over the
-  extent list, so the exclusion is structural — the startup relation stands beside it as the
-  guard that survives a refactor, rather than as the mechanism.
-- **§12 corrected by measurement, in two places that had been wrong.** P2 **refuted** this
-  document's "modelled seconds" for the fragment build — it is ~200 ms and flat in tier count — and
-  a merge's peak RSS, carried as a modelled ≈5–7×, measured at **4.4–4.9×**. Both were figures a
-  reader would have sized a deployment from.
-- **§14 extended** to obligations 36–43, all but one of which exist as tests.
-
-**r5 (2026-08-04) — decision 0047: edit is delete + re-ingest, deleted entities forgotten at
-the boundary.** The predicate op is withdrawn (§5's op list, §5.2, §5.8), which dissolves the
-review's novel-descriptor finding rather than patching it; the ingest duplicate check exempts
-deleted holders while suppressed ones still collide (§2.1); resolution is newest-binding-first
-through the live map, the sidecar's reversed run walk and merge's keep-newest coalesce (§6's
-new interleaving); the evaluate machinery is retained dormant for pre-0047 WALs, its fold
-obligation legacy-scoped (§5.3, §8). Tests 33–35. I9 untouched: forgotten is not reused.
-
-**r4 (2026-08-04) — the round's proposals ruled and landed.** Tick-driven rotation for the
-deny-only regime: **built**, growth-gated (§4.5), with the restart-survival test. Step-down
-gates ingest, the flush plan and rotation, denies exempt: **built** (§2.4, §5.6), with the
-fabricated-manifest test. The buffer byte gauge: **ruled not needed yet** (§2.1). The runtime
-WAL ceiling: **ruled a nice-to-have** at r3 and stays a ⊘ (§1.3). The novel-descriptor
-predicate change (§5.2's ⊘) awaits its ruling.
-
-**r3 (2026-08-04) — the adversarial review round: three independent lenses (fidelity,
-invariants/fail-open, performance/memory), dispositioned in one pass.**
-
-*Fidelity* returned twelve findings, one fatal: r2 had laundered contracts §2.6's stale
-streamed-segment `permutation.bin` into §4.3 — flush writes no such file; the extent is rebuilt
-at open from the segment's own `tessera_id` column (contracts corrected at r16). The rest were
-table and phrasing errors against the code, all applied: the WAL "hard bound" is a startup
-relation with no runtime ceiling (§1.3, §10 — and the owner ruled the runtime machinery a
-nice-to-have, so the doc states the truth rather than proposing the mechanism); mixed idsets are
-422 not 409; the ingest-admission Retry-After is service-rate-derived, never fixed 1; the flush
-gauges are now genuinely on `/control/status` (wired with this revision); §2.2's fragmentation
-scope caught up with r16; the §0 diagram lost the deleted Flush record; admission steps 8/9
-un-inverted; `Change` marked written-by-nothing; the 125.12 MB figure re-attributed to
-`probes/results.md` §4.2. Every other sampled category — both ack orderings, the deny fold,
-recovery, rotation, publication-by-rebase, all twelve ⊘ markers, the remaining §12 figures —
-survived.
-
-*Invariants* returned eight. The one that changes the design's shape: **Rule F's identity match
-has a third gap** — nothing can rotate the fragment identity in-process, and the one
-publication seam is compaction-shaped (no postings, no identity), so a fold through it would
-serve folded-away deletions from persisted pre-fold fragments; recorded at §5.4 and §8 as the
-fold's first obligation. Also recorded: the deny-only node never rotates and its WAL grows
-unmeasured (§4.5 ⊘; tick-driven rotation proposed); a predicate change naming a novel
-descriptor is a silent permanent hide (§5.2 ⊘; refusal-vs-promotion proposed); 0044's
-stale-serve needs the fragment watermark in the projection key and claim-before-swap (§4.6);
-step-down gates routing, not the write path (§2.4, §5.6 ⊘; gating proposed); the duplicate-check
-guarantee is scoped to callers carrying external ids (§2.1); a deletion's label-invalidation
-consequence joins §5.8 and §11; the multi-partition deny-state premise violation joins §6.
-Attacks that failed are recorded in the review transcript, most notably: 0044's stale-serve
-soundness argument itself survived four constructed interleavings.
-
-*Memory* modelled every maintenance event's peak transient (no such measurement exists
-anywhere in the corpus): flush ≈1–2.5× buffer bytes per stage, worst overlap ~3.5–5×; merge
-≈5–7× input bytes with `max_merged_segment_bytes` bounding selection-time file bytes only; the
-promoting flush's full dictionary clone as the write path's largest single term (measured
-7.1 GB at 1.17×10⁸ terms); the buffer bounded in items, not bytes — the one unbounded transient
-operand. §2.1, §4.3, §7 and §12 carry the figures; the skipped-tick plan build it found was
-fixed in code with this revision.
-
-Proposed to the owner, not built at r3 (all four since ruled — r4 and r5): tick-driven
-rotation; step-down gating ingest and the flush plan; the novel-descriptor answer; a buffer byte
-gauge. The three review transcripts are preserved as the round's record:
-[fidelity](../evidence/memos/2026-08-04-write-path-review-fidelity.md),
-[invariants](../evidence/memos/2026-08-04-write-path-review-invariants.md),
-[memory](../evidence/memos/2026-08-04-write-path-review-memory.md).
-
-**r2 (2026-08-04) — the rulings and corrections landed.** The owner ruled §13.4's two items
-(decisions 0044 and 0045 — 0044 recording the streaming-ingest budget verbatim and settling
-D1/D2/D3; 0045 deleting the two inert keys) and agreed §13.3's corrections, which are applied:
-contracts r15, lifecycle r6, SA r11, CLAUDE.md, and the stale code comments. This document's
-§2.2, §4.1, §4.6, §7, §10 and §13 are updated to match. Still not reviewed; the Status line
-names the gate.
-
-**r1 (2026-08-03) — drafted**, as a consolidation of the built system: every mechanism claim was
-verified against the tree at `5060acd` before being restated, and the discrepancies that
-verification found are recorded at the claim (`flush_max_items` then-inert; the delta-tier path;
-recovery's `has_row` predicate superseding the watermark rule; the stale ⊘ markers then listed
-in §13.3) rather than silently normalised in either direction.
+with every item **and every consumed segment's delta tier still listed** (exists — `merge.rs`);
+44 a coalesce collapses the entity→term extents, the live stack included, and every entity's
+labels — stored and served — are unchanged (exists — `coalesce.rs`); 45 a pending deletion keeps
+its term list across a coalesce and retires at the fold that follows it (exists — `coalesce.rs`).

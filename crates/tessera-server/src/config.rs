@@ -101,6 +101,16 @@ pub enum ConfigError {
     BadAddr(String),
     /// Only `builtin:passthrough` is available; the wasmtime plugin host is not built.
     UnsupportedPlugin(String),
+    /// A CORS origin list carries `*`.
+    ///
+    /// Refused rather than dropped, and refused for both lists. The reason is decision 0102's and
+    /// not the layer's: an origin list is a deployment's statement about which pages may present
+    /// its tokens, and a wildcard says every page, which is the one thing an enumerated list is
+    /// for not saying. (`tower_http`'s `AllowOrigin::list` also panics on one, so an unchecked
+    /// wildcard would be a process that dies at router construction rather than at parse.)
+    CorsWildcard {
+        key: &'static str,
+    },
     /// `serve.k_min = 0`, which switches off §7.2's floor clause — the **I7 guarantee** that a
     /// non-empty tile always draws at least one mark. With no floor, a tile whose visible items all
     /// sit above θ serves nothing, and the sparsest principals' maps go blank exactly where I7
@@ -475,6 +485,13 @@ impl std::fmt::Display for ConfigError {
                  intent is to fold whenever there is work, and let compaction_max_segments say \
                  how much work"
             ),
+            ConfigError::CorsWildcard { key } => write!(
+                f,
+                "serve.{key} contains \"*\". A CORS origin list is enumerated or it is absent: it \
+                 is this deployment's statement about which pages may present its session tokens \
+                 in a browser, and a wildcard says every page there has ever been. Name the \
+                 origins, or remove the key and let the layer be absent"
+            ),
             ConfigError::FloorClauseDisabled => write!(
                 f,
                 "serve.k_min = 0 switches off design §7.2's floor clause, which is the I7 \
@@ -841,6 +858,22 @@ struct RawServe {
     #[serde(default)]
     max_category_values: Option<usize>,
     #[serde(default)]
+    max_suggestions: Option<usize>,
+    #[serde(default)]
+    max_suggestion_walk: Option<u64>,
+    #[serde(default)]
+    max_suggest_set_entities: Option<u64>,
+    #[serde(default)]
+    max_shape_vertices: Option<u64>,
+    #[serde(default)]
+    max_region_vertices: Option<u64>,
+    #[serde(default)]
+    max_region_cells: Option<usize>,
+    #[serde(default)]
+    max_browse_rows: Option<usize>,
+    #[serde(default)]
+    region_cache_bytes: Option<u64>,
+    #[serde(default)]
     session_credential_file: Option<PathBuf>,
     #[serde(default)]
     session_credential_env: Option<String>,
@@ -889,6 +922,15 @@ struct RawServe {
     /// integration pattern. See [`crate::cors`].
     #[serde(default)]
     dev_cors_origins: Option<Vec<String>>,
+    /// Browser origins permitted to call the **viewer plane** in a deployment.
+    ///
+    /// The production half of the pair, and it stops at the viewer plane: `/session/authorise` is
+    /// gated by the session credential, which a browser must never hold, so no origin list opens
+    /// it (decision 0102). Absent means no layer, and a wildcard is refused — an origin list is a
+    /// deployment's statement about which pages may present its tokens, and `*` is not a
+    /// statement. Unlike `dev_cors_origins` this is silent at startup. See [`crate::cors`].
+    #[serde(default)]
+    cors_origins: Option<Vec<String>>,
 }
 
 /// The control plane's listen target: a real unix socket, or (tests, and the documented Windows
@@ -937,6 +979,57 @@ pub struct Config {
     /// **A performance knob, so it defaults** (SA §7). It bounds a response, not a disclosure:
     /// what a principal may be *told* is `visibility`'s question and is settled before paging starts.
     pub max_category_values: usize,
+    /// `/v1/categories/{column}/suggest`'s page ceiling and `limit`'s default
+    /// (`value-suggestion.md` §5.3). Published in `/v1/meta`'s `selection` block on
+    /// `max_category_values`' own argument: a client must be able to tell a short list that means
+    /// *that is all* from one the deployment truncated, which `more` alone does not.
+    ///
+    /// **A performance knob, so it defaults.** What a principal may be *told* is `visibility`'s
+    /// question, settled before the page is cut.
+    pub max_suggestions: usize,
+    /// The walk budget `Engine::suggest` spends before it stops and answers `more: true`
+    /// (`value-suggestion.md` §5.3, §6.2). A client that receives `more` on an unfilled page reads
+    /// it as this deployment constant rather than as its own arithmetic being wrong.
+    ///
+    /// **Bounds latency, not disclosure**: the enumeration walks the whole vocabulary unbudgeted,
+    /// and this bound exists only because a suggestion is per keystroke. A performance knob, so it
+    /// defaults, identical for every principal.
+    pub max_suggestion_walk: u64,
+    /// The composed cardinality at or under which the suggestion verb builds this session a set of
+    /// its visible values and answers from it (`value-suggestion.md` §6.3, decision 0124). A wider
+    /// viewer keeps the probe route, as does every keystroke before the set lands and every column
+    /// with nothing to sweep.
+    ///
+    /// **A performance knob, so it defaults**, and a deployment constant identical for every
+    /// principal: the quantity it is compared against is the caller's own composed cardinality,
+    /// which a zoom-0 viewport already returns exactly as `visible`.
+    pub max_suggest_set_entities: u64,
+    /// The most vertices a published polygon may carry after canonicalisation
+    /// (`polygon-membership.md` §9, ruling (e)): over it, `PUT /control/layers/{name}/artifacts`
+    /// is a `422` naming the count and the cap. Published on `/v1/meta`. The held decomposition
+    /// is reported and never capped; this bounds the one input a caller can simplify.
+    pub max_shape_vertices: u64,
+    /// The most vertices a `region` filter leaf's polygon may carry (selection-operand §2): over
+    /// it the request is a `422` naming the count and the cap. Published on `/v1/meta`'s
+    /// `selection` block. A vertex count is the caller's own arithmetic, which is why this one
+    /// refuses where `max_region_cells` does not.
+    pub max_region_vertices: u64,
+    /// The most boundary cells a `region` leaf's decomposition may hold at one depth
+    /// (selection-operand §6). **Not a refusal**: over it the descent stops at the deepest depth
+    /// that fits and the answer is a cover, said on `x-tessera-region`. Published on `/v1/meta`.
+    pub max_region_cells: usize,
+    /// The most rows `POST /v1/artifacts/browse` returns in one page — the page-size ceiling, and
+    /// the default page size when a caller names none (`highlight-and-hierarchy.md` §4).
+    ///
+    /// **A response bound and not a disclosure control**, exactly as `max_category_values` is:
+    /// what a principal may be *told* is the artifact's own existence criterion, settled before
+    /// paging starts, and every page's fill counts only artifacts that cleared it. `limit` clamps
+    /// to this and `limit = 0` is a `422`. Published on `/v1/meta`'s `selection` block.
+    pub max_browse_rows: usize,
+    /// The byte bound on the region decomposition cache (`tessera_engine::region`), which is
+    /// shared across principals and pruned per generation; a decomposition is a perimeter's worth
+    /// of work, so a bound that evicts costs latency and nothing else.
+    pub region_cache_bytes: u64,
     /// Emit `x-tessera-stage-ns` on viewport responses. **Fails closed**: absent means false, and
     /// even true does nothing in a binary built without the `bench-timing` feature. The header
     /// carries only durations and row counts — no identifier, no per-principal label (SA §9) —
@@ -946,6 +1039,10 @@ pub struct Config {
     /// not a layer that allows nothing. See [`crate::cors`] for why this is a development
     /// affordance rather than an integration feature.
     pub dev_cors_origins: Vec<String>,
+    /// `serve.cors_origins` — the production origin list, viewer plane only (decision 0102).
+    /// Empty is the default and mounts nothing. Both lists may be set; a duplicate origin across
+    /// the two is not an error. See [`crate::cors`].
+    pub cors_origins: Vec<String>,
     /// **Where** the session bearer secret comes from, not what it is. Read at
     /// [`crate::prepare`], never at parse: `tessera build` reads this same file and has no
     /// business requiring a serving secret to be exported before it will write a bundle. What
@@ -1156,6 +1253,48 @@ const DEFAULT_MAX_TILES_PER_REQUEST: usize = 262_144;
 /// thousands of values, where an unpaged response is megabytes against a measured 79 KB viewport
 /// response and, being per-principal, shares no cache with anyone.
 const DEFAULT_MAX_CATEGORY_VALUES: usize = 1_000;
+
+/// `/v1/categories/{column}/suggest`'s page ceiling and default (`value-suggestion.md` §5.3,
+/// contracts §3.2's r72). The owner's recommended default: a typeahead page, not a legend.
+const DEFAULT_MAX_SUGGESTIONS: usize = 20;
+
+/// The suggestion walk's budget (`value-suggestion.md` §5.3, §6.2). The owner's recommended
+/// default — measured (`probes/2026-09-02-value-suggestion/`) as the smallest budget that fills
+/// the sparsest measured viewer's page on a one-character prefix at 10⁷ values.
+const DEFAULT_MAX_SUGGESTION_WALK: u64 = 100_000;
+
+/// The composed cardinality at or under which a suggestion is answered from a per-session set of
+/// visible values rather than by probing a posting per value walked (`value-suggestion.md` §6.3,
+/// [decision 0124](../../../docs/decisions/0124-the-suggestion-route-may-follow-the-viewers-cardinality.md)).
+///
+/// The owner's recommended default: 10⁷ is the *measured* 46–61 ms point for the sweep the set is
+/// built by (`probes/2026-09-02-value-suggestion/` arm 3), and a wider viewer stays on the probe
+/// route, which fills that viewer's page in under a millisecond anyway. A deployment constant,
+/// identical for every principal — which is what makes a route keyed on the caller's own
+/// cardinality admissible under §8.2 at all.
+const DEFAULT_MAX_SUGGEST_SET_ENTITIES: u64 = 10_000_000;
+
+/// One page of a layer's hierarchy (`highlight-and-hierarchy.md` §4).
+///
+/// Sized against the panel that reads it: a tree row is a name, a count and an expander, and a
+/// hundred of them is more than fits a column at any zoom. Rung 3's MeSH DAG has 30,217
+/// descriptors and 16 top-level roots, so a root page and a typical expansion each arrive in one
+/// request; what this bounds is the pathological expansion — a node with thousands of children —
+/// where an unpaged answer is a scroll nobody reads and a response nobody shares, being
+/// per-principal.
+const DEFAULT_MAX_BROWSE_ROWS: usize = 200;
+
+/// A `region` leaf's vertex cap. A lasso is drawn with a mouse at one vertex per pointer event, so
+/// a few hundred is an elaborate one; ten thousand leaves room for a client that hands over a
+/// polygon it holds rather than one it drew, and stays well inside what the descent's per-edge
+/// cost makes a millisecond's work. The publication cap (`max_shape_vertices`) is two orders
+/// larger because a held shape pays its decomposition once.
+const DEFAULT_MAX_REGION_VERTICES: u64 = 10_000;
+
+/// The region decomposition cache's bound. A whole-world box at the cell budget is a few
+/// megabytes of ranges and contexts; this holds dozens of such shapes, and an ordinary lasso is
+/// kilobytes.
+const DEFAULT_REGION_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 
 /// The compute pool should fill the machine. `available_parallelism` fails only when the OS
 /// genuinely cannot answer the question (SA has no fallback story for that host); treated as 1
@@ -2035,6 +2174,20 @@ fn parse(text: &str) -> Result<Config> {
     if theta_target_marks == 0 {
         return Err(ConfigError::ThetaTargetZero);
     }
+
+    // Both CORS lists are enumerated or absent (decision 0102), so a wildcard is refused here
+    // rather than dropped downstream: dropping it would leave an operator who asked for open CORS
+    // with a *working* server and no CORS, which is a worse answer than a refusal naming the key.
+    let dev_cors_origins = raw.serve.dev_cors_origins.unwrap_or_default();
+    let cors_origins = raw.serve.cors_origins.unwrap_or_default();
+    for (key, origins) in [
+        ("dev_cors_origins", &dev_cors_origins),
+        ("cors_origins", &cors_origins),
+    ] {
+        if origins.iter().any(|origin| origin.trim() == "*") {
+            return Err(ConfigError::CorsWildcard { key });
+        }
+    }
     let max_underlay_offset = raw
         .serve
         .max_underlay_offset
@@ -2491,8 +2644,41 @@ fn parse(text: &str) -> Result<Config> {
             .serve
             .max_category_values
             .unwrap_or(DEFAULT_MAX_CATEGORY_VALUES),
+        max_suggestions: raw
+            .serve
+            .max_suggestions
+            .unwrap_or(DEFAULT_MAX_SUGGESTIONS),
+        max_suggestion_walk: raw
+            .serve
+            .max_suggestion_walk
+            .unwrap_or(DEFAULT_MAX_SUGGESTION_WALK),
+        max_suggest_set_entities: raw
+            .serve
+            .max_suggest_set_entities
+            .unwrap_or(DEFAULT_MAX_SUGGEST_SET_ENTITIES),
+        max_shape_vertices: raw
+            .serve
+            .max_shape_vertices
+            .unwrap_or(tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES),
+        max_region_vertices: raw
+            .serve
+            .max_region_vertices
+            .unwrap_or(DEFAULT_MAX_REGION_VERTICES),
+        max_region_cells: raw
+            .serve
+            .max_region_cells
+            .unwrap_or(tessera_engine::DEFAULT_MAX_REGION_CELLS),
+        max_browse_rows: raw
+            .serve
+            .max_browse_rows
+            .unwrap_or(DEFAULT_MAX_BROWSE_ROWS),
+        region_cache_bytes: raw
+            .serve
+            .region_cache_bytes
+            .unwrap_or(DEFAULT_REGION_CACHE_BYTES),
         stage_timing: raw.serve.stage_timing.unwrap_or(false),
-        dev_cors_origins: raw.serve.dev_cors_origins.unwrap_or_default(),
+        dev_cors_origins,
+        cors_origins,
         session_credential,
         operator_credential,
         compute_threads,
@@ -3324,6 +3510,83 @@ compaction_after_deletions = 9000
         let toml = valid_toml("dev_cors_origins = [\"http://localhost:5173\"]");
         let config = parse(&toml).expect("a config naming a CORS origin must load");
         assert_eq!(config.dev_cors_origins, vec!["http://localhost:5173"]);
+        assert!(
+            config.cors_origins.is_empty(),
+            "the dev key must not populate the production list — they are two postures, not one \
+             list with two spellings"
+        );
+    }
+
+    /// `serve.cors_origins` — the production list (decision 0102) — defaults to empty on the same
+    /// fail-closed reasoning, and round-trips beside the development key rather than instead of
+    /// it. Both may be set: a laptop pointed at a deployment that also serves a drop-in.
+    #[test]
+    fn cors_origins_defaults_to_empty_and_round_trips_beside_the_dev_key() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let config = parse(&valid_toml("")).expect("a config naming no CORS origins must load");
+        assert!(config.cors_origins.is_empty());
+
+        let toml = valid_toml(
+            "dev_cors_origins = [\"http://localhost:5173\"]\n\
+             cors_origins = [\"https://app.example\", \"https://docs.example\"]",
+        );
+        let config = parse(&toml).expect("both lists together must load");
+        assert_eq!(config.dev_cors_origins, vec!["http://localhost:5173"]);
+        assert_eq!(
+            config.cors_origins,
+            vec!["https://app.example", "https://docs.example"]
+        );
+    }
+
+    /// A duplicate origin across the two lists is not an error. The viewer plane matches an origin
+    /// by equality against the concatenation, so a repeat costs a comparison and nothing else —
+    /// and refusing it would make the ordinary case (a dev origin still listed after the
+    /// production one arrives) a startup failure for no disclosure reason.
+    #[test]
+    fn an_origin_in_both_lists_is_not_an_error() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let toml = valid_toml(
+            "dev_cors_origins = [\"https://app.example\"]\n\
+             cors_origins = [\"https://app.example\"]",
+        );
+        let config = parse(&toml).expect("a duplicated origin must load");
+        assert_eq!(config.dev_cors_origins, config.cors_origins);
+    }
+
+    /// A wildcard is refused at parse, in **either** list, naming the key that carries it.
+    ///
+    /// Decision 0102's list is enumerated or absent. Dropping the wildcard instead would leave an
+    /// operator who asked for open CORS with a working server and no CORS; allowing it would hand
+    /// every page there has ever been the right to present this deployment's tokens.
+    #[test]
+    fn a_wildcard_origin_is_refused_in_either_list() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let err = parse(&valid_toml("cors_origins = [\"*\"]")).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ConfigError::CorsWildcard {
+                    key: "cors_origins"
+                }
+            ),
+            "{err}"
+        );
+        let err = parse(&valid_toml(
+            "dev_cors_origins = [\"http://localhost:5173\", \" * \"]",
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ConfigError::CorsWildcard {
+                    key: "dev_cors_origins"
+                }
+            ),
+            "surrounding whitespace must not smuggle a wildcard past the check: {err}"
+        );
     }
 
     // ---- The write-path and admission knobs --------------------------------------------------

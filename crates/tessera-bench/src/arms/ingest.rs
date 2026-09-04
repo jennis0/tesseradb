@@ -64,7 +64,7 @@
 //! * **F3 — the `apply_window` buffer clone — is confirmed**, by `WriteStage` rather than by
 //!   inference. It was the largest single stage until a `BufferedItem` went behind an `Arc`; the
 //!   `B²/2W` law is untouched by that change, only its constant. Reopening conditions for removing
-//!   the term itself are in `docs/evidence/memos/2026-08-05-ingest-buffer-snapshot.md`.
+//!   the term itself are in docs/evidence/memos/2026-08-05-ingest-buffer-snapshot.md.
 //!
 //! F2 — `compose` iterating the whole overlay and buffer per viewport, with a `perm.row_of` per
 //! entry — is confirmed and linear, at ~10 ns per buffered item flat over 50x of depth. That is a
@@ -230,18 +230,27 @@ pub fn run_build(
 
             let collector = StageCollector::default();
             let args = BuildArgs {
-                point_fields: Default::default(),
-                points: geometry.clone(),
+                arena_order: Default::default(),
+                views: vec![tessera_build::ViewArgs {
+                    visibility: None,
+                    view_id: "s0".to_string(),
+                    projection: tessera_spatial::Projection::None,
+                    extent: Bounds {
+                        x_min: 0.0,
+                        x_max: 65536.0,
+                        y_min: 0.0,
+                        y_max: 65536.0,
+                    },
+                    points: geometry.clone(),
+                    point_fields: Default::default(),
+                    select: None,
+                    access: tessera_build::config::AccessInput::relation(pairs.clone()),
+                }],
+                anchor: 0,
+                groups: Vec::new(),
+                scoped_attributes: Vec::new(),
                 attribute_sources: Vec::new(),
-                access: tessera_build::config::AccessInput::relation(pairs.clone()),
                 out: out.clone(),
-                extent: Bounds {
-                    x_min: 0.0,
-                    x_max: 65536.0,
-                    y_min: 0.0,
-                    y_max: 65536.0,
-                },
-                view_id: "s0".to_string(),
                 limit: Some(scale),
                 identity_key: IdentityKey::from_hex(TEST_KEY_HEX)?,
                 identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -249,6 +258,7 @@ pub fn run_build(
                 shard_id: 0,
                 layers: Vec::new(),
                 layer_inputs: Vec::new(),
+                scoped_layers: Default::default(),
                 mint_external_ids: true,
                 emit_oracle_pairs: true,
                 batch_items: None,
@@ -367,11 +377,13 @@ pub(crate) fn synth_rows(
             UnallocatedRow {
                 external_id: Some(format!("bench-{n}").into_bytes()),
                 view: "s0".to_string(),
+                join: None,
                 descriptors: descriptors.to_vec(),
-                x: ((n * 37) % 65536) as f32,
-                y: ((n * 53) % 65536) as f32,
+                x: ((n * 37) % 65536) as f64,
+                y: ((n * 53) % 65536) as f64,
                 scalars: Vec::new(),
                 terms: terms.to_vec(),
+                scoped: Vec::new(),
             }
         })
         .collect()
@@ -597,7 +609,13 @@ pub fn run_continuous(ctx: &Context, checkpoints: &[u64], k: usize, seed: u64) -
         }
 
         let bundle = open_bundle(&fixture.root)?;
-        let extent_span = bundle.manifest.quantisation.x_max - bundle.manifest.quantisation.x_min;
+        let q = bundle
+            .manifest
+            .views
+            .first()
+            .expect("a built bundle declares a view")
+            .quantisation;
+        let extent_span = q.x_max - q.x_min;
         let view_id = bundle
             .partitions
             .values()
@@ -1080,11 +1098,13 @@ fn rate_rows(
             UnallocatedRow {
                 external_id: Some(format!("rate-{n}").into_bytes()),
                 view: "s0".to_string(),
+                join: None,
                 descriptors: picks.iter().map(|&k| pool_descriptors[k].clone()).collect(),
-                x: ((n * 37) % 65536) as f32,
-                y: ((n * 53) % 65536) as f32,
+                x: ((n * 37) % 65536) as f64,
+                y: ((n * 53) % 65536) as f64,
                 scalars: Vec::new(),
                 terms: picks.iter().map(|&k| pool_terms[k]).collect(),
+                scoped: Vec::new(),
             }
         })
         .collect()

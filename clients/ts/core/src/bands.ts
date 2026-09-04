@@ -1,4 +1,5 @@
 import {MAX_DEPTH, WORLD_SIZE, tileContains, tileXY} from './coords.js';
+import {NO_ORDINAL, type ArtifactRef, type SessionArtifactTable} from './artifactTable.js';
 import type {ScalarColumn, ViewportResult} from './types.js';
 import {
   coverageAdd,
@@ -75,12 +76,36 @@ export type Band = {
    */
   positions: Float32Array;
   scalars: Record<string, ScalarColumn>;
+  /**
+   * The session ordinal per point, per layer the response was asked for (design §5.10): `0` for
+   * a point under no served artifact of that layer. Named on the main thread as the band was
+   * built, from the decoder's response-local index. A layer absent here was not named when the
+   * band was fetched, which is what makes the band colour-stale for it; a layer turned off keeps
+   * its column until eviction, so turning it back on is free.
+   *
+   * `distinct` is the band's reference on the table — one per ordinal it carries — released when
+   * the band is evicted or truncated, and the list colour coverage is checked over (a dozen
+   * entries, never the points).
+   */
+  membership: Record<string, BandMembership>;
+  /**
+   * The per-point highlight bit, one byte a point (`highlight-and-hierarchy.md` §2): `1` where
+   * the point satisfies the request's `highlight`, `0` where it does not.
+   *
+   * **`null` where the response carried no highlight**, which is a different state from every
+   * point reading `0` — nothing is dulled when no question was put. A band held from a request
+   * that carried one and drawn under a request that does not is re-fetched like any other
+   * question change, so this never carries a stale answer into a frame.
+   */
+  highlightBits: Uint8Array | null;
   /** `m(T)` as the server reported it: how many points the definition serves for this tile. */
   served: number;
   /** `min(k, k_max_marks)` in force when this band was fetched — see {@link isComplete}. */
   capUsed: number;
   visible: bigint;
   matched: bigint;
+  /** The tile's own `highlighted` count, exact — equal to `matched` where no highlight is set. */
+  highlighted: bigint;
   /** The declaration: every held identity is strictly below this. `0n` for an empty band. */
   heldBelow: bigint;
   identityKey: string;
@@ -88,6 +113,18 @@ export type Band = {
   bytes: number;
   touchedAt: number;
 };
+
+export type BandMembership = {ordinals: Uint32Array; distinct: Uint32Array};
+
+/** The distinct non-zero ordinals of a slice, ascending — a band's reference on the table. */
+export function distinctOrdinals(ordinals: Uint32Array): Uint32Array {
+  const seen = new Set<number>();
+  for (let i = 0; i < ordinals.length; i++) {
+    const o = ordinals[i]!;
+    if (o !== NO_ORDINAL) seen.add(o);
+  }
+  return Uint32Array.from(seen).sort();
+}
 
 /**
  * Does this band hold the whole of `served(T)`, and will it still at `k`?
@@ -114,12 +151,18 @@ export function isComplete(band: Band, contentKey: string, k: number): boolean {
 function bandBytes(
   ids: BigUint64Array,
   positions: Float32Array,
-  scalars: Record<string, ScalarColumn>
+  scalars: Record<string, ScalarColumn>,
+  membership: Record<string, BandMembership>,
+  highlightBits: Uint8Array | null
 ): number {
   let bytes = ids.byteLength + positions.byteLength;
   for (const column of Object.values(scalars)) {
     bytes += scalarBytes(column);
   }
+  // The ordinal column is 4 B a point per layer on (§5.10's table); the ledger counts it.
+  for (const m of Object.values(membership)) bytes += m.ordinals.byteLength + m.distinct.byteLength;
+  // One byte a point where a highlight is set, and nothing at all where none is.
+  bytes += highlightBits?.byteLength ?? 0;
   return bytes;
 }
 
@@ -173,13 +216,97 @@ export type BandSplitter = {
   step(deadline: number): Band[];
 };
 
+/**
+ * The main thread's half of naming (design §5.10): the decoder's distinct-id list maps to
+ * session ordinals through the table — a few thousand lookups, once per response — and each
+ * band's points are remapped from local index to ordinal with a tight loop as the band is
+ * built. Parent links come from the same response's artifacts frame, which is the only place a
+ * `parentIds` is ever named (decision 0087).
+ *
+ * The response holds one temporary reference per distinct ordinal while its bands are being
+ * built, so an ordinal named by the distinct list cannot be recycled between two slices; each
+ * band then takes its own references, and the temporary ones go when the split completes.
+ */
+type ResponseNaming = {
+  layer: string;
+  index: Uint16Array | Uint32Array;
+  /** Local index → session ordinal; `map[0] = 0`. */
+  map: Uint32Array;
+  /** Scratch over local indices, for collecting a band's distinct set without a `Set` per band. */
+  mark: Uint8Array;
+};
+
+function nameResponse(result: ViewportResult, table: SessionArtifactTable): {naming: ResponseNaming[]; release: () => void} {
+  // The response's own artifacts frame is the only source of a `parentIds` (decision 0087) and,
+  // for the artifacts this response's points belong to, of a centroid — which is what colours
+  // them. Feeding both here is what lets a band be coloured by the response that carried it,
+  // rather than waiting on the `k = 0` channel two hundred milliseconds behind the gesture.
+  const frameOf = new Map<string, {parentIds: readonly bigint[]; centroid: readonly [number, number] | null; rung: number}>();
+  for (const a of result.artifacts) frameOf.set(`${a.layer} ${a.tesseraId}`, {parentIds: a.parentIds, centroid: a.centroid, rung: a.rung});
+  const naming: ResponseNaming[] = [];
+  const held: Uint32Array[] = [];
+  for (const [layer, column] of Object.entries(result.membership)) {
+    const refs: ArtifactRef[] = [];
+    for (let d = 0; d < column.ids.length; d++) {
+      const id = column.ids[d]!;
+      const known = frameOf.get(`${layer} ${id}`);
+      // **`rung` only where the artifacts frame named it.** A membership column may name an
+      // artifact this response's artifacts frame also carries, and then the rung is the wire's; a
+      // reference built from the column alone has no rung to give and takes 0, which is what a
+      // flat layer's — and a treed root's — is. It is never counted from the links.
+      refs.push({tesseraId: id, layer, parentIds: known?.parentIds ?? [], centroid: known?.centroid ?? null, rung: known?.rung});
+    }
+    const ordinals = table.take(refs);
+    held.push(ordinals);
+    const map = new Uint32Array(column.ids.length + 1);
+    map.set(ordinals, 1);
+    naming.push({layer, index: column.index, map, mark: new Uint8Array(column.ids.length + 1)});
+  }
+  return {
+    naming,
+    release: () => {
+      for (const ordinals of held) table.release(ordinals);
+    }
+  };
+}
+
+/** One band's membership for one layer: the remap loop, and its distinct list, retained. */
+function remapBand(n: ResponseNaming, from: number, to: number, table: SessionArtifactTable): BandMembership {
+  const ordinals = new Uint32Array(to - from);
+  const {index, map, mark} = n;
+  let distinctCount = 0;
+  for (let i = from; i < to; i++) {
+    const local = index[i]!;
+    ordinals[i - from] = map[local]!;
+    if (local !== 0 && mark[local] === 0) {
+      mark[local] = 1;
+      distinctCount++;
+    }
+  }
+  const distinct = new Uint32Array(distinctCount);
+  let d = 0;
+  for (let i = from; i < to; i++) {
+    const local = index[i]!;
+    if (mark[local] === 1) {
+      mark[local] = 0;
+      distinct[d++] = map[local]!;
+    }
+  }
+  distinct.sort();
+  table.retain(distinct);
+  return {ordinals, distinct};
+}
+
 export function bandSplitter(
   result: ViewportResult,
   depth: number,
-  meta: {identityKey: string; contentKey: string; capUsed: number; now: number}
+  meta: {identityKey: string; contentKey: string; capUsed: number; now: number; table?: SessionArtifactTable; onRemap?: (ms: number) => void}
 ): BandSplitter {
   let offset = 0;
   let i = 0;
+  const table = meta.table;
+  const named = table && Object.keys(result.membership).length > 0 ? nameResponse(result, table) : null;
+  let remapMs = 0;
   return {
     done: () => i >= result.tiles.length,
     step(deadline: number): Band[] {
@@ -208,6 +335,15 @@ export function bandSplitter(
         // Already in world space — the decoder produced it, which in a browser means a worker did.
         const positions = result.world.slice(offset * 2, end * 2);
         const scalars = sliceScalars(result.scalars, offset, end);
+        // A copy, never a view: a `subarray` would keep the whole response alive and the byte
+        // ledger would be fiction, which is the rule every other array here follows.
+        const highlightBits = result.highlighted ? result.highlighted.slice(offset, end) : null;
+        const membership: Record<string, BandMembership> = {};
+        if (named) {
+          const started = performance.now();
+          for (const n of named.naming) membership[n.layer] = remapBand(n, offset, end, table!);
+          remapMs += performance.now() - started;
+        }
         const {x, y} = tileXY(tile.tile, depth);
         bands.push({
           depth,
@@ -217,17 +353,24 @@ export function bandSplitter(
           ids,
           positions,
           scalars,
+          membership,
+          highlightBits,
           served,
           capUsed: meta.capUsed,
           visible: tile.visible,
           matched: tile.matched,
+          highlighted: tile.highlighted,
           heldBelow: ids.length === 0 ? 0n : ids[ids.length - 1]! + 1n,
           identityKey: meta.identityKey,
           contentKey: meta.contentKey,
-          bytes: bandBytes(ids, positions, scalars),
+          bytes: bandBytes(ids, positions, scalars, membership, highlightBits),
           touchedAt: meta.now
         });
         offset = end;
+      }
+      if (i >= result.tiles.length && named) {
+        named.release();
+        meta.onRemap?.(remapMs);
       }
       return bands;
     }
@@ -266,7 +409,111 @@ export type PlannedRequest = {
   novel: number;
 };
 
-export type EvictionFocus = {depth: number; prefix: bigint};
+export type EvictionFocus = {
+  depth: number;
+  prefix: bigint;
+  /**
+   * The bands that are on screen at this depth, which eviction never truncates. Before the
+   * response landed part by part every band of one answer shared a touch time and the tie broke
+   * on distance from the focus, so the periphery went first; streamed, the first rows to land are
+   * the least recently touched and were halved while the rest of the same view kept every point —
+   * strips at half density across the map, their coverage retracted, refetched and halved again
+   * (GeoNames, 2026-08-28). What is being looked at is not a candidate.
+   */
+  protect?: {depth: number; rect: TileRect};
+};
+
+/**
+ * One byte budget over every view's bands (`view-switching.md` §3).
+ *
+ * A store holds one {@link BandCache} per view — bands are geometry quantised under one frame, so
+ * they cannot share an index — but **one number bounds the total**, and the victim is chosen
+ * least-recently-drawn across every view rather than within one. A view the user left an hour ago
+ * yields its bytes to the view they are in; the view they are in never yields the rectangle it is
+ * drawing.
+ *
+ * The accountant, rather than a view axis on the band key, because the per-depth indexes, the
+ * coverage rectangles and every band-key site then stay exactly as they are: what is shared is the
+ * arithmetic, not the storage. Registered caches are the whole of its state.
+ *
+ * **A held view is a bystander here, never a participant.** Eviction runs on the fetch that
+ * overflowed the budget, which is always the current view's — a view that is not current issues
+ * nothing (§8) — so `from` is the evicting cache and its protected rectangle is the one that
+ * applies.
+ */
+export class BandBudget {
+  private readonly caches = new Set<BandCache>();
+
+  constructor(readonly budgetBytes: number) {}
+
+  /** Called by {@link BandCache}'s constructor; a cache belongs to exactly one budget. */
+  register(cache: BandCache): void {
+    this.caches.add(cache);
+  }
+
+  /** Bytes held across every registered cache — the figure {@link budgetBytes} bounds. */
+  get bytes(): number {
+    let held = 0;
+    for (const cache of this.caches) held += cache.bytes;
+    return held;
+  }
+
+  /** How many caches hold any band — the `replica` projection's `views` (`view-switching.md` §3). */
+  get views(): number {
+    let n = 0;
+    for (const cache of this.caches) if (cache.bandCount > 0) n++;
+    return n;
+  }
+
+  /**
+   * Evict to the budget across every cache, deepest / least-recently-touched / farthest-from-focus
+   * first — see {@link BandCache.evict} for what a single eviction does and why it truncates.
+   *
+   * **Every other view's bands are offered before the evicting view's**, which is the cross-view
+   * half of least-recently-drawn: a view that is not current was, by construction, drawn less
+   * recently than the one being fetched for. Within each group the single-cache order stands, so a
+   * store with one view evicts byte for byte as it did before this existed. **View-first rather
+   * than one merged ordering across views**: a held view's recent band yields before the current
+   * view's older one, which is the intent — the current view is the one being drawn.
+   */
+  evict(focus: EvictionFocus, from: BandCache, lowWaterFraction = 0.9): void {
+    if (this.bytes <= this.budgetBytes) return;
+    const target = this.budgetBytes * lowWaterFraction;
+
+    const held: {cache: BandCache; band: Band}[] = [];
+    for (const cache of this.caches) {
+      if (cache === from) continue;
+      for (const band of cache.heldBands()) held.push({cache, band});
+    }
+    held.sort((a, b) => evictionOrder(a.band, b.band, focus));
+
+    const evicting = from
+      .heldBands()
+      .map((band) => ({cache: from, band}))
+      .sort((a, b) => evictionOrder(a.band, b.band, focus));
+    const order = held.concat(evicting);
+
+    const protect = focus.protect;
+    for (const {cache, band} of order) {
+      if (this.bytes <= target) return;
+      // The protected rectangle is the evicting view's: another view's bands at the same tile
+      // coordinates are not what is on screen.
+      if (cache === from && protect && band.depth === protect.depth && rectContainsTile(protect.rect, band.x, band.y)) continue;
+      cache.shed(band);
+    }
+  }
+}
+
+/**
+ * The order eviction takes bands in: deepest first, then least recently touched, then farthest
+ * from the focus. Coarse points are the head of every band, so depth-first is what keeps overview
+ * rendering from blanking (`caching.md` §6).
+ */
+function evictionOrder(a: Band, b: Band, focus: EvictionFocus): number {
+  if (a.depth !== b.depth) return b.depth - a.depth;
+  if (a.touchedAt !== b.touchedAt) return a.touchedAt - b.touchedAt;
+  return Number(distance(b, focus) - distance(a, focus));
+}
 
 /**
  * The held bands for one principal, under one byte budget.
@@ -275,6 +522,10 @@ export type EvictionFocus = {depth: number; prefix: bigint};
  * filtering it, so cross-principal reuse is impossible by construction rather than by discipline
  * (`client-interaction.md` §10). A cache keyed too loosely here serves one principal's authorised
  * data to another — a disclosure, not a staleness bug (decision 0029).
+ *
+ * **One cache per view, one budget over them all** (`view-switching.md` §3): the budget is a
+ * {@link BandBudget} the caller may share between caches, or a plain number, which makes this
+ * cache its own budget's only member.
  */
 export class BandCache {
   private bands = new Map<BandKey, Band>();
@@ -325,7 +576,38 @@ export class BandCache {
   private held = 0;
   private heldPoints = 0;
 
-  constructor(private readonly budgetBytes: number) {}
+  /** The budget this cache is accounted against — its own where the caller passed a number. */
+  private readonly budget: BandBudget;
+
+  constructor(
+    budget: number | BandBudget,
+    /** The session table each band's membership holds references on; absent, nothing is named. */
+    private readonly table: SessionArtifactTable | null = null
+  ) {
+    this.budget = typeof budget === 'number' ? new BandBudget(budget) : budget;
+    this.budget.register(this);
+  }
+
+  /** The budget bounding this cache and every other view's — see {@link BandBudget}. */
+  get budgetBytes(): number {
+    return this.budget.budgetBytes;
+  }
+
+  /** Bytes held across every view sharing this cache's budget. */
+  get sharedBytes(): number {
+    return this.budget.bytes;
+  }
+
+  /** How many views hold any band — see {@link BandBudget.views}. */
+  get heldViews(): number {
+    return this.budget.views;
+  }
+
+  /** Give back every reference a band's membership holds. */
+  private releaseMembership(band: Band): void {
+    if (!this.table) return;
+    for (const m of Object.values(band.membership)) this.table.release(m.distinct);
+  }
 
   get bytes(): number {
     return this.held;
@@ -407,6 +689,20 @@ export class BandCache {
     const key = bandKey(band.depth, band.prefix);
     const previous = this.bands.get(key);
     if (previous) {
+      // **A layer's column survives a refetch that did not name the layer.** A band refetched
+      // for another layer's column carries the same served set (same content key and length),
+      // so the columns it lacks are carried over from the band it replaces with their references
+      // — which is what makes switching a layer back on free (§5.10). A replacement under a
+      // moved content key carries nothing over: the served set may differ.
+      const sameSet = previous.contentKey === band.contentKey && previous.ids.length === band.ids.length;
+      for (const [layer, held] of Object.entries(previous.membership)) {
+        if (sameSet && !(layer in band.membership)) {
+          band.membership[layer] = held;
+          band.bytes += held.ordinals.byteLength + held.distinct.byteLength;
+        } else if (this.table) {
+          this.table.release(held.distinct);
+        }
+      }
       this.held -= previous.bytes;
       this.heldPoints -= previous.ids.length;
     }
@@ -433,8 +729,22 @@ export class BandCache {
     return coverageAt(this.covered, depth, contentKey, k);
   }
 
+  /**
+   * Withdraw the coverage claim over each of `bands`' tiles, so the next plan fetches them
+   * again — the colour-stale refetch (§5.10): a band whose ordinals no longer resolve to
+   * anything served, or that lacks the column for a layer now on, is asked for again after novel
+   * ground, centre-first, by the same path a stale-content band takes. The band stays held and
+   * drawn meanwhile; the arrival replaces it.
+   */
+  retract(bands: readonly Band[]): void {
+    for (const band of bands) {
+      if (this.bands.get(bandKey(band.depth, band.prefix)) === band) this.retractCoverage(band.depth, band.x, band.y);
+    }
+  }
+
   /** Drop everything. Called on a token change, where the whole partition becomes unrenderable. */
   dropIdentity(): void {
+    for (const band of this.bands.values()) this.releaseMembership(band);
     this.bands.clear();
     this.byDepth.clear();
     this.covered = [];
@@ -618,23 +928,29 @@ export class BandCache {
    *
    * Runs to a low-water mark rather than to the budget exactly, so a steady stream of `put`s does
    * not re-sort the whole cache on each one.
+   *
+   * The pass itself is the budget's, because the budget may span several views' caches
+   * (`view-switching.md` §3); this cache's protected rectangle is the one that applies, since this
+   * is the cache being fetched into.
    */
   evict(focus: EvictionFocus, lowWaterFraction = 0.9): void {
-    if (this.held <= this.budgetBytes) return;
-    const target = this.budgetBytes * lowWaterFraction;
+    this.budget.evict(focus, this, lowWaterFraction);
+  }
 
-    const order = [...this.bands.values()].sort((a, b) => {
-      if (a.depth !== b.depth) return b.depth - a.depth;
-      if (a.touchedAt !== b.touchedAt) return a.touchedAt - b.touchedAt;
-      return Number(distance(b, focus) - distance(a, focus));
-    });
+  /** Every held band, for the budget's cross-view ordering. */
+  heldBands(): Band[] {
+    return [...this.bands.values()];
+  }
 
-    for (const band of order) {
-      if (this.held <= target) return;
-      const keep = Math.max(1, Math.floor(band.ids.length / 2));
-      if (keep >= band.ids.length) continue;
-      this.truncate(band, keep);
-    }
+  /**
+   * Halve one band, keeping its head — the unit of eviction. False where the band is a single
+   * point and there is nothing left to give.
+   */
+  shed(band: Band): boolean {
+    const keep = Math.max(1, Math.floor(band.ids.length / 2));
+    if (keep >= band.ids.length) return false;
+    this.truncate(band, keep);
+    return true;
   }
 
   /** Cut a band to its first `keep` points, lowering its bound to match exactly. */
@@ -662,12 +978,22 @@ export class BandCache {
     const ids = band.ids.slice(0, keep);
     const positions = band.positions.slice(0, keep * 2);
     const scalars = sliceScalars(band.scalars, 0, keep);
-    const bytes = bandBytes(ids, positions, scalars);
+    // The head's membership, re-referenced: the distinct list may shrink with the tail.
+    const membership: Record<string, BandMembership> = {};
+    for (const [layer, held] of Object.entries(band.membership)) {
+      const ordinals = held.ordinals.slice(0, keep);
+      const distinct = distinctOrdinals(ordinals);
+      this.table?.retain(distinct);
+      this.table?.release(held.distinct);
+      membership[layer] = {ordinals, distinct};
+    }
+    const highlightBits = band.highlightBits ? band.highlightBits.slice(0, keep) : null;
+    const bytes = bandBytes(ids, positions, scalars, membership, highlightBits);
     this.held += bytes - band.bytes;
     this.heldPoints += keep - band.ids.length;
     this.changes++;
     const truncated = bandKey(band.depth, band.prefix);
-    const kept: Band = {...band, ids, positions, scalars, heldBelow: ids[keep - 1]! + 1n, bytes};
+    const kept: Band = {...band, ids, positions, scalars, membership, highlightBits, heldBelow: ids[keep - 1]! + 1n, bytes};
     this.bands.set(truncated, kept);
     this.index(kept, truncated);
   }

@@ -1,0 +1,3 @@
+cmd: ./suggestprobe/target/release/suggestprobe prep /home/joe/code/tessera/data/ladder/geonames/allCountries.txt /home/joe/code/tessera/data/ladder/probe-suggest
+prep: 13463857 rows, 26927714 raw strings, 10132181 distinct folded, 15.0s
+prep: wrote 10132181 keys to /home/joe/code/tessera/data/ladder/probe-suggest/vocab.txt

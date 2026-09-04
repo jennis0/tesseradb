@@ -715,6 +715,7 @@ fn main() {
     log("building");
     let t = Instant::now();
     tessera_build::build(&tessera_build::BuildArgs {
+        arena_order: Default::default(),
         point_fields: Default::default(),
         corpus_fields: Default::default(),
         points: a.data.join("points.parquet"),

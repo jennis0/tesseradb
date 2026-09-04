@@ -21,7 +21,7 @@ fn unit_quantisation() -> Quantisation {
     }
 }
 
-fn row(entity: u64, external_id: Option<&[u8]>, x: f32, y: f32) -> FlushRow {
+fn row(entity: u64, external_id: Option<&[u8]>, x: f64, y: f64) -> FlushRow {
     FlushRow {
         entity_id: EntityId::new(entity),
         external_id: external_id.map(|id| id.to_vec()),
@@ -38,6 +38,7 @@ fn flush(prefix_dir: &Path, seg_id: &str, rows: Vec<FlushRow>, row_base: u32) ->
         PARTITION,
         VIEW,
         FlushInput {
+            incarnation: 0,
             seg_id,
             rows,
             quantisation: unit_quantisation(),
@@ -226,6 +227,7 @@ fn unordered_rows_are_refused() {
         PARTITION,
         VIEW,
         FlushInput {
+            incarnation: 0,
             seg_id: "seg-bad",
             rows: vec![row(52, None, 0.1, 0.1), row(50, None, 0.2, 0.2)],
             quantisation: unit_quantisation(),

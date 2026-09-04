@@ -24,7 +24,8 @@
 //! mints, and the codes a vocabulary's own `source` file seeds. Missing one is the failure this module is most
 //! exposed to, and it is silent — `a_draw_excludes_codes_from_every_home` is the direct test.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
 
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -178,7 +179,20 @@ pub struct VocabularyMinter {
     kind: VocabularyKind,
     visibility: Visibility,
     width: ScalarType,
-    codes: BTreeMap<String, u32>,
+    /// Key → code. **The key bytes are `Arc<str>` and are shared with [`Self::by_code`]**, so the
+    /// reverse map costs a pointer per value rather than a second copy of every key — which at 10⁷
+    /// values is the difference between a pointer table and another 705 MB of heap
+    /// (`value-suggestion.md` §6.1, measured).
+    codes: BTreeMap<Arc<str>, u32>,
+    /// Code → key: the map `/v1/categories?codes=` resolves through.
+    ///
+    /// **It replaces a walk of the whole binding set per request.** The `Codes` arm tested
+    /// `codes.contains(&code)` against every binding, which at 10⁶ values is a million-step walk
+    /// per legend resolve — tens of milliseconds where it is now microseconds
+    /// (`value-suggestion.md` §9). A hash map rather than a `BTreeMap` because a code is drawn at
+    /// random over the width and has no order a reader wants; the *response* order is still key
+    /// order, taken from the caller's codes being resolved and then sorted.
+    by_code: HashMap<u32, Arc<str>>,
     /// Per-value presentation, keyed as `codes` is; absent for a value given no title, which is
     /// every value a *discovered* vocabulary mints — there was no author to write one.
     ///
@@ -186,7 +200,7 @@ pub struct VocabularyMinter {
     /// lives in one of two homes (the manifest, or a `SEGMENTS-<n>.json` extension) and a reader
     /// that consulted only the first would serve a legend missing every value minted since the
     /// last build. This type already exists to be the union of those homes.
-    titles: BTreeMap<String, String>,
+    titles: BTreeMap<Arc<str>, String>,
     /// Every code that must never be drawn: bound values and authored `reserved` retirements
     /// alike. [`ABSENT_CODE`] is excluded by the draw itself rather than held here, so that a
     /// vocabulary's assigned count is the number of codes it has actually spent.
@@ -211,6 +225,7 @@ impl VocabularyMinter {
             visibility,
             width,
             codes: BTreeMap::new(),
+            by_code: HashMap::new(),
             titles: BTreeMap::new(),
             assigned: BTreeSet::new(),
         }
@@ -235,10 +250,9 @@ impl VocabularyMinter {
             // authored retirement that a value block then re-used, which is the same defect seen
             // from the other side.
             let under = self
-                .codes
-                .iter()
-                .find(|(_, &c)| c == code)
-                .map(|(k, _)| k.clone())
+                .by_code
+                .get(&code)
+                .map(|k| k.to_string())
                 .unwrap_or_else(|| format!("<reserved {code}>"));
             return Err(BindingConflict {
                 vocabulary: self.name.clone(),
@@ -247,9 +261,17 @@ impl VocabularyMinter {
                 held: HeldBinding::CodeUnder(under),
             });
         }
-        self.codes.insert(key.to_string(), code);
+        self.bind(key, code);
         self.assigned.insert(code);
         Ok(())
+    }
+
+    /// The one place a key and a code become a pair, so the forward and reverse maps cannot
+    /// disagree about one.
+    fn bind(&mut self, key: &str, code: u32) {
+        let key: Arc<str> = Arc::from(key);
+        self.codes.insert(Arc::clone(&key), code);
+        self.by_code.insert(code, key);
     }
 
     /// Seed a retired code (§3.4's `reserved`). Spent, so never drawn, but bound to no key.
@@ -265,7 +287,11 @@ impl VocabularyMinter {
         for value in &vocabulary.values {
             self.seed_value(&value.key, value.code)?;
             if let Some(title) = &value.title {
-                self.titles.insert(value.key.clone(), title.clone());
+                // Keyed by the `Arc` the binding above interned, so a title costs no second copy
+                // of its key either.
+                if let Some((key, _)) = self.codes.get_key_value(value.key.as_str()) {
+                    self.titles.insert(Arc::clone(key), title.clone());
+                }
             }
         }
         for &code in &vocabulary.reserved {
@@ -306,6 +332,24 @@ impl VocabularyMinter {
         self.codes.get(key).copied()
     }
 
+    /// The key `code` is bound to, or `None` where nothing is — an unbound code, a `reserved`
+    /// retirement, or the absent sentinel.
+    ///
+    /// **The reverse of [`Self::code_of`], in one lookup rather than a walk.** See
+    /// [`Self::by_code`].
+    pub fn key_of(&self, code: u32) -> Option<&str> {
+        self.by_code.get(&code).map(|k| &**k)
+    }
+
+    /// Every binding whose key sorts strictly after `after`, ascending — `/v1/categories`' page
+    /// cursor, resumed by a range rather than by walking the map from its start and discarding.
+    pub fn bindings_after<'a>(&'a self, after: &str) -> impl Iterator<Item = (&'a str, u32)> {
+        use std::ops::Bound;
+        self.codes
+            .range::<str, _>((Bound::Excluded(after), Bound::Unbounded))
+            .map(|(k, &c)| (&**k, c))
+    }
+
     /// Every binding, ascending by key.
     ///
     /// **Key order, and `/v1/categories` pages in it.** Code order would be the obvious choice for
@@ -315,7 +359,7 @@ impl VocabularyMinter {
     /// on every page of every request. Keys are unique, so a key is a total order and therefore a
     /// usable cursor.
     pub fn bindings(&self) -> impl Iterator<Item = (&str, u32)> {
-        self.codes.iter().map(|(k, &c)| (k.as_str(), c))
+        self.codes.iter().map(|(k, &c)| (&**k, c))
     }
 
     /// This value's presentation title, where an author wrote one. `None` is ordinary — the key is
@@ -349,7 +393,7 @@ impl VocabularyMinter {
             return Ok(Minted::Existing(code));
         }
         let code = self.draw()?;
-        self.codes.insert(key.to_string(), code);
+        self.bind(key, code);
         self.assigned.insert(code);
         Ok(Minted::Fresh(code))
     }

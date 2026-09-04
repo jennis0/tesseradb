@@ -58,7 +58,13 @@ the evaluation, and gives up cross-query reuse entirely.
 which are viewport-dependent, and `evaluate_routed` chooses between the two per request on
 `rows_in_ranges ≤ v_total` — so the same filter takes different routes on different frames. Only
 `RoutedFilter::Entity` is cacheable. A frame that takes the row route does not hit, and it took that
-route because it was cheap for that frame.
+route because it was cheap for that frame. **The `region` leaf is the one row-space exception, and
+it is cached — built 2026-08-29** ([`selection-operand.md`](selection-operand.md) §5,
+`tessera_engine::region`): a shape is fixed in world space, so its decomposition does not move when
+the viewport does, and it carries no authorisation, so the entry is held once per generation and
+shared across principals — what is cached is the decomposition and never the tested rows, which are
+each request's own under its mask. That cache is a second `SingleFlightCache` beside the row
+projections' and not this document's clause cache, whose unit and key are entity-space.
 
 ## 3. The key, and why the overlay is not in it
 

@@ -25,17 +25,18 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine as _;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use sha2::{Digest, Sha256};
 
 use tessera_engine::{
-    AcceptError, DeclaredScalar, ScalarType, Vocabularies, VocabularyKind, ABSENT_CODE,
-    DENY_WINDOW_MAX_ENTRIES,
+    AcceptError, DeclaredScalar, MetaView, Projection, ScalarType, ScopedScalar, Vocabularies,
+    VocabularyKind, ABSENT_CODE, DENY_WINDOW_MAX_ENTRIES,
 };
 use tessera_lifecycle::{
     BatchArtifacts, BatchEdge, BatchMembership, ChangeOp, UnallocatedRow, WalScalar,
 };
 
+use tessera_types::view::ViewMetadataValue;
 use tessera_types::{EntityId, TermId, TesseraId};
 
 use crate::error::{
@@ -255,9 +256,21 @@ pub fn router(state: Arc<AppState>) -> Router {
         // refused rather than repeated if it is taken; there is no server-minted name to `POST` to.
         .route("/control/layers", axum::routing::put(register_layer))
         .route("/control/layers/{name}", axum::routing::delete(drop_layer))
+        // **`PUT` and `DELETE` on the view itself, spelled as a layer's are** (`views.md` §3.2,
+        // §3.4): the key is the identity, so the operation is refused rather than repeated if it
+        // is taken, and there is no server-minted name to `POST` to. A roster record is small and
+        // takes no body limit of its own.
+        .route(
+            "/control/views/{group}/{key}",
+            axum::routing::put(create_view).delete(drop_view),
+        )
         .route(
             "/control/layers/{name}/artifacts",
-            axum::routing::put(publish_artifacts),
+            // **Not the inherited 2 MiB default** — see [`PUBLISH_MAX_BODY_BYTES`]. A membership is
+            // as large as the artifact is, and the batch is the commit unit, so a single artifact
+            // over the cap has no smaller spelling.
+            axum::routing::put(publish_artifacts)
+                .layer(axum::extract::DefaultBodyLimit::max(PUBLISH_MAX_BODY_BYTES)),
         );
     // The faults build's arming surface (decision 0071) — absent from a default build rather
     // than mounted and refusing, and above the credential layer below like every other route.
@@ -361,6 +374,52 @@ async fn require_operator_credential(
     Ok(next.run(request).await)
 }
 
+/// The frame **each** of a layer's views canonicalises its shapes in: the projection that placed
+/// that view's points, and the extent they are quantised against (decision 0040).
+///
+/// **Per view, and never the layer's first view for all of them**
+/// ([decision 0111](../../../docs/decisions/0111-a-shape-spans-projected-views-through-wgs84.md)):
+/// a layer's views need share neither projection nor frame, and a `wgs84` shape goes through each
+/// view's own transform. What is refused rather than resolved is a layer mixing a projected view
+/// with a `projection = "none"` one, and — where the submission wrote `space = "view"` — a span
+/// over frames that are not identical; both are [`tessera_engine::shapes::check_shape_span`]'s,
+/// applied where the shape is canonicalised so the refusal can name the row.
+///
+/// What is not safe is reading the *bundle's* views: a layer need not be drawn on all of them, and
+/// a shape placed by a projection none of its own views declares holds the wrong rows with nothing
+/// saying so.
+fn layer_frames(
+    meta: &tessera_engine::EngineMeta,
+    views: &[&str],
+) -> Result<Vec<tessera_engine::shapes::ViewFrame>, ApiError> {
+    if views.is_empty() {
+        return Err(ApiError::Contract(
+            "this layer declares no view to publish a shape into".into(),
+        ));
+    }
+    views
+        .iter()
+        .map(|name| {
+            let view = meta
+                .views
+                .iter()
+                .find(|v| v.id == *name)
+                .ok_or_else(|| ApiError::Unknown(format!("unknown view '{name}'")))?;
+            let q = view.quantisation;
+            Ok(tessera_engine::shapes::ViewFrame::new(
+                &view.id,
+                view.projection,
+                tessera_engine::shapes::Bounds {
+                    x_min: q.x_min,
+                    x_max: q.x_max,
+                    y_min: q.y_min,
+                    y_max: q.y_max,
+                },
+            ))
+        })
+        .collect()
+}
+
 /// Every route [`router`] mounts, as `(method, path)` — the subject of
 /// `every_control_route_requires_the_operator_credential`.
 ///
@@ -408,6 +467,21 @@ const INGEST_BUFFER_FULL_RETRY_AFTER_S: u64 = 90;
 
 const CHANGES_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 
+/// The publication route's own body cap.
+///
+/// **A publication is corpus-sized where a declaration and a change list are not**, which is why it
+/// does not inherit axum's 2 MiB default the way `PUT /control/layers` does. One artifact's
+/// `members` is its whole membership and the batch is the commit unit, so an artifact larger than
+/// the cap cannot be split across two requests — it is published entire or not at all. Measured on
+/// the campaign's MedCPT rung: the largest MeSH descriptor over 10⁶ articles holds 756,640 members,
+/// ~11 MB of base64 external ids, and under the inherited default it was unpublishable at any batch
+/// size. 64 MiB carries that with room and is still a bounded buffer.
+///
+/// Stated here rather than inherited so the refusal can name a number that is true, and mapped to
+/// 422 for [`ingest`]'s reason: axum's own rejection is a **413**, which is outside contracts
+/// §3.1's closed code list.
+const PUBLISH_MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
+
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(axum::http::header::AUTHORIZATION)
@@ -431,20 +505,50 @@ struct RawIngestItem {
     /// gets no sidecar entry and is addressable only by its `tessera_id` (returned per row in
     /// [`IngestResp`]).
     external_id: Option<Vec<u8>>,
-    x: f32,
-    y: f32,
+    /// **The view's frame, never longitude and latitude** — the transform has already run
+    /// (`projections.md` §3). Everything downstream of the decode reads a frame coordinate: the
+    /// engine's out-of-frame check, the WAL record, the buffer and the flush's quantiser.
+    x: f64,
+    y: f64,
     access: Vec<u8>,
     scalars: Vec<WalScalar>,
+    /// The group-scoped values this row carries for its view's group, positional against the
+    /// families the batch was parsed with (`views.md` §5). Empty for a plain view and for a group
+    /// that owns no family.
+    scoped: Vec<WalScalar>,
 }
 
-/// The column names this schema gives a meaning of their own; everything else in a batch is a
+/// The column names this schema gives a meaning of their own whatever the view, plus the
+/// coordinate pair [`coordinate_columns`] resolves; everything else in a batch is a
 /// caller-declared scalar **or a declared layer's name** (see [`parse_ingest_batch`]).
-const RESERVED_COLUMNS: [&str; 5] = ["external_id", "x", "y", "access", "node_id"];
+const RESERVED_COLUMNS: [&str; 3] = ["external_id", "access", "node_id"];
 
-/// One ingest batch, decoded: its rows, and what its membership columns said.
+/// What this view's coordinate columns are called, and what the wrong spelling would have meant.
+///
+/// **A projected view spells them `lon` and `lat`; a view with no projection spells them `x` and
+/// `y`** (`projections.md` §2). Longitude-then-latitude is the order GeoJSON and WKT use and the
+/// opposite of the order many sources publish, and a corpus written with the two exchanged is
+/// silently mirrored about the diagonal — so the axes are named for what they hold rather than
+/// documented. The build applies the same rule to a points file's columns
+/// (`tessera_build::config`'s `compile_projected_fields`), and it has to exist on both paths or a
+/// projected view is something that can be built correctly and ingested into wrongly
+/// (decision 0091).
+fn coordinate_columns(projection: Projection) -> (&'static str, &'static str) {
+    match projection {
+        Projection::None => ("x", "y"),
+        _ => ("lon", "lat"),
+    }
+}
+
+/// One ingest batch, decoded: its rows, what its membership columns said, and how many of those
+/// rows the view's projection clipped.
 struct ParsedBatch {
     items: Vec<RawIngestItem>,
     artifacts: BatchArtifacts,
+    /// Rows whose latitude fell outside the projection's own domain and were moved onto the
+    /// frame's edge (`projections.md` §7). Always `0` under `projection = "none"`, which has no
+    /// domain.
+    clipped: u64,
 }
 
 /// A column named for a declared layer, and what its cells mean.
@@ -879,10 +983,12 @@ fn code_at(width: ScalarType, code: u32) -> WalScalar {
 }
 
 /// Parse `/control/ingest`'s body: one Arrow IPC stream, schema
-/// `(external_id: binary, x: float32, y: float32, access: utf8, node_id: utf8?, ...scalars)`
-/// (R5). `node_id` is accepted — so a well-formed client request is never rejected for including
-/// it — but not stored: `WalRow` has no `node_id` field, because a buffered item has no row geometry
-/// until the next build and `node_id` is a segment-column concept.
+/// `(external_id: binary, x: float32|float64, y: float32|float64, access: utf8, node_id: utf8?,
+/// ...scalars)` (R5). The coordinate columns take either float width and the narrower is widened —
+/// see [`coordinate_col`] for why the widening runs in that one direction. `node_id` is accepted
+/// — so a well-formed client request is never rejected for including it — but not stored: `WalRow`
+/// has no `node_id` field, because a buffered item has no row geometry until the next build and
+/// `node_id` is a segment-column concept.
 ///
 /// # The scalar tail is validated against `MANIFEST.declared_scalars`, and misalignment is a 422
 ///
@@ -939,7 +1045,12 @@ fn code_at(width: ScalarType, code: u32) -> WalScalar {
 /// either is read as the other — a layer called `x` cannot make the geometry column mean a cluster.
 fn parse_ingest_batch(
     body: &[u8],
+    projection: Projection,
     declared: &[DeclaredScalar],
+    // The **group-scoped** attribute families this view's batch may carry, under their plain
+    // names — the families of the group that owns the view, in manifest order, and empty for
+    // every view outside a scope (`views.md` §5). See the section on them in this function's doc.
+    scoped: &[ScopedScalar],
     vocabularies: &Vocabularies,
     layer_of: &dyn Fn(&str) -> Option<tessera_types::layer::LayerDeclaration>,
 ) -> Result<ParsedBatch, ApiError> {
@@ -948,8 +1059,10 @@ fn parse_ingest_batch(
         ApiError::Contract(format!("ingest body is not a valid Arrow IPC stream: {e}"))
     })?;
 
+    let (x_name, y_name) = coordinate_columns(projection);
     let mut items = Vec::new();
     let mut tally = MembershipTally::default();
+    let mut clipped = 0u64;
     for batch in reader {
         let batch = batch
             .map_err(|e| ApiError::Contract(format!("ingest body: arrow decode error: {e}")))?;
@@ -959,8 +1072,33 @@ fn parse_ingest_batch(
         let offset = items.len();
 
         let ext = optional_binary_col(&batch, "external_id")?;
-        let x = f32_col(&batch, "x")?;
-        let y = f32_col(&batch, "y")?;
+        // **The spelling is checked before the columns are read**, so a batch that used the other
+        // one meets a refusal naming what this view calls its axes rather than a bare "column 'x'
+        // missing". Only fired where the right column is absent, so a `projection = "none"` view
+        // whose declared scalars happen to include a `lon` is unaffected: this is the surface
+        // every existing ingest uses.
+        for (wrong, right) in wrong_spellings(projection) {
+            if batch.column_by_name(wrong).is_some() && batch.column_by_name(right).is_none() {
+                return Err(ApiError::Contract(format!(
+                    "ingest body: {}, so its coordinate columns are '{x_name}' and '{y_name}', \
+                     not '{wrong}' (projections.md §2, §3). The axes are named for what they hold \
+                     because a corpus written with longitude and latitude exchanged is mirrored \
+                     about the diagonal and malformed in no other way; rename '{wrong}' to \
+                     '{right}'",
+                    match projection {
+                        Projection::None =>
+                            "this view declares no projection, so it has no longitude".to_string(),
+                        _ => format!("this view is projected `{}`", projection.name()),
+                    }
+                )));
+            }
+        }
+        let mut x = coordinate_col(&batch, x_name)?;
+        let mut y = coordinate_col(&batch, y_name)?;
+        // **The transform runs here, at the boundary, before anything else looks at the numbers**
+        // (`projections.md` §3) — the same place `tessera_build::input` runs it, which is what
+        // makes a projected view ingestable rather than only buildable (decision 0091).
+        clipped += project_columns(projection, &mut x, &mut y)?;
         let access = utf8_col(&batch, "access")?;
 
         // Whole-batch schema validation, before a single row is read: a batch whose scalar tail
@@ -969,7 +1107,17 @@ fn parse_ingest_batch(
         let mut declarations = Vec::new();
         for field in schema.fields() {
             let name = field.name().as_str();
-            if RESERVED_COLUMNS.contains(&name) || declared.iter().any(|d| d.name == name) {
+            if RESERVED_COLUMNS.contains(&name)
+                || name == x_name
+                || name == y_name
+                || declared.iter().any(|d| d.name == name)
+                // **A group-scoped family, under its plain name** (`views.md` §5): the view is
+                // known from the header, so the column is not qualified and the view decides
+                // which of the family's columns the value lands in. `scoped` is empty for every
+                // view outside a scope, so the refusal below is unchanged there — which is what
+                // keeps a scoped column un-nameable on an entity-space batch.
+                || scoped.iter().any(|f| f.name == name)
+            {
                 continue;
             }
             let Some(declaration) = layer_of(name) else {
@@ -1015,6 +1163,28 @@ fn parse_ingest_batch(
             }
         }
 
+        // **The scoped families' columns, checked on the declared ones' rule** (`views.md` §5) —
+        // but a *missing* column is not an error here, where a missing declared scalar is: a
+        // family has no slot in the positional tail, so its absence misaligns nothing and simply
+        // means every row of the batch is absent in it. What is refused is the same wrong type,
+        // for the same reason: a value decoded against the wrong declaration is a wrong value
+        // stored with no error anywhere.
+        for f in scoped {
+            let Some(col) = batch.column_by_name(&f.name) else {
+                continue;
+            };
+            let expected = scoped_wire_type(f);
+            if batch.num_rows() > 0 && scalar_at(col.as_ref(), 0, expected).is_none() {
+                return Err(ApiError::Contract(format!(
+                    "ingest body: column '{}' is {:?}, but it is a group-scoped attribute \
+                     declared {} (views §5); refused rather than dropped",
+                    f.name,
+                    col.data_type(),
+                    expected.arrow_type_name()
+                )));
+            }
+        }
+
         for i in 0..batch.num_rows() {
             // The artifacts this row names, read before its scalars so a malformed membership
             // column refuses the batch with nothing decoded into `items` — the whole-batch rule
@@ -1051,6 +1221,34 @@ fn parse_ingest_batch(
                 };
                 scalars.push(value);
             }
+            // **The scoped tail, in the families' own order** — a second positional list rather
+            // than more slots in the one above, because the two are indexed against different
+            // declarations (`WalRow::scoped`). Absence takes each family's ordinary route: the
+            // reserved code 0 for a category, `WalScalar::Null` for everything else, which is
+            // decision 0064's presence bitmap.
+            let mut scoped_values = Vec::with_capacity(scoped.len());
+            for f in scoped {
+                let value = match batch.column_by_name(&f.name) {
+                    // A family the batch does not mention: every row is absent in it, which is
+                    // an ordinary state and not the omission a declared scalar's would be. A
+                    // family has no bundle-wide column, so nothing downstream is misaligned by a
+                    // batch that carries none of them.
+                    None => scoped_absent(f),
+                    Some(col) => match f.vocabulary.as_deref() {
+                        Some(vocabulary) => category_code(
+                            col.as_ref(),
+                            i,
+                            &scoped_as_declared(f),
+                            vocabulary,
+                            vocabularies,
+                        )?,
+                        None if col.is_null(i) => WalScalar::Null,
+                        None => scalar_at(col.as_ref(), i, scoped_wire_type(f))
+                            .expect("every scoped column's type was checked above"),
+                    },
+                };
+                scoped_values.push(value);
+            }
             // Contracts §3.4: `external_id` is optional. Neither a missing column nor a null
             // within the column is an error -- both simply mean this item has no caller-supplied
             // external id and is addressable only by its `tessera_id`.
@@ -1074,17 +1272,119 @@ fn parse_ingest_batch(
             }
             items.push(RawIngestItem {
                 external_id,
-                x: x.value(i),
-                y: y.value(i),
+                x: x[i],
+                y: y[i],
                 access: access.value(i).as_bytes().to_vec(),
                 scalars,
+                scoped: scoped_values,
             });
         }
     }
     Ok(ParsedBatch {
         items,
         artifacts: tally.into_artifacts(),
+        clipped,
     })
+}
+
+/// A group-scoped family as the declaration the row-level helpers take.
+///
+/// **The declaration is an ordinary attribute's** (`views.md` §5) — same types, same `index` and
+/// `render` — and what the scope changes is only which column file a value lands in. So a
+/// family's key check, wire type and code minting are the entity-scoped ones, asked of a borrowed
+/// declaration built here rather than restated as a second set of rules that could drift from
+/// [`DeclaredScalar`]'s.
+fn scoped_as_declared(family: &ScopedScalar) -> DeclaredScalar {
+    DeclaredScalar {
+        name: family.name.clone(),
+        arrow_type: family.arrow_type,
+        vocabulary: family.vocabulary.clone(),
+        analyser: family.analyser.clone(),
+        index: family.index,
+        render: family.render,
+    }
+}
+
+/// What a batch column of this family carries on the wire — [`DeclaredScalar::wire_type`]'s
+/// answer, so a scoped category arrives as its **key** exactly as an entity-scoped one does and a
+/// caller is never the minting authority for a code (per-point-attributes §3.1, §5).
+fn scoped_wire_type(family: &ScopedScalar) -> ScalarType {
+    scoped_as_declared(family).wire_type()
+}
+
+/// The value a row carries for a family the batch does not mention at all.
+///
+/// A category spends its reserved code 0, which its vocabulary keeps out of the value space;
+/// every other family has no spare bit pattern and travels `Null`, which lands in the column's
+/// presence bitmap (decision 0064). The same split [`parse_ingest_batch`] makes per row, restated
+/// here for the whole-column case — which a family has and a declared scalar does not, a family
+/// having no slot in the positional tail to misalign.
+fn scoped_absent(family: &ScopedScalar) -> WalScalar {
+    match family.vocabulary {
+        Some(_) => code_at(family.arrow_type, ABSENT_CODE),
+        None => WalScalar::Null,
+    }
+}
+
+/// The coordinate columns a batch for this view must *not* carry, each paired with what it should
+/// have been called.
+///
+/// `x`/`y` and `lon`/`lat` are the only two spellings, so each view refuses exactly the other one
+/// and the pair is total rather than a list that could be empty.
+fn wrong_spellings(projection: Projection) -> [(&'static str, &'static str); 2] {
+    match projection {
+        Projection::None => [("lon", "x"), ("lat", "y")],
+        _ => [("x", "lon"), ("y", "lat")],
+    }
+}
+
+/// Project a batch's coordinate columns in place, returning how many rows the projection
+/// **clipped** (`projections.md` §3, §7).
+///
+/// # Two things go wrong here and they are not the same thing
+///
+/// A coordinate outside WGS84's own range is **not a coordinate** and is refused, exactly as the
+/// build refuses it (`projections.md` §2): the accepted input coordinate system is longitude
+/// within ±180 and latitude within ±90, and a caller holding anything else converts before
+/// arriving.
+///
+/// A latitude inside that range but outside the *projection's* domain — beyond ±85.0511287798066°
+/// for `web_mercator` — is **clipped onto the frame's edge, counted, and never refused** (§7). The
+/// same row builds, and a row a build accepts and an ingest rejects is a defect rather than a
+/// policy. Clipping never earns a refusal at any proportion: a clipped point's position is the
+/// projection's own domain boundary, which no choice of frame moves.
+///
+/// # Why the count is taken here and not downstream
+///
+/// The engine's out-of-frame check runs on what this function returns, and the frame's edge is
+/// exactly where the quantisation rule says a point is *not* out of frame — so at the whole-world
+/// frame that check structurally cannot see a single clipped row, however many there are. At a
+/// sub-square frame the two do overlap, a clipped point landing on the *world's* edge and so
+/// outside a frame that does not reach it; such a row is both clipped here and refused there,
+/// which §7 states as correct rather than as an exception to carve out.
+///
+/// `Projection::None` returns without touching either column — the identity, bit for bit, which is
+/// what keeps every existing ingest exactly as it was.
+fn project_columns(projection: Projection, x: &mut [f64], y: &mut [f64]) -> Result<u64, ApiError> {
+    if projection == Projection::None {
+        return Ok(0);
+    }
+    let mut clipped = 0u64;
+    for (row, (lon, lat)) in x.iter_mut().zip(y.iter_mut()).enumerate() {
+        if !lon.is_finite() || !lat.is_finite() || lon.abs() > 180.0 || lat.abs() > 90.0 {
+            return Err(ApiError::Contract(format!(
+                "ingest body: row {row} is at lon {lon}, lat {lat}, which is not a place. This \
+                 view is projected ({}), and the accepted input coordinate system is WGS84 \
+                 degrees — longitude within ±180, latitude within ±90 (projections.md §2). The \
+                 whole batch is refused, so nothing was queued or appended",
+                projection.name()
+            )));
+        }
+        clipped += u64::from(projection.is_clipped(*lat));
+        let (px, py) = projection.forward(*lon, *lat);
+        (*lon, *lat) = (px, py);
+    }
+    Ok(clipped)
 }
 
 /// `x-tessera-view` (contracts §3.4): optional when the bundle has one view, `422` if ambiguous.
@@ -1109,10 +1409,15 @@ fn parse_ingest_batch(
 /// silently joins the wrong row space the day partitioning lands. A bundle declaring no view at
 /// all has no row space to ingest into, so it is refused here rather than accepted into nothing.
 ///
-/// No build path emits a multi-view bundle (`tessera-build` writes exactly one `ViewDescriptor`),
-/// so the second row is unreachable. It is implemented rather than asserted-away because it is a
-/// contract clause and it costs one comparison.
-fn resolve_view(view: Option<&str>, views: &[(String, String)]) -> Result<String, ApiError> {
+/// **A named view is resolved by [`tessera_engine::EngineMeta::resolve_view`]**, the one
+/// resolution both planes take, so `x-tessera-view: quarter:2026-Q3` names the same view a
+/// viewport request naming it does — and an unknown id and an absent key are one 404 here as they
+/// are there.
+fn resolve_view<'a>(
+    view: Option<&str>,
+    meta: &'a tessera_engine::EngineMeta,
+) -> Result<&'a MetaView, ApiError> {
+    let views = &meta.views;
     match view {
         None if views.len() > 1 => Err(ApiError::Contract(format!(
             "this bundle has {} views ({}), so x-tessera-view is required — which one a batch \
@@ -1120,15 +1425,16 @@ fn resolve_view(view: Option<&str>, views: &[(String, String)]) -> Result<String
             views.len(),
             views
                 .iter()
-                .map(|(id, _)| id.as_str())
+                .map(|v| v.id.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
         ))),
-        None => views.first().map(|(id, _)| id.clone()).ok_or_else(|| {
-            ApiError::Contract("this bundle declares no view to ingest into".into())
-        }),
-        Some(id) if views.iter().any(|(known, _)| known == id) => Ok(id.to_string()),
-        Some(id) => Err(ApiError::Unknown(format!("unknown view '{id}'"))),
+        None => views
+            .first()
+            .ok_or_else(|| ApiError::Contract("this bundle declares no view to ingest into".into())),
+        Some(id) => meta
+            .resolve_view(id)
+            .ok_or_else(|| ApiError::Unknown(format!("unknown view '{id}'"))),
     }
 }
 
@@ -1153,18 +1459,35 @@ fn optional_binary_col<'a>(
     }
 }
 
-fn f32_col<'a>(
-    batch: &'a arrow::record_batch::RecordBatch,
+/// A coordinate column, as `f64` — **`float32` and `float64` are both accepted and the narrower is
+/// widened**, which is the rule the build reads a points file's coordinate columns by
+/// (`tessera_build::input`'s `read_f64_column`), stated here because ingest and build must not
+/// disagree about which files can be loaded (decision 0091).
+///
+/// The widening direction is the only one: an `f64` column is never narrowed. A frame at zoom
+/// offset *k* resolves `2^(8−k)` `f32` steps per cell, so past roughly offset 8 the narrowing would
+/// decide the **cell** a point occupies (`projections.md` §6), and it would do so inside a request
+/// the caller was acked for. A whole-world frame is served perfectly well by `float32`, which is
+/// why the narrower width stays acceptable rather than being refused.
+fn coordinate_col(
+    batch: &arrow::record_batch::RecordBatch,
     name: &str,
-) -> Result<&'a arrow::array::Float32Array, ApiError> {
-    batch
-        .column_by_name(name)
-        .and_then(|c| c.as_any().downcast_ref::<arrow::array::Float32Array>())
-        .ok_or_else(|| {
-            ApiError::Contract(format!(
-                "ingest body: column '{name}' missing or not float32"
-            ))
-        })
+) -> Result<Vec<f64>, ApiError> {
+    let column = batch.column_by_name(name).ok_or_else(|| {
+        ApiError::Contract(format!(
+            "ingest body: column '{name}' missing or not float32/float64"
+        ))
+    })?;
+    let any = column.as_any();
+    if let Some(a) = any.downcast_ref::<arrow::array::Float64Array>() {
+        Ok(a.values().to_vec())
+    } else if let Some(a) = any.downcast_ref::<arrow::array::Float32Array>() {
+        Ok(a.values().iter().map(|v| f64::from(*v)).collect())
+    } else {
+        Err(ApiError::Contract(format!(
+            "ingest body: column '{name}' missing or not float32/float64"
+        )))
+    }
 }
 
 fn utf8_col<'a>(
@@ -1184,6 +1507,14 @@ struct IngestResp {
     accepted: u64,
     over_bound: u64,
     over_bound_ids: Vec<String>,
+    /// Rows this view's projection **clipped** — a latitude outside its domain, stored on the
+    /// frame's edge rather than where it was written (`projections.md` §7, §8).
+    ///
+    /// **Reported rather than refused, and reported here because nothing else would mention it.**
+    /// The build prints a clip count in its frame report; a projected view fed polar rows one
+    /// batch at a time has no build to print anything, so this is the only report those rows get.
+    /// Always `0` under `projection = "none"`, which has no domain to leave.
+    clipped: u64,
     /// Contracts §3.4: `external_id` is optional, so an accepted item may be addressable
     /// only by its `tessera_id` -- returned here per accepted row, in the same order as the
     /// request batch, so a caller can correlate. Present for every accepted row, whether or not
@@ -1220,15 +1551,50 @@ fn run_ingest(
     // narrower accessor on purpose: it is the one definition of what this bundle declares, the one
     // `/v1/meta` publishes, and a second accessor is a second definition that can drift from it.
     let meta = state.engine.meta();
-    let view = resolve_view(view, &meta.views)?;
+    let view = resolve_view(view, &meta)?;
+    // **The projection is the view's, read from the bundle manifest, and it decides both what the
+    // coordinate columns are called and what the numbers in them mean** (`projections.md` §3).
+    // Read once per batch beside the scalar tail, from the same `meta()` snapshot, so the two
+    // cannot come from different generations.
+    let projection = view.projection;
+    let view = view.id.clone();
 
     // **The layer lookup is the engine's registry, per column, not per row.** A registration is a
     // WAL append on the executor, so a column naming a layer registered a moment ago resolves here
     // exactly as the publication that created its artifacts did — and a name nothing registered is
     // refused with the undeclared-column message rather than accepted into nothing.
-    let ParsedBatch { items, artifacts } = parse_ingest_batch(
+    // **The group-scoped families this batch may carry** (`views.md` §5, decision 0116): those
+    // whose owning group's key set contains this view's key, under their plain names, the *key*
+    // deciding which of each family's columns a value lands in. A plain view gets none, so a scoped
+    // column named on an entity-space batch takes the undeclared-column refusal exactly as before —
+    // which is what makes such a column un-nameable outside the views its key addresses.
+    //
+    // **A view of a group declaring `members` gets them too**, on the ruling of 2026-09-01: the
+    // address of a scoped value is `(attribute → its group, key)` and never the view, so the key a
+    // sharing group's view holds — the owner's by construction (`views.md` §3.3) — is the same cell
+    // the owner's own view addresses, and either door writes it. What was withdrawn with that is
+    // the "two extents claiming one entity" argument for the old one-door rule: the cell is written
+    // once, by whichever row reaches it first, and a second row naming it is deduped or refused on
+    // the writer (`WriteExecutor::admit`).
+    //
+    // `EngineMeta::owning_key` is the resolution, and is the same function the filter surface and
+    // the render list ask — a view whose key is in no scope resolves to `None` here and its batch
+    // may name no family's column, whatever the view's spelling.
+    let scoped: Vec<ScopedScalar> = meta
+        .scoped_scalars
+        .iter()
+        .filter(|f| meta.owning_key(&view, &f.group).is_some())
+        .cloned()
+        .collect();
+    let ParsedBatch {
+        items,
+        artifacts,
+        clipped,
+    } = parse_ingest_batch(
         body,
+        projection,
         &meta.declared_scalars,
+        &scoped,
         &meta.vocabularies,
         &|name| state.engine.registered_layer(name).map(|l| l.declaration),
     )?;
@@ -1307,6 +1673,11 @@ fn run_ingest(
                 accepted: items.len() as u64,
                 over_bound,
                 over_bound_ids,
+                // Clipping is a property of the rows, not an effect of accepting them, so a
+                // replay reports the same count its first acceptance did — recomputed from the
+                // identical body, which is what makes the two agree. `minted` is 0 beside it
+                // because minting *is* an effect and this submission had none.
+                clipped,
                 tessera_ids,
                 // A replay creates nothing: the artifacts this batch's keys named were minted when
                 // it was first accepted, and this submission had no effect at all.
@@ -1366,25 +1737,48 @@ fn run_ingest(
         .engine
         .resolve_external_ids(&supplied_ids)
         .map_err(map_store_error)?;
-    // **A deleted holder is not a duplicate** (decision 0047: edit is delete + re-ingest, and our
-    // retention of a dead binding must never refuse a user's write). A **suppressed** holder
-    // still is one — suppression is temporary hiding, and re-ingesting a byte-identical copy past
-    // it is the exact hole this check exists to close. Resolution is newest-binding-first, so a
-    // re-ingested id's live holder is the one consulted here.
+    // **A known external id naming a view the entity is not in is a JOIN, not a duplicate**
+    // (`views.md` §4). The same point in two views is the caller saying so at ingest: two batches,
+    // two views, one `external_id`. What each arm below refuses, it refuses loudly.
+    //
+    // **A deleted holder is not a duplicate either** (decision 0047: edit is delete + re-ingest,
+    // and our retention of a dead binding must never refuse a user's write) — it allocates fresh.
+    // A **suppressed** holder takes the same arms as a live one and stays hidden: the new row
+    // lands on the *same* entity, suppression composes in entity space, and the entity is
+    // invisible in the new view as in every other from the moment the row exists. What
+    // write-path §2.1 refuses is a byte-identical *re-ingest past* a suppression — a second copy
+    // under a fresh entity — and attaching a view to the suppressed entity creates no copy.
+    // Resolution is newest-binding-first, so a re-ingested id's live holder is the one consulted.
+    //
+    // **The join rule's own arms are NOT here** (ruled 2026-09-01, decision 0116). What survives in
+    // this handler is the duplicate answer alone — the one refusal that may *name* the ids, because
+    // the caller supplied them. Whether a row joins, and what a join may carry, is settled once on
+    // the serial writer (`WriteExecutor::admit`), where the map that decides it is the map the apply
+    // clones from; a row promoted to a join between this pass and that one used to skip both arms.
     let overlay_generation = state.engine.generation();
-    let existing_ids: Vec<String> = resolved
-        .iter()
-        .zip(&supplied)
-        .filter(|(entity, _)| entity.is_some_and(|e| !overlay_generation.overlay.is_deleted(e)))
-        .map(|(_, (_, id))| base64::engine::general_purpose::STANDARD.encode(id))
-        .collect();
-    if !existing_ids.is_empty() {
+    let mut duplicate_ids: Vec<String> = Vec::new();
+    let mut joins: Vec<(usize, EntityId)> = Vec::new();
+    for (entity, (index, id)) in resolved.iter().zip(&supplied) {
+        let Some(entity) = *entity else { continue };
+        if overlay_generation.overlay.is_deleted(entity) {
+            continue;
+        }
+        if state.engine.view_holds(entity, &view) {
+            duplicate_ids.push(base64::engine::general_purpose::STANDARD.encode(id));
+            continue;
+        }
+        joins.push((*index, entity));
+    }
+    if !duplicate_ids.is_empty() {
+        duplicate_ids.sort_unstable();
         return Err(ApiError::Conflict(format!(
-            "duplicate external ids already known to this deployment: {}",
-            existing_ids.join(", ")
+            "these external ids already have a row in view '{view}': {}. Positions are not \
+             updated in place — a re-placed point is a new view, or for a group a new one \
+             (views §2) — and the permutation is single-valued, so it cannot hold two rows for \
+             one entity in one view",
+            duplicate_ids.join(", ")
         )));
     }
-
     // **The buffer-occupancy bound (§1.3).** Checked here, before submission, and distinct from
     // `ingest_queue_bound`: that one bounds the *command queue* — 32 jobs by default — and the
     // executor drains a job into the buffer in milliseconds, so no ingest rate produces a 429 by
@@ -1417,17 +1811,36 @@ fn run_ingest(
     // concurrent handlers, which is the term `INGEST_RESIDENT_CEILING_BYTES`'s arithmetic is about.
     // Moving also deletes four per-row allocations on the path that must sustain 10⁹-scale ingest;
     // the three source vectors drop at the end of this statement.
+    // Which rows join, by position. Empty for every batch of new items, which is most of them.
+    //
+    // **This resolution stays here; the join rule does not** (decision 0116). The *sidecar* half of
+    // it can only be answered here — the bundle's external-id extents are immutable, so the answer
+    // cannot go stale, and the executor's backstop deliberately re-reads only the live map. What
+    // moved to the writer is every *comparison* the rule makes, and the drop of a joining row's
+    // descriptors and terms with them: `LiveState::established_collisions` is what finally settles
+    // join-ness, so a row this pass called new and that pass calls a join must still arrive with
+    // its descriptors intact for that site to drop them, and a row this pass called a join and
+    // that pass calls new — its holder deleted in between — must still arrive with a label.
+    let join_of: FxHashMap<usize, EntityId> = joins.into_iter().collect();
     let rows: Vec<UnallocatedRow> = items
         .into_iter()
         .zip(terms_per_item)
         .zip(descriptor_lists)
-        .map(|((item, terms), descriptors)| UnallocatedRow {
+        .enumerate()
+        .map(|(index, ((item, terms), descriptors))| UnallocatedRow {
             external_id: item.external_id,
             view: view.clone(),
+            join: join_of.get(&index).copied(),
             descriptors,
             x: item.x,
             y: item.y,
             scalars: item.scalars,
+            // **A join carries these, and they are the one thing it carries beyond geometry**
+            // (`views.md` §4, §5). A scoped value belongs to the `(entity, attribute, key)` cell
+            // the row addresses rather than to the entity, so it is not a re-statement of anything
+            // the entity already holds — which is what the descriptors and the entity-scoped
+            // scalars are, and why the writer drops those on a join and keeps this.
+            scoped: item.scoped,
             terms,
         })
         .collect();
@@ -1455,6 +1868,7 @@ fn run_ingest(
         accepted,
         over_bound,
         over_bound_ids,
+        clipped,
         tessera_ids,
         minted,
     })
@@ -1966,6 +2380,7 @@ fn alarm_change_failure(op: ChangeOp, e: &AcceptError) {
         // Ingest-only, and refused before the submit — unreachable from a change, and in force in
         // no sense even if it were.
         AcceptError::OutsideExtent { .. }
+        | AcceptError::UnknownView { .. }
         | AcceptError::ScalarArity { .. }
         | AcceptError::SteppedDown => false,
     };
@@ -2104,6 +2519,18 @@ async fn register_layer(
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let declaration = body.0;
     let name = declaration.name.clone();
+    // **Decision 0111's layer-level span rule, at the declaration.** A shape layer whose views are
+    // a mix of projected and unprojected row spaces has no geometry that could span them, so it is
+    // refused here — naming the layer and both sides — rather than at the first artifact, where
+    // the caller would have to infer the declaration was the problem. The frames themselves are
+    // read per view at publication (`layer_frames`).
+    if declaration.membership == tessera_types::layer::MembershipSource::Spatial {
+        let views: Vec<&str> = declaration.views.iter().map(String::as_str).collect();
+        let meta = state.engine.meta();
+        let frames = layer_frames(&meta, &views)?;
+        tessera_engine::shapes::check_shape_span(&frames, tessera_engine::shapes::ShapeSpace::Wgs84)
+            .map_err(|e| ApiError::Contract(format!("layer '{name}': {e}")))?;
+    }
     // The **shared** blocking pool, not the deny runtime beside it. That runtime exists so a
     // suppression is never queued behind ingest; a registration is not a deny, and delaying one
     // under ingest load is backpressure working rather than a security operation refused.
@@ -2136,6 +2563,154 @@ async fn drop_layer(
         .map_err(crate::error::map_join_error)?
         .map_err(crate::error::map_accept_error)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `PUT /control/views/{group}/{key}`'s body: the roster record, which is the inline
+/// `[[view_group.view]]` block written as a request (`views.md` §3.2).
+///
+/// **`deny_unknown_fields`, because a misspelt metadata name must not be silently absent.** The
+/// record is immutable, so a value that did not land is one that can never be supplied; a typo
+/// answered 201 would leave a view carrying a default nobody wrote.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ViewRecord {
+    /// This view's own gate; absent takes the group's. ⊘ Only `"public"` is accepted — no gate is
+    /// evaluated anywhere (`views.md` §6), so a label would be a control accepted and never
+    /// enforced. The refusal is the write executor's, beside every other roster rule.
+    #[serde(default)]
+    visibility: Option<String>,
+    /// One entry per name the group declared, typed against it. `timestamp_us` is **microseconds
+    /// since the epoch as a JSON integer**: JSON carries no date type, and a string would have to
+    /// name a format the roster does not otherwise have.
+    #[serde(default)]
+    metadata: serde_json::Map<String, serde_json::Value>,
+}
+
+/// `DELETE /control/views/{group}/{key}`'s query: `?delete_dangling=true`.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DropViewQuery {
+    /// Also delete the entities of this view that hold a row in **no other view**
+    /// (`views.md` §3.4). Sugar over the ordinary deletion path — the entities enter the overlay
+    /// and retire at the fold, like any deletion — and off by default, because dropping a view
+    /// deletes no entity.
+    #[serde(default)]
+    delete_dangling: bool,
+}
+
+/// One supplied metadata value as the roster stores it.
+///
+/// **The JSON shape decides the type, and the group's declaration decides whether that type
+/// belongs** — checked on the executor, against the manifest, beside every other roster rule. A
+/// float and an integer are told apart here rather than coerced: the roster is served typed, and a
+/// client reading `starts` as a float because one record happened to carry one is a client the
+/// declaration cannot help.
+fn metadata_value(name: &str, value: &serde_json::Value) -> Result<ViewMetadataValue, ApiError> {
+    match value {
+        serde_json::Value::Bool(v) => Ok(ViewMetadataValue::Bool(*v)),
+        serde_json::Value::String(v) => Ok(ViewMetadataValue::Text(v.clone())),
+        serde_json::Value::Number(n) => {
+            if let Some(v) = n.as_i64() {
+                // An integer stands for `int`, for a category's code and for `timestamp_us`; which
+                // one it is is the declaration's to say, so the value is carried as both and the
+                // roster picks. A `timestamp_us` is microseconds since the epoch.
+                Ok(ViewMetadataValue::Int(v))
+            } else if let Some(v) = n.as_f64() {
+                Ok(ViewMetadataValue::Float(v))
+            } else {
+                Err(ApiError::Contract(format!(
+                    "metadata '{name}' is a number this build cannot store"
+                )))
+            }
+        }
+        serde_json::Value::Null => Err(ApiError::Contract(format!(
+            "metadata '{name}' is null. Every name a view group declares is required and a roster \
+             record is immutable, so an absent value is one that can never be supplied \
+             (views §3.2)"
+        ))),
+        _ => Err(ApiError::Contract(format!(
+            "metadata '{name}' is an array or an object, and view metadata is one typed scalar \
+             per name (views §3.1). A per-(entity, view) value is an attribute, not metadata"
+        ))),
+    }
+}
+
+/// `PUT /control/views/{group}/{key}` — create a view of a group while the service runs
+/// (`views.md` §3.2, decision 0108).
+///
+/// **Nothing is checked here.** Whether the group exists and whether the key is free are both
+/// state only the write executor may read — a handler that checked first could be overtaken
+/// between its check and the enqueue, and would then have acked two views onto one key. The one
+/// thing this function does is turn JSON into the typed record the roster stores, and refuse a
+/// shape that is not a scalar.
+///
+/// The three answers are the executor's: **404** for a group this deployment does not carry,
+/// **409** for a key that is **live** — a roster record is immutable, so a caller who wants to
+/// change one drops the view first — and **422** for a record refused on its own terms.
+///
+/// **A previously dropped key is a 201, not a 409** ([decision 0115](../../../docs/decisions/0115-a-dropped-view-key-is-reusable.md)):
+/// a key is a name the caller chose, and the immutable-record workflow above is only useful if
+/// the name can come back. The recreated view is empty, and a principal cannot tell it from a key
+/// created for the first time — the incarnation that keeps the predecessor's artifacts out is
+/// internal and reaches no wire surface.
+async fn create_view(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path((group, key)): axum::extract::Path<(String, String)>,
+    body: Json<ViewRecord>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let record = body.0;
+    let mut metadata = std::collections::BTreeMap::new();
+    for (name, value) in &record.metadata {
+        metadata.insert(name.clone(), metadata_value(name, value)?);
+    }
+    let visibility = record.visibility;
+    let (group_name, view_key) = (group.clone(), key.clone());
+    // The **shared** blocking pool, not the deny runtime beside it, on `register_layer`'s rule: a
+    // creation is not a deny, and delaying one under ingest load is backpressure working rather
+    // than a security operation refused.
+    tokio::task::spawn_blocking(move || {
+        state
+            .engine
+            .create_view(group_name, view_key, visibility, metadata)
+    })
+    .await
+    .map_err(crate::error::map_join_error)?
+    .map_err(crate::error::map_accept_error)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "view": format!("{group}:{key}"),
+            "group": group,
+            "key": key,
+        })),
+    ))
+}
+
+/// `DELETE /control/views/{group}/{key}` — drop a view, freeing its key (`views.md` §3.4).
+///
+/// **The key comes back free** (decision 0115). What does not come back is the view: its row
+/// spaces, columns and derived structures stay on disc until the fold reclaims them, stamped with
+/// an incarnation the recreated key does not carry, so a `PUT` under the same name is an *empty*
+/// view rather than the old one under a new record.
+///
+/// **Dropping a view deletes no entity.** `?delete_dangling=true` is for the caller who did mean
+/// "and the items that were only here": the entities of this view that hold a row in no other one
+/// — the commit-window buffer included — are submitted as **ordinary deletions**, which enter the
+/// overlay and retire at the fold like any other (Rule F, write-path §5.4). It is not a second
+/// retirement route. The count is in the body, because a deletion is not undoable and the caller
+/// who asked for it is told what it did, in the same response that accepted the drop.
+async fn drop_view(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path((group, key)): axum::extract::Path<(String, String)>,
+    axum::extract::Query(query): axum::extract::Query<DropViewQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let deleted = tokio::task::spawn_blocking(move || {
+        state.engine.drop_view(group, key, query.delete_dangling)
+    })
+    .await
+    .map_err(crate::error::map_join_error)?
+    .map_err(crate::error::map_accept_error)?;
+    Ok(Json(serde_json::json!({ "deleted": deleted })))
 }
 
 /// Turn a flat member offset back into `(artifact index, member index)`, so a refusal names the
@@ -2174,6 +2749,14 @@ struct PublishBody {
     /// key, so accepting an idset beside one would imply a check that never ran.
     #[serde(default)]
     idset: Option<u32>,
+    /// The space every row's geometry is in where the row names none (`polygon-membership.md`
+    /// §4.3) — its membership shape and its authored shape content alike, which are read in one
+    /// space (§6.1). `"view"` if absent, or `"wgs84"`, which asks the view to project the
+    /// coordinates with the same function it projected its points with. A view whose `projection`
+    /// is `none` has one space and refuses the second; so does a coordinate outside ±180 × ±90 —
+    /// each a `422` naming the row, the whole batch without effect.
+    #[serde(default)]
+    default_space: Option<String>,
     artifacts: Vec<IncomingArtifactBody>,
 }
 
@@ -2201,6 +2784,220 @@ struct IncomingArtifactBody {
     /// stop serving on every route, the ones that traverse no edge included.
     #[serde(default)]
     attached_to: Option<AttachmentBody>,
+    /// This artifact's parents in its layer's hierarchy, **each named by the parent's own key** —
+    /// the artifact row's `parent` column, which is where a `dag` layer's edges are spelled and the
+    /// only place they are ([decision 0125](../../../docs/decisions/0125-a-dag-list-column-is-membership-not-lineage.md)).
+    ///
+    /// Empty at a root. At most one on a `nested` or `tiered` layer, which refuse a second; as many
+    /// as the child sits beneath on a `dag` layer, where a key named twice is one edge
+    /// (`dag-hierarchies.md` §4). By key rather than by ordinal for [`AttachmentBody`]'s reason: a
+    /// publication answers with a `tessera_id` and never a position in a level (C8), so a key is
+    /// the only address a caller holds. The parent must already exist or be **earlier in this same
+    /// batch** — `LayerRegistry::prepare_publish` resolves a sibling's ordinal — which is the
+    /// parent-before-child ordering an edge has always carried
+    /// (`annotation-representation.md` §5.0.4).
+    #[serde(default)]
+    parent: Vec<String>,
+    /// The artifact's shape, in its layer's kind's field and no other — the same row shape the
+    /// build reads (decision 0091; `polygon-membership.md` §6.1, §6.4): `bbox = [min_x, min_y,
+    /// max_x, max_y]`, `circle = [cx, cy, r]`, `ellipse = [cx, cy, a, b, angle]`, or `wkt`.
+    /// Required on a layer whose `shape` declares a kind, refused on every other.
+    #[serde(default)]
+    bbox: Option<Vec<f64>>,
+    #[serde(default)]
+    circle: Option<Vec<f64>>,
+    #[serde(default)]
+    ellipse: Option<Vec<f64>>,
+    #[serde(default)]
+    wkt: Option<String>,
+    /// This row's own space, overriding the batch's `default_space` — for the shape above and for
+    /// the authored shape content this row's `content` carries, which are one producer's geometry
+    /// in one coordinate system.
+    #[serde(default)]
+    space: Option<String>,
+}
+
+/// One ranked content's authored shape — the text at the layer's shape slot — canonicalised for
+/// every view of its layer, by the route [`canonical_row_shape`] takes for a membership shape.
+///
+/// **The `space` is the row's own**, resolved as a membership shape's is: the batch's
+/// `default_space` unless the row overrides it. A drawing and the membership beside it come from
+/// one source in one coordinate system, so a `wgs84` row whose polygon is placed by the view's
+/// transform and whose drawing is not would put the two in different places
+/// (`polygon-membership.md` §6.1, §4.3).
+fn canonical_authored_content(
+    state: &AppState,
+    declaration: &tessera_types::layer::LayerDeclaration,
+    index: usize,
+    rank: usize,
+    kind: tessera_types::layer::ShapeKind,
+    space: tessera_engine::shapes::ShapeSpace,
+    text: &str,
+) -> Result<
+    (
+        tessera_lifecycle::membership::ArtifactShapes,
+        serde_json::Value,
+    ),
+    ApiError,
+> {
+    use tessera_engine::shapes::{authored_shape_input, canonical_shapes, shape_input};
+    let refuse = |detail: String| {
+        ApiError::Contract(format!(
+            "artifact {index}: content {rank}: the authored {} content: {detail}",
+            kind.as_str()
+        ))
+    };
+    let input = authored_shape_input(kind, text).map_err(|e| refuse(e.to_string()))?;
+    let shape = shape_input(kind, input).map_err(|e| refuse(e.to_string()))?;
+    let meta = state.engine.meta();
+    let views: Vec<&str> = declaration.views.iter().map(String::as_str).collect();
+    // **One frame per view of the layer**, and never the bundle's — the bundle has no frame of
+    // its own to read (decision 0040), and a layer's views need share neither projection nor
+    // extent (decision 0111). The shape goes through each view's own transform and is quantised
+    // against each view's own extent; [`layer_frames`] is where the two spans that cannot be
+    // resolved are refused instead.
+    let frames = layer_frames(&meta, &views)?;
+    let canonical = canonical_shapes(&shape, &frames, space, state.max_shape_vertices)
+        .map_err(|e| refuse(e.to_string()))?;
+    let report: Vec<serde_json::Value> = canonical
+        .reports
+        .iter()
+        .map(|(view, r, stats)| {
+            serde_json::json!({
+                "view": view,
+                "clipped": r.clipped,
+                "outside": r.outside,
+                "rings_dropped": r.rings_dropped,
+                "degrees_looking": r.degrees_looking,
+                "vertices_in": r.vertices_in,
+                "vertices_out": r.vertices_out,
+                "parts": stats.parts,
+                "rings": stats.rings,
+            })
+        })
+        .collect();
+    let shapes = tessera_lifecycle::membership::ArtifactShapes::new(canonical.by_view)
+        .ok_or_else(|| refuse("canonicalised to no view".to_string()))?;
+    Ok((shapes, serde_json::Value::Array(report)))
+}
+
+/// One row's shape as the caller wrote it, canonicalised for every view of its layer.
+///
+/// **The same canonicalisation the build applies, and the same report** — clipped, outside, rings
+/// dropped, degrees-looking, the decomposition's size — returned in the response body rather than
+/// printed, so a row published at ingest is published as it would have been at the build. What
+/// refuses is what refuses there: a coordinate that is not one, a non-positive radius or axis, a
+/// polygon over the vertex cap, a kind that is not the layer's, and a `space` the view cannot
+/// honour — each naming the row, the whole batch without effect.
+fn canonical_row_shape(
+    state: &AppState,
+    declaration: &tessera_types::layer::LayerDeclaration,
+    index: usize,
+    artifact: &IncomingArtifactBody,
+    default_space: tessera_engine::shapes::ShapeSpace,
+) -> Result<
+    Option<(
+        tessera_lifecycle::membership::ArtifactShapes,
+        serde_json::Value,
+    )>,
+    ApiError,
+> {
+    use tessera_engine::shapes::{canonical_shapes, shape_input, ShapeInput, ShapeSpace};
+    let refuse = |detail: String| ApiError::Contract(format!("artifact {index}: {detail}"));
+    let mut carried: Vec<(&str, ShapeInput)> = Vec::new();
+    let count = |field: &str, n: usize, want: usize| {
+        refuse(format!("`{field}` has {n} value(s); it is exactly {want}"))
+    };
+    if let Some(v) = &artifact.bbox {
+        let [a, b, c, d] = v[..] else {
+            return Err(count("bbox", v.len(), 4));
+        };
+        carried.push(("bbox", ShapeInput::Bbox([a, b, c, d])));
+    }
+    if let Some(v) = &artifact.circle {
+        let [a, b, c] = v[..] else {
+            return Err(count("circle", v.len(), 3));
+        };
+        carried.push(("circle", ShapeInput::Circle([a, b, c])));
+    }
+    if let Some(v) = &artifact.ellipse {
+        let [a, b, c, d, e] = v[..] else {
+            return Err(count("ellipse", v.len(), 5));
+        };
+        carried.push(("ellipse", ShapeInput::Ellipse([a, b, c, d, e])));
+    }
+    if let Some(text) = &artifact.wkt {
+        carried.push(("wkt", ShapeInput::Wkt(text.clone())));
+    }
+    let Some(kind) = declaration.shape.map(|s| s.kind) else {
+        if !carried.is_empty() {
+            return Err(refuse(
+                "carries a shape, and this layer declares no `shape`. Its members come from the \
+                 stored set its membership names, so a shape beside them is a region nothing \
+                 evaluates"
+                    .to_string(),
+            ));
+        }
+        return Ok(None);
+    };
+    let space = match artifact.space.as_deref() {
+        None => default_space,
+        Some(word) => ShapeSpace::parse(word).map_err(|e| refuse(format!("`space`: {e}")))?,
+    };
+    let input = match carried.len() {
+        0 => {
+            return Err(refuse(format!(
+                "carries no shape, and this layer's `shape` declares a {}. The shape is the \
+                 whole of such an artifact's membership, so one published without it would count \
+                 zero for every viewer",
+                kind.as_str()
+            )))
+        }
+        1 => carried.pop().expect("one").1,
+        _ => {
+            return Err(refuse(format!(
+                "carries {} — one row has one shape, in its layer's kind's field",
+                carried
+                    .iter()
+                    .map(|(f, _)| format!("`{f}`"))
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            )))
+        }
+    };
+    let shape = shape_input(kind, input).map_err(|e| refuse(e.to_string()))?;
+    let meta = state.engine.meta();
+    let views: Vec<&str> = declaration.views.iter().map(String::as_str).collect();
+    // **One frame per view of the layer**, and never the bundle's — the bundle has no frame of
+    // its own to read (decision 0040), and a layer's views need share neither projection nor
+    // extent (decision 0111). The shape goes through each view's own transform and is quantised
+    // against each view's own extent; [`layer_frames`] is where the two spans that cannot be
+    // resolved are refused instead.
+    let frames = layer_frames(&meta, &views)?;
+    let canonical = canonical_shapes(&shape, &frames, space, state.max_shape_vertices)
+        .map_err(|e| refuse(e.to_string()))?;
+    let report: Vec<serde_json::Value> = canonical
+        .reports
+        .iter()
+        .map(|(view, r, stats)| {
+            serde_json::json!({
+                "view": view,
+                "clipped": r.clipped,
+                "outside": r.outside,
+                "rings_dropped": r.rings_dropped,
+                "degrees_looking": r.degrees_looking,
+                "vertices_in": r.vertices_in,
+                "vertices_out": r.vertices_out,
+                "parts": stats.parts,
+                "rings": stats.rings,
+                "interior_tiles": stats.interior_tiles,
+                "boundary_cells": stats.boundary_cells,
+            })
+        })
+        .collect();
+    let shapes = tessera_lifecycle::membership::ArtifactShapes::new(canonical.by_view)
+        .ok_or_else(|| refuse("the layer is drawn in no view".to_string()))?;
+    Ok(Some((shapes, serde_json::Value::Array(report))))
 }
 
 /// How a caller names an attachment's target.
@@ -2257,19 +3054,113 @@ struct IncomingContentBody {
 async fn publish_artifacts(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
-    body: Json<PublishBody>,
+    body: Result<Json<PublishBody>, axum::extract::rejection::JsonRejection>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    // Contracts §3.1's 422 row is "malformed request, **bounds exceeded**", and a `JsonRejection`
+    // is one or the other. Branched on the rejection's own status rather than collapsed, on
+    // [`ingest`]'s argument: a caller whose 4 KB body was truncated mid-upload must not be told to
+    // publish fewer artifacts. The rejection's `Display` is not forwarded (this module's rule).
+    let body = body.map_err(|rejection| {
+        if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            ApiError::Contract(format!(
+                "the publication body exceeds the {PUBLISH_MAX_BODY_BYTES}-byte per-request cap; \
+                 refused before decoding, so it allocated no ordinal and appended nothing. Send \
+                 fewer artifacts per request — but a single artifact's membership has no smaller \
+                 spelling, the batch being the commit unit"
+            ))
+        } else {
+            ApiError::Contract(
+                "the publication body is not the JSON this route takes, or the connection failed \
+                 mid-upload. Nothing was decoded, allocated or appended"
+                    .to_string(),
+            )
+        }
+    })?;
     let PublishBody {
         level,
         addressing,
         idset,
-        artifacts,
+        default_space,
+        mut artifacts,
     } = body.0;
 
     if artifacts.is_empty() {
         return Err(ApiError::Contract(
             "a publication carries at least one artifact".to_string(),
         ));
+    }
+
+    // **The shapes, canonicalised before anything is resolved or allocated** — a refusal spends
+    // nothing, and the batch is the commit unit. The layer's declaration is the engine's state;
+    // a layer this deployment does not hold is the engine's refusal below, so here it simply
+    // canonicalises nothing.
+    let default_space = match default_space.as_deref() {
+        None => tessera_engine::shapes::ShapeSpace::View,
+        Some(word) => tessera_engine::shapes::ShapeSpace::parse(word)
+            .map_err(|e| ApiError::Contract(format!("`default_space`: {e}")))?,
+    };
+    let declaration = state
+        .engine
+        .registered_layer(&name)
+        .map(|registered| registered.declaration);
+    let mut shapes: Vec<Option<tessera_lifecycle::membership::ArtifactShapes>> =
+        Vec::with_capacity(artifacts.len());
+    let mut shape_reports: Vec<serde_json::Value> = Vec::new();
+    for (index, artifact) in artifacts.iter().enumerate() {
+        match &declaration {
+            Some(declaration) => {
+                match canonical_row_shape(&state, declaration, index, artifact, default_space)? {
+                    Some((canonical, report)) => {
+                        shapes.push(Some(canonical));
+                        shape_reports.push(serde_json::json!({
+                            "key": artifact.key,
+                            "views": report,
+                        }));
+                    }
+                    None => shapes.push(None),
+                }
+            }
+            None => shapes.push(None),
+        }
+    }
+    // **The authored shape content, read as a membership shape is** (`polygon-membership.md`
+    // §6.1, ruling (h)): where the layer declares a `polygon`, `circle` or `ellipse` content, that
+    // slot of every ranked content is canonicalised for every view of the layer — the same
+    // reader, the same report, the same vertex cap and **the same space**, the batch's
+    // `default_space` and the row's own `space` — and the slot then holds the canonical bytes
+    // in their content spelling, which is what the blob stores and the serve reads back into
+    // `shape_x`/`shape_y`. Refused as a membership shape is refused, naming the row.
+    if let Some((slot, kind)) = declaration.as_ref().and_then(|d| d.authored_shape()) {
+        let declaration = declaration.as_ref().expect("an authored slot names a declaration");
+        for (index, artifact) in artifacts.iter_mut().enumerate() {
+            let space = match artifact.space.as_deref() {
+                None => default_space,
+                Some(word) => tessera_engine::shapes::ShapeSpace::parse(word).map_err(|e| {
+                    ApiError::Contract(format!("artifact {index}: `space`: {e}"))
+                })?,
+            };
+            for (rank, content) in artifact.content.iter_mut().enumerate() {
+                let Some(text) = content.values.get_mut(slot) else {
+                    // Short of a value: the engine refuses the row below, naming the count.
+                    continue;
+                };
+                let (canonical, report) = canonical_authored_content(
+                    &state,
+                    declaration,
+                    index,
+                    rank,
+                    kind,
+                    space,
+                    text,
+                )?;
+                shape_reports.push(serde_json::json!({
+                    "key": artifact.key,
+                    "content": rank,
+                    "views": report,
+                }));
+                *text = canonical.content_text();
+            }
+        }
     }
 
     // Flattened once, so each address form is resolved in a single batched call whatever the shape
@@ -2359,7 +3250,8 @@ async fn publish_artifacts(
     let mut entities = resolved.into_iter().flatten();
     let incoming: Vec<tessera_lifecycle::IncomingArtifact> = artifacts
         .into_iter()
-        .map(|artifact| {
+        .zip(shapes)
+        .map(|(artifact, shape)| {
             let members: Vec<tessera_types::EntityId> =
                 entities.by_ref().take(artifact.members.len()).collect();
             let contents: Vec<tessera_lifecycle::membership::IncomingContent> = artifact
@@ -2378,7 +3270,7 @@ async fn publish_artifacts(
                     key: a.key,
                 }
             });
-            match attached_to {
+            let mut incoming = match attached_to {
                 None => tessera_lifecycle::IncomingArtifact::with_content(
                     artifact.key,
                     members,
@@ -2390,7 +3282,10 @@ async fn publish_artifacts(
                     contents,
                     attached_to,
                 ),
-            }
+            };
+            incoming.shape = shape;
+            incoming.parent_keys = artifact.parent;
+            incoming
         })
         .collect();
     let keys: Vec<Option<String>> = incoming.iter().map(|a| a.key.clone()).collect();
@@ -2409,10 +3304,14 @@ async fn publish_artifacts(
         .zip(keys)
         .map(|(id, key)| serde_json::json!({ "key": key, "tessera_id": id.raw().to_string() }))
         .collect();
-    Ok((
-        StatusCode::CREATED,
-        Json(serde_json::json!({ "artifacts": published })),
-    ))
+    // **The same report the build prints, in the body** (`polygon-membership.md` §6.4): what
+    // canonicalisation did to each shape, per view, and what its decomposition holds. Absent
+    // where the layer declares no shape, so the enumerated case's response is unchanged.
+    let mut body = serde_json::json!({ "artifacts": published });
+    if !shape_reports.is_empty() {
+        body["shapes"] = serde_json::Value::Array(shape_reports);
+    }
+    Ok((StatusCode::CREATED, Json(body)))
 }
 
 /// `POST /control/faults/arm` — the correctness suite's arming surface (decision 0071;
@@ -2911,7 +3810,9 @@ mod tests {
         ) -> Result<Vec<RawIngestItem>, ApiError> {
             parse_ingest_batch(
                 &body(column, nullable),
+                Projection::None,
                 &declared(),
+                &[],
                 &vocabularies(),
                 &no_layers,
             )
@@ -3001,7 +3902,9 @@ mod tests {
         fn a_novel_key_under_a_discovered_vocabulary_travels_unresolved() {
             let items = parse_ingest_batch(
                 &body(Arc::new(StringArray::from(vec!["k9-unit"])), false),
+                Projection::None,
                 &declared(),
+                &[],
                 &vocabularies_of(VocabularyKind::Discovered),
                 &no_layers,
             )
@@ -3020,7 +3923,9 @@ mod tests {
         fn a_bound_key_under_a_discovered_vocabulary_still_resolves_here() {
             let items = parse_ingest_batch(
                 &body(Arc::new(StringArray::from(vec!["ops"])), false),
+                Projection::None,
                 &declared(),
+                &[],
                 &vocabularies_of(VocabularyKind::Discovered),
                 &no_layers,
             )

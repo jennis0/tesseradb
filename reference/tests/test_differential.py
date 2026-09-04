@@ -67,6 +67,23 @@ def _descriptor_str(d: bytes) -> str:
     return d.decode("ascii")
 
 
+def _pair_backed_descriptor(bundle: Bundle) -> bytes:
+    """The first dictionary descriptor with pairs rows behind it.
+
+    `public` is interned at term 0 — the declaration's default-visibility term, which grants by
+    default rather than through the pairs relation, so its mask over pairs is empty. The three
+    tests that took `dictionary[0]` as "the first corpus term" predate that interning and only
+    meet it on a freshly built fixture; the mask catalogue met the same shift
+    (`oracle/catalogue.py`'s header). The tests that share a mask across a session-scoped server
+    (see `test_items_drilldown_returns_expected_external_id`'s comment) all derive it from this
+    one descriptor, so their disjoint-ends reservation still holds.
+    """
+    for descriptor in bundle.dictionary:
+        if mask_mod.mask_of({bundle.term_id_of(descriptor)}, bundle.pairs_path()):
+            return descriptor
+    raise AssertionError("no dictionary descriptor is granted to any entity through pairs")
+
+
 def _random_grant_sets(descriptors: list[bytes], rng: random.Random) -> list[list[bytes]]:
     """20 grant sets: one empty, one everything, the rest random subsets of mixed size."""
     sets: list[list[bytes]] = [[]]
@@ -181,8 +198,8 @@ def _grid_differential(server, oracle_bundle: Bundle, *, require_partial: bool =
                 morton.tiles_for_bbox(bbox, zoom, oracle_bundle.extent)
             )
 
-            server_tile_map = {t: v for t, v, m, _s in server_tiles}
-            for t, v, m, _s in server_tiles:
+            server_tile_map = {t: v for t, v, m, _s, _h in server_tiles}
+            for t, v, m, _s, _h in server_tiles:
                 assert v == m, "Phase 1 has no filters: matched must equal visible"
             assert server_tile_map == oracle_tile_counts, (
                 f"tile counts disagree for zoom={zoom} bbox={bbox} grant_size={len(grant)}: "
@@ -196,7 +213,7 @@ def _grid_differential(server, oracle_bundle: Bundle, *, require_partial: bool =
             # which cannot be recomputed from k and visible alone. That is the whole reason `served`
             # is on the wire.
             cursor = 0
-            for t, _visible, _matched, served_n in server_tiles:
+            for t, _visible, _matched, served_n, _h in server_tiles:
                 tile_points = server_points[cursor : cursor + served_n]
                 cursor += served_n
                 # Counter, not set: two distinct entities can share a position within a tile,
@@ -234,7 +251,7 @@ def _grid_differential(server, oracle_bundle: Bundle, *, require_partial: bool =
 
 
 def _visible_of(server_tiles, tile):
-    for t, v, _m, _s in server_tiles:
+    for t, v, _m, _s, _h in server_tiles:
         if t == tile:
             return v
     raise AssertionError(f"tile {tile} not in the tiles batch")
@@ -250,7 +267,7 @@ def _oracle_counts(bundle, base_mask, view_id, zoom, bbox):
 
 def test_suppress_over_control_plane_drops_the_count(server, oracle_bundle: Bundle):
     """(d) suppress over the control plane -> oracle told to drop it -> counts re-agree."""
-    descriptor = oracle_bundle.dictionary[0]
+    descriptor = _pair_backed_descriptor(oracle_bundle)
     term_id = oracle_bundle.term_id_of(descriptor)
     base_mask = mask_mod.mask_of({term_id}, oracle_bundle.pairs_path())
     assert len(base_mask) > 1, "need at least two visible entities to suppress one meaningfully"
@@ -263,7 +280,7 @@ def test_suppress_over_control_plane_drops_the_count(server, oracle_bundle: Bund
 
     raw_before = server.viewport(token, VIEW, zoom, bbox, k=200)
     tiles_before, _ = decode_viewport(raw_before)
-    counts_before = {t: v for t, v, m, _s in tiles_before}
+    counts_before = {t: v for t, v, m, _s, _h in tiles_before}
     oracle_before = _oracle_counts(oracle_bundle, base_mask, VIEW, zoom, bbox)
     assert counts_before == oracle_before
 
@@ -277,7 +294,7 @@ def test_suppress_over_control_plane_drops_the_count(server, oracle_bundle: Bund
 
     raw_after = server.viewport(token, VIEW, zoom, bbox, k=200)
     tiles_after, _ = decode_viewport(raw_after)
-    counts_after = {t: v for t, v, m, _s in tiles_after}
+    counts_after = {t: v for t, v, m, _s, _h in tiles_after}
     resolved_mask = changes.resolve(base_mask, {term_id})
     oracle_after = _oracle_counts(oracle_bundle, resolved_mask, VIEW, zoom, bbox)
 
@@ -299,13 +316,14 @@ def test_mixed_change_composition_stress(server, oracle_bundle: Bundle):
     422, so the two subtracting ops are the whole of what an overlay can now hold. The refusal
     itself is pinned in `conformance/tests/test_overlay_journal.py`, where the journal rules live."""
     dictionary = oracle_bundle.dictionary
-    term_a = 0
+    descriptor_a = _pair_backed_descriptor(oracle_bundle)
+    term_a = oracle_bundle.term_id_of(descriptor_a)
     session_terms = {term_a}
 
     base_mask = mask_mod.mask_of(session_terms, oracle_bundle.pairs_path())
-    assert len(base_mask) >= 2, "fixture must have enough term-0 members for this stress test"
+    assert len(base_mask) >= 2, "fixture must have enough members of this term for the stress test"
 
-    auth = server.authorise([_descriptor_str(dictionary[term_a])])
+    auth = server.authorise([_descriptor_str(descriptor_a)])
     token = auth["token"]
 
     bbox = (0.0, 0.0, GRID_MAX, GRID_MAX)
@@ -350,7 +368,7 @@ def test_mixed_change_composition_stress(server, oracle_bundle: Bundle):
 
     raw = server.viewport(token, VIEW, zoom, bbox, k=200)
     tiles, _ = decode_viewport(raw)
-    server_counts = {t: v for t, v, m, _s in tiles}
+    server_counts = {t: v for t, v, m, _s, _h in tiles}
     oracle_counts = _oracle_counts(oracle_bundle, resolved_mask, VIEW, zoom, bbox)
 
     assert server_counts == oracle_counts
@@ -365,7 +383,7 @@ def test_items_drilldown_returns_expected_external_id(server, oracle_bundle: Bun
     if oracle_bundle.identity_key is None:
         pytest.skip("bundle has no `identity` object in MANIFEST (pre-r6 bundle)")
 
-    descriptor = oracle_bundle.dictionary[0]
+    descriptor = _pair_backed_descriptor(oracle_bundle)
     term_id = oracle_bundle.term_id_of(descriptor)
     base_mask = mask_mod.mask_of({term_id}, oracle_bundle.pairs_path())
     assert base_mask, "need at least one visible entity"

@@ -177,11 +177,13 @@ fn the_manifest_publish_site_parks_a_flush_with_its_segment_unreferenced() {
     let row = UnallocatedRow {
         external_id: Some(b"seam-flush-1".to_vec()),
         view: "s0".to_string(),
+        join: None,
         x: 5.0,
         y: 5.0,
         scalars: Vec::new(),
         terms: engine.resolve_terms(&descriptors),
         descriptors,
+        scoped: Vec::new(),
     };
     engine
         .accept_ingest(vec![row], "seam-batch-1".to_string(), [0u8; 32])

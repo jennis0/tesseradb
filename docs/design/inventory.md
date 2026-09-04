@@ -31,7 +31,7 @@ the other.
 | **I13b** | a partition not consulted fails closed |
 | **I13c** | a partition unreachable through outage is an error, never an empty contribution |
 
-## Leak register (29 rows)
+## Leak register (33 rows)
 
 Exhaustive by construction: a disclosure not in this table is a bug, not an omission.
 
@@ -65,7 +65,11 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | **C26** | Drill-down decompression time over the record blob | Low | Accepted — named at the record blob's design |
 | **C27** | An artifact layer's member-label declaration — artifact_visibility = { field, … } | Medium | Accepted — caller's control (⊘ not built) |
 | **C28** | A caller's membership requirement on supplied content — require_member_visibility | High if mis-declared | Accepted — caller's control (⊘ not built) |
-| **C29** | An artifact's parent identifier on the wire | Low | Accepted — bounded to the response's own membership |
+| **C29** | An artifact's parent identifiers on the wire | Low | Accepted — bounded to the response's own membership |
+| **C30** | An item's satisfied labels, its reachable views and their positions, and its scoped values, on the drill-down | Low | Accepted — the intersection is the disclosure, and it is the principal's own; the views and values are the principal's own too |
+| **C31** | Listing and suggestion time on a derived category column | Low | Accepted — owner ruling 2026-09-02; narrowed for indexed columns once the per-session set is warm (decision 0124): no posting is read, the walk over entries remains. Unnarrowed on the probe route — the first keystrokes on a session-column pair, viewers wider than the constant, a value minted since the sweep, blob-resident columns, and the enumeration. (0124 and r60 read this as closed, on a set walk over positions inside the prefix range that is not implementable; value-suggestion.md r5 §6.3 carries the correction) |
+| **C32** | A highlight's counts and bits — highlighted per tile, per served point and per served artifact (highlight-and-hierarchy.md §2) | Low | Accepted — a second filter over the same candidate (⊘ not built) |
+| **C33** | The browse verb — a layer's artifacts by lineage (highlight-and-hierarchy.md §4) | Low | Accepted — bounded to what a viewport already serves (⊘ not built) |
 
 ## Documents
 
@@ -73,37 +77,48 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 
 | Document | Status | ⊘ |
 |---|---|---|
-| `annotation-representation.md` | Normative for the annotation representat | 39 |
-| `annotation-write-cycle.md` | Normative for the annotation write cycle | 18 |
-| `annotations.md` | Normative — r43 | 18 |
-| `architecture.md` | Normative — r49 | 37 |
+| `annotation-representation.md` | Normative for the annotation representat | 38 |
+| `annotation-write-cycle.md` | Normative for the annotation write cycle | 15 |
+| `annotations.md` | Normative — r43 | 17 |
+| `architecture.md` | Normative — r61 | 48 |
+| `artifact-fetch-protocol.md` | Normative — r3 | 6 |
 | `artifact-serving-at-scale.md` | Ruled, reviewed, amended, and re-measure | 22 |
+| `artifact-shapes.md` | Normative — r7 |  |
 | `artifact-system.md` | Descriptive. This document orients an ar | 6 |
-| `artifacts-from-points.md` | Draft | 2 |
+| `artifacts-from-points.md` | Draft | 1 |
 | `caching.md` | Provisional — under review |  |
 | `client-architecture.md` | Provisional — under review |  |
+| `client-components.md` | Provisional — under review | 10 |
 | `client-interaction.md` | Provisional — under review |  |
-| `compaction.md` | Normative — r11 | 9 |
-| `concurrency-lifecycle.md` | Normative — r11 | 13 |
-| `configuration.md` | Normative for the build-time configurati | 28 |
-| `conformance.md` | Normative — r15 | 20 |
-| `contracts.md` | Normative — r37 | 23 |
+| `client-obligations.md` | Provisional — under review |  |
+| `compaction.md` | Normative — r12 | 8 |
+| `concurrency-lifecycle.md` | Normative — r11 | 11 |
+| `configuration.md` | Normative for the build-time configurati | 22 |
+| `conformance.md` | Normative — r22 | 16 |
+| `contracts.md` | Normative — r76 | 29 |
 | `core-access-expressions.md` | Provisional — under review | 1 |
 | `correctness-suite.md` | Provisional — under review | 13 |
+| `dag-hierarchies.md` | Normative — r3 | 3 |
 | `deferred-index-ordinal-split.md` | Deferred |  |
 | `deferred-signature-major-layout.md` | Deferred |  |
 | `delta-serving.md` | Provisional — under review | 3 |
-| `filter-index.md` | Provisional — under review | 12 |
+| `filter-index.md` | Provisional — under review | 13 |
 | `filter-result-cache.md` | Provisional — under review | 7 |
-| `filter-surface.md` | Provisional — under review | 8 |
+| `filter-surface.md` | Provisional — under review | 6 |
 | `geometry-pinning.md` | Normative. Reviewed three times (invaria |  |
+| `highlight-and-hierarchy.md` | Normative — r6 | 10 |
 | `hot-row-geometry.md` | Normative. The §6 amendments are folded  | 2 |
 | `measurement.md` | Provisional — under review | 5 |
 | `per-point-attributes.md` | Provisional — under review | 6 |
 | `performance-suite.md` | Provisional — under review | 9 |
-| `records-and-search.md` | Provisional — under review | 29 |
+| `polygon-membership.md` | Normative — r10 | 12 |
+| `projections.md` | Normative — r8 | 3 |
+| `records-and-search.md` | Provisional — under review | 25 |
+| `selection-operand.md` | Normative — r2 | 2 |
 | `streamed-serving.md` | Normative — r2 |  |
-| `system-architecture.md` | Normative — r17 | 28 |
+| `system-architecture.md` | Normative — r17 | 23 |
 | `tile-addressed-integration.md` | Provisional — under review |  |
-| `views-and-multi-table.md` | Provisional — under review | 8 |
-| `write-path.md` | Normative for the write path. Owner sign | 20 |
+| `value-suggestion.md` | Normative — r5 | 12 |
+| `view-switching.md` | Provisional — under review | 4 |
+| `views.md` | Normative — r29 | 14 |
+| `write-path.md` | Normative for the write path. Owner sign | 11 |

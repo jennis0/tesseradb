@@ -46,9 +46,15 @@ rustc-hash = "1"
 # Self dev-dependency, the same shape as tessera-lifecycle's and tessera-engine's: this crate's
 # integration tests run against the faults build so the arming surface is exercised over real
 # HTTP, and `cargo tree -e normal` does not see this edge — which is what keeps rule 2 green.
-tessera-server = { path = ".", features = ["fault-injection"] }
+# `bench-timing` is named for the same reason as in `tessera-engine`: so `-p` and `--workspace`
+# select the same tests rather than agreeing only by accident of `tessera-bench`'s default feature.
+# Two of the byte-identity tests here force the parallel tile fan-out behind it. Compiling it in
+# does not emit the header — that still needs `[serve] stage_timing = true`, which defaults false.
+tessera-server = { path = ".", features = ["fault-injection", "bench-timing"] }
 tempfile = { workspace = true }
 tessera-build = { path = "../tessera-build" }
 tessera-spatial = { path = "../tessera-spatial" }
 parquet = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+jsonschema = { version = "0.51", default-features = false }
+serde_yaml_ng = "0.10"

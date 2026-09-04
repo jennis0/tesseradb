@@ -193,6 +193,32 @@ decimal string, not as 8 raw LE bytes, so the binary scan is structurally blind 
 {tessera_id}`, and the raw response bytes are decimal-string- and byte-substring-scanned exactly
 like the log.
 
+**The drill-down's positions are trimmed from the decimal sweep, and only they are** (owner
+ruling 2026-09-01; contracts §3.2 r68). `POST /v1/items/{tessera_id}` now carries a `views` array
+with each reachable view's `x` and `y` — the two 32-bit axes of the row's stored position, which is
+the same quantity the points batch's `code` column carries under a bit permutation (`code` *is*
+`x` and `y` interleaved). `code` has never been swept against the unfiltered target set for exactly
+this reason: the `SAFE_ID_FLOOR` section above records that a point at the extent origin quantises
+to `0` on both axes and therefore equals entity id **0**, and that this fired on essentially every
+run. An axis on the drill-down is that same class of value arriving as decimal text, where the
+sweep has no alignment to filter it by — so the two fields are parsed out and the rest of the body
+is scanned, rather than the floor being raised or the whole route exempted.
+
+*The rate this removes, measured rather than argued.* Each axis is uniform over `2^32` and the
+floored target set is 50,000 wide, so a coincidence costs `50_000 / 2^32 ≈ 1.2e-5` per axis; at
+`ITEM_SAMPLE_SIZE` items and one view each in this fixture that is about **`6e-4` per run**. It is
+**linear in sampled items × views per item**, so a six-view corpus with a larger sample reaches the
+low single digits of a percent — a test that fails one run in a few hundred, for a reason nobody
+can reproduce, spends more than the coverage is worth.
+
+*The residual, stated as this file states its others.* An entity id smuggled into an `x` or a `y`
+is not caught here. It is caught by the `code` column's own sweep on every viewport response the
+same point appears in — the same bits, on a route with an alignment to sweep by — so what is left
+uncovered is a leak that reaches the drill-down's copy of a position and never the wire's.
+`test_every_scan_mechanism_catches_a_planted_entity_id` plants an id in `fields` and asserts it
+survives the trim, which is what keeps the trim from quietly widening into an exemption for the
+route.
+
 **Why the log scan needs its own decimal-string pass, not just the binary one.** Unaffected by
 this revision: `tracing` emits human-readable text; a leaked id there would appear as an ASCII
 decimal substring, never as a raw little-endian integer in the general case. Both scans are kept:
@@ -238,6 +264,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import re
 from pathlib import Path
 
@@ -304,6 +331,49 @@ def _decimal_windows(data: bytes, floor: int) -> set[int]:
         if v >= floor:
             out.add(v)
     return out
+
+
+def _item_body_without_positions(body: bytes) -> bytes:
+    """One `/v1/items/{tessera_id}` body with **`views[*].x` and `views[*].y` removed**, and
+    nothing else removed, re-serialised for the decimal sweep.
+
+    **Why a position is trimmed, and why only a position.** A view's `x`/`y` are the two 32-bit
+    axes of the row's stored position (contracts §3.2 r68) — the same quantity the points batch's
+    `code` column carries, deinterleaved: `code` *is* `x` and `y` interleaved, so a position on
+    this route and a code on that one are one value under a bit permutation. `code` has never been
+    checked against the unfiltered target set for exactly this reason (module doc's `SAFE_ID_FLOOR`
+    section: a point at the extent origin quantises to `0` on both axes, which numerically equals
+    entity id **0**, a real and always-present member of a dense `0..N` id space). An axis is a
+    uniform 32-bit quantity with no relationship to the id space at all, and the decimal sweep has
+    no alignment to filter it by — so it is trimmed here rather than floored, and `code`'s own
+    binary sweep, which does have an alignment, keeps the coverage.
+
+    **The residual, stated rather than argued.** Trimming the two fields removes them from this
+    sweep, so an entity id smuggled into an `x` or a `y` would not be caught here. It would be
+    caught by the `code` column's sweep on every viewport response the same point appears in, that
+    column being where the same bits live; a leak reaching only the drill-down's copy of a position
+    and never the wire's is the gap, and it is narrower than the false-positive rate the trim
+    removes. Today that rate is about `6e-4` per run — `ITEM_SAMPLE_SIZE` items, one view each in
+    this fixture, two axes, each uniform over `2^32` against the 50,000-wide floored target set —
+    and it is **linear in sampled items × views per item**, so a fixture with six views and a
+    larger sample reaches the low single digits of a percent. A test that fails one run in a
+    thousand for a reason nobody can reproduce is worse than the coverage it buys.
+
+    Everything else in the body is scanned exactly as before, `scoped`'s values included: a scoped
+    attribute's value is a corpus value under a caller's own key, and a build that put an id there
+    is precisely the shape this module exists to catch.
+    """
+    try:
+        parsed = json.loads(body)
+    except (ValueError, UnicodeDecodeError):
+        # A refusal body, or anything else this route can answer with, is scanned whole — the trim
+        # is for a field that only a 200 has.
+        return body
+    for view in parsed.get("views", []) if isinstance(parsed, dict) else []:
+        if isinstance(view, dict):
+            view.pop("x", None)
+            view.pop("y", None)
+    return json.dumps(parsed).encode()
 
 
 def _points_value_buffer_windows(points_bytes: bytes) -> tuple[set[int], set[int]]:
@@ -550,6 +620,36 @@ def test_every_scan_mechanism_catches_a_planted_entity_id():
     )
     assert _le_windows(log_bytes, 8) & targets, "the 8-byte binary log sweep did not catch a plant"
     assert _le_windows(log_bytes, 4) & targets, "the 4-byte binary log sweep did not catch a plant"
+
+    # 6. The drill-down's **positional trim** (contracts §3.2 r68): `views[*].x` and `views[*].y`
+    #    are removed before the decimal sweep, and the plant is what proves the trim removes those
+    #    two fields and nothing else. An id planted in `fields` — a corpus value under a declared
+    #    column name, which is the shape a build putting an id where a value belongs would produce
+    #    — must survive the trim and be caught; the same id sitting in an axis must not be, which
+    #    is the trim working rather than failing.
+    item_body = json.dumps(
+        {
+            "fields": {"revision": planted},
+            "labels": ["public"],
+            "views": [{"id": "world", "x": planted, "y": 7}],
+            "scoped": {},
+        }
+    ).encode()
+    assert _decimal_windows(_item_body_without_positions(item_body), SAFE_ID_FLOOR) & targets, (
+        "the drill-down's decimal sweep did not catch an entity id planted in `fields`; the "
+        "positional trim has blanked more than the two axes it is allowed to"
+    )
+    axis_only = json.dumps(
+        {"fields": {}, "labels": [], "views": [{"id": "world", "x": planted, "y": 7}], "scoped": {}}
+    ).encode()
+    assert not (_decimal_windows(_item_body_without_positions(axis_only), SAFE_ID_FLOOR) & targets), (
+        "the positional trim did not remove `views[*].x`, so the sweep still reads a grid "
+        "coordinate as a candidate id"
+    )
+    assert _decimal_windows(axis_only, SAFE_ID_FLOOR) & targets, (
+        "the untrimmed body does not carry the axis at all, so the assertion above passes for the "
+        "wrong reason"
+    )
 
     clean_log = b"2026-08-01T00:00:00Z INFO tessera_server: served zoom=4 k=20 status=200\n"
     assert not (_decimal_windows(clean_log, SAFE_ID_FLOOR) & targets), (
@@ -800,7 +900,13 @@ def test_no_entity_id_key_or_misplaced_external_id_crosses_the_wire_or_appears_i
         resp = server.item(token, tid)
         # A tessera_id may legitimately be denied-by-race or already retired; any 2xx/4xx body is
         # still text worth scanning either way, so no status-code assertion is made here.
-        item_decimal_hits |= _decimal_windows(resp.content, SAFE_ID_FLOOR)
+        # The positions are trimmed and nothing else is — see `_item_body_without_positions`.
+        # The **untrimmed** bytes go on `item_bodies`, which is the external-id substring sweep
+        # below: an external id is bytes rather than a decimal run, and the trim is the decimal
+        # sweep's alone.
+        item_decimal_hits |= _decimal_windows(
+            _item_body_without_positions(resp.content), SAFE_ID_FLOOR
+        )
         item_bodies.append(resp.content)
     leaked_items = item_decimal_hits & target_ids_high
     assert not leaked_items, (

@@ -183,13 +183,22 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
     write_pairs(&pairs);
 
     let args = BuildArgs {
-        point_fields: Default::default(),
-        points: points.clone(),
+        arena_order: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: points.clone(),
+            point_fields: Default::default(),
+            select: None,
+            access: tessera_build::config::AccessInput::relation(pairs.clone()),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: Vec::new(),
-        access: tessera_build::config::AccessInput::relation(pairs.clone()),
         out: out.clone(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -197,6 +206,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
         mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
@@ -209,7 +219,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
 
     // ---- (a) manifests present, digests verify (open_bundle is the read protocol) ----------
     let bundle = open_bundle(&out).expect("open_bundle must verify the freshly built bundle");
-    assert_eq!(bundle.manifest.bundle_format, 3);
+    assert_eq!(bundle.manifest.bundle_format, 5);
     assert_eq!(bundle.manifest.entity_id_high_water, N_ITEMS);
     assert_eq!(bundle.manifest.small_term_threshold, 32);
     assert_eq!(bundle.manifest.partitions.len(), 1);
@@ -217,7 +227,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
     assert!(bundle.manifest.partitions[0].required_terms.is_empty());
     assert_eq!(bundle.manifest.views.len(), 1);
     assert_eq!(bundle.manifest.views[0].id, "s0");
-    assert_eq!(bundle.manifest.quantisation.x_max, 1000.0);
+    assert_eq!(bundle.manifest.views[0].quantisation.x_max, 1000.0);
     assert!(!bundle.manifest.data_plugin_hash.is_empty());
     assert_eq!(
         bundle.manifest.provenance["generating_set_choice"],
@@ -259,6 +269,11 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
         "partitions/default/terms/pairs.parquet",
         "partitions/default/entities/external-ids-0.arrow",
         "partitions/default/entities/ext-locator.u32",
+        // The entity→term transpose (contracts §2.4), unconditional: every entity has a label
+        // set, so a build always writes one, and a bundle without it refuses at open.
+        "partitions/default/entities/terms/hasrow.roaring",
+        "partitions/default/entities/terms/offsets.u32",
+        "partitions/default/entities/terms/terms.u32",
         "partitions/default/views/s0/permutation.bin",
         "partitions/default/views/s0/row-entity.u32",
         "partitions/default/views/s0/segments/seg-0/columns.arrow",
@@ -272,7 +287,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
     }
     assert_eq!(
         bundle.manifest.files.len(),
-        9,
+        12,
         "MANIFEST.json must list every build-written file and nothing else"
     );
 
@@ -478,13 +493,22 @@ fn build_refuses_to_clobber_an_existing_bundle() {
     write_points(&points);
     write_pairs(&pairs);
     let args = BuildArgs {
-        point_fields: Default::default(),
+        arena_order: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points,
+            point_fields: Default::default(),
+            select: None,
+            access: tessera_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: Vec::new(),
-        points,
-        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.clone(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -492,6 +516,7 @@ fn build_refuses_to_clobber_an_existing_bundle() {
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
         mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
@@ -507,21 +532,35 @@ fn build_refuses_to_clobber_an_existing_bundle() {
     open_bundle(&out).unwrap();
 }
 
+/// **An empty selection is a bundle, not a refusal** (decision 0091): `--limit 0` selects nothing
+/// from a populated corpus and the build writes a zero-item bundle, which opens and verifies like
+/// any other. The full walk of that case — every declared column, every declared layer, the two
+/// builds byte-identical, and `extent = "auto"` still refused — is `empty_bundle.rs`.
 #[test]
-fn build_rejects_an_empty_selection() {
+fn an_empty_selection_builds_an_empty_bundle() {
     let tmp = tempfile::tempdir().unwrap();
     let points = tmp.path().join("points.parquet");
     let pairs = tmp.path().join("pairs.parquet");
     write_points(&points);
     write_pairs(&pairs);
-    assert!(build(&BuildArgs {
-        point_fields: Default::default(),
+    let out = tmp.path().join("bundle");
+    build(&BuildArgs {
+        arena_order: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points,
+            point_fields: Default::default(),
+            select: None,
+            access: tessera_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: Vec::new(),
-        points,
-        access: tessera_build::config::AccessInput::relation(pairs),
-        out: tmp.path().join("bundle"),
-        extent: extent(),
-        view_id: "s0".to_string(),
+        out: out.clone(),
         limit: Some(0),
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -529,6 +568,7 @@ fn build_rejects_an_empty_selection() {
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
         mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
@@ -536,7 +576,12 @@ fn build_rejects_an_empty_selection() {
         band_rows: None,
         schema: Default::default(),
     })
-    .is_err());
+    .expect("a build that selects no rows writes a bundle with no items");
+
+    let bundle = open_bundle(&out).expect("the empty bundle opens and its digests verify");
+    assert_eq!(bundle.manifest.entity_id_high_water, 0);
+    let partition = bundle.partitions.values().next().expect("one partition");
+    assert_eq!(partition.manifest.segments[0].row_count, 0);
 }
 
 /// A points file storing Morton codes is exact only against the grid's own extent. Any other
@@ -552,15 +597,24 @@ fn morton_input_requires_the_identity_extent() {
     write_pairs(&pairs);
 
     let args = |extent| BuildArgs {
-        point_fields: Default::default(),
-        points: points.clone(),
+        arena_order: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent,
+            points: points.clone(),
+            point_fields: Default::default(),
+            select: None,
+            access: tessera_build::config::AccessInput::relation(pairs.clone()),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: Vec::new(),
-        access: tessera_build::config::AccessInput::relation(pairs.clone()),
         out: tmp
             .path()
             .join(format!("bundle-{extent:?}").replace(['/', ' '], "_")),
-        extent,
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -568,6 +622,7 @@ fn morton_input_requires_the_identity_extent() {
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
         mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
@@ -600,13 +655,22 @@ fn morton_input_requires_the_identity_extent() {
     };
     let out = tmp.path().join("bundle-ok");
     build(&BuildArgs {
-        point_fields: Default::default(),
+        arena_order: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: identity,
+            points,
+            point_fields: Default::default(),
+            select: None,
+            access: tessera_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: Vec::new(),
-        points,
-        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.clone(),
-        extent: identity,
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -614,6 +678,7 @@ fn morton_input_requires_the_identity_extent() {
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
         mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
@@ -636,7 +701,7 @@ fn morton_input_requires_the_identity_extent() {
         got, want,
         "the bundle must reproduce the source Morton codes exactly"
     );
-    assert_eq!(bundle.manifest.quantisation.x_max, 65536.0);
+    assert_eq!(bundle.manifest.views[0].quantisation.x_max, 65536.0);
 }
 
 #[test]
@@ -647,13 +712,22 @@ fn build_rejects_an_unsafe_view_id() {
     write_points(&points);
     write_pairs(&pairs);
     assert!(build(&BuildArgs {
-        point_fields: Default::default(),
+        arena_order: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            visibility: None,
+            view_id: "../escape".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points,
+            point_fields: Default::default(),
+            select: None,
+            access: tessera_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: Vec::new(),
-        points,
-        access: tessera_build::config::AccessInput::relation(pairs),
         out: tmp.path().join("bundle"),
-        extent: extent(),
-        view_id: "../escape".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -661,6 +735,7 @@ fn build_rejects_an_unsafe_view_id() {
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
         mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
@@ -693,13 +768,22 @@ fn limit_filters_the_source_entity_id_prefix() {
     write_pairs(&pairs);
 
     let report = build(&BuildArgs {
-        point_fields: Default::default(),
+        arena_order: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points,
+            point_fields: Default::default(),
+            select: None,
+            access: tessera_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: Vec::new(),
-        points,
-        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.clone(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: Some(100),
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -707,6 +791,7 @@ fn limit_filters_the_source_entity_id_prefix() {
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
         mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
@@ -733,13 +818,22 @@ fn verify_accepts_a_freshly_built_bundle() {
     write_pairs(&pairs);
 
     build(&BuildArgs {
-        point_fields: Default::default(),
+        arena_order: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points,
+            point_fields: Default::default(),
+            select: None,
+            access: tessera_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: Vec::new(),
-        points,
-        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.clone(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -747,6 +841,7 @@ fn verify_accepts_a_freshly_built_bundle() {
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
         mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
@@ -776,13 +871,22 @@ fn verify_rejects_a_columns_file_whose_tessera_ids_do_not_match_the_key() {
     write_pairs(&pairs);
 
     let report = build(&BuildArgs {
-        point_fields: Default::default(),
+        arena_order: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points,
+            point_fields: Default::default(),
+            select: None,
+            access: tessera_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: Vec::new(),
-        points,
-        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.clone(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -790,6 +894,7 @@ fn verify_rejects_a_columns_file_whose_tessera_ids_do_not_match_the_key() {
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
         mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
@@ -931,7 +1036,15 @@ fn morton_plus_residual_recovers_sub_cell_position() {
     w.write(&batch).unwrap();
     w.close().unwrap();
 
-    let mut rows = read_points(&points, &Default::default(), &IDENTITY_EXTENT, None).unwrap();
+    let mut rows = read_points(
+        &points,
+        &Default::default(),
+        tessera_spatial::Projection::None,
+        &IDENTITY_EXTENT,
+        None,
+            None,
+    )
+    .unwrap();
     rows.sort_by_key(|r| r.source_id);
     assert_eq!(rows.len(), 4);
 
@@ -961,7 +1074,15 @@ fn bare_morton_widens_with_a_zero_residual() {
     let points = tmp.path().join("points.parquet");
     write_morton_points(&points);
 
-    let rows = read_points(&points, &Default::default(), &IDENTITY_EXTENT, None).unwrap();
+    let rows = read_points(
+        &points,
+        &Default::default(),
+        tessera_spatial::Projection::None,
+        &IDENTITY_EXTENT,
+        None,
+            None,
+    )
+    .unwrap();
     assert!(!rows.is_empty());
     for row in &rows {
         assert_eq!(
@@ -1068,13 +1189,22 @@ fn entity_ids_break_signature_ties_on_the_morton_code() {
         write_fixture(&points, &pairs);
 
         let args = BuildArgs {
-            point_fields: Default::default(),
+            arena_order: Default::default(),
+            views: vec![tessera_build::ViewArgs {
+                visibility: None,
+                view_id: "s0".to_string(),
+                projection: tessera_spatial::Projection::None,
+                extent: tessera_build::input::IDENTITY_EXTENT,
+                points,
+                point_fields: Default::default(),
+                select: None,
+                access: tessera_build::config::AccessInput::relation(pairs),
+            }],
+            anchor: 0,
+            groups: Vec::new(),
+            scoped_attributes: Vec::new(),
             attribute_sources: Vec::new(),
-            points,
-            access: tessera_build::config::AccessInput::relation(pairs),
             out: out.clone(),
-            extent: tessera_build::input::IDENTITY_EXTENT,
-            view_id: "s0".to_string(),
             limit: None,
             identity_key: test_key(),
             identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -1082,6 +1212,7 @@ fn entity_ids_break_signature_ties_on_the_morton_code() {
             shard_id: 0,
             layers: Vec::new(),
             layer_inputs: Vec::new(),
+            scoped_layers: Default::default(),
             mint_external_ids: true,
             emit_oracle_pairs: false,
             batch_items: None,

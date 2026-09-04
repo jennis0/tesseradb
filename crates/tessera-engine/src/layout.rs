@@ -52,6 +52,7 @@ mod tests {
 
     fn declaration(membership: MembershipSource, pin: Option<ServingLayout>) -> LayerDeclaration {
         LayerDeclaration {
+            scope: Default::default(),
             name: "clusters/x".into(),
             title: None,
             views: vec!["s0".into()],
@@ -164,18 +165,25 @@ mod tests {
         }
     }
 
-    /// **A predicate level has exactly one layout**, whatever anyone declares and whatever the
-    /// observations say — and a pin that says otherwise never validated.
+    /// **An attribute level has exactly one layout**, whatever anyone declares and whatever the
+    /// observations say — and a pin that says otherwise never validated. A spatial level is picked
+    /// as an enumerated one is, and a pin on it holds.
     #[test]
-    fn a_predicate_level_has_one_layout() {
+    fn an_attribute_level_has_one_layout_and_a_spatial_level_is_picked() {
         let mut spatial = declaration(MembershipSource::Spatial, None);
         spatial.shape = Some(ShapeDeclaration {
             kind: ShapeKind::Bbox,
-            depth: 6,
         });
         let attribute = declaration(MembershipSource::Attribute("severity".into()), None);
+        assert_eq!(
+            choose(&spatial, shape(1, 0.0, true)),
+            ServingLayout::ArtifactMajor
+        );
+        assert_eq!(
+            choose(&spatial, shape(10_000_000, 1.0, true)),
+            ServingLayout::RowMajorLabel
+        );
         for observed in [shape(1, 0.0, true), shape(10_000_000, 1.0, false)] {
-            assert_eq!(choose(&spatial, observed), ServingLayout::SpatialRanges);
             assert_eq!(choose(&attribute, observed), ServingLayout::RowMajorLabel);
             for pin in [
                 ServingLayout::ArtifactMajor,
@@ -184,7 +192,7 @@ mod tests {
             ] {
                 let mut pinned = spatial.clone();
                 pinned.layout = Some(pin);
-                assert_eq!(choose(&pinned, observed), ServingLayout::SpatialRanges);
+                assert_eq!(choose(&pinned, observed), pin);
                 let mut pinned = attribute.clone();
                 pinned.layout = Some(pin);
                 assert_eq!(choose(&pinned, observed), ServingLayout::RowMajorLabel);

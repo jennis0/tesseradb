@@ -117,16 +117,22 @@ the one; what the kind supplies is what the *positions* mean:
 | `stacked` | fixed-length list, one entry per level | none — independent analyses |
 | `tiered` | fixed-length list, one entry per level | containment, between consecutive entries |
 | `nested` | variable-length list | the lineage: entry *k* is the parent of entry *k+1* |
+| `dag` | scalar, or a list read as plain multi-membership, as `flat` | none from the column — the artifact row's `parent` list is the only spelling ([decision 0125](../decisions/0125-a-dag-list-column-is-membership-not-lineage.md)) |
 
 Fixed-length entries are nullable: a point may be noise at a fine resolution and clustered at a
 coarse one. A variable-length list against `tiered`, or a fixed-length one against `nested`, is a
 refusal rather than a guess.
 
-**A child naming two different parents is refused.** The map is built during the pass that already
-walks the column, and a conflict means the data is not the tree the layer declared — there is no
-correct output, and choosing a parent would publish a hierarchy the caller did not write. A `parent`
-column on an artifact row and a lineage column disagreeing about one artifact is the same conflict
-and refuses with the same words: they are two spellings of one edge.
+**A child naming two different parents is refused — on a tree.** The map is built during the pass
+that already walks the column, and a conflict means the data is not the tree the layer declared —
+there is no correct output, and choosing a parent would publish a hierarchy the caller did not
+write. A `dag` layer never meets the refusal: its list column declares no edge, since a DAG node's
+ancestor closure is a set with no order for a list to carry, and its several parents are spelled on
+the artifact row's `parent` list ([`dag-hierarchies.md`](dag-hierarchies.md) §4;
+[decision 0125](../decisions/0125-a-dag-list-column-is-membership-not-lineage.md)). A self-edge and
+a cycle refuse at every kind, at both entry points. A `parent` column on an artifact row and a
+lineage column disagreeing about one artifact is the same conflict and refuses with the same words:
+they are two spellings of one edge.
 
 Three things the table does not settle, decided in the building:
 
@@ -394,178 +400,3 @@ makes membership a *predicate evaluated per request*, where this design material
 maintains at ingest. The two look alike from the declaration and differ in where the work happens —
 a predicate over a `derived` vocabulary is answered by a masked scan, which a viewport showing 263
 clusters would pay 263 times.
-
-## Appendix R — review trail
-
-**2026-08-20 — r7. A key that names nothing creates it, at both entry points, and the fail-open is
-closed three times.** §6.3 is built:
-[decision 0091](../decisions/0091-build-is-ingest-into-an-empty-database.md)'s last obligation, and
-with it the last difference between what can be *said* at a build and at ingest. An unknown key on an
-open layer no longer refuses a batch; it creates the artifact it names, carrying nothing but the
-name and the points that named it.
-
-**Where minting happens was the first decision, and admission was wrong for it.** An ordinal is
-claimed from the level's cursor and is durable only in the record that claims it, so a claim made at
-admission would be held unappended across everything the executor does before the window closes — and
-a `PublishArtifacts` command executes in exactly that interval, reads the same cursor, and would take
-the same ordinal. So the mint is at the **close**, where the window is shut, the allocation is made,
-and the record rides the window's own fsync. What stays at admission is every refusal that can be
-made about one batch alone, which is what keeps one caller's typo off another caller's rows.
-
-**The growth record carried no lineage and did not need to.** A growth is a delta of members and has
-no field for an edge; what creates an edge is the publication that creates the artifact, which has
-carried `parent_key` since artifacts existed. So a minted chain needed no new record shape — only the
-order: one record for a nested lineage, where a sibling's ordinal is resolved inside its own batch,
-and one record per level coarse-first for a tiered chain, where the parent's ordinal was fixed by the
-record before and is answered by a `pending` resolver one level up. That is §5.0.4's constraint
-applied to a batch, and it is the whole of what minting a lineage required.
-
-**A minted artifact is published carrying its members** rather than published empty and grown: the
-entities exist by the close, so one record says the whole of what happened and no log pin is owed.
-
-**§5's third ruling has three guards and the innermost is not one anybody added.** The resolution at
-admission and the re-resolution at the close both read `ArtifactStore::ordinal_of_key`, which no
-suppression touches; and `prepare_publish` refuses a key its level already holds. Breaking both
-resolutions together turns the suppression test red on that third refusal — a 422 rather than a
-second artifact — which is the fail-closed direction and is how the guards are known to be
-load-bearing.
-
-**One thing the design had wrong, and it cuts against the earlier claim.** §6.2 said the
-edge-with-no-parent warning "stops being reachable when minting lands". It does not: a chain whose
-artifacts are all new is linked, but a child that *already exists* and holds no parent is still an
-edge a growth cannot create, whoever the parent is. §6.2 now says so.
-
-**2026-08-20 — r6. The wire says what a file says, and the shared piece is the rule rather than the
-reader.** §6.2 is built: `/control/ingest` accepts a column named for a declared layer, reads it by
-the same rules a member table is read by, and the joins ride the batch's own commit window — one
-`ArtifactGrow` per `(layer, level)`, inside the fsync that makes the rows durable. That closes the ⊘
-[decision 0091](../decisions/0091-build-is-ingest-into-an-empty-database.md) marked as the one
-genuine breach of its own rule.
-
-**Two things were decided in the building.** *Where the keys resolve*: at **admission**, not at the
-close, because a commit window holds several callers' batches and one caller's typo may not refuse
-another's rows — after the allocation there is no per-entry refusal left to make. The ordinal is then
-carried rather than re-derived, which is safe for a reason worth writing down: between admission and
-the close nothing can move an existing ordinal (a publication appends, and both operations that
-remove an artifact close the open window before they run), and an ordinal whose record has gone by
-then adds nothing, which is what stops a growth resurrecting an artifact a fold retired. *What a
-lineage may do at ingest*: **check, never create**. A growth adds members and never edges, so a
-contradiction is the build's own two-parents refusal and an edge the layer holds no parent for is a
-warning with the memberships still applied — a refusal there would block a batch over a roster
-published without its edges, which is outside the disclosure surface entirely.
-
-**The sharing is deliberately partial, and the split is where the drift would be.** `tessera-types`
-carries no `arrow` dependency and does not acquire one: the Arrow decode stays with each reader,
-and `ListMeaning`, `parent_edges` and `integer_key` move into `tessera_types::layer` so that the
-*meaning* — which position is which level, which adjacencies are edges, what `-1` says — has one
-definition. The build's own reader now takes its list meaning, its noise sentinel and its adjacency
-from there, so the two cannot read one file two ways.
-
-**The test 0091 names is `tessera-server`'s `membership_column.rs`, and it is not the test that was
-first planned.** *Ingest into an empty database* cannot be reached through this system's own tools:
-`tessera build` refuses a bundle with no items, so the honest form is one corpus arriving two ways —
-every point built on one side, a seed built and the rest ingested on the other — compared at what a
-client sees, for three principals, at a scalar key and at a lineage. The built side is additionally
-pinned to an oracle computed from the fixture, because two sides that both dropped the membership
-column would otherwise agree perfectly. Removing the column from the handler's submission turns both
-comparisons red, which is how it is known to be load-bearing.
-
-**2026-08-20 — r5. The growth mechanism is built, and the packing rule is the part that decides it
-is correct rather than working.**
-[Decision 0091](../decisions/0091-build-is-ingest-into-an-empty-database.md) ruled r4's
-contradiction — an ingested point *does* enter an enumerated membership, because a build
-reading a member table has always done exactly that — and what r4 investigated was then built as it
-described: a delta record (`ArtifactGrow`), one store method taken by both the live path and replay,
-and a log pin that only the fold's whole rewrite releases. §6.1 is now what exists rather than what
-is needed, and the three refusals it names are the whole of what growth declines to do.
-
-**The failure r4 named as the one to get right is the one the tests are built around.** A grown
-record sits below its level's published high-water and no tail pack reaches it, so releasing the log
-at `mark_published` would leave the join durable nowhere: the artifact comes back from a restart at
-its pre-growth size, acked and silent. It is asserted where it bites — a rotation may not reclaim
-the member holding a growth (removing the pin fails that case and nothing else, which is why the
-case is written against rotation rather than against a restart alone) — and the fold's rewrite is
-asserted by deleting the log outright and reading the membership back from the prefix.
-
-**One thing §6.1 had slightly wrong, and it is worth stating because it cuts the other way.** The
-argument that a growth has no observable effect before the fold is about points *ingested* since the
-last structural pass, which hold no base row; a point that already holds one joins and is counted at
-the **ack**, because the row-space projection is keyed on the store's version and growth moves it.
-So the fold is the right home for where a membership is *stored*, and the interval is not
-unobservable — it is observable and correct. That is a stronger position than the one the
-investigation described, not a weaker one.
-
-**2026-08-20 — r4. §6 was attempted and stopped, and §6.1 is what the attempt found.** The stage
-was to be the first half of the ingest route — a column named for a layer, resolved against
-artifacts that already exist, joined — with minting left for later. It stopped before the wire
-column, on the third of its three parts: **there is no way to grow an existing artifact's
-membership, and adding one is a second publication path.** Every route into the store writes a
-whole record; publication refuses a key the level holds; the fold's two passes only remove. The
-three pieces a growth needs are named in §6.1, and the one that decides the shape is the packing
-bookkeeping rather than the record: a grown record below `published_through` is never repacked, the
-rotation pin releases at the next flush, and the acked join is then lost on restart with nothing
-saying so.
-
-**Found in the same pass, and the more consequential of the two:
-`annotation-write-cycle.md` §3.4 rules that an ingested point enters an enumerated membership
-*never*.** §5 here rules that it joins. That contradiction predates this stage — §5's rulings were
-taken in discussion against a table nobody re-read — and it is not resolvable from inside either
-document, so §6 is blocked on a ruling and not only on machinery.
-
-**Nothing was built, deliberately.** The wire column and the key resolution are real work and were
-not landed: a column accepted at `/control/ingest` whose effect is unbuilt either drops the caller's
-membership silently — the failure §7 exists to prevent, arriving on the request path — or answers
-422 for every batch that carries one, which is what an undeclared column already does. Building the
-reader ahead of the ruling would also be building on the contradiction. The one thing the attempt
-*did* establish and is worth keeping is the timing observation now in §6.1: the row form covers base
-rows, so an ingest-time join has no observable effect until the fold whatever route carries it,
-which is what makes the fold the candidate home rather than a place the growth eventually reaches.
-
-**2026-08-19 — r3. §4 is built, and the byte-identical assertion is what says it reads structure
-rather than inventing it.** A `nested` lineage column and the same clustering written out as an
-artifact table with a `parent` column and a member table build the same bundle down to the byte,
-and so do a `tiered` fixed-length column and a member table carrying a `level`. Every entry is a
-membership and the kind supplies the positions' meaning; minting composes with §3, so an interior
-parent that only ever appears inside somebody's lineage is minted like any other key. Three points
-the section did not settle were decided in the building and are now written into it: what counts as
-a fixed length (the declared level count, from the Arrow type where the file gives one and from the
-row otherwise), that a null entry breaks the adjacency rather than being read past, and that a row
-of nothing but noise is one unclustered row. One refusal was added beyond the ones §4 states — a
-lineage column contradicting a `parent` column, which is §4's own conflict arriving by two routes —
-and one thing that could have been a second is a warning instead: a `level` column beside a list is
-ignored and printed, on the rule that only a disclosure or an irreversibility earns a refusal.
-
-**A list under `flat` was briefly refused and is not.** The reasoning was that a flat layer has no
-positions for a list to index, which is true and does not follow: the entries are still
-memberships, and a point in several artifacts of one flat layer is what several rows of a member
-table have always meant. Refusing the list spelling would have made two spellings of one
-membership disagree — the property every other input route here is held to — and would have
-foreclosed overlapping groupings, a document under three topics being ordinary rather than a
-mistake. `a_list_on_a_flat_layer_is_multi_membership_and_matches_a_member_table` pins it byte for
-byte.
-
-**2026-08-19 — r2. §2 and §3 are built at build time, and §2's first claim was already true.** The
-membership route needed no code: a `[layer.members]` block pointed at the points file, with
-`fields = { key = "cluster_id", entity = "id" }`, already built the same bundle as the same layer
-declared with a member table — asserted byte for byte, which is how the other input spellings are
-held. What the stage added is the two readers (an integer key canonicalised to its decimal string,
-converted once per artifact and never per point; a null key and exactly `-1` skipped and counted)
-and `value_set` on `[[layer]]`, carried on the layer declaration so the write path has the same key
-to read when §6 is built. One refusal was lifted rather than added: a member source with no
-artifacts source is legal under `open`, which is the bare clustering of §1's table. The count of
-skipped rows is printed and reaches the build report; the join-coverage report of §7 remains
-unbuilt.
-
-**2026-08-19 — r1.** Written from a discussion that reversed several of its own conclusions, and
-the reversals are worth recording because each was a wrong instinct with a recognisable shape.
-*Attribute membership* was reached for first, because `membership = { attribute = … }` fits the
-data; it was the wrong mechanism, being a live predicate whose per-request cost nobody asked for
-(§9). *A vocabulary as the roster* followed, and fell to the observation that if the column is not
-an attribute it does not want a vocabulary either — which removed the multi-valued-attribute
-dependency that had made §4 look blocked. *A `column` key* reading implicitly from the corpus was
-proposed and rejected: the source is named. And the roster was twice conflated with enrichment,
-first in one `artifacts` key and then in a reserved word, before §3 separated them.
-
-The residue is small: one capability (`value_set` on a layer), one reading of a list column, two
-reader fixes, and four rulings. Everything else the requirement needed was already in
-`[layer.members]`.

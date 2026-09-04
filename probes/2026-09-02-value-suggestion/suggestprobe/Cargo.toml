@@ -1,0 +1,24 @@
+[package]
+name = "suggestprobe"
+version = "0.1.0"
+edition = "2021"
+
+# Standalone: not a member of the repo workspace, and must not become one — the gate's
+# `cargo test --workspace` should never build a probe harness.
+[workspace]
+
+[dependencies]
+fst = "0.4"
+memmap2 = "0.9"
+croaring = "2"
+# The fold: NFKC from this crate; case folding is `str::to_lowercase` (see README, "Fold").
+unicode-normalization = "0.1"
+# The repository's own readers and writers, used as they ship rather than re-implemented:
+# `SortedDictWriter`/`SortedDict` (front-coded block dictionary) and `ColumnPostings::narrow`
+# from tessera-filter; `PostingsSpool`/`encode_posting`/`PostingsReader` from tessera-authz.
+tessera-filter = { path = "../../../crates/tessera-filter" }
+tessera-authz = { path = "../../../crates/tessera-authz" }
+tessera-types = { path = "../../../crates/tessera-types" }
+
+[profile.release]
+debug = 1

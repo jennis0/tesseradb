@@ -70,10 +70,12 @@ proptest! {
                             external_id: Some(id.to_le_bytes().to_vec()),
                             entity_id: EntityId::new(id),
                             view: "default".to_string(),
+                            join: false,
                             descriptors: Vec::new(),
                             x: 0.0,
                             y: 0.0,
                             scalars: Vec::new(),
+                            scoped: Vec::new(),
                         }],
                     });
                 }
@@ -133,10 +135,12 @@ proptest! {
                         external_id: Some(id.to_le_bytes().to_vec()),
                         entity_id: EntityId::new(id),
                         view: "default".to_string(),
+                        join: false,
                         descriptors: Vec::new(),
                         x: 0.0,
                         y: 0.0,
                         scalars: Vec::new(),
+                        scoped: Vec::new(),
                     }],
                 });
             }

@@ -8,7 +8,9 @@ default = []
 # Per-stage viewport timing (see `src/timing.rs`). OFF by default and must stay off in anything
 # shipped: `tessera-server` additionally gates header emission on a config flag, and CI asserts a
 # release `tessera-cli` emits no `x-tessera-stage-ns`. Enabling it here does NOT enable it there —
-# but cargo's feature unification will, on a `--workspace` build, so both gates matter.
+# but cargo's feature unification will, on a `--workspace` build, so both gates matter. The self
+# dev-dependency below names it explicitly so that the two selections agree: unification alone left
+# `cargo test -p tessera-engine` with a strictly smaller set of tests than `cargo test --workspace`.
 bench-timing = []
 # Deliberate WAL/executor fault injection — see `tessera-lifecycle/src/faults.rs`. Enabled via the
 # self dev-dependency below (tests) and via tessera-server/tessera-cli's declared, default-off
@@ -24,6 +26,11 @@ tessera-authz = { path = "../tessera-authz" }
 tessera-store = { path = "../tessera-store" }
 tessera-spatial = { path = "../tessera-spatial" }
 tessera-lifecycle = { path = "../tessera-lifecycle" }
+# **The container encoder**, for the same reason `tessera-store` and `tessera-filter` hold it: a row
+# column's transposition already holds one Roaring block's worth of finished words per artifact, so
+# the container is its output rather than something to insert value by value
+# (`row_column::RowColumn::transpose`).
+tessera-roaring = { path = "../tessera-roaring" }
 # The filter artefact's reader. Entity-space only — it never sees a `RowId`, which is what
 # `check-layers.sh` pins by denying it `tessera-store` and `tessera-spatial`.
 tessera-filter = { path = "../tessera-filter" }
@@ -40,6 +47,8 @@ arc-swap = { workspace = true }
 # `deny tessera-engine tokio`) — rayon's work-stealing pool is a plain-thread mechanism.
 rayon = { workspace = true }
 rustc-hash = "1"
+# The suggestion index's five side arrays, mapped rather than heap-resident (value-suggestion.md §6.1).
+memmap2 = { workspace = true }
 arrow = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
@@ -61,7 +70,12 @@ tracing = { workspace = true }
 # `fault-injection` it finds there. (An earlier version of this note said the rule "reads
 # `cargo tree`" while the rule was in fact a grep over manifest text that exempted this whole file.
 # It is a `cargo tree` now, and demonstrated red by enabling the feature on the edge below.)
-tessera-engine = { path = ".", features = ["fault-injection"] }
+# `bench-timing` is named here, rather than left to unification from `tessera-bench`'s default
+# feature, so that `-p` and `--workspace` select the same tests: two `viewport.rs` tests are gated
+# on it entirely — one of them the only test of the mask independence C4's numerator rests on — and
+# four more lose an assertion arm without it. Which leak-register rows have a test is not a
+# benchmark crate's default feature to decide.
+tessera-engine = { path = ".", features = ["fault-injection", "bench-timing"] }
 tempfile = { workspace = true }
 tessera-build = { path = "../tessera-build" }
 # **The corpus census, and this edge may only ever be a dev one.** The generator is a second
@@ -72,6 +86,7 @@ tessera-build = { path = "../tessera-build" }
 tessera-corpus = { path = "../tessera-corpus" }
 parquet = { workspace = true }
 criterion = "0.5"
+delaunator = "1.1.0"
 
 [[bench]]
 name = "viewport"

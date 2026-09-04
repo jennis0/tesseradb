@@ -104,13 +104,19 @@ pub fn build_bundle(root: &Path, n: u64) {
         entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
         layers: Vec::new(),
         layer_tombstones: Vec::new(),
+        views: Vec::new(),
+        scoped_columns: Vec::new(),
+        dead_view_incarnations: Vec::new(),
         membership_extents: Vec::new(),
         level_versions: Vec::new(),
         containment_extents: Vec::new(),
         tile_index_extents: Vec::new(),
         row_column_extents: Vec::new(),
+        shape_rows_extents: Vec::new(),
+        shape_held_extents: Vec::new(),
         artifact_record_extents: Vec::new(),
         segments: vec![SegmentDescriptor {
+            incarnation: 0,
             view: VIEW.to_string(),
             seg_id: "seg0".to_string(),
             row_count: n as u32,
@@ -121,6 +127,7 @@ pub fn build_bundle(root: &Path, n: u64) {
         dict_extents: vec![],
         attr_extents: Vec::new(),
         record_extents: Vec::new(),
+        entity_terms_extents: Vec::new(),
         text_extents: Vec::new(),
         external_id_runs: vec![],
         locator_extents: vec![],
@@ -136,19 +143,13 @@ pub fn build_bundle(root: &Path, n: u64) {
     .expect("write SEGMENTS-0");
 
     let manifest = Manifest {
-        bundle_format: 3,
+        bundle_format: tessera_types::BUNDLE_FORMAT,
         created_at: "2026-08-02T00:00:00Z".to_string(),
         data_plugin_hash: tessera_plugin::Passthrough::new().data_plugin_hash(),
         declared_bounds: serde_json::json!({}),
         declared_scalars: vec![],
         vocabularies: vec![],
         small_term_threshold: 32,
-        quantisation: Quantisation {
-            x_min: 0.0,
-            x_max: 1.0,
-            y_min: 0.0,
-            y_max: 1.0,
-        },
         entity_id_high_water: n,
         identity: IdentityDescriptor {
             construction: IDENTITY_CONSTRUCTION.to_string(),
@@ -157,9 +158,20 @@ pub fn build_bundle(root: &Path, n: u64) {
             shard_id: 0,
             idset: 1,
         },
+        groups: Vec::new(),
         views: vec![ViewDescriptor {
+            incarnation: 0,
+            visibility: None,
             id: VIEW.to_string(),
             display_name: VIEW.to_string(),
+            // The frame is the view's, not the bundle's (decision 0040).
+            quantisation: Quantisation {
+                x_min: 0.0,
+                x_max: 1.0,
+                y_min: 0.0,
+                y_max: 1.0,
+            },
+            projection: tessera_spatial::Projection::None,
         }],
         partitions: vec![PartitionDescriptor {
             phash: PARTITION.to_string(),
@@ -205,13 +217,14 @@ pub fn flush_segment(
         PARTITION,
         VIEW,
         FlushInput {
+            incarnation: 0,
             seg_id: &seg_id,
             rows: (entity_lo..entity_lo + count)
                 .map(|e| FlushRow {
                     entity_id: EntityId::new(e),
                     external_id: Some(format!("ext-{e}").into_bytes()),
-                    x: ((e * 37) % 100) as f32 / 100.0,
-                    y: ((e * 61) % 100) as f32 / 100.0,
+                    x: ((e * 37) % 100) as f64 / 100.0,
+                    y: ((e * 61) % 100) as f64 / 100.0,
                     scalars: vec![],
                 })
                 .collect(),

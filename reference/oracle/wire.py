@@ -2,13 +2,18 @@
 `streamed-serving.md`): a sequence of frames, each `u8 kind` + `u32 LE payload length` + payload,
 every payload a complete Arrow IPC stream (JSON for the trailer):
 
-    kind 1  tiles      (tile, visible, matched, served)      exactly one, first
+    kind 1  tiles      (tile, visible, matched, served,      exactly one, first
+                        highlighted)
     kind 2  sub-cells  (cell, count)                          exactly one, iff underlay requested
     kind 3  points     (tessera_id, code, ...scalars)         zero or more; concatenate in order
     kind 4  trailer    JSON                                   exactly one, last
-    kind 5  artifacts  (layer, tessera_id, key,        at most one, after tiles and before
-                        masked_count, and the derived            any points; absent when none served
-                        geometry columns)
+    kind 5  artifacts  (layer dict<u16,utf8>, tessera_id,  at most one, after tiles and before
+                        key, masked_count, the derived           any points; absent when none served
+                        geometry, content, parent_ids,
+                        rung, matched, highlighted — then
+                        shape_x/shape_y,
+                        in the schema only when a served
+                        row carries a drawn geometry; §3.2 r45)
 
 Mirrors `crates/tessera-server/tests/common/mod.rs`'s `decode_viewport_frames` byte-for-byte,
 independently implemented in Python (this is the client-side decode any real SDK would need, not
@@ -47,10 +52,35 @@ class Artifact(NamedTuple):
     masked_count: int
     centroid: tuple[float, float] | None
     box: tuple[int, int, int, int] | None
-    hull: list[tuple[int, int]] | None
+    #: The artifact's one drawn geometry, of the kind its layer declared (contracts §3.2 r45,
+    #: `polygon-membership.md` §7.1): parts, then rings, then `(x, y)` vertices. A part's first
+    #: ring is its outer and the rest are holes; two parts are two shapes, never a shape with a
+    #: gap. A derived hull is one part per α-group with no holes, so a membership that is several
+    #: separated clouds is several parts. The wire's `shape_x`/`shape_y` are
+    #: `list<list<list<uint32>>>`, one column per axis, and the two agree at every level.
+    shape: list[list[list[tuple[int, int]]]] | None
     #: One content, entire, positional to the layer's declared kinds. Empty means the layer
     #: declares no supplied content — never that content was withheld.
     content: list[str]
+    #: The rung this artifact is drawn at (contracts §3.2 r44): the declared level on a levelled
+    #: layer — a fact about the artifact, so two principals served it *do* agree on it — and the
+    #: response-local depth on a treed one, the longest parent chain to this row in the forest the
+    #: response's own `parent_ids` links form after the budget cut. `0` on a flat layer.
+    rung: int
+    #: The identifiers of this artifact's parents **that are in this same response**, ascending
+    #: (contracts §3.2 r71, `dag-hierarchies.md` §7): at most one on a tree, several on a `dag`
+    #: layer. Empty for a root, for a flat artifact, and for a parent the response withheld alike
+    #: — the wire does not distinguish them (C29, per entry), and neither may a reader.
+    parent_ids: list[int]
+    #: Whether a member this principal may see, inside the request's tiles, matches the request's
+    #: `filters` ([decision 0104](../../docs/decisions/0104-a-filter-answers-a-boolean-per-served-artifact.md)).
+    #: `None` — a null on the wire — where the request carried none: *there was no question*,
+    #: never *no matches*. A boolean and never a count, and clipped to the request's tiles where
+    #: `masked_count` is not.
+    matched: bool | None
+    #: The same bit for `all_of[filters, highlight]` (`highlight-and-hierarchy.md` §2), and `None`
+    #: where the request carried no `highlight`.
+    highlighted: bool | None
 
 
 FRAME_TILES = 1
@@ -97,6 +127,27 @@ def split_frames(data: bytes) -> list[tuple[int, bytes]]:
     return frames
 
 
+def _zip_shape(sx, sy):
+    """Parts → rings → `(x, y)`, refusing the two axes disagreeing at any level.
+
+    Contracts §3.2 r45: the axes carry the same structure by construction and a decoder checks
+    it rather than assumes it — `zip` would silently truncate to the shorter side.
+    """
+    if len(sx) != len(sy):
+        raise ValueError("shape axes disagree on the number of parts")
+    parts = []
+    for px, py in zip(sx, sy):
+        if px is None or py is None or len(px) != len(py):
+            raise ValueError("shape axes disagree on the number of rings in a part")
+        rings = []
+        for rx, ry in zip(px, py):
+            if rx is None or ry is None or len(rx) != len(ry):
+                raise ValueError("shape axes disagree on the number of vertices in a ring")
+            rings.append(list(zip(rx, ry)))
+        parts.append(rings)
+    return parts
+
+
 def _batches(payload: bytes):
     with ipc.open_stream(io.BytesIO(payload)) as reader:
         yield from reader
@@ -105,7 +156,7 @@ def _batches(payload: bytes):
 def decode_frames(data: bytes):
     """`(tiles, points, sub_cells, trailer)` — the full grammar-checked decode.
 
-    - `tiles`: `(tile, visible, matched, served)` per row.
+    - `tiles`: `(tile, visible, matched, served, highlighted)` per row.
     - `points`: `(tessera_id, code)` per point, concatenated across every points frame in order.
     - `sub_cells`: `(cell, count)` rows, or `None` when no kind-2 frame was present (underlay
       unrequested — distinct from `[]`, a present-but-empty frame; contracts §3.2's r12 rule).
@@ -139,6 +190,11 @@ def decode_frames(data: bytes):
                         batch.column("visible").to_pylist(),
                         batch.column("matched").to_pylist(),
                         batch.column("served").to_pylist(),
+                        # `highlighted` is always present and equals `matched` where the request
+                        # carried no `highlight` (`highlight-and-hierarchy.md` §2): an absent
+                        # highlight is the identity for this quantity, so a reader needs no
+                        # schema branch and a response without one is not a special case.
+                        batch.column("highlighted").to_pylist(),
                     )
                 )
         elif kind == FRAME_SUB_CELLS:
@@ -170,10 +226,20 @@ def decode_frames(data: bytes):
                 # design, so there is nothing here to reconcile against a corpus-wide figure.
                 #
                 # The geometry columns carry the same warning in a shape that hides it better: a
-                # centroid or a hull is computed over `membership ∩ M_auth`, so two principals
-                # legitimately disagree about the same `tessera_id` here too, and neither shape is
-                # the artifact's. A `None` is *this layer declares no such property* — never
-                # *withheld*, since an artifact whose content could not be served is absent whole.
+                # centroid or a derived hull is computed over `membership ∩ M_auth`, so two
+                # principals legitimately disagree about the same `tessera_id` here too, and
+                # neither shape is the artifact's (a predicate or authored shape agrees across
+                # principals, but this reader does not know the kind and must not assume it). A
+                # `None` is *this layer declares no such property* — never *withheld*, since an
+                # artifact whose content could not be served is absent whole. `layer` is
+                # dictionary-encoded (contracts §3.2 r44); `to_pylist` resolves the keys to their
+                # utf8 values, so the encoding is invisible from here on. The two shape columns
+                # TRAIL the fixed columns and are absent from the schema entirely when no served
+                # row carries a drawn geometry (§3.2 r45) — an absent column is distinguishable
+                # from a null one, so 0076's null rule gains no third reading.
+                names = set(batch.schema.names)
+                if ("shape_x" in names) != ("shape_y" in names):
+                    raise ValueError("a shape with one axis column and not the other")
                 columns = {
                     name: batch.column(name).to_pylist()
                     for name in (
@@ -187,17 +253,23 @@ def decode_frames(data: bytes):
                         "box_min_y",
                         "box_max_x",
                         "box_max_y",
-                        "hull_x",
-                        "hull_y",
                         "content",
+                        "parent_ids",
+                        "rung",
+                        "matched",
+                        "highlighted",
                     )
                 }
+                shapes = "shape_x" in names
+                shape_x = batch.column("shape_x").to_pylist() if shapes else None
+                shape_y = batch.column("shape_y").to_pylist() if shapes else None
                 for row in range(batch.num_rows):
                     cx = columns["centroid_x"][row]
                     bx = columns["box_min_x"][row]
-                    hx, hy = columns["hull_x"][row], columns["hull_y"][row]
-                    if (hx is None) != (hy is None):
-                        raise ValueError("a hull with one axis and not the other")
+                    sx = shape_x[row] if shapes else None
+                    sy = shape_y[row] if shapes else None
+                    if (sx is None) != (sy is None):
+                        raise ValueError("a shape with one axis and not the other")
                     artifacts.append(
                         Artifact(
                             layer=columns["layer"][row],
@@ -217,8 +289,12 @@ def decode_frames(data: bytes):
                                     columns["box_max_y"][row],
                                 )
                             ),
-                            hull=None if hx is None else list(zip(hx, hy)),
+                            shape=None if sx is None else _zip_shape(sx, sy),
                             content=list(columns["content"][row] or []),
+                            rung=columns["rung"][row],
+                            parent_ids=list(columns["parent_ids"][row] or []),
+                            matched=columns["matched"][row],
+                            highlighted=columns["highlighted"][row],
                         )
                     )
             if not artifacts:
@@ -233,12 +309,20 @@ def decode_frames(data: bytes):
                 # oracle must not translate it — it is opaque here, and the differential compares
                 # point sets by position code precisely so that agreement never depends on either
                 # side interpreting an identifier.
-                points.extend(
-                    zip(
-                        batch.column("tessera_id").to_pylist(),
-                        batch.column("code").to_pylist(),
-                    )
+                #
+                # **`code` is absent under `point_rows: "highlight"`** — that projection is
+                # `(tessera_id, highlighted)` and nothing else (`highlight-and-hierarchy.md` §2),
+                # the client joining the bits to points it already holds. The row *set* and the
+                # per-tile `served` split are identical under either projection, which is what the
+                # consistency checks below actually test, so this reads a `None` position rather
+                # than refusing a well-formed body.
+                names = set(batch.schema.names)
+                codes = (
+                    batch.column("code").to_pylist()
+                    if "code" in names
+                    else [None] * batch.num_rows
                 )
+                points.extend(zip(batch.column("tessera_id").to_pylist(), codes))
         elif kind == FRAME_TRAILER:
             if trailer is not None:
                 raise ValueError("more than one trailer frame")
@@ -264,7 +348,7 @@ def decode_frames(data: bytes):
 
 
 def decode_viewport(data: bytes):
-    """`(tiles, points)`; tile rows are 4-tuples `(tile, visible, matched, served)`."""
+    """`(tiles, points)`; tile rows are 5-tuples `(tile, visible, matched, served, highlighted)`."""
     tiles, points, _sub_cells, _artifacts, _trailer = decode_frames(data)
     return tiles, points
 

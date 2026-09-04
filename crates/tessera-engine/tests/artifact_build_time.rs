@@ -207,13 +207,22 @@ fn try_fixture(topics: fn(&Path)) -> Result<Fixture, tessera_build::BuildError> 
     write_members(&tmp.path().join("topics_members.parquet"), &topic_members());
 
     let args = BuildArgs {
-        point_fields: Default::default(),
+        arena_order: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: points.clone(),
+            point_fields: Default::default(),
+            select: None,
+            access: tessera_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: Vec::new(),
-        points,
-        access: tessera_build::config::AccessInput::relation(pairs),
         out: root.clone(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -221,6 +230,7 @@ fn try_fixture(topics: fn(&Path)) -> Result<Fixture, tessera_build::BuildError> 
         shard_id: 0,
         layers: config.layers,
         layer_inputs: config.layer_sources,
+        scoped_layers: Default::default(),
         mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
@@ -311,7 +321,7 @@ fn a_built_edge_withholds_its_label_when_the_cluster_is_suppressed() {
     let cluster_id = of_layer(&served, CLUSTERS)[0].tessera_id;
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     assert!(engine
-        .artifact(&session, label_id, None, "s0")
+        .artifact(&session, label_id, None, "s0", None)
         .unwrap()
         .is_some());
 
@@ -325,7 +335,7 @@ fn a_built_edge_withholds_its_label_when_the_cluster_is_suppressed() {
         "the label goes with its cluster"
     );
     assert!(engine
-        .artifact(&session, label_id, None, "s0")
+        .artifact(&session, label_id, None, "s0", None)
         .unwrap()
         .is_none());
 }
@@ -373,7 +383,7 @@ fn a_built_bundle_takes_an_online_publication_beside_its_own() {
     assert_eq!(built.masked_count, MEMBERS.count() as u64);
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     assert!(engine
-        .artifact(&session, published_id, None, "s0")
+        .artifact(&session, published_id, None, "s0", None)
         .unwrap()
         .is_some());
 }
@@ -392,6 +402,7 @@ fn a_later_online_registration_does_not_reissue_the_builds_ids() {
 
     let id = engine
         .register_layer(tessera_types::layer::LayerDeclaration {
+            scope: Default::default(),
             name: "clusters/online".into(),
             title: Some("registered against the running node".into()),
             views: vec!["s0".into()],

@@ -7,6 +7,14 @@ edition = "2021"
 serde = { workspace = true, optional = true }
 
 [dev-dependencies]
+# Self dev-dependency, the same shape as tessera-engine's and tessera-server's, and here for the
+# same reason: `serde` gates the whole `layer` module and with it 22 of this crate's 39 tests, so
+# without this edge `cargo test -p tessera-types` runs 17 and `cargo test --workspace` runs all 39
+# — the feature being unified on only by tessera-lifecycle's normal edge. A developer running the
+# crate's own tests on the module they are changing should see all of them, not a subset an
+# unrelated member's dependency decided. `cargo tree -e normal` does not see a dev edge, so
+# check-layers.sh's rule 2 is unaffected.
+tessera-types = { path = ".", features = ["serde"] }
 # Test-only: parses reference/vectors/tessera_id.json against the known-answer vectors
 # (Task 5). The crate itself remains dependency-free of serde_json.
 serde_json = { workspace = true }

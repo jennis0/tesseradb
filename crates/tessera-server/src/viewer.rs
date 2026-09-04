@@ -21,31 +21,39 @@ use tokio::sync::{mpsc, oneshot};
 
 use tessera_types::{GenerationStamp, TesseraId};
 use tessera_wire::{
-    artifacts_frame, points_frame, sub_cells_frame, tiles_frame, trailer_frame, ArtifactRow,
-    ScalarColumn,
+    artifacts_frame, artifacts_identity_frame, points_frame, points_highlight_frame,
+    sub_cells_frame, tiles_frame,
+    trailer_frame, ArtifactRow, ScalarColumn,
 };
 
 use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{CancelToken, SinkClosed, SinkResult, ViewportHead, ViewportSink};
+use tessera_engine::{
+    CancelToken, ComputedSelection, LayerSelection, LevelSelection, SinkClosed, SinkResult,
+    ViewportHead, ViewportSink,
+};
 
 use crate::error::{map_engine_error, map_join_error, ApiError};
 use crate::health::{healthz, readyz};
 use crate::state::{AppState, GatePermits};
 
 pub fn router(state: Arc<AppState>) -> Router {
-    // The dev-only browser seam: absent `serve.dev_cors_origins` mounts nothing, so the seam is
-    // structurally absent from this router rather than present and configured empty.
-    let dev_cors = crate::cors::dev_layer(&state.dev_cors_origins);
+    // Both browser seams land here and only here: `serve.dev_cors_origins` (development) and
+    // `serve.cors_origins` (production token presentation, decision 0102). With neither set the
+    // layer is `None` and the seam is structurally absent from this router rather than present
+    // and configured empty.
+    let cors = crate::cors::viewer_layer(&state);
     let router = Router::new()
         .route("/v1/meta", get(meta))
         .route("/v1/categories/{column}", get(categories))
+        .route("/v1/categories/{column}/suggest", get(suggest))
         .route("/v1/viewport", post(viewport))
         .route("/v1/items/{tessera_id}", post(item))
         .route("/v1/artifacts/{tessera_id}", post(artifact))
+        .route("/v1/artifacts/browse", post(browse))
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .with_state(state);
-    match dev_cors {
+    match cors {
         Some(layer) => router.layer(layer),
         None => router,
     }
@@ -127,6 +135,23 @@ impl Drop for CancelGuard {
     }
 }
 
+/// One roster metadata value on the wire: `{"type": …, "value": …}` (`views.md` §3.2).
+///
+/// **Written out here rather than derived**, so that the published shape is this file's
+/// statement and not a serde attribute in another crate: the tag names the declared type, and a
+/// `timestamp_us` is microseconds since the epoch as a number, the one unit that type may hold.
+fn metadata_value(value: &tessera_engine::ViewMetadataValue) -> serde_json::Value {
+    use tessera_engine::ViewMetadataValue as V;
+    let (tag, value) = match value {
+        V::Bool(v) => ("bool", serde_json::json!(v)),
+        V::Int(v) => ("int", serde_json::json!(v)),
+        V::Float(v) => ("float", serde_json::json!(v)),
+        V::Text(v) => ("text", serde_json::json!(v)),
+        V::TimestampUs(v) => ("timestamp_us", serde_json::json!(v)),
+    };
+    serde_json::json!({"type": tag, "value": value})
+}
+
 async fn meta(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -141,13 +166,18 @@ async fn meta(
 
     let meta = state.engine.meta();
     let selection = state.engine.config();
-    // **Gate-filtered per principal, and this is the only per-principal field on the document.**
-    // Everything else here is a deployment constant identical for every caller; the layer list is
-    // not, and a shared cache over this response would hand one principal another's registry. The
+    // **Gate-filtered per principal, and this document has three such surfaces.** Everything else
+    // here is a deployment constant identical for every caller; the layer list is not, and a
+    // shared cache over this response would hand one principal another's registry. The
     // filtering is two steps in the engine — reachability by terms, then a live suppression check
     // on each layer's own entity — so a layer this caller may not know about is absent by the same
     // route a name nobody registered is.
     let layers = state.engine.visible_layers(&entry.session);
+    // **The views, the groups and the scoped families this principal may reach** (`views.md` §6),
+    // resolved at authorise and fixed for the session's life. Read here rather than recomputed:
+    // this document is the discovery surface, and a roster that disagreed with what a viewer verb
+    // will answer is an existence oracle by subtraction.
+    let visible = &entry.session.visible_views;
     Ok(Json(serde_json::json!({
         "api_version": meta.api_version,
         "bundle_format": meta.bundle_format,
@@ -155,13 +185,88 @@ async fn meta(
         // in any response, log line or metric label (I10, Appendix C C17) -- this is the idset
         // only, which is meaningless without the key and is what `POST /v1/items` checks against.
         "idset": meta.idset,
-        "views": meta.views.iter().map(|(id, name)| serde_json::json!({"id": id, "display_name": name})).collect::<Vec<_>>(),
-        "quantisation": {
-            "x_min": meta.quantisation.x_min,
-            "x_max": meta.quantisation.x_max,
-            "y_min": meta.quantisation.y_min,
-            "y_max": meta.quantisation.y_max,
-        },
+        // **What a client is looking at** (`projections.md` §9), beside the frame below. Four
+        // fields per view, and each is a **deployment constant identical for every caller** — the
+        // same class as the frame and the selection parameters, derived from the declaration and
+        // from nothing any principal can see. The build's clip and clamp counts are operator-facing
+        // and are not here: they are properties of the corpus's own data (`projections.md` §7).
+        //
+        // Per view rather than bundle-wide, because a projection is declared per view while the
+        // frame is not — a single key would have to pick one of two differently projected views.
+        //
+        // **`tile_scheme` decides whether a basemap may be drawn, and it is a scheme's name rather
+        // than a boolean** because grid alignment alone is not enough: an equirectangular frame is
+        // aligned to a square tiling no server publishes, so `null` here on an aligned frame is the
+        // ordinary answer and not a defect. `tessera_spatial::frame::tile_scheme` is the one
+        // derivation; `null` means draw the points and draw no basemap.
+        //
+        // **Gate-filtered** (`views.md` §6): a view whose own label — or whose group's — this
+        // principal does not satisfy is absent, and a request naming it is the same 404 a name
+        // nobody declared gets. A filtered roster is a **shorter list and nothing else**: views
+        // are served in creation order and carry no position, so a principal reading one cannot
+        // count what was withheld from it (decision 0113).
+        "views": meta.views.iter().filter(|v| visible.contains_view(&v.id)).map(|v| serde_json::json!({
+            "id": v.id,
+            "display_name": v.display_name,
+            // The frame this view's positions are quantised against, and the one a client
+            // decodes its tile prefixes with. **Per view and not bundle-wide** (decision 0040):
+            // two views of one bundle may quantise differently — an embedding and a map cannot
+            // share a frame without one of them wasting most of the grid — so a single top-level
+            // key would have to pick one of them, and a client drawing the other would decode
+            // every position against the wrong ground.
+            "quantisation": {
+                "x_min": v.quantisation.x_min,
+                "x_max": v.quantisation.x_max,
+                "y_min": v.quantisation.y_min,
+                "y_max": v.quantisation.y_max,
+            },
+            "projection": v.projection.name(),
+            // The ratio the world should be drawn at — 1 for `web_mercator`, `2cos φ₁` for an
+            // equirectangular alias, and `null` for `none`, which has no world to draw.
+            "world_aspect": v.projection.world_aspect(),
+            "tile_scheme": v.tile.map(|t| t.scheme),
+            "tile": v.tile.map(|t| serde_json::json!({"z": t.z, "x": t.x, "y": t.y})),
+            // **The roster record, on the view it belongs to** (`views.md` §3.2), and `null` on
+            // a plain view, which has no group and no key — `null` rather than absent because
+            // that is what `tile` and `world_aspect` beside it do, and one document should not
+            // spell "this view has none" two ways. The three keys travel together because they
+            // are one record: a key without its group names nothing.
+            //
+            // `metadata` is **typed**, one entry per name the group declared, each
+            // `{type, value}`. A bare value would leave a client guessing whether a large integer
+            // is a count or an instant, and the declaration already knows which.
+            "group": v.roster.as_ref().map(|r| &r.group),
+            "key": v.roster.as_ref().map(|r| &r.key),
+            "metadata": v.roster.as_ref().map(|r| r.metadata.iter().map(|(name, value)| {
+                (name.clone(), metadata_value(value))
+            }).collect::<serde_json::Map<_, _>>()),
+        })).collect::<Vec<_>>(),
+        // **The groups, in manifest order, each its views in creation order** (`views.md` §3.2)
+        // — what lets a client offer previous-and-next **without interpreting a key**, which is
+        // the one thing this structure exists for. The ids are the joined `group:key` form a
+        // request names, so a client steps from one view to the next by taking the id beside its
+        // own.
+        //
+        // **Nothing else of the group is here.** Every setting a group holds — its frame, its
+        // projection, its point visibility — is already on each of its views, and a second copy
+        // would be a second thing to disagree with the first. `members_of` is here because it is
+        // not on a view: it says that two groups are two layouts over one key set
+        // (`views.md` §3.3), which is exactly the fact a client pairing them needs.
+        //
+        // **Gate-filtered, group and roster alike** (`views.md` §6). A gate-failed group takes its
+        // whole roster with it: the row is absent and so is every view of it, which is what makes
+        // gating the group the answer for a deployment whose roster *shape* is sensitive. A group
+        // that passes lists only the views this principal may reach, so the ids here and the
+        // `views` entries above are one filtered set rather than two.
+        "groups": meta.groups.iter().filter(|g| visible.contains_group(&g.name)).map(|g| serde_json::json!({
+            "name": g.name,
+            // The declared title, `null` where the group declared none — a deployment constant,
+            // presentation metadata on an object whose visibility this roster has already
+            // decided, so it discloses nothing the name beside it does not.
+            "title": g.title,
+            "members_of": g.members_of,
+            "views": g.views.iter().filter(|id| visible.contains_view(id)).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
         // The column schema, and the **whole** of it: name, storage type, and — for a category —
         // the vocabulary it draws from, that vocabulary's kind and its `visibility`. Without the
         // `category` block a client cannot tell a `u16` category from a `u16` integer, since the
@@ -215,6 +320,77 @@ async fn meta(
                 "index": s.index,
             })
         }).collect::<Vec<_>>(),
+        // **The group-scoped column families, published exactly as `declared_scalars` publishes
+        // an entity-scoped column** (`views.md` §5, contracts §3.2): name, storage type, the
+        // `category` block a code needs to be read at all, the `analyser` a `text` family's terms
+        // were produced by, and the two placement flags. The one field an entity-scoped entry has
+        // no use for is `scope`, and it is the whole difference: the family is one column per view
+        // of that group, so what this entry says is *which* views the column arrives under.
+        //
+        // **`render` here is a per-view promise, which is what the scope makes it**: a family
+        // declaring it occupies a slot in the row tail of every view of its group, and of any
+        // group sharing those views via `members`, and of no other view — so a client reading this
+        // knows to expect the column in a points batch under those views and nowhere else. Where
+        // the entity-scoped flag says *this column arrives in the points batch*, this one says
+        // *under these views it does*.
+        //
+        // **A list of its own rather than rows in `declared_scalars`**, which is the flat
+        // bundle-wide schema the record blob addresses positionally and a family has no slot in
+        // (contracts §2.2); and rather than fields on the operand entry below, which is the
+        // operand surface and carries no placement for an entity-scoped column either. A
+        // render-only family is on this list and on no other, having no operand at all.
+        //
+        // **Gate-filtered on the same test the operand list uses** (`views.md` §5, §6): a family
+        // whose group this principal cannot reach is undeclared for them, so it is absent here
+        // exactly as it is absent below — this list would otherwise name the group the other one
+        // withholds.
+        "scoped_scalars": meta.scoped_scalars.iter().filter(|f| visible.contains_group(&f.group)).map(|f| {
+            serde_json::json!({
+                "name": f.name,
+                "arrow_type": f.arrow_type.arrow_type_name(),
+                "scope": {"group": f.group},
+                // The vocabulary a scoped category's codes index, with that vocabulary's kind and
+                // visibility — the three facts an entity-scoped category's entry gives, for the
+                // same reason: the hot column and the postings both carry a bare code, and a
+                // client with no block cannot tell a `u8` category from a `u8` number.
+                "category": f.vocabulary.as_deref().and_then(|name| {
+                    let vocabulary = meta.vocabularies.get(name)?;
+                    Some(serde_json::json!({
+                        "vocabulary": name,
+                        "kind": match vocabulary.kind() {
+                            tessera_engine::VocabularyKind::Declared => "declared",
+                            tessera_engine::VocabularyKind::Discovered => "discovered",
+                        },
+                        "visibility": vocabulary.visibility().as_str(),
+                    }))
+                }),
+                // The analyser a scoped `text` family's terms were produced by, for the reason
+                // `declared_scalars` publishes one: an empty `match` is otherwise
+                // indistinguishable from a query that segmented differently from the index.
+                "analyser": f.analyser,
+                "render": f.render,
+                "index": f.index,
+                // **Every view whose rows carry the column and that this principal may reach.**
+                // Two narrowings, and each answers a question the other cannot. The **expansion**
+                // is `views.md` §3.3's: a group declaring `members` of this family's group renders
+                // it under that group's own ids, so a client under `quarter_map:2026-Q1` must find
+                // that id here or conclude the column it is being served does not exist. The
+                // **filter** is §6's: a view of the group this principal cannot reach is absent
+                // from `views` above and is absent here for the same reason, so a list that named
+                // it would be the one place the document mentioned it.
+                //
+                // Neither is derivable from the roster a client already holds: a view created
+                // while the service runs has no column of any family until a flush covering it
+                // carries values, so this list is what separates *this view renders it* from
+                // *this view is one of the group's* — and what moves the moment that flush
+                // publishes (`views.md` §5, r24).
+                "views": meta
+                    .scoped_family_views(f)
+                    .into_iter()
+                    .filter(|id| visible.contains_view(id))
+                    .collect::<Vec<_>>(),
+            })
+        }).collect::<Vec<_>>(),
         // Reference Sheet R5: **which columns a client may filter on, and with which operators**
         // (contracts §3.2, decision 0062). Empty when the schema declares nothing filterable.
         //
@@ -256,6 +432,20 @@ async fn meta(
         // included: the hot column cannot express absence, so decision 0064 puts it in a presence
         // bitmap beside the column that the row scan reads. A client cannot tell which route
         // answered — that is 0068's whole licence to have two.
+        //
+        // **A group-scoped attribute's entry carries its `scope`** (`views.md` §5, §11): the group
+        // whose views its columns are per. That is what tells a client the leaf is not always
+        // answerable bare — under a view of that group, or of a group sharing its views, the
+        // request's own view decides; anywhere else the leaf must pin one, `sentiment@2026-Q3` or
+        // `sentiment@#3`, and an unpinned leaf there is a `422` rather than an empty answer. An
+        // absent `scope` is entity scope, which is the ordinary case and needs no key to say so.
+        //
+        // **A family whose group this principal cannot reach is omitted** (`views.md` §5, §6) —
+        // this entry is the only place the document names a group, so the omission has one site
+        // because the list has one. It is the discovery half of the collapse the filter parse
+        // makes: for such a principal the whole attribute is undeclared, and a leaf naming it,
+        // bare or pinned, takes the unknown-column 422 rather than a refusal that would confirm
+        // the group or its keys.
         "filter_operands": meta.declared_scalars.iter().filter(|d| tessera_engine::filter::is_filterable(d)).map(|d| {
             let family = family_of(d);
             serde_json::json!({
@@ -263,7 +453,23 @@ async fn meta(
                 "family": family.as_str(),
                 "operands": family.operands(),
             })
-        }).collect::<Vec<_>>(),
+        }).chain(
+            meta.scoped_scalars.iter().filter(|f| tessera_engine::filter::scoped_is_filterable(f) && visible.contains_group(&f.group)).map(|f| {
+                let family = tessera_engine::filter::Family::of_scoped(f);
+                serde_json::json!({
+                    "column": f.name,
+                    "family": family.as_str(),
+                    "operands": family.operands(),
+                    "scope": {"group": f.group},
+                    // **The vocabulary and the analyser are on `scoped_scalars` above**, which is
+                    // this family's `declared_scalars` row and carries every fact about the column
+                    // that is not about filtering it. They were carried here at r59, when a family
+                    // had no such row; putting them in both places would be two copies of one
+                    // fact, which is what an entity-scoped operand entry avoids by carrying
+                    // neither.
+                })
+            })
+        ).collect::<Vec<_>>(),
         // §7.2's selection constants. A client cannot read mark count as density without knowing
         // where the floor and the cap sit, so these are a genuine client need rather than test
         // convenience -- and the reference oracle cannot reproduce the definition without them.
@@ -298,6 +504,38 @@ async fn meta(
             // client that pages must know when a short page means "the set ended" rather than
             // "the deployment truncated".
             "max_category_values": state.max_category_values,
+            // `/v1/categories/{column}/suggest`'s two ceilings (`value-suggestion.md` §5.3),
+            // published on `max_category_values`' own argument. `max_suggestions` is the page
+            // ceiling and `limit`'s default; `max_suggestion_walk` is the walk budget a client
+            // reads `more: true` against on a page it did not fill, rather than mistaking it for
+            // its own arithmetic being wrong. Deployment constants, identical for every principal.
+            "max_suggestions": state.max_suggestions,
+            "max_suggestion_walk": state.max_suggestion_walk,
+            // The cardinality at or under which a suggestion is answered from this session's own
+            // set of visible values rather than by probing (`value-suggestion.md` §6.3, decision
+            // 0124). Published on the same argument, and it is the one constant on this surface a
+            // caller can compare against a quantity of their own — their composed cardinality,
+            // which a zoom-0 viewport already returns exactly as `visible`. What they learn from
+            // the pair is which side of a published constant their own mask falls on, which is a
+            // self-disclosure; nothing about another principal's mask and no corpus statistic.
+            "max_suggest_set_entities": state.max_suggest_set_entities,
+            // The publication vertex cap a shape is held to (`polygon-membership.md` §9), so a
+            // caller can simplify before submitting rather than learn the number from a `422`.
+            // A deployment constant, identical for every principal.
+            "max_shape_vertices": state.max_shape_vertices,
+            // The `region` leaf's two bounds (selection-operand §2), on the same argument: a
+            // client choosing a shape is choosing a cost, and a refusal it cannot predict is
+            // indistinguishable from its own arithmetic being wrong. Over the first is a `422`
+            // naming the count and the cap; over the second is **not a refusal** — the answer
+            // is a cover, said on `x-tessera-region`. Deployment constants, identical for every
+            // principal.
+            "max_region_vertices": state.max_region_vertices,
+            "max_region_cells": state.max_region_cells,
+            // `POST /v1/artifacts/browse`'s page ceiling and default
+            // (`highlight-and-hierarchy.md` §4), published for `max_category_values`' reason: a
+            // client choosing a page size is choosing a cost, and a refusal it cannot predict is
+            // indistinguishable from its own arithmetic being wrong.
+            "max_browse_rows": state.max_browse_rows,
         },
         // The annotation layers this principal may know exist, and what each declared.
         //
@@ -321,7 +559,10 @@ async fn meta(
             serde_json::json!({
                 "name": d.name,
                 "title": d.title,
-                "views": d.views,
+                // **Gate-filtered** (`views.md` §6): the gate governs every view-valued surface,
+                // not only discovery, so a layer served to a principal lists the views of it that
+                // principal may reach and no others.
+                "views": d.views.iter().filter(|id| visible.contains_view(id)).collect::<Vec<_>>(),
                 "membership": d.membership,
                 "hierarchy": {
                     "kind": d.hierarchy.kind,
@@ -339,6 +580,14 @@ async fn meta(
                     "zoom": l.zoom.map(|(lo, hi)| serde_json::json!([lo, hi])),
                 })).collect::<Vec<_>>(),
                 "computed_content": d.content.computed,
+                // **Which kind the layer's one drawn geometry is** — `derived` (the hull over the
+                // visible members, per principal), `predicate` (the membership shape, identical
+                // for every principal) or `authored` (a supplied drawing), or null where it draws
+                // none (`polygon-membership.md` §7.1). A client reads from it whether a shape
+                // moves with the principal, which decides whether it may hold one against a
+                // `tessera_id` across principals. A declaration fact, published on the same
+                // argument the computed vocabulary is.
+                "shape": d.drawn_shape().map(|k| k.name()),
                 // The **types**, as before: a client draws from them, and publishing them is safe
                 // because an artifact failing containment is absent whole. ⊘ Each entry's `name`
                 // — which distinguishes two contents of one type on one layer — is declared and
@@ -357,6 +606,16 @@ async fn meta(
 /// `GET /v1/categories/{column}`'s query string.
 #[derive(Debug, Deserialize)]
 struct CategoriesQuery {
+    /// **The request's own view**, for a group-scoped category (`views.md` §5): one column per
+    /// view means one value set per view, so the view is part of the address exactly as it is for
+    /// a filter leaf naming the family. Absent is the ordinary case — an entity-scoped column has
+    /// one value set for the corpus and no view decides anything about it — and a scoped column
+    /// named bare with no view is the same `422` a bare leaf takes.
+    ///
+    /// Resolved through the session's visible-view set before it decides anything, so it is the
+    /// same 404 a viewer verb gives a view this principal may not reach.
+    #[serde(default)]
+    view: Option<String>,
     /// Comma-separated codes to resolve. Present means bulk lookup; absent means enumerate.
     #[serde(default)]
     codes: Option<String>,
@@ -379,10 +638,14 @@ struct CategoriesQuery {
 /// caller may learn about which columns exist is `/v1/meta`'s answer, and this route must not
 /// become a second, finer one.
 ///
-/// **Not behind the compute gate**, unlike `/v1/viewport` and `/v1/items`. The work is a bounded
-/// walk of an in-memory `BTreeMap` — no mask composition, no projection, no file IO — so it is the
-/// same class of request as `/v1/meta`, which is also ungated. There is nothing here for a queue
-/// to protect.
+/// **Off the compute gate**, unlike `/v1/viewport` and `/v1/items`. **For a `public` column** the
+/// work is a bounded walk of an in-memory map with no mask composition, no projection and no file
+/// IO — the same class of request as `/v1/meta`. **A `derived` column is not that** (corrected
+/// alongside the suggestion verb, contracts §3.2 r72): it composes the candidate and probes one
+/// memory-mapped posting per value it walks, over the whole vocabulary, so it is neither IO-free
+/// nor bounded by the page. There is still nothing here a compute-admission queue is sized to
+/// protect: both this route and `suggest` below are read-only, per-request, memory-mapped work,
+/// not the `/v1/viewport` sweep the gate exists for.
 async fn categories(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -391,6 +654,11 @@ async fn categories(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let token = bearer_token(&headers).ok_or(ApiError::BadCredential)?;
     let entry = state.authenticated_session(token)?;
+
+    let meta = state.engine.meta();
+    let visible = &entry.session.visible_views;
+    let resolved =
+        resolve_category_column(&meta, &column, query.view.as_deref(), visible)?;
 
     // Clamped, not refused: the ceiling is a response bound rather than a disclosure control, so a
     // caller asking for more than the deployment serves gets the deployment's answer plus a cursor
@@ -433,12 +701,16 @@ async fn categories(
 
     let page = state
         .engine
-        .categories(&entry.session, &column, query)
+        .categories(&entry.session, &resolved, query)
         .map_err(map_engine_error)?
         .ok_or_else(|| ApiError::Unknown("unknown category column".to_string()))?;
 
     Ok(Json(serde_json::json!({
-        "column": page.column,
+        // **The caller's own spelling**, not the resolved one: a scoped family's resolved column
+        // is an engine-internal name (`sentiment@quarter:2026-Q3`) that no request writes, and
+        // echoing it would publish a second address for a column whose address is its name plus a
+        // view.
+        "column": column,
         "values": page.values.iter().map(|v| serde_json::json!({
             "code": v.code,
             "key": v.key,
@@ -447,6 +719,204 @@ async fn categories(
             "title": v.title,
         })).collect::<Vec<_>>(),
         "next": page.next,
+    })))
+}
+
+/// The column resolution `/v1/categories/{column}` and `/v1/categories/{column}/suggest` share
+/// (`value-suggestion.md` §5.1: "one gate, one address resolution"). An entity-scoped column is
+/// its own name; a group-scoped family is view-addressed through `?view=` or the `{column}@{key}`
+/// pin, resolved through the session's visible-view set exactly as a viewer verb's `view` is — so
+/// a view this principal cannot reach is the same `404` an unknown view gets, whatever the
+/// column's scope. Factored out of `categories` (design r72) so the two listing surfaces cannot
+/// silently diverge on which column a spelling names — a gate reached by one door and not the
+/// other is the existence oracle by the second door.
+///
+/// `Ok` carries the resolved column name (an engine-internal `name@view` for a scoped family);
+/// every failure is the caller's `ApiError`, already shaped as `/v1/categories` shapes it, so
+/// both handlers return the identical body for the identical mistake.
+fn resolve_category_column(
+    meta: &tessera_engine::EngineMeta,
+    column: &str,
+    requested_view: Option<&str>,
+    visible: &tessera_engine::gate::VisibleViews,
+) -> Result<String, ApiError> {
+    // **`view` is resolved first and on its own terms**, before the column is looked at
+    // (contracts §3.2): an entity-scoped column has one value set and no view decides anything
+    // about it, but a `view` naming nothing or naming a view this principal may not reach is
+    // still the unknown-view 404, applied ahead of the branch rather than inside one of its arms.
+    let view = match requested_view {
+        None => "",
+        Some(requested) => match meta.resolve_visible_view(requested, visible) {
+            Some(view) => view.id.as_str(),
+            None => return Err(ApiError::Unknown(format!("unknown view '{requested}'"))),
+        },
+    };
+    match meta.resolve_category_column(column, view, visible) {
+        // A non-category column is the same `404` a name that is nothing at all gets, which is
+        // this route's own rule and the reason it cannot be used to probe which columns are
+        // categories beyond what `/v1/meta` already says.
+        tessera_engine::LeafColumn::Resolved {
+            column: resolved,
+            family: tessera_engine::filter::Family::Category,
+        } => Ok(resolved),
+        tessera_engine::LeafColumn::Unpinned { group } => Err(ApiError::Contract(format!(
+            "'{column}' is scoped to view group '{group}' and this request names no view of \
+             it, so the name decides no value set. Pass `view=` a view of that group, or pin \
+             the one it means — '{column}@<key>'"
+        ))),
+        tessera_engine::LeafColumn::UnknownPin { group, pin } => Err(ApiError::Unknown(format!(
+            "unknown view '{pin}' of group '{group}'"
+        ))),
+        tessera_engine::LeafColumn::PinOnUnscoped { column } => Err(ApiError::Contract(format!(
+            "'{column}' is not scoped to a view group, so there is nothing for the pin to \
+             choose between: it is one value set for the corpus"
+        ))),
+        _ => Err(ApiError::Unknown("unknown category column".to_string())),
+    }
+}
+
+/// `GET /v1/categories/{column}/suggest`'s query string.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SuggestQuery {
+    /// The text typed, echoed back **as received**, not folded (`value-suggestion.md` §5.1).
+    /// Bounded at 256 bytes; empty matches every value.
+    #[serde(default)]
+    q: String,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    counts: Option<bool>,
+    /// As `/v1/categories`' own `view` — resolved through the same site, before the column.
+    #[serde(default)]
+    view: Option<String>,
+}
+
+/// `GET /v1/categories/{column}/suggest` (contracts §3.2, r72; `value-suggestion.md`): the values
+/// whose folded key, title, or a word start of either has `q` as a prefix.
+///
+/// **One gate with the enumeration, and one address resolution** — [`resolve_category_column`],
+/// shared with [`categories`]. Everything about who may be told a value name is
+/// `Engine::suggest`'s predicate, which is `Engine::categories`' own; this handler's job is the
+/// wire shape, the two 422s the enumeration has no need of (`q` too long, an unknown parameter),
+/// and the per-session admission below.
+///
+/// **`limit=0` is `422`**, on its own reason from the enumeration's: a zero-length suggestion page
+/// is a request for no answer rather than a cursor that cannot advance (this route has no cursor
+/// at all). **Unresolved parameters are `422`**: this route has no cursor and no bulk form to
+/// compose with, so a parameter it does not define is refused rather than silently ignored —
+/// `#[serde(deny_unknown_fields)]` on [`SuggestQuery`] is what that refusal actually is, since a
+/// spelling mistake in a client's `q` or `limit` must not be read as an empty prefix or the
+/// deployment default.
+///
+/// **Off the compute-admission gate, and admitted at most once per session.** The walk faults on
+/// mapped files and probes up to `max_suggestion_walk` postings — not reactor work — so it runs in
+/// `spawn_blocking`, exactly as `/v1/items` and `/v1/artifacts` do; unlike them it takes no
+/// `compute_gate` permit; a per-keystroke surface queued behind viewport renders would be
+/// unusable. What it takes instead is [`crate::state::SuggestAdmission`]'s one-per-session slot: a
+/// second request for a session already walking is refused with the shared `429 backpressure`
+/// (`ApiError::Backpressure`, `Retry-After: 1`) **before any work runs**, which is what stops a
+/// client that does not debounce its keystrokes from turning a held key into a queue.
+async fn suggest(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(column): AxumPath<String>,
+    query: Result<AxumQuery<SuggestQuery>, axum::extract::rejection::QueryRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let token = bearer_token(&headers).ok_or(ApiError::BadCredential)?;
+    let entry = state.authenticated_session(token)?;
+
+    // An unknown query parameter is `deny_unknown_fields`'s rejection, which axum reports as an
+    // extractor error rather than routing it through `SuggestQuery`'s `Deserialize` impl and back
+    // out here — caught explicitly so the response is this route's own `422 contract` rather than
+    // axum's default plain-text rejection body. A fixed detail, not the rejection's own `Display`
+    // (`map_store_error`'s rule, applied here too): the query string is caller-supplied and its
+    // exact serde error is not this crate's to forward verbatim.
+    let AxumQuery(query) = query.map_err(|_| {
+        ApiError::Contract(
+            "the query string is malformed, or carries a parameter this route does not define; \
+             it accepts only `q`, `limit`, `counts` and `view`"
+                .to_string(),
+        )
+    })?;
+
+    if query.q.len() > 256 {
+        return Err(ApiError::Contract(format!(
+            "q must be at most 256 bytes, got {}",
+            query.q.len()
+        )));
+    }
+    let limit = match query.limit {
+        Some(0) => {
+            return Err(ApiError::Contract(
+                "limit must be at least 1; a zero-length suggestion page is a request for no \
+                 answer"
+                    .to_string(),
+            ))
+        }
+        Some(n) => n.min(state.max_suggestions),
+        None => state.max_suggestions,
+    };
+    let counts = query.counts.unwrap_or(false);
+
+    let meta = state.engine.meta();
+    let visible = &entry.session.visible_views;
+    let resolved = resolve_category_column(&meta, &column, query.view.as_deref(), visible)?;
+
+    // **At most one walk in flight per session, refused before any work runs.** `token_id` rather
+    // than the bearer token itself: the admission set is process-wide, and a token never crosses a
+    // response or a log line here either way, but the id is the same handle `/session/revoke`
+    // already addresses this session by.
+    let Some(_suggest_guard) = state.suggest_admission.try_begin(entry.session.token_id) else {
+        return Err(ApiError::Backpressure);
+    };
+
+    let walk_budget = state.max_suggestion_walk;
+    let max_suggest_set_entities = state.max_suggest_set_entities;
+    let q = query.q.clone();
+    let page = tokio::task::spawn_blocking(move || {
+        let _suggest_guard = _suggest_guard;
+        state
+            .engine
+            .suggest(
+                &entry.session,
+                &resolved,
+                &q,
+                limit,
+                counts,
+                walk_budget,
+                max_suggest_set_entities,
+            )
+    })
+    .await
+    .map_err(map_join_error)?
+    .map_err(map_engine_error)?
+    .ok_or_else(|| ApiError::Unknown("unknown category column".to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        // The caller's own spelling, as `/v1/categories` echoes it — never the resolved,
+        // engine-internal `name@view` form of a scoped family.
+        "column": column,
+        "q": query.q,
+        "values": page.values.iter().map(|v| {
+            let mut value = serde_json::json!({
+                "code": v.code,
+                "key": v.key,
+                "title": v.title,
+                "match": {
+                    "field": v.span.field.as_str(),
+                    "start": v.span.start,
+                    "len": v.span.len,
+                },
+            });
+            // Present iff `counts=true`, and never `0`/`null` as a stand-in for absent — `count`
+            // is only ever inserted here when the engine actually returned one.
+            if let Some(count) = v.count {
+                value["count"] = serde_json::json!(count);
+            }
+            value
+        }).collect::<Vec<_>>(),
+        "more": page.more,
     })))
 }
 
@@ -496,14 +966,20 @@ struct ViewportReq {
     /// must not be conflated.
     #[serde(default)]
     filters: Option<serde_json::Value>,
-    /// Which annotation layers to answer for. Absent answers for every layer this principal
-    /// reaches; an empty list answers for none and costs nothing.
+    /// Which annotation layers to answer for — and, with them, which membership columns the
+    /// points frames carry (D12).
     ///
-    /// **It narrows and never widens.** A name this principal does not reach is absent from the
-    /// answer whether or not it was asked for, by the same route a name nobody registered is — so
-    /// naming a layer is not a way to learn whether it exists.
+    /// **Absent, or the empty list, answers for none and costs nothing; the string `"all"`
+    /// answers for every layer this principal reaches** (owner ruling 2026-08-25, contracts
+    /// §3.2). A client that never thinks about layers therefore never pays the artifact pass,
+    /// and one that wants everything says so. `all` is reserved — a layer cannot be registered
+    /// under it — so the word is never ambiguous.
+    ///
+    /// **A list narrows and never widens.** A name this principal does not reach is absent from
+    /// the answer whether or not it was asked for, by the same route a name nobody registered is —
+    /// so naming a layer is not a way to learn whether it exists.
     #[serde(default)]
-    layers: Option<Vec<String>>,
+    layers: Option<LayersReq>,
     /// How many artifacts the client wants back at most, in the same shape as `k` beside it.
     ///
     /// **Honoured structurally, never by sampling** ([decision 0083](../../../docs/decisions/0083-the-frontier-is-a-request-time-budget.md)):
@@ -513,6 +989,176 @@ struct ViewportReq {
     /// frame later is the change this ordering exists to avoid.
     #[serde(default)]
     artifact_budget: Option<u32>,
+    /// Which of each named layer's declared levels to answer for.
+    ///
+    /// **Absent follows the layer's own declaration** — the levels whose declared zoom range
+    /// contains this request's `zoom`, which is what a client reading `/v1/meta`'s zoom→level map
+    /// would have asked for and until now had no way to say. The string `"all"` answers for every
+    /// level; a list answers for exactly those, and **an empty list is *none*, as `layers: []` is**.
+    ///
+    /// **A layer that declares no levels at all is inert to this in every form** — a treed or flat
+    /// layer sits entirely at level 0, so a request naming levels for the tiered layer beside it
+    /// does not blank its clusterings. **A layer that declares levels but no zoom range on any of
+    /// them serves every level in the absent case**, there being no map to follow.
+    ///
+    /// **It applies to every layer named.** A level number is a rung of one layer and means nothing
+    /// across two, so there is no per-layer map here; under decision 0096 a request names one layer
+    /// anyway, and the absent case needs no map at all because each layer's own ranges decide for
+    /// it.
+    ///
+    /// **A level a layer does not hold is absent, not a refusal** — the same route an unreachable
+    /// layer name takes, and the same reason: asking is not a way to learn what exists.
+    #[serde(default)]
+    levels: Option<LevelsReq>,
+    /// Which of each layer's **declared** computed properties — `centroid`, `box`, `shape` — the
+    /// response should carry. `shape` is the layer's **one drawn geometry** of whichever kind
+    /// `/v1/meta` publishes for it — the derived hull, the predicate shape or the authored one
+    /// (`polygon-membership.md` §7.1) — so a request asks for the drawing without knowing its
+    /// derivation; `hull` is the declaration's word and not an ask word.
+    ///
+    /// **Absent is the declaration's own set**, which is what every response carried before this
+    /// field existed. A list answers for exactly those, intersected with what each layer declared,
+    /// and **the empty list is none**: counts and no geometry.
+    ///
+    /// **It narrows and can never widen.** A property a layer did not declare is not served for
+    /// naming it, by the same route an unreachable layer name takes; the intersection is the whole
+    /// rule. Nothing here reaches the closure rule — whatever is computed is still a function of
+    /// `membership ∩ M_auth` and nothing else — so this is a cost control of exactly the kind the
+    /// declaration is, moved to the request that pays for it. The client draws a hull for the one
+    /// artifact under the pointer and asks the drill-down route for that one, where before it was
+    /// served 197 to draw one (`artifact-shapes.md` §7).
+    ///
+    /// **A name outside the vocabulary is a `422`, unlike an unreachable layer name**, and the
+    /// split is the one contracts §3.2 already draws for filters: the vocabulary is deployment
+    /// schema, fixed, the same for every principal and published in `/v1/meta`, so refusing
+    /// discloses nothing. A *layer* name is viewer data, which is why that one is absent instead.
+    #[serde(default)]
+    computed: Option<Vec<String>>,
+    /// Which columns each served artifact row answers with (`artifact-fetch-protocol.md` §5.2).
+    ///
+    /// **Absent is `"full"`** — every column, the answer a caller who has read nothing receives.
+    /// **`"identity"` answers with the SAME rows in a fixed four-column schema** — `layer`
+    /// (dictionary-encoded), `tessera_id`, `rung`, `matched`: the row set, the `matched` bits and
+    /// the `rung` values are identical under either value, and only the columns change, which is
+    /// what keeps every cross-reference (`parent_ids`, the points frames' membership columns) true
+    /// and is why the projection discloses nothing — a column subset of what the same caller's
+    /// identical request would have been served. For the caller that already holds the payload
+    /// columns and wants this filter's bits over the same rows.
+    ///
+    /// Any other value is a `422`, from serde naming the two accepted spellings.
+    #[serde(default)]
+    artifact_rows: Option<ArtifactRowsReq>,
+    /// The request's **highlight** expression, in exactly `filters`' grammar
+    /// (`highlight-and-hierarchy.md` §2).
+    ///
+    /// **Filter and highlight are two fields of one request, never two endpoints**: a viewer
+    /// narrowed by one clause and lit by another sends both here and reads both answers off the
+    /// same frames. It is evaluated over the candidate `filters` produced and **never changes
+    /// which rows the response holds** — the cap clause, the density sampling and `served` run
+    /// over the `filters` candidate exactly as they do without it, which is what makes it a
+    /// highlight rather than a filter: the map does not move and the marks do not resample.
+    ///
+    /// What it adds is three answers, each a conjunction with the filter's candidate: the *tiles*
+    /// frame's `highlighted` count, the *points* frame's `highlighted` bit, and the *artifacts*
+    /// frame's `highlighted` bit. There is no list form, for the reason `filters` is one
+    /// expression — two highlights are one expression under `all_of` or `any_of`, and a second
+    /// grammar is a second surface.
+    #[serde(default)]
+    highlight: Option<serde_json::Value>,
+    /// Which columns each served point answers with (`highlight-and-hierarchy.md` §2).
+    ///
+    /// **Absent is `"full"`** — every column. **`"highlight"` answers with the SAME points as
+    /// `(tessera_id, highlighted)`**: the row set and the per-tile `served` split are identical
+    /// under either value and only the columns change, which is what makes the projection
+    /// disclose nothing — the served set does not depend on the highlight at all. It is for the
+    /// client that changed only its highlight and already holds every point it needs; the bits
+    /// join its held points by `tessera_id`.
+    ///
+    /// **Bound to a generation**: a stamp move (`x-tessera-stale`) means the held set may no
+    /// longer be what the same request serves, and the client re-asks with `"full"` — exactly as
+    /// `artifact_rows` requires. Without a `highlight` on the request there is nothing to project
+    /// to, and this answers as `"full"` does.
+    ///
+    /// Any other value is a `422`, from serde naming the two accepted spellings.
+    #[serde(default)]
+    point_rows: Option<PointRowsReq>,
+}
+
+/// The `point_rows` field's two values — [`ArtifactRowsReq`]'s shape, for its reason.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PointRowsReq {
+    Full,
+    Highlight,
+}
+
+/// The `artifact_rows` field's two values. A derived enum rather than [`LayersReq`]'s untagged
+/// shape — there is no list form here — so an unknown value is a `422` whose message names the
+/// two accepted spellings.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ArtifactRowsReq {
+    Full,
+    Identity,
+}
+
+/// The `layers` field's two spellings: a list of names, or the one reserved word.
+///
+/// Untagged, so the JSON is `["a", "b"]` or `"all"` and nothing else: any other string is a
+/// `422` from serde rather than a name that silently matches no layer, which is what an
+/// `Option<Vec<String>>` accepting a stray string would have had to become.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum LayersReq {
+    All(AllLayers),
+    Named(Vec<String>),
+}
+
+/// The `levels` field's two spellings: a list of level numbers, or the one reserved word.
+///
+/// Untagged on the same argument as [`LayersReq`]: `[0, 1]` or `"all"`, and any other string is a
+/// `422` rather than a selection that silently matches nothing.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum LevelsReq {
+    All(AllLevels),
+    Named(Vec<u32>),
+}
+
+/// The literal `"all"` and only that, for `levels`.
+#[derive(Debug)]
+struct AllLevels;
+
+impl<'de> Deserialize<'de> for AllLevels {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let word = String::deserialize(deserializer)?;
+        if word == tessera_types::layer::RESERVED_LAYER_SELECTION {
+            Ok(AllLevels)
+        } else {
+            Err(serde::de::Error::custom(format!(
+                "`levels` is a list of level numbers or the string \"{}\"; got \"{word}\"",
+                tessera_types::layer::RESERVED_LAYER_SELECTION
+            )))
+        }
+    }
+}
+
+/// The literal `"all"` and only that — `tessera_types::layer::RESERVED_LAYER_SELECTION`.
+#[derive(Debug)]
+struct AllLayers;
+
+impl<'de> Deserialize<'de> for AllLayers {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let word = String::deserialize(deserializer)?;
+        if word == tessera_types::layer::RESERVED_LAYER_SELECTION {
+            Ok(AllLayers)
+        } else {
+            Err(serde::de::Error::custom(format!(
+                "`layers` is a list of layer names or the string \"{}\"; got \"{word}\"",
+                tessera_types::layer::RESERVED_LAYER_SELECTION
+            )))
+        }
+    }
 }
 
 /// The streamed viewport's channel capacity, in frames. Two: one in flight to hyper, one built
@@ -535,6 +1181,9 @@ struct FirstFlush {
     coordinates: tessera_engine::ViewCoordinates,
     stamp: GenerationStamp,
     stale: bool,
+    /// The region leaves' verdict — the `x-tessera-region` header, absent when the request
+    /// carried none.
+    region: Option<tessera_engine::RegionVerdict>,
     /// The serialised tiles frame plus, when the §3.3 underlay was requested, the sub-cells
     /// frame — the body's first bytes, prepended ahead of the channel.
     first_frames: Vec<u8>,
@@ -574,9 +1223,20 @@ struct WireSink {
     /// request truncated at 111 s with **neither** `viewport stream aborted` line firing, because
     /// the server's own deadline had fired and had no way to say so. This is that way.
     shed: Option<Shed>,
+    /// The request's `artifact_rows` projection — which kind-5 frame shape [`Self::artifacts`]
+    /// writes. Set by the producer from the parsed request before the engine call; the engine
+    /// computes the same rows either way (`artifact-fetch-protocol.md` §5.2).
+    artifact_rows: tessera_engine::ArtifactRows,
+    /// The request's `point_rows` projection — which kind-3 frame shape [`Self::points`] writes.
+    /// Set the same way and for the same reason (`highlight-and-hierarchy.md` §2).
+    point_rows: tessera_engine::PointRows,
     arrow_serialise_ns: u64,
     points_total: u64,
     flushes: u64,
+    /// How many served artifacts had their shape's vertex budget fire (`polygon-membership.md`
+    /// §7.2) — the trailer's `stage_ns` companion records it, so a coarser-than-depth drawing is
+    /// a number in the trace and not a guess from the picture.
+    shape_guard_fired: u64,
 }
 
 /// A sink refusal the **server** chose, told apart from the client going away.
@@ -649,7 +1309,8 @@ impl ViewportSink for WireSink {
         let visible: Vec<u64> = tiles.iter().map(|t| t.visible).collect();
         let matched: Vec<u64> = tiles.iter().map(|t| t.matched).collect();
         let served: Vec<u64> = tiles.iter().map(|t| t.served).collect();
-        let mut frames = tiles_frame(&tile, &visible, &matched, &served);
+        let highlighted: Vec<u64> = tiles.iter().map(|t| t.highlighted).collect();
+        let mut frames = tiles_frame(&tile, &visible, &matched, &served, &highlighted);
         // `Some` of an empty slice is a present, zero-row frame; `None` is no frame at all —
         // presence is decided by the request, not the result (contracts §3.2's r12 rule).
         if let Some(cells) = sub_cells {
@@ -671,6 +1332,7 @@ impl ViewportSink for WireSink {
             coordinates: head.coordinates,
             stamp: head.stamp.clone(),
             stale: head.stale,
+            region: head.region,
             first_frames: frames,
             server_us: self.start.elapsed().as_micros() as u64,
         };
@@ -691,6 +1353,7 @@ impl ViewportSink for WireSink {
     /// `streamed-serving.md` §2 puts first deliberately.
     fn artifacts(&mut self, artifacts: &[tessera_engine::ArtifactOut]) -> SinkResult {
         let serialise_start = Instant::now();
+        self.shape_guard_fired += artifacts.iter().filter(|a| a.shape_guard_fired).count() as u64;
         let rows: Vec<ArtifactRow<'_>> = artifacts
             .iter()
             .map(|a| ArtifactRow {
@@ -700,12 +1363,20 @@ impl ViewportSink for WireSink {
                 masked_count: a.masked_count,
                 centroid: a.derived.centroid,
                 bbox: a.derived.bbox,
-                hull: a.derived.hull.as_deref(),
+                shape: a.derived.shape.as_deref(),
                 content: &a.content,
-                parent_id: a.parent_id.map(|id| id.raw()),
+                parent_ids: a.parent_ids.iter().map(|id| id.raw()).collect(),
+                rung: a.rung,
+                matched: a.matched,
+                highlighted: a.highlighted,
             })
             .collect();
-        let frame = artifacts_frame(&rows);
+        // The same rows either way — the projection changes which columns are written, never
+        // which artifacts the engine served (`artifact-fetch-protocol.md` §5.2).
+        let frame = match self.artifact_rows {
+            tessera_engine::ArtifactRows::Full => artifacts_frame(&rows),
+            tessera_engine::ArtifactRows::Identity => artifacts_identity_frame(&rows),
+        };
         self.arrow_serialise_ns += serialise_start.elapsed().as_nanos() as u64;
         self.send(frame)
     }
@@ -724,7 +1395,27 @@ impl ViewportSink for WireSink {
             .zip(&chunk.scalars)
             .map(|(d, col)| (d.name.as_str(), column_ref(col)))
             .collect();
-        let frame = points_frame(&chunk.tessera_ids, &chunk.codes, &scalar_refs);
+        // The membership columns (D12) name themselves: which layers get one is settled by the
+        // artifact pass, after the head, so the chunk carries the names rather than the head.
+        let membership_refs: Vec<(&str, &[Option<u64>])> = chunk
+            .membership
+            .iter()
+            .map(|m| (m.layer.as_str(), m.ids.as_slice()))
+            .collect();
+        // The highlight projection is the two-column frame, and the row set is the same either
+        // way — see `points_highlight_frame` (`highlight-and-hierarchy.md` §2).
+        let frame = match (self.point_rows, chunk.highlighted.as_deref()) {
+            (tessera_engine::PointRows::Highlight, Some(bits)) => {
+                points_highlight_frame(&chunk.tessera_ids, bits)
+            }
+            (_, bits) => points_frame(
+                &chunk.tessera_ids,
+                &chunk.codes,
+                &scalar_refs,
+                bits,
+                &membership_refs,
+            ),
+        };
         self.arrow_serialise_ns += serialise_start.elapsed().as_nanos() as u64;
         self.points_total += chunk.tessera_ids.len() as u64;
         self.flushes += 1;
@@ -745,6 +1436,34 @@ fn run_viewport_stream(
     shared: Arc<AtomicU8>,
 ) {
     let stamp = req.pin.map(GenerationStamp::from);
+    // **One `Engine::meta()` for the whole request** (lifecycle §1.1), read before any compute:
+    // the view id is resolved against it, and the filter parse below reads the same snapshot, so
+    // the frame a `region` leaf is canonicalised in cannot come from a different generation than
+    // the view the request was answered for.
+    let meta = state.engine.meta();
+    // **The one resolution of a caller's view id** (`views.md` §3.2), through this session's
+    // visible-view set (`views.md` §6): a plain view's name, or a group's `<group>:<key>`.
+    // Unknown is the 404 the engine would have given for an unknown id — the same answer, from
+    // the same construction site, for an absent key, a name that was never declared and a view
+    // this principal's gate fails. `resolve_visible_view` makes the same one set-membership probe
+    // on all of them, so the three cost the same work as well as reading the same.
+    let Some(view) = meta.resolve_visible_view(&req.view, &session.visible_views) else {
+        if let Some(tx) = sink.first_tx.take() {
+            let _ = tx.send(Err(ApiError::Unknown(format!(
+                "unknown view '{}'",
+                req.view
+            ))));
+        }
+        return;
+    };
+    let view_id = view.id.clone();
+    let view_extent = tessera_engine::shapes::Bounds {
+        x_min: view.quantisation.x_min,
+        x_max: view.quantisation.x_max,
+        y_min: view.quantisation.y_min,
+        y_max: view.quantisation.y_max,
+    };
+    let view_projection = view.projection;
     // Contracts §3.2's default. It is the deployment's own overplot ceiling rather than a
     // literal, so a client that expresses no preference gets the full budget this deployment will
     // serve and §7.2's proportional window is realised in full — at the old default of 30 against a
@@ -775,72 +1494,171 @@ fn run_viewport_stream(
     // has already paid for a fragment. It is also before the first frame is written, which matters
     // more under streaming than it did before it: once a frame is out the status line is spent, and
     // a filter refused mid-stream could only be reported as a truncation.
-    let filter = match &req.filters {
-        None => None,
-        Some(value) => {
-            let meta = state.engine.meta();
-            // The same predicate `/v1/meta`'s operand list publishes — the engine's
-            // `filter::is_filterable` — so a column a client was told about parses and a column
-            // it was not stays the unknown-column 422.
-            let filterable: std::collections::HashMap<&str, tessera_engine::filter::Family> = meta
-                .declared_scalars
-                .iter()
-                .filter(|d| tessera_engine::filter::is_filterable(d))
-                .map(|d| (d.name.as_str(), family_of(d)))
-                .collect();
+    // **One parse for both expressions.** `filters` and `highlight` are two fields of one request
+    // in one grammar (`highlight-and-hierarchy.md` §2), so they are parsed by one closure against
+    // one schema — a second transcription here is a second surface, which is the argument the
+    // design makes for there being no list of highlights on the wire either.
+    let parse_expr = |value: &serde_json::Value| {
+        {
+            // **Keyed by the leaf's bare name**, the entity-scoped columns and the group-scoped
+            // families alike: a family's columns are one declaration and share one vocabulary, so
+            // a key resolves to the same code whichever view's column reads it. Names are unique
+            // across the two lists — the build refuses a family sharing a declared column's name —
+            // so one map cannot answer two things.
             let vocab_of: std::collections::HashMap<&str, &str> = meta
                 .declared_scalars
                 .iter()
                 .filter_map(|d| Some((d.name.as_str(), d.vocabulary.as_deref()?)))
+                .chain(
+                    meta.scoped_scalars
+                        .iter()
+                        .filter_map(|f| Some((f.name.as_str(), f.vocabulary.as_deref()?))),
+                )
                 .collect();
-            match crate::filter_dto::parse(
+            // A `region` leaf is canonicalised here, against the view's own extent — the one
+            // `/v1/meta` publishes — so the engine sees a grid-unit shape and the vertex cap and
+            // every coordinate refusal are `422`s before any compute (selection-operand §2).
+            // **The frame and the projection of the view this request names**, not the bundle's
+            // first: both are declared per view (decision 0040, `projections.md` §3). A `region`
+            // leaf declared in longitude and latitude is placed by the same function that placed
+            // the points it selects (`polygon-membership.md` R12), against the same grid — and
+            // reading any other view's would hold the wrong rows with nothing saying so. Both are
+            // taken from one lookup, so they cannot come from different views.
+            let region = crate::filter_dto::RegionContext {
+                extent: view_extent,
+                projection: view_projection,
+                max_vertices: state.max_region_vertices,
+            };
+            crate::filter_dto::parse(
                 value,
-                &|column| filterable.get(column).copied(),
+                // **The engine resolves the leaf's spelling**, against the same operand predicate
+                // `/v1/meta` publishes and the same view namespace a request's `view` is resolved
+                // through — so a column a client was told about parses, a column it was not stays
+                // the unknown-column 422, and a pinned leaf cannot mean one thing here and another
+                // on the discovery document (`views.md` §5).
+                &|leaf| meta.resolve_filter_column(leaf, &view_id, &session.visible_views),
                 &|column, key| {
-                    let vocabulary = vocab_of.get(column)?;
+                    // The caller's own spelling reaches here, which for a scoped family may pin a
+                    // view (`views.md` §5). The pin decides which *column* is read and never which
+                    // value set the key is in — that is the family's — so it is dropped before the
+                    // lookup rather than being a second key space.
+                    let name = column
+                        .split_once(tessera_engine::filter::PIN)
+                        .map_or(column, |(name, _)| name);
+                    let vocabulary = vocab_of.get(name)?;
                     meta.vocabularies.get(vocabulary)?.code_of(key)
                 },
-            ) {
-                Ok(expr) => Some(expr),
-                // The pre-first-flush channel, the same one an engine refusal takes: nothing is
-                // committed, the handler is still waiting on it, and the typed `422` reaches the
-                // client exactly as it did before streaming.
-                Err(e) => {
-                    if let Some(tx) = sink.first_tx.take() {
-                        let _ = tx.send(Err(e));
-                    }
-                    return;
-                }
-            }
+                &region,
+            )
+        }
+    };
+    // The pre-first-flush channel, the same one an engine refusal takes: nothing is committed, the
+    // handler is still waiting on it, and the typed `422` reaches the client exactly as it did
+    // before streaming.
+    let mut refuse = |e| {
+        if let Some(tx) = sink.first_tx.take() {
+            let _ = tx.send(Err(e));
+        }
+    };
+    let filter = match req.filters.as_ref().map(&parse_expr) {
+        None => None,
+        Some(Ok(expr)) => Some(expr),
+        Some(Err(e)) => {
+            refuse(e);
+            return;
+        }
+    };
+    let highlight = match req.highlight.as_ref().map(&parse_expr) {
+        None => None,
+        Some(Ok(expr)) => Some(expr),
+        Some(Err(e)) => {
+            refuse(e);
+            return;
         }
     };
 
     // **Owned copies of what names the request**, taken before the engine borrows `req`, so the
     // shed log below can say which request it was without extending a borrow across the call.
     // Three coordinates and no principal: a view id, a zoom and the layer names the caller asked
-    // for, all of them the caller's own words back.
-    let named_view = req.view.clone();
+    // for. The view is the **resolved** id rather than the caller's spelling of it, so a log line
+    // about a request naming `quarter:2026-Q3` says which view it was actually answered for; the
+    // names are the caller's own words back.
+    let named_view = view_id.clone();
     let named_zoom = req.zoom;
-    let named_layers = req
-        .layers
-        .as_ref()
-        .map(|names| names.join(","))
-        .unwrap_or_default();
+    let named_layers = match &req.layers {
+        Some(LayersReq::All(_)) => tessera_types::layer::RESERVED_LAYER_SELECTION.to_string(),
+        Some(LayersReq::Named(names)) => names.join(","),
+        None => String::new(),
+    };
 
-    // Borrowed as `&[&str]` for the engine's request, which holds the list rather than owning it.
-    let layer_names: Option<Vec<&str>> = req
-        .layers
-        .as_ref()
-        .map(|names| names.iter().map(String::as_str).collect());
-    let mut request = ViewportRequest::new(&req.view, req.zoom, bbox, k)
+    // **Omitted is the empty list**, and the mapping is the one place the wire's default is
+    // decided. Borrowed as `&[&str]` for the engine's request, which holds the list rather than
+    // owning it.
+    let layer_names: Vec<&str> = match &req.layers {
+        Some(LayersReq::Named(names)) => names.iter().map(String::as_str).collect(),
+        Some(LayersReq::All(_)) | None => Vec::new(),
+    };
+    let layers = match &req.layers {
+        Some(LayersReq::All(_)) => LayerSelection::All,
+        Some(LayersReq::Named(_)) | None => LayerSelection::Named(&layer_names),
+    };
+    // **Omitted is the declaration's own map**, which is the opposite default from `layers` beside
+    // it and deliberately so: naming a layer has already opted into the artifact pass, and what is
+    // left is which of its rungs to answer at. The expensive answer is *every level*, so that is
+    // the one a caller asks for by name.
+    let level_numbers: Vec<u32> = match &req.levels {
+        Some(LevelsReq::Named(levels)) => levels.clone(),
+        Some(LevelsReq::All(_)) | None => Vec::new(),
+    };
+    let levels = match &req.levels {
+        Some(LevelsReq::All(_)) => LevelSelection::All,
+        Some(LevelsReq::Named(_)) => LevelSelection::Named(&level_numbers),
+        None => LevelSelection::Declared,
+    };
+    // **Absent is the declaration's own set**, as `levels` beside it is: a client that never
+    // thought about geometry is answered exactly as it was before the field existed. Parsed rather
+    // than validated here — the handler already refused an unknown name, so this cannot drop one.
+    let computed_named: Vec<tessera_engine::ComputedProperty> = req
+        .computed
+        .iter()
+        .flatten()
+        .filter_map(|name| tessera_engine::ComputedProperty::parse_ask(name))
+        .collect();
+    let computed = match &req.computed {
+        Some(_) => ComputedSelection::Named(&computed_named),
+        None => ComputedSelection::Declared,
+    };
+    // **Omitted is `"full"`** — the complete answer is the default and the projection is the
+    // opt-in (`artifact-fetch-protocol.md` §5.2). Told to the engine (which skips payload
+    // production) and to the sink (which writes the four-column frame); the row set is identical
+    // either way.
+    let artifact_rows = match req.artifact_rows {
+        Some(ArtifactRowsReq::Identity) => tessera_engine::ArtifactRows::Identity,
+        Some(ArtifactRowsReq::Full) | None => tessera_engine::ArtifactRows::Full,
+    };
+    sink.artifact_rows = artifact_rows;
+    // The same shape one field over: omitted is `"full"`, and the projection is the opt-in.
+    let point_rows = match req.point_rows {
+        Some(PointRowsReq::Highlight) => tessera_engine::PointRows::Highlight,
+        Some(PointRowsReq::Full) | None => tessera_engine::PointRows::Full,
+    };
+    sink.point_rows = point_rows;
+    let mut request = ViewportRequest::new(&view_id, req.zoom, bbox, k)
         .tiles(tiles.as_deref())
         .stamp(stamp)
         .underlay_offset(req.underlay_offset)
-        .layers(layer_names.as_deref())
+        .layers(layers)
         .artifact_budget(req.artifact_budget)
+        .levels(levels)
+        .computed(computed)
+        .artifact_rows(artifact_rows)
+        .point_rows(point_rows)
         .cancel(Some(cancel));
     if let Some(filter) = filter {
         request = request.filter(filter);
+    }
+    if let Some(highlight) = highlight {
+        request = request.highlight(highlight);
     }
 
     let outcome =
@@ -862,7 +1680,9 @@ fn run_viewport_stream(
                 "flushes": sink.flushes,
             });
             if state.stage_timing {
-                if let Some(csv) = stage_header(&timings, sink.arrow_serialise_ns) {
+                if let Some(csv) =
+                    stage_header(&timings, sink.arrow_serialise_ns, sink.shape_guard_fired)
+                {
                     trailer["stage_ns"] = serde_json::Value::String(csv);
                 }
             }
@@ -1025,6 +1845,21 @@ async fn viewport(
         }
     }
 
+    // **The computed vocabulary is refused here, before admission**, and it is the one part of
+    // this field that is not an intersection: the three names are deployment schema, so an unknown
+    // one is a client bug and saying so costs no disclosure (see [`ViewportReq::computed`]).
+    if let Some(names) = &req.computed {
+        if let Some(bad) = names
+            .iter()
+            .find(|name| tessera_engine::ComputedProperty::parse_ask(name).is_none())
+        {
+            return Err(ApiError::Contract(format!(
+                "`computed` names {bad:?}; the computed properties are {}",
+                tessera_engine::ComputedProperty::ASK_VOCABULARY.join(", ")
+            )));
+        }
+    }
+
     // The cancellation token and its drop-guard, created before the admission-gate acquire below
     // so the guard's lifetime spans the whole handler — a disconnect during the queue
     // wait is already free (dropping the `admit().await` future releases nothing that was ever
@@ -1080,7 +1915,12 @@ async fn viewport(
         deadline: Duration::from_millis(state.stream_deadline_ms),
         first_flush_at: None,
         shed: None,
+        // Re-derived from the request inside the producer; the default only carries this value
+        // to there.
+        artifact_rows: tessera_engine::ArtifactRows::Full,
+        point_rows: tessera_engine::PointRows::Full,
         arrow_serialise_ns: 0,
+        shape_guard_fired: 0,
         points_total: 0,
         flushes: 0,
     };
@@ -1147,6 +1987,14 @@ async fn viewport(
         .header("x-tessera-stale", if first.stale { "1" } else { "0" })
         .header("x-tessera-server-us", first.server_us.to_string())
         .header("x-tessera-admission-us", admission_us.to_string());
+    // The region verdict (selection-operand §6), on `x-tessera-stale`'s precedent: a client
+    // reading counts alone should not have to decode a batch to learn whether they are exact.
+    // Absent when the request carried no region leaf. A function of the shape and the grid alone,
+    // settled before the first row was read — never of the rows.
+    let response = match first.region {
+        Some(verdict) => response.header("x-tessera-region", verdict.header_value()),
+        None => response,
+    };
 
     // No `x-tessera-stage-ns` header any more: whole-request timings cannot precede the body
     // they describe, so the stage breakdown rides the trailer frame (same double gate).
@@ -1205,7 +2053,11 @@ fn hex16(bytes: &[u8; 16]) -> String {
 /// `compute_threads` value — the `pool.install` fan-out does not run at all for those requests —
 /// so below that line these per-tile fields do partition the request's own wall clock.
 #[cfg(feature = "bench-timing")]
-fn stage_header(t: &tessera_engine::StageTimings, arrow_serialise_ns: u64) -> Option<String> {
+fn stage_header(
+    t: &tessera_engine::StageTimings,
+    arrow_serialise_ns: u64,
+    shape_guard_fired: u64,
+) -> Option<String> {
     // **Append-only.** This is a positional CSV, so inserting a field anywhere but the end silently
     // misaligns every existing consumer — the same reason `served` was appended to the tiles batch
     // rather than slotted next to `visible`. The three trailing fields (theta_anchor_ns,
@@ -1213,7 +2065,7 @@ fn stage_header(t: &tessera_engine::StageTimings, arrow_serialise_ns: u64) -> Op
     // grouping the rest follows; `tessera_bench::report::Stages` is JSON-by-name and keeps the
     // readable order.
     Some(format!(
-        "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+        "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
         t.generation_resolve_ns,
         t.stamp_compare_ns,
         t.view_lookup_ns,
@@ -1236,11 +2088,18 @@ fn stage_header(t: &tessera_engine::StageTimings, arrow_serialise_ns: u64) -> Op
         t.theta_anchor_ns,
         t.underlay_ns,
         t.underlay_cells_evaluated,
+        // Appended 2026-08-29: how many served artifacts had their shape's vertex budget fire
+        // (`polygon-membership.md` §7.2). A counter, after the three trailing fields.
+        shape_guard_fired,
     ))
 }
 
 #[cfg(not(feature = "bench-timing"))]
-fn stage_header(_t: &tessera_engine::StageTimings, _arrow_serialise_ns: u64) -> Option<String> {
+fn stage_header(
+    _t: &tessera_engine::StageTimings,
+    _arrow_serialise_ns: u64,
+    _shape_guard_fired: u64,
+) -> Option<String> {
     None
 }
 
@@ -1301,6 +2160,44 @@ struct ItemResp {
     /// viewer-plane sweep must be scoped to exclude this endpoint's response.
     #[serde(skip_serializing_if = "Option::is_none")]
     external_id: Option<String>,
+    /// **The satisfied terms only** (contracts §3.2, decision 0114): the item's own labels
+    /// intersected with this session's satisfied set, as the authorisation plugin presents them,
+    /// sorted. Never the full label set — a viewer must not learn a compartment they do not hold,
+    /// which is what makes this array computable from inside their own authority (**I2**).
+    ///
+    /// Always present, empty included: an item whose labels this principal holds none of is a
+    /// different fact from an endpoint that does not answer the question, and a client rendering
+    /// a "why can I see this" panel needs the first to be sayable. It costs two bytes.
+    labels: Vec<String>,
+    /// **The views this item is in that this principal may reach**, sorted by id, each with the
+    /// position that view places it at (contracts §3.2 r68; owner ruling 2026-09-01).
+    ///
+    /// Gate-filtered: a view the session's gate refuses is absent exactly as a view nobody
+    /// declared is, so this array is never the place a gate-failed view is named. Always present,
+    /// empty included — `[]` says *none of this item's views is one you may reach*, and it says
+    /// nothing else: an item in no view at all is a `404` before this field is built, so it is not
+    /// the other reading of an empty array but a different response entirely.
+    views: Vec<ItemViewDto>,
+    /// **The group-scoped attribute values, by family name and then by the group's key**
+    /// (`views.md` §5) — `{"mood": {"2026-Q1": "calm"}}`. The key is a view's only address
+    /// (decision 0113), so two views sharing a key through a `members` group share one entry.
+    ///
+    /// Which group a family's keys belong to is on `/v1/meta`'s `scoped_scalars` and is not
+    /// repeated here. Gate-filtered per key on the same set `views` is; a family with no reachable
+    /// key, and one this item carries no value under, are both absent rather than empty.
+    scoped: serde_json::Map<String, serde_json::Value>,
+}
+
+/// One entry of [`ItemResp::views`]: a view this item is in, and where that view puts it.
+#[derive(Debug, Serialize)]
+struct ItemViewDto {
+    id: String,
+    /// The two axes in **this view's own grid units** — 32-bit fixed point against the frame
+    /// `/v1/meta` publishes for this view, which is the same quantity the viewport's Morton codes
+    /// decode to. Deinterleaved server-side rather than shipped as the 64-bit code: a JSON number
+    /// cannot carry one exactly, and the viewport's binary payload is the surface that ships codes.
+    x: u32,
+    y: u32,
 }
 
 /// `engine.item`'s sidecar read plus the scalar/external-id shaping that follows it — the CPU-bound
@@ -1358,27 +2255,63 @@ fn run_item(
         // value, not of its storage width, and a client reading `severity: 3` should not have to
         // know the column is a `u8`. The width is a residency decision (per-point-attributes
         // §3.6), and `/v1/meta` publishes it for a client that does care.
-        .map(|f| {
-            macro_rules! arms {
-                ($($v:ident),* $(,)?) => {
-                    match f.value {
-                        $(tessera_engine::ScalarOut::$v(v) => serde_json::json!(v),)*
-                        tessera_engine::ScalarOut::Utf8(v) => serde_json::json!(v),
-                    }
-                };
-            }
-            (f.name, scalar_families!(arms))
-        })
+        .map(|f| (f.name, scalar_out_json(f.value)))
         .collect();
 
     let external_id = item
         .external_id
         .map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes));
 
+    // Both gate-filtered inside the engine, against the session's own `visible_views` — this
+    // layer holds no gate and evaluates nothing; it renames the fields.
+    let views = item
+        .views
+        .into_iter()
+        .map(|v| ItemViewDto {
+            id: v.id,
+            x: v.x,
+            y: v.y,
+        })
+        .collect();
+    let scoped = item
+        .scoped
+        .into_iter()
+        .map(|family| {
+            let values: serde_json::Map<String, serde_json::Value> = family
+                .values
+                .into_iter()
+                .map(|(key, value)| (key, scalar_out_json(value)))
+                .collect();
+            (family.name, serde_json::Value::Object(values))
+        })
+        .collect();
+
     Ok(ItemResp {
         fields,
         external_id,
+        // Assembled inside the engine, against the session's own satisfied descriptors — this
+        // layer neither resolves a term nor holds a dictionary to resolve one with.
+        labels: item.labels,
+        views,
+        scoped,
     })
+}
+
+/// One drill-down value as JSON — every width on a number, as [`ItemResp::fields`] serves it.
+///
+/// **One function for the record's fields and the scoped values alike**, so the two cannot come to
+/// present a `u8` differently: the response is a presentation of the value and not of its storage
+/// width, which `/v1/meta` publishes for a client that does care.
+fn scalar_out_json(value: tessera_engine::ScalarOut) -> serde_json::Value {
+    macro_rules! arms {
+        ($($v:ident),* $(,)?) => {
+            match value {
+                $(tessera_engine::ScalarOut::$v(v) => serde_json::json!(v),)*
+                tessera_engine::ScalarOut::Utf8(v) => serde_json::json!(v),
+            }
+        };
+    }
+    scalar_families!(arms)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1390,6 +2323,12 @@ struct ArtifactReq {
     /// Optional, on [`ItemReq::idset`]'s argument.
     #[serde(default)]
     idset: Option<u32>,
+    /// The depth the caller draws at, for the vertex rule a predicate or an authored shape is
+    /// served under (`polygon-membership.md` §7.2): a vertex that would move the drawn edge by
+    /// less than a pixel at this zoom is not sent. Absent serves the whole presimplified shape
+    /// under the 2,048-vertex guard. A derived hull is unaffected.
+    #[serde(default)]
+    zoom: Option<u8>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1399,7 +2338,7 @@ struct ArtifactResp {
     #[serde(skip_serializing_if = "Option::is_none")]
     key: Option<String>,
     /// **How many of this artifact's members the asking principal can see** — never how many it
-    /// has. There is deliberately no ordinal, no membership and no declared size here; see
+    /// has. There is deliberately no membership and no declared size here; see
     /// `tessera_engine::ArtifactOut`.
     masked_count: u64,
     /// The layer's declared derived geometry, recomputed for this principal, in the grid units the
@@ -1409,13 +2348,248 @@ struct ArtifactResp {
     centroid: Option<[f64; 2]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     r#box: Option<[u32; 4]>,
+    /// **The artifact's one drawn geometry** — parts, then rings, then vertices — of the kind
+    /// `/v1/meta` publishes for its layer (`polygon-membership.md` §7.1): the derived hull, every
+    /// α-group its own part; the predicate shape; or the authored one. A part's first ring is its
+    /// outer and the rest are holes. Absent where the layer declares none.
     #[serde(skip_serializing_if = "Option::is_none")]
-    hull: Option<Vec<[u32; 2]>>,
+    shape: Option<Vec<Vec<Vec<[u32; 2]>>>>,
+    /// **The rung this artifact sits at** — the declared level on a levelled layer, `0` on a
+    /// treed or flat one, which on this one-artifact response is also its response-local chain
+    /// depth, there being no parent links to be deep in (the viewport frame's `rung`,
+    /// `artifact-fetch-protocol.md` §5.3). Always present, and — unlike everything else here — a
+    /// fact about the artifact rather than about the asking principal: two principals served it
+    /// agree on it.
+    rung: u32,
     /// The publisher's supplied content — one entry of the ranked `contents`, entire, positional to the layer's declared
     /// kinds. Empty where the layer declares none; never partial, because an artifact whose content
     /// this principal may not read is a `404`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     content: Vec<String>,
+}
+
+/// `POST /v1/artifacts/browse` — one page of a layer's hierarchy, by lineage
+/// (`highlight-and-hierarchy.md` §4).
+///
+/// **JSON rather than Arrow**: a page is at most `selection.max_browse_rows` small rows, and the
+/// verb is read by the panel and the notebook alike.
+///
+/// **The refusals are about deployment schema and never about an artifact.** A layer outside this
+/// principal's own `/v1/meta` list, a `level` on a kind that has one, a level a layer does not
+/// hold, an attached layer and `limit = 0` are each a `422` naming what was wrong. A `parent` that
+/// names nothing, one of another layer, one suppressed and one below this principal's own
+/// existence criterion all answer an **empty page** — the same rule §3's `member_of` leaf follows,
+/// and for the same reason: refusing would make the verb an existence oracle over exactly what
+/// the criterion withholds.
+///
+/// Gated like `/v1/viewport`: the pass is one mask composition and one walk of the layer's
+/// artifacts, and under `filters` one whole-view filter evaluation beside it.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BrowseReq {
+    /// Which view's row space the counts are taken in — required for `ArtifactReq::view`'s reason.
+    view: String,
+    /// The layer to browse. A name outside `/v1/meta`'s list is a `422`.
+    layer: String,
+    /// Which level the form addresses on a **levelled** layer (`stacked`, `tiered`). A `422` on
+    /// `flat`, `nested` and `dag`, which have one level: a kind's levels are deployment schema,
+    /// and a parameter accepted and ignored is a wrong answer that looks right.
+    #[serde(default)]
+    level: Option<u32>,
+    /// The children form: the artifacts naming this one among their parents, with its own served
+    /// parents in `parents`. A `tessera_id`, as a number or its decimal string.
+    #[serde(default)]
+    parent: Option<serde_json::Value>,
+    /// The search form: the layer's artifacts whose key, or whose first supplied text content,
+    /// contains this case-insensitively.
+    #[serde(default)]
+    q: Option<String>,
+    /// The viewport's own filter object. Each row then carries `matched_count`, and the page is
+    /// ordered by it. **Existence and `masked_count` never move with it.**
+    #[serde(default)]
+    filters: Option<serde_json::Value>,
+    /// Page size, clamped to `selection.max_browse_rows`. `0` is a `422`.
+    #[serde(default)]
+    limit: Option<usize>,
+    /// The `next` of a previous page.
+    #[serde(default)]
+    cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct BrowseResp {
+    artifacts: Vec<BrowseRowResp>,
+    /// The requested artifact's own served parents — **the children form only**, `[]` elsewhere.
+    parents: Vec<BrowseRowResp>,
+    /// The cursor for the next page, absent where this page is the last.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct BrowseRowResp {
+    /// A string, for `artifact_rows`' reason: a `u64` does not ride through a JavaScript number
+    /// intact, and every other viewer-plane JSON identifier is spelled the same way.
+    tessera_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    masked_count: u64,
+    /// Present exactly when the request carried `filters` — *there was no question* otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    matched_count: Option<u64>,
+    rung: u32,
+    /// This artifact's parents **that this principal is also served** (C29, per entry).
+    parent_ids: Vec<String>,
+}
+
+fn browse_row(row: tessera_engine::browse::BrowseRow) -> BrowseRowResp {
+    BrowseRowResp {
+        tessera_id: row.tessera_id.raw().to_string(),
+        key: row.key,
+        name: row.name,
+        masked_count: row.masked_count,
+        matched_count: row.matched_count,
+        rung: row.rung,
+        parent_ids: row
+            .parent_ids
+            .iter()
+            .map(|id| id.raw().to_string())
+            .collect(),
+    }
+}
+
+async fn browse(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<BrowseReq>,
+) -> Result<Json<BrowseResp>, ApiError> {
+    use tessera_engine::browse::{BrowseCursor, BrowseForm, BrowseRequest};
+    let token = bearer_token(&headers).ok_or(ApiError::BadCredential)?;
+    let entry = state.authenticated_session(token)?;
+    // **`limit` clamps and `0` refuses** — the page bound is `/v1/categories`' shape exactly.
+    if req.limit == Some(0) {
+        return Err(ApiError::Contract(
+            "`limit` is 0, which asks for a page with no rows. Omit it for the deployment's \
+             default, or name a positive number up to `selection.max_browse_rows`"
+                .to_string(),
+        ));
+    }
+    let limit = req
+        .limit
+        .map_or(state.max_browse_rows, |n| n.min(state.max_browse_rows));
+    // **Exactly one of `parent` and `q`, or neither** — three forms, and a request naming two
+    // would need an order between them that nothing states.
+    if req.parent.is_some() && req.q.is_some() {
+        return Err(ApiError::Contract(
+            "`parent` and `q` are two different forms of this verb — the children form and the \
+             search form — so a request carries at most one of them"
+                .to_string(),
+        ));
+    }
+    let form = match (&req.parent, &req.q) {
+        (Some(value), _) => {
+            let id = match value {
+                serde_json::Value::Number(n) => n.as_u64(),
+                serde_json::Value::String(s) => s.parse::<u64>().ok(),
+                _ => None,
+            }
+            .ok_or_else(|| {
+                ApiError::Contract(
+                    "`parent` is a `tessera_id` — a JSON number, or a decimal string where the \
+                     caller cannot carry one intact"
+                        .to_string(),
+                )
+            })?;
+            BrowseForm::Children(TesseraId::new(id))
+        }
+        (None, Some(q)) => BrowseForm::Search(q.clone()),
+        (None, None) => BrowseForm::Roots,
+    };
+    let cursor = match &req.cursor {
+        None => None,
+        Some(text) => Some(BrowseCursor::parse(text).ok_or_else(|| {
+            ApiError::Contract(
+                "`cursor` is not one this endpoint issued — pass back a page's `next` unchanged"
+                    .to_string(),
+            )
+        })?),
+    };
+    let (gate_permits, _admission_us) = state.compute_gate.admit().await?;
+    let out = tokio::task::spawn_blocking(move || {
+        let _gate_permits = gate_permits;
+        let meta = state.engine.meta();
+        // The same view resolution every other viewer verb takes, gate included.
+        let view = meta
+            .resolve_visible_view(&req.view, &entry.session.visible_views)
+            .map(|v| v.id.clone())
+            .ok_or_else(|| ApiError::Unknown(format!("unknown view '{}'", req.view)))?;
+        // The filter is parsed against the live schema, before any compute — the viewport's own
+        // rule, and the same parser, so one object means one thing on both verbs.
+        let filter = match &req.filters {
+            None => None,
+            Some(value) => {
+                let view_meta = meta
+                    .resolve_view(&view)
+                    .ok_or_else(|| ApiError::Unknown(format!("unknown view '{view}'")))?;
+                let vocab_of: std::collections::HashMap<&str, &str> = meta
+                    .declared_scalars
+                    .iter()
+                    .filter_map(|d| Some((d.name.as_str(), d.vocabulary.as_deref()?)))
+                    .chain(
+                        meta.scoped_scalars
+                            .iter()
+                            .filter_map(|f| Some((f.name.as_str(), f.vocabulary.as_deref()?))),
+                    )
+                    .collect();
+                let region = crate::filter_dto::RegionContext {
+                    extent: tessera_engine::shapes::Bounds {
+                        x_min: view_meta.quantisation.x_min,
+                        x_max: view_meta.quantisation.x_max,
+                        y_min: view_meta.quantisation.y_min,
+                        y_max: view_meta.quantisation.y_max,
+                    },
+                    projection: view_meta.projection,
+                    max_vertices: state.max_region_vertices,
+                };
+                Some(crate::filter_dto::parse(
+                    value,
+                    &|leaf| meta.resolve_filter_column(leaf, &view, &entry.session.visible_views),
+                    &|column, key| {
+                        let name = column
+                            .split_once(tessera_engine::filter::PIN)
+                            .map_or(column, |(name, _)| name);
+                        let vocabulary = vocab_of.get(name)?;
+                        meta.vocabularies.get(vocabulary)?.code_of(key)
+                    },
+                    &region,
+                )?)
+            }
+        };
+        state
+            .engine
+            .browse(
+                &entry.session,
+                BrowseRequest {
+                    view: &view,
+                    layer: &req.layer,
+                    level: req.level,
+                    form,
+                    filter,
+                    limit,
+                    cursor,
+                },
+            )
+            .map_err(crate::error::map_engine_error)
+    })
+    .await
+    .map_err(map_join_error)??;
+    Ok(Json(BrowseResp {
+        artifacts: out.artifacts.into_iter().map(browse_row).collect(),
+        parents: out.parents.into_iter().map(browse_row).collect(),
+        next: out.next.map(|c| c.encode()),
+    }))
 }
 
 /// `POST /v1/artifacts/{tessera_id}` — drill down on one artifact.
@@ -1446,9 +2620,26 @@ async fn artifact(
 
     let served = tokio::task::spawn_blocking(move || {
         let _gate_permits = gate_permits;
+        // **The same view resolution the viewport takes** (`views.md` §3.2, §6), gate included,
+        // so one id means one view on every verb and a view its gate fails is the same 404 on all
+        // of them. The engine call below
+        // loads its own generation; a view that went away between the two is the 404 an unknown
+        // view already is, which is the answer either order produces.
+        let view = state
+            .engine
+            .meta()
+            .resolve_visible_view(&req.view, &entry.session.visible_views)
+            .map(|v| v.id.clone())
+            .ok_or_else(|| ApiError::Unknown(format!("unknown view '{}'", req.view)))?;
         state
             .engine
-            .artifact(&entry.session, TesseraId::new(raw), req.idset, &req.view)
+            .artifact(
+                &entry.session,
+                TesseraId::new(raw),
+                req.idset,
+                &view,
+                req.zoom,
+            )
             .map_err(crate::error::map_engine_error)
     })
     .await
@@ -1464,8 +2655,9 @@ async fn artifact(
         masked_count: served.masked_count,
         centroid: served.derived.centroid,
         r#box: served.derived.bbox,
-        hull: served.derived.hull,
+        shape: served.derived.shape,
         content: served.content,
+        rung: served.rung,
     }))
 }
 

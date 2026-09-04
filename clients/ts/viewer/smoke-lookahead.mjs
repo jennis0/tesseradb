@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Does the anticipatory ring remove the wait when panning at high zoom?
 //
-//   node clients/ts/viewer/smoke-lookahead.mjs [--no-prefetch]
+//   node clients/ts/viewer/smoke-lookahead.mjs [--no-prefetch] [--url http://localhost:5173]
+//     [--headed] [--executable /path/to/chrome]
 //
 // Measured on the 2.4M demo corpus, six consecutive same-direction pans at depth 10:
 //   look-ahead off: 9 requests, 0 of 6 pans free, 14,382 of 16,524 tiles from cache
@@ -13,11 +14,11 @@
 // issues no request at all is one the user never waited for. Pauses between pans are deliberate:
 // the ring only runs when the view is still, which is the whole point — it spends an idle moment
 // so the next movement does not have to.
-import {chromium} from 'playwright';
+import {flags, isSupersededAbort, launchBrowser, withParams} from './smoke-browser.mjs';
 
-const browser = await chromium.launch({
-  args: ['--use-gl=swiftshader', '--enable-unsafe-swiftshader', '--disable-gpu-sandbox']
-});
+const args = flags();
+
+const browser = await launchBrowser(args);
 const page = await browser.newPage({viewport: {width: 1280, height: 800}});
 
 let requests = 0;
@@ -34,9 +35,8 @@ page.on('response', (r) => {
   }
 });
 
-const url = process.argv.includes('--no-prefetch')
-  ? 'http://localhost:5173/?prefetch=0'
-  : 'http://localhost:5173';
+const base = args.url ?? 'http://localhost:5173';
+const url = 'no-prefetch' in args ? withParams(base, {prefetch: 0}) : base;
 console.log(`driving ${url}`);
 await page.goto(url, {waitUntil: 'load'});
 await page.waitForTimeout(6000);
@@ -82,7 +82,7 @@ for (let i = 0; i < 6; i++) {
 const total = requests - before;
 
 const stats = await page.evaluate(() => {
-  const text = document.getElementById('panels')?.innerText ?? '';
+  const text = document.getElementById('instruments')?.innerText ?? '';
   const g = (l) => text.match(new RegExp(`${l}\\s*\\n\\s*([\\d,.]+( of [\\d,]+)?)`))?.[1] ?? '?';
   return {cache: g('tiles from cache'), prefetched: g('prefetched ahead'), held: g('replica held')};
 });
@@ -92,6 +92,13 @@ console.log(`per-pan viewport requests: [${perPan.join(', ')}]`);
 console.log(`${free} of ${perPan.length} pans needed no request at all (${total} requests total)`);
 console.log(`server CPU over those pans: ${((serverUs - beforeUs) / 1000).toFixed(1)} ms; wire ${(((bytes - beforeBytes)) / 1e6).toFixed(2)} MB`);
 console.log(`tiles from cache ${stats.cache}, prefetched ahead ${stats.prefetched}, replica ${stats.held}MB`);
-console.log(`console errors: ${errors.length ? errors.join(' | ') : 'none'}`);
+// A superseded request's abort is the client working as designed (`smoke-browser.mjs`), and this
+// script moves the view on purpose; the count is reported, the errors are not counted against it.
+const unexplained = errors.filter((e) => !isSupersededAbort(e));
+const aborts = errors.length - unexplained.length;
+console.log(
+  `console errors: ${unexplained.length ? unexplained.join(' | ') : 'none'}` +
+    `${aborts ? ` (and ${aborts} superseded request(s) aborted)` : ''}`
+);
 
 await browser.close();

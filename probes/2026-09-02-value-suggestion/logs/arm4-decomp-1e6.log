@@ -1,0 +1,24 @@
+# suggest_walk — 1000000 values over 100000000 entities, 200 repeats
+# one thread, page cache warm; candidate composition is NOT measured (see header)
+vocabulary        0.49 s
+index build       0.98 s   1002064 entry strings, 4000000 payloads
+index bytes      105.5 MB
+postings          1.94 s   126.2 MB
+
+# probe decomposition — one budgeted walk's probes, staged
+# timer: 21.1 ns per `Instant::now()`, so a bracketed stage carries ~21.1 ns of instrument
+
+shape        class          n  search50  search99    view50    view99    test50    test99   whole50   whole99
+# contiguous: 10000 candidate entities in 1 containers; 652684 probes over 26 prefixes (16 pages filled), 395 visible, 5333 on a Roaring record
+# contiguous: minor faults — 133 over the first (cold-mapping) walk, 0 over the whole-call pass, 0 over the staged pass = 2.0, 0.0 and 0.0 per 10^4 probes
+# contiguous: the walk itself, per prefix — null gate 0.47 ms median / 1.31 p99 over 1738460 entries = 10.2 ns each; shipped gate 9.12 / 16.71 ms
+contiguous   hidden    652289     130.0     380.0     160.0     460.0      30.0      60.0     280.0     590.0
+contiguous   visible      395     140.0     360.0     191.0    4512.0      40.0     481.0     380.0    5698.0
+# scattered: 10000 candidate entities in 1526 containers; 651884 probes over 26 prefixes (16 pages filled), 402 visible, 8964 on a Roaring record
+# scattered: minor faults — 1 over the first (cold-mapping) walk, 0 over the whole-call pass, 0 over the staged pass = 0.0, 0.0 and 0.0 per 10^4 probes
+# scattered: the walk itself, per prefix — null gate 0.37 ms median / 1.74 p99 over 1738460 entries = 11.0 ns each; shipped gate 12.95 / 20.24 ms
+scattered    hidden    651482     190.0     531.0     180.0     501.0     100.0     710.0     480.0    1161.0
+scattered    visible      402     210.0     590.0     230.0    5023.0     230.0   16830.0     730.0   32980.0
+
+# postings: 1000000 records, 47348 of them Roaring; 11792930 container keys in all (23.6 MB as u16 + 4.0 MB of u32 run offsets)  [0.1 s to count]
+# (1000000 values; every figure ns per probe unless marked)

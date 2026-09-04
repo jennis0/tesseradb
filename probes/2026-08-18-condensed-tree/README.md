@@ -9,13 +9,17 @@ Run 2026-08-18. `check.py` is the whole probe; it builds a bundle, serves it, an
 
 ```bash
 # the corpus, if it is not already written
-TESSERA_DATA=… TESSERA_NOTEBOOK_OUT=/tmp/nbout TESSERA_NOTEBOOK_SAMPLE=50000 \
-  notebooks/.venv/bin/jupyter nbconvert --to notebook --execute \
-  --output /tmp/executed.ipynb notebooks/arxiv-corpus.ipynb
+~/venvs/arxiv/bin/python -m test_corpora.arxiv.prepare --sample 50000 --out /tmp/nbout
 
 cargo build --release -p tessera-cli
-notebooks/.venv/bin/python probes/2026-08-18-condensed-tree/check.py /tmp/nbout
+~/venvs/arxiv/bin/python probes/2026-08-18-condensed-tree/check.py /tmp/nbout
 ```
+
+⊘ **The producer changed after this run.** The corpus came from `notebooks/arxiv-corpus.ipynb`,
+which was ported to `test_corpora/arxiv/` on 2026-08-28 and deleted; the command above is the
+current way to write the same corpus, and it collapses the condensed tree's chains where the
+notebook of 2026-08-18 did not. The figures below are the 2026-08-18 run's and a rerun will not
+reproduce the tree's depth.
 
 ## What was measured
 

@@ -70,13 +70,24 @@ fn ensure_bundle() -> PathBuf {
     if !bundle_root.join("CURRENT").exists() {
         let root = workspace_root();
         let args = BuildArgs {
-            point_fields: Default::default(),
-            points: root.join("data/scaled/geometry.parquet"),
+            arena_order: Default::default(),
+            views: vec![tessera_build::ViewArgs {
+                visibility: None,
+                view_id: "s0".to_string(),
+                projection: tessera_spatial::Projection::None,
+                extent: extent(),
+                points: root.join("data/scaled/geometry.parquet"),
+                point_fields: Default::default(),
+                select: None,
+                access: tessera_build::config::AccessInput::relation(
+                    root.join("data/scaled/pairs/categories-subclass.pairs.parquet"),
+                ),
+            }],
+            anchor: 0,
+            groups: Vec::new(),
+            scoped_attributes: Vec::new(),
             attribute_sources: Vec::new(),
-            access: tessera_build::config::AccessInput::relation(root.join("data/scaled/pairs/categories-subclass.pairs.parquet")),
             out: bundle_root.clone(),
-            extent: extent(),
-            view_id: "s0".to_string(),
             limit: Some(ITEM_LIMIT),
             identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
             identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -84,6 +95,7 @@ fn ensure_bundle() -> PathBuf {
             shard_id: 0,
             layers: Vec::new(),
             layer_inputs: Vec::new(),
+            scoped_layers: Default::default(),
             mint_external_ids: true,
             emit_oracle_pairs: true,
             batch_items: None,
@@ -206,7 +218,7 @@ fn bench_viewport(c: &mut Criterion) {
 
     // zoom 8 gives a 256x256 tile grid, and 23,170 of 65,536 units covers tile coordinates 0..=90
     // per axis — **8,281 tiles spanning 242,221 rows**, measured directly with `tiles_for_bbox` +
-    // `tile_ranges_all` on this fixture (`docs/evidence/memos/2026-07-31-viewport-bench-regression.md`,
+    // `tile_ranges_all` on this fixture (docs/evidence/memos/2026-07-31-viewport-bench-regression.md,
     // reproduced as the `f35/z8` cell of `probes/2026-08-01-two-axis-sweep/`).
     //
     // **Not a ~300-tile shape**, however much it resembles the calibration sweep's z8 cell (289

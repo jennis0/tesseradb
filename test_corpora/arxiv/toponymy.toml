@@ -1,0 +1,60 @@
+# The Toponymy layer, which `toponymy.py` splices into the copy of `corpus.toml` beside the data.
+#
+# It is a file of its own because the stage is optional: the rung builds and serves without a chat
+# endpoint, and a declaration naming files that stage never wrote would refuse the build. The four
+# keys below are injected at `# <toponymy-sources>` in `[sources]` — they sit at the root here, and
+# under that table there — and everything after the split marker is appended.
+#
+# `# <levels>` is replaced with one `[[layer.levels]]` block per rung. The rungs are not known
+# until Toponymy has run, and their titles say how many clusters each holds, which is what an
+# operator choosing a level wants to know.
+
+toponymy               = "clusters-toponymy.parquet"
+toponymy_members       = "clusters-toponymy-members.parquet"
+toponymy_topics        = "topics-toponymy.parquet"
+toponymy_topic_members = "topics-toponymy-members.parquet"
+
+# ---- split ----
+
+# **Toponymy's rungs are levels, and its tree runs between them.** This is the *tiered* shape, and
+# it is the rung's only one — the third shape beside `clusters/kmeans`'s flat one and
+# `clusters/hdbscan`'s nested tree. Like the second and unlike a published taxonomy, it is not
+# covering: a paper that is noise on one rung belongs to nothing there. The build's containment
+# report names every such edge; they are the algorithm's, not a fault.
+
+[[layer]]
+name       = "clusters/toponymy"
+title      = "Toponymy clusters"
+source     = "toponymy"
+views      = ["knn", "pca64"]
+membership = "enumerated"
+hierarchy  = { kind = "tiered", prune_children = false }
+
+visibility          = "public"
+artifact_visibility = { default = "inherited" }
+require_member_visibility = { count = 50 }
+content = { computed = ["centroid", "box", "hull"] }
+
+# <levels>
+
+  [layer.members]
+  source = "toponymy_members"
+
+  [layer.labels]
+  name                = "topics/toponymy"
+  title               = "Toponymy topics"
+  source              = "toponymy_topics"
+  type                = "text"
+  membership          = "enumerated"
+  artifact_visibility = { default = "inherited" }
+  require_member_visibility = "none"
+
+    # The name was written from the exemplar titles the model saw, so it is read only by a viewer
+    # who can already read every one of them. The keyphrases do not enter this: they were counted
+    # over the whole cluster, and a count is a statistic rather than a document — no title is
+    # disclosed by a phrase occurring in thousands of them.
+    [layer.labels.content]
+    require_member_visibility = "all"
+
+    [layer.labels.members]
+    source = "toponymy_topic_members"

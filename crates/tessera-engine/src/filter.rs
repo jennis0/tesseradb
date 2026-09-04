@@ -161,7 +161,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use croaring::Bitmap;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use tessera_filter::{
     resolve_union, CodeSet, Codes, ColumnPostings, DictError, KeyMatcher, RecordExtentPaths,
     RecordStack, RecordValue, SortedDict, ValueColumn,
@@ -229,6 +229,23 @@ impl Family {
             return Family::Numeric;
         }
         if scalar.arrow_type == tessera_spatial::tiler::ScalarType::Text {
+            return Family::Text;
+        }
+        Family::Keyword
+    }
+
+    /// One **group-scoped** column family's family (`views.md` §5) — the same derivation as
+    /// [`Family::of`], over the declaration a scoped family records instead of a declared
+    /// scalar's. The two read the same two fields, and a scope changes only which column file a
+    /// predicate reads, never how its values are read.
+    pub fn of_scoped(scoped: &tessera_store::manifest::ScopedScalar) -> Family {
+        if scoped.vocabulary.is_some() {
+            return Family::Category;
+        }
+        if is_numeric(scoped.arrow_type) {
+            return Family::Numeric;
+        }
+        if scoped.arrow_type == tessera_spatial::tiler::ScalarType::Text {
             return Family::Text;
         }
         Family::Keyword
@@ -377,6 +394,46 @@ pub enum FilterOperand {
 /// match a filter naming some other value either, and this is the code such an item carries.
 pub const UNRESOLVABLE_VALUE: AttrLocalId = AttrLocalId::new(0);
 
+/// The leaf name a region leaf answers to in [`FilterExpr::columns`] — the one word a column may
+/// not be called, refused at the build as `all_of`/`any_of`/`none_of` are (selection-operand §2).
+pub const REGION_COLUMN: &str = "region";
+
+/// The `region` leaf's two spellings (selection-operand §2; `polygon-membership.md` §8).
+///
+/// **A row-space operand over the whole view, and the one leaf that carries no authorisation.**
+/// A shape sent as geometry arrives already canonical — quantised to the view's grid at the wire —
+/// so the same shape from two callers is one value, one cache entry and one row set. A published
+/// shape is named by its `tessera_id` and answered from its held membership, under the artifact's
+/// own verdict: an artifact this principal would not be served is an **empty operand**, and so is
+/// an id that names nothing, one on another view, one whose layer draws an authored shape, or one
+/// below this principal's criterion — one answer, indistinguishable by construction (C17).
+#[derive(Debug, Clone, PartialEq)]
+pub enum RegionLeaf {
+    /// A box, circle, ellipse or polygon in its canonical grid-unit form.
+    Shape(Arc<tessera_spatial::shape::Shape>),
+    /// A published artifact's membership.
+    Artifact(tessera_types::TesseraId),
+}
+
+/// The leaf name a `member_of` leaf answers to in [`FilterExpr::columns`] — reserved at the build
+/// exactly as `region` is (`highlight-and-hierarchy.md` §3).
+pub const MEMBER_OF_COLUMN: &str = "member_of";
+
+/// The `member_of` leaf: one artifact of one layer, resolved to `membership ∩ M_auth` in row space
+/// over the whole view (`highlight-and-hierarchy.md` §3).
+///
+/// **The layer is deployment schema and the artifact is a value**, which is what settles the two
+/// different refusals: a layer this principal does not reach is [`FilterError::UnknownLayer`], a
+/// `422` on `contracts.md` §3.2's unknown-column rule, while an identifier that names nothing —
+/// or an artifact below this principal's own existence criterion, or suppressed, or of another
+/// layer — is the **empty operand**. Answering `422` to the second would make the leaf an
+/// existence oracle over exactly what the criterion withholds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberOfLeaf {
+    pub layer: String,
+    pub artifact: tessera_types::TesseraId,
+}
+
 /// A filter expression: a leaf predicate over one column, or a combinator over sub-expressions.
 ///
 /// **Any boolean combination, evaluated inside the candidate** (decision 0062). Every node returns a
@@ -394,6 +451,16 @@ pub enum FilterExpr {
         column: String,
         operand: FilterOperand,
     },
+    /// A region — a drawn shape or a published one — as a set of rows over the whole view
+    /// (selection-operand §5). Row space only: [`FilterColumns::evaluate`] refuses it, and
+    /// [`FilterColumns::evaluate_routed`] resolves it through the caller's resolver, which is
+    /// where the mask, the segments and the cache live.
+    Region(RegionLeaf),
+    /// One artifact's membership, as a set of rows over the whole view
+    /// (`highlight-and-hierarchy.md` §3). Row space only, for [`FilterExpr::Region`]'s reason, and
+    /// resolved through the caller's resolver, which holds the mask, the layer registry and the
+    /// artifact's own existence criterion.
+    MemberOf(MemberOfLeaf),
     /// Every sub-expression must match. Empty matches the whole candidate — the identity, and what
     /// an absent filter means.
     AllOf(Vec<FilterExpr>),
@@ -436,7 +503,7 @@ impl FilterExpr {
     /// Nesting depth, with a leaf at 1.
     pub fn depth(&self) -> usize {
         match self {
-            FilterExpr::Leaf { .. } => 1,
+            FilterExpr::Leaf { .. } | FilterExpr::Region(_) | FilterExpr::MemberOf(_) => 1,
             FilterExpr::AllOf(kids) | FilterExpr::AnyOf(kids) | FilterExpr::NoneOf(kids) => {
                 1 + kids.iter().map(FilterExpr::depth).max().unwrap_or(0)
             }
@@ -454,6 +521,16 @@ impl FilterExpr {
         match self {
             FilterExpr::Leaf { column, .. } => {
                 out.insert(column.as_str());
+            }
+            // The reserved word, so `none_of: [region, region]` is one column and
+            // `none_of: [region, department]` is two — the rule needs no special case for it.
+            FilterExpr::Region(_) => {
+                out.insert(REGION_COLUMN);
+            }
+            // The second reserved word, on the same argument: `none_of: [member_of, member_of]`
+            // is one column and needs no special case in the negation rule.
+            FilterExpr::MemberOf(_) => {
+                out.insert(MEMBER_OF_COLUMN);
             }
             FilterExpr::AllOf(kids) | FilterExpr::AnyOf(kids) | FilterExpr::NoneOf(kids) => {
                 for kid in kids {
@@ -473,7 +550,7 @@ impl FilterExpr {
     /// meant.
     fn check_negations(&self) -> Result<(), FilterError> {
         match self {
-            FilterExpr::Leaf { .. } => Ok(()),
+            FilterExpr::Leaf { .. } | FilterExpr::Region(_) | FilterExpr::MemberOf(_) => Ok(()),
             FilterExpr::AllOf(kids) | FilterExpr::AnyOf(kids) => {
                 kids.iter().try_for_each(FilterExpr::check_negations)
             }
@@ -523,6 +600,13 @@ pub struct FilterColumns {
     /// column) plus every flush extent the manifest names. Empty — zero layers — when neither
     /// exists, which answers `fields_of` with an ordinary absence.
     records: Arc<RecordStack>,
+    /// The entity→term transpose: the build's base plus every flush extent the manifest names
+    /// (contracts §2.4). It rides here for the record blob's reasons exactly — opened from the
+    /// same manifests at the same two sites, carried forward by every flush successor, replaced
+    /// whole at a fold's prefix rotation — and it is read by the same two callers a record is:
+    /// the drill-down (intersected with the session's satisfied set, decision 0114) and the write
+    /// path's join arm (`views.md` §4).
+    entity_terms: Arc<tessera_store::EntityTermsStack>,
 }
 
 // Hand-written because `RecordStack` carries no `Debug` of its own (it is a stack of mapped
@@ -543,6 +627,7 @@ impl Default for FilterColumns {
             placements: BTreeMap::new(),
             access: tessera_filter::Access::Read,
             records: Arc::new(empty_record_stack()),
+            entity_terms: Arc::new(tessera_store::EntityTermsStack::empty()),
         }
     }
 }
@@ -622,6 +707,259 @@ pub struct Placement {
 /// column the row scan cannot read.
 pub fn is_filterable(scalar: &tessera_store::manifest::DeclaredScalar) -> bool {
     scalar.index || (scalar.render && Family::of(scalar).reaches_hot_column())
+}
+
+/// The character a filter leaf **pins** a group-scoped attribute's view with — `sentiment@2026-Q3`
+/// (`views.md` §5).
+///
+/// Reserved out of a column name at the build, which is what makes the split unambiguous: a leaf
+/// carries at most one `@`, everything before it is a column and everything after it is a view's
+/// key within the attribute's own group.
+pub const PIN: char = '@';
+
+/// The internal name one view's column of a group-scoped family is held under —
+/// `sentiment@quarter:2026-Q3`.
+///
+/// **Not a spelling any caller writes.** A request pins by *key* within the attribute's own group
+/// (`sentiment@2026-Q3`), which is a view's only address
+/// ([decision 0113](../../../docs/decisions/0113-ordinals-are-removed-and-the-key-is-the-only-address.md));
+/// resolution turns that into the view's id and this function into the key the column map answers
+/// on. Holding the resolved form here is
+/// what lets a scoped column evaluate as an unscoped one of its family does — one map, one
+/// `evaluate`, and no second route for a leaf to take.
+pub fn scoped_column_name(name: &str, view_id: &str) -> String {
+    format!("{name}{PIN}{view_id}")
+}
+
+/// The name a manifest extent entry composes onto — the column's own for an entity-scoped one, and
+/// [`scoped_column_name`]'s resolved form where the entry names a view (`views.md` §5).
+///
+/// **One function, so every producer and every reader of an extent agree.** A flush, a coalesce,
+/// a restart's `open` and the live composition each turn an `(column, view)` pair into the key the
+/// column map answers on; two spellings of that rule would compose a flush's layer under a name no
+/// leaf resolves to, and the values would be served as the absence below with no error anywhere.
+pub fn extent_column_name(column: &str, view: Option<&str>) -> String {
+    match view {
+        Some(view) => scoped_column_name(column, view),
+        None => column.to_string(),
+    }
+}
+
+/// Is this group-scoped family on the filter surface — published by `/v1/meta`'s
+/// `filter_operands` and resolvable by a leaf (`views.md` §5)?
+///
+/// **`index`, or `render`** — [`is_filterable`]'s licence, asked of a family, and the two are the
+/// same rule since the asymmetry between them was closed (2026-08-31, owner ruling). Every one of
+/// the four families is served, the build writing per view exactly what its entity-scoped
+/// counterpart writes bundle-wide: a value column and a presence bitmap for a number, those and a
+/// dictionary for a keyword, those and keyed postings for a category, and a token dictionary with
+/// positional postings — no value column at all — for text.
+///
+/// **What `render` licences here is the entity-space column, not the row tail.** A rendered
+/// entity-scoped column has no entity-space column of its own — `owes_value_column` is `index`
+/// or a `derived` vocabulary — so decision 0068 answers it over the request's own rows. A scoped
+/// family's per-view column *is* entity space and is written whatever the family's flags, so a
+/// rendered one is answered from it by the ordinary scan, which is what makes a **pin** work:
+/// a leaf naming another view's column is read where it lives rather than from rows the request
+/// does not hold. The row tail a rendered family also occupies answers no filter at all
+/// ([`open_scoped_column`]'s placement).
+///
+/// **`text` is excluded from the render arm** rather than assumed away, as [`is_filterable`]
+/// excludes the string families from its own: `render` on a scoped `text` family is refused at the
+/// declaration, so the combination reaches no manifest a build wrote — and a manifest that
+/// carried it would name a token index no pass produced, which this predicate would otherwise
+/// demand at open.
+/// Does this family have an entity-space **value column** — the artefact a flush writes an extent
+/// into and the drill-down reads a value out of?
+///
+/// **Every family but `text`**, whose extent is a token dictionary and positional postings and
+/// holds nothing per entity. This is deliberately *wider* than [`scoped_is_filterable`]: a family
+/// declaring neither `index` nor `render` is stored and served at the drill-down without being
+/// searchable or drawn (owner ruling), so its column is opened and its extents composed while its
+/// leaf stays the unknown-column refusal — `EngineMeta::resolve_filter_column` requires
+/// [`scoped_is_filterable`] and answers `Unknown` before any column is looked up, so opening one
+/// here puts nothing on the filter surface.
+///
+/// The rule itself is [`ScopedScalar::has_value_column`], one crate down beside its licence
+/// sibling; this is the engine's name for it and nothing more.
+pub fn scoped_has_value_column(scoped: &tessera_store::manifest::ScopedScalar) -> bool {
+    scoped.has_value_column()
+}
+///
+/// **The rule itself is `ScopedScalar::is_filterable`**, one crate down, because the build decides
+/// what to *write* on the same licence and `check-layers.sh` denies the build this crate. This is
+/// the engine's name for it and nothing more.
+pub fn scoped_is_filterable(scoped: &tessera_store::manifest::ScopedScalar) -> bool {
+    scoped.is_filterable()
+}
+
+/// Does this scoped family's per-view column carry keyed postings — the build's
+/// `scoped_postings_are_owed`, on the manifest's own types?
+///
+/// A category's, and only a category's: the postings are what an `eq` or an `in` is answered from
+/// on a `public` vocabulary, and what `/v1/categories` derives value visibility from on a
+/// `derived` one. The two functions must agree, or the open demands a file no pass wrote — a
+/// refusal — or leaves one no reader touches.
+///
+/// **[`scoped_is_filterable`] is the whole condition, where an entity-scoped column's is `index`
+/// *or* a `derived` vocabulary.** The difference is that a scoped family's admission decides both
+/// surfaces at once: a family on no filter surface has no `/v1/categories` answer either, that
+/// route resolving a scoped column through the same admission the filter parse makes — so
+/// postings written for one would be read by nothing. A **rendered** category is therefore on
+/// both surfaces and owes them, which is where this parts from the entity-scoped rendered
+/// category: that one has no entity-space column for postings to key, and this one always has.
+pub(crate) fn scoped_owes_postings(scoped: &tessera_store::manifest::ScopedScalar) -> bool {
+    scoped.vocabulary.is_some() && scoped_is_filterable(scoped)
+}
+
+/// Open one view's column of a group-scoped attribute family (`views.md` §5) — the name it is held
+/// under, its placement, and its layers.
+///
+/// **One column per view, opened under its resolved name**, so a scoped leaf evaluates through
+/// exactly the machinery an unscoped one of its family does: the same `ValueColumn`, the same
+/// scan, the same presence rules for absence. The only thing the scope decides is which file —
+/// which is what keeps the attribute inside I2's argument unchanged, every value being indexed by
+/// entity and every predicate answering a bitmap in entity space that the mask meets before any
+/// permutation.
+///
+/// **Two callers, one body.** [`FilterColumns::open`] walks every family's `views` at startup; a
+/// flush that wrote the *first* column of a family for a view created since the build composes it
+/// onto the live generation through [`FilterColumns::with_scoped_columns`]. The two must produce
+/// the same reader, or a running process and the same bundle reopened would disagree about what a
+/// pin resolves to.
+fn open_scoped_column(
+    partition_dir: &Path,
+    family: &tessera_store::manifest::ScopedScalar,
+    view_id: &str,
+    incarnation: tessera_types::view::ViewIncarnation,
+    vocabularies: &[tessera_store::manifest::ManifestVocabulary],
+    mmap: bool,
+) -> std::io::Result<(String, Placement, Layers)> {
+    let scoped_family = Family::of_scoped(family);
+    // **A family with neither flag is opened and is not filterable** (owner ruling 2026-09-01).
+    // Its per-view column is on disc exactly as an indexed one's is, and the drill-down reads one
+    // entity's value out of it — so the column is held here, `filterable: false`, which is the
+    // same standing an entity-scoped `derived` category with neither flag already has: `resolve`
+    // refuses it by name and `FilterColumns::stored_value` answers from it.
+    let filterable = family.is_filterable();
+    // The analyser a text family's terms were produced by: an analyser this binary does not carry
+    // is the same refusal an entity-scoped text column's is — a `match` answered from a different
+    // segmentation is a wrong answer wearing a correct one's clothes.
+    let analyser = (scoped_family == Family::Text)
+        .then(|| resolve_analyser(&family.name, family.analyser.as_deref()))
+        .transpose()?;
+    // `attrs/<column>/<group>/<key>/` — the view id's own path components, through the one place a
+    // view id becomes a path, so the opener cannot drift from the writer. Above the declared
+    // incarnation the key carries its own suffix (decision 0115): a recreated key opens its own
+    // base, and its predecessor's is left where the fold's reclaim expects to find it.
+    let mut dir = partition_dir.join("attrs").join(&family.name);
+    for component in tessera_store::scoped_column_components(view_id, incarnation) {
+        dir.push(component);
+    }
+    let name = scoped_column_name(&family.name, view_id);
+    let placement = Placement {
+        entity: true,
+        // **Never the row route**, though a rendered family does occupy a row tail
+        // (`views.md` §5): a leaf resolves to one entity-space column and a pin may make that
+        // another view's, which no scan of *these* rows can answer. A rendered family is an
+        // operand through the entity column beside that tail rather than through it, so the
+        // entity route is the whole filter surface — see [`scoped_is_filterable`].
+        row: false,
+        family: scoped_family,
+    };
+    // **No position in `declared_scalars`, because it is not one of them.** The tag is the record
+    // blob's field key and a scoped column is never blob-resident — it has an entity-space home by
+    // construction, which is the condition `blob_resident` is the negation of. The sentinel is what
+    // a reader would see if that ever stopped being true, rather than another column's field.
+    let declared_index = usize::MAX;
+    // **Text opens with no value column at all**, per view exactly as bundle-wide: its artefacts
+    // are the token dictionary and the positional postings over it. The base's layer is opened
+    // here; a flush's layers are appended by the composition, which is where every text extent
+    // enters whatever its scope.
+    if scoped_family == Family::Text {
+        let text = vec![text_layer(
+            SortedDict::open_dir(&dir, request_access(mmap))?,
+            ColumnPostings::open(&dir.join("postings.arrow"), mmap)?,
+            &name,
+            "base",
+            // The base writes no presence file of its own, here for the same reason the
+            // entity-scoped base writes none: see `TextLayer::present`.
+            Bitmap::new(),
+            None,
+        )?];
+        return Ok((
+            name,
+            placement,
+            Layers {
+                declared_index,
+                layers: Vec::new(),
+                covered: Bitmap::new(),
+                filterable,
+                postings: None,
+                analyser,
+                text,
+                route: Route::Postings,
+                family: scoped_family,
+            },
+        ));
+    }
+    let base = Arc::new(ValueColumn::open_dir(&dir, request_access(mmap))?);
+    let dict = (scoped_family == Family::Keyword)
+        .then(|| SortedDict::open_dir(&dir, request_access(mmap)).map(Arc::new))
+        .transpose()?;
+    let covered = base.present();
+    // A category's keyed postings, in this view's own directory — opened on the declaration rather
+    // than probed for, the rule every open here keeps.
+    let postings = scoped_owes_postings(family)
+        .then(|| ColumnPostings::open_keyed(&dir.join("postings.arrow")).map(Arc::new))
+        .transpose()?;
+    // The same routing the entity-scoped family takes, and for decision 0063's reason rather than
+    // a tuning one: a `derived` vocabulary's postings answer *membership* and must not answer the
+    // filter, whose work would then be a function of the value named.
+    let route = if postings.is_some()
+        && scoped_visibility_of(family, vocabularies) == Some(Visibility::Public)
+    {
+        Route::Postings
+    } else {
+        Route::Scan
+    };
+    Ok((
+        name,
+        placement,
+        Layers {
+            declared_index,
+            layers: vec![Layer {
+                values_rel: None,
+                values: base,
+                dict,
+            }],
+            covered,
+            // **The licence, not the fact that it opened.** A family carrying neither flag is
+            // opened so the drill-down can read a value out of it, and `evaluate` gates on this
+            // flag — so a leaf that somehow reached it is refused exactly as an unfilterable
+            // entity-scoped column's is. `EngineMeta::resolve_filter_column` refuses such a leaf
+            // one layer earlier, before any column is looked up; this is the second of the two.
+            filterable: scoped_is_filterable(family),
+            postings,
+            analyser: None,
+            text: Vec::new(),
+            route,
+            family: scoped_family,
+        },
+    ))
+}
+
+/// The `visibility` of the vocabulary a scoped category's codes index — [`visibility_of`]'s
+/// question over a family's declaration.
+pub(crate) fn scoped_visibility_of(
+    scoped: &tessera_store::manifest::ScopedScalar,
+    vocabularies: &[tessera_store::manifest::ManifestVocabulary],
+) -> Option<Visibility> {
+    let name = scoped.vocabulary.as_deref()?;
+    vocabularies
+        .iter()
+        .find(|v| v.name == name)
+        .map(|v| v.visibility)
 }
 
 /// How a category operand is answered on one column — decided at open from the declaration alone.
@@ -871,6 +1209,21 @@ pub enum RowExpr {
         family: Family,
         kids: Vec<RowExpr>,
     },
+    /// A region leaf, already resolved: its rows over the **whole view**, boundary rows tested
+    /// under the request's composed mask (`crate::region`). Exact at any range, so a tree made of
+    /// these and projected entity verdicts alone is [`crate::compose::FilterRows::Complete`].
+    Region(crate::region::RegionRows),
+    /// A `member_of` leaf, already resolved: `membership ∩ M_auth` over the **whole view**
+    /// (`highlight-and-hierarchy.md` §3). Exact at any range, so it composes into
+    /// [`crate::compose::FilterRows::Complete`] as a region does — and unlike a region it has
+    /// already met the mask, so its cardinality is a quantity the principal may already read off
+    /// the artifacts frame.
+    MemberOf(Bitmap),
+    /// `none_of` over region or `member_of` leaves: every rowed entity carries a position and may
+    /// be a member, so the presence half is the whole view — or the request's domain, where a
+    /// sibling leaf bounds the tree — and the answer is the complement of the union within it
+    /// (selection-operand §5). A buffered entity has no row and matches neither the leaf nor this.
+    NotInRows(Vec<RowExpr>),
 }
 
 impl RowExpr {
@@ -885,8 +1238,8 @@ impl RowExpr {
     fn collect_verdicts<'a>(&'a self, out: &mut Vec<&'a Bitmap>) {
         match self {
             RowExpr::Entity(bitmap) => out.push(bitmap),
-            RowExpr::Leaf { .. } => {}
-            RowExpr::AllOf(kids) | RowExpr::AnyOf(kids) => {
+            RowExpr::Leaf { .. } | RowExpr::Region(_) | RowExpr::MemberOf(_) => {}
+            RowExpr::AllOf(kids) | RowExpr::AnyOf(kids) | RowExpr::NotInRows(kids) => {
                 for kid in kids {
                     kid.collect_verdicts(out);
                 }
@@ -898,6 +1251,76 @@ impl RowExpr {
             }
         }
     }
+
+    /// Whether every row-space node answers over the whole view — no render-column leaf, whose
+    /// answer is bounded by the request's own rows. Decides whether the tree's result can be
+    /// `FilterRows::Complete`.
+    pub fn is_whole_view(&self) -> bool {
+        match self {
+            RowExpr::Entity(_) | RowExpr::Region(_) | RowExpr::MemberOf(_) => true,
+            RowExpr::Leaf { .. } | RowExpr::NoneOf { .. } => false,
+            RowExpr::AllOf(kids) | RowExpr::AnyOf(kids) | RowExpr::NotInRows(kids) => {
+                kids.iter().all(RowExpr::is_whole_view)
+            }
+        }
+    }
+
+    /// Whether a region leaf is anywhere in the tree — the tree's row set then carries interior
+    /// rows the mask has not yet met, and must not be counted before it does.
+    pub fn has_region(&self) -> bool {
+        match self {
+            // **A `member_of` leaf is not one**, though it shares the negation node: its set has
+            // already met the mask, so its cardinality is the masked count the artifacts frame
+            // already serves. The negation is, because its presence half is every row in scope
+            // and the mask has not met those.
+            RowExpr::Region(_) | RowExpr::NotInRows(_) => true,
+            RowExpr::Entity(_) | RowExpr::Leaf { .. } | RowExpr::MemberOf(_) => false,
+            RowExpr::AllOf(kids) | RowExpr::AnyOf(kids) => kids.iter().any(RowExpr::has_region),
+            RowExpr::NoneOf { kids, .. } => kids.iter().any(RowExpr::has_region),
+        }
+    }
+
+    /// The coarsest verdict any region leaf in the tree reached, or `None` where there is none —
+    /// the `x-tessera-region` header's value.
+    pub fn region_verdict(&self) -> Option<crate::region::RegionVerdict> {
+        match self {
+            RowExpr::Region(rows) => Some(rows.verdict),
+            RowExpr::Entity(_) | RowExpr::Leaf { .. } | RowExpr::MemberOf(_) => None,
+            RowExpr::AllOf(kids) | RowExpr::AnyOf(kids) | RowExpr::NotInRows(kids) => kids
+                .iter()
+                .filter_map(RowExpr::region_verdict)
+                .reduce(|a, b| a.coarser(b)),
+            RowExpr::NoneOf { kids, .. } => kids
+                .iter()
+                .filter_map(RowExpr::region_verdict)
+                .reduce(|a, b| a.coarser(b)),
+        }
+    }
+}
+
+/// How a routed evaluation answers a region leaf — the caller's, because the answer needs the
+/// request's composed mask, the view's segments and the engine's cache, none of which this module
+/// holds. Refusing is the resolver's own affair: a shape that cannot be decomposed for this
+/// generation is [`FilterError::RegionUnavailable`], never an empty operand.
+pub type RegionResolver<'a> =
+    dyn Fn(&RegionLeaf) -> Result<crate::region::RegionRows, FilterError> + 'a;
+
+/// How a routed evaluation answers a `member_of` leaf — the caller's, for
+/// [`RegionResolver`]'s reason and one more: the gate is the artifact's own existence criterion,
+/// which lives in `viewport.rs` beside the one the artifacts frame applies, and two
+/// transcriptions of it is the failure this codebase has written down more than once.
+///
+/// The answer is `membership ∩ M_auth` over the whole view. An artifact this principal would not
+/// be served is the **empty bitmap** and never an error; only a layer name outside their own
+/// (`FilterError::UnknownLayer`) and a generation that cannot answer at all
+/// (`FilterError::MemberOfUnavailable`) refuse.
+pub type MemberResolver<'a> = dyn Fn(&MemberOfLeaf) -> Result<Bitmap, FilterError> + 'a;
+
+/// The two row-space leaves' resolvers, together — one argument rather than two on
+/// [`FilterColumns::evaluate_routed`] and on every frame of [`FilterColumns::route`].
+pub struct RowLeafResolvers<'a> {
+    pub regions: &'a RegionResolver<'a>,
+    pub members: &'a MemberResolver<'a>,
 }
 
 /// The space a sub-tree evaluates in — [`FilterColumns::space_of`]'s answer.
@@ -942,6 +1365,26 @@ pub enum FilterError {
     /// matches. Refusing names the column and the reason, so a caller can say what they meant a
     /// different way.
     NegationWithoutPresence { column: String, family: String },
+    /// A region leaf reached the entity-space evaluator, which cannot answer it: a region is a
+    /// statement about position, and position is row space (I4). Only
+    /// [`FilterColumns::evaluate_routed`] takes a tree carrying one.
+    RegionInEntitySpace,
+    /// The region resolver could not answer a leaf for this generation — a cancelled build, a
+    /// view whose segments could not be assembled. Fail-closed: an empty operand here would be
+    /// indistinguishable from a shape that holds nothing.
+    RegionUnavailable(String),
+    /// A `member_of` leaf reached the entity-space evaluator. Row space only, exactly as
+    /// [`FilterError::RegionInEntitySpace`] is.
+    MemberOfInEntitySpace,
+    /// A `member_of` leaf named a layer this principal's `/v1/meta` does not list. **A `422`, and
+    /// the caller's fault**: a layer name is deployment schema, resolved through the same probe
+    /// that answers alike for a gate-failed name and a never-registered one
+    /// (`LayerRegistry::resolve_for`), so refusing by name discloses nothing this principal was
+    /// not already told. The *artifact* is a value and is never refused (§3).
+    UnknownLayer(String),
+    /// The `member_of` resolver could not answer for this generation. Fail-closed, for
+    /// [`FilterError::RegionUnavailable`]'s reason.
+    MemberOfUnavailable(String),
 }
 
 impl std::fmt::Display for FilterError {
@@ -996,6 +1439,33 @@ impl std::fmt::Display for FilterError {
                  it*, and there is nothing here to answer the first half. Say what is wanted with \
                  a positive expression instead"
             ),
+            FilterError::RegionInEntitySpace => write!(
+                f,
+                "a 'region' leaf is answered in row space over the whole view and cannot be \
+                 evaluated by the entity-space evaluator"
+            ),
+            FilterError::RegionUnavailable(detail) => write!(
+                f,
+                "the 'region' leaf could not be resolved against this generation ({detail}); \
+                 refused rather than answered empty"
+            ),
+            FilterError::MemberOfInEntitySpace => write!(
+                f,
+                "a 'member_of' leaf is answered in row space over the whole view and cannot be \
+                 evaluated by the entity-space evaluator"
+            ),
+            FilterError::UnknownLayer(layer) => write!(
+                f,
+                "'member_of' names layer '{layer}', which this deployment does not publish to you \
+                 — /v1/meta lists the layers a 'member_of' leaf may name. The *artifact* it names \
+                 is never refused: an identifier that resolves to nothing you may see is an empty \
+                 operand"
+            ),
+            FilterError::MemberOfUnavailable(detail) => write!(
+                f,
+                "the 'member_of' leaf could not be resolved against this generation ({detail}); \
+                 refused rather than answered empty"
+            ),
         }
     }
 }
@@ -1019,10 +1489,15 @@ impl FilterError {
             FilterError::UndeclaredColumn(_)
             | FilterError::TooDeep { .. }
             | FilterError::NegationSpansColumns { .. }
-            | FilterError::NegationWithoutPresence { .. } => true,
+            | FilterError::NegationWithoutPresence { .. }
+            | FilterError::UnknownLayer(_) => true,
             FilterError::PostingsUnreadable { .. }
             | FilterError::DictionaryUnreadable { .. }
-            | FilterError::MembershipUnavailable(_) => false,
+            | FilterError::MembershipUnavailable(_)
+            | FilterError::RegionInEntitySpace
+            | FilterError::RegionUnavailable(_)
+            | FilterError::MemberOfInEntitySpace
+            | FilterError::MemberOfUnavailable(_) => false,
         }
     }
 }
@@ -1108,6 +1583,42 @@ pub(crate) fn owes_postings(
     scalar.vocabulary.is_some() && owes_value_column(scalar, vocabularies)
 }
 
+/// **The analyser that indexed a text column, not the default** — one resolution for the
+/// entity-scoped column and the group-scoped family alike, so neither can come to open with a
+/// pipeline the other would refuse.
+///
+/// A bundle records the identity its build resolved; opening with anything else would answer
+/// `match` against a token stream the index was not built from. Both failures are refusals rather
+/// than fallbacks: a text column with no recorded identity is a bundle that is not what its
+/// manifest says, and an identity this binary does not carry is terms it cannot reproduce.
+fn resolve_analyser(
+    column: &str,
+    identity: Option<&str>,
+) -> std::io::Result<Arc<tessera_analyse::Analyser>> {
+    let identity = identity.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "column '{column}' is text but the manifest records no analyser identity — the \
+                 build is what resolves one, so this bundle is not what its manifest says"
+            ),
+        )
+    })?;
+    tessera_analyse::analyser(identity.split('/').next().unwrap_or_default())
+        .filter(|a| a.identity() == identity)
+        .map(Arc::new)
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "column '{column}' was indexed by analyser '{identity}', which this binary \
+                     does not carry. Its terms cannot be reproduced, so every `match` over it \
+                     would answer from a different segmentation"
+                ),
+            )
+        })
+}
+
 /// The request path's two modes, and only those: `MappedSequential` is the fold's and is
 /// deliberately unreachable from here (decision 0052).
 fn request_access(mmap: bool) -> tessera_filter::Access {
@@ -1168,10 +1679,17 @@ impl FilterColumns {
         prefix_dir: &Path,
         partition: &str,
         declared: &[tessera_store::manifest::DeclaredScalar],
+        // Every group's scoped column families, in manifest order (`views.md` §5).
+        scoped: &[tessera_store::manifest::ScopedScalar],
+        // Which incarnation each view is, from the roster (`Manifest::incarnation_of`,
+        // decision 0115). A family names the views that have a column; this is what places one on
+        // disc, a recreated key's base living beside its predecessor's rather than over it.
+        view_incarnation: &dyn Fn(&str) -> Option<tessera_types::view::ViewIncarnation>,
         vocabularies: &[tessera_store::manifest::ManifestVocabulary],
         extents: &[tessera_store::manifest::AttrExtent],
         record_extents: &[tessera_store::manifest::RecordExtent],
         artifact_record_extents: &[tessera_store::manifest::RecordExtent],
+        entity_terms_extents: &[tessera_store::manifest::EntityTermsExtent],
         text_extents: &[tessera_store::manifest::TextExtent],
         mmap: bool,
     ) -> std::io::Result<Self> {
@@ -1230,7 +1748,10 @@ impl FilterColumns {
                     Bitmap::new(),
                     None,
                 )?];
-                for extent in text_extents.iter().filter(|e| e.column == scalar.name) {
+                for extent in text_extents
+                    .iter()
+                    .filter(|e| e.column == scalar.name && e.view.is_none())
+                {
                     text_layers.push(text_layer(
                         SortedDict::open(&prefix_dir.join(&extent.dict), request_access(mmap))?,
                         ColumnPostings::open(&prefix_dir.join(&extent.postings), mmap)?,
@@ -1242,35 +1763,7 @@ impl FilterColumns {
                         Some(extent.dict.clone()),
                     )?);
                 }
-                // **The analyser that indexed it, not the default.** A bundle records the identity
-                // its build resolved; opening with anything else would answer `match` against a
-                // token stream the index was not built from.
-                let identity = scalar.analyser.as_deref().ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!(
-                            "column '{}' is text but the manifest records no analyser identity — \
-                             the build is what resolves one, so this bundle is not what its \
-                             manifest says",
-                            scalar.name
-                        ),
-                    )
-                })?;
-                let analyser =
-                    tessera_analyse::analyser(identity.split('/').next().unwrap_or_default())
-                        .filter(|a| a.identity() == identity)
-                        .map(Arc::new)
-                        .ok_or_else(|| {
-                            std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                format!(
-                            "column '{}' was indexed by analyser '{identity}', which this binary \
-                             does not carry. Its terms cannot be reproduced, so every `match` over \
-                             it would answer from a different segmentation",
-                            scalar.name
-                        ),
-                            )
-                        })?;
+                let analyser = Some(resolve_analyser(&scalar.name, scalar.analyser.as_deref())?);
                 columns.insert(
                     scalar.name.clone(),
                     Layers {
@@ -1279,7 +1772,7 @@ impl FilterColumns {
                         covered: Bitmap::new(),
                         filterable: true,
                         postings: None,
-                        analyser: Some(analyser),
+                        analyser,
                         text: text_layers,
                         route: Route::Postings,
                         family,
@@ -1336,6 +1829,54 @@ impl FilterColumns {
                 },
             );
         }
+        // ---- the group-scoped column families (`views.md` §5) ------------------------------
+        //
+        // **One column per view, opened under its resolved name**, so a scoped leaf evaluates
+        // through exactly the machinery an unscoped one of its family does: the same
+        // `ValueColumn`, the same scan, the same presence rules for absence. The only thing the
+        // scope decides is which file — which is what keeps the attribute inside I2's argument
+        // unchanged, every value being indexed by entity and every predicate answering a bitmap
+        // in entity space that the mask meets before any permutation.
+        //
+        // **Every family with a value column on disc is opened; only a filterable one takes a
+        // placement.** The drill-down serves a scoped family's values whatever its flags (owner
+        // ruling 2026-09-01), which is what gives a declaration with neither `index` nor `render`
+        // its meaning — stored, served at `POST /v1/items`, on no filter surface and in no row
+        // tail. Holding a column without a placement is exactly the standing an entity-scoped
+        // `derived` category with neither flag already has: `placement` is `None`, `resolve`
+        // refuses the name as undeclared, and `stored_value` answers from it.
+        //
+        // `text` is the one family skipped, and skipped because there is nothing to read: it has
+        // no per-entity value slot at all, so no drill-down could serve it either. An unindexed
+        // scoped `text` column is refused at the declaration, so a text family here is always
+        // filterable and always takes the branch below.
+        for family in scoped {
+            if !family.has_value_column() && !scoped_is_filterable(family) {
+
+                continue;
+            }
+            for view_id in &family.views {
+                // **No incarnation, no column** (decision 0115): a family naming a view the
+                // roster cannot place is a bundle whose two halves disagree, and opening it under
+                // a guessed incarnation is how a dropped view's values reach a live one.
+                let Some(incarnation) = view_incarnation(view_id) else {
+                    continue;
+                };
+                let (name, placement, layers) = open_scoped_column(
+                    &partition_dir,
+                    family,
+                    view_id,
+                    incarnation,
+                    vocabularies,
+                    mmap,
+                )?;
+                if scoped_is_filterable(family) {
+                    placements.insert(name.clone(), placement);
+                }
+
+                columns.insert(name, layers);
+            }
+        }
         // The record blob's base is owed exactly when the compiled schema has a blob-resident
         // column — one with no other home ([`blob_resident`], records §3). Derived from the schema
         // rather than probed for on disk, so a missing base is a refusal at open, never "those
@@ -1362,11 +1903,28 @@ impl FilterColumns {
             request_access(mmap),
         )
         .map_err(record_open_error)?;
+        // **The transpose's base is unconditional**, where the blob's is schema-dependent: every
+        // entity has a label set, so a build always writes one. A bundle that lacks it refuses the
+        // open rather than reading as "no entity carries a term" — the fail-open direction on the
+        // write path, where the join rule's label arm compares against it (`views.md` §4).
+        let entity_terms = tessera_store::EntityTermsStack::open(
+            Some(&partition_dir.join(tessera_store::ENTITY_TERMS_DIR)),
+            &entity_terms_extents
+                .iter()
+                .map(|e| tessera_store::EntityTermsExtentPaths {
+                    hasrow: prefix_dir.join(&e.hasrow),
+                    offsets: prefix_dir.join(&e.offsets),
+                    terms: prefix_dir.join(&e.terms),
+                })
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
         let mut open = FilterColumns {
             columns,
             placements,
             access: request_access(mmap),
             records: Arc::new(records),
+            entity_terms: Arc::new(entity_terms),
         };
         for extent in extents {
             let column = tessera_filter::open_extent(
@@ -1384,7 +1942,12 @@ impl FilterColumns {
                     SortedDict::open(&prefix_dir.join(rel), request_access(mmap)).map(Arc::new)
                 })
                 .transpose()?;
-            open.compose(&extent.column, &extent.values, Arc::new(column), dict)?;
+            open.compose(
+                &extent_column_name(&extent.column, extent.view.as_deref()),
+                &extent.values,
+                Arc::new(column),
+                dict,
+            )?;
         }
         Ok(open)
     }
@@ -1394,6 +1957,27 @@ impl FilterColumns {
     /// has published an extent.
     pub fn records(&self) -> &RecordStack {
         &self.records
+    }
+
+    /// The entity→term transpose this prefix answers a label question from — see this type's doc
+    /// for why it lives here.
+    pub fn entity_terms(&self) -> &tessera_store::EntityTermsStack {
+        &self.entity_terms
+    }
+
+    /// The access mode every layer of this generation was opened with — what a re-derived stack
+    /// must be opened with too, or a publication would swap a mapped reader for a read one under
+    /// a live request.
+    pub(crate) fn access(&self) -> tessera_filter::Access {
+        self.access
+    }
+
+    /// How many layers the record blob's stack holds — the base, if the schema has a
+    /// blob-resident column, plus one per published extent. Operator- and test-facing: nothing on
+    /// the wire carries it, and it is how a coalesce's publication can be asserted to have
+    /// *shrunk* the live stack rather than merely the manifest.
+    pub fn record_layers(&self) -> usize {
+        self.records.layer_count()
     }
 
     /// The route affordances of one filterable column, or `None` where the column is not
@@ -1414,6 +1998,27 @@ impl FilterColumns {
     /// the column's own public surface: the count of present entities strictly below this one is
     /// its slot, for a universal column (where it degenerates to the entity id) and a partial one
     /// alike. O(containers below the entity) per read — drill-down cadence, never per mark.
+    /// Does any **flushed** `text` layer of `column` hold prose for `entity`?
+    ///
+    /// **The scoped cell arm's fail-closed source for a text family** (`views.md` §5, decision
+    /// 0116). A text column has no per-entity value to read back — its extent is a dictionary,
+    /// postings and this presence bitmap — so the cell arm cannot compare a supplied string with
+    /// a stored one across a flush boundary. What it can establish is *occupancy*, and that is
+    /// what this answers: a joining row supplying prose for a cell some layer already holds prose
+    /// for is refused rather than admitted unchecked, because admitting it would write a second
+    /// text layer stamped with the same view and `match` unions across layers silently.
+    ///
+    /// ⊘ **The base is not covered, and cannot be**: it writes no presence file at all
+    /// ([`TextLayer::present`]'s own marker, issue #123), so a cell whose only prose came from the
+    /// build reads as empty here. Closing that needs the base's presence bitmap, not a change to
+    /// this rule.
+    pub(crate) fn text_present(&self, column: &str, entity: u32) -> bool {
+        let Some(layers) = self.columns.get(column) else {
+            return false;
+        };
+        layers.text.iter().any(|layer| layer.present.contains(entity))
+    }
+
     pub(crate) fn stored_value(&self, column: &str, entity: u32) -> Option<RecordValue> {
         let layers = self.columns.get(column)?;
         let probe = Bitmap::of(&[entity]);
@@ -1530,6 +2135,59 @@ impl FilterColumns {
         Ok(())
     }
 
+    /// This generation's columns with a **newly based** group-scoped column opened onto them —
+    /// the first flush of a view a family had no column for (`views.md` §5).
+    ///
+    /// **Applied before the extents compose, and that order is the whole of it.** A flush of a
+    /// view created since the build writes the family's base and its own extent in one unit; the
+    /// extent composes onto a column, so the column has to exist first. A `(column, view)` pair
+    /// this generation already holds is a no-op rather than a refusal — a re-publication reaching
+    /// the same state — because the base is written once and named by its files, not by a counter.
+    pub fn with_scoped_columns(
+        &self,
+        partition_dir: &Path,
+        columns: &[(String, String, tessera_types::view::ViewIncarnation)],
+        scoped: &[tessera_store::manifest::ScopedScalar],
+        vocabularies: &[tessera_store::manifest::ManifestVocabulary],
+        mmap: bool,
+    ) -> std::io::Result<FilterColumns> {
+        let mut next = FilterColumns {
+            columns: self.columns.clone(),
+            placements: self.placements.clone(),
+            access: self.access,
+            records: Arc::clone(&self.records),
+            entity_terms: Arc::clone(&self.entity_terms),
+        };
+        for (column, view, incarnation) in columns {
+            let Some(family) = scoped.iter().find(|f| f.name == *column) else {
+                return std::io::Result::Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "a flush wrote a base for the group-scoped column family '{column}' under \
+                         view '{view}', which this bundle does not declare"
+                    ),
+                ));
+            };
+            if !scoped_is_filterable(family) && !scoped_has_value_column(family) {
+                continue;
+            }
+            if next.columns.contains_key(&scoped_column_name(column, view)) {
+                continue;
+            }
+            let (name, placement, layers) = open_scoped_column(
+                partition_dir,
+                family,
+                view,
+                *incarnation,
+                vocabularies,
+                mmap,
+            )?;
+            next.placements.insert(name.clone(), placement);
+            next.columns.insert(name, layers);
+        }
+        Ok(next)
+    }
+
     /// This generation's columns with one flush's extents added — the successor generation's.
     ///
     /// Cheap by construction: the base columns are `Arc`s, so a flush that published one entity
@@ -1545,6 +2203,7 @@ impl FilterColumns {
         &self,
         extents: &[PublishedExtent],
         records: &[RecordExtentPaths],
+        entity_terms: &[tessera_store::EntityTermsExtentPaths],
         texts: &[TextExtentPaths],
     ) -> std::io::Result<FilterColumns> {
         // The record blob's extent composes here for the same reason a filter extent does: the
@@ -1561,17 +2220,29 @@ impl FilterColumns {
                     .map_err(record_open_error)?,
             )
         };
+        // The transpose's extent composes here for the record blob's reason, plus one of its own:
+        // a flush's labels that no live stack holds leave the join rule's label arm unable to
+        // compare against the batch that just landed, which is the arm's whole point.
+        let entity_terms =
+            if entity_terms.is_empty() {
+                Arc::clone(&self.entity_terms)
+            } else {
+                Arc::new(self.entity_terms.with_extents(entity_terms).map_err(|e| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
+                })?)
+            };
         let mut next = FilterColumns {
             columns: self.columns.clone(),
             placements: self.placements.clone(),
             access: self.access,
             records,
+            entity_terms,
         };
         // A text extent appends a layer: its own dictionary, its own postings, and the entities it
         // covers. Composed here for the same reason a filter extent is — a published layer the live
         // generation does not hold answers no `match` until the next fold.
         for text in texts {
-            let Some(layers) = next.columns.get_mut(&text.column) else {
+            let Some(layers) = next.columns.get_mut(text.column.as_str()) else {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!(
@@ -1625,16 +2296,65 @@ impl FilterColumns {
     /// nothing outside the three files ever held one. `texts` carries those windows; the coverage
     /// equality above is checked for them too, against `TextLayer::present`, which is exactly what
     /// a flush extent stores and what makes the check expressible for this family.
+    /// **The transpose is replaced whole rather than patched**, and `entity_terms` is the stack
+    /// the caller re-derived from the rebased manifest — `None` where the axis did not run, in
+    /// which case the live stack rides through unchanged. Its ordinals need no attention either
+    /// way: they are dictionary positions, which `coalesce_dict_extents` preserves by construction
+    /// (it replaces a contiguous window with the same records in the same order), so unlike a
+    /// keyword column's they name the same terms after every coalesce.
+    ///
+    /// The coverage rule above holds for it too, and is checked the same way: the replacement's
+    /// entity set must **equal** the live one's. A merge that lost a layer would leave the
+    /// drill-down answering *unknown* for entities that carry labels, and the join rule's arm
+    /// comparing against nothing — which is a `409` that does not fire.
     pub fn with_coalesced(
         &self,
         windows: &[CoalescedWindow],
         texts: &[CoalescedTextWindow],
+        entity_terms: Option<Arc<tessera_store::EntityTermsStack>>,
+        records: Option<Arc<RecordStack>>,
     ) -> std::io::Result<FilterColumns> {
+        let entity_terms = match entity_terms {
+            None => Arc::clone(&self.entity_terms),
+            Some(next) => {
+                let held = self.entity_terms.entity_set();
+                let replacement = next.entity_set();
+                if held != replacement {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "a coalesce's entity→term stack holds lists for {} entities where the one it \
+                             replaces holds {}; replacing on that would answer 'unknown' for an \
+                             entity that carries labels, which on the write path is a 409 that \
+                             does not fire",
+                            replacement.cardinality(),
+                            held.cardinality()
+                        ),
+                    ));
+                }
+                next
+            }
+        };
+        // **The record axis's stack is replaced, not carried through** — the same rule the
+        // transpose above takes, and it had the same defect the transpose was fixed for: a
+        // coalesce that folded a window of record extents into one edited the manifest and left
+        // the live stack holding the layers it had consumed, so the running process kept probing
+        // them until a restart while a reopen of the same bundle held one. Nothing served a wrong
+        // answer — the layers are disjoint in entity space (I9), so an extra layer answers for
+        // the entities it always answered for — but the cost the coalesce exists to remove stayed
+        // until a restart removed it, and the process and its own manifest disagreed about what
+        // it was serving from. `None` where the axis did not run, in which case the live stack
+        // rides through untouched, which is the ordinary case.
+        let records = match records {
+            None => Arc::clone(&self.records),
+            Some(next) => next,
+        };
         let mut next = FilterColumns {
             columns: self.columns.clone(),
             placements: self.placements.clone(),
             access: self.access,
-            records: Arc::clone(&self.records),
+            records,
+            entity_terms,
         };
         for window in windows {
             let Some(layers) = next.columns.get_mut(&window.column) else {
@@ -1932,20 +2652,33 @@ impl FilterColumns {
             .as_ref()
             .ok_or_else(|| FilterError::MembershipUnavailable(column.to_string()))?;
 
-        let mut from_extents = FxHashSet::default();
+        // **A count per code, not a set of codes.** The sweep is the same one pass over the same
+        // entities either way, and counting in it is what lets `?counts=true` be exact without a
+        // second sweep: the extents and the base postings are disjoint in entity space — a posting
+        // covers the base build and an extent covers entities ingested since it — so the two halves
+        // of a value's count add rather than overlapping.
+        let mut from_extents: FxHashMap<u32, u64> = FxHashMap::default();
         for layer in layers.layers.iter().filter(|l| l.values_rel.is_some()) {
             let layer = &layer.values;
             for entity in layer.present().and(candidate).iter() {
                 if let Some(code) = layer.value_of(entity) {
-                    from_extents.insert(code.raw());
+                    *from_extents.entry(code.raw()).or_default() += 1;
                 }
             }
         }
+        // **The one thing a count may not assume**, checked where it is cheap rather than argued
+        // where it is not: `intersection_cardinality` is exact per source and cardinality does not
+        // distribute over a union, so a category column that ever acquired delta postings tiers
+        // would need the materialising route. None does today — a flush writes extents for a
+        // category, never postings (decision 0063) — and this is where that stops being an
+        // assumption. `carries` is unaffected either way, existence *does* distribute.
+        let postings_are_single_source = !postings.has_tiers();
         Ok(CategoryMembership {
             column: column.to_string(),
             postings,
             candidate,
             from_extents,
+            postings_are_single_source,
         })
     }
 
@@ -2002,11 +2735,16 @@ impl FilterColumns {
     /// evaluated **here, under `candidate`** — the composed verdict — and the returned
     /// [`RowExpr`] awaits the one crossing and the row-space leaves, which need the request's
     /// tile ranges and so live in `viewport.rs`.
+    ///
+    /// `resolvers` answers each region leaf (selection-operand §5) and each `member_of` leaf
+    /// (`highlight-and-hierarchy.md` §3): both are always row space and always the whole view, so
+    /// a tree carrying either never returns [`RoutedFilter::Entity`].
     pub fn evaluate_routed(
         &self,
         expr: &FilterExpr,
         candidate: &Bitmap,
         prefer_row: bool,
+        resolvers: &RowLeafResolvers<'_>,
     ) -> Result<RoutedFilter, FilterError> {
         let depth = expr.depth();
         if depth > MAX_FILTER_DEPTH {
@@ -2019,7 +2757,9 @@ impl FilterColumns {
         if self.space_of(expr, prefer_row)? == Space::Entity {
             return Ok(RoutedFilter::Entity(self.eval(expr, candidate)?));
         }
-        Ok(RoutedFilter::Row(self.route(expr, candidate, prefer_row)?))
+        Ok(RoutedFilter::Row(
+            self.route(expr, candidate, prefer_row, resolvers)?,
+        ))
     }
 
     /// Which space `expr` evaluates in, given each leaf's placement and the request's preference.
@@ -2032,6 +2772,11 @@ impl FilterColumns {
     /// One column's routed space — **the single transcription of the leaf-routing rule**, called
     /// for a leaf and for a `none_of`'s one column alike, so the two cannot drift.
     fn leaf_space(&self, column: &str, prefer_row: bool) -> Result<Space, FilterError> {
+        // The reserved words name no column: a region and a `member_of` are row space whatever
+        // the request's span.
+        if column == REGION_COLUMN || column == MEMBER_OF_COLUMN {
+            return Ok(Space::Row);
+        }
         let placement = self.placement_of(column)?;
         Ok(match (placement.entity, placement.row) {
             (true, false) => Space::Entity,
@@ -2056,6 +2801,7 @@ impl FilterColumns {
     fn space_of(&self, expr: &FilterExpr, prefer_row: bool) -> Result<Space, FilterError> {
         match expr {
             FilterExpr::Leaf { column, .. } => self.leaf_space(column, prefer_row),
+            FilterExpr::Region(_) | FilterExpr::MemberOf(_) => Ok(Space::Row),
             FilterExpr::AllOf(kids) | FilterExpr::AnyOf(kids) => {
                 let mut all_entity = true;
                 for kid in kids {
@@ -2089,6 +2835,7 @@ impl FilterColumns {
         expr: &FilterExpr,
         candidate: &Bitmap,
         prefer_row: bool,
+        resolvers: &RowLeafResolvers<'_>,
     ) -> Result<RowExpr, FilterError> {
         if self.space_of(expr, prefer_row)? == Space::Entity {
             return Ok(RowExpr::Entity(self.eval(expr, candidate)?));
@@ -2099,14 +2846,16 @@ impl FilterColumns {
                 family: self.placement_of(column)?.family,
                 operand: operand.clone(),
             }),
+            FilterExpr::Region(leaf) => Ok(RowExpr::Region((resolvers.regions)(leaf)?)),
+            FilterExpr::MemberOf(leaf) => Ok(RowExpr::MemberOf((resolvers.members)(leaf)?)),
             FilterExpr::AllOf(kids) => Ok(RowExpr::AllOf(
                 kids.iter()
-                    .map(|kid| self.route(kid, candidate, prefer_row))
+                    .map(|kid| self.route(kid, candidate, prefer_row, resolvers))
                     .collect::<Result<Vec<_>, _>>()?,
             )),
             FilterExpr::AnyOf(kids) => Ok(RowExpr::AnyOf(
                 kids.iter()
-                    .map(|kid| self.route(kid, candidate, prefer_row))
+                    .map(|kid| self.route(kid, candidate, prefer_row, resolvers))
                     .collect::<Result<Vec<_>, _>>()?,
             )),
             FilterExpr::NoneOf(kids) => {
@@ -2116,14 +2865,18 @@ impl FilterColumns {
                     .next()
                     .expect("check_negations admits exactly one column")
                     .to_string();
+                let routed = kids
+                    .iter()
+                    .map(|kid| self.route(kid, candidate, prefer_row, resolvers))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if column == REGION_COLUMN || column == MEMBER_OF_COLUMN {
+                    return Ok(RowExpr::NotInRows(routed));
+                }
                 let family = self.placement_of(&column)?.family;
                 Ok(RowExpr::NoneOf {
                     column,
                     family,
-                    kids: kids
-                        .iter()
-                        .map(|kid| self.route(kid, candidate, prefer_row))
-                        .collect::<Result<Vec<_>, _>>()?,
+                    kids: routed,
                 })
             }
         }
@@ -2245,6 +2998,8 @@ impl FilterColumns {
     fn eval(&self, expr: &FilterExpr, candidate: &Bitmap) -> Result<Bitmap, FilterError> {
         match expr {
             FilterExpr::Leaf { column, operand } => self.resolve(column, operand, candidate),
+            FilterExpr::Region(_) => Err(FilterError::RegionInEntitySpace),
+            FilterExpr::MemberOf(_) => Err(FilterError::MemberOfInEntitySpace),
             FilterExpr::AllOf(kids) => {
                 let mut live = candidate.clone();
                 for kid in kids {
@@ -2297,11 +3052,21 @@ pub struct CategoryMembership<'a> {
     column: String,
     postings: &'a ColumnPostings,
     candidate: &'a Bitmap,
-    /// The codes the candidate's *post-build* entities carry — the half no posting covers.
-    from_extents: FxHashSet<u32>,
+    /// The codes the candidate's *post-build* entities carry, **and how many of them carry each** —
+    /// the half no posting covers. Disjoint from the postings' half in entity space, which is what
+    /// lets [`Self::count`] add the two.
+    from_extents: FxHashMap<u32, u64>,
+    /// Whether the column's postings are one record per value rather than a base plus live tiers.
+    /// [`Self::count`] refuses otherwise; see [`FilterColumns::category_membership`].
+    postings_are_single_source: bool,
 }
 
 impl CategoryMembership<'_> {
+    /// The column this predicate was built for, for a caller shaping a refusal that names it.
+    pub fn column(&self) -> &str {
+        &self.column
+    }
+
     /// Is `code` carried by at least one entity this principal may see?
     ///
     /// The extent half is answered first because it is a hash lookup against a set the sweep
@@ -2313,17 +3078,48 @@ impl CategoryMembership<'_> {
             // exactly the entities that carry no value. It is not a value and is never visible.
             return Ok(false);
         }
-        if self.from_extents.contains(&code) {
+        if self.from_extents.contains_key(&code) {
             return Ok(true);
         }
-        let members = self
+        // **A boolean against the mapped view, never a materialised posting.** A value's posting is
+        // corpus-wide — every entity carrying it, hidden ones included — and the question is one
+        // bit, asked once per value walked. `ColumnPostings::intersects` short-circuits at the
+        // first container the two sets share and allocates nothing.
+        self.postings
+            .intersects(AttrLocalId::new(code), self.candidate)
+            .map_err(|e| FilterError::PostingsUnreadable {
+                column: self.column.clone(),
+                detail: e.to_string(),
+            })
+    }
+
+    /// **How many items carrying `code` this principal may see** — C8's `and_cardinality` against
+    /// the composed mask, exact, computed per request and never precomputed
+    /// (`value-suggestion.md` §3).
+    ///
+    /// The two halves add because they are disjoint in entity space: the extents sweep counted the
+    /// candidate's *post-build* entities and the postings cover the base build alone.
+    ///
+    /// Never a sort key. The count is the viewer's own number and would be admissible as one under
+    /// **I2**, but a count-ordered page is a top-*k* over the prefix and depends on which values
+    /// were examined before the budget ran out (§8.2, and decision 0069 for the corpus-global
+    /// alternative). Ordering is the matched text's, and this is information beside a row.
+    pub fn count(&self, code: u32) -> Result<u64, FilterError> {
+        if code == UNRESOLVABLE_VALUE.raw() {
+            return Ok(0);
+        }
+        if !self.postings_are_single_source {
+            return Err(FilterError::MembershipUnavailable(self.column.clone()));
+        }
+        let extents = self.from_extents.get(&code).copied().unwrap_or(0);
+        let base = self
             .postings
-            .entities(AttrLocalId::new(code))
+            .intersection_cardinality(AttrLocalId::new(code), self.candidate)
             .map_err(|e| FilterError::PostingsUnreadable {
                 column: self.column.clone(),
                 detail: e.to_string(),
             })?;
-        Ok(members.intersect(self.candidate))
+        Ok(extents + base)
     }
 }
 
@@ -3188,6 +3984,7 @@ mod keyword_tests {
             placements,
             access: tessera_filter::Access::Read,
             records: Arc::new(empty_record_stack()),
+            entity_terms: Arc::new(tessera_store::EntityTermsStack::empty()),
         }
     }
 

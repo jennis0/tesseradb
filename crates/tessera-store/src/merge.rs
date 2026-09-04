@@ -153,6 +153,9 @@ pub struct MergeInput {
 /// Everything [`execute_merge`] needs beyond its inputs — the same shape [`crate::flush::FlushInput`]
 /// has, because publication does not care which produced the segment.
 pub struct MergeSpec<'a> {
+    /// The incarnation of the view this merge writes into (decision 0115) — the inputs' own, a
+    /// merge never crossing a drop.
+    pub incarnation: tessera_types::view::ViewIncarnation,
     /// The **new** segment's id. Never one of the inputs': `seg_id`s are never reused (contracts
     /// §2.1), which is what makes the publication rebase ABA-safe.
     pub seg_id: &'a str,
@@ -160,6 +163,11 @@ pub struct MergeSpec<'a> {
     pub identity_key: &'a IdentityKey,
     pub shard_id: u32,
     pub scalar_schema: &'a [(String, ScalarType)],
+    /// Where [`Self::scalar_schema`]'s **group-scoped** render suffix begins (`views.md` §5) — the
+    /// index from which a column the input segment lacks is the ordinary absence rather than a
+    /// malformed bundle. `scalar_schema.len()` for a view outside every scope, which is the
+    /// refuse-everything reading and the one every caller had before families existed.
+    pub scoped_from: usize,
     /// Where the merged extent begins in view row space — the **first consumed extent's**
     /// `row_base`. A merge emits exactly as many rows as it consumed, so no later extent's
     /// `row_base` moves and `RowSpace::collapsing` puts this where the consumed run was.
@@ -241,11 +249,7 @@ pub fn execute_merge(
     }
 
     let seg_path = |seg_id: &str| {
-        prefix_dir
-            .join("partitions")
-            .join(partition)
-            .join("views")
-            .join(view)
+        crate::view_path(&prefix_dir.join("partitions").join(partition), view)
             .join("segments")
             .join(seg_id)
     };
@@ -315,7 +319,14 @@ pub fn execute_merge(
                 ),
             });
         }
-        let scalars = gather_scalars(&cursor.columns, spec.scalar_schema, row, &cursor.seg_id, OP)?;
+        let scalars = gather_scalars(
+            &cursor.columns,
+            spec.scalar_schema,
+            spec.scoped_from,
+            row,
+            &cursor.seg_id,
+            OP,
+        )?;
         writer
             .append(SegmentRow {
                 tessera_id,
@@ -392,7 +403,8 @@ pub fn execute_merge(
 
     let rel = |name: &str| {
         format!(
-            "partitions/{partition}/views/{view}/segments/{}/{name}",
+            "partitions/{partition}/{}/segments/{}/{name}",
+            crate::view_rel(view),
             spec.seg_id
         )
     };
@@ -413,6 +425,7 @@ pub fn execute_merge(
     Ok(FlushOutput {
         segment: SegmentDescriptor {
             view: view.to_string(),
+            incarnation: spec.incarnation,
             seg_id: spec.seg_id.to_string(),
             row_count: row_count as u32,
             entity_lo,
@@ -459,7 +472,7 @@ mod tests {
 
     /// Write one input segment. Items are laid out along x alone, so Morton order is x order and a
     /// fixture can say exactly which rows the merge will interleave.
-    fn segment(dir: &Path, seg_id: &str, rows: &[(u64, f32, ScalarValue)]) -> MergeInput {
+    fn segment(dir: &Path, seg_id: &str, rows: &[(u64, f64, ScalarValue)]) -> MergeInput {
         let key = IdentityKey::from_hex(KEY_HEX).expect("test key");
         let flush_rows: Vec<FlushRow> = rows
             .iter()
@@ -476,6 +489,7 @@ mod tests {
             "p",
             "s",
             FlushInput {
+                incarnation: 0,
                 seg_id,
                 rows: flush_rows,
                 quantisation: Quantisation {
@@ -539,11 +553,13 @@ mod tests {
             "p",
             "s",
             MergeSpec {
+                incarnation: 0,
                 seg_id: "seg-m",
                 inputs: &[a, b],
                 identity_key: &key,
                 shard_id: 0,
                 scalar_schema: &schema(),
+                scoped_from: schema().len(),
                 row_base: 0,
                 watermark: 8,
                 entity_id_high_water: 8,
@@ -593,11 +609,13 @@ mod tests {
             "p",
             "s",
             MergeSpec {
+                incarnation: 0,
                 seg_id: "seg-m",
                 inputs: &[a, b],
                 identity_key: &key,
                 shard_id: 0,
                 scalar_schema: &schema(),
+                scoped_from: schema().len(),
                 row_base: 0,
                 watermark: 2,
                 entity_id_high_water: 2,

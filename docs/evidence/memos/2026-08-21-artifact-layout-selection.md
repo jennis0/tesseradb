@@ -6,7 +6,7 @@
 and §9 is the list of constraints the build wave inherits.
 
 Ruled by
-[decision 0094](../../decisions/0094-the-serving-layout-is-chosen-at-build-and-re-evaluated-at-the-fold.md):
+decision 0094:
 the layout is chosen automatically, recorded per (layer, level), overridable per layer, and
 re-evaluated at every compaction fold. That decision settles *the shape of the mechanism*. This
 memo is the surface — what the enum holds, what the automatic pick reads, how the key is spelled and
@@ -23,7 +23,7 @@ campaign proposes are *not* alternatives and are not in the enum:
 
 - **The containment partition** (§4.2) is built for every layer whatever its layout. It answers
   `G ⊆ M_auth` from terms alone, per `(artifact, rank)`, and names no principal
-  ([decision 0093](../../decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md))
+  (decision 0093)
   — but it is not the whole answer: `denied = deleted ∪ suppressed` is applied live against the
   overlay beside it, and the entity→artifacts index that needs is sized by `Σ|G|` whatever layout the
   level is in.
@@ -210,7 +210,7 @@ anyway. There is no case for it that a nightly fold does not already answer.
   a layout flip at a fold is detectable in the timing channel — about one bit per (layer, level) per
   fold, about corpus shape rather than content, bounded by the layer gate.
 - **It does not bound anything.** A layer whose shape suits no layout is reported and served
-  ([decision 0092](../../decisions/0092-the-build-reports-a-layers-shape-and-no-layer-carries-a-declared-bound.md)).
+  (decision 0092).
 - **It does not re-evaluate on publication or on ingest.** Both move the observations; neither is a
   cheap moment to rewrite a level, and a layout that flips on a write would flip back on the next
   one.
@@ -291,7 +291,7 @@ things the implementation must not be free to decide differently.
 11. **The masked-count histogram is byte-budgeted and per (session, layer).** ~4 B per artifact, 4 MB
     at 10⁶ and 40 MB at 10⁷, on the session-geometry refresh cadence and inside the same byte budget
     the row-projection cache answers to — the single exception
-    [decision 0093](../../decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md)
+    decision 0093
     names, and it applies to row-major layers alone.
 12. **The deny correction is on the accept path or it is fail-open.** `deleted ∪ suppressed`, live
     against the overlay per request or applied synchronously with the acknowledgement; the inverted

@@ -30,7 +30,9 @@ use std::path::Path;
 use arrow::datatypes::{DataType, Schema as ArrowSchema};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-use crate::config::{ArtifactSource, Config, Extent, Fields, ENTITY_ID};
+use crate::config::{
+    ArtifactSource, Config, Extent, Fields, PointVisibility, Roster, ViewGroup, ENTITY_ID,
+};
 use crate::input::{column_carries, TERM_ID};
 
 /// One thing wrong, named the way the reader that would have refused it names it.
@@ -53,10 +55,71 @@ pub struct SourceChecked {
     pub path: Option<String>,
 }
 
+/// A projected view's frame, answered from the declaration alone (`projections.md` §4.2, §8).
+///
+/// **The one thing about a frame a check *can* settle.** A stated longitude/latitude box projects
+/// and snaps with no data at all, so the square a corpus will be quantised against — and the
+/// resolution the snap costs — are readable in seconds rather than after a build. Under `auto` the
+/// frame is a function of the data, and this says so instead of guessing.
+#[derive(Debug, Clone)]
+pub struct FramePreview {
+    pub view: String,
+    pub projection: &'static str,
+    /// The box declared, and the square it snaps to. `None` under `auto`.
+    pub snapped: Option<(crate::config::LonLatBox, tessera_spatial::frame::Snap)>,
+}
+
+impl FramePreview {
+    /// One line for the view, and one for the snap where there is one.
+    pub fn print(&self) {
+        match &self.snapped {
+            None => eprintln!(
+                "  {:<20} {}, `extent = \"auto\"` — the frame is fitted to the data, so it is not \
+                 known until the build reads the points",
+                self.view, self.projection
+            ),
+            Some((asked, snap)) => {
+                let f = snap.square.bounds();
+                eprintln!(
+                    "  {:<20} {}, asked for lon [{}, {}], lat [{}, {}]",
+                    self.view,
+                    self.projection,
+                    asked.lon_min,
+                    asked.lon_max,
+                    asked.lat_min,
+                    asked.lat_max
+                );
+                eprintln!(
+                    "  {:<20} {} to the square at z{} ({}, {}) — x [{}, {}], y [{}, {}]",
+                    "",
+                    if snap.floored {
+                        "FLOORED at the offset cap rather than fitted"
+                    } else {
+                        "snapped outward"
+                    },
+                    snap.square.z,
+                    snap.square.x,
+                    snap.square.y,
+                    f.x_min,
+                    f.x_max,
+                    f.y_min,
+                    f.y_max
+                );
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct CheckReport {
     pub sources: Vec<SourceChecked>,
     pub findings: Vec<Finding>,
+    /// Per projected view, the frame its declaration implies — the half of the frame report that
+    /// needs no data.
+    pub frames: Vec<FramePreview>,
+    /// Per shape layer, what its geometry is — computed from the geometry alone, before any
+    /// build (`polygon-membership.md` §6.5); a layer that could not be sized says why.
+    pub shapes: Vec<std::result::Result<crate::shapes::ShapeLayerReport, String>>,
 }
 
 impl CheckReport {
@@ -163,10 +226,21 @@ fn open(report: &mut CheckReport, object: &str, path: &Path) -> Option<ArrowSche
 pub fn check(config: &Config) -> CheckReport {
     let mut report = CheckReport::default();
     check_attribute_sources(config, &mut report);
+    check_scoped_attribute_sources(config, &mut report);
     for view in &config.views {
         check_view(view, &mut report);
     }
+    for group in &config.view_groups {
+        check_view_group(config, group, &mut report);
+    }
     check_layers(config, &mut report);
+    // **The shape report is the one part of a check that reads rows**, deliberately: the
+    // decomposition's size is what an operator sizing a world-scale boundary set needs, and it is
+    // known from the geometry alone. A finding above means the file the shapes would be read from
+    // may not open, so the rows are read only on a clean schema.
+    if report.is_clean() {
+        report.shapes = crate::shapes::check_reports(config);
+    }
     report
 }
 
@@ -186,6 +260,9 @@ fn check_attribute_sources(config: &Config, report: &mut CheckReport) {
         .flat_map(|s| s.attributes.iter().copied())
         .collect();
     carried.sort_unstable();
+    // A group-scoped attribute is not in the schema at all — it is a column family, read from
+    // the group's views' points files, which [`check_view_group`] checks column by column
+    // (`views.md` §5).
     for (index, attribute) in config.schema.attributes.iter().enumerate() {
         if carried.binary_search(&index).is_err() {
             report.note(
@@ -242,8 +319,76 @@ fn check_attribute_sources(config: &Config, report: &mut CheckReport) {
     }
 }
 
+/// Every group-scoped attribute that declares a **source of its own** (`views.md` §5), against
+/// that file: the entity id, the value column, and the discriminator that says which view each
+/// row's value is for.
+///
+/// **The discriminator is the one field this check adds**, and it is the reason such a source is
+/// admissible at all: without it the file would be read as entity space and one arbitrary view's
+/// values would be taken as every view's. Whether the keys in it are the roster's is a per-row
+/// question the build answers when it reads them, not one a schema can.
+fn check_scoped_attribute_sources(config: &Config, report: &mut CheckReport) {
+    for scoped in &config.scoped_attributes {
+        let Some(source) = &scoped.source else {
+            continue;
+        };
+        let attribute = &scoped.attribute;
+        let object = format!("attribute '{}'", attribute.name);
+        let Some(schema) = open(report, &object, &source.path) else {
+            continue;
+        };
+        for (what, column) in [
+            ("the entity id", source.entity_id.as_str()),
+            ("the value", attribute.column()),
+            ("the view discriminator", source.view_field.as_str()),
+        ] {
+            let Some((_, field)) = schema.column_with_name(column) else {
+                report.note(
+                    &object,
+                    format!(
+                        "is scoped to view group '{}' and reads {what} from a column named \
+                         '{column}', which its `source` does not carry. Its columns are: {}",
+                        scoped.group,
+                        columns(&schema)
+                    ),
+                );
+                continue;
+            };
+            if column == attribute.column() && !column_carries(attribute, field.data_type()) {
+                report.note(
+                    &object,
+                    format!(
+                        "declared '{}'{}, and the column '{column}' holds {:?}. The width is \
+                         taken from the declaration and the data must match it",
+                        attribute.ty.arrow_type_name(),
+                        match &attribute.vocabulary {
+                            Some(v) => format!(" over vocabulary '{v}', whose keys arrive as utf8"),
+                            None => String::new(),
+                        },
+                        field.data_type()
+                    ),
+                );
+            }
+        }
+    }
+}
+
 fn check_view(view: &crate::config::View, report: &mut CheckReport) {
     let object = format!("view '{}'", view.name);
+    // **The frame, before the file** — a projected view's square is a function of its declaration
+    // alone, so it is answered here whether or not the source opens.
+    if view.projection != tessera_spatial::Projection::None {
+        report.frames.push(FramePreview {
+            view: view.name.clone(),
+            projection: view.projection.name(),
+            snapped: match &view.extent {
+                Extent::LonLat(asked) => {
+                    Some((*asked, crate::config::snap_lon_lat(view.projection, asked)))
+                }
+                _ => None,
+            },
+        });
+    }
     let Some(path) = &view.source else {
         report.sources.push(SourceChecked {
             object: object.clone(),
@@ -281,6 +426,191 @@ fn check_view(view: &crate::config::View, report: &mut CheckReport) {
         require(report, &object, &schema, &view.fields, "y");
     }
     check_point_visibility(view, Some(&schema), report);
+}
+
+/// A view group's files: each view's points under form A, the group's own under form B, and the
+/// roster table where one is declared (`views.md` §3.1).
+///
+/// **Every view of a group is checked as a view**, because that is what it is below the
+/// declaration: the same identity column, the same geometry pair, the same access column. What is
+/// added is the discriminator — a form B source with no `view` column lands every row in a view
+/// nobody named — and the group-scoped attribute columns, which live in the views' own files where
+/// the attribute declares no source of its own (`views.md` §5).
+fn check_view_group(config: &Config, group: &ViewGroup, report: &mut CheckReport) {
+    let object = format!("view group '{}'", group.name);
+    if group.projection != tessera_spatial::Projection::None {
+        report.frames.push(FramePreview {
+            view: group.name.clone(),
+            projection: group.projection.name(),
+            snapped: match &group.extent {
+                Extent::LonLat(asked) => {
+                    Some((*asked, crate::config::snap_lon_lat(group.projection, asked)))
+                }
+                _ => None,
+            },
+        });
+    }
+    // The columns a scoped attribute reads out of this group's points files, where it declares no
+    // source of its own — Appendix A's `sentiment`, read from each quarter's own file.
+    // A `members` group's views are its owner's, and so are the files a column family scoped to
+    // them is read from — this group's own points carry its geometry and nothing else
+    // (`views.md` §3.3, §5).
+    // A family declaring its **own** `source` is not among them: its values live in that file,
+    // routed per view by the discriminator, and are checked against it in
+    // [`check_scoped_attribute_sources`].
+    let scoped: Vec<&str> = match group.members.is_some() {
+        true => Vec::new(),
+        false => config
+            .scoped_attributes
+            .iter()
+            .filter(|scoped| scoped.group == group.name && scoped.source.is_none())
+            .map(|scoped| scoped.attribute.column())
+            .collect(),
+    };
+
+    match &group.roster {
+        Roster::Inline(views) => {
+            for view in views {
+                let object = format!("{object}, view '{}'", view.key);
+                let Some(path) = &view.source else {
+                    report.sources.push(SourceChecked {
+                        object,
+                        path: None,
+                    });
+                    continue;
+                };
+                let Some(schema) = open(report, &object, path) else {
+                    continue;
+                };
+                check_points(&object, &schema, &group.fields, false, report);
+                check_group_labels(&object, &group.point_visibility, &schema, report);
+                for column in &scoped {
+                    if schema.column_with_name(column).is_none() {
+                        report.note(
+                            &object,
+                            format!(
+                                "the group-scoped attribute column '{column}' is read from each \
+                                 view's own points file, and this one does not carry it. Its \
+                                 columns are: {}. Declare the attribute's own `source` if the \
+                                 values live elsewhere (views §5)",
+                                columns(&schema)
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+        Roster::Table(_) | Roster::Discriminator => {
+            let Some(path) = &group.source else {
+                report.sources.push(SourceChecked {
+                    object,
+                    path: None,
+                });
+                return;
+            };
+            let Some(schema) = open(report, &object, path) else {
+                return;
+            };
+            check_points(&object, &schema, &group.fields, true, report);
+            check_group_labels(&object, &group.point_visibility, &schema, report);
+            for column in &scoped {
+                if schema.column_with_name(column).is_none() {
+                    report.note(
+                        &object,
+                        format!(
+                            "the group-scoped attribute column '{column}' is read from this \
+                             group's points, and the source does not carry it. Its columns are: \
+                             {}. Declare the attribute's own `source` if the values live elsewhere \
+                             (views §5)",
+                            columns(&schema)
+                        ),
+                    );
+                }
+            }
+        }
+    }
+    if let Roster::Table(table) = &group.roster {
+        let object = format!("{object} `[view_group.views]`");
+        let Some(schema) = open(report, &object, &table.source) else {
+            return;
+        };
+        require(report, &object, &schema, &table.fields, "key");
+        // `visibility` and the metadata names are located by the same map and required by the
+        // group's own declaration: a metadata name declared is a column every view carries, and a
+        // roster with the column missing serves the field absent for the life of every view.
+        require_named(report, &object, &schema, &table.fields, &["visibility"]);
+        for declared in &group.metadata {
+            require(report, &object, &schema, &table.fields, &declared.name);
+        }
+    }
+}
+
+/// One points file's identity and geometry, and — where the group carries one — its discriminator.
+fn check_points(
+    object: &str,
+    schema: &ArrowSchema,
+    fields: &Fields,
+    discriminator: bool,
+    report: &mut CheckReport,
+) {
+    require(report, object, schema, fields, ENTITY_ID);
+    let names_morton = fields.names("morton") || fields.names("residual");
+    let names_xy = fields.names("x") || fields.names("y");
+    let has_morton = column_type(schema, fields, "morton").is_some();
+    if names_morton || (!names_xy && has_morton) {
+        require(report, object, schema, fields, "morton");
+        if fields.names("residual") {
+            require(report, object, schema, fields, "residual");
+        }
+    } else {
+        require(report, object, schema, fields, "x");
+        require(report, object, schema, fields, "y");
+    }
+    if discriminator {
+        require(report, object, schema, fields, "view");
+    }
+}
+
+/// A group's `point_visibility` against one of its views' files — [`check_point_visibility`]'s
+/// rule, over a group's shared declaration rather than a view's own.
+fn check_group_labels(
+    object: &str,
+    point_visibility: &PointVisibility,
+    schema: &ArrowSchema,
+    report: &mut CheckReport,
+) {
+    let Some(field) = &point_visibility.field else {
+        return;
+    };
+    match schema.column_with_name(field) {
+        None => report.note(
+            object,
+            format!(
+                "`point_visibility.field = \"{field}\"` names a column this view's source does not \
+                 carry. Its columns are: {}",
+                columns(schema)
+            ),
+        ),
+        Some((_, found)) => {
+            let ok = match found.data_type() {
+                DataType::Utf8 => true,
+                DataType::List(inner) | DataType::LargeList(inner) => {
+                    matches!(inner.data_type(), DataType::Utf8)
+                }
+                _ => false,
+            };
+            if !ok {
+                report.note(
+                    object,
+                    format!(
+                        "the access column '{field}' holds {:?}. A point's access terms are \
+                         strings — one, or a list of them",
+                        found.data_type()
+                    ),
+                );
+            }
+        }
+    }
 }
 
 /// Where each point's access terms come from: a column of the view's own source, or an exploded
@@ -349,7 +679,7 @@ fn check_layers(config: &Config, report: &mut CheckReport) {
                 object: format!("{object} ({} inline artifact(s))", rows.len()),
                 path: None,
             }),
-            Some(ArtifactSource::File { path, fields }) => {
+            Some(ArtifactSource::File { path, fields, .. }) => {
                 if let Some(schema) = open(report, &object, path) {
                     // `key` is the one field a build-published artifact cannot do without: it is
                     // the address that survives a rebuild and what an edge into the layer names.
@@ -366,6 +696,18 @@ fn check_layers(config: &Config, report: &mut CheckReport) {
                             "attached_key",
                             "members",
                             "excluding",
+                            "min_x",
+                            "min_y",
+                            "max_x",
+                            "max_y",
+                            "cx",
+                            "cy",
+                            "r",
+                            "a",
+                            "b",
+                            "angle",
+                            "geometry",
+                            "space",
                         ],
                     );
                 }

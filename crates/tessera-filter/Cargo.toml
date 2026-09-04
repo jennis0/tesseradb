@@ -3,6 +3,13 @@ name = "tessera-filter"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+# Per-stage bench accessors on `ColumnPostings` — the record search, the view construction and the
+# `hits` test that `intersects` runs as one call. OFF by default and enabled only by
+# `tessera-bench`, mirroring `tessera-engine/bench-timing`. It adds no behaviour to any path.
+bench-timing = ["tessera-authz/bench-timing"]
+
 [dependencies]
 tessera-types = { path = "../tessera-types" }
 # The Roaring container assembler, shared with `tessera-store`'s row projection. Below both,

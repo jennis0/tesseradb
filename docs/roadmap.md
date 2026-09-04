@@ -50,8 +50,9 @@ filters, clusters and their labels, and [#56]. The reference viewer ([#46]) can 
 The conformance suite is the deliverable. An implementation that keeps Morton ordering, Roaring
 masks and tiered decode while quietly dropping I2, I7 or I13b passes every functional test and
 leaks; the suite is what distinguishes the two, and at release it is the only thing standing
-between a security claim and a reader's trust in it. Five of thirteen invariants are covered as
-designed. Six have no coverage, four of them for want of an implementation to test.
+between a security claim and a reader's trust in it. Where coverage stands is
+[`design/conformance.md`](design/conformance.md) §4.6 and nowhere else; the count that stood here
+was a hand-maintained second copy and had drifted from it.
 
 **CI exists as of [#69]** — the per-PR gate runs the workspace tests, clippy, both checker scripts
 and the conformance suite, so [#14]'s two checkers now run automatically and a regression cannot
@@ -93,7 +94,7 @@ question of when.** Three reasons to take it early:
   of this rework is now owed rather than avoidable. It is rework of machinery that carries
   invariants, in the one part of the system where a conflation has already been caught fail-open
   twice — which raises the cost of taking the fold-in later still, not lowers it.
-- **A window closes when the clients ship.** `views-and-multi-table.md` §12 lists six things
+- **A window closes when the clients ship.** `views.md` §12 lists six things
   cheap now and expensive later — container-aligned table base offsets, the manifest `group` key,
   prefix-qualified table references, the `{view → (x, y)}` ingest map, resolving contracts §2.6's
   *"row IDs are segment-local"* to the view-global reading, and keeping the permutation behind
@@ -203,7 +204,7 @@ at 2.4×10⁶ and 2.5×10⁷ against an independently decoded oracle
 refusing by name; `none_of` landed with decision 0066. They are not equal in cost: lists need their
 own addressing before the fold's blanking and the coalesce's merge are sound for them. The open work
 is handed over in
-[`2026-08-10-filter-handover.md`](evidence/memos/2026-08-10-filter-handover.md).
+2026-08-10-filter-handover.md.
 
 **That remainder is sequenced by [`records-and-search.md`](design/records-and-search.md) §13, which
 subsumes it.** That design generalises per-item data to five families under one declaration — a
@@ -267,7 +268,7 @@ found contradictory answers. They also govern [#43]'s frontier behaviour and pha
 [#43] changes shape under them, since the frontier is now a per-node test with a request-time budget
 rather than a descent.
 
-**What orders the work is [`artifact-delivery.md`](artifact-delivery.md), not these two issues.** By
+**What orders the work is artifact-delivery.md, not these two issues.** By
 owner direction the artifact work's stages, gates and status live there; [#13] and [#41] describe
 the capability from outside and are not the status record.
 

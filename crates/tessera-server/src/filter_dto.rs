@@ -28,10 +28,14 @@
 //! this path is forbidden to act on, per the rule above. So the client may use whichever it holds —
 //! and it holds codes, since the points batch ships codes and nothing else.
 
+use std::sync::Arc;
+
 use serde_json::Value;
 
-use tessera_engine::filter::{Endpoint, Family, FilterExpr, FilterOperand, Scalar};
-use tessera_types::AttrLocalId;
+use tessera_engine::filter::{Endpoint, Family, FilterExpr, FilterOperand, RegionLeaf, Scalar};
+use tessera_engine::LeafColumn;
+use tessera_engine::shapes::{Bounds, CanonError, Projection, ShapeF64, ShapeSpace};
+use tessera_types::{AttrLocalId, TesseraId};
 
 use crate::error::ApiError;
 
@@ -41,16 +45,66 @@ use crate::error::ApiError;
 use tessera_engine::filter::UNRESOLVABLE_VALUE as UNRESOLVABLE_ID;
 const UNRESOLVABLE: u32 = UNRESOLVABLE_ID.raw();
 
+/// What a `region` leaf is canonicalised against (selection-operand §2, `polygon-membership.md`
+/// §4.3–§4.4): the request's view's extent, the transform that placed its points there, and the
+/// deployment's vertex cap.
+pub struct RegionContext {
+    pub extent: Bounds,
+    /// **The view's own declared projection** — what a `space = "wgs84"` leaf is put through, and
+    /// the same function every point in the view went through (`projections.md` §10).
+    pub projection: Projection,
+    pub max_vertices: u64,
+}
+
 /// Parse `filters` into an expression, or refuse.
 ///
-/// `family_of` reports a column's family, or `None` for a name that is not a declared filterable
-/// column. `resolve` maps `(column, key)` to a code.
+/// `column_of` resolves a leaf's **spelling** — which may pin a group-scoped attribute's view,
+/// `sentiment@2026-Q3` or `sentiment@#3` (`views.md` §5) — to the column the engine evaluates and
+/// its family, or reports why it cannot. `resolve` maps `(column, key)` to a code. `region` is
+/// what a `region` leaf's geometry is quantised against.
 pub fn parse(
     filters: &Value,
-    family_of: &dyn Fn(&str) -> Option<Family>,
+    column_of: &dyn Fn(&str) -> LeafColumn,
     resolve: &dyn Fn(&str, &str) -> Option<u32>,
+    region: &RegionContext,
 ) -> Result<FilterExpr, ApiError> {
-    parse_node(filters, family_of, resolve)
+    parse_node(filters, column_of, resolve, region)
+}
+
+/// The column a leaf's spelling names, or the refusal it earns (`views.md` §5).
+///
+/// **Three refusals, two codes, and the split is contracts §3.1's closed list.** An unknown column
+/// and an ambiguous one are both `422`: the caller wrote something this schema cannot answer, and
+/// can be told so. A **pin naming nothing** is the `404` an unknown view already gets, and is
+/// deliberately the same answer for a key nobody declared and a view this principal's gate fails
+/// (`views.md` §6): a `422` there would make the filter surface an
+/// existence oracle over a roster the viewer plane refuses to enumerate.
+///
+/// **A principal who cannot reach the attribute's group at all reaches none of the three**: the
+/// family is undeclared for them, so `EngineMeta::resolve_filter_column` answers
+/// [`LeafColumn::Unknown`] for both spellings and the leaf takes the ordinary unknown-column `422`
+/// below — which names no group and confirms no key space (`views.md` §5).
+fn resolve_leaf(leaf: &str, column: LeafColumn) -> Result<(String, Family), ApiError> {
+    match column {
+        LeafColumn::Resolved { column, family } => Ok((column, family)),
+        LeafColumn::Unknown => Err(bad(format!(
+            "'{leaf}' is not a filterable column. `/v1/meta`'s `filter_operands` lists \
+             the columns and the operators each accepts"
+        ))),
+        LeafColumn::Unpinned { group } => Err(bad(format!(
+            "'{leaf}' is scoped to view group '{group}' and this request's view is not one of \
+             its views, so the leaf names no column to read. Pin the view it means — \
+             '{leaf}@<key>' — as `/v1/meta`'s `filter_operands` entry for it says"
+        ))),
+        LeafColumn::UnknownPin { group, pin } => Err(ApiError::Unknown(format!(
+            "unknown view '{pin}' of group '{group}'"
+        ))),
+        LeafColumn::PinOnUnscoped { column } => Err(bad(format!(
+            "'{column}' is not scoped to a view group, so there is nothing for '@{}' to choose \
+             between: it is one column for the corpus and every view reads it",
+            leaf.split_once(tessera_engine::filter::PIN).map_or("", |(_, pin)| pin)
+        ))),
+    }
 }
 
 fn bad(detail: impl Into<String>) -> ApiError {
@@ -59,8 +113,9 @@ fn bad(detail: impl Into<String>) -> ApiError {
 
 fn parse_node(
     node: &Value,
-    family_of: &dyn Fn(&str) -> Option<Family>,
+    column_of: &dyn Fn(&str) -> LeafColumn,
     resolve: &dyn Fn(&str, &str) -> Option<u32>,
+    region: &RegionContext,
 ) -> Result<FilterExpr, ApiError> {
     let obj = node
         .as_object()
@@ -84,7 +139,7 @@ fn parse_node(
             })?;
             let kids = arr
                 .iter()
-                .map(|k| parse_node(k, family_of, resolve))
+                .map(|k| parse_node(k, column_of, resolve, region))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(match combinator {
                 "all_of" => FilterExpr::AllOf(kids),
@@ -97,20 +152,241 @@ fn parse_node(
                 _ => FilterExpr::NoneOf(kids),
             })
         }
-        column => {
+        // **The reserved word, before any column** (selection-operand §2): the build refuses a
+        // column of this name, so the key can mean one thing.
+        tessera_engine::filter::REGION_COLUMN => Ok(FilterExpr::Region(parse_region(body, region)?)),
+        // The second reserved word, on the same argument (`highlight-and-hierarchy.md` §3).
+        tessera_engine::filter::MEMBER_OF_COLUMN => Ok(FilterExpr::MemberOf(parse_member_of(body)?)),
+        leaf => {
             // **An unknown column is an error; an unknown value is not.** See the module header.
-            let Some(family) = family_of(column) else {
-                return Err(bad(format!(
-                    "'{column}' is not a filterable column. `/v1/meta`'s `filter_operands` lists \
-                     the columns and the operators each accepts"
-                )));
-            };
+            // A leaf's *spelling* is resolved here too — a group-scoped attribute's pin, and the
+            // refusals a spelling can earn — because both questions are about the name and this is
+            // the boundary where a name becomes a column (`views.md` §5).
+            let (column, family) = resolve_leaf(leaf, column_of(leaf))?;
             Ok(FilterExpr::Leaf {
-                column: column.to_string(),
-                operand: parse_operand(column, family, body, resolve)?,
+                // The **resolved** column, which for a scoped family is one view's of it. The
+                // caller's own spelling stays in the refusals: a message quoting a name the caller
+                // never wrote is one they cannot find in their request.
+                column,
+                operand: parse_operand(leaf, family, body, resolve)?,
             })
         }
     }
+}
+
+/// A `member_of` leaf's body: `{layer: <name>, artifact: <tessera_id>}`
+/// (`highlight-and-hierarchy.md` §3).
+///
+/// **Shape only is checked here.** Whether the layer exists is the engine's — the answer depends
+/// on the principal's own reachable layer set, which this module does not hold — and whether the
+/// artifact resolves is never checked at all: an identifier that names nothing this principal may
+/// see is an empty operand, on the module header's rule, so it travels through unexamined.
+///
+/// The identifier is accepted as a JSON number or a decimal string, exactly as
+/// `region.artifact` is: a `u64` beyond `2^53` cannot ride through a JavaScript number intact.
+fn parse_member_of(body: &Value) -> Result<tessera_engine::filter::MemberOfLeaf, ApiError> {
+    let obj = body
+        .as_object()
+        .ok_or_else(|| bad("`member_of` takes an object with `layer` and `artifact`"))?;
+    for key in obj.keys() {
+        if key != "layer" && key != "artifact" {
+            return Err(bad(format!(
+                "`member_of` takes `layer` and `artifact`, not '{key}'"
+            )));
+        }
+    }
+    let layer = obj
+        .get("layer")
+        .and_then(Value::as_str)
+        .ok_or_else(|| bad("`member_of.layer` is the name of a layer, as a string"))?;
+    let artifact = match obj.get("artifact") {
+        Some(Value::Number(n)) => n.as_u64(),
+        Some(Value::String(s)) => s.parse::<u64>().ok(),
+        _ => None,
+    }
+    .ok_or_else(|| {
+        bad("`member_of.artifact` is a `tessera_id` — a JSON number, or a decimal string where the \
+             caller cannot carry one intact")
+    })?;
+    Ok(tessera_engine::filter::MemberOfLeaf {
+        layer: layer.to_string(),
+        artifact: TesseraId::new(artifact),
+    })
+}
+
+/// A `region` leaf's body: exactly one of `polygon`, `bbox`, `circle`, `ellipse` — with `space`,
+/// `view` if absent — or `artifact` (`polygon-membership.md` §8).
+///
+/// **Geometry is canonicalised here, at the boundary**, against the view's extent and through the
+/// same `fixed32` the tiler applies to a point, so what the engine holds is the grid-unit form
+/// and two callers drawing one shape send one value. What refuses: a coordinate that is not one,
+/// an inverted box, a non-positive radius or axis, too few vertices, too many (`422` naming the
+/// count and the cap), an unknown key, a `wgs84` coordinate outside ±180 × ±90 — which is not a
+/// coordinate — and `wgs84` at all on a view whose `projection` is `none`, which has one space
+/// and nothing to convert from (§4.3). A shape wholly outside the extent is not refused: it holds
+/// no rows, and a request may ask that.
+///
+/// **A `wgs84` leaf is put through the view's own transform**, each edge densified first, on the
+/// rule that the space a shape is declared in defines the plane its edges are straight in
+/// (R10, `projections.md` §10). The vertex cap is therefore checked twice: on what the caller
+/// sent, and on what densification produced.
+fn parse_region(body: &Value, ctx: &RegionContext) -> Result<RegionLeaf, ApiError> {
+    let obj = body
+        .as_object()
+        .ok_or_else(|| bad("`region` takes an object with exactly one of polygon, bbox, circle, ellipse or artifact"))?;
+    const KINDS: [&str; 5] = ["polygon", "bbox", "circle", "ellipse", "artifact"];
+    let named: Vec<&str> = obj
+        .keys()
+        .map(String::as_str)
+        .filter(|k| KINDS.contains(k))
+        .collect();
+    if named.len() != 1 {
+        return Err(bad(format!(
+            "`region` takes exactly one of polygon, bbox, circle, ellipse or artifact; this one \
+             carries {}",
+            if named.is_empty() {
+                "none".to_string()
+            } else {
+                named.join(", ")
+            }
+        )));
+    }
+    for key in obj.keys() {
+        if key != named[0] && key != "space" {
+            return Err(bad(format!(
+                "`region` takes {} and `space`, not '{key}'",
+                named[0]
+            )));
+        }
+    }
+    let kind = named[0];
+    if obj.contains_key("space") && obj.get("space").and_then(Value::as_str).is_none() {
+        return Err(bad("`region.space` is a string"));
+    }
+    let space = match obj.get("space").and_then(Value::as_str) {
+        None => ShapeSpace::View,
+        Some(word) => ShapeSpace::parse(word)
+            .map_err(|_| bad(format!("`region.space` is `view` or `wgs84`, not '{word}'")))?,
+    };
+    let space = space
+        .resolve(ctx.projection)
+        .map_err(|e| bad(format!("`region.space`: {e}")))?;
+    if kind == "artifact" {
+        if obj.contains_key("space") {
+            return Err(bad("`region.artifact` names a published shape and carries no `space`"));
+        }
+        let id = match &obj["artifact"] {
+            Value::Number(n) => n.as_u64(),
+            Value::String(s) => s.parse::<u64>().ok(),
+            _ => None,
+        }
+        .ok_or_else(|| bad("`region.artifact` is a tessera_id — a whole number, or its decimal string"))?;
+        return Ok(RegionLeaf::Artifact(TesseraId::new(id)));
+    }
+    let number = |v: &Value, what: &str| -> Result<f64, ApiError> {
+        v.as_f64()
+            .filter(|f| f.is_finite())
+            .ok_or_else(|| bad(format!("`region.{kind}`: {what} must be a finite number")))
+    };
+    let numbers = |n: usize| -> Result<Vec<f64>, ApiError> {
+        let arr = obj[kind].as_array().ok_or_else(|| {
+            bad(format!("`region.{kind}` takes an array of {n} numbers"))
+        })?;
+        if arr.len() != n {
+            return Err(bad(format!(
+                "`region.{kind}` takes {n} numbers, not {}",
+                arr.len()
+            )));
+        }
+        arr.iter().map(|v| number(v, "each entry")).collect()
+    };
+    let shape = match kind {
+        "polygon" => {
+            let arr = obj["polygon"]
+                .as_array()
+                .ok_or_else(|| bad("`region.polygon` takes an array of [x, y] vertices"))?;
+            if arr.len() < 3 {
+                return Err(bad(format!(
+                    "`region.polygon` needs at least three vertices; this one has {}",
+                    arr.len()
+                )));
+            }
+            if arr.len() as u64 > ctx.max_vertices {
+                return Err(bad(format!(
+                    "`region.polygon` carries {} vertices; the deployment's `max_region_vertices` \
+                     is {} (`/v1/meta`'s selection block). Simplify the shape before sending it",
+                    arr.len(),
+                    ctx.max_vertices
+                )));
+            }
+            let mut ring = Vec::with_capacity(arr.len());
+            for v in arr {
+                let pair = v
+                    .as_array()
+                    .filter(|p| p.len() == 2)
+                    .ok_or_else(|| bad("`region.polygon`: each vertex is [x, y]"))?;
+                ring.push((number(&pair[0], "x")?, number(&pair[1], "y")?));
+            }
+            ShapeF64::Polygon(vec![vec![ring]])
+        }
+        "bbox" => {
+            let b = numbers(4)?;
+            ShapeF64::Bbox {
+                min_x: b[0],
+                min_y: b[1],
+                max_x: b[2],
+                max_y: b[3],
+            }
+        }
+        "circle" => {
+            let c = numbers(3)?;
+            ShapeF64::Circle {
+                cx: c[0],
+                cy: c[1],
+                r: c[2],
+            }
+        }
+        "ellipse" => {
+            let e = numbers(5)?;
+            ShapeF64::Ellipse {
+                cx: e[0],
+                cy: e[1],
+                a: e[2],
+                b: e[3],
+                angle_degrees: e[4],
+            }
+        }
+        _ => unreachable!("the kind was checked against the five"),
+    };
+    let (canonical, _report) = shape.canonical(space, &ctx.extent).map_err(|e| match e {
+        CanonError::NotFinite => bad(format!("`region.{kind}`: a coordinate is not finite")),
+        CanonError::InvertedBox => bad(
+            "`region.bbox` is [x0, y0, x1, y1] with x0 <= x1 and y0 <= y1",
+        ),
+        CanonError::NonPositiveAxis => bad(format!(
+            "`region.{kind}`: the radius and the axes must be positive"
+        )),
+        CanonError::NotACoordinate => bad(format!(
+            "`region.{kind}` is `space = \"wgs84\"` and carries a coordinate outside ±180 \
+             longitude or ±90 latitude; a value outside that is not a coordinate \
+             (`projections.md` §2)"
+        )),
+        // Unreachable: `ShapeSpace::resolve` refuses the pair above, naming the view.
+        CanonError::NoProjection => bad(format!("`region.{kind}`: {e}")),
+    })?;
+    // **The cap again, on what densification produced** (R5): a `wgs84` polygon whose edges curve
+    // in the frame leaves this line with more vertices than the caller sent, and a bound checked
+    // only on the submission would not be a bound on the evaluation.
+    let vertices = canonical.vertex_count();
+    if vertices > ctx.max_vertices {
+        return Err(bad(format!(
+            "`region.{kind}` is {vertices} vertices once its edges are densified for \
+             `space = \"wgs84\"`, and the deployment's `max_region_vertices` is {}. Simplify the \
+             shape, or send it in the view's own space",
+            ctx.max_vertices
+        )));
+    }
+    Ok(RegionLeaf::Shape(Arc::new(canonical)))
 }
 
 fn parse_operand(
@@ -392,17 +668,36 @@ fn text_value(column: &str, op: &str, value: &Value) -> Result<String, ApiError>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tessera_engine::filter::PIN;
 
-    fn schema(name: &str) -> impl Fn(&str) -> Option<Family> + '_ {
+    /// A resolver over four columns, standing in for the engine's own: three entity-scoped, and
+    /// `sentiment` scoped to the group `quarter` with the request's view deciding nothing — so the
+    /// bare leaf is the unpinned refusal and `sentiment@2026-Q3` resolves.
+    fn schema(name: &str) -> impl Fn(&str) -> LeafColumn + '_ {
         move |c: &str| {
-            if c == name {
-                Some(Family::Category)
-            } else if c == "title" || c == "submitter" {
-                Some(Family::Keyword)
-            } else if c == "score" {
-                Some(Family::Numeric)
-            } else {
-                None
+            let plain = |family| LeafColumn::Resolved {
+                column: c.to_string(),
+                family,
+            };
+            match c.split_once(PIN) {
+                None if c == name => plain(Family::Category),
+                None if c == "title" || c == "submitter" => plain(Family::Keyword),
+                None if c == "score" => plain(Family::Numeric),
+                None if c == "sentiment" => LeafColumn::Unpinned {
+                    group: "quarter".to_string(),
+                },
+                Some(("sentiment", "2026-Q3")) => LeafColumn::Resolved {
+                    column: "sentiment@quarter:2026-Q3".to_string(),
+                    family: Family::Numeric,
+                },
+                Some(("sentiment", pin)) => LeafColumn::UnknownPin {
+                    group: "quarter".to_string(),
+                    pin: pin.to_string(),
+                },
+                Some(("score", _)) => LeafColumn::PinOnUnscoped {
+                    column: "score".to_string(),
+                },
+                _ => LeafColumn::Unknown,
             }
         }
     }
@@ -415,9 +710,178 @@ mod tests {
         }
     }
 
+    /// An unprojected view: its own coordinates are the only space it has.
+    fn region_ctx() -> RegionContext {
+        RegionContext {
+            extent: Bounds {
+                x_min: 0.0,
+                x_max: 1000.0,
+                y_min: 0.0,
+                y_max: 1000.0,
+            },
+            projection: Projection::None,
+            max_vertices: 8,
+        }
+    }
+
+    /// A Web Mercator view over the whole world — the frame the United Kingdom takes.
+    fn projected_ctx() -> RegionContext {
+        RegionContext {
+            extent: Bounds {
+                x_min: 0.0,
+                x_max: 1.0,
+                y_min: 0.0,
+                y_max: 1.0,
+            },
+            projection: Projection::WebMercator,
+            max_vertices: 2_048,
+        }
+    }
+
     fn parse_str(text: &str) -> Result<FilterExpr, ApiError> {
         let v: Value = serde_json::from_str(text).unwrap();
-        parse(&v, &schema("department"), &codes)
+        parse(&v, &schema("department"), &codes, &region_ctx())
+    }
+
+    fn parse_projected(text: &str) -> Result<FilterExpr, ApiError> {
+        let v: Value = serde_json::from_str(text).unwrap();
+        parse(&v, &schema("department"), &codes, &projected_ctx())
+    }
+
+    #[test]
+    fn a_region_polygon_parses_to_its_canonical_shape() {
+        let expr = parse_str(r#"{"region": {"polygon": [[0, 0], [500, 0], [500, 500], [0, 500]]}}"#)
+            .unwrap();
+        let FilterExpr::Region(RegionLeaf::Shape(shape)) = expr else {
+            panic!("a region leaf");
+        };
+        assert_eq!(shape.vertex_count(), 4);
+        // The same shape with `space = "view"` is the same value.
+        let again = parse_str(
+            r#"{"region": {"polygon": [[0, 0], [500, 0], [500, 500], [0, 500]], "space": "view"}}"#,
+        )
+        .unwrap();
+        assert_eq!(again, FilterExpr::Region(RegionLeaf::Shape(shape)));
+    }
+
+    #[test]
+    fn a_region_bbox_circle_and_ellipse_parse() {
+        for text in [
+            r#"{"region": {"bbox": [10, 10, 20, 20]}}"#,
+            r#"{"region": {"circle": [500, 500, 100]}}"#,
+            r#"{"region": {"ellipse": [500, 500, 100, 50, 30]}}"#,
+        ] {
+            assert!(matches!(
+                parse_str(text).unwrap(),
+                FilterExpr::Region(RegionLeaf::Shape(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn a_wgs84_region_goes_through_the_views_own_transform() {
+        // The United Kingdom's diagonal, in degrees, on a Web Mercator view.
+        let expr = parse_projected(
+            r#"{"region": {"polygon": [[-8, 50], [2, 58], [2, 50]], "space": "wgs84"}}"#,
+        )
+        .unwrap();
+        let FilterExpr::Region(RegionLeaf::Shape(shape)) = expr else {
+            panic!("a region leaf");
+        };
+        // Densified: the diagonal edge is a curve in the frame, so more than three vertices
+        // survive canonicalisation.
+        assert!(
+            shape.vertex_count() > 3,
+            "the diagonal was joined by a chord: {} vertices",
+            shape.vertex_count()
+        );
+        // The same numbers read as view coordinates land nowhere near — they are degrees on a
+        // unit-square frame, so they clamp to a corner and canonicalise away.
+        let as_view =
+            parse_projected(r#"{"region": {"polygon": [[-8, 50], [2, 58], [2, 50]]}}"#).unwrap();
+        assert_ne!(as_view, FilterExpr::Region(RegionLeaf::Shape(shape)));
+    }
+
+    #[test]
+    fn a_wgs84_region_refuses_what_is_not_a_coordinate() {
+        let err = parse_projected(
+            r#"{"region": {"bbox": [-8, 50, 2, 91], "space": "wgs84"}}"#,
+        )
+        .unwrap_err();
+        let ApiError::Contract(detail) = err else {
+            panic!("expected a 422");
+        };
+        assert!(detail.contains("not a coordinate"), "{detail}");
+    }
+
+    #[test]
+    fn a_wgs84_region_is_capped_on_what_densification_produced() {
+        let mut small = projected_ctx();
+        small.max_vertices = 8;
+        let v: Value = serde_json::from_str(
+            r#"{"region": {"polygon": [[-30, -30], [30, 30], [30, -30]], "space": "wgs84"}}"#,
+        )
+        .unwrap();
+        let err = parse(&v, &schema("department"), &codes, &small).unwrap_err();
+        let ApiError::Contract(detail) = err else {
+            panic!("expected a 422");
+        };
+        assert!(detail.contains("once its edges are densified"), "{detail}");
+    }
+
+    #[test]
+    fn a_region_by_artifact_takes_an_integer_or_its_decimal_string() {
+        for text in [r#"{"region": {"artifact": 42}}"#, r#"{"region": {"artifact": "42"}}"#] {
+            assert_eq!(
+                parse_str(text).unwrap(),
+                FilterExpr::Region(RegionLeaf::Artifact(TesseraId::new(42)))
+            );
+        }
+    }
+
+    #[test]
+    fn a_region_refuses_what_it_must() {
+        for (text, needle) in [
+            // Two vertices is not a polygon.
+            (r#"{"region": {"polygon": [[0, 0], [1, 1]]}}"#, "at least three"),
+            // Over the cap, naming the count and the cap.
+            (
+                r#"{"region": {"polygon": [[0,0],[1,0],[2,0],[3,0],[4,0],[5,0],[6,0],[7,0],[8,0]]}}"#,
+                "9 vertices; the deployment's `max_region_vertices` is 8",
+            ),
+            // Two kinds, or none.
+            (r#"{"region": {"bbox": [0,0,1,1], "circle": [0,0,1]}}"#, "exactly one of"),
+            (r#"{"region": {}}"#, "exactly one of"),
+            // A view with no projection has one space, and says so.
+            (r#"{"region": {"bbox": [0,0,1,1], "space": "wgs84"}}"#, "projections.md"),
+            (r#"{"region": {"bbox": [0,0,1,1], "space": "utm"}}"#, "`view` or `wgs84`"),
+            // The canonical form's own refusals.
+            (r#"{"region": {"bbox": [5,5,1,1]}}"#, "x0 <= x1"),
+            (r#"{"region": {"circle": [5,5,0]}}"#, "positive"),
+            // An unknown key beside the kind.
+            (r#"{"region": {"bbox": [0,0,1,1], "depth": 4}}"#, "not 'depth'"),
+            // An artifact carries no space.
+            (r#"{"region": {"artifact": 1, "space": "view"}}"#, "carries no `space`"),
+        ] {
+            let err = parse_str(text).unwrap_err();
+            let ApiError::Contract(detail) = err else {
+                panic!("{text}: expected a 422, got {err:?}");
+            };
+            assert!(detail.contains(needle), "{text}: {detail}");
+        }
+    }
+
+    #[test]
+    fn a_region_composes_and_negates_like_any_leaf() {
+        let expr = parse_str(
+            r#"{"all_of": [{"department": {"eq": "eng"}},
+                           {"none_of": [{"region": {"bbox": [0, 0, 10, 10]}}]}]}"#,
+        )
+        .unwrap();
+        let FilterExpr::AllOf(kids) = expr else {
+            panic!("all_of");
+        };
+        assert!(matches!(kids[1], FilterExpr::NoneOf(_)));
     }
 
     #[test]
@@ -671,5 +1135,46 @@ mod tests {
             "{err:?}"
         );
         assert!(format!("{err:?}").contains("keyword column"), "{err:?}");
+    }
+
+    /// **The pinned leaf's three refusals, each with the code contracts §3.1 gives it**
+    /// (`views.md` §5). The resolution itself is the engine's; what is checked here is that the
+    /// parse carries each outcome to the wire unflattened — an ambiguous leaf and a pin naming
+    /// nothing are different answers, and collapsing them would either publish a roster the
+    /// viewer plane refuses to enumerate or hide a malformed request behind a 404.
+    #[test]
+    fn a_scoped_leaf_resolves_or_refuses_by_its_spelling() {
+        // Pinned: the leaf carries the resolved column, not the caller's spelling of it.
+        let FilterExpr::Leaf { column, .. } =
+            parse_str(r#"{"sentiment@2026-Q3": {"range": {"gte": 0.5}}}"#).unwrap()
+        else {
+            panic!("a leaf");
+        };
+        assert_eq!(column, "sentiment@quarter:2026-Q3");
+
+        // Bare, under a view that decides no column: 422 naming the group and the pin form.
+        let ApiError::Contract(detail) =
+            parse_str(r#"{"sentiment": {"range": {"gte": 0.5}}}"#).unwrap_err()
+        else {
+            panic!("expected a 422");
+        };
+        assert!(detail.contains("quarter"), "{detail}");
+        assert!(detail.contains("sentiment@<key>"), "{detail}");
+
+        // A pin naming no view of the group: the 404 an unknown view gets, and it says no more.
+        let ApiError::Unknown(detail) =
+            parse_str(r#"{"sentiment@2099-Q9": {"range": {"gte": 0.5}}}"#).unwrap_err()
+        else {
+            panic!("expected a 404");
+        };
+        assert!(detail.contains("2099-Q9"), "{detail}");
+
+        // A pin on a column with no scope: one column for the corpus, nothing to choose between.
+        let ApiError::Contract(detail) =
+            parse_str(r#"{"score@2026-Q3": {"range": {"gte": 1}}}"#).unwrap_err()
+        else {
+            panic!("expected a 422");
+        };
+        assert!(detail.contains("not scoped to a view group"), "{detail}");
     }
 }

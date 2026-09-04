@@ -62,7 +62,7 @@ verbs into panels, legends and DOM. It is low-volume, exact, and **never** deriv
 from the mark channel, because the marks are a sample and the numbers are not.
 
 **"Number" is too narrow, and the artifact work corrects it** *(2026-08-01; see
-[`annotations.md`](annotations.md) §9)*. A cluster hull is an aggregate over the
+[`annotations.md`](annotations.md) §4.2, the closure rule a derived property obeys)*. A cluster hull is an aggregate over the
 visible set, so a client that draws a hull around the *k* points it holds has committed the
 sample-as-set error **in geometry** — the same failure in a shape nobody thinks to check.
 So this is the **exact masked-aggregate channel**, and geometry travels on it: hulls,
@@ -1106,7 +1106,9 @@ direction as viewport-addressed requests. The three findings of this date are on
 **Selection should become a
 content-addressed filter operand** rather than a one-shot verb, so it composes with
 other filters, caches per §8.5, and gets §8.1's matched-versus-visible highlight
-affordance for free. And **per-scalar histograms are the one new verb mode 1 needs** —
+affordance for free — built 2026-08-29 as the `region` leaf
+([`selection-operand.md`](selection-operand.md), Normative), content-addressed on the
+canonical shape's digest per generation and shared across principals. And **per-scalar histograms are the one new verb mode 1 needs** —
 distributions are the first thing anyone plots — implementable as build-time
 bin-membership bitmaps, one `and_cardinality` per bin, no scan.
 
@@ -1496,7 +1498,7 @@ archive is forbidden.*
 ## 16. Provenance
 
 **r2 (2026-08-01) applies two decisions and changes no mechanism.** Decision
-[0029](../decisions/0029-view-key.md) names the composite this document is largely about: the
+0029 names the composite this document is largely about: the
 coordinate **(mask, overlay version, view, *k*, idset)** within which `served(viewport)` is
 stable was a fourth thing called "epoch", and is now the **view key** (§6). *Key* rather than
 *state* because the viewport is deliberately **not** one of its components — a served viewport is

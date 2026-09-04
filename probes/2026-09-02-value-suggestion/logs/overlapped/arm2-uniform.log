@@ -1,0 +1,174 @@
+cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm2 /home/joe/code/tessera/data/ladder/probe-suggest 10000000 uniform
+== arm2 uniform V=10000000
+open: PostingsReader::open(10000000 records) median of 3: mmap 0.048s, read 0.347s (page-cache warm)
+fixture: N=100000000 V=10000000; member counts read in 0.15s; 453 empty, 0 Roaring, max 31
+index: key-only arena over 10000000 values built in 6.08s
+-- candidate 1e-4 contiguous |cand|=10000 (1 containers)
+   probe[hidden, no members] narrow:    n=0 median 0.00 us  p99 0.00 us  mean 0.00 us  max 0.0 us
+   probe[hidden, no members] intersect: n=0 median 0.00 us  p99 0.00 us  mean 0.00 us  max 0.0 us
+   probe[hidden, members disjoint] narrow:    n=6291 median 0.08 us  p99 0.13 us  mean 0.08 us  max 0.5 us
+   probe[hidden, members disjoint] intersect: n=6291 median 0.14 us  p99 0.45 us  mean 0.18 us  max 60.7 us
+   probe[visible] narrow:    n=9 median 0.18 us  p99 0.22 us  mean 0.17 us  max 0.2 us
+   probe[visible] intersect: n=9 median 0.16 us  p99 0.33 us  mean 0.18 us  max 0.3 us
+   probe by members 1-32 (tag 0) hidden : n=6291 median 0.08 us  p99 0.13 us  mean 0.08 us  max 0.5 us
+   probe by members 1-32 (tag 0) visible: n=9 median 0.18 us  p99 0.22 us  mean 0.17 us  max 0.2 us
+   walk prefix 1 budget   1000: median 0.07 ms  p99 0.13 ms  max 0.15 ms | page filled 0/100 budget spent 100 range exhausted 0 | mean examined 1000 mean emitted 0.8
+   walk prefix 1 budget  10000: median 0.70 ms  p99 1.08 ms  max 1.09 ms | page filled 3/100 budget spent 97 range exhausted 0 | mean examined 9987 mean emitted 9.1
+   walk prefix 1 budget 100000: median 1.54 ms  p99 2.18 ms  max 2.22 ms | page filled 100/100 budget spent 0 range exhausted 0 | mean examined 21855 mean emitted 20.0
+   walk prefix 2 budget   1000: median 0.07 ms  p99 0.09 ms  max 0.11 ms | page filled 0/100 budget spent 100 range exhausted 0 | mean examined 1000 mean emitted 0.8
+   walk prefix 2 budget  10000: median 0.70 ms  p99 1.10 ms  max 1.14 ms | page filled 0/100 budget spent 90 range exhausted 10 | mean examined 9553 mean emitted 9.2
+   walk prefix 2 budget 100000: median 1.39 ms  p99 2.23 ms  max 2.25 ms | page filled 82/100 budget spent 0 range exhausted 18 | mean examined 18935 mean emitted 18.0
+   walk prefix 3 budget   1000: median 0.10 ms  p99 0.13 ms  max 0.14 ms | page filled 0/100 budget spent 84 range exhausted 16 | mean examined 933 mean emitted 1.0
+   walk prefix 3 budget  10000: median 0.45 ms  p99 1.03 ms  max 1.13 ms | page filled 0/100 budget spent 38 range exhausted 62 | mean examined 5744 mean emitted 5.8
+   walk prefix 3 budget 100000: median 0.44 ms  p99 1.76 ms  max 1.90 ms | page filled 24/100 budget spent 0 range exhausted 76 | mean examined 8254 mean emitted 8.4
+   walk prefix 4 budget   1000: median 0.07 ms  p99 0.16 ms  max 0.16 ms | page filled 0/100 budget spent 51 range exhausted 49 | mean examined 629 mean emitted 0.7
+   walk prefix 4 budget  10000: median 0.07 ms  p99 0.83 ms  max 0.85 ms | page filled 0/100 budget spent 19 range exhausted 81 | mean examined 2957 mean emitted 3.2
+   walk prefix 4 budget 100000: median 0.07 ms  p99 1.52 ms  max 1.92 ms | page filled 13/100 budget spent 0 range exhausted 87 | mean examined 4447 mean emitted 4.6
+-- candidate 1e-4 scattered |cand|=9860 (1524 containers)
+   probe[hidden, no members] narrow:    n=0 median 0.00 us  p99 0.00 us  mean 0.00 us  max 0.0 us
+   probe[hidden, no members] intersect: n=0 median 0.00 us  p99 0.00 us  mean 0.00 us  max 0.0 us
+   probe[hidden, members disjoint] narrow:    n=6291 median 0.27 us  p99 0.60 us  mean 0.29 us  max 11.4 us
+   probe[hidden, members disjoint] intersect: n=6291 median 0.46 us  p99 0.99 us  mean 0.49 us  max 19.2 us
+   probe[visible] narrow:    n=9 median 0.37 us  p99 0.67 us  mean 0.40 us  max 0.7 us
+   probe[visible] intersect: n=9 median 0.32 us  p99 0.56 us  mean 0.33 us  max 0.6 us
+   probe by members 1-32 (tag 0) hidden : n=6291 median 0.27 us  p99 0.60 us  mean 0.29 us  max 11.4 us
+   probe by members 1-32 (tag 0) visible: n=9 median 0.37 us  p99 0.67 us  mean 0.40 us  max 0.7 us
+   walk prefix 1 budget   1000: median 0.42 ms  p99 0.47 ms  max 0.47 ms | page filled 0/100 budget spent 100 range exhausted 0 | mean examined 1000 mean emitted 0.9
+   walk prefix 1 budget  10000: median 4.27 ms  p99 4.65 ms  max 4.89 ms | page filled 0/100 budget spent 100 range exhausted 0 | mean examined 10000 mean emitted 8.7
+   walk prefix 1 budget 100000: median 10.09 ms  p99 14.75 ms  max 15.29 ms | page filled 100/100 budget spent 0 range exhausted 0 | mean examined 21779 mean emitted 20.0
+   walk prefix 2 budget   1000: median 0.43 ms  p99 0.54 ms  max 0.54 ms | page filled 0/100 budget spent 100 range exhausted 0 | mean examined 1000 mean emitted 0.9
+   walk prefix 2 budget  10000: median 4.25 ms  p99 4.71 ms  max 4.73 ms | page filled 0/100 budget spent 90 range exhausted 10 | mean examined 9553 mean emitted 9.9
+   walk prefix 2 budget 100000: median 8.36 ms  p99 13.72 ms  max 14.01 ms | page filled 81/100 budget spent 0 range exhausted 19 | mean examined 18119 mean emitted 18.1
+   walk prefix 3 budget   1000: median 0.42 ms  p99 0.57 ms  max 0.58 ms | page filled 0/100 budget spent 84 range exhausted 16 | mean examined 933 mean emitted 1.1
+   walk prefix 3 budget  10000: median 2.68 ms  p99 5.59 ms  max 5.61 ms | page filled 0/100 budget spent 38 range exhausted 62 | mean examined 5744 mean emitted 5.9
+   walk prefix 3 budget 100000: median 2.71 ms  p99 10.99 ms  max 13.08 ms | page filled 24/100 budget spent 0 range exhausted 76 | mean examined 8391 mean emitted 8.4
+   walk prefix 4 budget   1000: median 0.42 ms  p99 0.57 ms  max 0.65 ms | page filled 0/100 budget spent 51 range exhausted 49 | mean examined 629 mean emitted 0.8
+   walk prefix 4 budget  10000: median 0.45 ms  p99 4.27 ms  max 4.28 ms | page filled 0/100 budget spent 19 range exhausted 81 | mean examined 2957 mean emitted 2.8
+   walk prefix 4 budget 100000: median 0.44 ms  p99 10.60 ms  max 11.03 ms | page filled 11/100 budget spent 0 range exhausted 89 | mean examined 4760 mean emitted 4.5
+-- candidate 1e-3 contiguous |cand|=100000 (2 containers)
+   probe[hidden, no members] narrow:    n=0 median 0.00 us  p99 0.00 us  mean 0.00 us  max 0.0 us
+   probe[hidden, no members] intersect: n=0 median 0.00 us  p99 0.00 us  mean 0.00 us  max 0.0 us
+   probe[hidden, members disjoint] narrow:    n=6227 median 0.11 us  p99 0.16 us  mean 0.11 us  max 10.2 us
+   probe[hidden, members disjoint] intersect: n=6227 median 0.16 us  p99 0.48 us  mean 0.17 us  max 9.5 us
+   probe[visible] narrow:    n=73 median 0.20 us  p99 0.26 us  mean 0.20 us  max 0.3 us
+   probe[visible] intersect: n=73 median 0.14 us  p99 0.34 us  mean 0.15 us  max 0.4 us
+   probe by members 1-32 (tag 0) hidden : n=6227 median 0.11 us  p99 0.16 us  mean 0.11 us  max 10.2 us
+   probe by members 1-32 (tag 0) visible: n=73 median 0.20 us  p99 0.26 us  mean 0.20 us  max 0.3 us
+   walk prefix 1 budget   1000: median 0.07 ms  p99 0.10 ms  max 0.10 ms | page filled 0/100 budget spent 100 range exhausted 0 | mean examined 1000 mean emitted 9.3
+   walk prefix 1 budget  10000: median 0.16 ms  p99 0.21 ms  max 0.22 ms | page filled 100/100 budget spent 0 range exhausted 0 | mean examined 2092 mean emitted 20.0
+   walk prefix 1 budget 100000: median 0.16 ms  p99 0.21 ms  max 0.22 ms | page filled 100/100 budget spent 0 range exhausted 0 | mean examined 2092 mean emitted 20.0
+   walk prefix 2 budget   1000: median 0.07 ms  p99 0.09 ms  max 0.09 ms | page filled 1/100 budget spent 99 range exhausted 0 | mean examined 1000 mean emitted 10.1
+   walk prefix 2 budget  10000: median 0.15 ms  p99 0.23 ms  max 0.23 ms | page filled 98/100 budget spent 0 range exhausted 2 | mean examined 2020 mean emitted 19.9
+   walk prefix 2 budget 100000: median 0.14 ms  p99 0.21 ms  max 0.22 ms | page filled 98/100 budget spent 0 range exhausted 2 | mean examined 2020 mean emitted 19.9
+   walk prefix 3 budget   1000: median 0.07 ms  p99 0.10 ms  max 0.11 ms | page filled 0/100 budget spent 84 range exhausted 16 | mean examined 933 mean emitted 9.9
+   walk prefix 3 budget  10000: median 0.13 ms  p99 0.23 ms  max 0.23 ms | page filled 73/100 budget spent 0 range exhausted 27 | mean examined 1680 mean emitted 17.2
+   walk prefix 3 budget 100000: median 0.13 ms  p99 0.22 ms  max 0.22 ms | page filled 73/100 budget spent 0 range exhausted 27 | mean examined 1680 mean emitted 17.2
+   walk prefix 4 budget   1000: median 0.07 ms  p99 0.09 ms  max 0.11 ms | page filled 0/100 budget spent 51 range exhausted 49 | mean examined 629 mean emitted 6.2
+   walk prefix 4 budget  10000: median 0.08 ms  p99 0.22 ms  max 0.22 ms | page filled 35/100 budget spent 0 range exhausted 65 | mean examined 1090 mean emitted 10.5
+   walk prefix 4 budget 100000: median 0.07 ms  p99 0.22 ms  max 0.22 ms | page filled 35/100 budget spent 0 range exhausted 65 | mean examined 1090 mean emitted 10.5
+-- candidate 1e-3 scattered |cand|=99809 (1526 containers)
+   probe[hidden, no members] narrow:    n=0 median 0.00 us  p99 0.00 us  mean 0.00 us  max 0.0 us
+   probe[hidden, no members] intersect: n=0 median 0.00 us  p99 0.00 us  mean 0.00 us  max 0.0 us
+   probe[hidden, members disjoint] narrow:    n=6226 median 0.32 us  p99 0.69 us  mean 0.35 us  max 33.3 us
+   probe[hidden, members disjoint] intersect: n=6226 median 0.47 us  p99 0.99 us  mean 0.52 us  max 106.2 us
+   probe[visible] narrow:    n=74 median 0.43 us  p99 0.76 us  mean 0.48 us  max 1.0 us
+   probe[visible] intersect: n=74 median 0.36 us  p99 0.76 us  mean 0.38 us  max 0.9 us
+   probe by members 1-32 (tag 0) hidden : n=6226 median 0.32 us  p99 0.69 us  mean 0.35 us  max 33.3 us
+   probe by members 1-32 (tag 0) visible: n=74 median 0.43 us  p99 0.76 us  mean 0.48 us  max 1.0 us
+   walk prefix 1 budget   1000: median 0.43 ms  p99 0.50 ms  max 0.52 ms | page filled 0/100 budget spent 100 range exhausted 0 | mean examined 1000 mean emitted 10.2
+   walk prefix 1 budget  10000: median 0.82 ms  p99 1.27 ms  max 1.28 ms | page filled 100/100 budget spent 0 range exhausted 0 | mean examined 2032 mean emitted 20.0
+   walk prefix 1 budget 100000: median 0.86 ms  p99 1.43 ms  max 1.55 ms | page filled 100/100 budget spent 0 range exhausted 0 | mean examined 2032 mean emitted 20.0
+   walk prefix 2 budget   1000: median 0.45 ms  p99 0.97 ms  max 1.04 ms | page filled 0/100 budget spent 100 range exhausted 0 | mean examined 1000 mean emitted 9.2
+   walk prefix 2 budget  10000: median 0.93 ms  p99 1.42 ms  max 1.51 ms | page filled 99/100 budget spent 0 range exhausted 1 | mean examined 2068 mean emitted 19.9
+   walk prefix 2 budget 100000: median 0.89 ms  p99 1.42 ms  max 1.50 ms | page filled 99/100 budget spent 0 range exhausted 1 | mean examined 2068 mean emitted 19.9
+   walk prefix 3 budget   1000: median 0.44 ms  p99 0.63 ms  max 0.66 ms | page filled 1/100 budget spent 83 range exhausted 16 | mean examined 933 mean emitted 9.2
+   walk prefix 3 budget  10000: median 0.80 ms  p99 1.48 ms  max 1.55 ms | page filled 73/100 budget spent 0 range exhausted 27 | mean examined 1730 mean emitted 17.1
+   walk prefix 3 budget 100000: median 0.78 ms  p99 1.78 ms  max 1.81 ms | page filled 73/100 budget spent 0 range exhausted 27 | mean examined 1730 mean emitted 17.1
+   walk prefix 4 budget   1000: median 0.42 ms  p99 0.83 ms  max 0.85 ms | page filled 0/100 budget spent 51 range exhausted 49 | mean examined 629 mean emitted 5.8
+   walk prefix 4 budget  10000: median 0.45 ms  p99 1.60 ms  max 2.24 ms | page filled 36/100 budget spent 0 range exhausted 64 | mean examined 1112 mean emitted 10.4
+   walk prefix 4 budget 100000: median 0.48 ms  p99 1.54 ms  max 1.59 ms | page filled 36/100 budget spent 0 range exhausted 64 | mean examined 1112 mean emitted 10.4
+-- candidate 1e-2 contiguous |cand|=1000000 (16 containers)
+   probe[hidden, no members] narrow:    n=0 median 0.00 us  p99 0.00 us  mean 0.00 us  max 0.0 us
+   probe[hidden, no members] intersect: n=0 median 0.00 us  p99 0.00 us  mean 0.00 us  max 0.0 us
+   probe[hidden, members disjoint] narrow:    n=5675 median 0.10 us  p99 0.17 us  mean 0.11 us  max 13.4 us
+   probe[hidden, members disjoint] intersect: n=5675 median 0.17 us  p99 0.49 us  mean 0.18 us  max 1.7 us
+   probe[visible] narrow:    n=625 median 0.16 us  p99 0.26 us  mean 0.17 us  max 2.0 us
+   probe[visible] intersect: n=625 median 0.17 us  p99 0.51 us  mean 0.19 us  max 1.3 us
+   probe by members 1-32 (tag 0) hidden : n=5675 median 0.10 us  p99 0.17 us  mean 0.11 us  max 13.4 us
+   probe by members 1-32 (tag 0) visible: n=625 median 0.16 us  p99 0.26 us  mean 0.17 us  max 2.0 us
+   walk prefix 1 budget   1000: median 0.02 ms  p99 0.05 ms  max 0.11 ms | page filled 100/100 budget spent 0 range exhausted 0 | mean examined 223 mean emitted 20.0
+   walk prefix 1 budget  10000: median 0.02 ms  p99 0.05 ms  max 0.06 ms | page filled 100/100 budget spent 0 range exhausted 0 | mean examined 223 mean emitted 20.0
+   walk prefix 1 budget 100000: median 0.02 ms  p99 0.03 ms  max 0.04 ms | page filled 100/100 budget spent 0 range exhausted 0 | mean examined 223 mean emitted 20.0
+   walk prefix 2 budget   1000: median 0.02 ms  p99 0.05 ms  max 0.06 ms | page filled 100/100 budget spent 0 range exhausted 0 | mean examined 206 mean emitted 20.0
+   walk prefix 2 budget  10000: median 0.02 ms  p99 0.03 ms  max 0.03 ms | page filled 100/100 budget spent 0 range exhausted 0 | mean examined 206 mean emitted 20.0
+   walk prefix 2 budget 100000: median 0.02 ms  p99 0.04 ms  max 0.05 ms | page filled 100/100 budget spent 0 range exhausted 0 | mean examined 206 mean emitted 20.0
+   walk prefix 3 budget   1000: median 0.02 ms  p99 0.03 ms  max 0.04 ms | page filled 98/100 budget spent 0 range exhausted 2 | mean examined 207 mean emitted 19.9
+   walk prefix 3 budget  10000: median 0.02 ms  p99 0.04 ms  max 0.04 ms | page filled 98/100 budget spent 0 range exhausted 2 | mean examined 207 mean emitted 19.9
+   walk prefix 3 budget 100000: median 0.02 ms  p99 0.03 ms  max 0.04 ms | page filled 98/100 budget spent 0 range exhausted 2 | mean examined 207 mean emitted 19.9
+   walk prefix 4 budget   1000: median 0.02 ms  p99 0.03 ms  max 0.03 ms | page filled 69/100 budget spent 0 range exhausted 31 | mean examined 178 mean emitted 16.3
+   walk prefix 4 budget  10000: median 0.02 ms  p99 0.03 ms  max 0.04 ms | page filled 69/100 budget spent 0 range exhausted 31 | mean examined 178 mean emitted 16.3
+   walk prefix 4 budget 100000: median 0.02 ms  p99 0.03 ms  max 0.03 ms | page filled 69/100 budget spent 0 range exhausted 31 | mean examined 178 mean emitted 16.3
+-- candidate 1e-2 scattered |cand|=999431 (1526 containers)
+   probe[hidden, no members] narrow:    n=0 median 0.00 us  p99 0.00 us  mean 0.00 us  max 0.0 us
+   probe[hidden, no members] intersect: n=0 median 0.00 us  p99 0.00 us  mean 0.00 us  max 0.0 us
+   probe[hidden, members disjoint] narrow:    n=5683 median 0.40 us  p99 0.98 us  mean 0.43 us  max 12.4 us
+   probe[hidden, members disjoint] intersect: n=5683 median 0.52 us  p99 1.15 us  mean 0.56 us  max 29.6 us
+   probe[visible] narrow:    n=617 median 0.48 us  p99 1.09 us  mean 0.54 us  max 1.2 us
+   probe[visible] intersect: n=617 median 0.38 us  p99 1.07 us  mean 0.43 us  max 12.4 us
+   probe by members 1-32 (tag 0) hidden : n=5683 median 0.40 us  p99 0.98 us  mean 0.43 us  max 12.4 us
+   probe by members 1-32 (tag 0) visible: n=617 median 0.48 us  p99 1.09 us  mean 0.54 us  max 1.2 us
+   walk prefix 1 budget   1000: median 0.14 ms  p99 0.23 ms  max 0.30 ms | page filled 100/100 budget spent 0 range exhausted 0 | mean examined 198 mean emitted 20.0
+   walk prefix 1 budget  10000: median 0.14 ms  p99 0.34 ms  max 0.36 ms | page filled 100/100 budget spent 0 range exhausted 0 | mean examined 198 mean emitted 20.0
+   walk prefix 1 budget 100000: median 0.14 ms  p99 0.26 ms  max 0.46 ms | page filled 100/100 budget spent 0 range exhausted 0 | mean examined 198 mean emitted 20.0
+   walk prefix 2 budget   1000: median 0.16 ms  p99 0.31 ms  max 0.31 ms | page filled 100/100 budget spent 0 range exhausted 0 | mean examined 211 mean emitted 20.0
+   walk prefix 2 budget  10000: median 0.15 ms  p99 0.31 ms  max 0.70 ms | page filled 100/100 budget spent 0 range exhausted 0 | mean examined 211 mean emitted 20.0
+   walk prefix 2 budget 100000: median 0.16 ms  p99 0.57 ms  max 0.65 ms | page filled 100/100 budget spent 0 range exhausted 0 | mean examined 211 mean emitted 20.0
+   walk prefix 3 budget   1000: median 0.15 ms  p99 0.48 ms  max 0.61 ms | page filled 97/100 budget spent 0 range exhausted 3 | mean examined 208 mean emitted 19.8
+   walk prefix 3 budget  10000: median 0.14 ms  p99 0.55 ms  max 0.61 ms | page filled 97/100 budget spent 0 range exhausted 3 | mean examined 208 mean emitted 19.8
+   walk prefix 3 budget 100000: median 0.14 ms  p99 0.59 ms  max 0.60 ms | page filled 97/100 budget spent 0 range exhausted 3 | mean examined 208 mean emitted 19.8
+   walk prefix 4 budget   1000: median 0.14 ms  p99 0.57 ms  max 0.62 ms | page filled 73/100 budget spent 0 range exhausted 27 | mean examined 178 mean emitted 16.5
+   walk prefix 4 budget  10000: median 0.14 ms  p99 0.61 ms  max 0.66 ms | page filled 73/100 budget spent 0 range exhausted 27 | mean examined 178 mean emitted 16.5
+   walk prefix 4 budget 100000: median 0.14 ms  p99 0.59 ms  max 0.60 ms | page filled 73/100 budget spent 0 range exhausted 27 | mean examined 178 mean emitted 16.5
+-- candidate 1e-1 contiguous |cand|=10000000 (154 containers)
+   probe[hidden, no members] narrow:    n=0 median 0.00 us  p99 0.00 us  mean 0.00 us  max 0.0 us
+   probe[hidden, no members] intersect: n=0 median 0.00 us  p99 0.00 us  mean 0.00 us  max 0.0 us
+   probe[hidden, members disjoint] narrow:    n=2235 median 0.12 us  p99 0.22 us  mean 0.13 us  max 12.2 us
+   probe[hidden, members disjoint] intersect: n=2235 median 0.18 us  p99 0.52 us  mean 0.20 us  max 11.8 us
+   probe[visible] narrow:    n=4065 median 0.21 us  p99 0.47 us  mean 0.23 us  max 20.4 us
+   probe[visible] intersect: n=4065 median 0.17 us  p99 0.46 us  mean 0.18 us  max 0.6 us
+   probe by members 1-32 (tag 0) hidden : n=2235 median 0.12 us  p99 0.22 us  mean 0.13 us  max 12.2 us
+   probe by members 1-32 (tag 0) visible: n=4065 median 0.21 us  p99 0.47 us  mean 0.23 us  max 20.4 us
+   walk prefix 1 budget   1000: median 0.01 ms  p99 0.01 ms  max 0.01 ms | page filled 100/100 budget spent 0 range exhausted 0 | mean examined 31 mean emitted 20.0
+   walk prefix 1 budget  10000: median 0.01 ms  p99 0.06 ms  max 0.37 ms | page filled 100/100 budget spent 0 range exhausted 0 | mean examined 31 mean emitted 20.0
+   walk prefix 1 budget 100000: median 0.01 ms  p99 0.01 ms  max 0.01 ms | page filled 100/100 budget spent 0 range exhausted 0 | mean examined 31 mean emitted 20.0
+   walk prefix 2 budget   1000: median 0.01 ms  p99 0.04 ms  max 0.40 ms | page filled 100/100 budget spent 0 range exhausted 0 | mean examined 32 mean emitted 20.0
+   walk prefix 2 budget  10000: median 0.01 ms  p99 0.01 ms  max 0.01 ms | page filled 100/100 budget spent 0 range exhausted 0 | mean examined 32 mean emitted 20.0
+   walk prefix 2 budget 100000: median 0.01 ms  p99 0.01 ms  max 0.02 ms | page filled 100/100 budget spent 0 range exhausted 0 | mean examined 32 mean emitted 20.0
+   walk prefix 3 budget   1000: median 0.01 ms  p99 0.01 ms  max 0.01 ms | page filled 100/100 budget spent 0 range exhausted 0 | mean examined 31 mean emitted 20.0
+   walk prefix 3 budget  10000: median 0.01 ms  p99 0.04 ms  max 0.06 ms | page filled 100/100 budget spent 0 range exhausted 0 | mean examined 31 mean emitted 20.0
+   walk prefix 3 budget 100000: median 0.01 ms  p99 0.01 ms  max 0.03 ms | page filled 100/100 budget spent 0 range exhausted 0 | mean examined 31 mean emitted 20.0
+   walk prefix 4 budget   1000: median 0.01 ms  p99 0.01 ms  max 0.01 ms | page filled 93/100 budget spent 0 range exhausted 7 | mean examined 30 mean emitted 19.0
+   walk prefix 4 budget  10000: median 0.01 ms  p99 0.04 ms  max 0.06 ms | page filled 93/100 budget spent 0 range exhausted 7 | mean examined 30 mean emitted 19.0
+   walk prefix 4 budget 100000: median 0.01 ms  p99 0.01 ms  max 0.01 ms | page filled 93/100 budget spent 0 range exhausted 7 | mean examined 30 mean emitted 19.0
+-- candidate 1e-1 scattered |cand|=9999273 (1526 containers)
+   probe[hidden, no members] narrow:    n=0 median 0.00 us  p99 0.00 us  mean 0.00 us  max 0.0 us
+   probe[hidden, no members] intersect: n=0 median 0.00 us  p99 0.00 us  mean 0.00 us  max 0.0 us
+   probe[hidden, members disjoint] narrow:    n=2211 median 0.23 us  p99 0.44 us  mean 0.24 us  max 9.5 us
+   probe[hidden, members disjoint] intersect: n=2211 median 0.36 us  p99 0.74 us  mean 0.37 us  max 0.9 us
+   probe[visible] narrow:    n=4089 median 0.32 us  p99 0.72 us  mean 0.35 us  max 13.2 us
+   probe[visible] intersect: n=4089 median 0.26 us  p99 0.67 us  mean 0.28 us  max 12.2 us
+   probe by members 1-32 (tag 0) hidden : n=2211 median 0.23 us  p99 0.44 us  mean 0.24 us  max 9.5 us
+   probe by members 1-32 (tag 0) visible: n=4089 median 0.32 us  p99 0.72 us  mean 0.35 us  max 13.2 us
+   walk prefix 1 budget   1000: median 0.02 ms  p99 0.04 ms  max 0.05 ms | page filled 100/100 budget spent 0 range exhausted 0 | mean examined 31 mean emitted 20.0
+   walk prefix 1 budget  10000: median 0.02 ms  p99 0.03 ms  max 0.03 ms | page filled 100/100 budget spent 0 range exhausted 0 | mean examined 31 mean emitted 20.0
+   walk prefix 1 budget 100000: median 0.02 ms  p99 0.04 ms  max 0.06 ms | page filled 100/100 budget spent 0 range exhausted 0 | mean examined 31 mean emitted 20.0
+   walk prefix 2 budget   1000: median 0.03 ms  p99 0.04 ms  max 0.04 ms | page filled 100/100 budget spent 0 range exhausted 0 | mean examined 31 mean emitted 20.0
+   walk prefix 2 budget  10000: median 0.02 ms  p99 0.03 ms  max 0.03 ms | page filled 100/100 budget spent 0 range exhausted 0 | mean examined 31 mean emitted 20.0
+   walk prefix 2 budget 100000: median 0.02 ms  p99 0.02 ms  max 0.03 ms | page filled 100/100 budget spent 0 range exhausted 0 | mean examined 31 mean emitted 20.0
+   walk prefix 3 budget   1000: median 0.03 ms  p99 0.04 ms  max 0.04 ms | page filled 100/100 budget spent 0 range exhausted 0 | mean examined 31 mean emitted 20.0
+   walk prefix 3 budget  10000: median 0.02 ms  p99 0.02 ms  max 0.03 ms | page filled 100/100 budget spent 0 range exhausted 0 | mean examined 31 mean emitted 20.0
+   walk prefix 3 budget 100000: median 0.02 ms  p99 0.03 ms  max 0.05 ms | page filled 100/100 budget spent 0 range exhausted 0 | mean examined 31 mean emitted 20.0
+   walk prefix 4 budget   1000: median 0.03 ms  p99 0.04 ms  max 0.06 ms | page filled 93/100 budget spent 0 range exhausted 7 | mean examined 30 mean emitted 19.1
+   walk prefix 4 budget  10000: median 0.03 ms  p99 0.05 ms  max 0.07 ms | page filled 93/100 budget spent 0 range exhausted 7 | mean examined 30 mean emitted 19.1
+   walk prefix 4 budget 100000: median 0.03 ms  p99 0.05 ms  max 0.08 ms | page filled 93/100 budget spent 0 range exhausted 7 | mean examined 30 mean emitted 19.1
+end: RSS 1565 MB peak 1615 MB heap 878 MB

@@ -7,14 +7,18 @@
 //! boundary (client-interaction §8.6(2)'s length-prefix-everything item):
 //!
 //! ```text
-//! kind 1  tiles      Arrow IPC stream (tile, visible, matched, served — all uint64); exactly
-//!                    one, first
+//! kind 1  tiles      Arrow IPC stream (tile, visible, matched, served, highlighted — all
+//!                    uint64); exactly one, first
 //! kind 2  sub-cells  Arrow IPC stream (cell: uint64, count: uint64); exactly one, iff the
 //!                    request asked for the §3.3 underlay — schema-only when requested-but-empty,
 //!                    ABSENT ENTIRELY when unrequested
-//! kind 3  points     Arrow IPC stream (tessera_id: uint64, code: uint64, ...scalars); zero or
-//!                    more, whole tiles per frame, concatenating to the full points stream
+//! kind 3  points     Arrow IPC stream (tessera_id: uint64, code: uint64, ...scalars,
+//!                    highlighted?: bool, ...membership:<layer>); zero or more, whole tiles per frame, concatenating
+//!                    to the full points stream
 //! kind 4  trailer    JSON; exactly one, last — its presence is the completeness signal
+//! kind 5  artifacts  Arrow IPC stream, one row per served artifact, in the request's projection
+//!                    (full, or the identity four-column schema); at most one, after tiles and
+//!                    before any points, ABSENT when nothing is served
 //! ```
 //!
 //! This module never touches the underlying entity-ID type: it accepts a caller-supplied
@@ -37,11 +41,11 @@
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
-    Int8Array, ListBuilder, StringArray, StringBuilder, TimestampMicrosecondArray, UInt16Array,
-    UInt32Array, UInt32Builder, UInt64Array, UInt8Array,
+    ArrayRef, BooleanArray, DictionaryArray, Float32Array, Float64Array, Int16Array, Int32Array,
+    Int64Array, Int8Array, ListBuilder, StringArray, StringBuilder, TimestampMicrosecondArray,
+    UInt16Array, UInt32Array, UInt32Builder, UInt64Array, UInt64Builder, UInt8Array,
 };
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{DataType, Field, Schema, UInt16Type};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 
@@ -171,34 +175,48 @@ fn patch_frame_len(out: &mut [u8], len_at: usize) {
     out[len_at..len_at + 4].copy_from_slice(&len.to_le_bytes());
 }
 
-/// The kind-1 tiles frame: one row per non-empty tile, `(tile, visible, matched, served)`.
+/// The kind-1 tiles frame: one row per non-empty tile,
+/// `(tile, visible, matched, served, highlighted)`.
 ///
 /// # Panics
 ///
-/// Panics on a length mismatch between the four columns, or on Arrow construction failure —
+/// Panics on a length mismatch between the five columns, or on Arrow construction failure —
 /// caller bugs, not runtime conditions this crate can recover from.
-pub fn tiles_frame(tile: &[u64], visible: &[u64], matched: &[u64], served: &[u64]) -> Vec<u8> {
+pub fn tiles_frame(
+    tile: &[u64],
+    visible: &[u64],
+    matched: &[u64],
+    served: &[u64],
+    highlighted: &[u64],
+) -> Vec<u8> {
     let tiles = tile.len();
     assert_eq!(tiles, visible.len(), "tile/visible length mismatch");
     assert_eq!(tiles, matched.len(), "tile/matched length mismatch");
     assert_eq!(tiles, served.len(), "tile/served length mismatch");
+    assert_eq!(tiles, highlighted.len(), "tile/highlighted length mismatch");
 
-    // `served` is APPENDED. Decoders that index this batch positionally exist, so inserting it
-    // earlier would silently rebind `visible`/`matched` in them.
+    // `served`, then `highlighted`, are APPENDED. Decoders that index this batch positionally
+    // exist, so inserting either earlier would silently rebind the columns before it.
+    //
+    // **`highlighted` is always present**, at the fifth position, and equals `matched` where the
+    // request carried no highlight (`highlight-and-hierarchy.md` §2): an absent highlight is the
+    // identity for this quantity, so a column that came and went would cost a schema branch to
+    // say what eight bytes a tile already say.
     let schema = Arc::new(Schema::new(vec![
         Field::new("tile", DataType::UInt64, false),
         Field::new("visible", DataType::UInt64, false),
         Field::new("matched", DataType::UInt64, false),
         Field::new("served", DataType::UInt64, false),
+        Field::new("highlighted", DataType::UInt64, false),
     ]));
-    let columns: Vec<ArrayRef> = [tile, visible, matched, served]
+    let columns: Vec<ArrayRef> = [tile, visible, matched, served, highlighted]
         .into_iter()
         .map(|c| Arc::new(UInt64Array::from_iter_values(c.iter().copied())) as ArrayRef)
         .collect();
     let batch =
         RecordBatch::try_new(schema.clone(), columns).expect("tiles frame batch construction");
 
-    let mut out = Vec::with_capacity(FRAME_HEADER_BYTES + tiles * 32 + 1024);
+    let mut out = Vec::with_capacity(FRAME_HEADER_BYTES + tiles * 40 + 1024);
     let len_at = begin_frame(&mut out, FRAME_TILES);
     write_stream_into(&schema, &batch, &mut out);
     patch_frame_len(&mut out, len_at);
@@ -261,7 +279,13 @@ pub struct ArtifactRow<'a> {
     pub centroid: Option<[f64; 2]>,
     /// `[qx_min, qy_min, qx_max, qy_max]`.
     pub bbox: Option<[u32; 4]>,
-    pub hull: Option<&'a [[u32; 2]]>,
+    /// **The artifact's one drawn geometry** (`polygon-membership.md` §7.1) — parts, then rings,
+    /// then vertices in grid units — of whichever kind its layer declared and `/v1/meta`
+    /// publishes: the derived hull (every α-group its own part, no holes), the predicate shape or
+    /// the authored one. A part's first ring is its outer and the rest are holes, which is
+    /// exactly the nesting a renderer's polygon-with-holes takes; two parts are two shapes, never
+    /// a shape with a gap.
+    pub shape: Option<&'a [Vec<Vec<[u32; 2]>>]>,
     /// The publisher's supplied content — **one entry of the ranked `contents`, entire**, one value per kind the layer
     /// declares, in declaration order. Empty where the layer declares none.
     ///
@@ -269,45 +293,154 @@ pub struct ArtifactRow<'a> {
     /// who contains none receives no artifact at all rather than this list empty. So there is no
     /// *content withheld* state on this wire and no shape to express one.
     pub content: &'a [String],
-    /// The identifier of this artifact's parent, **and only ever one that is in this same
-    /// response**.
+    /// The identifiers of this artifact's parents, **and only ever those in this same response**,
+    /// ascending (`dag-hierarchies.md` §7). A tree's list is at most one long; a `dag` layer's
+    /// may name several, and a client that wants one parent takes the first and gets the same
+    /// one every time.
     ///
     /// This is the structure a client needs to nest what it draws, or to filter to one subtree
     /// while still drawing the rest of the map. It is what a hierarchy is *for* on a levelled
     /// layer, whose edges carry containment rather than a ladder to coarsen along.
     ///
-    /// **Null is the fail-closed answer and covers two different situations deliberately.** The
-    /// artifact may be a root; or its parent may exist and not have been served — below its own
-    /// criterion for this viewer, suppressed, or dropped by the frontier. Naming a parent in the
-    /// second case would disclose that a coarser grouping exists which this principal is not
-    /// cleared to see, so the two are one value here and a client must read null as *no parent in
-    /// this response* rather than as *no parent*.
-    pub parent_id: Option<u64>,
+    /// **An absent entry is the fail-closed answer and covers two different situations
+    /// deliberately** (C29, per entry). The artifact may be a root; or a parent may exist and not
+    /// have been served — below its own criterion for this viewer, suppressed, or dropped by the
+    /// frontier. Naming a parent in the second case would disclose that a coarser grouping exists
+    /// which this principal is not cleared to see, so the two are one shape here and a client must
+    /// read an empty list as *no parent in this response* rather than as *no parent*.
+    pub parent_ids: Vec<u64>,
+    /// **The resolution a client draws this artifact at**, computed the right way for its layer's
+    /// kind so no client has to know which way that is (`artifact-fetch-protocol.md` §5.3, the
+    /// rung ruling; it renamed and re-meant the `level` column this field carried until then).
+    ///
+    /// On a **levelled** layer it is the declared level — a fact about the artifact, the same
+    /// number for every principal served it, indexing the level set `/v1/meta` publishes. On a
+    /// **treed** layer it is the response-local depth: the longest parent chain to this row in
+    /// the forest the response's own `parent_ids` links form, after the budget cut, so a
+    /// re-rooted subtree's root reads 0. On a **flat** layer it is 0. The two derivations disagree on real
+    /// data — a tiered layer's edges skip levels and its roots arrive parentless — which is why
+    /// the server computes the right one per layer rather than leaving every client to pick
+    /// (and one shipped client to pick wrongly, which is what happened).
+    pub rung: u32,
+    /// **Whether this artifact holds a member the request's filter admits** — one that this
+    /// principal may see and that lies inside the request's tiles
+    /// ([decision 0104](../../../docs/decisions/0104-a-filter-answers-a-boolean-per-served-artifact.md)).
+    ///
+    /// `None` where the request carried no filter: there was no question, and a `false` would
+    /// answer one that was never asked. A whole frame of nulls is what an unfiltered response
+    /// carries.
+    ///
+    /// **A boolean rather than a filtered count**, so that nothing here competes with
+    /// `masked_count` for what the client is showing. Existence and the count are anchored on
+    /// `M_auth` whatever the filter did, so this is the only field of the row a filter moves.
+    ///
+    /// **It is clipped to the request's tiles where the count is not**: the count and the geometry
+    /// describe the whole visible membership, this the part of it in view, that being the extent
+    /// every filter-crossing route can answer over.
+    pub matched: Option<bool>,
+    /// **The same bit for `all_of[filters, highlight]`** (`highlight-and-hierarchy.md` §2), the
+    /// fifteenth fixed column and immediately after [`Self::matched`]: whether a member this
+    /// principal may see, inside the request's tiles, satisfies both expressions. `None` — a null
+    /// on the wire — where the request carried no `highlight`, which is *there was no question*
+    /// rather than *no matches*.
+    pub highlighted: Option<bool>,
 }
 
-/// The kind-5 artifacts frame: one row per served artifact.
+/// The `layer` column, dictionary-encoded — one utf8 value per distinct layer, a `u16` key per
+/// row (`artifact-fetch-protocol.md` §8: the name is ~14% of every full row written plain, and a
+/// response's distinct layers are a handful).
+///
+/// Keys are minted in first-appearance order; `u16` bounds a response at 65,536 distinct layers,
+/// which is a caller bug long before it is a limit.
+fn layer_dictionary(rows: &[ArtifactRow<'_>]) -> ArrayRef {
+    let mut index: std::collections::HashMap<&str, u16> = std::collections::HashMap::new();
+    let mut values: Vec<&str> = Vec::new();
+    let keys: UInt16Array = rows
+        .iter()
+        .map(|r| {
+            Some(*index.entry(r.layer).or_insert_with(|| {
+                let next = u16::try_from(values.len())
+                    .expect("more than 65,536 distinct layers in one response");
+                values.push(r.layer);
+                next
+            }))
+        })
+        .collect();
+    let values = Arc::new(StringArray::from_iter_values(values));
+    Arc::new(
+        DictionaryArray::<UInt16Type>::try_new(keys, values)
+            .expect("layer dictionary construction"),
+    )
+}
+
+/// `layer`'s schema field — `Dictionary(UInt16, Utf8)`, shared by both artifact frame shapes so
+/// they cannot disagree about the encoding.
+fn layer_field() -> Field {
+    Field::new(
+        "layer",
+        DataType::Dictionary(Box::new(DataType::UInt16), Box::new(DataType::Utf8)),
+        false,
+    )
+}
+
+/// The kind-5 artifacts frame: one row per served artifact, in the full (default) projection.
 ///
 /// `masked_count` is `UInt64` and `tessera_id` is `UInt64`, matching the points frame's `tessera_id`
 /// column so a client's decoder has one identifier type across the response.
 ///
-/// **The geometry columns are nullable and the schema is fixed**, because one response carries
-/// artifacts from several layers and layers declare different vocabularies. A null is *this layer
-/// declares no centroid*; it is never *withheld*, since an artifact whose content could not be
-/// served is absent entirely (decision 0076). The hull travels as two `List<UInt32>` columns rather
-/// than one interleaved list so that a client reads an axis without a stride.
+/// **Column positions are contract for the fixed prefix; optional columns trail.** Decoders that
+/// index this batch positionally exist, so the fifteen fixed columns — `layer` through
+/// `highlighted` — sit at fixed positions, and the only columns whose presence varies,
+/// `shape_x`/`shape_y`, come
+/// after all of them (`artifact-fetch-protocol.md` §8; this superseded the earlier
+/// appended-last-per-revision rule when the shape columns moved to the tail). The frame kinds are
+/// unchanged and `api_version` stays at 1 (contracts §3.2: no published deployment exists and
+/// every in-repo reader moves in lockstep, decision 0048) — the reordering is the loud break, a
+/// positional decoder finding `content` where `shape_x` sat rather than one column's values under
+/// another's meaning of the same type.
+///
+/// **`layer` is dictionary-encoded** — see [`layer_dictionary`].
+///
+/// **The geometry columns are nullable and per-row**, because one response carries artifacts from
+/// several layers and layers declare different vocabularies. A null is *this layer declares no
+/// centroid*; it is never *withheld*, since an artifact whose content could not be served is
+/// absent entirely (decision 0076).
+///
+/// **The shape columns are present exactly when some row carries a drawn geometry** — i.e. when a
+/// served layer declares one of the three kinds and the request asked for it — **and absent from
+/// the schema otherwise.** An absent column is distinguishable from a null one, so decision 0076's
+/// rule (a null means *this layer declares no such property*, never *withheld*) gains no third
+/// reading: when the columns are present, a per-row null keeps exactly its 0076 meaning. When
+/// present they travel as two `List<List<List<UInt32>>>` columns — one per axis so that a client
+/// reads an axis without a stride, and nested three deep so that **parts, rings and vertices are
+/// in the type rather than in a convention** (`polygon-membership.md` §7.1): a hole and a second
+/// part are different things to a renderer, and one flat ring list would have a client draw a
+/// second part as a hole of the first. A reader written against the two-level hull shape descends
+/// to what it takes for a vertex, finds a list, and fails, which is the loud break rather than a
+/// silent misdraw. The two axes carry the same structure by construction, and a decoder that zips
+/// them should check the lengths agree at every level rather than assume it (`contracts.md` §3.2).
 ///
 /// # Panics
 ///
 /// Panics on Arrow construction failure.
 pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
-    // One definition of the hull's element field, used by the schema and by the builders below:
-    // a `ListBuilder` builds a **nullable** item field by default, and a vertex is never null — a
-    // hull is a list of positions or it is absent entirely. Declaring it twice is how the two drift
-    // into the mismatch Arrow then refuses at batch construction.
-    let item = || Arc::new(Field::new("item", DataType::UInt32, false));
+    // One definition of each of the shape's three nested element fields, used by the schema and by
+    // the builders below: a `ListBuilder` builds a **nullable** item field by default, and neither
+    // a vertex, a ring nor a part is ever null — a shape is a list of parts of rings of positions,
+    // or it is absent entirely. Declaring them twice is how the two drift into the mismatch Arrow
+    // then refuses at batch construction.
+    let vertex = || Arc::new(Field::new("item", DataType::UInt32, false));
+    let ring = || Arc::new(Field::new("item", DataType::List(vertex()), false));
+    let part = || Arc::new(Field::new("item", DataType::List(ring()), false));
 
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("layer", DataType::Utf8, false),
+    // A row carries a shape exactly when its layer declares a drawn geometry and the request asked
+    // for it (a declared hull over a served artifact always computes — a served artifact has a
+    // visible member), so *any row carries one* and *a served layer declares one* are the same
+    // test, and it is decidable here from the rows alone.
+    let shapes = rows.iter().any(|r| r.shape.is_some());
+
+    let mut fields = vec![
+        layer_field(),
         Field::new("tessera_id", DataType::UInt64, false),
         // A publisher need not supply a key.
         Field::new("key", DataType::Utf8, true),
@@ -318,16 +451,6 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
         Field::new("box_min_y", DataType::UInt32, true),
         Field::new("box_max_x", DataType::UInt32, true),
         Field::new("box_max_y", DataType::UInt32, true),
-        Field::new(
-            "hull_x",
-            DataType::List(item()),
-            true,
-        ),
-        Field::new(
-            "hull_y",
-            DataType::List(item()),
-            true,
-        ),
         // One list per artifact, positional to its layer's declared kinds. A list rather than a
         // column per kind, because one response carries artifacts from several layers and their
         // declarations differ; the client reads the kinds from `/v1/meta` and zips.
@@ -336,30 +459,33 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
             DataType::List(Arc::new(Field::new("item", DataType::Utf8, false))),
             false,
         ),
-        // **Appended last, and its position is contract**, on the same argument the tiles frame's
-        // `served` carries: decoders that index this batch positionally exist, so inserting it
-        // earlier would silently rebind every column after it.
-        Field::new("parent_id", DataType::UInt64, true),
-    ]));
-
-    let mut hull_x = ListBuilder::new(UInt32Builder::new()).with_field(item());
-    let mut hull_y = ListBuilder::new(UInt32Builder::new()).with_field(item());
-    for row in rows {
-        match row.hull {
-            Some(vertices) => {
-                for v in vertices {
-                    hull_x.values().append_value(v[0]);
-                    hull_y.values().append_value(v[1]);
-                }
-                hull_x.append(true);
-                hull_y.append(true);
-            }
-            None => {
-                hull_x.append_null();
-                hull_y.append_null();
-            }
-        }
+        // Non-nullable, and empty is a value: a root, a flat artifact, and an artifact whose
+        // every parent this response withheld all carry an empty list (see
+        // [`ArtifactRow::parent_ids`]).
+        Field::new(
+            "parent_ids",
+            DataType::List(Arc::new(Field::new("item", DataType::UInt64, false))),
+            false,
+        ),
+        // Non-nullable: every artifact has a rung — a levelled layer's declared level, a treed
+        // layer's response-local chain depth, a flat layer's 0 (see [`ArtifactRow::rung`]). There
+        // is no *withheld* state to express — an artifact whose content could not be served is
+        // absent whole (decision 0076).
+        Field::new("rung", DataType::UInt32, false),
+        // Last of the fixed columns, and **nullable because null is a value here**: an unfiltered
+        // request asked no question, and a `false` would answer one. So the column is all-null on
+        // every response that carried no `filter`, rather than absent (decision 0104).
+        Field::new("matched", DataType::Boolean, true),
+        // Fifteenth, and nullable for exactly `matched`'s reason: a request carrying no
+        // `highlight` asked no question, and a `false` would answer one. So the column is all-null
+        // on every response without one, rather than absent (`highlight-and-hierarchy.md` §2).
+        Field::new("highlighted", DataType::Boolean, true),
+    ];
+    if shapes {
+        fields.push(Field::new("shape_x", DataType::List(part()), true));
+        fields.push(Field::new("shape_y", DataType::List(part()), true));
     }
+    let schema = Arc::new(Schema::new(fields));
 
     let mut content = ListBuilder::new(StringBuilder::new()).with_field(Arc::new(Field::new(
         "item",
@@ -374,9 +500,18 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
         // declares none. A null would have to mean something else, and there is nothing else.
         content.append(true);
     }
+    let mut parent_ids = ListBuilder::new(UInt64Builder::new()).with_field(Arc::new(Field::new(
+        "item",
+        DataType::UInt64,
+        false,
+    )));
+    for row in rows {
+        parent_ids.values().append_slice(&row.parent_ids);
+        parent_ids.append(true);
+    }
 
-    let columns: Vec<ArrayRef> = vec![
-        Arc::new(StringArray::from_iter_values(rows.iter().map(|r| r.layer))),
+    let mut columns: Vec<ArrayRef> = vec![
+        layer_dictionary(rows),
         Arc::new(UInt64Array::from_iter_values(
             rows.iter().map(|r| r.tessera_id),
         )),
@@ -402,11 +537,48 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
         Arc::new(UInt32Array::from_iter(
             rows.iter().map(|r| r.bbox.map(|b| b[3])),
         )),
-        Arc::new(hull_x.finish()),
-        Arc::new(hull_y.finish()),
         Arc::new(content.finish()),
-        Arc::new(UInt64Array::from_iter(rows.iter().map(|r| r.parent_id))),
+        Arc::new(parent_ids.finish()),
+        Arc::new(UInt32Array::from_iter_values(rows.iter().map(|r| r.rung))),
+        Arc::new(BooleanArray::from_iter(rows.iter().map(|r| r.matched))),
+        Arc::new(BooleanArray::from_iter(rows.iter().map(|r| r.highlighted))),
     ];
+    if shapes {
+        let builder = || {
+            ListBuilder::new(
+                ListBuilder::new(ListBuilder::new(UInt32Builder::new()).with_field(vertex()))
+                    .with_field(ring()),
+            )
+            .with_field(part())
+        };
+        let (mut shape_x, mut shape_y) = (builder(), builder());
+        for row in rows {
+            match row.shape {
+                Some(parts) => {
+                    for rings in parts {
+                        for r in rings {
+                            for v in r {
+                                shape_x.values().values().values().append_value(v[0]);
+                                shape_y.values().values().values().append_value(v[1]);
+                            }
+                            shape_x.values().values().append(true);
+                            shape_y.values().values().append(true);
+                        }
+                        shape_x.values().append(true);
+                        shape_y.values().append(true);
+                    }
+                    shape_x.append(true);
+                    shape_y.append(true);
+                }
+                None => {
+                    shape_x.append_null();
+                    shape_y.append_null();
+                }
+            }
+        }
+        columns.push(Arc::new(shape_x.finish()));
+        columns.push(Arc::new(shape_y.finish()));
+    }
     let batch =
         RecordBatch::try_new(schema.clone(), columns).expect("artifacts frame batch construction");
 
@@ -417,8 +589,105 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
     out
 }
 
+/// The kind-5 artifacts frame in the **identity projection** — `artifact_rows: "identity"`,
+/// `artifact-fetch-protocol.md` §5.2: the same rows as [`artifacts_frame`] would carry, in a
+/// fixed five-column schema of `layer` (dictionary-encoded), `tessera_id`, `rung`, `matched`,
+/// `highlighted`.
+///
+/// **The row set, the `matched` and `highlighted` bits and the `rung` values are identical under
+/// either projection; only the columns change.** That sentence is the contract: no parent can dangle
+/// and the points frame's membership columns still name identifiers present here, because no row
+/// was dropped — and the response is a column subset of what the same caller's identical request
+/// would have been served, which is why the projection discloses nothing. The payload columns are
+/// **absent from the schema, not null**, so decision 0076's null rule gains no third reading.
+///
+/// Measured at 13.6 B/row against 125 for the pre-dictionary full row (§8 of the design; the
+/// size-regression test in `tests/wire.rs` holds the bounds).
+///
+/// # Panics
+///
+/// Panics on Arrow construction failure.
+pub fn artifacts_identity_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
+    let schema = Arc::new(Schema::new(vec![
+        layer_field(),
+        Field::new("tessera_id", DataType::UInt64, false),
+        Field::new("rung", DataType::UInt32, false),
+        Field::new("matched", DataType::Boolean, true),
+        Field::new("highlighted", DataType::Boolean, true),
+    ]));
+    let columns: Vec<ArrayRef> = vec![
+        layer_dictionary(rows),
+        Arc::new(UInt64Array::from_iter_values(
+            rows.iter().map(|r| r.tessera_id),
+        )),
+        Arc::new(UInt32Array::from_iter_values(rows.iter().map(|r| r.rung))),
+        Arc::new(BooleanArray::from_iter(rows.iter().map(|r| r.matched))),
+        Arc::new(BooleanArray::from_iter(rows.iter().map(|r| r.highlighted))),
+    ];
+    let batch = RecordBatch::try_new(schema.clone(), columns)
+        .expect("identity artifacts frame batch construction");
+
+    let mut out = Vec::with_capacity(FRAME_HEADER_BYTES + rows.len() * 16 + 1024);
+    let len_at = begin_frame(&mut out, FRAME_ARTIFACTS);
+    write_stream_into(&schema, &batch, &mut out);
+    patch_frame_len(&mut out, len_at);
+    out
+}
+
+/// The kind-3 points frame in the **highlight projection** — `point_rows: "highlight"`
+/// (`highlight-and-hierarchy.md` §2): the same points [`points_frame`] would carry, in a fixed
+/// two-column schema of `tessera_id` and `highlighted`.
+///
+/// **The row set and the per-tile `served` split are identical under either projection; only the
+/// columns change.** That sentence is the contract, and it is what makes the projection disclose
+/// nothing: the served set does not depend on the highlight at all, so this is a column subset of
+/// what the same caller's identical request would have been served. The bits join a client's held
+/// points by `tessera_id`, which is why `code` is absent — a client asking for this holds the
+/// positions already, and one that does not meets identifiers it cannot draw, knows it, and
+/// re-asks with `"full"`.
+///
+/// Nine bytes a point, against the render columns' width.
+///
+/// # Panics
+///
+/// Panics on a length mismatch or Arrow construction failure.
+pub fn points_highlight_frame(tessera_ids: &[u64], highlighted: &[bool]) -> Vec<u8> {
+    assert_eq!(
+        tessera_ids.len(),
+        highlighted.len(),
+        "points/highlighted length mismatch"
+    );
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("tessera_id", DataType::UInt64, false),
+        Field::new("highlighted", DataType::Boolean, false),
+    ]));
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(UInt64Array::from_iter_values(tessera_ids.iter().copied())),
+        Arc::new(BooleanArray::from_iter(
+            highlighted.iter().map(|&b| Some(b)),
+        )),
+    ];
+    let batch = RecordBatch::try_new(schema.clone(), columns)
+        .expect("highlight points frame batch construction");
+
+    let mut out = Vec::with_capacity(FRAME_HEADER_BYTES + tessera_ids.len() * 9 + 1024);
+    let len_at = begin_frame(&mut out, FRAME_POINTS);
+    write_stream_into(&schema, &batch, &mut out);
+    patch_frame_len(&mut out, len_at);
+    out
+}
+
+/// The points-frame column name a layer's membership column travels under: `membership:<layer>`.
+///
+/// One definition, shared by the writer and every Rust reader, so the two cannot spell it
+/// differently. The Python oracle and the TS client carry their own, deliberately (contracts
+/// §0.2's second-reader posture).
+pub fn membership_column_name(layer: &str) -> String {
+    format!("membership:{layer}")
+}
+
 /// The kind-3 points frame: one `tessera_id` and one 64-bit position `code` per point, plus the
-/// declared scalars in schema order.
+/// declared scalars in schema order, then one nullable membership column per layer.
 ///
 /// `code` is the Morton interleave of the point's two 32-bit fixed-point axes against the extent
 /// `/v1/meta` publishes — the same 16 bytes per point the `x`/`y` `f32` pair cost, carrying 32
@@ -429,6 +698,19 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
 /// [`estimated_points_bytes`]: at a saturated flush this payload is a megabyte-plus, so the copy
 /// a materialise-then-frame shape would cost is the largest single memmove in the response.
 ///
+/// `highlighted` is `highlight-and-hierarchy.md` §2's bit per served point, present exactly when
+/// the request carried a `highlight`, and positioned after the scalars and before the membership
+/// columns.
+///
+/// `membership` is the per-point membership column of design D12 (`client-components.md`
+/// §5.10): per layer, the `tessera_id` of the **deepest served** artifact the point belongs to
+/// in this response, `null` where no served artifact holds it. Plain `Option<u64>` slices —
+/// nothing here knows what an artifact is, and the engine has already bounded every value to the
+/// response's own artifacts frame. Columns are named [`membership_column_name`] and appended
+/// after the scalars, so a decoder that indexes scalars positionally is unaffected. Empty when
+/// the request resolved to no layers or the response served no artifact: an absent column and an
+/// all-null one would say the same thing, and only one of them costs bytes.
+///
 /// # Panics
 ///
 /// Panics on any column length mismatch or Arrow construction failure.
@@ -436,12 +718,24 @@ pub fn points_frame(
     tessera_ids: &[u64],
     codes: &[u64],
     scalars: &[(&str, ScalarColumn)],
+    highlighted: Option<&[bool]>,
+    membership: &[(&str, &[Option<u64>])],
 ) -> Vec<u8> {
     let points = tessera_ids.len();
     assert_eq!(points, codes.len(), "points/codes length mismatch");
     for (name, col) in scalars {
         let len = wire_column_len(col);
         assert_eq!(points, len, "scalar column {name:?} length mismatch");
+    }
+    for (layer, col) in membership {
+        assert_eq!(
+            points,
+            col.len(),
+            "membership column {layer:?} length mismatch"
+        );
+    }
+    if let Some(col) = highlighted {
+        assert_eq!(points, col.len(), "highlighted column length mismatch");
     }
 
     let mut fields = vec![
@@ -451,21 +745,52 @@ pub fn points_frame(
     for (name, col) in scalars {
         fields.push(Field::new(*name, wire_column_type(col), false));
     }
+    // **After the render scalars and before the membership columns** — the position
+    // `highlight-and-hierarchy.md` §2 fixes, so a decoder indexing scalars positionally is
+    // unaffected and one reading membership by name is too. Present exactly when the request
+    // carried a `highlight`: absent, not all-false, because a `false` would answer a question
+    // nobody asked. Non-nullable — every served point has an answer.
+    if highlighted.is_some() {
+        fields.push(Field::new("highlighted", DataType::Boolean, false));
+    }
+    // **After the render scalars, one per named layer in request order, and nullable** — the only
+    // nullable columns in this frame. `membership:` prefixes the layer name so a declared scalar
+    // can never collide with it: a layer is path-shaped (`clusters/hdbscan`) and a scalar name is
+    // an identifier, but the prefix is what makes that structural rather than a coincidence.
+    for (layer, _) in membership {
+        fields.push(Field::new(
+            membership_column_name(layer),
+            DataType::UInt64,
+            true,
+        ));
+    }
     let schema = Arc::new(Schema::new(fields));
 
-    let mut columns: Vec<ArrayRef> = Vec::with_capacity(2 + scalars.len());
+    let mut columns: Vec<ArrayRef> =
+        Vec::with_capacity(2 + scalars.len() + usize::from(highlighted.is_some()) + membership.len());
     columns.push(Arc::new(UInt64Array::from_iter_values(
         tessera_ids.iter().copied(),
     )));
-    columns.push(Arc::new(UInt64Array::from_iter_values(codes.iter().copied())));
+    columns.push(Arc::new(UInt64Array::from_iter_values(
+        codes.iter().copied(),
+    )));
     for (_, col) in scalars {
         columns.push(wire_column_array(col));
+    }
+    if let Some(col) = highlighted {
+        columns.push(Arc::new(BooleanArray::from_iter(
+            col.iter().map(|&b| Some(b)),
+        )));
+    }
+    for (_, col) in membership {
+        columns.push(Arc::new(UInt64Array::from_iter(col.iter().copied())));
     }
     let batch =
         RecordBatch::try_new(schema.clone(), columns).expect("points frame batch construction");
 
-    let mut out =
-        Vec::with_capacity(FRAME_HEADER_BYTES + estimated_points_bytes(points, scalars));
+    let mut out = Vec::with_capacity(
+        FRAME_HEADER_BYTES + estimated_points_bytes(points, scalars, membership.len()),
+    );
     let len_at = begin_frame(&mut out, FRAME_POINTS);
     write_stream_into(&schema, &batch, &mut out);
     patch_frame_len(&mut out, len_at);
@@ -534,7 +859,10 @@ impl std::fmt::Display for FrameError {
                 write!(f, "truncated frame header at byte {at}")
             }
             FrameError::TruncatedPayload { at } => {
-                write!(f, "frame at byte {at} claims a payload past the end of the body")
+                write!(
+                    f,
+                    "frame at byte {at} claims a payload past the end of the body"
+                )
             }
             FrameError::UnknownKind { kind, at } => {
                 write!(f, "unknown frame kind {kind} at byte {at}")
@@ -550,9 +878,16 @@ impl std::error::Error for FrameError {}
 /// **A hint, never a contract.** A short estimate costs a reallocation and a long one costs
 /// transient memory; neither changes a byte of output, which is why this is allowed to approximate
 /// nothing — the fixed-width columns are exact and `utf8` is walked.
-fn estimated_points_bytes(points: usize, scalars: &[(&str, ScalarColumn)]) -> usize {
+fn estimated_points_bytes(
+    points: usize,
+    scalars: &[(&str, ScalarColumn)],
+    membership_columns: usize,
+) -> usize {
     // `tessera_id` and `code`, both u64.
     let mut bytes = points * 16;
+    // A membership column is a u64 per point plus its validity bitmap, and the same per-buffer
+    // padding and per-field descriptor a scalar pays.
+    bytes += membership_columns * (points * 8 + points.div_ceil(8) + 64 + 128);
     for (_, col) in scalars {
         bytes += match col {
             ScalarColumn::Bool(_) => points.div_ceil(8),
@@ -584,17 +919,46 @@ fn wire_column_width(col: &ScalarColumn) -> usize {
 
 /// The element type behind each `ScalarColumn` variant, for `size_of`.
 macro_rules! wire_elem {
-    (U8) => { u8 }; (U16) => { u16 }; (U32) => { u32 }; (U64) => { u64 };
-    (I8) => { i8 }; (I16) => { i16 }; (I32) => { i32 }; (I64) => { i64 };
-    (F32) => { f32 }; (F64) => { f64 }; (TimestampUs) => { i64 };
+    (U8) => {
+        u8
+    };
+    (U16) => {
+        u16
+    };
+    (U32) => {
+        u32
+    };
+    (U64) => {
+        u64
+    };
+    (I8) => {
+        i8
+    };
+    (I16) => {
+        i16
+    };
+    (I32) => {
+        i32
+    };
+    (I64) => {
+        i64
+    };
+    (F32) => {
+        f32
+    };
+    (F64) => {
+        f64
+    };
+    (TimestampUs) => {
+        i64
+    };
 }
 use wire_elem;
 
 /// Serialise `batch` by **appending** to `out` — straight into the frame buffer, no intermediate
 /// allocation and no copy of the finished stream.
 fn write_stream_into(schema: &Schema, batch: &RecordBatch, out: &mut Vec<u8>) {
-    let mut writer =
-        StreamWriter::try_new(out, schema).expect("frame stream writer construction");
+    let mut writer = StreamWriter::try_new(out, schema).expect("frame stream writer construction");
     writer.write(batch).expect("frame stream write");
     writer.finish().expect("frame stream finish");
 }
@@ -602,16 +966,22 @@ fn write_stream_into(schema: &Schema, batch: &RecordBatch, out: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::array::Array;
 
     #[test]
     fn frames_roundtrip_through_split() {
-        let tiles = tiles_frame(&[5, 9], &[100, 3], &[100, 3], &[10, 3]);
+        let tiles = tiles_frame(&[5, 9], &[100, 3], &[100, 3], &[10, 3], &[100, 3]);
         let subs = sub_cells_frame(&[], &[]);
         let names3 = vec!["a".to_string(), "b".to_string(), "c".to_string()];
         let points = points_frame(
             &[1, 2, 3],
             &[10, 20, 30],
-            &[("w", ScalarColumn::U16(&[7, 8, 9])), ("n", ScalarColumn::Utf8(&names3))],
+            &[
+                ("w", ScalarColumn::U16(&[7, 8, 9])),
+                ("n", ScalarColumn::Utf8(&names3)),
+            ],
+            None,
+            &[],
         );
         let trailer = trailer_frame(br#"{"stream_us":1}"#);
 
@@ -623,7 +993,10 @@ mod tests {
 
         let frames = split_frames(&body).expect("well-formed body splits");
         let kinds: Vec<u8> = frames.iter().map(|(k, _)| *k).collect();
-        assert_eq!(kinds, vec![FRAME_TILES, FRAME_SUB_CELLS, FRAME_POINTS, FRAME_TRAILER]);
+        assert_eq!(
+            kinds,
+            vec![FRAME_TILES, FRAME_SUB_CELLS, FRAME_POINTS, FRAME_TRAILER]
+        );
         assert_eq!(frames[3].1, br#"{"stream_us":1}"#);
         // Each payload is a complete Arrow stream: decodable alone.
         for (kind, payload) in &frames[..3] {
@@ -636,9 +1009,102 @@ mod tests {
         }
     }
 
+    /// Decode one points payload into `(schema, batches)`.
+    fn decode_points(frame: &[u8]) -> (Arc<Schema>, Vec<RecordBatch>) {
+        let frames = split_frames(frame).expect("a single well-formed frame");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].0, FRAME_POINTS);
+        let cursor = std::io::Cursor::new(frames[0].1.to_vec());
+        let reader = arrow::ipc::reader::StreamReader::try_new(cursor, None).unwrap();
+        let schema = reader.schema();
+        let batches: Vec<RecordBatch> = reader.map(|b| b.unwrap()).collect();
+        (schema, batches)
+    }
+
+    /// **Zero, one and two membership columns**, and the nullability of each survives the IPC
+    /// round trip. The column set is what a client keys its colouring on, so its position (after
+    /// the scalars, in request order), its name and its nulls are each pinned here.
+    #[test]
+    fn membership_columns_are_named_nullable_and_after_the_scalars() {
+        let ids = [1u64, 2, 3];
+        let codes = [10u64, 20, 30];
+        let scalars = [("w", ScalarColumn::U16(&[7, 8, 9]))];
+
+        // Zero: the schema is exactly the scalars'.
+        let (schema, _) = decode_points(&points_frame(&ids, &codes, &scalars, None, &[]));
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(names, vec!["tessera_id", "code", "w"]);
+
+        // One and two: appended, named, nullable, in the order given.
+        let a: [Option<u64>; 3] = [Some(100), None, Some(300)];
+        let b: [Option<u64>; 3] = [None, None, Some(999)];
+        let frame = points_frame(
+            &ids,
+            &codes,
+            &scalars,
+            None,
+            &[("clusters/hdbscan", &a), ("regions/admin", &b)],
+        );
+        let (schema, batches) = decode_points(&frame);
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "tessera_id",
+                "code",
+                "w",
+                "membership:clusters/hdbscan",
+                "membership:regions/admin"
+            ]
+        );
+        assert!(!schema.field(2).is_nullable(), "a scalar is never null");
+        assert!(schema.field(3).is_nullable());
+        assert!(schema.field(4).is_nullable());
+        assert_eq!(schema.field(3).data_type(), &DataType::UInt64);
+
+        assert_eq!(batches.len(), 1);
+        let batch = &batches[0];
+        let read = |i: usize| -> Vec<Option<u64>> {
+            let col = batch
+                .column(i)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap();
+            (0..col.len())
+                .map(|r| col.is_valid(r).then(|| col.value(r)))
+                .collect()
+        };
+        assert_eq!(read(3), a.to_vec());
+        assert_eq!(read(4), b.to_vec());
+    }
+
+    /// The size estimate is a hint, but a hint that ignores a column is a reallocation on every
+    /// flush; the estimate must grow by at least the column's data.
+    #[test]
+    fn the_size_estimate_covers_the_membership_columns() {
+        let points = 1000;
+        let scalars = [("w", ScalarColumn::U16(&[0u16; 1000]))];
+        let without = estimated_points_bytes(points, &scalars, 0);
+        let with_two = estimated_points_bytes(points, &scalars, 2);
+        assert!(with_two >= without + 2 * (points * 8 + points.div_ceil(8)));
+
+        // And the estimate is an over-estimate of the real payload, which is what lets the frame
+        // buffer be sized once.
+        let ids = vec![0u64; points];
+        let col: Vec<Option<u64>> = (0..points)
+            .map(|i| (i % 3 != 0).then_some(i as u64))
+            .collect();
+        let frame = points_frame(&ids, &ids, &scalars, None, &[("a", &col), ("b", &col)]);
+        assert!(
+            frame.len() <= FRAME_HEADER_BYTES + with_two,
+            "estimate {with_two} short of the {} bytes written",
+            frame.len()
+        );
+    }
+
     #[test]
     fn split_refuses_truncation_and_unknown_kinds() {
-        let tiles = tiles_frame(&[1], &[1], &[1], &[1]);
+        let tiles = tiles_frame(&[1], &[1], &[1], &[1], &[1]);
         // Truncated payload: cut the last byte.
         let cut = &tiles[..tiles.len() - 1];
         assert!(matches!(

@@ -174,7 +174,12 @@ fn a_suppression_survives_the_reclamation_of_the_record_that_carried_it() {
     }
 
     let (_wal, records) = Wal::open(&base).unwrap();
-    let (overlay, _buffer, _established, _resolver) = replay(&records, &dict, Overlay::new());
+    let (overlay, _buffer, _established, _resolver) = replay(
+        &records,
+        &dict,
+        Overlay::new(),
+        &tessera_lifecycle::owner_id_only,
+    );
     assert!(
         overlay.is_suppressed(entity),
         "a suppression retires only on unsuppress — reclaiming its record must not retire it"
@@ -333,8 +338,16 @@ unsafe fn libc_geteuid() -> u32 {
     unsafe { geteuid() }
 }
 
-/// Records appended but never fsynced are discarded by the rotation's own sync, exactly as a
-/// restart would discard them — a rotation must not sweep unacked bytes into the durable prefix.
+/// The first member's records start immediately after its header: a member's file offset and the
+/// sequence position it carries differ by exactly `HEADER_LEN`, so position space is header-free
+/// and a member's records can be addressed from either without a correction term. A member that
+/// reserved space before its first record, or a `position()` that counted the header, would move
+/// the two apart.
+///
+/// Nothing here concerns unsynced bytes. A rotation does not discard a pending tail: `Wal::rotate`
+/// calls `sync_and_publish` when `len != durable_len`, making the tail **durable** before the
+/// member is sealed. That is group commit and it is correct — the caller of the rotation is the
+/// same executor that owns those appends.
 #[test]
 fn the_first_member_starts_its_records_at_the_header() {
     let dir = tempdir().unwrap();

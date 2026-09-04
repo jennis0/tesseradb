@@ -16,7 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use arc_swap::ArcSwap;
 use rand::rngs::OsRng;
 use rand::RngCore;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use sha2::{Digest, Sha256};
 
 use tessera_authz::{
@@ -257,6 +257,40 @@ pub struct Session {
     /// `Arc` so the row-projection cache's entry can carry it for the background refresh, which
     /// has no session registry to look it up in — see [`crate::cache::SessionGeometry`].
     pub(crate) satisfied_sorted: Arc<Vec<TermId>>,
+    /// **The descriptor this session's credential presented for each satisfied term** — the one
+    /// route by which a term ordinal becomes a string a viewer is shown (decision 0114).
+    ///
+    /// The drill-down's `labels` array is built from this map alone: an entity's own term list is
+    /// intersected with it, and a term the map does not hold has no name here and cannot be
+    /// served. That is the satisfied-only rule expressed as a data structure rather than as a
+    /// filter — a bug in the intersection can lose a label the viewer holds, and cannot invent one
+    /// they do not.
+    ///
+    /// **This is also why the bundle carries no reverse dictionary.** Resolving an ordinal to its
+    /// descriptor globally would need an index over every term the corpus knows — at the plugin's
+    /// declared 2×10⁸ terms, gigabytes of it — for a surface that may only ever name terms the
+    /// caller already handed in. The credential's own descriptors are bounded by
+    /// `max_terms_per_token` and are already in hand at authorise.
+    ///
+    /// `public` is here with a descriptor no credential supplied, exactly as it is in
+    /// [`Session::satisfied`] and for the same reason: it is the label every principal holds.
+    pub(crate) satisfied_descriptors: Arc<FxHashMap<TermId, Vec<u8>>>,
+    /// **The visible-view set** (`views.md` §6): every view of every group this principal may
+    /// reach, resolved once here at authorise and **fixed for this session's life**.
+    ///
+    /// Fixed is a guarantee rather than an oversight. Every view is evaluated at authorise
+    /// whatever the outcome, so the request-time check is one set-membership lookup and a
+    /// gate-failed name costs the same work as a name nobody declared — r23's
+    /// work-indistinguishability standard, and the closure Appendix C's C4 records for
+    /// `/v1/items`. A view **created after** this session authorised is therefore a 404 to it
+    /// until it re-authorises (owner ruling 2026-08-30): creation is rare, tokens expire, and the
+    /// alternatives — a per-request gate evaluation, or a lazily-evaluated miss — each cost
+    /// exactly the property this field exists to hold. Roster immutability (`views.md` §3.2) is
+    /// the other half: a gate, once written, never changes, so a fixed set can never hold a stale
+    /// *widening*.
+    ///
+    /// `Arc` because every request path reads it and none of them may clone the set.
+    pub visible_views: Arc<crate::gate::VisibleViews>,
     /// `sha256(auth_data)` — the cache's caller obligation, kept for the same reason.
     ///
     /// A digest of the credential, never the credential: this lives for the session's lifetime in
@@ -391,6 +425,11 @@ pub enum EngineError {
     /// existence and family are published to every principal alike — so naming them back discloses
     /// nothing. An unknown *value* is neither of these: it is an empty operand, never an error.
     FilterMalformed(String),
+    /// A browse request named something this deployment does not publish to this principal — a
+    /// layer, a level, or a zero-length page (`crate::browse::BrowseRefused`). **Always the
+    /// caller's fault and always a `422`**: every arm names deployment schema the caller reads off
+    /// `/v1/meta`, and no arm is ever about an *artifact*, which is the empty page instead.
+    BrowseRefused(crate::browse::BrowseRefused),
     Store(StoreError),
     Wal(WalError),
     Plugin(PluginError),
@@ -451,6 +490,19 @@ pub enum EngineError {
     /// though it had been computed. Serving the set *unfiltered* is the other direction and is the
     /// C11 disclosure itself.
     VocabularyVisibilityUnavailable {
+        column: String,
+        detail: String,
+    },
+    /// `GET /v1/categories/{column}/suggest` was asked for a column whose vocabulary has no
+    /// suggestion index, or whose index could not be walked.
+    ///
+    /// **Refused rather than answered empty**, on the sibling variant's reasoning exactly: an empty
+    /// suggestion list is a real answer — it is what a viewer who may see nothing under their
+    /// prefix is told — so serving it for a missing index makes a broken surface indistinguishable
+    /// from a working one, and a client would read "no such value" where the truth is "not asked".
+    /// It is not a disclosure refusal: the enumeration over the same column is unaffected, and this
+    /// costs a typeahead rather than a value list.
+    SuggestionUnavailable {
         column: String,
         detail: String,
     },
@@ -529,6 +581,7 @@ impl std::fmt::Display for EngineError {
         match self {
             EngineError::FilterRefused(why) => write!(f, "filter refused: {why}"),
             EngineError::FilterMalformed(why) => write!(f, "filter refused: {why}"),
+            EngineError::BrowseRefused(why) => write!(f, "browse refused: {why}"),
             EngineError::Store(e) => write!(f, "store error: {e}"),
             EngineError::Wal(e) => write!(f, "wal error: {e}"),
             EngineError::Plugin(e) => write!(f, "plugin error: {e}"),
@@ -559,6 +612,12 @@ impl std::fmt::Display for EngineError {
                  rather than published unfiltered, and rather than served empty — an empty value \
                  set is what a principal who may see none of them is told"
             ),
+            EngineError::SuggestionUnavailable { column, detail } => write!(
+                f,
+                "column '{column}' cannot be suggested over ({detail}). The suggestion index is \
+                 derived rather than built, so this refuses a typeahead and nothing else — \
+                 /v1/categories over the same column is unaffected"
+            ),
             EngineError::TooManyTiles { demanded, limit } => write!(
                 f,
                 "this (zoom, bbox) spans {demanded} tiles, above the configured limit of {limit}; \
@@ -588,6 +647,82 @@ impl std::error::Error for EngineError {}
 
 pub type Result<T> = std::result::Result<T, EngineError>;
 
+/// Build the shared compute pool, **with the panic handler every pooled task depends on**.
+///
+/// One constructor rather than a `ThreadPoolBuilder` at each site, because the handler is not a
+/// refinement of the pool: it is the difference between a diagnosable failure and an unattributable
+/// one, and a second pool built without it would silently be the old behaviour.
+///
+/// # What rayon does with a panic, and why the two APIs differ
+///
+/// `install`, `join` and `scope` have an obvious caller to propagate a panic to, and they do —
+/// `Engine::viewport`'s tile sweep relies on exactly that, and the panic handler is **not** invoked
+/// for them ([`tests::a_panic_inside_the_shared_pool_propagates_to_the_caller`] pins it, and would
+/// abort this process instead of passing if that changed). `spawn` has no such caller: the write
+/// path's flush, merge and coalesce submit their result through a channel and nobody is waiting on
+/// the closure. With no handler configured, rayon's answer to a panic there is to **abort the
+/// process** — one line, no payload, no backtrace, and under `libtest` the panic's own message is
+/// discarded with the captured output of a test the runner never gets to name. That is what made a
+/// `debug_assert` anywhere inside flush, merge or coalesce undiagnosable in a debug build.
+///
+/// # The record, and why it is written twice
+///
+/// [`describe_pool_panic`] names the subsystem, the worker thread and the payload, and carries a
+/// backtrace of the **abort site** — the handler's own stack, since rayon calls it after unwinding
+/// has finished. The panic's own location is on the line the default panic hook already printed;
+/// what this adds is the attribution, and a copy that survives.
+///
+/// It goes to `tracing` for a deployment, which has a subscriber, and directly to `stderr` for
+/// everything that does not — a test binary above all, where `libtest`'s capture is discarded with
+/// the process the next line aborts.
+///
+/// **Aborting is deliberately unchanged.** A pooled task that panicked left its `in_flight` flag
+/// set — the store that clears it is the last statement of the closure the unwind skipped — so
+/// continuing would wedge the flush, merge or coalesce it was, silently and for the process's
+/// lifetime. Whether that should instead reach the write path's `Dead` posture, which refuses
+/// callers and says why, is a design question this does not settle.
+pub(crate) fn build_compute_pool(
+    threads: usize,
+) -> std::result::Result<rayon::ThreadPool, rayon::ThreadPoolBuildError> {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .panic_handler(|payload| {
+            let record = describe_pool_panic(payload.as_ref());
+            tracing::error!(pool_panic = %record, "a task spawned on the shared compute pool panicked");
+            // Directly, not through `eprintln!`: `libtest` captures the print macros and drops
+            // what it captured when the process below dies, which is the whole reason this record
+            // exists.
+            let _ = std::io::Write::write_all(
+                &mut std::io::stderr().lock(),
+                format!("{record}\n").as_bytes(),
+            );
+            std::process::abort();
+        })
+        .build()
+}
+
+/// The record a pooled task's panic leaves: subsystem, worker thread, payload, abort-site
+/// backtrace.
+///
+/// Separate from the handler so it can be asserted without aborting the process that asserts it.
+fn describe_pool_panic(payload: &(dyn std::any::Any + Send)) -> String {
+    let message = payload
+        .downcast_ref::<&'static str>()
+        .map(|s| (*s).to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a payload that is neither &str nor String".to_string());
+    let thread = std::thread::current()
+        .name()
+        .unwrap_or("<unnamed>")
+        .to_string();
+    format!(
+        "tessera: a task spawned on the shared compute pool panicked; aborting\n  \
+         worker thread: {thread}\n  payload: {message}\n  abort-site backtrace (the panic's own \
+         location is on the default hook's line above):\n{}",
+        std::backtrace::Backtrace::force_capture()
+    )
+}
+
 /// The request-serving engine: one immutable [`Generation`] behind an atomically-swappable
 /// pointer, plus the state that genuinely is process-lifetime — the plugin, the compute pool, the
 /// `tessera_id` key, the row-projection cache and the bundle root.
@@ -606,11 +741,29 @@ pub struct Engine {
     pub(crate) plugin: Arc<dyn Plugin>,
     /// The row-projection cache — see [`RowProjectionCache`]'s own doc.
     pub(crate) row_projection_cache: Arc<RowProjectionCache>,
+    /// A region leaf's decomposition per `(view, generation, canonical shape, stop depth)` —
+    /// see [`crate::region`]. Keyed on **no principal**, deliberately: the entry carries no
+    /// authorisation, and the rows inside the shape are tested under each request's own mask
+    /// rather than held (owner ruling 2026-08-29, selection-operand §10 (b)).
+    pub(crate) region_cache: Arc<
+        crate::single_flight::SingleFlightCache<
+            crate::region::RegionKey,
+            crate::region::RegionDecomposition,
+        >,
+    >,
+    /// `serve.max_region_cells` — the most boundary cells a region's descent may hold at one
+    /// depth before it answers a cover (selection-operand §6). A setter rather than an
+    /// `EngineConfig` field, for [`Engine::set_masked_count_cache_bytes`]'s reason.
+    pub(crate) max_region_cells: AtomicU64,
     /// Artifact memberships in row space, one entry per `(view, layer, level)` — see
     /// [`ArtifactProjections`]. Distinct from the cache above and deliberately so: that one is
     /// keyed per *session* (a principal's own visible set), this one per *deployment* (what a layer
     /// published), and they move on different events.
     pub(crate) artifact_projections: Arc<crate::artifacts::ArtifactProjections>,
+    /// The spatial levels' held shapes, index and per-segment resolved pieces
+    /// (`crate::shapes`) — built at open and at every publication into a shape layer, filled by
+    /// every flush before its publication, and joined per generation into the row form above.
+    pub(crate) shapes: Arc<crate::shapes::ShapeStore>,
     /// The masked-count histograms of the levels served **row-major**, per `(session, layer,
     /// level)` — [decision 0093](../../../docs/decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md)'s
     /// one named exception, byte-budgeted exactly as the row-projection cache is.
@@ -620,10 +773,25 @@ pub struct Engine {
     /// when the principal's mask does — which includes every accepted deny. Empty for a deployment
     /// with no row-major level, which is most of them.
     pub(crate) masked_counts: Arc<crate::histogram::MaskedCountCache>,
+    /// One artifact's derived centroid, box and hull, per principal — see
+    /// [`crate::derived_cache::DerivedCache`]. Per *session* like the histograms beside it and for
+    /// the same reason: the values are functions of the principal's own visible members, so an
+    /// entry is never shared across principals.
+    pub(crate) derived_geometry: Arc<crate::derived_cache::DerivedCache>,
+    /// One session's visible values per category column — see [`crate::suggest_set::SuggestSets`].
+    /// Per *session* like the two caches above it, and keyed on the generation and the overlay for
+    /// the reason stated there: a set taken before a suppression would keep offering the name of a
+    /// value whose last visible member has gone.
+    pub(crate) suggest_sets: Arc<crate::suggest_set::SuggestSets>,
     /// One lineage per `(layer, level)` — see [`crate::cut::Lineages`]. Keyed per *deployment* like
     /// the projections beside it, and on the store's version alone, because a level's parent
     /// pointers are the same whichever view is served.
     pub(crate) lineages: Arc<crate::cut::Lineages>,
+    /// One supplied-content table per `(layer, level)` — see
+    /// [`crate::artifact_content::LevelContents`]. Keyed per *deployment* like the two caches
+    /// above it: what an artifact's name says is a property of what was published, and the
+    /// verdict that decides whether a viewer is served it runs before this is read.
+    pub(crate) level_contents: Arc<crate::artifact_content::LevelContents>,
     /// D-D: the ONE shared compute pool every admitted `viewport` request's tile loop `install`s
     /// onto (`Engine::viewport`). Built once, here, at open — never per request, and never a
     /// second pool anywhere else in this crate (no nested throttling). `pool.install` from more
@@ -643,6 +811,9 @@ pub struct Engine {
     /// is **derived** from the live generation's own `prefix` wherever it is needed
     /// (`Executor::prefix_dir`), so it cannot go stale by construction.
     pub(crate) bundle_root: std::path::PathBuf,
+    /// Where this engine writes its suggestion indexes — `<cache dir>/suggest`, engine-local and
+    /// never in the bundle (`crate::suggest`'s header).
+    pub(crate) suggest_dir: std::path::PathBuf,
     pub(crate) config: EngineConfig,
     next_token_id: AtomicU64,
     /// The write path: the WAL, the I9 allocator, the live external-id maps, the resolver's
@@ -698,6 +869,16 @@ pub struct Engine {
     /// still count the one crossing such a request makes for its entity-space sub-trees; a
     /// pure-row tree crosses nothing and moves this counter alone.
     pub(crate) filter_row_routed: AtomicU64,
+    /// `member_of` leaves that could not read an artifact-major membership and walked the level's
+    /// row column instead (`viewport::Engine::resolve_member_of`).
+    ///
+    /// **It should stay at zero**, and it is a counter rather than an assertion because the walk
+    /// is a correct answer at the wrong price: every level carries the artifact-major form today,
+    /// so the fallback is unreachable, and if the ⊘ residency saving of `crate::row_column` ever
+    /// drops that form this is the number that says the leaf started costing a pass over the whole
+    /// view rather than an intersection. Measured at 2.85 s against 22 ms on rung 3's
+    /// `mesh/descriptors` (2026-09-02).
+    pub(crate) member_of_column_walks: AtomicU64,
     /// Requests served from a one-generation-stale entry — the steady-state observable behind
     /// decision 0044's stale-serve. A deployment where this rises and
     /// [`Self::full_projection_builds`] does not is one where the refresh is keeping up.
@@ -998,6 +1179,32 @@ impl Engine {
             .values()
             .flat_map(|partition| partition.manifest.layer_tombstones.iter().cloned())
             .collect();
+        // **The roster's runtime half, unioned on `manifest_layers`' argument** (`views.md` §3.2):
+        // a view is a deployment-level object — its key is the group's, not a partition's — so
+        // the creations and the tombstones belong to the deployment whichever
+        // partition's manifest published them. With one partition this is that partition's list.
+        let manifest_created_views: Vec<tessera_types::view::CreatedView> = bundle
+            .partitions
+            .values()
+            .flat_map(|partition| partition.manifest.views.iter().cloned())
+            .collect();
+        let manifest_dead_incarnations: Vec<tessera_types::view::DeadIncarnation> = bundle
+            .partitions
+            .values()
+            .flat_map(|partition| partition.manifest.dead_view_incarnations.iter().cloned())
+            .collect();
+        // The views the *build* declared, whose keys a create must not reissue.
+        let declared_views: Vec<(String, String)> = bundle
+            .manifest
+            .groups
+            .iter()
+            .flat_map(|group| {
+                group
+                    .views
+                    .iter()
+                    .map(|view| (group.name.clone(), view.key.clone()))
+            })
+            .collect();
         // **The union across partitions, on `manifest_layers`' argument**: an artifact is a
         // deployment-level object with an entity of its own, so its membership belongs to the
         // deployment rather than to whichever partition's manifest happens to name the extent.
@@ -1029,6 +1236,16 @@ impl Engine {
             .values()
             .flat_map(|partition| partition.manifest.row_column_extents.iter().cloned())
             .collect();
+        let manifest_shape_rows_extents: Vec<tessera_store::manifest::ShapeRowsExtent> = bundle
+            .partitions
+            .values()
+            .flat_map(|partition| partition.manifest.shape_rows_extents.iter().cloned())
+            .collect();
+        let manifest_shape_held_extents: Vec<tessera_store::manifest::ShapeHeldExtent> = bundle
+            .partitions
+            .values()
+            .flat_map(|partition| partition.manifest.shape_held_extents.iter().cloned())
+            .collect();
         let (overlay, buffer, write_state) = WritePath::reconstruct(
             wal_path,
             crate::write::ManifestSeed {
@@ -1042,6 +1259,16 @@ impl Engine {
                 ),
                 layers: &manifest_layers,
                 tombstones: &manifest_layer_tombstones,
+                created_views: &manifest_created_views,
+                dead_view_incarnations: &manifest_dead_incarnations,
+                declared_views,
+                // **The `members` expansion, so replay's `ViewDrop` arm prunes every id the key
+                // names** (`views.md` §3.3, decision 0115). The owner's spelling alone would
+                // leave a sharing group's buffered rows in the log to be flushed into whatever
+                // takes the key next.
+                view_ids_of_key: &|group: &str, key: &str| {
+                    bundle.manifest.view_ids_for_key(group, key)
+                },
                 membership_extents: &manifest_membership_extents,
                 level_versions: &manifest_level_versions,
                 prefix_dir: prefix_dir.clone(),
@@ -1049,15 +1276,17 @@ impl Engine {
             &dict,
             &initial_deny,
             &mut vocabularies,
-            // An entity belongs to exactly one view, so "any view's row space holds it" is the
-            // same question as "its view's does" — and asking it this way needs no view lookup,
-            // which the buffer would otherwise have to supply before it has been filtered.
-            |entity| {
+            // **Does this row's own view hold it**, not "does any view" (`views.md` §4). An
+            // entity may hold a row in several views at once — that is what the ingest join
+            // produces — so a predicate over the entity alone would discard a pending row of a
+            // second view because the first had already been flushed, leaving it in no segment
+            // and no buffer.
+            |entity, view| {
                 bundle.partitions.values().any(|partition| {
                     partition
                         .views
-                        .values()
-                        .any(|view| view.row_space.row_of(entity).is_some())
+                        .get(view)
+                        .is_some_and(|data| data.row_space.row_of(entity).is_some())
                 })
             },
         )?;
@@ -1078,9 +1307,7 @@ impl Engine {
         // this engine's *open*-time health, not a fact to discover on whichever request happens
         // to be first (fail-closed: this engine simply does not open).
         let pool = Arc::new(
-            rayon::ThreadPoolBuilder::new()
-                .num_threads(config.compute_threads)
-                .build()
+            build_compute_pool(config.compute_threads)
                 .map_err(|e| EngineError::ThreadPoolBuild(e.to_string()))?,
         );
 
@@ -1090,7 +1317,37 @@ impl Engine {
         // row space the bundle carries — the same derivation every later publication repeats
         // (`compose::derive_denied`). A node restarting into a live suppression set gets it here,
         // not on its first request.
-        let bundle = Arc::new(bundle);
+        // **The bundle as the roster makes it** (`views.md` §3.2): the views a build declared,
+        // plus every view created while the service ran and replayed just now, minus every key
+        // dropped. Applied here, before the first generation is built, because everything below
+        // reads the manifest — the deny mask over every view, `/v1/meta`, view resolution on both
+        // planes — and a created view absent from it comes back from a restart as a 404.
+        let (created_views, dead_incarnations) = write_state.roster.snapshot();
+        // **And the group-scoped columns a flush wrote** (`views.md` §5).
+        // `scoped_scalars[..].views` names the views that have a column; a flush of a view created
+        // since the build wrote one, and `SegmentsManifest::scoped_columns` is where that survives
+        // a restart — `MANIFEST.json` being rewritten only by a fold.
+        // The incarnation travels with the pair: a column of a dead incarnation is on disc under
+        // the same path a key created again would use, and `with_scoped_columns` drops it rather
+        // than publishing the predecessor's values as the new view's (decision 0115).
+        let scoped_columns: Vec<(String, String, tessera_types::view::ViewIncarnation)> = bundle
+            .partitions
+            .values()
+            .flat_map(|p| p.manifest.scoped_columns.iter())
+            .map(|c| (c.column.clone(), c.view.clone(), c.incarnation))
+            .collect();
+        let bundle = if created_views.is_empty()
+            && dead_incarnations.is_empty()
+            && scoped_columns.is_empty()
+        {
+            Arc::new(bundle)
+        } else {
+            let manifest = bundle
+                .manifest
+                .with_roster(&created_views, &dead_incarnations)
+                .with_scoped_columns(&scoped_columns);
+            Arc::new(bundle).with_views(manifest)
+        };
         let denied = Arc::new(crate::compose::derive_denied(&overlay, &bundle));
 
         // The filter artefact belongs to the published prefix, so it is opened here with the
@@ -1123,15 +1380,31 @@ impl Engine {
                 .get(&partition)
                 .map(|p| p.manifest.text_extents.clone())
                 .unwrap_or_default();
+            // The entity→term transpose rides the same open (contracts §2.4): the base the build
+            // always writes plus every extent the side-manifest names, so a restart composes the
+            // labels of everything flushed since the build rather than answering "unknown" for it.
+            let entity_terms_extents = bundle
+                .partitions
+                .get(&partition)
+                .map(|p| p.manifest.entity_terms_extents.clone())
+                .unwrap_or_default();
             Arc::new(
                 crate::filter::FilterColumns::open(
                     &prefix_dir,
                     &partition,
                     &bundle.manifest.declared_scalars,
+                    // The scoped column families of every group, flattened: the group is already
+                    // the first component of each family's view ids, so what the opener needs is
+                    // the families and not the rosters (`views.md` §5).
+                    &bundle.manifest.scoped_scalars(),
+                    // The roster this bundle is serving, which is what places a scoped column on
+                    // disc (decision 0115).
+                    &|view: &str| bundle.manifest.incarnation_of(view),
                     &bundle.manifest.vocabularies,
                     &extents,
                     &record_extents,
                     &artifact_record_extents,
+                    &entity_terms_extents,
                     &text_extents,
                     // Mapped, for the reason `FilterColumns::open` gives: the engine opens every
                     // declared column at once and holds them for the process lifetime, so the
@@ -1147,8 +1420,45 @@ impl Engine {
             )
         };
 
+        // **The suggestion indexes, built here and synchronously** (`value-suggestion.md` §6.1).
+        //
+        // At open rather than lazily because a first keystroke that paid the whole sort would be a
+        // request-shaped cold start; on the pool because the sort *is* the build cost — 34–38 s
+        // single-threaded for 22M entries at 10⁷ values, against 2.4–4.2 s to write the
+        // dictionary. Into the engine's own cache directory, which is where a derived, undigested,
+        // rebuilt-every-open file belongs: contracts §2.1 fixes what a bundle contains, and this
+        // is not part of it.
+        //
+        // **Only the vocabularies a declared category column draws on.** A vocabulary nothing
+        // names has no suggest surface to serve, and building an index for it would pay the sort
+        // for a value set no request can reach.
+        let suggest_dir = cache_dir.join(crate::suggest::SUGGEST_DIR);
+        // A previous run's indexes are stale by construction — every open rebuilds — and leaving
+        // them would accumulate a directory per restart under a name the next build reuses.
+        let _ = std::fs::remove_dir_all(&suggest_dir);
+        let suggest_names: std::collections::BTreeSet<String> = bundle
+            .manifest
+            .declared_scalars
+            .iter()
+            .filter_map(|scalar| scalar.vocabulary.clone())
+            .chain(
+                bundle
+                    .manifest
+                    .scoped_scalars()
+                    .into_iter()
+                    .filter_map(|family| family.vocabulary),
+            )
+            .collect();
+        let suggest = Arc::new(crate::suggest::SuggestIndexes::build(
+            &suggest_dir,
+            &vocabularies,
+            suggest_names,
+            &pool,
+        ));
+
         let generation = Arc::new(ArcSwap::new(Arc::new(Generation {
             prefix,
+            suggest,
             segments_version,
             watermark,
             bundle: Arc::clone(&bundle),
@@ -1222,7 +1532,51 @@ impl Engine {
             "the engine adopted the prefix's derived artifact structures"
         );
 
+        // **Every spatial level's shapes are decoded and decomposed, and every segment's piece
+        // claimed or resolved, before this engine serves a request** (`polygon-membership.md`
+        // §6.3). The store holds what the manifests seeded plus what the WAL replayed, so the
+        // shapes built here are the ones a publication would have built. The pieces the build or
+        // the last fold persisted — the row-major column, or the `shape-rows` row form — are
+        // claimed under the same coordinate rule as the structures adopted above; what is
+        // resolved is the segments no persisted form covers, the flushed ones. The cost is
+        // reported: it is the open's, and it is the figure stage 2 measures.
+        let shapes = Arc::new(crate::shapes::ShapeStore::new());
+        {
+            let (layers, _) = write_state.registry.snapshot();
+            let warmed = shapes.warm(
+                &generation.load().bundle,
+                &layers,
+                &write_state.artifacts,
+                None,
+                &crate::shapes::PersistedPieces {
+                    prefix_dir: Some(&prefix_dir),
+                    shape_rows: &manifest_shape_rows_extents,
+                    row_columns: &manifest_row_column_extents,
+                    shape_held: &manifest_shape_held_extents,
+                },
+            );
+            if warmed.levels > 0 {
+                tracing::info!(
+                    levels = warmed.levels,
+                    artifacts = warmed.artifacts,
+                    pieces_claimed = warmed.pieces_claimed,
+                    pieces_resolved = warmed.pieces_resolved,
+                    held_claimed = warmed.held_claimed,
+                    held_decomposed = warmed.held_decomposed,
+                    rows_tested = warmed.rows_tested,
+                    build_ms = warmed.build_ms,
+                    claim_ms = warmed.claim_ms,
+                    resolve_ms = warmed.resolve_ms,
+                    held_bytes = warmed.held_bytes,
+                    elapsed_ms = warmed.elapsed_ms,
+                    "the engine built every spatial level's shapes and claimed or resolved every \
+                     segment's piece"
+                );
+            }
+        }
+
         let row_projection_cache = Arc::new(RowProjectionCache::new(u64::MAX));
+        let region_cache = Arc::new(crate::single_flight::SingleFlightCache::new(u64::MAX));
         let refresh_in_flight = Arc::new(AtomicU64::new(crate::refresh::NO_REFRESH));
         let refresh_enabled = Arc::new(AtomicBool::new(true));
         let refresh_paused = Arc::new(AtomicBool::new(false));
@@ -1232,18 +1586,25 @@ impl Engine {
         let fold_publication_paused = Arc::new(AtomicBool::new(false));
         let merge_publication_paused = Arc::new(AtomicBool::new(false));
 
-        Ok(Engine {
+        let engine = Engine {
             generation: Arc::clone(&generation),
             plugin,
             // Unbounded until `set_cache_bounds` is called. `tessera-server` calls it immediately
             // after `open`, having validated the figure; every other embedder (tests, benches,
             // examples) gets unbounded caches, which is what a read-only embedder wants.
             row_projection_cache: Arc::clone(&row_projection_cache),
+            region_cache: Arc::clone(&region_cache),
+            max_region_cells: AtomicU64::new(crate::region::DEFAULT_MAX_REGION_CELLS as u64),
             artifact_projections: Arc::clone(&artifact_projections),
+            shapes: Arc::clone(&shapes),
             masked_counts: Arc::new(crate::histogram::MaskedCountCache::default()),
+            derived_geometry: Arc::new(crate::derived_cache::DerivedCache::default()),
+            suggest_sets: Arc::new(crate::suggest_set::SuggestSets::default()),
             lineages: Arc::new(crate::cut::Lineages::new()),
+            level_contents: Arc::new(crate::artifact_content::LevelContents::new()),
             pool,
             bundle_root: bundle_root.to_path_buf(),
+            suggest_dir,
             config,
             next_token_id: AtomicU64::new(0),
             write: WritePath::new(write_state),
@@ -1252,6 +1613,7 @@ impl Engine {
             serial_fallback_max_rows: AtomicU64::new(crate::viewport::SERIAL_FALLBACK_MAX_ROWS),
             filter_crossings_projected: AtomicU64::new(0),
             filter_crossings_per_tile: AtomicU64::new(0),
+            member_of_column_walks: AtomicU64::new(0),
             filter_row_routed: AtomicU64::new(0),
             stale_serves: AtomicU64::new(0),
             refreshes: Arc::new(AtomicU64::new(0)),
@@ -1264,7 +1626,23 @@ impl Engine {
             fold_publication_paused: Arc::clone(&fold_publication_paused),
             merge_publication_paused: Arc::clone(&merge_publication_paused),
             full_projection_builds: AtomicU64::new(0),
-        })
+        };
+
+        // **Every level's row form, built before this engine serves a request** — the same rule
+        // the shapes above follow, one structure along, and for a cost an order larger: rung 3's
+        // `mesh/descriptors` projection is a *measured* 23.3 s over a 1.66×10⁹-row membership, and
+        // left lazy it landed on whichever request of a fresh process arrived first. See
+        // `Engine::warm_artifact_projections` for what it does and does not build.
+        let warmed = engine.warm_artifact_projections();
+        if warmed.levels > 0 {
+            tracing::info!(
+                levels = warmed.levels,
+                elapsed_ms = warmed.elapsed_ms,
+                builds = engine.artifact_projections.builds(),
+                "the engine built every level's artifact row form; no request pays for one"
+            );
+        }
+        Ok(engine)
     }
 
     /// Test-only override for the serial/parallel fan-out threshold
@@ -1314,6 +1692,49 @@ impl Engine {
     #[doc(hidden)]
     pub fn set_background_refresh_for_test(&self, enabled: bool) {
         self.refresh_enabled.store(enabled, Ordering::SeqCst);
+    }
+
+    /// Drop one vocabulary's suggestion index from the live generation — the fault state
+    /// [`EngineError::SuggestionUnavailable`] exists for.
+    ///
+    /// **A test hook, gated so it cannot exist in a shipped build**, on
+    /// [`Self::set_background_refresh_for_test`]'s argument. Nothing request-shaped reaches that
+    /// refusal: `Engine::open` builds an index for every vocabulary a declared category column
+    /// names, and only a build that failed at open leaves one absent — which is a host condition a
+    /// test cannot produce without either breaking the filesystem or reaching in here.
+    ///
+    /// **It submits to the executor rather than swapping the generation itself**, and that is not
+    /// ceremony. The executor thread is the sole publisher (lifecycle §1.3, #59): it loads the live
+    /// generation, builds a successor and stores it, so a store from any other thread can be
+    /// overwritten by a swap already in flight between those two steps. A hook that lost its swap
+    /// that way would leave the test asserting against an index it had asked to remove — passing or
+    /// failing on timing rather than on the behaviour under test — and `scripts/check-layers.sh`
+    /// refuses the second publisher for exactly that reason. Returns once the executor has
+    /// published, so the caller's next request sees it.
+    ///
+    /// Requires a started write executor; `false` where there is none.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn forget_suggestion_index_for_test(&self, vocabulary: &str) -> bool {
+        self.write.forget_suggestion_index(vocabulary.to_string())
+    }
+
+    /// Rebuild one vocabulary's suggestion index from the live minter and publish it, returning
+    /// once the executor has swapped — the cadence a fixture cannot otherwise reach.
+    ///
+    /// **A test hook, gated so it cannot exist in a shipped build**, on
+    /// [`Self::forget_suggestion_index_for_test`]'s argument, and submitted through the executor
+    /// for that method's reason. It exists because a rebuild is dispatched only when a side map has
+    /// run 4,096 values ahead of its base — hundreds of ingest batches — and because it is the one
+    /// publication that moves neither `segments_version` nor `overlay_version`, which makes it
+    /// exactly the state a per-session suggestion set's key cannot see
+    /// (`crate::suggest_set::SuggestSets::get`).
+    ///
+    /// Requires a started write executor; `false` where there is none.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn rebuild_suggestion_index_for_test(&self, vocabulary: &str) -> bool {
+        self.write.rebuild_suggestion_index(vocabulary.to_string())
     }
 
     /// Hold the background refresh, leaving it **in flight** — the window rung 3 of
@@ -1371,6 +1792,17 @@ impl Engine {
         if !paused {
             self.write.wake();
         }
+    }
+
+    /// Whether a completed fold is waiting, undrained, at
+    /// [`Self::set_fold_publication_paused_for_test`]'s hold — the fold's half of
+    /// [`Self::merge_publication_is_held_for_test`], and the condition a test waits on rather than
+    /// guessing at the hold with a sleep.
+    pub fn fold_publication_is_held_for_test(&self) -> bool {
+        self.write
+            .health()
+            .fold_completed_pending
+            .load(Ordering::SeqCst)
     }
 
     /// Whether a completed merge is waiting, undrained, at
@@ -1434,6 +1866,12 @@ impl Engine {
         self.filter_row_routed.load(Ordering::Relaxed)
     }
 
+    /// `member_of` leaves served by the row-column walk rather than by the artifact-major
+    /// membership — see [`Self::member_of_column_walks`]. Zero in every deployment today.
+    pub fn member_of_column_walks(&self) -> u64 {
+        self.member_of_column_walks.load(Ordering::Relaxed)
+    }
+
     #[cfg(feature = "bench-timing")]
     #[doc(hidden)]
     pub fn set_serial_fallback_max_rows_for_test(&self, value: u64) {
@@ -1467,11 +1905,16 @@ impl Engine {
         // descriptor that does not exist. Only `> 0` is ever read (`Session::is_stale`), but a
         // count that can be wrong for a reason unrelated to the dictionary is not one to keep.
         let mut satisfied: FxHashSet<TermId> = FxHashSet::default();
+        // The descriptor beside each ordinal, kept for the drill-down's `labels` array — see
+        // `Session::satisfied_descriptors`. Populated from the credential's own bytes and from
+        // nothing else, which is what makes the surface satisfied-only by construction.
+        let mut satisfied_descriptors: FxHashMap<TermId, Vec<u8>> = FxHashMap::default();
         let mut unresolved_count = 0usize;
         for descriptor in &auth_terms.terms {
             match generation.dict.lookup(descriptor) {
                 Some(term) => {
                     satisfied.insert(term);
+                    satisfied_descriptors.insert(term, descriptor.clone());
                 }
                 // An unknown descriptor is simply unsatisfied, never an error — and §3.3's
                 // observation is that the ones that drop out here are precisely this session's
@@ -1501,7 +1944,19 @@ impl Engine {
                 "`public` is reserved at term 0 by every build"
             );
             satisfied.insert(term);
+            satisfied_descriptors.insert(term, tessera_authz::PUBLIC_LABEL.to_vec());
         }
+
+        // **The visible-view set, resolved here and never again** (`views.md` §6) — after the
+        // credential has been resolved and `public` added, and before anything is masked with the
+        // result, because the gate is satisfied by exactly the terms an item's label is. Every
+        // view of every group is evaluated whatever the outcome; see `crate::gate`.
+        let visible_views = Arc::new(crate::gate::resolve(
+            &generation.bundle.manifest,
+            &generation.dict,
+            &satisfied,
+            self.plugin.as_ref(),
+        ));
 
         let mut satisfied_sorted: Vec<TermId> = satisfied.iter().copied().collect();
         satisfied_sorted.sort_unstable();
@@ -1544,6 +1999,8 @@ impl Engine {
             satisfied,
             fragment,
             satisfied_sorted,
+            satisfied_descriptors: Arc::new(satisfied_descriptors),
+            visible_views,
             auth_data_hash,
             expires_at,
             unresolved_count,
@@ -1722,6 +2179,8 @@ impl Engine {
         // target: a masked-count histogram is ~4 B per artifact, 40 MB at 10⁷, and a revoked
         // session's is pinned by nothing else.
         self.masked_counts.prune_token(token_id);
+        self.derived_geometry.prune_token(token_id);
+        self.suggest_sets.prune_token(token_id);
         self.row_projection_cache.prune_token(token_id)
     }
 
@@ -1729,6 +2188,24 @@ impl Engine {
     /// only; a count of structures, naming no artifact and no principal.
     pub fn masked_count_cache_stats(&self) -> crate::histogram::MaskedCountStats {
         self.masked_counts.stats()
+    }
+
+    /// The derived-geometry cache's gauges — see [`crate::derived_cache::DerivedCacheStats`].
+    /// Operator plane only; a count of structures, naming no artifact and no principal.
+    ///
+    /// `hit_rate` is the figure this cache is judged on, and it is a figure about a *pan*: the same
+    /// principal panning across one layer re-serves mostly the same artifacts, which is what makes
+    /// a held shape worth its bytes.
+    pub fn derived_cache_stats(&self) -> crate::derived_cache::DerivedCacheStats {
+        self.derived_geometry.stats()
+    }
+
+    /// Bound the derived-geometry cache. An embedder that never calls this gets
+    /// `crate::derived_cache`'s own default, which is where the figure is argued — there is no
+    /// configuration key, because an entry's size is bounded by the vertex budget rather than by
+    /// the corpus.
+    pub fn set_derived_cache_bytes(&self, bytes: u64) {
+        self.derived_geometry.set_bound_bytes(bytes);
     }
 
     /// How many levels are recorded row-major and served artifact-major — see
@@ -1794,6 +2271,25 @@ impl Engine {
     /// cache, which is what a read-only embedder over a small corpus wants.
     pub fn set_masked_count_cache_bytes(&self, bytes: u64) {
         self.masked_counts.set_bound_bytes(bytes);
+    }
+
+    /// Bound the region decomposition cache (`serve.region_cache_bytes`) — a setter for
+    /// [`Self::set_masked_count_cache_bytes`]'s reason.
+    pub fn set_region_cache_bytes(&self, bytes: u64) {
+        self.region_cache.set_bound_bytes(bytes);
+    }
+
+    /// `serve.max_region_cells` — the boundary-cell budget a region's descent stops at
+    /// (selection-operand §6; published on `/v1/meta`). A setter rather than an `EngineConfig`
+    /// field, for [`Self::set_masked_count_cache_bytes`]'s reason; the default is
+    /// [`crate::region::DEFAULT_MAX_REGION_CELLS`].
+    pub fn set_max_region_cells(&self, cells: usize) {
+        self.max_region_cells.store(cells as u64, Ordering::Relaxed);
+    }
+
+    /// The region cache's gauges, beside the row-projection cache's.
+    pub fn region_cache_stats(&self) -> crate::single_flight::CacheStats {
+        self.region_cache.stats()
     }
 
     /// How long a request parks on another request's in-flight row-projection build before it is
@@ -2251,6 +2747,58 @@ impl Engine {
             .collect())
     }
 
+    /// Does `view` hold a row for `entity` — **the "already in the view" arm of the ingest join
+    /// rule** (`views.md` §4)?
+    ///
+    /// "In the view" is the view's permutation **and** the commit window's buffer: a row accepted
+    /// but not yet flushed is in no permutation, and a check that missed it would let two batches
+    /// hand one flush two rows for one entity in one view, which the single-valued permutation
+    /// cannot hold. The window's own open entries are covered upstream, by the early close a held
+    /// external id already forces.
+    ///
+    /// One permutation read and one hash lookup; nothing walks.
+    pub fn view_holds(&self, entity: EntityId, view: &str) -> bool {
+        let generation = self.generation();
+        generation.bundle.partitions.values().any(|partition| {
+            partition
+                .views
+                .get(view)
+                .is_some_and(|data| data.row_space.row_of(entity).is_some())
+        }) || generation.buffer.contains_in_view(entity, view)
+    }
+
+    /// An already-flushed entity's **full** term set, ascending, from the entity→term transpose
+    /// (contracts §2.4) — the join rule's label arm, once the entity's own row has left the buffer
+    /// (`views.md` §4).
+    ///
+    /// **The full set, and it never leaves the server.** This is the opposite surface from the
+    /// drill-down's `labels`, which serves the intersection with the asking session: this compares
+    /// a *writer's* batch against what the deployment already holds, and equality is the whole
+    /// question — an arm that compared only the terms the writer named would accept a batch that
+    /// dropped one. Nothing derived from it is returned; the refusal names the row, never a term.
+    ///
+    /// `None` where no layer holds a list for the entity, which is *unknown* rather than *empty*
+    /// and leaves the comparison unavailable exactly as an empty buffer does. `Some(vec![])` is a
+    /// real answer: an item may legitimately carry no label.
+    ///
+    /// **A malformed layer is `None`, not a wrong answer — and it is logged, not swallowed.** The
+    /// transpose refuses a bad offset pair rather than truncating
+    /// (`tessera_store::entity_terms`), and this is a *report*, not an authorisation: the join it
+    /// guards is inert either way (a joining row carries no descriptors), so a corrupt artefact
+    /// loses the refusal rather than turning a caller's batch into a server error. That is the
+    /// recoverable-and-discloses-nothing side of the line, where the posture is *report loudly and
+    /// let the operator decide* — so the warning below fires, and the same corruption is a hard
+    /// error on the drill-down path, which propagates it.
+    ///
+    /// **The warning names the artefact and not the entity** (**I10**, contracts §4). The
+    /// byte-scanner sweeps payloads *and logs* for entity ids, and `crate`'s store follows the
+    /// external-ID sidecar's rule at the same standard: the error carries the file and the shape
+    /// of the inconsistency, which is what an operator chasing a systematic build or flush defect
+    /// needs, and naming the slot buys nothing an entity-independent message does not.
+    pub fn flushed_terms(&self, entity: EntityId) -> Option<Vec<TermId>> {
+        flushed_terms_of(&self.generation(), entity)
+    }
+
     pub fn resolve_external_ids(
         &self,
         external_ids: &[Vec<u8>],
@@ -2373,11 +2921,15 @@ impl Engine {
                 coalesce: coalesce_policy(&self.config),
                 merge: merge_policy(&self.config),
                 artifact_projections: Arc::clone(&self.artifact_projections),
+                region_cache: Arc::clone(&self.region_cache),
+                shapes: Arc::clone(&self.shapes),
                 lineages: Arc::clone(&self.lineages),
+                level_contents: Arc::clone(&self.level_contents),
                 // The **configured** value, not the resolved policy's: compaction §4 step 3
                 // re-checks write-path §7's base-segment relation against the fold's own output,
                 // and `tessera-server`'s loader checks only an explicitly set one.
                 configured_merge_bytes: self.config.max_merged_segment_bytes,
+                suggest_dir: self.suggest_dir.clone(),
                 compaction: self.config.compaction,
                 coalesce_enabled: Arc::clone(&self.coalesce_enabled),
                 merge_enabled: Arc::clone(&self.merge_enabled),
@@ -2430,11 +2982,15 @@ impl Engine {
                 coalesce: coalesce_policy(&self.config),
                 merge: merge_policy(&self.config),
                 artifact_projections: Arc::clone(&self.artifact_projections),
+                region_cache: Arc::clone(&self.region_cache),
+                shapes: Arc::clone(&self.shapes),
                 lineages: Arc::clone(&self.lineages),
+                level_contents: Arc::clone(&self.level_contents),
                 // The **configured** value, not the resolved policy's: compaction §4 step 3
                 // re-checks write-path §7's base-segment relation against the fold's own output,
                 // and `tessera-server`'s loader checks only an explicitly set one.
                 configured_merge_bytes: self.config.max_merged_segment_bytes,
+                suggest_dir: self.suggest_dir.clone(),
                 compaction: self.config.compaction,
                 coalesce_enabled: Arc::clone(&self.coalesce_enabled),
                 merge_enabled: Arc::clone(&self.merge_enabled),
@@ -2485,6 +3041,15 @@ impl Engine {
         self.write.health().stats()
     }
 
+    /// What the last shape warm pass did — the open's, until a publication into a shape layer
+    /// runs another: how many segment pieces were claimed from the prefix's persisted forms and
+    /// how many resolved from the geometry (`crate::shapes`). Operator plane only, beside
+    /// [`Engine::write_executor_stats`]: counts of structures, naming no artifact and no
+    /// principal.
+    pub fn shape_warm_report(&self) -> crate::shapes::WarmReport {
+        self.shapes.last_warm()
+    }
+
     /// How many artifact row forms, and how many lineages, this engine has built since it opened.
     ///
     /// **The cadence, not the cost.** Both structures are per `(layer, level)` and both are
@@ -2497,6 +3062,29 @@ impl Engine {
         (self.artifact_projections.builds(), self.lineages.builds())
     }
 
+    /// The row form this engine is **holding** for one `(view, layer, level)`, without building
+    /// one — the maintained form itself, for the differential that asserts it equals a form built
+    /// from scratch (`tests/artifact_bring_forward.rs`).
+    ///
+    /// **Test-only, and the reason is what it would otherwise be**: a caller that took the held
+    /// form on a request path would be taking whatever was last written to the cache rather than
+    /// the form of the generation it is serving — the freshness argument `get_or_build` makes by
+    /// reading the level's version from the store it builds from.
+    pub fn held_artifact_form_for_test(
+        &self,
+        view: &str,
+        layer: &str,
+        level: u32,
+    ) -> Option<std::sync::Arc<crate::artifacts::ArtifactRows>> {
+        self.artifact_projections.held_form(view, layer, level)
+    }
+
+    /// Drop every derived form this engine holds for one layer, so the next request builds them —
+    /// the *from scratch* half of the same differential.
+    pub fn forget_artifact_forms_for_test(&self, layer: &str) {
+        self.artifact_projections.forget(layer);
+    }
+
     /// How many artifact row forms, and how many lineages, are held right now.
     ///
     /// The gauge beside [`Engine::artifact_cache_builds`]'s counter, and the one that moves in
@@ -2504,6 +3092,17 @@ impl Engine {
     /// only — counts of structures, naming no artifact, no layer and no principal.
     pub fn artifact_cache_held(&self) -> (usize, usize) {
         (self.artifact_projections.held(), self.lineages.held())
+    }
+
+    /// The supplied-content tables' gauges — see
+    /// [`crate::artifact_content::ContentCacheStats`]. Its own accessor rather than a third
+    /// element of the two tuples above, because it reports bytes as well as a count and those
+    /// two report neither.
+    ///
+    /// Operator plane only, beside them: counts of structures a deployment built, naming no
+    /// artifact, no layer and no principal.
+    pub fn artifact_content_cache_stats(&self) -> crate::artifact_content::ContentCacheStats {
+        self.level_contents.stats()
     }
 
     /// How many containment partitions this engine has composed (`crate::containment`).
@@ -2685,18 +3284,27 @@ impl Engine {
                 got: row.scalars.len(),
             });
         }
-        let quantisation = self.meta().quantisation;
-        if let Some((index, row)) = rows
-            .iter()
-            .enumerate()
-            .find(|(_, row)| !quantisation.contains(row.x, row.y))
-        {
-            return Err(crate::write::AcceptError::OutsideExtent {
-                index,
-                x: row.x,
-                y: row.y,
-                quantisation,
-            });
+        // **Each row against its own view's frame** (decision 0040). The extent is the view's,
+        // so one bundle-wide check would pass a row that has no cell in the view it is destined
+        // for — silently clamped onto that view's grid edge at the flush. A row naming a view
+        // this bundle does not declare is refused here for the same reason: there is no frame to
+        // check it against, and the handler's own 404 guards only one of the buffer's writers.
+        let meta = self.meta();
+        for (index, row) in rows.iter().enumerate() {
+            let Some(quantisation) = meta.quantisation_of(&row.view) else {
+                return Err(crate::write::AcceptError::UnknownView {
+                    index,
+                    view: row.view.clone(),
+                });
+            };
+            if !quantisation.contains(row.x, row.y) {
+                return Err(crate::write::AcceptError::OutsideExtent {
+                    index,
+                    x: row.x,
+                    y: row.y,
+                    quantisation,
+                });
+            }
         }
         self.write
             .accept_ingest(rows, batch_id, body_hash, artifacts)
@@ -2768,6 +3376,66 @@ impl Engine {
     /// Drop a layer. Its name is tombstoned and refused on recreation for ever.
     pub fn drop_layer(&self, name: String) -> std::result::Result<(), crate::write::AcceptError> {
         self.write.drop_layer(name)
+    }
+
+    /// Create a view of a view group while the service runs (`views.md` §3.2, decision 0108).
+    ///
+    /// **Almost nothing is validated here**, on `register_layer`'s rule: whether the key is free
+    /// is state only the write executor may read — a handler that checked first could be
+    /// overtaken between its check and the enqueue.
+    ///
+    /// The **gate label** is the exception, and it is here because only the engine holds the
+    /// plugin. A view's gate is satisfied by exactly the item-visibility predicate
+    /// (`views.md` §6), so the label is put through the same [`Plugin::terms_of_label`] call an
+    /// item's `access` bytes take at `/control/ingest`, and a label the plugin cannot read — or
+    /// one that names no terms at all — is refused rather than stored. Stored, it would be a gate
+    /// no principal could ever satisfy: a view created and reachable by nobody, including the
+    /// operator who created it. `public` is not asked about — it is the label every principal
+    /// holds inside the trust boundary (decision 0088), and the roster stores its absence.
+    pub fn create_view(
+        &self,
+        group: String,
+        key: String,
+        visibility: Option<String>,
+        metadata: std::collections::BTreeMap<String, tessera_types::view::ViewMetadataValue>,
+    ) -> std::result::Result<(), crate::write::AcceptError> {
+        if let Some(label) = visibility.as_deref().filter(|l| {
+            *l != std::str::from_utf8(tessera_authz::PUBLIC_LABEL).expect("the label is ASCII")
+        }) {
+            let refused = |detail: String| {
+                crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::LayerRefused {
+                    detail,
+                })
+            };
+            let descriptors = self.plugin.terms_of_label(label.as_bytes()).map_err(|e| {
+                refused(format!(
+                    "visibility = '{label}' is not a label the plugin can read ({e}). A view's \
+                     gate is satisfied by the item-visibility predicate (views §6), so a label the \
+                     plugin cannot turn into terms is one no principal could satisfy"
+                ))
+            })?;
+            if descriptors.is_empty() {
+                return Err(refused(format!(
+                    "visibility = '{label}' names no terms. A gate is satisfied where its term \
+                     set meets the principal's, so an empty one is satisfied by nobody and the \
+                     view would be reachable by no principal at all. Write `public`, or a label \
+                     naming terms"
+                )));
+            }
+        }
+        self.write.create_view(group, key, visibility, metadata)
+    }
+
+    /// Drop a view. Its key is tombstoned and refused on recreation for ever, and the answer is
+    /// how many entities `delete_dangling` submitted for deletion — zero unless it was asked for
+    /// (`views.md` §3.4).
+    pub fn drop_view(
+        &self,
+        group: String,
+        key: String,
+        delete_dangling: bool,
+    ) -> std::result::Result<u64, crate::write::AcceptError> {
+        self.write.drop_view(group, key, delete_dangling)
     }
 
     /// Publish a batch of artifacts into one level of a layer, returning a `tessera_id` per
@@ -3109,12 +3777,15 @@ pub(crate) fn open_rotation(
             &prefix_dir,
             &phash,
             &bundle.manifest.declared_scalars,
+            &bundle.manifest.scoped_scalars(),
+            &|view: &str| bundle.manifest.incarnation_of(view),
             &bundle.manifest.vocabularies,
             &partition.manifest.attr_extents,
             // The record blob rotates with the prefix for the reason the value columns do: the
             // fold rewrites it, and the superseded prefix's files are pre-blanking.
             &partition.manifest.record_extents,
             &partition.manifest.artifact_record_extents,
+            &partition.manifest.entity_terms_extents,
             &partition.manifest.text_extents,
             true,
         )
@@ -3219,6 +3890,321 @@ impl ExternalIdIndex {
     }
 }
 
+/// One entity's record-blob row, decompressed **at most once** whatever how many blob-resident
+/// columns ask for it (review finding F4).
+///
+/// `fields_of` decompresses the block the entity's row sits in, and the join rule's attribute arm
+/// asks it once per blob-resident column: a schema with six such columns paid six decompressions of
+/// one block per joining row. The row is the same for all of them, so it is read here and shared.
+/// The outer `Option` is *not yet read*; the inner one is the blob's own answer, which is `None`
+/// for an entity with no row and for a blob that could not be read alike — the same collapse
+/// [`flushed_scalar_of`] documents, and for the same reason.
+#[derive(Default)]
+pub(crate) struct BlobRow(Option<Option<Vec<tessera_filter::RecordField>>>);
+
+impl BlobRow {
+    fn get(
+        &mut self,
+        generation: &Generation,
+        entity: u32,
+    ) -> &Option<Vec<tessera_filter::RecordField>> {
+        self.0.get_or_insert_with(|| {
+            match generation.filter_columns.records().fields_of(entity) {
+                Ok(fields) => fields,
+                // **The error's *kind*, never its `Display`** (**I10**). `RecordError::Malformed`
+                // carries a detail string, and the blob's detail strings name the entity in six
+                // spellings — its addressing checks are about *which* entity's row was found. The
+                // byte-scanner sweeps logs as well as payloads, so this warning carries the
+                // artefact and the class of defect, which is what an operator chasing a systematic
+                // build or flush fault needs; the row that tripped it buys nothing an
+                // entity-independent message does not. The drill-down propagates the same error as
+                // a refusal, and that path may carry the detail: it reaches an operator's error
+                // surface rather than the log the scanner reads.
+                Err(e) => {
+                    let kind = match &e {
+                        tessera_filter::RecordError::Io(io) => io.kind().to_string(),
+                        tessera_filter::RecordError::Malformed(_) => "malformed".to_string(),
+                    };
+                    tracing::warn!(
+                        artefact = "attrs/record",
+                        kind = %kind,
+                        "the record blob could not answer, so the join rule's attribute arm has \
+                         nothing to compare a blob-resident column against and this batch's joins \
+                         are accepted unchecked (views §4). The artefact is a build or flush \
+                         defect; a fold rewrites it."
+                    );
+                    None
+                }
+            }
+        })
+    }
+}
+
+/// An already-flushed entity's stored value for one declared column, at the shape a batch carries
+/// it in — the join rule's attribute arm and its render backfill, once the entity's own row has
+/// left the commit-window buffer (`views.md` §4).
+///
+/// **The label arm's shape, over three homes instead of one.** `entities/terms/` answers the label
+/// question outright; an entity-scoped *value* has no single artefact, so this reads the home the
+/// declaration puts it in and there are exactly three (records §3, decision 0068): the entity-space
+/// value column where the column owes one (`index = true`, or a `derived` category's floor), the
+/// record blob where it is blob-resident (text always; anything neither rendered nor
+/// value-columned), and the hot column where `render = true` is the value's only store. The three
+/// are exhaustive and, per column, the first that applies is the cheapest — only a render-only
+/// column pays a row lookup.
+///
+/// The answer is returned as a [`tessera_lifecycle::WalScalar`] so the comparison at the call site
+/// is the *same* equality the buffered arm makes against a buffered row's scalars: one comparison,
+/// two sources, and the two arms cannot come to disagree about what "the same value" means.
+///
+/// `None` is *no value held*, and it is also *could not find out* — the two are one answer here
+/// because the join it guards is inert in entity space either way (a joining row writes no
+/// postings, no attribute column and no record field), so what an unreadable artefact costs is the
+/// refusal, not the rule. Corruption is warned, never swallowed, and the warning names the artefact
+/// rather than the entity (**I10**).
+///
+/// **A free function rather than a method, because the write executor needs this form**: it must
+/// read the same generation its apply will clone from rather than re-loading the pointer under
+/// itself. `blob` is the caller's per-row [`BlobRow`], so a schema's blob-resident columns share one
+/// decompression.
+///
+/// **Server-side and control-plane.** Nothing derived from this reaches a client: the refusal names
+/// the column, exactly as the buffered arm's does, and never the value on either side.
+pub(crate) fn flushed_scalar_of(
+    generation: &Generation,
+    entity: EntityId,
+    declared_index: usize,
+    blob: &mut BlobRow,
+) -> Option<tessera_lifecycle::WalScalar> {
+    let manifest = &generation.bundle.manifest;
+    let declared = manifest.declared_scalars.get(declared_index)?;
+    let vocabularies = &manifest.vocabularies;
+    // I9 caps entity ids at `u32::MAX`, and the same `expect` guards the drill-down's read. A
+    // violated invariant is loud rather than a `None` the caller would read as "no value held"
+    // and accept a mismatch under.
+    let entity_raw = u32::try_from(entity.raw()).expect("entity ids are capped at u32::MAX by I9");
+
+    let stored = if crate::filter::owes_value_column(declared, vocabularies) {
+        generation
+            .filter_columns
+            .stored_value(&declared.name, entity_raw)
+    } else if crate::filter::blob_resident(declared, vocabularies) {
+        // The blob is keyed by entity and its rows are self-describing, so the field wanted is the
+        // one tagged with this column's declared position (records §3). A malformed row refuses on
+        // the drill-down path, which propagates it; here it is a lost report — warned once per
+        // row by `BlobRow`, which is also what keeps this to one decompression however many
+        // blob-resident columns the schema declares.
+        blob.get(generation, entity_raw)
+            .as_ref()?
+            .iter()
+            .find_map(|f| (f.tag as usize == declared_index).then(|| f.value.clone()))
+    } else {
+        crate::viewport::flushed_row_scalar(generation, entity, declared_index)
+    }?;
+    stored_as_wal(stored, declared)
+}
+
+/// [`Engine::flushed_terms`]'s body, over a generation the caller already holds.
+///
+/// **The write executor needs this form, and that is why it is not a method** — the same reason
+/// [`flushed_scalar_of`] is not one. The join rule's label arm runs on the serial writer
+/// (decision 0116), beside the generation its apply will clone from, and re-loading the pointer
+/// under itself is exactly the race the relocation exists to close.
+pub(crate) fn flushed_terms_of(generation: &Generation, entity: EntityId) -> Option<Vec<TermId>> {
+    let entity = u32::try_from(entity.raw()).ok()?;
+    let terms = match generation.filter_columns.entity_terms().terms_of(entity) {
+        Ok(terms) => terms?,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "the entity->term transpose could not answer, so the join rule's label arm \
+                 has nothing to compare against and this batch's joins are accepted \
+                 unchecked (views §4). The artefact is a build or flush defect and the error \
+                 names the file; a fold rewrites it."
+            );
+            return None;
+        }
+    };
+    Some(terms.into_iter().map(TermId::new).collect())
+}
+
+/// One already-flushed `(entity, attribute, key)` cell's value, at the shape a batch carries it in
+/// — the scoped half of the join rule's attribute arm (`views.md` §5, decision 0116).
+///
+/// `owner_view` is the cell's address, `write::scoped_owner_view_of`'s answer, so a value written
+/// through a sharing group's door and one written through the owner's are read back from the one
+/// column. A family on no filter surface has no store to read and answers `None`, as does a `text`
+/// family, whose extent is a dictionary and postings and holds no value per entity; both lose the
+/// comparison rather than the rule, exactly as a blob-resident entity-scoped column does.
+pub(crate) fn flushed_scoped_of(
+    generation: &Generation,
+    entity: EntityId,
+    family: &tessera_store::manifest::ScopedScalar,
+    owner_view: &str,
+) -> Option<tessera_lifecycle::WalScalar> {
+    if !crate::filter::scoped_is_filterable(family) {
+        return None;
+    }
+    let entity = u32::try_from(entity.raw()).ok()?;
+    let column = crate::filter::scoped_column_name(&family.name, owner_view);
+    let stored = generation.filter_columns.stored_value(&column, entity)?;
+    stored_as_wal(stored, &declared_of_scoped(family))
+}
+
+/// Does a **flushed** layer of this `(entity, attribute, key)` cell hold prose?
+///
+/// The `text` half of the scoped cell arm (`views.md` §5, decision 0116; review finding F1). A text
+/// family has no per-entity value for [`flushed_scoped_of`] to answer with, so the cell arm asks
+/// occupancy instead of equality and refuses a supplied string where the cell is occupied. `false`
+/// for every other family, which has a value to compare, and for a family on no filter surface,
+/// which has no column at all.
+///
+/// ⊘ **The build's base is not covered** — it writes no presence file
+/// ([`crate::filter::FilterColumns::text_present`], issue #123) — so a cell whose only prose came
+/// from the build reads as unoccupied. That is an under-refusal and it is stated rather than
+/// hidden: the fix is the base's presence bitmap, not a change here.
+pub(crate) fn flushed_scoped_text_present(
+    generation: &Generation,
+    entity: EntityId,
+    family: &tessera_store::manifest::ScopedScalar,
+    owner_view: &str,
+) -> bool {
+    if !crate::filter::scoped_is_filterable(family) {
+        return false;
+    }
+    let Ok(entity) = u32::try_from(entity.raw()) else {
+        return false;
+    };
+    let column = crate::filter::scoped_column_name(&family.name, owner_view);
+    generation.filter_columns.text_present(&column, entity)
+}
+
+/// A scoped family as the entity-scoped declaration the absence and comparison helpers take.
+///
+/// **The same transcription the ingest boundary makes** (`control.rs`'s `scoped_as_declared`): a
+/// scoped column *is* an entity-scoped one — same types, same vocabulary, same absence rules — so
+/// the two helpers that decide what "absent" and "the same value" mean take one shape and cannot
+/// come to mean two things.
+pub(crate) fn declared_of_scoped(
+    family: &tessera_store::manifest::ScopedScalar,
+) -> tessera_store::manifest::DeclaredScalar {
+    tessera_store::manifest::DeclaredScalar {
+        name: family.name.clone(),
+        arrow_type: family.arrow_type,
+        vocabulary: family.vocabulary.clone(),
+        analyser: family.analyser.clone(),
+        index: family.index,
+        render: family.render,
+    }
+}
+
+/// Is this value **no value at all** for `declared` — the join rule's "or be absent from the
+/// batch" (`views.md` §4), asked of a supplied value and a stored one alike?
+///
+/// **Two spellings, because a category's absence is in band.** Every other family says absence
+/// with [`tessera_lifecycle::WalScalar::Null`], having no bit pattern to spare; a vocabulary keeps
+/// code 0 out of its value space precisely so a category can say it with a code
+/// ([`tessera_store::vocabulary::ABSENT_CODE`], per-point-attributes §3.4), and the ingest parse
+/// turns a null category cell into that code before either arm sees it. Reading only the `Null`
+/// spelling made a joining batch that left a category null a `409` against an entity holding a
+/// value, and a join carrying a value against an entity holding *none* a `409` as well, neither of
+/// which the rule asks for.
+///
+/// One definition, because three callers ask it: the handler's comparison, on both sides, and the
+/// executor's backfill.
+pub(crate) fn scalar_is_absent(
+    value: &tessera_lifecycle::WalScalar,
+    declared: &tessera_store::manifest::DeclaredScalar,
+) -> bool {
+    use tessera_lifecycle::WalScalar as WS;
+    if matches!(value, WS::Null) {
+        return true;
+    }
+    if declared.vocabulary.is_none() {
+        return false;
+    }
+    let absent = tessera_store::vocabulary::ABSENT_CODE;
+    match value {
+        WS::U8(c) => u32::from(*c) == absent,
+        WS::U16(c) => u32::from(*c) == absent,
+        WS::U32(c) => *c == absent,
+        // A novel key on a `discovered` vocabulary travels as its key and is minted at the commit
+        // window's close; a key is never absence — the empty string is refused upstream.
+        _ => false,
+    }
+}
+
+/// One stored value at the shape an ingest batch carries it in, so the join rule's attribute arm
+/// compares like with like whichever home answered (`views.md` §4).
+///
+/// **Three normalisations, one per family whose storage type is not its wire type**, and each is a
+/// storage fact rather than a presentation choice:
+///
+/// - **A `bool` stores as a byte** in a value column and as an Arrow boolean in the hot column, and
+///   arrives as [`WalScalar::Bool`]; non-zero is `true`.
+/// - **A `timestamp_us` stores as an `i64`** whose unit the declaration fixes, and arrives as
+///   [`WalScalar::TimestampUs`]; the two are the same number.
+/// - **A category stays a code**, and is deliberately *not* resolved to its key. The code is what
+///   the batch carries by the time this comparison runs (`category_scalar` mints nothing and
+///   resolves through the live bindings), the code is what the entity stores, and resolving both
+///   ends through a vocabulary would make a rebinding — which never happens, codes being
+///   never-reused — the only thing the extra work could ever detect. The declared width is the
+///   one both sides are read at, so a `u8` column's code cannot compare unequal to itself because
+///   one home widened it.
+///
+/// Every other family is its own storage type: a number byte-matches a number, and a keyword or a
+/// text field matches on its **bytes** — decoded from this layer's sorted dictionary where the
+/// value column holds an ordinal (**I10**: an ordinal is an index internal and never the unit of
+/// comparison across a flush boundary, because two flushes number the same key differently).
+///
+/// `None` where the stored value cannot be read at the declared type at all, which is a malformed
+/// bundle rather than a caller's error and so loses the report rather than refusing the batch.
+fn stored_as_wal(
+    value: tessera_filter::RecordValue,
+    declared: &tessera_store::manifest::DeclaredScalar,
+) -> Option<tessera_lifecycle::WalScalar> {
+    use tessera_filter::RecordValue as RV;
+    use tessera_lifecycle::WalScalar as WS;
+    use tessera_spatial::tiler::ScalarType;
+
+    if declared.vocabulary.is_some() {
+        let code = match value {
+            RV::U8(c) => u32::from(c),
+            RV::U16(c) => u32::from(c),
+            RV::U32(c) => c,
+            _ => return None,
+        };
+        return Some(match declared.arrow_type {
+            ScalarType::U8 => WS::U8(code as u8),
+            ScalarType::U16 => WS::U16(code as u16),
+            _ => WS::U32(code),
+        });
+    }
+    Some(match (declared.arrow_type, value) {
+        (ScalarType::Bool, RV::U8(x)) => WS::Bool(x != 0),
+        (ScalarType::Bool, RV::Bool(b)) => WS::Bool(b),
+        (ScalarType::TimestampUs, RV::I64(x)) | (ScalarType::TimestampUs, RV::TimestampUs(x)) => {
+            WS::TimestampUs(x)
+        }
+        (_, RV::U8(x)) => WS::U8(x),
+        (_, RV::U16(x)) => WS::U16(x),
+        (_, RV::U32(x)) => WS::U32(x),
+        (_, RV::U64(x)) => WS::U64(x),
+        (_, RV::I8(x)) => WS::I8(x),
+        (_, RV::I16(x)) => WS::I16(x),
+        (_, RV::I32(x)) => WS::I32(x),
+        (_, RV::I64(x)) => WS::I64(x),
+        (_, RV::F32(x)) => WS::F32(x),
+        (_, RV::F64(x)) => WS::F64(x),
+        (_, RV::Bool(b)) => WS::Bool(b),
+        (_, RV::TimestampUs(x)) => WS::TimestampUs(x),
+        (_, RV::Utf8(s)) => WS::Utf8(s),
+        // ⊘ Lists land with epic 3's multi surface; no writer produces one, and a reader that met
+        // one would be looking at a future format — no answer, not a guess.
+        (_, RV::List(_)) => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     /// I13a pin (D-F): a panic inside `install`/`par_iter` on the engine's shared pool must
@@ -3248,16 +4234,24 @@ mod tests {
     /// to share that harness across a `tests/` integration binary and an internal `src/` module
     /// (different compilation units), for a test whose only load-bearing claim is "rayon
     /// propagates a worker panic through `install()`" — a property of rayon's own pool, not of
-    /// anything `Engine::open` does when building one. The construction below is checked against
-    /// `Engine::open`'s by inspection (both are a bare
-    /// `rayon::ThreadPoolBuilder::new().num_threads(n).build()`, no further configuration either
-    /// side) rather than by sharing code, which is what "identical construction" above means.
+    /// anything `Engine::open` does when building one. The pool below is now built by `Engine::open`'s own constructor
+    /// ([`super::build_compute_pool`]) rather than by a look-alike checked against it by
+    /// inspection, so "identical construction" above is a fact rather than a claim.
+    ///
+    /// # What it does not cover, which is the half the write path uses
+    ///
+    /// `install` is synchronous and has a caller to propagate to. The write path's flush, merge and
+    /// coalesce use `pool.spawn`, which has none, and a panic there reaches the pool's panic
+    /// handler instead — so this test says nothing about them, and the reassurance it reads as was
+    /// once taken for one. That path is pinned by
+    /// [`a_panic_in_a_spawned_pool_task_is_recorded_before_the_process_aborts`].
+    ///
+    /// **Mutations this kills:** removing the panic handler's exemption for propagating APIs — if
+    /// `install` ever routed through the handler, this test would abort its own process rather
+    /// than pass.
     #[test]
     fn a_panic_inside_the_shared_pool_propagates_to_the_caller() {
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(2)
-            .build()
-            .expect("pool should build");
+        let pool = super::build_compute_pool(2).expect("pool should build");
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             pool.install(|| {
@@ -3268,6 +4262,115 @@ mod tests {
         assert!(
             result.is_err(),
             "a panic inside install() must propagate to the caller, not be swallowed"
+        );
+    }
+
+    /// **A panic in a task spawned on the shared pool leaves a record naming what panicked, before
+    /// the process dies.**
+    ///
+    /// The write path's flush, merge and coalesce run on `pool.spawn`, whose panic rayon reports to
+    /// the pool's panic handler and, with none configured, answers by aborting the process — one
+    /// line, no payload, no backtrace, and `libtest` discarding the captured output of a test the
+    /// runner never names. That is the "target failed, no test named" this repository has seen
+    /// twice, and it is what makes a `debug_assert` inside those three passes undiagnosable.
+    ///
+    /// # A subprocess, because the behaviour under test ends the process
+    ///
+    /// The child is this same test binary, re-executed against the `#[ignore]`d case below, which
+    /// runs only with `POOL_PANIC_CHILD` set — so a plain `--ignored` sweep does not abort someone's
+    /// test run. What is asserted is the child's *stderr*, which is where the record has to be:
+    /// `libtest` captures the print macros and drops what it captured when the process dies, so a
+    /// record written through them would be exactly as lost as the panic message it replaces.
+    ///
+    /// **Mutations this kills** (each run): dropping the `panic_handler` from
+    /// [`super::build_compute_pool`] — the child aborts with rayon's own line and no payload;
+    /// writing the record through `eprintln!` rather than to `stderr` directly — the child aborts
+    /// with nothing; dropping the payload or the thread from [`super::describe_pool_panic`] — the
+    /// corresponding assertion fails.
+    #[cfg(unix)]
+    #[test]
+    fn a_panic_in_a_spawned_pool_task_is_recorded_before_the_process_aborts() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let exe = std::env::current_exe().expect("the test binary knows its own path");
+        let out = std::process::Command::new(exe)
+            // A substring filter, not `--exact`: the module path of a unit test is not something
+            // this test should have to restate correctly.
+            .args(["--ignored", "--nocapture", "the_pool_panic_child"])
+            .env(POOL_PANIC_CHILD, "1")
+            .output()
+            .expect("the test binary re-executes");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+
+        assert!(
+            !out.status.success(),
+            "a panicked pooled task must not leave the process healthy: {out:?}"
+        );
+        assert_eq!(
+            out.status.signal(),
+            Some(libc::SIGABRT),
+            "the behaviour is unchanged — the process still aborts; only the record is new: \
+             {stderr}"
+        );
+        assert!(
+            stderr.contains("spawned on the shared compute pool panicked"),
+            "the record names the subsystem: {stderr}"
+        );
+        assert!(
+            stderr.contains("synthetic pooled-task panic"),
+            "the record carries the payload, which is what makes it a diagnosis: {stderr}"
+        );
+        assert!(
+            stderr.contains("worker thread:"),
+            "and the thread it happened on: {stderr}"
+        );
+    }
+
+    /// The child half of
+    /// [`a_panic_in_a_spawned_pool_task_is_recorded_before_the_process_aborts`]. Aborts the process
+    /// by design, and does nothing at all unless that parent set `POOL_PANIC_CHILD` — an
+    /// `--ignored` sweep must not take a test binary down with it.
+    #[test]
+    #[ignore = "child half of the pool-panic test: inert unless the parent set POOL_PANIC_CHILD"]
+    fn the_pool_panic_child() {
+        if std::env::var_os(POOL_PANIC_CHILD).is_none() {
+            return;
+        }
+        let pool = super::build_compute_pool(1).expect("pool should build");
+        pool.spawn(|| panic!("synthetic pooled-task panic"));
+        // The abort arrives on the worker thread; this one only has to still be here for it.
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        unreachable!("the panic handler aborts long before this");
+    }
+
+    const POOL_PANIC_CHILD: &str = "TESSERA_POOL_PANIC_CHILD";
+
+    /// **The record carries the payload for both of the shapes a panic can leave it in, and says so
+    /// when it is neither.**
+    ///
+    /// `panic!("literal")` leaves a `&'static str` and `panic!("{x}")` a `String`; an assertion
+    /// macro's payload is one of the two, and a `panic_any` is neither. A record that reads
+    /// "a payload that is neither" for the common case is the diagnosis quietly not happening.
+    ///
+    /// **Mutations this kills:** downcasting to only one of the two types; dropping the payload
+    /// from the record; dropping the backtrace.
+    #[test]
+    fn the_pool_panic_record_carries_every_payload_shape() {
+        let from_literal: Box<dyn std::any::Any + Send> = Box::new("a literal payload");
+        let from_format: Box<dyn std::any::Any + Send> =
+            Box::new("a formatted payload".to_string());
+        let from_neither: Box<dyn std::any::Any + Send> = Box::new(7u32);
+
+        let literal = super::describe_pool_panic(from_literal.as_ref());
+        assert!(literal.contains("a literal payload"), "{literal}");
+        assert!(
+            literal.contains("backtrace"),
+            "the record carries a backtrace, which is the half a one-line abort never had: \
+             {literal}"
+        );
+        assert!(super::describe_pool_panic(from_format.as_ref()).contains("a formatted payload"));
+        assert!(
+            super::describe_pool_panic(from_neither.as_ref()).contains("neither &str nor String")
         );
     }
 }

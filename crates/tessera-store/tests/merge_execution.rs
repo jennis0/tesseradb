@@ -33,8 +33,8 @@ fn segment(root: &Path, seg_id: &str, entity_lo: u64, count: u64, stride: u64) -
         .map(|e| FlushRow {
             entity_id: EntityId::new(e),
             external_id: Some(format!("ext-{e}").into_bytes()),
-            x: (((e * stride) % 97) as f32) / 97.0,
-            y: (((e * 53) % 89) as f32) / 89.0,
+            x: (((e * stride) % 97) as f64) / 97.0,
+            y: (((e * 53) % 89) as f64) / 89.0,
             scalars: vec![],
         })
         .collect();
@@ -43,6 +43,7 @@ fn segment(root: &Path, seg_id: &str, entity_lo: u64, count: u64, stride: u64) -
         PARTITION,
         VIEW,
         FlushInput {
+            incarnation: 0,
             seg_id,
             rows,
             quantisation: quantisation(),
@@ -67,11 +68,13 @@ fn merge(root: &Path, inputs: &[MergeInput]) -> tessera_store::flush::FlushOutpu
         PARTITION,
         VIEW,
         MergeSpec {
+            incarnation: 0,
             seg_id: "merged-1",
             inputs,
             identity_key: &key(),
             shard_id: 0,
             scalar_schema: &schema,
+            scoped_from: usize::MAX,
             row_base: 0,
             // The live values a publication would carry — deliberately *above* the inputs' own
             // range, so a merge that derived them from `entity_hi` would show up as a regression.
@@ -256,11 +259,13 @@ fn out_of_order_inputs_are_refused() {
         PARTITION,
         VIEW,
         MergeSpec {
+            incarnation: 0,
             seg_id: "merged-1",
             inputs: &[a, b],
             identity_key: &key(),
             shard_id: 0,
             scalar_schema: &schema,
+            scoped_from: usize::MAX,
             row_base: 0,
             watermark: 10_000,
             entity_id_high_water: 10_000,
@@ -290,11 +295,13 @@ fn a_missing_scalar_column_fails_the_merge_rather_than_shifting_the_rest() {
         PARTITION,
         VIEW,
         MergeSpec {
+            incarnation: 0,
             seg_id: "merged-1",
             inputs: &[a, b],
             identity_key: &key(),
             shard_id: 0,
             scalar_schema: &schema,
+            scoped_from: usize::MAX,
             row_base: 0,
             watermark: 10_000,
             entity_id_high_water: 10_000,

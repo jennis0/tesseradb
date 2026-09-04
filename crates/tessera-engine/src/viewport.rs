@@ -45,6 +45,7 @@
 //! See [`SERIAL_FALLBACK_MAX_ROWS`]'s doc for the predictor argument and the sweep data, and the
 //! calibration report for the full method.
 
+use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -53,18 +54,21 @@ use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
 use tessera_authz::FrozenFragment;
+use tessera_spatial::projection::Projection;
 use tessera_spatial::tiler::ScalarType;
 use tessera_spatial::{tiles_for_bbox, tiles_for_bbox_count, Bounds, Tile};
-use tessera_store::manifest::{DeclaredScalar, Quantisation};
+use tessera_store::manifest::{DeclaredScalar, Quantisation, ViewMetadataValue};
 use tessera_store::read::{ScalarSlice, SegmentData};
 use tessera_store::vocabulary::Vocabularies;
 use tessera_store::{tile_ranges_all, tile_ranges_within};
-use tessera_types::{EntityId, GenerationStamp, RowId, TesseraId, API_VERSION};
+use tessera_types::layer::ComputedProperty;
+use tessera_types::{EntityId, GenerationStamp, RowId, TermId, TesseraId, API_VERSION};
 
 use crate::cache::{CacheWaitEnded, Peek, RowProjectionKey, SessionGeometry};
 use crate::cancel::CancelToken;
 use crate::compose::{compose, visible_to, EffectiveMask, FilterRows, MaskedSet, RowProjection};
 use crate::filter::{Endpoint, Family, FilterOperand, Scalar};
+use crate::membership_column::{ServedLayer, ServedLevel};
 use crate::select::{SelectParams, Selection, SelectionPart, SelectionParts, Threshold};
 use crate::session::{Engine, EngineError, Result, Session};
 use crate::timing::{Probe, StageTimings, TileProbe, TileStats};
@@ -120,6 +124,18 @@ pub struct TileCount {
     /// cited later as precedent that some *other* quantity must go on the wire because it is
     /// otherwise underivable.
     pub served: u64,
+    /// **Of this tile's `matched`, how many also satisfy the request's `highlight`**
+    /// (`highlight-and-hierarchy.md` §2) — the fifth column, always present, and equal to
+    /// `matched` where the request carried no highlight.
+    ///
+    /// **Always present rather than optional**, because an absent highlight is the identity for
+    /// this quantity: `highlighted = matched` says exactly what a missing column would, costs
+    /// eight bytes a tile, and leaves the wire with one schema instead of two.
+    ///
+    /// `highlighted ≤ matched ≤ visible` holds by construction — each is the count of a subset of
+    /// the last — which is what makes the wash the client draws from it comparable, tile to tile,
+    /// with the number beside it.
+    pub highlighted: u64,
 }
 
 /// The sampled points, column-major: one buffer per field, all of the same length.
@@ -154,6 +170,20 @@ pub struct PointColumns {
     /// full declaration: a `filter`-only or blob-resident column occupies no slot in a segment's
     /// tail (contracts §2.6), so a buffer under its name could only be invented values.
     pub scalars: Vec<ColumnBuf>,
+    /// One column per layer this response served artifacts from, in the response's layer order:
+    /// the deepest served artifact each point belongs to, or `None` — see
+    /// [`crate::membership_column`]. Empty when no artifact was served. Parallel to the three
+    /// buffers above, and named by the chunk rather than by the head because which layers get a
+    /// column is not known until the artifact pass has run, which is after the head is delivered.
+    pub membership: Vec<crate::membership_column::MembershipColumn>,
+    /// One bit per point: whether it satisfies the request's `highlight`
+    /// (`highlight-and-hierarchy.md` §2). `None` where the request carried none, which is an
+    /// **absent column** on the wire rather than an all-false one — a `false` would answer a
+    /// question nobody asked.
+    ///
+    /// Parallel to the three buffers above when present. It sits after the render scalars and
+    /// before the membership columns, so a decoder indexing scalars positionally is unaffected.
+    pub highlighted: Option<Vec<bool>>,
 }
 
 impl PointColumns {
@@ -196,6 +226,22 @@ impl PointColumns {
         for (dst, src) in self.scalars.iter_mut().zip(other.scalars) {
             dst.append(src)?;
         }
+        // The same positional rule for the membership columns, and the same reason: every chunk
+        // of one response is resolved against the same served layers in the same order. The
+        // layer names are checked rather than assumed, because unlike a scalar's type nothing
+        // downstream would catch a column appended under another layer's name.
+        for (dst, src) in self.membership.iter_mut().zip(other.membership) {
+            assert_eq!(
+                dst.layer, src.layer,
+                "chunks of one response cannot disagree on their membership layers"
+            );
+            dst.ids.extend(src.ids);
+        }
+        // Seeded from the request rather than from the first chunk, exactly as the scalars are, so
+        // presence is decided once for the response and a chunk cannot introduce or drop it.
+        if let (Some(dst), Some(src)) = (self.highlighted.as_mut(), other.highlighted) {
+            dst.extend(src);
+        }
         Ok(())
     }
 
@@ -207,6 +253,13 @@ impl PointColumns {
         let mut bytes = self.tessera_ids.len() * 16;
         for col in &self.scalars {
             bytes += col.wire_bytes_estimate();
+        }
+        // A u64 and a validity bit per point per membership column.
+        bytes += self.membership.len()
+            * (self.tessera_ids.len() * 8 + self.tessera_ids.len().div_ceil(8));
+        // A bit per point, in Arrow's packed boolean buffer.
+        if self.highlighted.is_some() {
+            bytes += self.tessera_ids.len().div_ceil(8);
         }
         bytes
     }
@@ -363,6 +416,181 @@ pub struct SubCellCount {
     pub count: u64,
 }
 
+/// Which annotation layers a viewport answers for.
+///
+/// Two shapes and no third: the empty list is *none* and costs nothing, and there is no value
+/// meaning *the default*, so a caller who did not think about layers cannot pay for all of them
+/// by accident.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayerSelection<'a> {
+    /// Every layer this principal reaches.
+    All,
+    /// These, intersected with what the principal reaches — never unioned. Empty is none.
+    Named(&'a [&'a str]),
+}
+
+/// Which of a levelled layer's declared resolutions a viewport answers for.
+///
+/// **Three shapes, and the default is the declaration's own** — unlike [`LayerSelection`], whose
+/// default is *none* because the artifact pass is the expensive one to opt into. Here the pass has
+/// already been paid for by naming the layer, and what is left is which rungs of it to answer at.
+/// The costly answer is *every level*, and it is the one a caller must ask for by name.
+///
+/// **Why the declaration decides rather than the client.** A layer declares a zoom range per level
+/// (`configuration.md`'s `[[layer.levels]]`), `/v1/meta` publishes it, and a request already
+/// carries the depth it is asking at — three facts that until now were never joined, so a client
+/// following the published map paid for every level and drew one. The map stays the client's to
+/// override; what changes is that ignoring it is now the deliberate act rather than the accidental
+/// one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LevelSelection<'a> {
+    /// The levels whose declared zoom range contains the request's depth.
+    ///
+    /// **A layer that declares no range on any level yields every level** — the levelled layer whose
+    /// author stated titles and no scales. A level with no range of its own, in a layer where others
+    /// have one, is served at every depth: it has no scale to be outside of, and inventing one for
+    /// it would drop artifacts on a guess.
+    Declared,
+    /// Every level the layer holds, whatever the depth asked at.
+    All,
+    /// Exactly these, intersected with what the layer holds — never unioned. A level the layer does
+    /// not hold is absent from the answer rather than a refusal, by the same route an unreachable
+    /// layer name is: naming a level is not a way to learn whether it exists.
+    ///
+    /// **Empty is none**, as `layers: []` is: a caller who names no level has asked for no artifacts
+    /// from any layer that declares levels. It is reachable only deliberately — the *absent* request
+    /// field is [`LevelSelection::Declared`] and not this.
+    Named(&'a [u32]),
+}
+
+/// Which of a layer's **declared** computed properties a viewport answers for.
+///
+/// **The property this is built to preserve: a request may narrow the declaration and can never
+/// widen it.** Every form below is intersected with what the layer declared, so asking for `hull`
+/// on a layer that declares none yields none, and asking for less is never a route to more. The
+/// closure rule is untouched — whatever is computed is still a function of `membership ∩ M_auth`
+/// and nothing else (`annotations.md` §4.2) — so this is a **cost** control of exactly the kind the
+/// declaration itself is, moved one step closer to the request that pays for it.
+///
+/// **Why the request needs a say at all.** The declaration is per layer and the drawing is per
+/// artifact: a client draws a hull for the one artifact under the pointer and centroids for the
+/// other 196, and with only a layer-level declaration it had to be served 197 hulls to draw one.
+/// Measured on `clusters/hdbscan` over the 2.42M corpus, that was 94% of a `k = 0` artifacts
+/// request (`artifact-shapes.md` §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComputedSelection<'a> {
+    /// Everything the layer declared — the absent request field, and what every client received
+    /// before there was a field.
+    Declared,
+    /// Exactly these, intersected with the declaration. **Empty is none**: a caller who names no
+    /// property has asked for counts and no geometry, which is a real request and not a mistake.
+    Named(&'a [ComputedProperty]),
+}
+
+impl ComputedSelection<'_> {
+    /// Whether a declared property is answered for.
+    pub(crate) fn selects(&self, property: ComputedProperty) -> bool {
+        match self {
+            ComputedSelection::Declared => true,
+            ComputedSelection::Named(names) => names.contains(&property),
+        }
+    }
+}
+
+/// Which columns of the artifacts frame a viewport answers with — `artifact-fetch-protocol.md`
+/// §5.2's projection, the one wire affordance of that design.
+///
+/// **The row set, the `matched` bits and the `rung` values are identical under either value;
+/// only the columns change.** Candidacy, the verdict, the cut and the filter probe run
+/// identically — what [`ArtifactRows::Identity`] skips is payload *production* only: derived
+/// geometry ([`crate::derived::compute`]), the key lookup, and the materialisation of supplied
+/// content (its *servability* is still tested, because an artifact whose content cannot be
+/// served is withheld, and a projection must not resurrect it). The skip is a CPU saving and
+/// nothing else; a projection that altered selection would break §5.2's contract sentence and
+/// with it every cross-reference in the response.
+///
+/// It discloses nothing: an identity response is a column subset of what the same caller's
+/// identical request would have been served.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ArtifactRows {
+    /// Every column — the default, and the answer a caller who has read nothing receives.
+    #[default]
+    Full,
+    /// `layer`, `tessera_id`, `rung`, `matched` — for the caller that already holds the payload
+    /// columns and wants this filter's bits over the same rows.
+    Identity,
+}
+
+/// Which columns each **served point** answers with (`highlight-and-hierarchy.md` §2), mirroring
+/// [`ArtifactRows`] exactly.
+///
+/// **The row set and the `served` split are identical under either value; only the columns
+/// change.** That sentence is the contract, and it is what makes the projection disclose nothing:
+/// a highlight answer is a column subset of what the same caller's identical request would have
+/// been served, because the served set does not depend on the highlight at all. A client that
+/// changes only its highlight already holds every point it needs and wants only the bits, which
+/// join its held points by `tessera_id`.
+///
+/// **Bound to a generation.** The served set is deterministic within one, and a stamp move
+/// (`x-tessera-stale`) means the held set may no longer be what the same request serves — the
+/// client re-asks with [`PointRows::Full`], exactly as it does for `artifact_rows`. A client
+/// asking for this while holding nothing meets identifiers it cannot draw, knows it, and re-asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PointRows {
+    /// Every column — the default, and the answer a caller who has read nothing receives.
+    #[default]
+    Full,
+    /// `tessera_id` and `highlighted` alone. **Without a `highlight` on the request there is
+    /// nothing to project to**, so this answers as [`PointRows::Full`] does rather than serving a
+    /// column of nulls.
+    Highlight,
+}
+
+/// Whether one level of one layer is answered for.
+///
+/// Split out of the serving loop so the rule is readable on its own and a test can state it
+/// directly: the loop's job is to skip, and this is what it skips on.
+pub(crate) fn level_is_selected(
+    selection: LevelSelection<'_>,
+    declared: &[tessera_types::layer::LevelDeclaration],
+    level: u32,
+    zoom: u8,
+) -> bool {
+    // **A layer that declares no levels is not selectable, in any of the three forms.** A treed or
+    // flat layer sits entirely at level 0 (decision 0082) and a level number names nothing about it,
+    // so a request naming levels for the tiered layer beside it must not blank it. Without this the
+    // uniform reading — the selection applies to every layer named — makes `levels: [1]` alongside
+    // `layers: "all"` serve nothing at all from every clustering in the deployment.
+    if declared.is_empty() {
+        return true;
+    }
+    match selection {
+        LevelSelection::All => true,
+        LevelSelection::Named(levels) => levels.contains(&level),
+        LevelSelection::Declared => {
+            // Nothing declared a scale, so there is no map to follow and every level answers. This
+            // is the treed and flat case, and also the levelled layer whose author declared titles
+            // and no ranges.
+            if !declared.iter().any(|d| d.zoom.is_some()) {
+                return true;
+            }
+            match declared.iter().find(|d| d.level == level) {
+                // Declared, so the range decides.
+                Some(d) => match d.zoom {
+                    Some((lo, hi)) => (lo..=hi).contains(&u32::from(zoom)),
+                    // A level with no range of its own in a layer that has them: no scale to be
+                    // outside of.
+                    None => true,
+                },
+                // A run with no declaration behind it — level 0 of a treed layer reached through a
+                // layer that also declares levels cannot happen, but a run beyond the declared
+                // list would otherwise vanish silently.
+                None => true,
+            }
+        }
+    }
+}
+
 /// One `/v1/viewport` request, as the engine sees it.
 ///
 /// A struct rather than a positional argument list: the query is the system's main entry point and
@@ -439,7 +667,13 @@ pub struct ViewportRequest<'a> {
     /// **It narrows and never widens.** A name this principal does not reach is simply absent from
     /// the answer, by the same route a name nobody registered is: the request is intersected with
     /// the session's resolved set, so asking for a layer is not a way to learn whether it exists.
-    pub layers: Option<&'a [&'a str]>,
+    ///
+    /// [`ViewportRequest::new`] starts at [`LayerSelection::All`]. **The wire's default is the
+    /// opposite** (owner ruling 2026-08-25): a `/v1/viewport` request that omits `layers` names
+    /// none, and asks for every layer with the string `"all"`. A Rust caller has no *omitted* —
+    /// it constructs the request and names its selection — and the batch entry point keeps the
+    /// serve-everything default its callers were written against.
+    pub layers: LayerSelection<'a>,
     /// The client's artifact budget — how many artifacts it wants back at most, in the same shape
     /// as the `k` mark budget beside it ([decision 0083](../../../docs/decisions/0083-the-frontier-is-a-request-time-budget.md)).
     ///
@@ -460,6 +694,41 @@ pub struct ViewportRequest<'a> {
     /// Both directions are safe here — cutting shallower serves strictly less, cutting deeper
     /// serves more artifacts that each passed against `M_auth`.
     pub artifact_budget: Option<u32>,
+    /// Which of each named layer's levels to answer for. See [`LevelSelection`].
+    ///
+    /// **Applies to every layer named**, against that layer's own declaration — a level number is a
+    /// rung of one layer and means nothing across two, so there is no per-layer map here and under
+    /// [decision 0096](../../../docs/decisions/0096-layers-are-usually-one-and-the-picker-offers-the-closure.md)
+    /// a request names one layer anyway. [`LevelSelection::Declared`] needs no such map at all,
+    /// each layer's own ranges deciding for it.
+    ///
+    /// **This is a request bound and never a control.** Every artifact a level holds passed its own
+    /// existence criterion against `M_auth` before any of this ran (decision 0080), so asking for
+    /// fewer levels serves strictly less and asking for more serves only artifacts that had already
+    /// cleared their own test. It sits beside `artifact_budget` for that reason and carries the same
+    /// warning: §8.4's maximum depth was a disclosure control and this is not one.
+    pub levels: LevelSelection<'a>,
+    /// Which of each layer's declared computed properties to answer for. See
+    /// [`ComputedSelection`].
+    ///
+    /// [`ViewportRequest::new`] starts at [`ComputedSelection::Declared`], which is what the wire's
+    /// absent field means and what every response carried before the field existed.
+    pub computed: ComputedSelection<'a>,
+    /// Which columns each served artifact answers with — see [`ArtifactRows`]. The row set is
+    /// identical under either value; [`ArtifactRows::Identity`] skips payload production only.
+    pub artifact_rows: ArtifactRows,
+    /// The request's **highlight** expression, in exactly [`Self::filter`]'s grammar
+    /// (`highlight-and-hierarchy.md` §2).
+    ///
+    /// **It never changes which rows the response holds.** The cap clause, the density sampling
+    /// and `served` all run over the `filters` candidate exactly as they do without it, so the set
+    /// of points a viewer sees is the same with and without a highlight — the map does not move,
+    /// the marks do not resample, and a point the viewer was looking at stays where it is with its
+    /// brightness changed. What it adds is three answers, all conjunctions with the filter's
+    /// candidate: a count per tile, a bit per served point, and a bit per served artifact.
+    pub highlight: Option<crate::filter::FilterExpr>,
+    /// Which columns each served point answers with — see [`PointRows`].
+    pub point_rows: PointRows,
 }
 
 impl<'a> ViewportRequest<'a> {
@@ -475,13 +744,18 @@ impl<'a> ViewportRequest<'a> {
             underlay_offset: None,
             cancel: None,
             filter: None,
-            layers: None,
+            layers: LayerSelection::All,
             artifact_budget: None,
+            levels: LevelSelection::Declared,
+            computed: ComputedSelection::Declared,
+            artifact_rows: ArtifactRows::Full,
+            highlight: None,
+            point_rows: PointRows::Full,
         }
     }
 
     /// Answer for exactly these layers rather than for every one this principal reaches.
-    pub fn layers(mut self, layers: Option<&'a [&'a str]>) -> Self {
+    pub fn layers(mut self, layers: LayerSelection<'a>) -> Self {
         self.layers = layers;
         self
     }
@@ -492,9 +766,40 @@ impl<'a> ViewportRequest<'a> {
         self
     }
 
+    /// Answer for these computed properties of every layer that declares them. See
+    /// [`ComputedSelection`].
+    pub fn computed(mut self, computed: ComputedSelection<'a>) -> Self {
+        self.computed = computed;
+        self
+    }
+
+    /// Answer for these levels of every named layer. See [`LevelSelection`].
+    pub fn levels(mut self, levels: LevelSelection<'a>) -> Self {
+        self.levels = levels;
+        self
+    }
+
+    /// Answer each artifact with these columns. See [`ArtifactRows`].
+    pub fn artifact_rows(mut self, rows: ArtifactRows) -> Self {
+        self.artifact_rows = rows;
+        self
+    }
+
     /// Attach a filter expression. See [`ViewportRequest::filter`].
     pub fn filter(mut self, filter: crate::filter::FilterExpr) -> Self {
         self.filter = Some(filter);
+        self
+    }
+
+    /// Attach a highlight expression. See [`ViewportRequest::highlight`].
+    pub fn highlight(mut self, highlight: crate::filter::FilterExpr) -> Self {
+        self.highlight = Some(highlight);
+        self
+    }
+
+    /// Answer each point with these columns. See [`PointRows`].
+    pub fn point_rows(mut self, rows: PointRows) -> Self {
+        self.point_rows = rows;
         self
     }
 
@@ -544,6 +849,11 @@ pub struct ViewCoordinates {
     pub content_key: [u8; 16],
 }
 
+/// An artifact's two filter answers — `(matched, highlighted)`, each `None` where the request
+/// asked no such question. They are named as a pair because a dependent inherits both or neither
+/// (`highlight-and-hierarchy.md` §2; decision 0104's D13 argument for the first).
+type FilterBits = (Option<bool>, Option<bool>);
+
 /// One artifact, as a viewport serves it.
 ///
 /// **The absences are the design.** There is no ordinal — a position in a dense
@@ -573,18 +883,75 @@ pub struct ArtifactOut {
     /// it safe beside a gate that may have admitted the artifact on its own terms: such an artifact
     /// is authorised to *exist*, not to describe members the viewer cannot see.
     pub derived: crate::derived::DerivedContent,
-    /// This artifact's parent, **and only ever one that is also in this response**.
+    /// This artifact's parents, **and only ever those that are also in this response**, ascending
+    /// by identifier (`dag-hierarchies.md` §7). A tree's list is at most one long; a `dag`
+    /// layer's may name several.
     ///
     /// The structure a client needs to nest what it draws, or to filter to one subtree while still
-    /// drawing the rest of the map. **Null covers two situations on purpose**: a root, and a parent
-    /// that exists but was withheld from this viewer. Distinguishing them would disclose that a
-    /// coarser grouping exists which they are not cleared to see.
-    pub parent_id: Option<TesseraId>,
+    /// drawing the rest of the map. **An absent entry covers two situations on purpose**: a root,
+    /// and a parent that exists but was withheld from this viewer (C29, per entry). Distinguishing
+    /// them would disclose that a coarser grouping exists which they are not cleared to see.
+    pub parent_ids: Vec<TesseraId>,
     /// **This is one content, entire.** Where an artifact carries several ranked descriptions,
     /// this is the first whose generating set the viewer contains completely; a viewer containing
     /// none receives no artifact at all rather than this list empty. Empty means the layer declares
     /// no supplied content, and nothing else.
     pub content: Vec<String>,
+    /// **The resolution a client draws this artifact at**, computed the right way for its
+    /// layer's kind (`artifact-fetch-protocol.md` §5.3 — the rung ruling, which renamed and
+    /// re-meant the `level` field this carried until then).
+    ///
+    /// On a **levelled** layer it is the declared level — a fact about the artifact, the same for
+    /// every principal served it, indexing the level set `/v1/meta` publishes. A client needs
+    /// that number because the alternative it was reduced to is wrong: a tiered layer's edges
+    /// skip levels and leave roots parentless, so counting `parent_ids` links disagrees with the
+    /// declaration on every layer whose data is not a perfect ladder.
+    ///
+    /// On a **treed** layer — which declares no levels and sits entirely at level 0, its
+    /// structure in its edges ([decision 0082](../../../docs/decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md))
+    /// — it is the **response-local depth**: the longest parent chain to this row in the forest
+    /// the response's own `parent_ids` links form (`dag-hierarchies.md` §5), *after* the budget
+    /// cut and every other narrowing, so the root of a re-rooted subtree reads 0. That is the
+    /// number walking the served parents yields, computed server-side so no client has to know
+    /// which layer kind wants which derivation (the shipped client picked wrongly once).
+    ///
+    /// On a **flat** layer it is 0.
+    pub rung: u32,
+    /// Whether the served shape's vertex budget cut vertices the request's depth alone would have
+    /// kept (`polygon-membership.md` §7.2) — a predicate or an authored shape still above 2,048
+    /// vertices at that depth. Counted into the trailer's `stage_ns` companion; never a
+    /// disclosure, being a fact about a drawing every principal served the artifact receives alike.
+    pub shape_guard_fired: bool,
+    /// **Whether any member of this artifact that the principal may see, and that lies inside the
+    /// request's tiles, matches the request's filter** — `None` where the request carried no
+    /// filter, which is *there was no question* rather than *no matches*
+    /// ([decision 0104](../../../docs/decisions/0104-a-filter-answers-a-boolean-per-served-artifact.md)).
+    ///
+    /// **A boolean and never a count.** A filtered count beside [`Self::masked_count`] would put
+    /// two numbers on one artifact and make a client choose which it is showing.
+    ///
+    /// **It is the only filter-dependent field here.** Existence and the count stay anchored on
+    /// `M_auth`, so a filter cannot make an artifact appear or vanish and cannot move the number
+    /// beside it (**I3**, **I12**) — and a client holding this artifact's payload across a filter
+    /// change holds nothing stale but this.
+    ///
+    /// **It is clipped to the viewport where the count is not.** The count and the geometry are
+    /// over the whole visible membership; this is over the part of it in view, because that is the
+    /// extent every filter-crossing route can answer over rather than the extent one of them can.
+    /// So an artifact whose only matches sit just off screen reads `false` until the viewer pans.
+    ///
+    /// **A dependent artifact carries its target's**, as its [`Self::masked_count`] does (D13): a
+    /// label describes its cluster, and its own membership is a slice of that cluster at best.
+    pub matched: Option<bool>,
+    /// **The same bit for `all_of[filters, highlight]`** (`highlight-and-hierarchy.md` §2):
+    /// whether a member this principal may see, inside the request's tiles, satisfies **both**
+    /// expressions — `None` where the request carried no `highlight`, which is *there was no
+    /// question* rather than *no matches*.
+    ///
+    /// Every rule [`Self::matched`] carries holds here unchanged, because this is that bit under a
+    /// second expression and not a second kind of answer: a boolean and never a count, clipped to
+    /// the viewport where the count is not, and the only other filter-dependent field on the row.
+    pub highlighted: Option<bool>,
 }
 
 /// The masked viewport response. No `serde` derive (I10) — see [`PointOut`]'s doc.
@@ -608,6 +975,8 @@ pub struct ViewportOut {
     /// argument for per-session scoping survives as an efficiency argument (do not wake clients
     /// whose view did not change), not a security one.
     pub stale: bool,
+    /// See [`ViewportHead::region`].
+    pub region: Option<crate::region::RegionVerdict>,
     pub tiles: Vec<TileCount>,
     /// The annotation artifacts intersecting the request's tiles, each with the count *this*
     /// principal's visible set generates — see [`ArtifactOut`]. Empty when the principal reaches no
@@ -667,6 +1036,10 @@ pub struct ViewportHead {
     pub stamp: GenerationStamp,
     /// See [`ViewportOut::stale`].
     pub stale: bool,
+    /// The region leaves' verdict — `x-tessera-region` — or `None` where the request carried no
+    /// region leaf. A function of the shapes and the grid alone, settled before any row is read
+    /// (selection-operand §6).
+    pub region: Option<crate::region::RegionVerdict>,
     /// The **render**-column schema, in declaration order, from the SAME generation the response
     /// is served from — names for the wire's column headers, types so a collecting sink can seed
     /// empty columns for a response that emits no points chunk at all.
@@ -677,6 +1050,11 @@ pub struct ViewportHead {
     /// column's name. The full compiled schema is `/v1/meta`'s to publish ([`EngineMeta`]), where
     /// it describes the ingest plane rather than a row.
     pub render_scalars: Vec<DeclaredScalar>,
+    /// Whether the *points* frame carries a `highlighted` column — i.e. whether the request
+    /// carried a `highlight` (`highlight-and-hierarchy.md` §2). Settled here, before the first
+    /// byte, for the reason [`Self::render_scalars`] is: the frame's schema is fixed for the
+    /// response and a chunk may not introduce or drop a column.
+    pub highlighted: bool,
 }
 
 /// The sink told the producer to stop: the consumer is gone (a closed channel, an expired
@@ -776,6 +1154,80 @@ pub struct ItemOut {
     /// the same statement the record blob makes byte-wise (records §3).
     pub fields: Vec<ItemField>,
     pub external_id: Option<Vec<u8>>,
+    /// **The satisfied terms only** (decision 0114): the intersection of this item's own term set
+    /// with the asking session's satisfied set, presented through the plugin, sorted bytewise.
+    ///
+    /// Never the item's full label set. A viewer learning a compartment they do not hold is the
+    /// disclosure this endpoint would otherwise be, and the intersection is what makes every
+    /// string here computable from inside the principal's own authority (**I2**). It is taken
+    /// against [`Session::satisfied_descriptors`], which holds only the descriptors the
+    /// credential itself presented — so a term outside the grant has no name to be served under,
+    /// whatever the intersection does.
+    ///
+    /// **Sorted by the presented string, not by term ordinal.** Ordinal order is the corpus's
+    /// interning order, which is a fact about the whole dictionary rather than about this
+    /// principal; sorting the strings is deterministic and says nothing the set does not.
+    pub labels: Vec<String>,
+    /// **The views this item holds a row in that this session may reach**, sorted by id, each with
+    /// the position that view places it at (owner ruling 2026-09-01).
+    ///
+    /// A view the gate refuses is absent, exactly as a view nobody declared is (`views.md` §6): the
+    /// array is built from the session's own [`crate::Session::visible_views`], so it can never
+    /// become the one place a gate-failed view is named. Empty is therefore two different facts
+    /// wearing one shape — an item held only in views this principal cannot reach, and an item in
+    /// no view at all — and that is deliberate: distinguishing them is precisely the disclosure
+    /// the gate exists to prevent. (An item in no view at all is a `404` before this is built, so
+    /// what a client actually sees is the first case alone.)
+    ///
+    /// **A position is a fact about a view, not about an item.** Two views of one bundle quantise
+    /// against different frames and may be projected differently (decision 0040), so the same item
+    /// sits at a different `(x, y)` in each and there is no bundle-wide position to serve instead.
+    pub views: Vec<ItemView>,
+    /// **The group-scoped attribute values this principal may see** (`views.md` §5, owner ruling
+    /// 2026-09-01), one entry per family, sorted by family name.
+    ///
+    /// **Keyed by the group's key, because the key is a view's only address**
+    /// ([decision 0113](../../../docs/decisions/0113-ordinals-are-removed-and-the-key-is-the-only-address.md)):
+    /// a family's value belongs to a `(entity, key)` pair, and two views sharing a key through a
+    /// `members` group share the value. Gate-filtered per key on the same set `views` is: a key
+    /// whose views this principal cannot reach is absent, and a family with no reachable key is
+    /// absent whole.
+    ///
+    /// **Every family with a per-view value column, whatever its flags** — which is what a
+    /// declaration with neither `index` nor `render` means: stored, served here, on no filter
+    /// surface and in no row tail. A `text` family is the one absent kind, having no per-entity
+    /// value slot to read (`views.md` §5).
+    pub scoped: Vec<ItemScoped>,
+}
+
+/// One view a drill-down's item holds a row in, and where that view puts it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemView {
+    /// The view's id — a plain view's name or `<group>:<key>`, the same address `/v1/meta` and
+    /// every viewer verb use.
+    pub id: String,
+    /// The horizontal axis in **this view's own grid units**, 32-bit fixed point against the frame
+    /// `/v1/meta` publishes for this view. The same units the viewport's Morton codes decode to,
+    /// deinterleaved server-side because a drill-down carries one point and a JSON number cannot
+    /// hold a 64-bit code exactly.
+    pub x: u32,
+    /// The vertical axis, on [`Self::x`]'s terms.
+    pub y: u32,
+}
+
+/// One group-scoped attribute family's values for a drill-down's item, keyed by the group's key.
+///
+/// **No group name here**, though the keys are one group's: `/v1/meta`'s `scoped_scalars` already
+/// says which group each family is scoped to, and a second copy beside the values is a second
+/// thing to disagree with the first.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ItemScoped {
+    /// The family's name, as a filter leaf spells it before any pin.
+    pub name: String,
+    /// The values this item carries, by key, sorted by key. A key the item carries no value under
+    /// is absent rather than null, the same rule the record's fields follow; a key this principal
+    /// cannot reach is absent for a different reason, and the two are deliberately one shape.
+    pub values: Vec<(String, ScalarOut)>,
 }
 
 /// One declared field of a drill-down record: the column's declared name and its value.
@@ -785,16 +1237,112 @@ pub struct ItemField {
     pub value: ScalarOut,
 }
 
+/// One declared view, as `GET /v1/meta` publishes it.
+///
+/// **The projection and the frame are both here, because that is where each is declared**
+/// (`projections.md` §3, decision 0040): a projection and an extent belong to a view, and two
+/// views of one bundle may be projected — and quantised — differently. What a client draws under
+/// a view is a function of the two together, and the server derives `tile` from them here rather
+/// than at the wire (`projections.md` §9).
+#[derive(Debug, Clone)]
+pub struct MetaView {
+    pub id: String,
+    pub display_name: String,
+    /// The frame every position in this view is quantised against, immutable for the view's life
+    /// (decision 0040) — what a client decodes a Morton prefix with, and what the write path
+    /// checks a coordinate against.
+    pub quantisation: Quantisation,
+    /// What placed every position in this view before the frame did — the closed set of
+    /// `projections.md` §5, and [`Projection::None`] for a view that projects nothing.
+    pub projection: Projection,
+    /// The tile this view's frame **is**, in the scheme that addresses it — or `None` where no
+    /// published scheme does, which is every projection but an aligned `web_mercator` one.
+    ///
+    /// **The scheme and the address are one field because neither is meaningful alone**: an
+    /// address without a scheme names nothing, and a scheme with no address gives a client no
+    /// tiles to ask for. The wire publishes them as two (`projections.md` §9) and they are absent
+    /// together.
+    pub tile: Option<TileAddress>,
+    /// Where this view sits in its group's roster (`views.md` §3.2), or `None` for a plain view.
+    ///
+    /// **A plain view has no roster entry, and that is a fact rather than an omission**: a key is
+    /// a group's, so a plain view carrying an empty one would invite a client to order a set of
+    /// one.
+    pub roster: Option<MetaRoster>,
+}
+
+/// One view's roster record, as `GET /v1/meta` publishes it beside the view (`views.md` §3.2).
+///
+/// The key is the caller's own and is a view's only address
+/// ([decision 0113](../../../docs/decisions/0113-ordinals-are-removed-and-the-key-is-the-only-address.md));
+/// the metadata is the group's declared names with this view's typed values. **Order is the list's
+/// order** — creation order, which is roster-record order — so a client offers previous-and-next
+/// by walking the group's `views` array rather than by interpreting a key or a number.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MetaRoster {
+    pub group: String,
+    pub key: String,
+    /// Typed, one entry per name the owning group declared. Empty on a `members` group's views,
+    /// whose metadata belongs to the owner (`views.md` §3.3).
+    pub metadata: BTreeMap<String, ViewMetadataValue>,
+}
+
+/// One view group, as `GET /v1/meta` publishes it: the name and its views in creation order.
+///
+/// **A group is not a view** — it cannot be named on a viewer verb and has no row space — so what
+/// is published here is the ordering and nothing else: every setting a group holds is already on
+/// each of its views, and a second copy of the frame beside the roster is a second thing to
+/// disagree with the first.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MetaGroup {
+    pub name: String,
+    /// The group's declared title, `None` where it declared none. Presentation metadata on an
+    /// object whose visibility is already decided, so it is a deployment constant and not a
+    /// per-principal field: a principal who sees the group sees its title.
+    pub title: Option<String>,
+    /// The group whose keys these are, where this group declares `members`
+    /// (`views.md` §3.3); `None` where it owns them.
+    pub members_of: Option<String>,
+    /// This group's view ids — the joined `group:key` form a request names — in creation order.
+    pub views: Vec<String>,
+}
+
+/// The tile a view's frame corresponds to, and the scheme it is a tile of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TileAddress {
+    /// The tile scheme's name — [`tessera_spatial::frame::XYZ`], the slippy-map `z/x/y` every
+    /// basemap server publishes, is the only one this system can name.
+    pub scheme: &'static str,
+    pub z: u32,
+    pub x: u32,
+    pub y: u32,
+}
+
 /// `GET /v1/meta`'s payload (R5) — the bundle-level facts a viewer client needs before it can
 /// issue a sensible `/v1/viewport` call.
 #[derive(Debug, Clone)]
 pub struct EngineMeta {
     pub api_version: u32,
     pub bundle_format: u32,
-    /// `(id, display_name)` pairs, in manifest order.
-    pub views: Vec<(String, String)>,
-    pub quantisation: Quantisation,
+    /// The declared views, **in serving order** (`views.md` §3.2): the plain views in manifest
+    /// order, then each group's views in creation order. Each carries its own frame (decision
+    /// 0040) and, for a group's view, its roster record. There is no bundle-level extent:
+    /// [`EngineMeta::quantisation_of`] answers for a named view, and a caller with no view id is
+    /// asking a question the bundle cannot answer.
+    pub views: Vec<MetaView>,
+    /// The view groups, in manifest order, each listing its views in creation order.
+    ///
+    /// Empty is the ordinary case — a declaration of plain views alone — and it is the same
+    /// answer as "this bundle has no group", there being nothing else empty could mean.
+    pub groups: Vec<MetaGroup>,
     pub declared_scalars: Vec<DeclaredScalar>,
+    /// The **group-scoped attribute column families** (`views.md` §5), flattened over the groups
+    /// in manifest order: one entry per family, each naming the group whose views it has a column
+    /// per and the view ids that have one.
+    ///
+    /// Empty is the ordinary case — a corpus whose attributes are all entity-scoped, which needs
+    /// no declaration to say so.
+    pub scoped_scalars: Vec<tessera_store::manifest::ScopedScalar>,
     /// The live category bindings, from the same generation as `declared_scalars`.
     ///
     /// **Ingest resolves keys through this, and never mints.** A declared vocabulary is immutable
@@ -809,25 +1357,441 @@ pub struct EngineMeta {
     pub idset: u32,
 }
 
+/// **The one statement of §3.3's ownership rule**: the key `view` holds in `group`'s roster,
+/// given the roster record `view` carries — `(its own group, its key)` — and a lookup for what a
+/// group declares `members` of.
+///
+/// A view of `group` holds its own key; a view of a group declaring `members` of `group` holds the
+/// same key, the keys being the owner's by construction; anything else holds none. Two callers ask
+/// it of different data — [`EngineMeta::owning_key`] of the meta document's roster records,
+/// [`scoped_render_scalars`] of the manifest's — and the rule itself lives here so it cannot come
+/// to mean two things. The build asks the same question of its own arguments
+/// (`pipeline::scoped_render_targets`), across a crate boundary, and says so at that site.
+pub(crate) fn owning_key_of<'a>(
+    roster: (&'a str, &'a str),
+    members_of: impl FnOnce(&str) -> Option<&'a str>,
+    group: &str,
+) -> Option<&'a str> {
+    let (own_group, key) = roster;
+    if own_group == group {
+        return Some(key);
+    }
+    (members_of(own_group)? == group).then_some(key)
+}
+
+/// What a filter leaf's column spelling resolves to under a request's view
+/// ([`EngineMeta::resolve_filter_column`], `views.md` §5).
+///
+/// **Four outcomes, and three of them are refusals a caller can act on.** They are kept apart
+/// here, in the engine, rather than collapsed into one error at the wire, because the codes they
+/// carry differ: an ambiguous leaf is contracts §3.1's `422` — a malformed request, not an empty
+/// answer, since a leaf with no column to read is not a constraint — where a pin naming nothing is
+/// the `404` an unknown view already gets, and must stay indistinguishable from one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeafColumn {
+    /// Not a filterable column under any spelling: the ordinary unknown-column refusal.
+    Unknown,
+    /// The column the engine evaluates — the leaf's own name for an entity-scoped column, and one
+    /// view's resolved name for a group-scoped family — and the family its values are read by.
+    Resolved {
+        column: String,
+        family: crate::filter::Family,
+    },
+    /// A group-scoped attribute named bare under a view that decides no column of its family.
+    Unpinned { group: String },
+    /// A pin naming no view of the attribute's group — an undeclared key, or a view with no
+    /// column.
+    UnknownPin { group: String, pin: String },
+    /// A pin on a column that has no scope: one column for the corpus, and nothing for a view to
+    /// choose between.
+    PinOnUnscoped { column: String },
+}
+
+impl EngineMeta {
+    /// The projection that placed a named view's positions, or `None` for a view this bundle does
+    /// not declare.
+    ///
+    /// **Keyed by view, never bundle-wide.** A projection is declared per view (`projections.md`
+    /// §3) while the frame is not, so a single answer would have to pick one of two differently
+    /// projected views — and both callers are about one view's rows: a `region` leaf names the view
+    /// it filters, and a shape submission names the layer whose views it publishes into. Reading
+    /// the *first* declared view instead is correct only while a bundle carries one, and fails
+    /// silently rather than loudly on the day one carries two: a shape would be placed by another
+    /// view's projection and simply hold the wrong rows.
+    ///
+    /// An unknown name is `None` and the caller refuses. Defaulting it to [`Projection::None`]
+    /// would put a degree through the identity transform and quantise it as a frame coordinate.
+    /// The view a request's id names — a plain view's name, or a group's `<group>:<key>`
+    /// (`views.md` §3.2).
+    ///
+    /// **One resolution for both planes.** A viewer verb's `view`, `x-tessera-view` and this
+    /// document's own `views` are one namespace, and two resolutions of it would eventually
+    /// disagree about what a `404` is — which contracts §3.1's closed code list does not allow.
+    /// **The key is the only address a view has** (decision 0113): an id nothing declares is
+    /// `None` whatever shape it has, and the caller's 404 says no more than "unknown view".
+    pub fn resolve_view(&self, requested: &str) -> Option<&MetaView> {
+        self.views.iter().find(|v| v.id == requested)
+    }
+
+    /// [`Self::resolve_view`] **through the session's visible-view set** (`views.md` §6) — the one
+    /// place a viewer verb's `view` is resolved, and the only gate check the request path makes.
+    ///
+    /// **One set-membership lookup, on both outcomes, and that is the point.** The probe is made
+    /// whether or not a view was found: a gate-failed name and a name nobody ever declared reach
+    /// the caller as the same `None`, having cost the same work — no plugin call, no roster scan,
+    /// no second branch. That is r23's work-indistinguishability standard, and the closure
+    /// Appendix C's C4 records for `/v1/items`, applied to a view id. Making the probe conditional
+    /// on a hit would put one hash lookup on the gate-failed path and none on the unknown one,
+    /// which is the difference a timing test is built to find.
+    ///
+    /// The set itself was resolved at authorise and is fixed for the session's life, so a view
+    /// created since is a `None` here until the session re-authorises — the owner ruling
+    /// [`crate::Session::visible_views`] records.
+    pub fn resolve_visible_view(
+        &self,
+        requested: &str,
+        visible: &crate::gate::VisibleViews,
+    ) -> Option<&MetaView> {
+        let resolved = self.resolve_view(requested);
+        let probe = resolved.map_or(crate::gate::NO_SUCH_VIEW, |v| v.id.as_str());
+        match visible.contains_view(probe) {
+            true => resolved,
+            false => None,
+        }
+    }
+
+    /// Resolve a **filter leaf's column spelling** under the view a request names
+    /// (`views.md` §5) — the one place the `@` forms are read, on both the meta surface's side and
+    /// the parser's.
+    ///
+    /// An entity-scoped column resolves to itself and takes no pin: there is one column for the
+    /// corpus, and a pin on it would name a view that decides nothing. A **group-scoped** family
+    /// resolves to exactly one view's column:
+    ///
+    /// - **under a view of the attribute's group**, or of a group sharing its views
+    ///   (`views.md` §3.3), the request's own view decides and nothing is added to the wire;
+    /// - **under any other view** the leaf must pin — `sentiment@2026-Q3`, by key and only by key
+    ///   — resolved through the same `group:key` namespace [`EngineMeta::resolve_view`] answers a
+    ///   viewer verb's `view` from, so the two cannot come to disagree about what a name means;
+    /// - a **pin under a view of the same group** is allowed and means what it says: Q4's map
+    ///   filtered by Q3's sentiment.
+    ///
+    /// The resolved column is an ordinary entity-space one and evaluates as its family's unscoped
+    /// columns do — the scope decides which file, never how the values are read.
+    ///
+    /// **The scoped surface is inside the gate** (`views.md` §5, §6), and it collapses in one
+    /// direction: for a principal whose group gate fails, the whole attribute is **undeclared**.
+    /// Bare and pinned uses alike take [`LeafColumn::Unknown`] — the ordinary unknown-column
+    /// refusal, which names no group — rather than the `Unpinned` 422 that names one or the
+    /// `UnknownPin` 404 that confirms the key space. Without that the pinned leaf is a route
+    /// around the gate: a principal failing `quarter`'s gate could filter their visible entities
+    /// by a Q3 value, which is per-entity membership of a gated view. Decision 0090's argument —
+    /// a gate at some surfaces and not others is fail-open — is the rule applied here, and
+    /// `/v1/meta`'s `filter_operands` omits the family on the same test.
+    ///
+    /// Where the group *is* reachable, a **pin** resolves through
+    /// [`EngineMeta::resolve_visible_view`], so a pin naming a view of the group this principal
+    /// may not reach is the `UnknownPin` a key no view holds already gets.
+    pub fn resolve_filter_column(
+        &self,
+        leaf: &str,
+        view: &str,
+        visible: &crate::gate::VisibleViews,
+    ) -> LeafColumn {
+        let (name, pin) = match leaf.split_once(crate::filter::PIN) {
+            Some((name, pin)) => (name, Some(pin)),
+            None => (leaf, None),
+        };
+        // **The entity-scoped columns first**, because a name is one or the other and never both:
+        // the build refuses a scoped family that shares a declared column's name.
+        if let Some(declared) = self
+            .declared_scalars
+            .iter()
+            .find(|d| d.name == name && crate::filter::is_filterable(d))
+        {
+            return match pin {
+                None => LeafColumn::Resolved {
+                    column: name.to_string(),
+                    family: crate::filter::Family::of(declared),
+                },
+                Some(_) => LeafColumn::PinOnUnscoped {
+                    column: name.to_string(),
+                },
+            };
+        }
+        let Some(family) = self
+            .scoped_scalars
+            .iter()
+            .find(|f| f.name == name && crate::filter::scoped_is_filterable(f))
+        else {
+            return LeafColumn::Unknown;
+        };
+        // **The group's gate, ahead of the pin/bare split**, so both spellings take the same
+        // unknown-column answer and neither confirms the group or its keys (`views.md` §5).
+        if !visible.contains_group(&family.group) {
+            return LeafColumn::Unknown;
+        }
+        let resolved = |view_id: &str| LeafColumn::Resolved {
+            column: crate::filter::scoped_column_name(name, view_id),
+            family: crate::filter::Family::of_scoped(family),
+        };
+        match pin {
+            Some(pin) => {
+                let requested =
+                    format!("{}{}{}", family.group, tessera_store::GROUP_SEPARATOR, pin);
+                match self.resolve_visible_view(&requested, visible) {
+                    // A view of the group that has no column — one created since the build — is
+                    // the same answer as a key nobody declared, and the same answer a gate-failed
+                    // one gets: what a caller learns is only that the pin names nothing to read.
+                    Some(view) if family.views.contains(&view.id) => resolved(&view.id),
+                    _ => LeafColumn::UnknownPin {
+                        group: family.group.clone(),
+                        pin: pin.to_string(),
+                    },
+                }
+            }
+            // **The request's own view, where it is one of the family's** — its own group's, or a
+            // group sharing them, whose keys are the owner's by construction (`views.md` §3.3).
+            None => match self.owning_key(view, &family.group) {
+                Some(key) => {
+                    let id = format!("{}{}{}", family.group, tessera_store::GROUP_SEPARATOR, key);
+                    match family.views.contains(&id) {
+                        true => resolved(&id),
+                        false => LeafColumn::Unpinned {
+                            group: family.group.clone(),
+                        },
+                    }
+                }
+                None => LeafColumn::Unpinned {
+                    group: family.group.clone(),
+                },
+            },
+        }
+    }
+
+    /// Resolve a **`/v1/categories` column spelling** — [`Self::resolve_filter_column`]'s question
+    /// asked by the value-list route, whose admission is not the filter surface's.
+    ///
+    /// **A category has a value list whether or not it is filterable**, and that difference is the
+    /// whole reason this is a second function. An entity-scoped category declared with neither
+    /// `render` nor `index` is *blob-resident* (records §3): no hot column, no entity-space
+    /// structure, no operand — and `/v1/meta` still publishes its `category` block, drill-down
+    /// still returns its code, and the code still needs a key. Resolving such a name through the
+    /// filter admission would answer `404` for a column the schema declares and the rest of the
+    /// surface talks about.
+    ///
+    /// So the entity-scoped columns are resolved here **by declaration alone**, ahead of that
+    /// admission, and everything else — every group-scoped family, the gate that collapses one,
+    /// the pin, the bare leaf with nothing to decide it — falls through to
+    /// [`Self::resolve_filter_column`] unchanged. The scoped surface therefore keeps exactly one
+    /// site deciding what a principal may reach, which is what `views.md` §5 requires of it; what
+    /// is widened is only the entity-scoped half, where there is no view and no gate to widen.
+    ///
+    /// A name that is a declared *non-category* resolves to itself and its own family, and the
+    /// caller refuses it as it refuses a name that is nothing at all — this route must not become
+    /// a finer answer than `/v1/meta`'s about which columns are categories.
+    pub fn resolve_category_column(
+        &self,
+        leaf: &str,
+        view: &str,
+        visible: &crate::gate::VisibleViews,
+    ) -> LeafColumn {
+        let (name, pin) = match leaf.split_once(crate::filter::PIN) {
+            Some((name, pin)) => (name, Some(pin)),
+            None => (leaf, None),
+        };
+        if let Some(declared) = self.declared_scalars.iter().find(|d| d.name == name) {
+            return match pin {
+                None => LeafColumn::Resolved {
+                    column: name.to_string(),
+                    family: crate::filter::Family::of(declared),
+                },
+                Some(_) => LeafColumn::PinOnUnscoped {
+                    column: name.to_string(),
+                },
+            };
+        }
+        self.resolve_filter_column(leaf, view, visible)
+    }
+
+    /// The key `view` holds in `group`'s roster — its own if it is a view of that group, and the
+    /// key it shares if its group declares `members` of it (`views.md` §3.3). `None` for a plain
+    /// view, or a view of an unrelated group.
+    ///
+    /// **Public because the ingest boundary asks it too** (decision 0116): a scoped value's address
+    /// is `(attribute → its group, key)`, so which families a batch may name is this question and
+    /// not a spelling test on the view id. One resolution, three surfaces — the filter leaf, the
+    /// render list, and the write.
+    pub fn owning_key(&self, view: &str, group: &str) -> Option<&str> {
+        let roster = self.resolve_view(view)?.roster.as_ref()?;
+        owning_key_of(
+            (&roster.group, &roster.key),
+            |name| {
+                self.groups
+                    .iter()
+                    .find(|g| g.name == name)?
+                    .members_of
+                    .as_deref()
+            },
+            group,
+        )
+    }
+
+    /// Every view id whose row space carries one column of `family` — the owning group's own
+    /// ids, and the same keys under every group declaring `members` of it (`views.md` §3.3, §5).
+    ///
+    /// **`ScopedScalar::views` is the owner's list and is not the answer a client needs.** A
+    /// request names a view, and under `quarter_map:2026-Q1` the column arrives though only
+    /// `quarter:2026-Q1` is named there — so publishing the stored list alone would tell a client
+    /// reading a sharing group's map that the column it is receiving does not exist. This is the
+    /// same expansion [`scoped_render_scalars`] makes at the request; there it resolves one view,
+    /// here it enumerates them.
+    ///
+    /// Unfiltered: the caller applies the gate, `/v1/meta`'s per-principal narrowing being the
+    /// server's own (`views.md` §6).
+    pub fn scoped_family_views(
+        &self,
+        family: &tessera_store::manifest::ScopedScalar,
+    ) -> Vec<String> {
+        let keys: Vec<&str> = family
+            .views
+            .iter()
+            .filter_map(|id| {
+                id.strip_prefix(family.group.as_str())?
+                    .strip_prefix(tessera_store::GROUP_SEPARATOR)
+            })
+            .collect();
+        let mut out = family.views.clone();
+        for group in self
+            .groups
+            .iter()
+            .filter(|g| g.members_of.as_deref() == Some(family.group.as_str()))
+        {
+            for id in &group.views {
+                let holds = id
+                    .strip_prefix(group.name.as_str())
+                    .and_then(|rest| rest.strip_prefix(tessera_store::GROUP_SEPARATOR))
+                    .is_some_and(|key| keys.contains(&key));
+                if holds {
+                    out.push(id.clone());
+                }
+            }
+        }
+        out
+    }
+
+    pub fn projection_of(&self, view: &str) -> Option<Projection> {
+        self.views
+            .iter()
+            .find(|v| v.id == view)
+            .map(|v| v.projection)
+    }
+
+    /// The frame a named view's positions are quantised against, or `None` for a view this bundle
+    /// does not declare.
+    ///
+    /// **Keyed by view, never bundle-wide** (decision 0040), on exactly the argument
+    /// [`Self::projection_of`] makes for the projection beside it: the extent is the view's, so a
+    /// single answer would have to pick one of two differently framed views, and reading the
+    /// *first* declared view is correct only while a bundle carries one. It fails silently on the
+    /// day one carries two — a region canonicalised against another view's grid, or an ingest
+    /// row's cell checked against a frame it does not live in.
+    ///
+    /// An unknown name is `None` and the caller refuses. There is no default frame.
+    pub fn quantisation_of(&self, view: &str) -> Option<Quantisation> {
+        self.views
+            .iter()
+            .find(|v| v.id == view)
+            .map(|v| v.quantisation)
+    }
+}
+
 impl Engine {
     /// `GET /v1/meta` (R5): read-only bundle facts, no session/authorisation involved. Loads the
     /// generation once, like every other request path.
     pub fn meta(&self) -> EngineMeta {
         let generation = self.generation.load_full();
         let manifest = &generation.bundle.manifest;
+        // **One derivation of what a client is looking at** (`projections.md` §9). The scheme is a
+        // function of the view's projection and the view's own frame together — both declared per
+        // view — and it is derived here rather than at the wire so that the ingest plane, which
+        // reads this same structure, cannot come to a different answer about the same bundle.
+        let meta_view = |s: &tessera_store::manifest::ViewDescriptor,
+                         roster: Option<MetaRoster>| MetaView {
+            id: s.id.clone(),
+            display_name: s.display_name.clone(),
+            quantisation: s.quantisation,
+            projection: s.projection,
+            tile: tessera_spatial::frame::tile_scheme(
+                s.projection,
+                &Bounds {
+                    x_min: s.quantisation.x_min,
+                    x_max: s.quantisation.x_max,
+                    y_min: s.quantisation.y_min,
+                    y_max: s.quantisation.y_max,
+                },
+            )
+            .map(|(scheme, square)| TileAddress {
+                scheme,
+                z: square.z,
+                x: square.x,
+                y: square.y,
+            }),
+            roster,
+        };
+        // **Serving order is the roster's order** (`views.md` §3.2): the plain views in manifest
+        // order, then each group's views in creation order — which is the order the roster
+        // records themselves are in, a build's declarations first and each create appended after
+        // (decision 0113). Nothing is sorted here: the record order *is* the order, and a sort
+        // would need a key nothing stores.
+        let rostered: std::collections::HashSet<String> = manifest
+            .groups
+            .iter()
+            .flat_map(|g| g.views.iter().map(move |v| format!("{}:{}", g.name, v.key)))
+            .collect();
+        let mut views: Vec<MetaView> = manifest
+            .views
+            .iter()
+            .filter(|v| !rostered.contains(&v.id))
+            .map(|v| meta_view(v, None))
+            .collect();
+        let mut groups: Vec<MetaGroup> = Vec::with_capacity(manifest.groups.len());
+        for group in &manifest.groups {
+            let mut ids = Vec::with_capacity(group.views.len());
+            for entry in &group.views {
+                let id = format!("{}:{}", group.name, entry.key);
+                // A roster entry with no declared view is refused at open
+                // (`Manifest::validate_groups`), so this cannot silently drop one.
+                let Some(descriptor) = manifest.views.iter().find(|v| v.id == id) else {
+                    continue;
+                };
+                ids.push(id);
+                views.push(meta_view(
+                    descriptor,
+                    Some(MetaRoster {
+                        group: group.name.clone(),
+                        key: entry.key.clone(),
+                        metadata: entry.metadata.clone(),
+                    }),
+                ));
+            }
+            groups.push(MetaGroup {
+                name: group.name.clone(),
+                title: group.title.clone(),
+                members_of: group.members_of.clone(),
+                views: ids,
+            });
+        }
         EngineMeta {
             api_version: API_VERSION,
             bundle_format: manifest.bundle_format,
-            views: manifest
-                .views
-                .iter()
-                .map(|s| (s.id.clone(), s.display_name.clone()))
-                .collect(),
-            quantisation: manifest.quantisation,
+            views,
+            groups,
             // The **full** compiled schema, including `filter`-only columns: `/v1/meta` describes
             // what a caller may declare and supply on the ingest plane, not what occupies a row.
             // The segment-facing readers narrow to `render_scalars` at their own sites.
             declared_scalars: manifest.declared_scalars.clone(),
+            scoped_scalars: manifest.scoped_scalars(),
             vocabularies: Arc::clone(&generation.vocabularies),
             idset: manifest.identity.idset,
         }
@@ -858,6 +1822,81 @@ impl Engine {
             &generation.buffer,
             entity,
         )
+    }
+
+    /// The drill-down's `labels` array: this entity's own terms, intersected with the session's
+    /// satisfied set, presented through the plugin (decision 0114).
+    ///
+    /// **Satisfied-only, twice over.** The intersection is `filter_map` over the entity's stored
+    /// ordinals against [`Session::satisfied_descriptors`]; that map holds exactly the descriptors
+    /// the credential presented, plus `public`, so there is no descriptor in scope for a term
+    /// outside the grant even if the intersection were written wrongly. Nothing here reads the
+    /// bundle dictionary, and there is deliberately no route from an ordinal to a descriptor that
+    /// does not pass through the session.
+    ///
+    /// **Reached only after the visibility verdict**, like every other read in [`Engine::item`]:
+    /// this is called from inside the row-bearing arm, so the transpose is never probed for an
+    /// entity the principal cannot see and C4 stays closed by position rather than by measure.
+    ///
+    /// An entity the transpose does not hold answers `[]` rather than refusing. That is the
+    /// direction that hides a label rather than inventing one, and it is reachable only while a
+    /// prefix predates the transpose — the base layer covers every entity a build knew and each
+    /// flush publishes its own.
+    ///
+    /// ⊘ **The plugin routing is the built-in one.** There is no wasmtime host (design §6.1's
+    /// standing gap), so `present_terms` is answered by `builtin:passthrough`, whose descriptors
+    /// are the caller's own label strings and whose presentation is therefore the identity. When a
+    /// host arrives this call site does not change; the plugin behind `self.plugin` does.
+    fn labels_for(
+        &self,
+        generation: &Generation,
+        session: &Session,
+        entity: u32,
+    ) -> Result<Vec<String>> {
+        let Some(terms) = generation
+            .filter_columns
+            .entity_terms()
+            .terms_of(entity)
+            .map_err(EngineError::Store)?
+        else {
+            return Ok(Vec::new());
+        };
+        let descriptors: Vec<Vec<u8>> = terms
+            .into_iter()
+            .filter_map(|term| {
+                session
+                    .satisfied_descriptors
+                    .get(&TermId::new(term))
+                    .cloned()
+            })
+            .collect();
+        if descriptors.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut labels = self
+            .plugin
+            .present_terms(&descriptors)
+            .map_err(EngineError::Plugin)?;
+        // **One string per descriptor, and the count is the enforcement of it.** A plugin
+        // returning MORE strings than it was handed would put on the wire strings that answer to
+        // no term this session satisfies — which is exactly the disclosure C30's structural claim
+        // rules out, arriving through the one function the claim does not itself constrain. Fewer
+        // is a lost label rather than an invented one, and is refused with it: positional is the
+        // contract, so a short list means the caller cannot say which label it failed to present.
+        if labels.len() != descriptors.len() {
+            return Err(EngineError::Plugin(tessera_plugin::PluginError::Malformed(
+                format!(
+                    "present_terms returned {} strings for {} descriptors; the mapping is \
+                     positional, and a longer list would serve a label answering to no term this \
+                     session satisfies",
+                    labels.len(),
+                    descriptors.len()
+                ),
+            )));
+        }
+        labels.sort_unstable();
+        labels.dedup();
+        Ok(labels)
     }
 
     /// `POST /v1/items/{handle}` (R5): validate `idset` if the caller sent one, invert `id` to
@@ -966,110 +2005,176 @@ impl Engine {
         // a 32-bit half; checked rather than cast so a violated invariant fails loudly.
         let entity_raw =
             u32::try_from(entity.raw()).expect("entity ids are capped at u32::MAX by I9");
+        // **Every view this item holds a row in, resolved in one pass.** The `views` array is the
+        // gate-filtered part of this list and the record below is assembled from one row of it, so
+        // a second walk would be a second chance to disagree about which rows exist.
+        //
+        // **Proportionate for one point**: the permutation is the only entity→row bridge (I4,
+        // §5.1) — an O(1) bounds-checked slot read per view, not a scan — and a view holds more
+        // than one segment once anything has flushed, so the *view*-space row must be resolved to
+        // the segment that owns it and to that segment's local index before anything is read
+        // ([`segment_row_of`], which is that resolution's one definition). A position is then two
+        // indexed reads and a bit permutation. So the whole `views` array costs O(views), with no
+        // per-view file read at all, and membership is never served without its position.
+        let mut rows: Vec<(&str, &SegmentData, usize)> = Vec::new();
         for partition in generation.bundle.partitions.values() {
             for (view, view_data) in &partition.views {
-                // The permutation is the only entity→row bridge (I4, §5.1) — an O(1)
-                // bounds-checked slot read, not a scan.
-                let Some(row) = view_data.row_space.row_of(entity) else {
+                let Some((segment, local)) = segment_row_of(view, view_data, entity)? else {
                     continue;
                 };
-                // **A view holds more than one segment once anything has flushed**, and `row` is
-                // a *view*-space row: it must be resolved to the segment that owns it and to that
-                // segment's local index before anything is read. Taking the first segment and
-                // indexing it with a view row read past the build segment's end for every
-                // flushed item.
-                let segments = segments_with_row_bases(view, view_data)?;
-                let Some(&(segment, row_base)) =
-                    segments.iter().rev().find(|(_, base)| row.raw() >= *base)
-                else {
-                    continue;
-                };
-
-                // One value slot per declared column, filled home by home; a column no home
-                // holds a value in stays `None` and is omitted — absence is absence.
-                let mut values: Vec<Option<ScalarOut>> =
-                    vec![None; manifest.declared_scalars.len()];
-
-                // Home 1: the row. The same `resolve_scalars` the viewport gather uses, so the
-                // two read paths cannot disagree about what a stored type decodes to.
-                let resolved = resolve_scalars(segment, &render_scalars);
-                let local = (row.raw() - row_base) as usize;
-                for (slot, declared_index) in manifest.render_indices().enumerate() {
-                    let Some(view) = &resolved[slot] else {
-                        continue;
-                    };
-                    let d = &manifest.declared_scalars[declared_index];
-                    values[declared_index] =
-                        row_field_out(view, local, d, &generation.vocabularies);
-                }
-
-                // Home 2: entity space — every non-rendered column with a value column (indexed
-                // columns, and the per-viewer vocabulary floor), at drill-down cadence.
-                for (declared_index, d) in manifest.declared_scalars.iter().enumerate() {
-                    if d.render || values[declared_index].is_some() {
-                        continue;
-                    }
-                    if let Some(stored) =
-                        generation.filter_columns.stored_value(&d.name, entity_raw)
-                    {
-                        values[declared_index] =
-                            stored_field_out(stored, d, &generation.vocabularies);
-                    }
-                }
-
-                // Home 3: the record blob — one block read, strictly after the verdict (see this
-                // method's doc). Fail-closed: a malformed row, a tag past the schema or an
-                // addressing defect refuses the request rather than serving a neighbour's field
-                // under this item's identity (records §3, review B6).
-                if let Some(blob_fields) = generation
-                    .filter_columns
-                    .records()
-                    .fields_of(entity_raw)
-                    .map_err(|e| EngineError::Malformed(e.to_string()))?
-                {
-                    for field in blob_fields {
-                        let declared_index = field.tag as usize;
-                        let Some(d) = manifest.declared_scalars.get(declared_index) else {
-                            return Err(EngineError::Malformed(format!(
-                                "a record-blob row carries field tag {} where the schema \
-                                 declares {} columns; the blob and the manifest disagree",
-                                field.tag,
-                                manifest.declared_scalars.len()
-                            )));
-                        };
-                        if values[declared_index].is_none() {
-                            values[declared_index] =
-                                stored_field_out(field.value, d, &generation.vocabularies);
-                        }
-                    }
-                }
-
-                let fields = manifest
-                    .declared_scalars
-                    .iter()
-                    .zip(values)
-                    .filter_map(|(d, value)| {
-                        value.map(|value| ItemField {
-                            name: d.name.clone(),
-                            value,
-                        })
-                    })
-                    .collect();
-                return Ok(Some(ItemOut {
-                    fields,
-                    // N-3: propagate, never swallow. `EngineError::Store`, the same wrapping
-                    // every other store-backed call in this crate uses (see `Engine::open`).
-                    // Against the generation this request loaded, never a second `load()`: the
-                    // sidecar is per-generation now, and a fold rewrites it.
-                    external_id: self
-                        .external_id_of_in(&generation, entity)
-                        .map_err(EngineError::Store)?,
-                }));
+                rows.push((view.as_str(), segment, local));
             }
         }
-        // Visible in entity space but with no row anywhere: a buffered item awaiting flush. Same
-        // `Ok(None)`, same 404 — it has no geometry to return.
-        Ok(None)
+        // **Sorted, because the maps above are hash maps.** Both the partitions and a partition's
+        // views iterate in an arbitrary order, so without this the record's home view — and the
+        // `views` array's order — would differ between two identical requests to one process.
+        //
+        // **One entry per view id, without deduplicating for it.** A view id is a key of one
+        // partition's map, and an entity lives in exactly one partition (I5 splits entity space),
+        // so `segment_row_of` can answer for at most one partition and no id can appear twice. The
+        // sort is therefore a total order on distinct ids rather than a grouping, and `views` is a
+        // set. A partitioning that put one entity in two partitions would break that here as it
+        // would break every other entity-space read.
+        rows.sort_unstable_by(|a, b| a.0.cmp(b.0));
+
+        // **The positions, gate-filtered** (`views.md` §6, owner ruling 2026-09-01): one entry per
+        // view of this item's that the session may reach, and nothing at all for the views it may
+        // not. A view failing the gate is absent exactly as a view nobody declared is, so the
+        // array never becomes the one place a gate-failed view is named.
+        //
+        // The position is the view's own grid units — the 64-bit interleave the row stores split
+        // across `morton.u32` and the residual column, deinterleaved through the inverse of what
+        // wrote it. It decodes against the frame `/v1/meta` publishes **for that view** and no
+        // other (decision 0040), which is the whole reason a per-view position is a different
+        // quantity per view rather than one position repeated.
+        let views: Vec<ItemView> = rows
+            .iter()
+            .filter(|(view, _, _)| session.visible_views.contains_view(view))
+            .map(|&(view, segment, local)| {
+                let (x, y) = tessera_spatial::unsplit32(
+                    tessera_types::MortonCode::new(segment.morton.u32()[local]),
+                    segment.columns.residual()[local],
+                );
+                ItemView {
+                    id: view.to_string(),
+                    x,
+                    y,
+                }
+            })
+            .collect();
+
+        // **The record's three homes read a row of a view this principal may reach, where one
+        // exists.** Home 1 is a row read, and the rows are ordered by view id — so without this
+        // the field values would come from whichever view sorts first, a gate-failed one included,
+        // and a sealed view named `a…` would supply the record every principal is served.
+        //
+        // Nothing is disclosed either way: home 1 reads the *declared* render scalars, which are
+        // entity-scoped and hold the same value in every view (a scoped family has no slot in
+        // `declared_scalars`). What the choice buys is that the served record is a fact about a
+        // view the principal knows exists, so nothing about the answer traces back to a view they
+        // may not reach. The fallback is deliberate rather than a fail-closed refusal: a point
+        // held only in views this principal cannot reach is served today and stays served
+        // (`ItemOut::views`), and its record is what it always was.
+        let Some(&(_view, segment, local)) = rows
+            .iter()
+            .find(|(view, _, _)| session.visible_views.contains_view(view))
+            .or_else(|| rows.first())
+        else {
+            // Visible in entity space but with no row anywhere: a buffered item awaiting flush.
+            // Same `Ok(None)`, same 404 — it has no geometry to return.
+            return Ok(None);
+        };
+
+        // **The scoped values, gate-filtered by the same set and keyed by the group's key** — the
+        // key being a view's only address (decision 0113). See [`scoped_values_of`].
+        let scoped = scoped_values_of(&generation, &session.visible_views, entity_raw);
+
+        // One value slot per declared column, filled home by home; a column no home
+        // holds a value in stays `None` and is omitted — absence is absence.
+        let mut values: Vec<Option<ScalarOut>> = vec![None; manifest.declared_scalars.len()];
+
+        // Home 1: the row. The same `resolve_scalars` the viewport gather uses, so the
+        // two read paths cannot disagree about what a stored type decodes to.
+        let resolved = resolve_scalars(segment, &render_scalars);
+        for (slot, declared_index) in manifest.render_indices().enumerate() {
+            let Some(view) = &resolved[slot] else {
+                continue;
+            };
+            let d = &manifest.declared_scalars[declared_index];
+            values[declared_index] = row_field_out(view, local, d, &generation.vocabularies);
+        }
+
+        // Home 2: entity space — every non-rendered column with a value column (indexed
+        // columns, and the per-viewer vocabulary floor), at drill-down cadence.
+        for (declared_index, d) in manifest.declared_scalars.iter().enumerate() {
+            if d.render || values[declared_index].is_some() {
+                continue;
+            }
+            if let Some(stored) = generation.filter_columns.stored_value(&d.name, entity_raw) {
+                values[declared_index] = stored_field_out(
+                    stored,
+                    d.arrow_type,
+                    d.vocabulary.as_deref(),
+                    &generation.vocabularies,
+                );
+            }
+        }
+
+        // Home 3: the record blob — one block read, strictly after the verdict (see this
+        // method's doc). Fail-closed: a malformed row, a tag past the schema or an
+        // addressing defect refuses the request rather than serving a neighbour's field
+        // under this item's identity (records §3, review B6).
+        if let Some(blob_fields) = generation
+            .filter_columns
+            .records()
+            .fields_of(entity_raw)
+            .map_err(|e| EngineError::Malformed(e.to_string()))?
+        {
+            for field in blob_fields {
+                let declared_index = field.tag as usize;
+                let Some(d) = manifest.declared_scalars.get(declared_index) else {
+                    return Err(EngineError::Malformed(format!(
+                        "a record-blob row carries field tag {} where the schema \
+                         declares {} columns; the blob and the manifest disagree",
+                        field.tag,
+                        manifest.declared_scalars.len()
+                    )));
+                };
+                if values[declared_index].is_none() {
+                    values[declared_index] = stored_field_out(
+                        field.value,
+                        d.arrow_type,
+                        d.vocabulary.as_deref(),
+                        &generation.vocabularies,
+                    );
+                }
+            }
+        }
+
+        let fields = manifest
+            .declared_scalars
+            .iter()
+            .zip(values)
+            .filter_map(|(d, value)| {
+                value.map(|value| ItemField {
+                    name: d.name.clone(),
+                    value,
+                })
+            })
+            .collect();
+        Ok(Some(ItemOut {
+            fields,
+            labels: self.labels_for(&generation, session, entity_raw)?,
+            views,
+            scoped,
+            // N-3: propagate, never swallow. `EngineError::Store`, the same wrapping
+            // every other store-backed call in this crate uses (see `Engine::open`).
+            // Against the generation this request loaded, never a second `load()`: the
+            // sidecar is per-generation now, and a fold rewrites it.
+            external_id: self
+                .external_id_of_in(&generation, entity)
+                .map_err(EngineError::Store)?,
+        }))
     }
 }
 
@@ -1095,7 +2200,7 @@ fn row_field_out(
             // gather refuses on its own path. Absence is the honest answer here.
             _ => return None,
         };
-        return category_key_out(code, d, vocabularies);
+        return category_key_out(code, d.vocabulary.as_deref(), vocabularies);
     }
     // Generated for the flat members; `Bool` and `Utf8` read through their arrays because
     // neither is stored as a flat slice of itself.
@@ -1111,25 +2216,133 @@ fn row_field_out(
     Some(flat_families!(out))
 }
 
+/// The hot-column value one already-flushed entity carries for `declared_index`, or `None` where
+/// no view holds a row for it, the column is not in the render tail, or the row's presence bitmap
+/// says the slot is empty — the join rule's attribute arm, home 1 (`views.md` §4, records §6.2).
+///
+/// **This home exists because a rendered column need not have an entity-space one.** `render =
+/// true, index = false` over a non-`derived` vocabulary owes no value column and is not
+/// blob-resident, so the hot column is the value's *only* store; an oracle reading the other two
+/// homes alone would report "no value held" for the most ordinary attribute declaration there is,
+/// and accept every mismatch against it.
+///
+/// **Every view is scanned, and a view holding no value is skipped rather than answering.** The
+/// first version stopped at the first view whose permutation held a row and returned `None` if
+/// *that* row's presence bit was clear — first-view-wins over a `HashMap` of partitions and views,
+/// so an entity holding a value in one view and an absence in another answered `200` or `409` by
+/// hash order (r24 review F1). Views can hold different tails lawfully: a join whose batch omitted
+/// a render-home value writes an absent slot, and until the backfill below fills it that view is a
+/// genuine absence beside another view's value. Absence is the *weaker* answer — the comparison
+/// reads it as "nothing held", which accepts — so it must never pre-empt a view that holds
+/// something. `None` here means no view holds a present value, which is the only reading of it
+/// the caller is entitled to.
+///
+/// **A malformed segment set skips that view too**, and does not abandon the scan — the drill-down
+/// skips a view it cannot resolve for the same reason. Where *no* view answers, the caller gets
+/// `None` and the join is accepted unchecked, which is the posture [`Engine::flushed_terms`] takes
+/// for the label arm: the join changes nothing in entity space either way, so a corrupt artefact
+/// loses the *report* rather than turning a caller's batch into a server error. The warning names
+/// the view and never the entity (**I10**: the byte-scanner sweeps logs as well as payloads).
+pub(crate) fn flushed_row_scalar(
+    generation: &Generation,
+    entity: EntityId,
+    declared_index: usize,
+) -> Option<tessera_filter::RecordValue> {
+    use tessera_filter::RecordValue as RV;
+
+    let manifest = &generation.bundle.manifest;
+    // The slot this declared column occupies in the *render* tail, which is the only tail a
+    // segment carries. A column that is not rendered has no hot-column home at all.
+    let slot = manifest
+        .render_indices()
+        .position(|i| i == declared_index)?;
+    let d = manifest.declared_scalars.get(declared_index)?;
+    let render_scalars: Vec<_> = manifest.render_scalars().cloned().collect();
+
+    for partition in generation.bundle.partitions.values() {
+        for (view, view_data) in &partition.views {
+            let resolved_row = match segment_row_of(view, view_data, entity) {
+                Ok(resolved) => resolved,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        view = %view,
+                        "a view's segment set could not be resolved, so the join rule's attribute \
+                         arm cannot read a render-only column from this view (views §4). The scan \
+                         continues; if no view answers, the batch's joins are accepted unchecked. \
+                         The artefact is a build or flush defect; a fold rewrites it."
+                    );
+                    continue;
+                }
+            };
+            let Some((segment, local)) = resolved_row else {
+                continue;
+            };
+            // **Absence is the presence bitmap beside the column, never a zero in it** (decision
+            // 0064). A category needs no bitmap and has none: its absence is the reserved code, in
+            // band, which the comparison reads as absence on both sides.
+            let Ok(local_row) = u32::try_from(local) else {
+                continue;
+            };
+            if d.vocabulary.is_none() && !segment.columns.presence(&d.name).contains(local_row) {
+                continue;
+            }
+            let resolved = resolve_scalars(segment, &render_scalars);
+            let Some(Some(view_slice)) = resolved.get(slot) else {
+                continue;
+            };
+            let read = match view_slice {
+                ScalarSlice::Bool(a) if local < arrow::array::Array::len(*a) => {
+                    Some(RV::Bool(a.value(local)))
+                }
+                ScalarSlice::Utf8(a) if local < arrow::array::Array::len(*a) => {
+                    Some(RV::Utf8(a.value(local).to_string()))
+                }
+                ScalarSlice::Bool(_) | ScalarSlice::Utf8(_) => None,
+                ScalarSlice::U8(s) => s.get(local).copied().map(RV::U8),
+                ScalarSlice::U16(s) => s.get(local).copied().map(RV::U16),
+                ScalarSlice::U32(s) => s.get(local).copied().map(RV::U32),
+                ScalarSlice::U64(s) => s.get(local).copied().map(RV::U64),
+                ScalarSlice::I8(s) => s.get(local).copied().map(RV::I8),
+                ScalarSlice::I16(s) => s.get(local).copied().map(RV::I16),
+                ScalarSlice::I32(s) => s.get(local).copied().map(RV::I32),
+                ScalarSlice::I64(s) => s.get(local).copied().map(RV::I64),
+                ScalarSlice::F32(s) => s.get(local).copied().map(RV::F32),
+                ScalarSlice::F64(s) => s.get(local).copied().map(RV::F64),
+                ScalarSlice::TimestampUs(s) => s.get(local).copied().map(RV::TimestampUs),
+            };
+            if read.is_some() {
+                return read;
+            }
+        }
+    }
+    None
+}
+
 /// One stored value's drill-down form, for the entity-space and blob homes: the storage-typed
 /// [`tessera_filter::RecordValue`] adapted through the declaration — a category code to its key,
 /// a `bool`'s `u8` storage back to `bool`, a `timestamp_us`'s `i64` back to its unit.
+///
+/// **Over the two facts rather than over the declaration**, because a group-scoped family is not
+/// one of `declared_scalars` and has no [`DeclaredScalar`] to pass: the storage type and the
+/// vocabulary it names are the whole of what this needs, and both records carry them.
 fn stored_field_out(
     value: tessera_filter::RecordValue,
-    d: &DeclaredScalar,
+    arrow_type: ScalarType,
+    vocabulary: Option<&str>,
     vocabularies: &Vocabularies,
 ) -> Option<ScalarOut> {
     use tessera_filter::RecordValue as RV;
-    if d.vocabulary.is_some() {
+    if vocabulary.is_some() {
         let code = match value {
             RV::U8(c) => c as u32,
             RV::U16(c) => c as u32,
             RV::U32(c) => c,
             _ => return None,
         };
-        return category_key_out(code, d, vocabularies);
+        return category_key_out(code, vocabulary, vocabularies);
     }
-    Some(match (d.arrow_type, value) {
+    Some(match (arrow_type, value) {
         (ScalarType::Bool, RV::U8(x)) => ScalarOut::Bool(x != 0),
         (ScalarType::Bool, RV::Bool(b)) => ScalarOut::Bool(b),
         (ScalarType::TimestampUs, RV::I64(x)) | (ScalarType::TimestampUs, RV::TimestampUs(x)) => {
@@ -1154,18 +2367,153 @@ fn stored_field_out(
     })
 }
 
+/// **Every group-scoped attribute value one item carries that this session may see**
+/// (`views.md` §5, owner ruling 2026-09-01) — one entry per family, keyed by the owning group's
+/// key, values read from the per-view entity-space columns.
+///
+/// # Why the key and not the view
+///
+/// A scoped family has one column per view, but the value belongs to the `(entity, key)` pair:
+/// two groups sharing a roster through `members` share the column, and a client that read the
+/// same value twice under two view ids would be reading one fact as two. So the address is the
+/// key ([decision 0113](../../../docs/decisions/0113-ordinals-are-removed-and-the-key-is-the-only-address.md)),
+/// resolved through [`owning_key_of`] — §3.3's ownership rule, stated once — from each visible
+/// view id to the key it holds in *this family's* group.
+///
+/// # The gate, which is two tests and not one
+///
+/// **The owning group's gate first, and it is the whole family's** (`views.md` §5, §6). A family
+/// belongs to the group that owns the views it has a column per, and for a principal who cannot
+/// reach that group the *whole attribute is undeclared*: `/v1/meta` omits it from both
+/// `scoped_scalars` and `filter_operands`, and a leaf naming it takes the unknown-column `422`
+/// that confirms neither group nor key. Serving its name and its values here would be the one
+/// surface that told them otherwise.
+///
+/// **It is reachable and it is not the per-view test.** A group declaring `members` of the owner
+/// carries its own gate, and nothing requires the two to agree — a sealed owner shared under a
+/// public roster is the ordinary way to publish a second layout of someone else's quarters. A
+/// principal failing the owner's gate then reaches the *sharer's* views, `owning_key_of` resolves
+/// each to the owner's key, and every per-view test below passes. The family's own gate is the
+/// only thing standing between that principal and a sealed group's attribute.
+///
+/// **Then the per-view test, per key.** A key is served only where the session may reach a view
+/// that holds it, its own group's or a sharing group's; a family no reachable view holds is absent
+/// whole rather than served empty. Nothing here can name a gate-failed view: the enumeration
+/// starts from the roster and every candidate is tested against [`crate::gate::VisibleViews`]
+/// before its key is minted, so the answer is a function of the views this principal already knows
+/// about.
+///
+/// # I2
+///
+/// Every value read is this **item's own**, at an entity the caller has already established
+/// visible, out of an entity-space column indexed by entity id. There is no aggregate here and no
+/// quantity derived from anything outside `M_auth`: the register's argument is the one C30 makes
+/// for the labels beside it.
+///
+/// # What it does not serve
+///
+/// A `text` family, which has no per-entity value slot — its entity-space artefacts are a token
+/// dictionary and the postings over it, so there is nothing to read for one entity
+/// ([`tessera_store::manifest::ScopedScalar::has_value_column`]).
+///
+/// ⊘ A value written by a **flush** for a family with neither `index` nor `render`: the flush
+/// writes no extent for one (`Engine::flush`'s scoped pass, on `filter::scoped_is_filterable`), so
+/// such a family serves the build's values and nothing since. Every other family — indexed,
+/// rendered, or both — takes its extents and is served live.
+fn scoped_values_of(
+    generation: &Generation,
+    visible: &crate::gate::VisibleViews,
+    entity: u32,
+) -> Vec<ItemScoped> {
+    let manifest = &generation.bundle.manifest;
+    let members_of = |name: &str| {
+        manifest
+            .groups
+            .iter()
+            .find(|g| g.name == name)?
+            .members_of
+            .as_deref()
+    };
+    // Every view of every group this session may reach, with the roster record that decides which
+    // key it holds where. Built once for all the families rather than per family: a corpus with
+    // eight families over one group of forty quarters would otherwise walk the roster eight times.
+    let reachable: Vec<(&str, &str)> = manifest
+        .groups
+        .iter()
+        .flat_map(|g| {
+            g.views
+                .iter()
+                .map(move |v| (g.name.as_str(), v.key.as_str()))
+        })
+        .filter(|(group, key)| {
+            visible.contains_view(&format!("{group}{}{key}", tessera_store::GROUP_SEPARATOR))
+        })
+        .collect();
+
+    let mut out: Vec<ItemScoped> = Vec::new();
+    for family in manifest.groups.iter().flat_map(|g| g.scoped_scalars.iter()) {
+        // **The owning group's gate, before anything about a view** — the test every other scoped
+        // surface makes (`EngineMeta::resolve_filter_column`, `/v1/meta`'s two lists,
+        // `scoped_render_families`), and see this function's doc for the shape that reaches it: a
+        // sealed owner shared under a public `members` roster passes every per-view test below.
+        if !visible.contains_group(&family.group) {
+            continue;
+        }
+        if !family.has_value_column() {
+            continue;
+        }
+        // Sorted and deduplicated by key: two views sharing one key through a `members` group are
+        // one value, and a client reading the map has no order of its own to fall back on.
+        let mut values: std::collections::BTreeMap<String, ScalarOut> =
+            std::collections::BTreeMap::new();
+        for &(group, key) in &reachable {
+            let Some(owned) = owning_key_of((group, key), members_of, &family.group) else {
+                continue;
+            };
+            let id = format!("{}{}{owned}", family.group, tessera_store::GROUP_SEPARATOR);
+            // The family's own list, not the roster: a view created since the build has no column
+            // until one is written for it, and asking for one would be asking for a file no pass
+            // wrote.
+            if !family.views.contains(&id) {
+                continue;
+            }
+            let column = crate::filter::scoped_column_name(&family.name, &id);
+            let Some(stored) = generation.filter_columns.stored_value(&column, entity) else {
+                continue;
+            };
+            if let Some(value) = stored_field_out(
+                stored,
+                family.arrow_type,
+                family.vocabulary.as_deref(),
+                &generation.vocabularies,
+            ) {
+                values.insert(owned.to_string(), value);
+            }
+        }
+        if values.is_empty() {
+            continue;
+        }
+        out.push(ItemScoped {
+            name: family.name.clone(),
+            values: values.into_iter().collect(),
+        });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
 /// A category code's drill-down value: its vocabulary **key**. Code 0 — the reserved absent
 /// sentinel — is absence, and a code no binding explains is omitted rather than served raw,
 /// the same rule `/v1/categories` applies to an unresolvable code.
 fn category_key_out(
     code: u32,
-    d: &DeclaredScalar,
+    vocabulary: Option<&str>,
     vocabularies: &Vocabularies,
 ) -> Option<ScalarOut> {
     if code == 0 {
         return None;
     }
-    let vocabulary = vocabularies.get(d.vocabulary.as_deref()?)?;
+    let vocabulary = vocabularies.get(vocabulary?)?;
     let (key, _) = vocabulary.bindings().find(|&(_, c)| c == code)?;
     Some(ScalarOut::Utf8(key.to_string()))
 }
@@ -1264,7 +2612,7 @@ impl Engine {
         }
     }
 
-    fn session_geometry(
+    pub(crate) fn session_geometry(
         &self,
         session: &Session,
         generation: &Generation,
@@ -1386,11 +2734,14 @@ impl Engine {
                 .iter()
                 .map(|d| ColumnBuf::empty(d.arrow_type))
                 .collect(),
+            membership: Vec::new(),
+            highlighted: head.highlighted.then(Vec::new),
         });
         Ok(ViewportOut {
             coordinates: head.coordinates,
             stamp: head.stamp,
             stale: head.stale,
+            region: head.region,
             tiles: sink.tiles,
             artifacts: sink.artifacts,
             points,
@@ -1429,6 +2780,8 @@ impl Engine {
     ) -> Result<StageTimings> {
         let ViewportRequest {
             filter: _,
+            highlight: _,
+            point_rows,
             view,
             zoom,
             bbox,
@@ -1439,6 +2792,9 @@ impl Engine {
             cancel,
             layers: req_layers,
             artifact_budget,
+            levels: req_levels,
+            computed: req_computed,
+            artifact_rows,
         } = req;
         // Load the generation pointer exactly once, at request start (see `GenerationHandle`'s
         // doc at its definition) — every subsequent read below (pin check, row-projection cache,
@@ -1534,26 +2890,29 @@ impl Engine {
         // the head's names are zipped positionally with the gathered buffers — caption a render
         // column's values with a non-render column's name wherever the two lists diverge. One
         // construction site is what keeps the names and the buffers the same list.
-        let render_scalars: Vec<_> = generation
+        let mut render_scalars: Vec<_> = generation
             .bundle
             .manifest
             .render_scalars()
             .cloned()
             .collect();
+        // **Then this view's scoped render columns, and only this view's** (`views.md` §5). A
+        // group-scoped attribute declaring `render` occupies a slot in the row tail of every view
+        // of its group — and of any group sharing those views — and in no other, so the list is
+        // per view where the bundle-wide half above is not. Appended rather than interleaved: the
+        // suffix is what `gather_tile_columns` reads to know which columns a segment may lawfully
+        // not hold (a view created since the build, or any segment a flush wrote).
+        let entity_scoped = render_scalars.len();
+        render_scalars.extend(scoped_render_scalars(
+            &generation.bundle.manifest,
+            view,
+            &session.visible_views,
+        ));
 
-        // The head, delivered before the sweep: everything the response headers derive from is
-        // known here, and a server that waits for the first flush before committing a status
-        // needs it in hand by then. A refusal is the consumer gone — cancellation, not a fault.
-        sink.head(ViewportHead {
-            coordinates,
-            stamp: answered_from.clone(),
-            stale,
-            render_scalars: render_scalars.clone(),
-        })
-        .map_err(|SinkClosed| EngineError::Cancelled)?;
-        // Reset the clock so the head's construction and delivery are unattributed rather than
-        // silently charged to compose.
-        probe.skip();
+        // The head is delivered below, after the filter is evaluated and before the sweep: its
+        // region verdict is settled by the decomposition, which needs the tile ranges the filter
+        // is evaluated beside, and a server that waits for the first flush before committing a
+        // status has it in hand by then.
 
         // D-C checkpoint: before compose, one of the two long serial-prefix stages this task
         // guards. Placed after the (non-cancellable, D-G) row-projection build so a cancellation
@@ -1589,7 +2948,16 @@ impl Engine {
         // beside the crossing it feeds. Everything between here and there is deliberately blind
         // to the filter.
 
-        let q = &generation.bundle.manifest.quantisation;
+        // **This view's frame, not the bundle's** (decision 0040): every tile address below is a
+        // fraction of the extent the requested view's positions were quantised against, so
+        // reading another view's would address different ground under the same prefix. An unknown
+        // name refuses rather than defaulting — there is no frame a view that does not exist
+        // could be drawn in.
+        let q = generation
+            .bundle
+            .manifest
+            .quantisation_of(view)
+            .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
         let extent = Bounds {
             x_min: q.x_min,
             x_max: q.x_max,
@@ -1712,7 +3080,7 @@ impl Engine {
         // Resolve every tile's row range in ONE monotone sweep rather than two full-column binary
         // searches per tile. A few hundred independent `log2(rows)` searches is where a sparse
         // request's time actually goes — measured at 26-64% of one
-        // (`docs/evidence/memos/2026-07-30-f1-selection-overdraw.md`), and flat in density, because
+        // (docs/evidence/memos/2026-07-30-f1-selection-overdraw.md), and flat in density, because
         // the cost is the searching rather than the rows found.
         //
         // `tile_ranges_all` returns ranges positionally aligned with `tiles`, so the zip below
@@ -1798,20 +3166,78 @@ impl Engine {
         // the answer is indistinguishable from a correct one. `/v1/categories` takes the same care
         // for the same reason. It costs nothing here: `session_geometry` above already resolved
         // the same fragment on this request, so this is the identity short-circuit or a cache hit.
-        let mask = match &req.filter {
-            None => mask,
-            Some(expr) => {
-                check_cancelled(&cancel)?;
-                let fragment = self.fragment_for(session, &generation)?;
-                let candidate = crate::filter::candidate(
-                    &fragment,
-                    &session.satisfied,
-                    &generation.overlay,
-                    &generation.buffer,
-                );
+        //
+        // **`filters` and `highlight` are two expressions of one request, evaluated here together**
+        // (`highlight-and-hierarchy.md` §2.1). Both run against the same candidate and through the
+        // same resolvers, closed over the same **pre-filter** mask — a highlight is a conjunction
+        // with the filter's candidate by construction, and evaluating its region or `member_of`
+        // leaves against an already-filtered mask would make the two positions of one clause mean
+        // different things. The mask takes both results afterwards, in separate fields: only
+        // `with_filter`'s narrows what is drawn.
+        let mut region_verdict: Option<crate::region::RegionVerdict> = None;
+        let mask = if req.filter.is_none() && req.highlight.is_none() {
+            mask
+        } else {
+            check_cancelled(&cancel)?;
+            let fragment = self.fragment_for(session, &generation)?;
+            let candidate = crate::filter::candidate(
+                &fragment,
+                &session.satisfied,
+                &generation.overlay,
+                &generation.buffer,
+            );
+            // The region leaves' resolver (`crate::region`): a drawn shape through the
+            // generation-keyed decomposition cache, its boundary rows tested under **this
+            // request's composed mask**; a published shape through the artifact's own verdict.
+            // Closed over the mask so the boundary path cannot run without one.
+            let regions = |leaf: &crate::filter::RegionLeaf| {
+                self.resolve_region(
+                    leaf,
+                    session,
+                    &generation,
+                    view,
+                    view_data,
+                    &segments,
+                    &mask,
+                    denied,
+                    mask_identity,
+                    &cancel,
+                )
+            };
+            // The `member_of` leaves' resolver, closed over the same mask for the same
+            // reason: the answer is `membership ∩ M_auth`, and a resolver that could be
+            // called without one would be a route to the unmasked membership.
+            let members = |leaf: &crate::filter::MemberOfLeaf| {
+                self.resolve_member_of(
+                    leaf,
+                    session,
+                    &generation,
+                    view,
+                    view_data,
+                    &segments,
+                    &mask,
+                    denied,
+                    mask_identity,
+                )
+            };
+            let resolvers = crate::filter::RowLeafResolvers {
+                regions: &regions,
+                members: &members,
+            };
+            let row_bases: Vec<u32> = segments.iter().map(|&(_, base)| base).collect();
+            let domain = crossing_domain(&ranges, &row_bases);
+            // One transcription of the evaluate-route-cross sequence, called for each expression,
+            // so the two positions of a clause cannot drift apart. `per_tile_only` is the
+            // highlight's route and `count_matched` its exclusion from the `filter_matched` probe
+            // — a highlight's own cardinality is not the filter's, and adding it there would make
+            // one gauge report two quantities.
+            let mut evaluate = |expr: &crate::filter::FilterExpr,
+                                per_tile_only: bool,
+                                count_matched: bool|
+             -> Result<(FilterRows, Option<crate::region::RegionVerdict>)> {
                 let routed = generation
                     .filter_columns
-                    .evaluate_routed(expr, &candidate, rows_in_ranges <= v_total)
+                    .evaluate_routed(expr, &candidate, rows_in_ranges <= v_total, &resolvers)
                     .map_err(|e| {
                         // Caller's fault or the deployment's — `FilterError` decides, at the
                         // variants, because that is where the argument for each one lives.
@@ -1823,39 +3249,112 @@ impl Engine {
                         }
                     })?;
                 probe.lap(|t| &mut t.filter_eval_ns);
-                // One crossing per request, whichever shape came back (0062's tree; 0068). The
+                // One crossing per expression, whichever shape came back (0062's tree; 0068). The
                 // row of `filter_matched` reports what the route produced: matched entities on
                 // the entity route, matched rows-in-domain on the row route.
-                let rows = match routed {
+                let out = match routed {
                     crate::filter::RoutedFilter::Entity(entities) => {
-                        probe.count(|t| &mut t.filter_matched, entities.cardinality());
-                        self.cross_filter_into_row_space(
-                            &view_data.row_space,
-                            &entities,
-                            &ranges,
-                            &segments,
-                            rows_in_ranges,
+                        if count_matched {
+                            probe.count(|t| &mut t.filter_matched, entities.cardinality());
+                        }
+                        (
+                            self.cross_filter_into_row_space(
+                                &view_data.row_space,
+                                &entities,
+                                &ranges,
+                                &segments,
+                                rows_in_ranges,
+                                per_tile_only,
+                            ),
+                            None,
                         )
                     }
                     crate::filter::RoutedFilter::Row(tree) => {
-                        let row_bases: Vec<u32> = segments.iter().map(|&(_, base)| base).collect();
-                        let domain = crossing_domain(&ranges, &row_bases);
+                        let verdict = tree.region_verdict();
                         let rows = self.evaluate_row_route(
                             &tree,
                             &view_data.row_space,
                             &segments,
                             &domain,
                             rows_in_ranges,
+                            view_data.row_space.total_rows(),
+                            per_tile_only,
                         )?;
                         self.filter_row_routed.fetch_add(1, Ordering::Relaxed);
-                        probe.count(|t| &mut t.filter_matched, rows.cardinality());
-                        FilterRows::Viewport { rows, domain }
+                        // **Not counted when a region is in the tree.** Its interior rows have
+                        // not met the mask yet, so the cardinality would be a pre-mask quantity
+                        // about the region — the number selection-operand §7 says may not be
+                        // computed, for a metric or for anything else.
+                        if count_matched && !tree.has_region() {
+                            probe.count(|t| &mut t.filter_matched, rows.rows().cardinality());
+                        }
+                        (rows, verdict)
                     }
                 };
                 probe.lap(|t| &mut t.filter_cross_ns);
-                mask.with_filter(rows)
+                Ok(out)
+            };
+            let filter_rows = match &req.filter {
+                None => None,
+                Some(expr) => {
+                    let (rows, verdict) = evaluate(expr, false, true)?;
+                    region_verdict = verdict;
+                    Some(rows)
+                }
+            };
+            // **The highlight always takes the per-tile walk**, whatever it matched corpus-wide:
+            // its three answers are all inside the request's tiles, so the whole-view projection
+            // would be paid for nothing (§2.1).
+            let highlight_rows = match &req.highlight {
+                None => None,
+                Some(expr) => {
+                    let (rows, verdict) = evaluate(expr, true, false)?;
+                    // The coarsest of the two, exactly as two region leaves of one expression
+                    // combine: a cover anywhere makes the response's verdict a cover.
+                    region_verdict = match (region_verdict, verdict) {
+                        (Some(a), Some(b)) => Some(a.coarser(b)),
+                        (a, b) => a.or(b),
+                    };
+                    Some(rows)
+                }
+            };
+            let mask = match filter_rows {
+                Some(rows) => mask.with_filter(rows),
+                None => mask,
+            };
+            match highlight_rows {
+                Some(rows) => mask.with_highlight(rows),
+                None => mask,
             }
         };
+
+        // **`point_rows = "highlight"` is a column projection and nothing else** (§2): the row
+        // set, the tile split and `served` are what the same request answers under `"full"`,
+        // because none of them depends on the highlight. What changes is that the gather reads no
+        // render column and the membership resolver is not built — so a client changing only its
+        // highlight is served the bits it asked for and not the payload it already holds. Without
+        // a `highlight` on the request there is nothing to project to, and this answers as
+        // `"full"` does rather than serving a column of nulls.
+        let highlight_only = point_rows == PointRows::Highlight && mask.has_highlight();
+        let render_scalars: &[DeclaredScalar] = if highlight_only { &[] } else { render_scalars };
+        let entity_scoped = if highlight_only { 0 } else { entity_scoped };
+
+        // The head, delivered before the sweep: everything the response headers derive from is
+        // known here — the region verdict last, settled by the decomposition above and never by a
+        // row — and a server that waits for the first flush before committing a status needs it
+        // in hand by then. A refusal is the consumer gone — cancellation, not a fault.
+        sink.head(ViewportHead {
+            coordinates,
+            stamp: answered_from.clone(),
+            stale,
+            region: region_verdict,
+            render_scalars: render_scalars.to_vec(),
+            highlighted: mask.has_highlight(),
+        })
+        .map_err(|SinkClosed| EngineError::Cancelled)?;
+        // Reset the clock so the head's construction and delivery are unattributed rather than
+        // silently charged to the stage that follows.
+        probe.skip();
 
         // §8.5's match-layer count rule: a filtered request serves every match, up to the cap —
         // the θ threshold clause does not thin a filtered selection. Saturating the threshold is
@@ -1989,7 +3488,7 @@ impl Engine {
 
         // The artifacts frame, after the counts and before any point. It is an aggregate channel,
         // not a point one — a cluster's masked count belongs beside a tile's, not beside a mark.
-        let artifacts = self.serve_artifacts(
+        let (artifacts, served_layers) = self.serve_artifacts(
             session,
             &generation,
             view,
@@ -1998,12 +3497,34 @@ impl Engine {
             &mask,
             req_layers,
             artifact_budget,
+            req_levels,
+            req_computed,
+            zoom,
             mask_identity,
+            artifact_rows,
+            &cancel,
         )?;
         if !artifacts.is_empty() {
             sink.artifacts(&artifacts)
                 .map_err(|SinkClosed| EngineError::Cancelled)?;
         }
+        probe.skip();
+
+        // The per-point membership column, resolved once for the whole response against the
+        // served set the artifacts frame just carried (`crate::membership_column`). No artifact
+        // served, no work: the resolver is not built and no chunk carries a column.
+        let membership = if artifacts.is_empty() || highlight_only {
+            None
+        } else {
+            let gathered: Vec<u32> = swept
+                .iter()
+                .flat_map(|ts| ts.rows.iter().copied())
+                .collect();
+            let resolved = crate::membership_column::Resolved::new(gathered, &served_layers);
+            (!resolved.is_empty()).then_some(resolved)
+        };
+        // Unattributed, as the artifact pass above is: a serial stage between two the header
+        // names, measured by `tests/membership_column.rs` rather than by a stage field.
         probe.skip();
 
         // The emit pass: gather and hand off, serial, in response order (this module's doc says
@@ -2017,6 +3538,11 @@ impl Engine {
                 .iter()
                 .map(|d| ColumnBuf::empty(d.arrow_type))
                 .collect(),
+            membership: membership
+                .as_ref()
+                .map(|m| m.empty_columns())
+                .unwrap_or_default(),
+            highlighted: mask.has_highlight().then(Vec::new),
         };
         let mut buf = seed();
         let mut buf_bytes = 0usize;
@@ -2026,7 +3552,17 @@ impl Engine {
             check_cancelled(&cancel)?;
             let mut stats = TileProbe::new();
             let parts = SelectionParts::new(&ts.parts);
-            let tile_points = gather_tile_columns(&parts, &ts.rows, render_scalars)?;
+            let mut tile_points =
+                gather_tile_columns(&parts, &ts.rows, render_scalars, entity_scoped)?;
+            if let Some(membership) = &membership {
+                tile_points.membership = membership.columns_for(&ts.rows);
+            }
+            // One `contains` per served point against the crossed highlight set — at most
+            // `k_max_marks` lookups for the whole response (`highlight-and-hierarchy.md` §2.1).
+            if mask.has_highlight() {
+                tile_points.highlighted =
+                    Some(ts.rows.iter().map(|&row| mask.is_highlighted(row)).collect());
+            }
             stats.count(|t| &mut t.points_gathered, tile_points.len() as u64);
             buf_bytes += tile_points.wire_bytes_estimate();
             if let Err((want, got)) = buf.append(tile_points) {
@@ -2084,6 +3620,15 @@ impl Engine {
     /// can ask about, which is what [`FilterRows`] carries the domain to keep true, and what
     /// `filter_routes_agree_over_the_domain` asserts. A view that published no `row-entity.u32`
     /// cannot take the per-tile route at all and silently gets the projecting one.
+    ///
+    /// **`per_tile_only` is the highlight's route, and it is not an optimisation**
+    /// (`highlight-and-hierarchy.md` §2.1). All three of a highlight's answers — a count per tile,
+    /// a bit per served point, a bit per served artifact — are inside the request's own tiles, so
+    /// it never needs the whole-view form and must never pay for it: projecting a 10⁷-entity
+    /// verdict is ~216 ms where the walk over a 300,000-row viewport is ~18 ms whatever the
+    /// highlight matched corpus-wide. A view that cannot invert its row space still gets the
+    /// projecting route, there being no other, which is the same silent fallback the measured rule
+    /// takes.
     fn cross_filter_into_row_space(
         &self,
         row_space: &tessera_store::permutation::RowSpace,
@@ -2091,9 +3636,10 @@ impl Engine {
         ranges: &[Vec<(usize, Range<u32>)>],
         segments: &[(&SegmentData, u32)],
         rows_in_ranges: u64,
+        per_tile_only: bool,
     ) -> FilterRows {
-        let per_tile_looks_cheaper =
-            entities.cardinality() > rows_in_ranges.saturating_mul(PER_TILE_CROSSING_RATIO);
+        let per_tile_looks_cheaper = per_tile_only
+            || entities.cardinality() > rows_in_ranges.saturating_mul(PER_TILE_CROSSING_RATIO);
         if per_tile_looks_cheaper && row_space.can_invert() {
             let row_bases: Vec<u32> = segments.iter().map(|&(_, base)| base).collect();
             let domain = crossing_domain(ranges, &row_bases);
@@ -2141,24 +3687,34 @@ impl Engine {
     /// combines entirely in row space. Evaluation runs on the engine's one shared pool, split
     /// over the domain exactly as the per-tile crossing splits, which is the "existing
     /// parallelism" records §6.2 prices the coarse-zoom cell against.
-    fn evaluate_row_route(
+    ///
+    /// **The result's extent is the tree's.** A tree of region leaves and projected entity
+    /// verdicts answers over the whole view and comes back [`FilterRows::Complete`]; a render
+    /// leaf anywhere in it, or a per-tile crossing, bounds the answer to the request's domain
+    /// and it comes back [`FilterRows::Viewport`] (selection-operand §5).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn evaluate_row_route(
         &self,
         tree: &crate::filter::RowExpr,
         row_space: &tessera_store::permutation::RowSpace,
         segments: &[(&SegmentData, u32)],
         domain: &[Range<u32>],
         rows_in_ranges: u64,
-    ) -> Result<croaring::Bitmap> {
+        total_rows: u64,
+        per_tile_only: bool,
+    ) -> Result<FilterRows> {
         // The one crossing: every entity-space verdict's row image, computed together. The route
         // between the two crossing shapes is the measured rule the single-operand path uses,
         // summed over the verdicts because that is what the projection would cost.
         let verdicts = tree.entity_verdicts();
+        let mut whole_view = tree.is_whole_view();
         let images: Vec<croaring::Bitmap> = if verdicts.is_empty() {
             Vec::new()
         } else {
             let total_matched: u64 = verdicts.iter().map(|v| v.cardinality()).sum();
-            let per_tile_looks_cheaper =
-                total_matched > rows_in_ranges.saturating_mul(PER_TILE_CROSSING_RATIO);
+            // `per_tile_only` is the highlight's route — see [`Engine::cross_filter_into_row_space`].
+            let per_tile_looks_cheaper = per_tile_only
+                || total_matched > rows_in_ranges.saturating_mul(PER_TILE_CROSSING_RATIO);
             let walked = (per_tile_looks_cheaper && row_space.can_invert())
                 .then(|| {
                     self.pool.install(|| {
@@ -2170,28 +3726,84 @@ impl Engine {
                 Some(images) => {
                     self.filter_crossings_per_tile
                         .fetch_add(1, Ordering::Relaxed);
+                    // A walk over the request's rows is silent outside them, whatever else the
+                    // tree holds.
+                    whole_view = false;
                     images
                 }
                 None => {
-                    // Projection crosses each verdict whole; clamped to the domain so the
-                    // combined answer never claims a row outside what `FilterRows::Viewport`
-                    // says was tested.
                     self.filter_crossings_projected
                         .fetch_add(1, Ordering::Relaxed);
-                    let mut domain_rows = croaring::Bitmap::new();
-                    for range in domain {
-                        domain_rows.add_range(range.clone());
+                    if whole_view {
+                        // Projection crosses each verdict whole, and with nothing in the tree
+                        // bounded by the domain, whole is what the answer is.
+                        verdicts.iter().map(|v| row_space.project(v)).collect()
+                    } else {
+                        // Clamped to the domain so the combined answer never claims a row
+                        // outside what `FilterRows::Viewport` says was tested.
+                        let mut domain_rows = croaring::Bitmap::new();
+                        for range in domain {
+                            domain_rows.add_range(range.clone());
+                        }
+                        verdicts
+                            .iter()
+                            .map(|v| row_space.project(v).and(&domain_rows))
+                            .collect()
                     }
-                    verdicts
-                        .iter()
-                        .map(|v| row_space.project(v).and(&domain_rows))
-                        .collect()
                 }
             }
         };
+        // What a negated region's presence half is, and what a region's rows are clamped to
+        // where the tree is domain-bounded: the whole view, or the request's own rows.
+        let scope = if whole_view {
+            RowScope::WholeView {
+                total_rows: u32::try_from(total_rows).unwrap_or(u32::MAX),
+            }
+        } else {
+            let mut domain_rows = croaring::Bitmap::new();
+            for range in domain {
+                domain_rows.add_range(range.clone());
+            }
+            RowScope::Domain(domain_rows)
+        };
         let mut next_image = 0usize;
-        self.pool
-            .install(|| eval_row_expr(tree, &images, &mut next_image, segments, domain))
+        let rows = self
+            .pool
+            .install(|| eval_row_expr(tree, &images, &mut next_image, segments, domain, &scope))?;
+        Ok(if whole_view {
+            FilterRows::Complete(rows)
+        } else {
+            FilterRows::Viewport {
+                rows,
+                domain: domain.to_vec(),
+            }
+        })
+    }
+}
+
+/// The rows a row-space evaluation answers over — see [`Engine::evaluate_row_route`].
+enum RowScope {
+    /// Every row of the view: the tree holds nothing the request's domain bounds.
+    WholeView { total_rows: u32 },
+    /// The request's own rows, as one bitmap, because a sibling leaf is bounded by them.
+    Domain(croaring::Bitmap),
+}
+
+impl RowScope {
+    /// Every row in scope — a negated region's presence half.
+    fn all_rows(&self) -> croaring::Bitmap {
+        match self {
+            RowScope::WholeView { total_rows } => croaring::Bitmap::from_range(0..*total_rows),
+            RowScope::Domain(rows) => rows.clone(),
+        }
+    }
+
+    /// A whole-view row set, narrowed to the scope where the scope is narrower.
+    fn clamp(&self, rows: &croaring::Bitmap) -> croaring::Bitmap {
+        match self {
+            RowScope::WholeView { .. } => rows.clone(),
+            RowScope::Domain(domain) => rows.and(domain),
+        }
     }
 }
 
@@ -2204,6 +3816,7 @@ fn eval_row_expr(
     next_image: &mut usize,
     segments: &[(&SegmentData, u32)],
     domain: &[Range<u32>],
+    scope: &RowScope,
 ) -> Result<croaring::Bitmap> {
     use crate::filter::RowExpr;
     match expr {
@@ -2220,10 +3833,27 @@ fn eval_row_expr(
             let values = LeafValues::of(*family, operand);
             scan_rows(segments, domain, column, values.predicate())
         }
+        RowExpr::Region(region) => Ok(scope.clamp(&region.rows)),
+        // Already `membership ∩ M_auth` over the whole view, clamped where a sibling leaf bounds
+        // the tree to the request's rows (`highlight-and-hierarchy.md` §3).
+        RowExpr::MemberOf(rows) => Ok(scope.clamp(rows)),
+        RowExpr::NotInRows(kids) => {
+            // The complement within the scope: every rowed entity carries a position and may be a
+            // member, so the presence half of this negation is every row (selection-operand §5).
+            // No early exit on an empty difference — the image cursor's positional rule is simpler
+            // kept whole here than skipped, and these leaves' kids are already resolved.
+            let mut out = scope.all_rows();
+            for kid in kids {
+                out.andnot_inplace(&eval_row_expr(
+                    kid, images, next_image, segments, domain, scope,
+                )?);
+            }
+            Ok(out)
+        }
         RowExpr::AllOf(kids) => {
             let mut out: Option<croaring::Bitmap> = None;
             for kid in kids {
-                let kid_rows = eval_row_expr(kid, images, next_image, segments, domain)?;
+                let kid_rows = eval_row_expr(kid, images, next_image, segments, domain, scope)?;
                 out = Some(match out {
                     None => kid_rows,
                     Some(mut acc) => {
@@ -2238,7 +3868,7 @@ fn eval_row_expr(
         RowExpr::AnyOf(kids) => {
             let mut out = croaring::Bitmap::new();
             for kid in kids {
-                out |= eval_row_expr(kid, images, next_image, segments, domain)?;
+                out |= eval_row_expr(kid, images, next_image, segments, domain, scope)?;
             }
             Ok(out)
         }
@@ -2254,7 +3884,9 @@ fn eval_row_expr(
             // entity path argues it).
             let mut out = scan_rows(segments, domain, column, RowPredicate::present_in(*family))?;
             for (i, kid) in kids.iter().enumerate() {
-                out.andnot_inplace(&eval_row_expr(kid, images, next_image, segments, domain)?);
+                out.andnot_inplace(&eval_row_expr(
+                    kid, images, next_image, segments, domain, scope,
+                )?);
                 if out.is_empty() {
                     // Nothing below can widen an empty difference, so the remaining kids are not
                     // evaluated — **but `images` is positional and their verdicts are still in
@@ -2975,6 +4607,19 @@ const DEPENDENCY_CHAIN_MAX: u32 = 16;
 /// Gathered once per response rather than per artifact: every field is a property of the request —
 /// the viewer, the generation, the view and the composed mask — and none of them is a property of
 /// the artifact being tested.
+/// What [`Engine::gated_artifact`] answers: the artifact, located, with its level's row form and
+/// the verdict's two outputs.
+struct GatedArtifact {
+    name: String,
+    level: u32,
+    ordinal: u32,
+    entity: tessera_types::EntityId,
+    layer: tessera_types::layer::RegisteredLayer,
+    rows: Arc<crate::artifacts::ArtifactRows>,
+    masked_count: u64,
+    rank: Option<u32>,
+}
+
 struct DependencyContext<'a> {
     generation: &'a crate::Generation,
     satisfied: &'a rustc_hash::FxHashSet<tessera_types::TermId>,
@@ -3032,7 +4677,7 @@ fn crossing_domain(ranges: &[Vec<(usize, Range<u32>)>], row_bases: &[u32]) -> Ve
 /// `None` also for a layer whose membership is not an attribute predicate at all, which is what
 /// makes the closure built from this total: it answers *no code* for every key of such a layer, and
 /// no such layer is ever asked.
-fn predicate_vocabulary<'a>(
+pub(crate) fn predicate_vocabulary<'a>(
     generation: &'a crate::Generation,
     declaration: &tessera_types::layer::LayerDeclaration,
 ) -> Option<&'a tessera_store::vocabulary::VocabularyMinter> {
@@ -3056,11 +4701,21 @@ fn predicate_vocabulary<'a>(
 /// — a column this generation does not hold, or a spatial layer that declares no shape. Both are
 /// the fail-closed answer: such a level is served with no membership, so none of its artifacts is a
 /// candidate anywhere, rather than every artifact being one.
-fn predicate_source<'a>(
+///
+/// A spatial level's source is its held structures (`crate::shapes`), taken at the store's current
+/// level version — built at open and at every publication into the level, so a request finds them
+/// held; the join over the segments is the request's own O(containers) step.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn predicate_source<'a>(
     declaration: &tessera_types::layer::LayerDeclaration,
     generation: &'a crate::Generation,
+    view: &str,
+    view_data: &tessera_store::read::ViewData,
     segments: &'a [(&'a tessera_store::read::SegmentData, u32)],
     code_of_key: &'a dyn Fn(&str) -> Option<u32>,
+    shapes: &crate::shapes::ShapeStore,
+    store: &tessera_lifecycle::membership::ArtifactStore,
+    level: u32,
 ) -> Option<crate::artifacts::PredicateSource<'a>> {
     match &declaration.membership {
         tessera_types::layer::MembershipSource::Enumerated => None,
@@ -3073,39 +4728,222 @@ fn predicate_source<'a>(
                 },
             ))
         }
-        // ⊘ A spatial layer with no `shape` holds no artifacts and has no ranges to serve — the
+        // ⊘ A spatial layer with no `shape` holds no artifacts and has nothing to resolve — the
         // state this surface has always had, and the one the generator's boundary fixture is in.
         tessera_types::layer::MembershipSource::Spatial => {
-            let shape = declaration.shape?;
-            // **The build's own quantisation frame, not the request's.** A box covered against a
-            // different extent quantises to different cells and so to different tiles — a different
-            // membership — which is why this comes from the manifest that the geometry was written
-            // under rather than from anything a viewer sends.
-            let q = &generation.bundle.manifest.quantisation;
+            declaration.shape?;
+            // On the request path only where a publication route missed the level; nothing
+            // persisted is claimable here, and the fallback is loud (`crate::shapes`).
+            let held = shapes.level(
+                view,
+                &declaration.name,
+                level,
+                store,
+                &crate::shapes::PersistedPieces::none(),
+            );
             Some(crate::artifacts::PredicateSource::Spatial(
                 crate::artifacts::SpatialSource {
-                    depth: shape.depth,
-                    extent: Bounds {
-                        x_min: q.x_min,
-                        x_max: q.x_max,
-                        y_min: q.y_min,
-                        y_max: q.y_max,
-                    },
+                    level: held,
                     segments,
+                    total_rows: u32::try_from(view_data.row_space.total_rows()).unwrap_or(u32::MAX),
                 },
             ))
         }
     }
 }
 
+/// What [`Engine::warm_artifact_projections`] did, for the open's own log line — the shape
+/// `crate::shapes::Warmed` already has, and read the same way: a count of structures and a
+/// duration, naming no artifact and no principal.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct WarmedProjections {
+    /// How many `(view, layer, level)` forms were asked for. Every one is either built here or
+    /// already held, which at open can only be the second when two views share nothing — so this
+    /// is the number of builds unless a level was skipped.
+    pub(crate) levels: u64,
+    /// What the whole pass took. **The figure that moved off the request path**, and the one an
+    /// operator compares against the start they used to get.
+    pub(crate) elapsed_ms: u64,
+}
+
 impl Engine {
+    /// Build every live level's row-space projection **now**, so no request ever pays for one.
+    ///
+    /// # Why this is at open rather than on the first request that wants it
+    ///
+    /// `ArtifactProjections::get_or_build` is a cache, and its build is
+    /// `RowSpace::project_base` over a level's whole membership — "seconds, not milliseconds" at
+    /// corpus scale, and **measured at 23.3 s** for rung 3's `mesh/descriptors`, whose membership
+    /// is 1.66×10⁹ rows (`probes/2026-09-02-cold-start/`). Left lazy, that lands on whichever
+    /// request of a fresh process happens to be first — a viewport naming the layer, a browse of
+    /// it, or a `member_of` highlight over it — and the viewer sees a blank map for half a minute.
+    /// It is per **process**, so every restart re-arms it and a demo restarts often.
+    ///
+    /// Paid here, it is paid before the listeners are bound: `tessera_server::prepare` opens the
+    /// engine and `run` binds afterwards, so nothing can reach `/readyz` — let alone a request —
+    /// until this returns. **The cost does not disappear; it moves off the request and onto the
+    /// start**, which is the trade a restart-often deployment wants and the one an operator can
+    /// see, because it is reported below.
+    ///
+    /// # What it does not do
+    ///
+    /// **Nothing is materialised per token over the artifact population** (decision 0093). Every
+    /// structure built here is per `(view, layer, level)` and shared by every principal: the row
+    /// form, its tile index or its label column, and the containment partition. The per-principal
+    /// half — the masked counts, the gate, the verdicts — is not touched, and cannot be: there is
+    /// no session at open.
+    ///
+    /// **It holds no more than serving would.** These are exactly the entries the cache would
+    /// hold after one request of each shape, under the same replace-on-mismatch rule; what changes
+    /// is when they arrive, not how many there are. A deployment whose clients only ever ask for
+    /// one of many views does now hold the others' forms — and pays for them at start — which is
+    /// the honest cost of the trade.
+    ///
+    /// **Failure is an absence, not a refusal.** A view no partition carries, a view two carry
+    /// (which is a request error in its own right), a layer suppressed at open: each is skipped
+    /// and the level is built on first use, which is what every request did before this existed.
+    /// Refusing to open over a derived structure that has a correct fallback would be a refusal
+    /// outside the disclosure surface.
+    ///
+    /// ⊘ A fold's prefix rotation does not re-warm: a rotated prefix invalidates every key, and
+    /// the level is rebuilt by the first request after it, exactly as before. The engine adopts no
+    /// derived structures at a rotation either, so this would be the only half of that pair.
+    pub(crate) fn warm_artifact_projections(&self) -> WarmedProjections {
+        let started = std::time::Instant::now();
+        let mut warmed = WarmedProjections::default();
+        let generation = self.generation.load();
+        let layers = self.write.registered_layers();
+        if layers.is_empty() {
+            return warmed;
+        }
+        let source = generation.partition_source();
+        // The views this bundle carries, each with the partition that carries it. A view two
+        // partitions carry is `EngineError::MultiPartitionView` on the request path; here it is
+        // simply not warmed, so the request that hits the error is not preceded by a build for a
+        // row space no request will use.
+        let mut views: std::collections::BTreeMap<&str, Option<&tessera_store::read::ViewData>> =
+            std::collections::BTreeMap::new();
+        for partition in generation.bundle.partitions.values() {
+            for (name, data) in &partition.views {
+                views
+                    .entry(name.as_str())
+                    .and_modify(|held| *held = None)
+                    .or_insert(Some(data));
+            }
+        }
+        for (view, view_data) in views {
+            let Some(view_data) = view_data else { continue };
+            let Ok(segments) = segments_with_row_bases(view, view_data) else {
+                continue;
+            };
+            for layer in &layers {
+                if !layer.declaration.views.iter().any(|s| s == view) {
+                    continue;
+                }
+                // The same two live tests `serve_artifacts` takes, in the same order: a suppressed
+                // or deleted layer is served to nobody, so building its form would be work for a
+                // set no response can carry.
+                if generation.overlay.is_deleted(layer.entity)
+                    || generation.overlay.is_suppressed(layer.entity)
+                {
+                    continue;
+                }
+                let vocabulary = predicate_vocabulary(&generation, &layer.declaration);
+                let code_of_key = |key: &str| match vocabulary {
+                    Some(vocabulary) => vocabulary.code_of(key),
+                    None => key.parse::<u32>().ok(),
+                };
+                for level in 0..layer.runs.len() as u32 {
+                    let recorded = layer.layout_of(level);
+                    // **The engine's own pool**, for `Engine::masked_counts`' reason: the
+                    // projection's decode fans out, and a build outside `install` would take
+                    // rayon's global pool rather than the one the deployment sized.
+                    let (rows, level_version) = self.pool.install(|| {
+                        self.write.with_artifacts(|store| {
+                            let predicate = predicate_source(
+                                &layer.declaration,
+                                &generation,
+                                view,
+                                view_data,
+                                &segments,
+                                &code_of_key,
+                                &self.shapes,
+                                store,
+                                level,
+                            );
+                            (
+                                self.artifact_projections.get_or_build(
+                                    &generation.prefix,
+                                    view,
+                                    &layer.declaration.name,
+                                    level,
+                                    store,
+                                    &view_data.row_space,
+                                    Some(&source),
+                                    recorded,
+                                    predicate.as_ref(),
+                                    generation.segments_version,
+                                ),
+                                store.level_version(&layer.declaration.name, level),
+                            )
+                        })
+                    });
+                    warmed.levels += 1;
+                    // **The other two per-generation structures a first request would build**,
+                    // and they are here for the row form's reason rather than for their size: the
+                    // lineage is ~0.5 s at rung 3's 30,217-node DAG and the level's contents ~0.5 s
+                    // beside it, both derived from the level's records alone. Neither depends on a
+                    // mask, a viewport or a principal, so neither is work a request should be
+                    // doing — and leaving them lazy would leave *some* per-process build on the
+                    // first request after the expensive one had been moved.
+                    self.lineages
+                        .get_or_build(&layer.declaration.name, level, level_version, || {
+                            let records = rows.records();
+                            let edges = (0..records.len() as u32).map(|ordinal| {
+                                let within = records
+                                    .parents(ordinal)
+                                    .iter()
+                                    .filter(move |parent| parent.level == level)
+                                    .map(|parent| parent.ordinal);
+                                (ordinal, within)
+                            });
+                            match lineage_kind(layer.declaration.hierarchy.kind) {
+                                Some(true) => crate::cut::Lineage::dag(edges),
+                                _ => crate::cut::Lineage::new(edges),
+                            }
+                        });
+                    // Skipped where the layer declares no supplied content, exactly as the two
+                    // serving paths skip it: there is nothing to read.
+                    if !layer.declaration.content.supplied.is_empty() {
+                        if let Some(runs) = layer.runs.get(level as usize) {
+                            self.level_contents.get_or_build(
+                                &layer.declaration.name,
+                                level,
+                                level_version,
+                                generation.segments_version,
+                                || {
+                                    crate::artifact_content::LevelContent::build(
+                                        generation.filter_columns.records(),
+                                        runs,
+                                    )
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        warmed.elapsed_ms = started.elapsed().as_millis() as u64;
+        warmed
+    }
+
     /// What this request's composed mask is, for the masked-count cache's key.
     ///
     /// **Taken from the geometry that actually resolved**, never from the live generation's idea of
     /// it: a session may be served a one-generation-stale projection (decision 0044), so the
     /// fragment a request composes against is the entry's and not the newest one there is. A key
     /// naming the wrong fragment would file one visible set's counts under another's.
-    fn mask_identity(
+    pub(crate) fn mask_identity(
         &self,
         session: &Session,
         generation: &crate::Generation,
@@ -3132,7 +4970,7 @@ impl Engine {
     /// rather than discovered: the column has no per-artifact route to a masked count, so the choice
     /// is between this and re-scanning the mask for every drill-down.
     #[allow(clippy::too_many_arguments)]
-    fn masked_counts(
+    pub(crate) fn masked_counts(
         &self,
         identity: &crate::histogram::MaskIdentity,
         view: &str,
@@ -3146,44 +4984,37 @@ impl Engine {
         Some(
             self.masked_counts
                 .get_or_build(identity.key(view, layer, level, level_version), || {
-                    crate::histogram::MaskedCounts::new(column.histogram(mask))
+                    // On the engine's own pool, because the walk inside is split across it
+                    // (`RowColumn::histogram_over`) and a request must not spill onto rayon's
+                    // global pool, which nothing here sizes.
+                    self.pool
+                        .install(|| crate::histogram::MaskedCounts::new(column.histogram(mask)))
                 }),
         )
     }
 
-    /// Drill down on one artifact by the identifier a response handed out.
+    /// **One artifact, located and gated for one principal** — the predicate
+    /// [`Engine::artifact`] answers by, shared with the region leaf by artifact
+    /// (`polygon-membership.md` §8) so that a shape a viewer may filter through is exactly a shape
+    /// they would be served, by the same call.
     ///
-    /// **The same predicate the viewport calls, and that is the whole design of this method.** An
-    /// artifact reachable by identifier but not by viewport — or the reverse — is two
-    /// transcriptions of one rule, which is the failure mode this codebase has written down more
-    /// than once. So this resolves the address, resolves the layer, and then calls
-    /// [`crate::artifacts::ArtifactView::verdict`], exactly as `serve_artifacts` does. The only
-    /// difference is that there is no tile candidacy: the caller named the artifact.
-    ///
-    /// **`None` is the only failure shape.** An identifier naming nothing, one naming a point
-    /// rather than an artifact, one whose layer this principal does not reach, one whose artifact
-    /// is suppressed, and one below its layer's existence criterion are one answer. That last route
-    /// reads as new and is not — Appendix C's C17 annotation: the criterion tests the **masked**
-    /// count, so it can only cross the bar when this principal's own visible membership changes.
-    ///
-    /// **On the cost channel.** In the steady state every route here is cheap and comparable: the
-    /// session's geometry is resolved from the per-session cache a viewport already filled, and the
-    /// membership's row form from the per-deployment cache. The one expensive path — building a
-    /// projection — is deployment-wide state keyed on what was published, not on who is asking, so
-    /// its timing carries nothing about a principal.
-    pub fn artifact(
+    /// **`None` is the only failure shape.** An identifier naming nothing, one naming a point, one
+    /// whose layer this principal does not reach or which is suppressed, one on another view, and
+    /// one below its layer's existence criterion are one answer — C17's posture, and what keeps
+    /// the leaf by artifact from being an oracle over shapes a viewer was not served.
+    #[allow(clippy::too_many_arguments)]
+    fn gated_artifact(
         &self,
         session: &Session,
-        id: TesseraId,
-        idset: Option<u32>,
+        generation: &crate::Generation,
         view: &str,
-    ) -> Result<Option<ArtifactOut>> {
-        let generation = self.generation.load_full();
-        if let Some(e) = idset {
-            if e != generation.bundle.manifest.identity.idset {
-                return Err(EngineError::StaleIdSet);
-            }
-        }
+        view_data: &tessera_store::read::ViewData,
+        segments: &[(&SegmentData, u32)],
+        mask: &EffectiveMask,
+        denied: &croaring::Bitmap,
+        mask_identity: crate::histogram::MaskIdentity,
+        id: TesseraId,
+    ) -> Result<Option<GatedArtifact>> {
         let (shard, entity) = self.identity_key.invert(id);
         if shard != generation.bundle.manifest.identity.shard_id {
             return Ok(None);
@@ -3212,6 +5043,332 @@ impl Engine {
             return Ok(None);
         }
 
+        let source = generation.partition_source();
+        let recorded = layer.layout_of(level);
+        // The predicate's own inputs, resolved once for this identifier — the same rule the
+        // viewport resolves per layer, from the same generation, so an artifact reached by
+        // identifier and one reached by viewport cannot be evaluated against different memberships.
+        let vocabulary = predicate_vocabulary(generation, &layer.declaration);
+        let code_of_key = |key: &str| match vocabulary {
+            Some(vocabulary) => vocabulary.code_of(key),
+            None => key.parse::<u32>().ok(),
+        };
+        let (rows, level_version) = self.write.with_artifacts(|store| {
+            let predicate = predicate_source(
+                &layer.declaration,
+                generation,
+                view,
+                view_data,
+                segments,
+                &code_of_key,
+                &self.shapes,
+                store,
+                level,
+            );
+            (
+                self.artifact_projections.get_or_build(
+                    &generation.prefix,
+                    view,
+                    &name,
+                    level,
+                    store,
+                    &view_data.row_space,
+                    Some(&source),
+                    recorded,
+                    predicate.as_ref(),
+                    generation.segments_version,
+                ),
+                store.level_version(&name, level),
+            )
+        });
+        // ⊘ **A cold drill-down on a row-major level pays the level's whole histogram**, because
+        // the column has no per-artifact route to a masked count — see `Engine::masked_counts`.
+        let counts = self.masked_counts(
+            &mask_identity,
+            view,
+            &name,
+            level,
+            level_version,
+            &rows,
+            mask,
+        );
+        // The same containment answers the viewport builds, from the same partition: an identifier
+        // route that resolved containment by a different arm would be a second ranking nobody
+        // wrote. Lazily, because this route resolves one identifier — see `answer_for_one`.
+        let containment = rows
+            .partition()
+            .map(|p| p.answer_for_one(&session.satisfied));
+        let ctx = DependencyContext {
+            generation,
+            satisfied: &session.satisfied,
+            view,
+            view_data,
+            mask,
+            denied,
+            reachable: &reachable,
+            mask_identity,
+        };
+        let dependency_served = self.dependency_gate(&ctx);
+        let artifact_view = crate::artifacts::ArtifactView {
+            declaration: &layer.declaration,
+            overlay: &generation.overlay,
+            satisfied: &session.satisfied,
+            layer_reachable: true,
+            rows: &rows,
+            mask,
+            dependency_served: &dependency_served,
+            containment,
+            denied,
+            counts,
+        };
+        // ⊘ Per-artifact terms arrive with content (Stage 3); until then a layer whose
+        // `artifact_visibility` names a field withholds here as it does on the viewport, which is
+        // the same fail-closed answer reached by the same call.
+        let crate::artifacts::ArtifactVerdict::Serve { masked_count, rank } =
+            artifact_view.verdict(entity, ordinal, None)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(GatedArtifact {
+            name,
+            level,
+            ordinal,
+            entity,
+            layer,
+            rows,
+            masked_count,
+            rank,
+        }))
+    }
+
+    /// Answer one region leaf for one request (`crate::region`; `crate::filter::RegionResolver`).
+    ///
+    /// A drawn shape: its decomposition from the generation-keyed cache — shared across
+    /// principals, it carries no authorisation — with the boundary rows tested under **this
+    /// request's composed mask**. A published shape: the artifact's held membership, whole and
+    /// exact, only where this principal would be served the artifact; otherwise the empty
+    /// operand, identically for every reason (`polygon-membership.md` §8). An artifact whose
+    /// layer draws an authored shape is an empty operand too — its drawing is content, not a
+    /// membership (§4.1).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn resolve_region(
+        &self,
+        leaf: &crate::filter::RegionLeaf,
+        session: &Session,
+        generation: &crate::Generation,
+        view: &str,
+        view_data: &tessera_store::read::ViewData,
+        segments: &[(&SegmentData, u32)],
+        mask: &EffectiveMask,
+        denied: &croaring::Bitmap,
+        mask_identity: crate::histogram::MaskIdentity,
+        cancel: &Option<CancelToken>,
+    ) -> std::result::Result<crate::region::RegionRows, crate::filter::FilterError> {
+        use crate::filter::{FilterError, RegionLeaf};
+        let never_cancelled = CancelToken::new();
+        let cancel = cancel.as_ref().unwrap_or(&never_cancelled);
+        use crate::region::{digest_of, RegionDecomposition, RegionKey, RegionRows, RegionVerdict};
+        match leaf {
+            RegionLeaf::Shape(shape) => {
+                let max_cells = self.max_region_cells.load(Ordering::Relaxed) as usize;
+                let canonical = shape.encode();
+                let key = RegionKey {
+                    view: view.to_string(),
+                    prefix: generation.prefix.clone(),
+                    segments_version: generation.segments_version,
+                    digest: digest_of(&canonical),
+                    max_cells,
+                };
+                let build = || RegionDecomposition::build(Arc::clone(shape), max_cells, segments);
+                let entry = match self
+                    .region_cache
+                    .get_or_derive_waiting(key, None, cancel, |_| build())
+                {
+                    // A hit is a hit only for these bytes: a digest collision is detected here
+                    // and answered from a fresh, unretained decomposition (selection-operand §5).
+                    Ok(entry) if entry.is_of(&canonical) => entry,
+                    Ok(_) => Arc::new(build()),
+                    Err(crate::single_flight::WaitEnded::Cancelled) => {
+                        return Err(FilterError::RegionUnavailable(
+                            "the request was cancelled while its region was being decomposed"
+                                .to_string(),
+                        ))
+                    }
+                    // A wait that ran out is answered by building here, unretained: the
+                    // decomposition is a perimeter's worth of work, and refusing it would make a
+                    // second viewer's identical lasso a 429.
+                    Err(crate::single_flight::WaitEnded::Budget) => Arc::new(build()),
+                };
+                Ok(RegionRows {
+                    rows: entry.rows_under(mask, segments),
+                    verdict: entry.verdict(),
+                })
+            }
+            RegionLeaf::Artifact(id) => {
+                let gated = self
+                    .gated_artifact(
+                        session,
+                        generation,
+                        view,
+                        view_data,
+                        segments,
+                        mask,
+                        denied,
+                        mask_identity,
+                        *id,
+                    )
+                    .map_err(|e| FilterError::RegionUnavailable(e.to_string()))?;
+                let rows = match gated {
+                    Some(gated)
+                        if gated.layer.declaration.drawn_shape()
+                            != Some(tessera_types::layer::DrawnShape::Authored) =>
+                    {
+                        gated.rows.get(gated.ordinal).cloned().unwrap_or_default()
+                    }
+                    _ => croaring::Bitmap::new(),
+                };
+                Ok(RegionRows {
+                    rows,
+                    verdict: RegionVerdict::Exact,
+                })
+            }
+        }
+    }
+
+    /// Answer one `member_of` leaf for one request (`highlight-and-hierarchy.md` §3;
+    /// [`crate::filter::MemberResolver`]).
+    ///
+    /// **The gate, then the membership, in that order and never the other.** The layer must be one
+    /// this principal reaches — a name outside their own `/v1/meta` list is
+    /// [`FilterError::UnknownLayer`], deployment schema, and the registry's probe answers alike for
+    /// a gate-failed name and a never-registered one. Then the artifact must pass its **own**
+    /// existence criterion for this principal, through the same
+    /// [`Engine::gated_artifact`] the drill-down and the published-region leaf call, so that one
+    /// rule has one transcription. An artifact that does not pass — one that names nothing, one of
+    /// another layer, one suppressed, one below the criterion — is the **empty operand**, one
+    /// answer for every reason, because a `422` there would make the leaf an existence oracle over
+    /// exactly what the criterion withholds.
+    ///
+    /// **The membership is read two ways, decided by the level's layout and by nothing about the
+    /// request** (decision 0093). Artifact-major: the held row bitmap, intersected with the
+    /// composed mask — one `and`, no postings, no crossing, whatever the artifact's size. Row-
+    /// major: one scan of the principal's visible rows comparing labels, which is the only route a
+    /// label column has to the same set. Either way the answer is `membership ∩ M_auth`, whose
+    /// cardinality is the masked count the artifacts frame already serves.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn resolve_member_of(
+        &self,
+        leaf: &crate::filter::MemberOfLeaf,
+        session: &Session,
+        generation: &crate::Generation,
+        view: &str,
+        view_data: &tessera_store::read::ViewData,
+        segments: &[(&SegmentData, u32)],
+        mask: &EffectiveMask,
+        denied: &croaring::Bitmap,
+        mask_identity: crate::histogram::MaskIdentity,
+    ) -> std::result::Result<croaring::Bitmap, crate::filter::FilterError> {
+        use crate::compose::WholeMask;
+        use crate::filter::FilterError;
+        let reachable = self.write.resolve_layers(
+            |term| session.satisfied.contains(&term),
+            |label| generation.dict.lookup(label.as_bytes()),
+        );
+        if !reachable.contains(&leaf.layer) {
+            return Err(FilterError::UnknownLayer(leaf.layer.clone()));
+        }
+        let gated = self
+            .gated_artifact(
+                session,
+                generation,
+                view,
+                view_data,
+                segments,
+                mask,
+                denied,
+                mask_identity,
+                leaf.artifact,
+            )
+            .map_err(|e| FilterError::MemberOfUnavailable(e.to_string()))?;
+        // An identifier of *another* layer is a value that does not resolve within the one named,
+        // and is answered exactly as one that resolves to nothing at all.
+        let Some(gated) = gated.filter(|g| g.name == leaf.layer) else {
+            return Ok(croaring::Bitmap::new());
+        };
+        // **The artifact-major membership first, whatever the level's serving layout** — this is
+        // the cheap case `highlight-and-hierarchy.md` §2.1 names, and it is cheap because
+        // `MembershipRows` is already a row-space bitmap: the operand is one intersection with
+        // `M_auth`, O(containers touched) and independent of what the artifact matched.
+        //
+        // **A row-major level has one too**, and reading the column instead was measured at
+        // 2.85 s on rung 3's `mesh/descriptors` — a walk of every visible row of a 3.6 × 10⁷-row
+        // view asking each of its ~46 labels whether it is this ordinal, where the bitmap beside
+        // it answers the same question in microseconds. The two agree by construction: the column
+        // is a projection *of* this membership (`crate::row_column`), and the residency saving
+        // that would drop the artifact-major form is ⊘ **not taken**, so the form is there.
+        //
+        // The column walk stays as the fallback for the level that one day has no artifact-major
+        // form — an unreachable route today, and the honest answer rather than an empty operand
+        // if it ever is reached.
+        if let Some(rows) = gated.rows.get(gated.ordinal) {
+            return Ok(mask.visible_rows(rows));
+        }
+        Ok(match gated.rows.column() {
+            None => croaring::Bitmap::new(),
+            Some(column) => {
+                self.member_of_column_walks.fetch_add(1, Ordering::Relaxed);
+                let visible = mask.visible_all();
+                let mut out = croaring::Bitmap::new();
+                for row in visible.iter() {
+                    column.for_each_label(row, |ordinal| {
+                        if ordinal == gated.ordinal {
+                            out.add(row);
+                        }
+                    });
+                }
+                out
+            }
+        })
+    }
+
+    /// Drill down on one artifact by the identifier a response handed out.
+    ///
+    /// **The same predicate the viewport calls, and that is the whole design of this method.** An
+    /// artifact reachable by identifier but not by viewport — or the reverse — is two
+    /// transcriptions of one rule, which is the failure mode this codebase has written down more
+    /// than once. So this resolves the address, resolves the layer, and then calls
+    /// [`crate::artifacts::ArtifactView::verdict`], exactly as `serve_artifacts` does. The only
+    /// difference is that there is no tile candidacy: the caller named the artifact.
+    ///
+    /// **`None` is the only failure shape.** An identifier naming nothing, one naming a point
+    /// rather than an artifact, one whose layer this principal does not reach, one whose artifact
+    /// is suppressed, and one below its layer's existence criterion are one answer. That last route
+    /// reads as new and is not — Appendix C's C17 annotation: the criterion tests the **masked**
+    /// count, so it can only cross the bar when this principal's own visible membership changes.
+    ///
+    /// **On the cost channel.** In the steady state every route here is cheap and comparable: the
+    /// session's geometry is resolved from the per-session cache a viewport already filled, and the
+    /// membership's row form from the per-deployment cache. The one expensive path — building a
+    /// projection — is deployment-wide state keyed on what was published, not on who is asking, so
+    /// its timing carries nothing about a principal.
+    ///
+    /// `zoom` is the depth the caller draws at, for the vertex rule a predicate or an authored
+    /// shape is served under (`polygon-membership.md` §7.2); `None` serves the whole presimplified
+    /// shape under the budget alone. The derived kind — the hull — is unaffected by it.
+    pub fn artifact(
+        &self,
+        session: &Session,
+        id: TesseraId,
+        idset: Option<u32>,
+        view: &str,
+        zoom: Option<u8>,
+    ) -> Result<Option<ArtifactOut>> {
+        let generation = self.generation.load_full();
+        if let Some(e) = idset {
+            if e != generation.bundle.manifest.identity.idset {
+                return Err(EngineError::StaleIdSet);
+            }
+        }
         let carriers = generation
             .bundle
             .partitions
@@ -3245,85 +5402,33 @@ impl Engine {
             &view_data.row_space,
             denied,
         );
-
-        let source = generation.partition_source();
-        let recorded = layer.layout_of(level);
-        // The predicate's own inputs, resolved once for this identifier — the same rule the
-        // viewport resolves per layer, from the same generation, so an artifact reached by
-        // identifier and one reached by viewport cannot be evaluated against different memberships.
         let segments = segments_with_row_bases(view, view_data)?;
-        let vocabulary = predicate_vocabulary(&generation, &layer.declaration);
-        let code_of_key = |key: &str| match vocabulary {
-            Some(vocabulary) => vocabulary.code_of(key),
-            None => key.parse::<u32>().ok(),
-        };
-        let predicate = predicate_source(&layer.declaration, &generation, &segments, &code_of_key);
-        let (rows, level_version) = self.write.with_artifacts(|store| {
-            (
-                self.artifact_projections.get_or_build(
-                    &generation.prefix,
-                    view,
-                    &name,
-                    level,
-                    store,
-                    &view_data.row_space,
-                    Some(&source),
-                    recorded,
-                    predicate.as_ref(),
-                    generation.segments_version,
-                ),
-                store.level_version(&name, level),
-            )
-        });
         let mask_identity = self.mask_identity(session, &generation, &geometry);
-        // ⊘ **A cold drill-down on a row-major level pays the level's whole histogram**, because
-        // the column has no per-artifact route to a masked count — see `Engine::masked_counts`.
-        let counts = self.masked_counts(
-            &mask_identity,
-            view,
-            &name,
-            level,
-            level_version,
-            &rows,
-            &mask,
-        );
-        // The same containment answers the viewport builds, from the same partition: an identifier
-        // route that resolved containment by a different arm would be a second ranking nobody
-        // wrote. Lazily, because this route resolves one identifier — see `answer_for_one`.
-        let containment = rows
-            .partition()
-            .map(|p| p.answer_for_one(&session.satisfied));
-        let ctx = DependencyContext {
-            generation: &generation,
-            satisfied: &session.satisfied,
+        // The one predicate, shared with the viewport and with the region leaf by artifact.
+        let Some(gated) = self.gated_artifact(
+            session,
+            &generation,
             view,
             view_data,
-            mask: &mask,
+            &segments,
+            &mask,
             denied,
-            reachable: &reachable,
             mask_identity,
-        };
-        let dependency_served = self.dependency_gate(&ctx);
-        let artifact_view = crate::artifacts::ArtifactView {
-            declaration: &layer.declaration,
-            overlay: &generation.overlay,
-            satisfied: &session.satisfied,
-            layer_reachable: true,
-            rows: &rows,
-            mask: &mask,
-            dependency_served: &dependency_served,
-            containment,
-            denied,
-            counts,
-        };
-        // ⊘ Per-artifact terms arrive with content (Stage 3); until then a layer whose
-        // `artifact_visibility` names a field withholds here as it does on the viewport, which is
-        // the same fail-closed answer reached by the same call.
-        let crate::artifacts::ArtifactVerdict::Serve { masked_count, rank } =
-            artifact_view.verdict(entity, ordinal, None)
+            id,
+        )?
         else {
             return Ok(None);
         };
+        let GatedArtifact {
+            name,
+            level,
+            ordinal,
+            entity,
+            layer,
+            rows,
+            masked_count,
+            rank,
+        } = gated;
         // Same resolution as the viewport's, by the same call — an identifier route that served a
         // different content would be a second ranking nobody wrote.
         let Some(content) = self.supplied_content(
@@ -3334,6 +5439,11 @@ impl Engine {
             entity,
             layer.declaration.content.supplied.len(),
             rank,
+            true,
+            // One artifact, so the direct read: the level's table would answer this in O(1) and
+            // cost a pass over the level to build, which is the wrong trade for a route that
+            // resolves one identifier.
+            None,
         ) else {
             return Ok(None);
         };
@@ -3347,17 +5457,58 @@ impl Engine {
             .iter()
             .filter_map(|name| crate::derived::ComputedProperty::parse(name))
             .collect();
+        //
+        // **The same per-principal cache the viewport reads** (`crate::derived_cache`), and this is
+        // the route that most needs it: the client asks the viewport for centroids and this for the
+        // one shape it draws (`artifact-shapes.md` §9), so a viewer moving the pointer back over a
+        // cluster they have already hovered pays nothing.
         let derived = if declared_derived.is_empty() {
             crate::derived::DerivedContent::default()
         } else {
-            let locator =
-                crate::derived::RowLocator::new(segments_with_row_bases(view, view_data)?);
-            let visible = rows
-                .get(ordinal)
-                .map(|members| mask.visible_rows(members))
-                .unwrap_or_default();
-            crate::derived::compute(&declared_derived, &visible, &locator)
+            let key = crate::derived_cache::DerivedKey {
+                token_id: mask_identity.token_id,
+                view: view.to_string(),
+                layer: name.clone(),
+                level,
+                ordinal,
+                level_version: self
+                    .write
+                    .with_artifacts(|store| store.level_version(&name, level)),
+                segments_version: mask_identity.segments_version,
+                overlay_version: mask_identity.overlay_version,
+                fragment_identity: mask_identity.fragment_identity,
+                fragment_watermark: mask_identity.fragment_watermark,
+                properties: crate::derived_cache::properties_bits(&declared_derived),
+            };
+            let content = self.derived_geometry.get_or_derive(key, || {
+                let Ok(segments) = segments_with_row_bases(view, view_data) else {
+                    // Unreachable in practice — the view resolved above — and an empty content is
+                    // the fail-closed reading of a row space that cannot be assembled.
+                    return crate::derived::DerivedContent::default();
+                };
+                let locator = crate::derived::RowLocator::new(segments);
+                let visible = rows
+                    .get(ordinal)
+                    .map(|members| mask.visible_rows(members))
+                    .unwrap_or_default();
+                crate::derived::compute(&declared_derived, &visible, &locator)
+            });
+            (*content).clone()
         };
+        // The one drawn geometry of the other two kinds (`polygon-membership.md` §7.1): this
+        // route is asked for the one shape a client draws, so it always answers.
+        let mut content = content;
+        let mut derived = derived;
+        let shape_guard_fired = self.drawn_shape(
+            &layer.declaration,
+            view,
+            &name,
+            level,
+            ordinal,
+            &mut content,
+            &mut derived,
+            zoom,
+        );
         Ok(Some(ArtifactOut {
             content,
             layer: name.clone(),
@@ -3367,12 +5518,102 @@ impl Engine {
             }),
             masked_count,
             derived,
-            // **Always null on this route, and not by omission.** A parent is named only where it
-            // is also in the response, and this response is one artifact — so there is nothing for
-            // it to name. Resolving the parent here anyway would hand a caller who holds one
+            // The declared level — which is the rung on every layer kind *for this route*: a
+            // treed layer's stored level is 0, and its response-local chain depth is also 0 here,
+            // this response being one artifact with no parent links to be deep in.
+            rung: level,
+            // **Always empty on this route, and not by omission.** A parent is named only where
+            // it is also in the response, and this response is one artifact — so there is nothing
+            // for it to name. Resolving the parents here anyway would hand a caller who holds one
             // identifier the existence of a coarser artifact they were never served.
-            parent_id: None,
+            parent_ids: Vec::new(),
+            // The identifier route carries no filter to answer about (decision 0104), and there is
+            // no viewport for the answer to be scoped to either.
+            matched: None,
+            // Nor a highlight, for the same two reasons.
+            highlighted: None,
+            shape_guard_fired,
         }))
+    }
+
+    /// **The predicate and the authored kind of an artifact's one drawn geometry**
+    /// (`polygon-membership.md` §7.1), filled into `derived.shape` beside the count — the derived
+    /// kind, the hull, is already there from [`crate::derived::compute`]. Returns whether the
+    /// vertex budget fired.
+    ///
+    /// A **predicate** shape is the level's held canonical shape at this ordinal
+    /// (`crate::shapes`), served at the request's depth (`crate::shapes::served_rings`) — the
+    /// same bytes for every principal, which is what `/v1/meta`'s kind tells a client. It is
+    /// served under the artifact's own verdict and nothing else: this is reached only for an
+    /// artifact that verdict admitted.
+    ///
+    /// An **authored** shape is the supplied content at the layer's shape slot, which
+    /// `supplied_content` already gated by that content's own `require_member_visibility`: the
+    /// canonical per-view bytes are read back out of the slot, the request's view's shape is
+    /// served at the same rule, and **the slot is blanked** — the wire's `content` carries the
+    /// layer's texts, and the geometry travels as rings in `shape_x`/`shape_y`. A slot that does
+    /// not read as a shape draws nothing rather than a guess.
+    ///
+    /// **Never on a request that did not ask**: the caller passes `derived` only where the
+    /// request's `computed` selected the shape, and passes the content list only where it was
+    /// materialised.
+    #[allow(clippy::too_many_arguments)]
+    fn drawn_shape(
+        &self,
+        declaration: &tessera_types::layer::LayerDeclaration,
+        view: &str,
+        layer: &str,
+        level: u32,
+        ordinal: u32,
+        content: &mut [String],
+        derived: &mut crate::derived::DerivedContent,
+        zoom: Option<u8>,
+    ) -> bool {
+        match declaration.drawn_shape() {
+            None | Some(crate::shapes::DrawnShape::Derived) => false,
+            Some(crate::shapes::DrawnShape::Predicate) => {
+                let held = match self.shapes.get(view, layer, level) {
+                    Some(held) => held,
+                    // Not yet held for this view — a publication route this module was not
+                    // wired into; the fallback is the loud one every other reader takes.
+                    None => self.write.with_artifacts(|store| {
+                        self.shapes.level(
+                            view,
+                            layer,
+                            level,
+                            store,
+                            &crate::shapes::PersistedPieces::none(),
+                        )
+                    }),
+                };
+                let Some(shape) = held.shapes.get(ordinal as usize).and_then(|s| s.as_ref()) else {
+                    return false;
+                };
+                let (parts, guarded) = crate::shapes::served_rings(&shape.shape, zoom);
+                derived.shape = Some(parts);
+                guarded
+            }
+            Some(crate::shapes::DrawnShape::Authored) => {
+                let Some((slot, _)) = declaration.authored_shape() else {
+                    return false;
+                };
+                let Some(text) = content.get_mut(slot) else {
+                    return false;
+                };
+                let shapes = tessera_lifecycle::membership::ArtifactShapes::from_content_text(text);
+                text.clear();
+                let Some(shape) = shapes
+                    .as_ref()
+                    .and_then(|s| s.for_view(view))
+                    .and_then(|bytes| tessera_spatial::shape::Shape::decode(bytes).ok())
+                else {
+                    return false;
+                };
+                let (parts, guarded) = crate::shapes::served_rings(&shape, zoom);
+                derived.shape = Some(parts);
+                guarded
+            }
+        }
     }
 
     /// The artifacts of this viewport: every one the request asked for, that this principal
@@ -3400,8 +5641,21 @@ impl Engine {
     /// `Some(vec![])` and `None` are different answers and the difference is the whole point:
     /// the first is *this layer declares no supplied content*, which is most layers; the second is
     /// *this artifact should carry content and it is not here*, which withholds the artifact.
+    ///
+    /// **`materialise = false` runs the same servability test and copies nothing** — the identity
+    /// projection's setting (`artifact-fetch-protocol.md` §5.2). `Some`/`None` is decided by
+    /// identical checks on either setting, because that answer withholds the artifact and a
+    /// projection must not move the row set; all `false` skips is the string copies, and its
+    /// `Some` always carries the empty vector. One function with a flag rather than a probing
+    /// sibling, so the two readings of "servable" cannot drift apart.
+    ///
+    /// **`table` is the level's contents, read once for the level** — the viewport pass supplies
+    /// it, and it is what keeps a response of thousands of artifacts off a zstd block read per
+    /// artifact (`crate::artifact_content`, which carries the measurement). `None` reads the one
+    /// entity's row directly: the drill-down route asks about one artifact, and building a whole
+    /// level's table to answer that would trade a block read for a pass over the level.
     #[allow(clippy::too_many_arguments)]
-    fn supplied_content(
+    pub(crate) fn supplied_content(
         &self,
         generation: &crate::Generation,
         layer: &str,
@@ -3410,6 +5664,8 @@ impl Engine {
         entity: EntityId,
         kinds: usize,
         rank: Option<u32>,
+        materialise: bool,
+        table: Option<&crate::artifact_content::LevelContent>,
     ) -> Option<Vec<String>> {
         let Some(rank) = rank else {
             return Some(Vec::new());
@@ -3420,38 +5676,73 @@ impl Engine {
             store
                 .get(layer, level, ordinal)
                 .and_then(|record| record.contents.get(rank as usize))
-                .and_then(|set| set.values.clone())
+                .and_then(|set| match (&set.values, materialise) {
+                    (Some(values), true) => Some(values.clone()),
+                    (Some(_), false) => Some(Vec::new()),
+                    (None, _) => None,
+                })
         });
         if let Some(values) = held {
             return Some(values);
         }
 
-        // Otherwise the record blob, at this artifact's own entity: one block read, the same one a
-        // point's blob-resident fields cost. Tags are `rank × kinds + kind` against the
-        // layer's declaration — see `ArtifactStore::unpublished_content`.
+        // Otherwise the record blob, at this artifact's own entity. Tags are `rank × kinds + kind`
+        // against the layer's declaration — see `ArtifactStore::unpublished_content`.
         if kinds == 0 {
             return Some(Vec::new());
         }
         let base = (rank as usize).checked_mul(kinds)?;
-        let fields = generation
-            .filter_columns
-            .records()
-            .fields_of(u32::try_from(entity.raw()).ok()?)
-            .ok()??;
-        let mut values = Vec::with_capacity(kinds);
-        for k in 0..kinds {
-            let tag = u16::try_from(base + k).ok()?;
-            // **Every declared kind or none.** A row missing one is content that did not survive
-            // its write, and serving the rest would hand a client an artifact short of what its
-            // layer says it carries — which is indistinguishable, from the client's side, from
-            // content withheld.
-            let field = fields.iter().find(|f| f.tag == tag)?;
-            match &field.value {
-                tessera_filter::RecordValue::Utf8(text) => values.push(text.clone()),
-                _ => return None,
+        let entity = u32::try_from(entity.raw()).ok()?;
+        /// **Every declared kind or none.** A row missing one is content that did not survive its
+        /// write, and serving the rest would hand a client an artifact short of what its layer
+        /// says it carries — which is indistinguishable, from the client's side, from content
+        /// withheld. Stated once, for both routes below.
+        fn values_for<'a>(
+            base: usize,
+            kinds: usize,
+            materialise: bool,
+            text_at: impl Fn(u16) -> Option<&'a str>,
+        ) -> Option<Vec<String>> {
+            let mut values = Vec::with_capacity(if materialise { kinds } else { 0 });
+            for k in 0..kinds {
+                let text = text_at(u16::try_from(base + k).ok()?)?;
+                if materialise {
+                    values.push(text.to_string());
+                }
+            }
+            Some(values)
+        }
+        // **The two routes decide identically**, which is the whole reason the tag walk above is
+        // one loop over a lookup rather than two loops: the table holds the row's utf8 fields, and
+        // a tag it does not hold is a tag the row did not carry *or* one whose value was not text
+        // — both of which withhold on the direct route too.
+        match table {
+            Some(table) => {
+                let tagged = table.tagged(entity)?;
+                values_for(base, kinds, materialise, |tag| {
+                    tagged
+                        .binary_search_by_key(&tag, |(t, _)| *t)
+                        .ok()
+                        .map(|at| tagged[at].1.as_str())
+                })
+            }
+            None => {
+                let fields = generation
+                    .filter_columns
+                    .records()
+                    .fields_of(entity)
+                    .ok()??;
+                values_for(base, kinds, materialise, |tag| {
+                    fields
+                        .iter()
+                        .find(|f| f.tag == tag)
+                        .and_then(|f| match &f.value {
+                            tessera_filter::RecordValue::Utf8(text) => Some(text.as_str()),
+                            _ => None,
+                        })
+                })
             }
         }
-        Some(values)
     }
 
     /// The dependency prerequisite, shared by both serving routes: **is the artifact this one
@@ -3530,9 +5821,18 @@ impl Engine {
             Some(vocabulary) => vocabulary.code_of(key),
             None => key.parse::<u32>().ok(),
         };
-        let predicate =
-            predicate_source(&layer.declaration, ctx.generation, &segments, &code_of_key);
         let (rows, level_version) = self.write.with_artifacts(|store| {
+            let predicate = predicate_source(
+                &layer.declaration,
+                ctx.generation,
+                ctx.view,
+                ctx.view_data,
+                &segments,
+                &code_of_key,
+                &self.shapes,
+                store,
+                attachment.level,
+            );
             (
                 self.artifact_projections.get_or_build(
                     &ctx.generation.prefix,
@@ -3595,10 +5895,10 @@ impl Engine {
         move |attachment| self.dependency_served(ctx, attachment, DEPENDENCY_CHAIN_MAX)
     }
 
-    // Nine, and every one is a thing the artifact pass genuinely needs from the request it is part
+    // Ten, and every one is a thing the artifact pass genuinely needs from the request it is part
     // of: the session, the generation, the view and its data, the resolved tile ranges, the
-    // composed mask, and the request's own two artifact parameters. Bundling them into a struct
-    // would name the same nine things one call earlier.
+    // composed mask, and the request's own three artifact parameters. Bundling them into a struct
+    // would name the same ten things one call earlier.
     #[allow(clippy::too_many_arguments)]
     fn serve_artifacts(
         &self,
@@ -3608,10 +5908,24 @@ impl Engine {
         view_data: &tessera_store::ViewData,
         ranges: &[Vec<(usize, Range<u32>)>],
         mask: &crate::compose::EffectiveMask,
-        requested: Option<&[&str]>,
+        requested: LayerSelection<'_>,
         artifact_budget: Option<u32>,
+        levels: LevelSelection<'_>,
+        // Which declared properties this request pays for — a narrowing of the declaration and
+        // never a widening of it (`ComputedSelection`).
+        computed: ComputedSelection<'_>,
+        // The request's tile depth, which `LevelSelection::Declared` joins against each layer's
+        // declared per-level zoom ranges. The two are the same 0–16 coordinate.
+        zoom: u8,
         mask_identity: crate::histogram::MaskIdentity,
-    ) -> Result<Vec<ArtifactOut>> {
+        artifact_rows: ArtifactRows,
+        // D-C: checked once per artifact served. The derived sweep is the response's dominant
+        // CPU and it runs between two flushes, so without a checkpoint here a client that has
+        // gone — or a stream the server has shed — is discovered only when the whole frame is
+        // ready to send: three abandoned GeoNames requests each held a worker for minutes
+        // (2026-08-28), deriving geometry nobody would read.
+        cancel: &Option<CancelToken>,
+    ) -> Result<(Vec<ArtifactOut>, Vec<ServedLayer>)> {
         // Which layers this principal may know exist — one set probe for a gate-failed name and a
         // never-registered one alike (`LayerRegistry::resolve_for`).
         let reachable = self.write.resolve_layers(
@@ -3621,15 +5935,15 @@ impl Engine {
         // **Intersected with the request, never unioned.** A name the principal does not reach is
         // absent whether or not they asked for it, so asking is not a way to learn what exists.
         let names: Vec<String> = match requested {
-            Some(list) => list
+            LayerSelection::Named(list) => list
                 .iter()
                 .filter(|name| reachable.contains(name))
                 .map(|name| name.to_string())
                 .collect(),
-            None => reachable.names().map(str::to_string).collect(),
+            LayerSelection::All => reachable.names().map(str::to_string).collect(),
         };
         if names.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
         // Built once for the whole response, and from the *same* resolution the names above came
         // from: a label's target may live in any layer its own declares in `depends_on`, reachable
@@ -3676,13 +5990,21 @@ impl Engine {
             tile_rows.add_range(span);
         }
         if tile_rows.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
         // **The one composition, hoisted out of every layer and every artifact**
         // (`design/artifact-serving-at-scale.md` §4 step 2, and `crate::tile_index::Viewport`).
         // Built once per request: it is the same set for every layer in the response, and its cost
         // is the viewport's containers rather than the population's.
         let viewport = crate::tile_index::Viewport::compose(&tile_rows, mask);
+        // **The filter's half of the same hoisting, and it is composed once for the request too**:
+        // `viewport ∩ M_auth ∩ M_sel`, the one set decision 0104's bit is asked against. `None` is
+        // an unfiltered request — no question, and no column on the wire to answer it.
+        let matched_here = mask.matched_rows(viewport.here());
+        // **The highlight's half of the same hoisting**: `viewport ∩ M_auth ∩ M_sel ∩ highlight`,
+        // the one set the conjunction's bit is asked against (`highlight-and-hierarchy.md` §2).
+        // `None` is a request carrying no highlight — no question, and a null column to say so.
+        let highlighted_here = mask.highlighted_rows(viewport.here());
 
         let shard = generation.bundle.manifest.identity.shard_id;
         // Built once for the whole response: the postings and the manifest's plugin are the
@@ -3695,11 +6017,19 @@ impl Engine {
         let in_request: std::collections::BTreeSet<String> = names.iter().cloned().collect();
 
         let mut out = Vec::new();
+        // The layers whose rung is the response-local chain depth rather than the declared level —
+        // the treed (nested) ones, decision 0082's edges-not-levels shape. Collected during the
+        // walk, applied after the response's row set is final (below).
+        let mut treed: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         // Where each served artifact ended up, and what each points at — collected during the walk
         // and reconciled after it.
         let mut served_at: std::collections::BTreeMap<(String, u32, u32), TesseraId> =
             std::collections::BTreeMap::new();
         let mut placed: Vec<Placement> = Vec::new();
+        // Every level this pass walked, with the structures the membership column reads the
+        // served set back through — the same row form and the same lineage the verdicts and the
+        // cut used, so the column cannot describe a level the artifacts frame did not.
+        let mut served_layers: Vec<ServedLayer> = Vec::new();
         for name in names {
             let Some(layer) = self.write.registered_layer(&name) else {
                 // Dropped between the resolution and here. Absent is the right answer and the same
@@ -3719,37 +6049,61 @@ impl Engine {
             {
                 continue;
             }
+            if lineage_kind(layer.declaration.hierarchy.kind).is_some() {
+                treed.insert(name.clone());
+            }
 
             // Parsed once per layer. A name outside the vocabulary cannot reach here — the
             // declaration was refused at registration — so an unparseable one is dropped rather
             // than erroring the whole response.
+            //
+            // **The request narrows it, and only ever narrows it.** The intersection is taken here
+            // so that a property the request did not ask for is never computed at all — the point
+            // of the field is the work it does not do, and filtering the *result* would keep the
+            // hull's cost while dropping its bytes.
             let declared_derived: Vec<crate::derived::ComputedProperty> = layer
                 .declaration
                 .content
                 .computed
                 .iter()
                 .filter_map(|name| crate::derived::ComputedProperty::parse(name))
+                .filter(|property| computed.selects(*property))
                 .collect();
 
-            // **The predicate's inputs, resolved once per layer rather than per level**: the
-            // membership is the layer's, and every level of a predicate layer reads the same
-            // column or the same declared depth. A layer with a stored membership resolves nothing.
+            // **The predicate's inputs, resolved per level.** An attribute layer's every level
+            // reads the same column; a spatial layer's held structures are per level, because
+            // each level holds its own shapes. A layer with a stored membership resolves nothing.
             let vocabulary = predicate_vocabulary(generation, &layer.declaration);
             let code_of_key = |key: &str| match vocabulary {
                 Some(vocabulary) => vocabulary.code_of(key),
                 None => key.parse::<u32>().ok(),
             };
-            let predicate = predicate_source(
-                &layer.declaration,
-                generation,
-                &segments_for_shapes,
-                &code_of_key,
-            );
 
+            let mut served_levels: Vec<ServedLevel> = Vec::new();
             for (level, runs) in layer.runs.iter().enumerate() {
                 let level = level as u32;
+                // **Skipped before the projection is built, not after it is served.** A level the
+                // request did not ask for costs nothing at all here: no `get_or_build`, no
+                // candidate walk, no masked probe and no derived geometry over its members. That is
+                // the whole point of the field — a whole-layer response over a five-level
+                // administrative hierarchy pays a pass over every member at every level, and the
+                // levels a client was never going to draw dominate it.
+                if !level_is_selected(levels, &layer.declaration.levels, level, zoom) {
+                    continue;
+                }
                 let recorded = layer.layout_of(level);
                 let (rows, level_version) = self.write.with_artifacts(|store| {
+                    let predicate = predicate_source(
+                        &layer.declaration,
+                        generation,
+                        view,
+                        view_data,
+                        &segments_for_shapes,
+                        &code_of_key,
+                        &self.shapes,
+                        store,
+                        level,
+                    );
                     (
                         self.artifact_projections.get_or_build(
                             &generation.prefix,
@@ -3781,6 +6135,15 @@ impl Engine {
                     mask,
                 );
                 let containment = rows.partition().map(|p| p.answers(&session.satisfied));
+                // Captured before the shadow below: `view` becomes the artifact predicate's value,
+                // and the derived-geometry key needs the view's *name*.
+                let view_name = view;
+                // **Built after the candidacy route and never as part of it**: the filter decides
+                // nothing about which artifacts are served (decision 0104), so this is computed
+                // beside the verdict rather than inside it, and is skipped whole on an unfiltered
+                // request.
+                let matched = matched_here.as_ref().map(|here| rows.matched(here));
+                let highlighted = highlighted_here.as_ref().map(|here| rows.matched(here));
                 let view = crate::artifacts::ArtifactView {
                     declaration: &layer.declaration,
                     overlay: &generation.overlay,
@@ -3834,9 +6197,11 @@ impl Engine {
                     passing.push((ordinal, entity, masked_count, rank));
                 }
 
-                // The level's lineage, read from the parent pointers of **every** artifact and not
-                // only the passing ones: an ancestor that failed its own criterion is still an
-                // ancestor, and a cut blind to it would keep a node its descendant covers.
+                // The level's lineage, read from the parent lists of **every** artifact and not
+                // only the passing ones, because the edges are a property of the level and one
+                // lineage serves every viewer. **What the cut is taken over is the passing nodes
+                // alone** (decision 0117 E): the plan counts depth in them and climbs through the
+                // rest, so a withheld ancestor is not in this viewer's tree.
                 //
                 // **Within-level edges only, and that is the whole of the tiered shape's
                 // treatment here** (owner ruling, 2026-08-18). A tiered layer's edges run
@@ -3852,28 +6217,25 @@ impl Engine {
                 // work: ~96 ms at a level of ten million, against the ~3 ms the cut over them now
                 // costs.
                 //
-                // **The version and the build are taken inside one hold of the artifacts lock**,
-                // which is what makes the cached lineage the lineage *of* the version it is filed
-                // under: read separately, a write landing between the two would file the new
-                // level's edges under the old level's version, and the next request would serve a
-                // cut through a tree that has moved.
-                let lineage = self.write.with_artifacts(|store| {
-                    self.lineages.get_or_build(
-                        &name,
-                        level,
-                        store.level_version(&name, level),
-                        || {
-                            crate::cut::Lineage::new(store.level(&name, level).map(
-                                |(ordinal, record)| {
-                                    let within = record
-                                        .parent
-                                        .filter(|parent| parent.level == level)
-                                        .map(|parent| parent.ordinal);
-                                    (ordinal, within)
-                                },
-                            ))
-                        },
-                    )
+                // **Read from the row form, whose records and version were taken inside one hold
+                // of the artifacts lock** (above), which is what makes the cached lineage the
+                // lineage *of* the version it is filed under: read separately, a write landing
+                // between the two would file the new level's edges under the old level's version,
+                // and the next request would serve a cut through a tree that has moved.
+                let lineage = self.lineages.get_or_build(&name, level, level_version, || {
+                    let records = rows.records();
+                    let edges = (0..records.len() as u32).map(|ordinal| {
+                        let within = records
+                            .parents(ordinal)
+                            .iter()
+                            .filter(move |parent| parent.level == level)
+                            .map(|parent| parent.ordinal);
+                        (ordinal, within)
+                    });
+                    match lineage_kind(layer.declaration.hierarchy.kind) {
+                        Some(true) => crate::cut::Lineage::dag(edges),
+                        _ => crate::cut::Lineage::new(edges),
+                    }
                 });
                 let ordinals: Vec<u32> = passing.iter().map(|&(o, ..)| o).collect();
                 // Ascending and deduplicated, which the cut guarantees — so the membership test in
@@ -3892,15 +6254,53 @@ impl Engine {
                     artifact_budget,
                     layer.declaration.hierarchy.prune_children,
                 );
+                // **The level's supplied content, read once for the level rather than once per
+                // served artifact** (`crate::artifact_content`, which carries the measurement that
+                // put it here: 408 ms of a response whose points half is 1.3 ms, all of it one
+                // zstd block decompressed per artifact served — 6.7 ms once the level's contents
+                // are read together). Built after the cut, so a level whose artifacts all failed
+                // their verdict reads nothing at all, and skipped whole where the layer declares no
+                // supplied content — which is most layers.
+                let contents = if layer.declaration.content.supplied.is_empty() || served.is_empty()
+                {
+                    None
+                } else {
+                    Some(self.level_contents.get_or_build(
+                        &name,
+                        level,
+                        level_version,
+                        generation.segments_version,
+                        || {
+                            crate::artifact_content::LevelContent::build(
+                                generation.filter_columns.records(),
+                                runs,
+                            )
+                        },
+                    ))
+                };
+                served_levels.push(ServedLevel {
+                    level,
+                    rows: Arc::clone(&rows),
+                    lineage: Arc::clone(&lineage),
+                    // Filled once the response's membership is settled, below.
+                    served: std::collections::HashMap::new(),
+                });
 
                 for (ordinal, entity, masked_count, rank) in passing {
                     if served.binary_search(&ordinal).is_err() {
                         continue;
                     }
+                    check_cancelled(cancel)?;
                     // The one content this viewer contains, entire. ⊘ A content restored from a
                     // packed extent carries no values yet (its content belongs in the record blob,
                     // decision 0077, and that write is unbuilt), and is **withheld** rather than
                     // served with its description missing.
+                    //
+                    // **Asked under the identity projection too, and deliberately** — with
+                    // `materialise = false`, so the values are not copied but the *servability*
+                    // test is identical. Content-cannot-be-served withholds the artifact, so
+                    // skipping the probe here would let an identity response carry a row the full
+                    // response withholds, breaking §5.2's row-set contract sentence.
                     let Some(content) = self.supplied_content(
                         generation,
                         &name,
@@ -3909,6 +6309,8 @@ impl Engine {
                         entity,
                         layer.declaration.content.supplied.len(),
                         rank,
+                        artifact_rows == ArtifactRows::Full,
+                        contents.as_deref(),
                     ) else {
                         continue;
                     };
@@ -3923,32 +6325,87 @@ impl Engine {
                     // artifact's membership intersected with what this principal may see, so every
                     // property below is a function of `membership ∩ M_auth` and nothing else
                     // (`annotations.md` §4.2). Skipped entirely where the layer declares nothing,
-                    // which is what keeps a count-only layer at count-only cost.
-                    let derived = if declared_derived.is_empty() {
+                    // which is what keeps a count-only layer at count-only cost — and skipped
+                    // whole under the identity projection, which is that projection's point: the
+                    // derived sweep is the response's dominant CPU and decides nothing about
+                    // which rows are served (`artifact-fetch-protocol.md` §5.2).
+                    //
+                    // **Held per principal between requests** (`crate::derived_cache`): a pan
+                    // re-serves mostly the same artifacts to the same viewer, and a shape is the
+                    // most expensive thing this loop does. The key names the principal, so a hit
+                    // answers the request that would have derived the same value.
+                    let derived = if artifact_rows == ArtifactRows::Identity
+                        || declared_derived.is_empty()
+                    {
                         crate::derived::DerivedContent::default()
                     } else {
-                        let visible = rows
-                            .get(ordinal)
-                            .map(|members| mask.visible_rows(members))
-                            .unwrap_or_default();
-                        crate::derived::compute(&declared_derived, &visible, &locator)
+                        let key = crate::derived_cache::DerivedKey {
+                            token_id: mask_identity.token_id,
+                            view: view_name.to_string(),
+                            layer: name.clone(),
+                            level,
+                            ordinal,
+                            level_version,
+                            segments_version: mask_identity.segments_version,
+                            overlay_version: mask_identity.overlay_version,
+                            fragment_identity: mask_identity.fragment_identity,
+                            fragment_watermark: mask_identity.fragment_watermark,
+                            properties: crate::derived_cache::properties_bits(&declared_derived),
+                        };
+                        (*self.derived_geometry.get_or_derive(key, || {
+                            let visible = rows
+                                .get(ordinal)
+                                .map(|members| mask.visible_rows(members))
+                                .unwrap_or_default();
+                            crate::derived::compute(&declared_derived, &visible, &locator)
+                        }))
+                        .clone()
                     };
-                    // **The parent comes from the level's own records and the key from the store.**
-                    // Both are per-ordinal facts of one generation, but only one of them is held
-                    // in the row form: a key is a caller's string, one per artifact, and copying
-                    // ten million of them into a cached structure buys nothing the store's own
-                    // lookup does not already answer.
-                    let parent = rows.parent(ordinal);
-                    let key = self
-                        .write
-                        .with_artifacts(|store| store.get(&name, level, ordinal)?.key.clone());
+                    // The predicate or the authored shape, **only where the request asked for the
+                    // shape** (`polygon-membership.md` §7.1) and the row is materialised — the
+                    // identity projection carries no geometry and no content at all.
+                    let mut content = content;
+                    let mut derived = derived;
+                    let shape_guard_fired = if artifact_rows == ArtifactRows::Full
+                        && computed.selects(crate::derived::ComputedProperty::Hull)
+                    {
+                        self.drawn_shape(
+                            &layer.declaration,
+                            view_name,
+                            &name,
+                            level,
+                            ordinal,
+                            &mut content,
+                            &mut derived,
+                            Some(zoom),
+                        )
+                    } else {
+                        false
+                    };
+                    // **The parents come from the level's own records and the key from the
+                    // store.** Both are per-ordinal facts of one generation, but only one of them
+                    // is held in the row form: a key is a caller's string, one per artifact, and
+                    // copying ten million of them into a cached structure buys nothing the
+                    // store's own lookup does not already answer. The key is payload, so the
+                    // identity projection skips the lookup.
+                    let parents: Vec<(String, u32, u32)> = rows
+                        .parents(ordinal)
+                        .iter()
+                        .map(|p| (name.clone(), p.level, p.ordinal))
+                        .collect();
+                    let key = match artifact_rows {
+                        ArtifactRows::Identity => None,
+                        ArtifactRows::Full => self
+                            .write
+                            .with_artifacts(|store| store.get(&name, level, ordinal)?.key.clone()),
+                    };
                     // Recorded, not resolved: which artifacts this response holds is not known
                     // until every layer and level has been walked, and a parent — or the artifact
                     // a dependent hangs from — may sit in a level this loop has not reached.
                     served_at.insert((name.clone(), level, ordinal), tessera_id);
                     placed.push(Placement {
                         at: (name.clone(), level, ordinal),
-                        parent: parent.map(|p| (name.clone(), p.level, p.ordinal)),
+                        parents,
                         attached_to: rows
                             .attachment(ordinal)
                             .map(|a| (a.layer.clone(), a.level, a.ordinal)),
@@ -3960,11 +6417,27 @@ impl Engine {
                         key,
                         masked_count,
                         derived,
+                        // The declared level. On a treed layer — where every artifact sits at
+                        // level 0 and the rung is the response-local chain depth — this is
+                        // recomputed below, once the response's row set is final.
+                        rung: level,
                         // Filled in below, once the response's own membership is settled.
-                        parent_id: None,
+                        parent_ids: Vec::new(),
+                        // Asked only of the artifacts that survived the cut: the bit describes what
+                        // is served, and an artifact the response drops has no row to carry one.
+                        matched: matched.as_ref().map(|m| rows.matches(m, ordinal)),
+                        // 0104's probe with the highlight's crossed set in place of the filter's
+                        // — the same early-exiting intersection, over `all_of[filters, highlight]`
+                        // (`highlight-and-hierarchy.md` §2).
+                        highlighted: highlighted.as_ref().map(|m| rows.matches(m, ordinal)),
+                        shape_guard_fired,
                     });
                 }
             }
+            served_layers.push(ServedLayer {
+                name,
+                levels: served_levels,
+            });
         }
         // **The cut ran after the verdicts, so a dependent may have passed on a target this
         // response then removed.** Dropping it here — before the parents are resolved, so a
@@ -3972,26 +6445,204 @@ impl Engine {
         // response from describing a cluster it does not contain (decision 0089).
         let dropped = orphaned_dependents(&placed, &in_request, &mut served_at);
 
+        // **A dependent carries its target's masked count** (D13; owner ruling 2026-08-25): a
+        // label describes its cluster, so the number beside it is the cluster's — how many of
+        // *that* artifact's members this principal can see — and not the label's own membership,
+        // which a publisher may leave empty. The target is in this response with that very count
+        // (the drop above guarantees it), so the value is derivable from the artifacts frame and
+        // discloses nothing new (decision 0023). Filter-blind, as every masked count is
+        // (`MaskedSet::count_intersection`, I12): the request's filter never moves it.
+        let count_at: std::collections::BTreeMap<&(String, u32, u32), u64> = placed
+            .iter()
+            .zip(&out)
+            .map(|(place, artifact)| (&place.at, artifact.masked_count))
+            .collect();
+        let target_counts: Vec<Option<u64>> = placed
+            .iter()
+            .map(|place| {
+                place
+                    .attached_to
+                    .as_ref()
+                    .filter(|target| in_request.contains(&target.0))
+                    .and_then(|target| count_at.get(target).copied())
+            })
+            .collect();
+        // **And its target's two filter bits, on D13's own argument** (decision 0104;
+        // `highlight-and-hierarchy.md` §2 for the second). A label describes its cluster, so *does
+        // anything here match* is a question about the cluster; the label's own membership is often
+        // empty, and a bit over it would read `false` for every label under every filter — the same
+        // defect the count rule exists to prevent, in the fields beside it. Derivable from the
+        // target's own row in this response, which the drop above guarantees is present, so it
+        // discloses nothing new (decision 0023).
+        //
+        // **The two travel as one pair, deliberately.** `highlighted` is `matched` under a second
+        // expression and not a second kind of answer, so a shape that let one inherit and the
+        // other keep the label's own would serve two answers to one question about one cluster —
+        // which is what happened when this carried `matched` alone.
+        let bits_at: std::collections::BTreeMap<&(String, u32, u32), FilterBits> = placed
+            .iter()
+            .zip(&out)
+            .map(|(place, artifact)| (&place.at, (artifact.matched, artifact.highlighted)))
+            .collect();
+        let target_bits: Vec<Option<FilterBits>> = placed
+            .iter()
+            .map(|place| {
+                place
+                    .attached_to
+                    .as_ref()
+                    .filter(|target| in_request.contains(&target.0))
+                    .and_then(|target| bits_at.get(target).copied())
+            })
+            .collect();
+
         // **A parent is named only where it is also in this response**, which is the whole of the
-        // disclosure rule for this field. An artifact whose parent exists but was withheld — below
-        // its own criterion for this viewer, suppressed, or dropped by the frontier — carries a
-        // null here, indistinguishable from a root. Naming it would tell the viewer that a coarser
-        // grouping exists which they are not cleared to see, which is a disclosure the rest of this
-        // pass takes care to avoid making.
+        // disclosure rule for this field, and it applies per entry (C29). An artifact whose parent
+        // exists but was withheld — below its own criterion for this viewer, suppressed, or dropped
+        // by the frontier — carries no entry for it, indistinguishable from a root having none.
+        // Naming it would tell the viewer that a coarser grouping exists which they are not
+        // cleared to see, which is a disclosure the rest of this pass takes care to avoid making.
+        // Ascending by identifier, so a client that wants one parent takes the first and gets the
+        // same one every time.
         let mut served = Vec::with_capacity(out.len());
-        for ((mut artifact, place), dropped) in out.into_iter().zip(&placed).zip(dropped) {
+        for ((((mut artifact, place), dropped), target_count), target_bit) in out
+            .into_iter()
+            .zip(&placed)
+            .zip(dropped)
+            .zip(target_counts)
+            .zip(target_bits)
+        {
             if dropped {
                 continue;
             }
-            artifact.parent_id = place
-                .parent
-                .as_ref()
-                .and_then(|key| served_at.get(key))
-                .copied();
+            if let Some(count) = target_count {
+                artifact.masked_count = count;
+            }
+            if let Some((matched, highlighted)) = target_bit {
+                artifact.matched = matched;
+                artifact.highlighted = highlighted;
+            }
+            artifact.parent_ids = place
+                .parents
+                .iter()
+                .filter_map(|key| served_at.get(key))
+                .copied()
+                .collect();
+            artifact.parent_ids.sort_unstable_by_key(|id| id.raw());
+            artifact.parent_ids.dedup();
             served.push(artifact);
         }
-        Ok(served)
+        // **A treed layer's rung is the response-local depth** — the longest parent chain to each
+        // row in the forest this response's own `parent_ids` links form
+        // (`artifact-fetch-protocol.md` §5.3, `dag-hierarchies.md` §5). Computed here, after the
+        // cut, the content withholds and the dependent drop, because those are what make the
+        // forest response-local: a row whose ancestors were pruned, withheld or cut away is a root
+        // of its subtree and reads 0, whatever its depth in the stored tree.
+        //
+        // **Settled before the membership column's served set is handed over**, because the
+        // column ranks by this rung and never by the stored depth: the stored depth counts
+        // withheld nodes, so two served artifacts holding one point would be ordered by an
+        // artifact the viewer cannot see (`dag-hierarchies.md` §6, decision 0117 E).
+        let parents_of: std::collections::HashMap<u64, Vec<u64>> = served
+            .iter()
+            .filter(|a| treed.contains(&a.layer))
+            .map(|a| {
+                (
+                    a.tessera_id.raw(),
+                    a.parent_ids.iter().map(|p| p.raw()).collect(),
+                )
+            })
+            .collect();
+        let rungs = response_rungs(&parents_of);
+        for artifact in served.iter_mut().filter(|a| treed.contains(&a.layer)) {
+            artifact.rung = rungs.get(&artifact.tessera_id.raw()).copied().unwrap_or(0);
+        }
+        // **The membership column's served set is `served_at` after the drop** — exactly the
+        // artifacts in `served`, and the only identifiers the column can name — each with its
+        // response-local rung (0 on a layer whose rung is its declared level, which the level
+        // index already ranks).
+        for ((name, level, ordinal), tessera_id) in &served_at {
+            if let Some(slot) = served_layers
+                .iter_mut()
+                .find(|l| &l.name == name)
+                .and_then(|l| l.levels.iter_mut().find(|l| l.level == *level))
+            {
+                let rung = rungs.get(&tessera_id.raw()).copied().unwrap_or(0);
+                slot.served.insert(*ordinal, (*tessera_id, rung));
+            }
+        }
+        Ok((served, served_layers))
     }
+}
+
+/// Whether a layer's kind holds a lineage the cut climbs and the rung is counted over —
+/// `Some(dag)` for the kinds whose edges are roll-up, `None` for the flat and levelled kinds,
+/// whose edges are information rather than a ladder to coarsen along
+/// ([decision 0087](../../../docs/decisions/0087-cross-level-edges-are-information-not-rollup.md)).
+fn lineage_kind(kind: tessera_types::layer::HierarchyKind) -> Option<bool> {
+    match kind {
+        tessera_types::layer::HierarchyKind::Nested => Some(false),
+        // A `dag` layer is `nested` with several parents (decision 0117): a lineage, and one the
+        // cut reads every depth's count over rather than bisecting (`dag-hierarchies.md` §6).
+        tessera_types::layer::HierarchyKind::Dag => Some(true),
+        _ => None,
+    }
+}
+
+/// The response-local depth of every served treed artifact — its `rung`
+/// (`artifact-fetch-protocol.md` §5.3): **the longest parent chain** to it over the response's
+/// own links (`dag-hierarchies.md` §5), the same definition the stored lineage's depth has.
+///
+/// `parents_of` holds every served row of the treed layers, keyed by `tessera_id`, valued with the
+/// response's own `parent_ids` — which, by that field's contract, only ever name identifiers in
+/// the same response, and within the artifact's own layer. An empty list, and an identifier
+/// `parents_of` does not hold, are both roots: *no parent in this response* is rung 0, whatever
+/// the stored tree says.
+///
+/// One depth-first pass with the ancestors memoised, iterative for the same reason
+/// [`crate::cut::Lineage`]'s is; the cycle guard is the in-progress mark — the publish and the
+/// mint refuse a cycle, so a parent still in progress when its child is resolved is a malformed
+/// store, and it contributes nothing rather than looping.
+pub(crate) fn response_rungs(
+    parents_of: &std::collections::HashMap<u64, Vec<u64>>,
+) -> std::collections::HashMap<u64, u32> {
+    const PENDING: u32 = u32::MAX;
+    let mut known: std::collections::HashMap<u64, u32> =
+        std::collections::HashMap::with_capacity(parents_of.len());
+    let mut stack: Vec<u64> = Vec::new();
+    for &id in parents_of.keys() {
+        if known.contains_key(&id) {
+            continue;
+        }
+        stack.push(id);
+        while let Some(&at) = stack.last() {
+            let ups = parents_of.get(&at).map_or(&[][..], Vec::as_slice);
+            match known.get(&at).copied() {
+                None => {
+                    known.insert(at, PENDING);
+                    for &up in ups {
+                        if !known.contains_key(&up) {
+                            stack.push(up);
+                        }
+                    }
+                }
+                Some(PENDING) => {
+                    let rung = ups
+                        .iter()
+                        .filter_map(|up| known.get(up).copied())
+                        .filter(|&k| k != PENDING)
+                        .map(|k| k + 1)
+                        .max()
+                        .unwrap_or(0);
+                    known.insert(at, rung);
+                    stack.pop();
+                }
+                Some(_) => {
+                    stack.pop();
+                }
+            }
+        }
+    }
+    known
 }
 
 /// Where one served artifact sits, and what it points at.
@@ -4001,8 +6652,8 @@ impl Engine {
 struct Placement {
     /// Its own address — `(layer, level, ordinal)`, the triple an [`Attachment`] carries.
     at: (String, u32, u32),
-    /// The address of its parent, where it names one. Within its own layer by construction.
-    parent: Option<(String, u32, u32)>,
+    /// The addresses of its parents, where it names any. Within its own layer by construction.
+    parents: Vec<(String, u32, u32)>,
     /// The address of the artifact it depends on, where its layer declares a dependency.
     attached_to: Option<(String, u32, u32)>,
 }
@@ -4017,8 +6668,8 @@ struct Placement {
 /// clusters that same response does not hold. One response never contradicts itself.
 ///
 /// **Server-side, and the attachment identifier never reaches the wire.** Publishing it so a client
-/// could filter for itself was declined for the reason `parent_id` carries a null rather than a
-/// withheld parent's name: handing over the identifier names an artifact the response does not
+/// could filter for itself was declined for the reason `parent_ids` omits a withheld parent rather
+/// than naming it: handing over the identifier names an artifact the response does not
 /// contain. A client never told the relationship cannot notice what is missing from it.
 ///
 /// **The target's layer must be in this request.** A request naming the dependent layer *alone* —
@@ -4268,7 +6919,7 @@ pub const SERIAL_FALLBACK_MAX_ROWS: u64 = 500_000_000;
 /// or a test's override — see `Engine::set_serial_fallback_max_rows_for_test`'s doc for why an
 /// override exists at all and why it lives on `Engine`, not here.
 /// **Two terms since 2026-08-01** (owner decision, on the two-axis sweep —
-/// `docs/evidence/memos/2026-07-31-tile-parallelism-calibration.md`, "Follow-up 4, answered", and
+/// docs/evidence/memos/2026-07-31-tile-parallelism-calibration.md, "Follow-up 4, answered", and
 /// `probes/2026-08-01-two-axis-sweep/`). The row term is unchanged; [`TILE_PAR_MIN_TILES`] is new,
 /// and the fan-out runs when **either** fires.
 #[inline]
@@ -4525,6 +7176,15 @@ fn tile_sweep<'a>(
         // How many of those the filter admits. Equal to `visible` on an unfiltered request.
         matched,
         served: selected.rows.len() as u64,
+        // Of `matched`, how many also satisfy the highlight — one `and_cardinality` per segment
+        // range, the operation `matched` already is. Equal to `matched` with no highlight.
+        highlighted: tile_parts
+            .iter()
+            .map(|(s, range)| {
+                let (_, row_base) = segments[*s];
+                mask.count_highlighted_range(row_base + range.start..row_base + range.end)
+            })
+            .sum(),
     };
 
     // §3.3: the tile's sub-cells, each an exact masked count over a contiguous Morton range. Only
@@ -4593,6 +7253,35 @@ struct TileSweepOut<'a> {
     stats: TileStats,
 }
 
+/// One entity's row in one view, resolved to the **segment that owns it and that segment's local
+/// index** — the step every entity→row-tail read takes, and the one that must not be written twice.
+///
+/// `Ok(None)` where the view's permutation holds no row for the entity, and where no segment's
+/// `row_base` covers the row it does hold; `Err` where the view's segment set cannot be resolved
+/// at all, which is a malformed bundle and is the caller's to interpret — the drill-down refuses
+/// on it, the join rule's oracle warns and moves on.
+///
+/// **One definition, because three read paths need it.** `Engine::item` had its own copy, and
+/// `flushed_row_scalar` was written as a fourth variation on it; the three lines that differed
+/// between them were exactly where a false accept got in (`views.md` §4, r24 review F1). Row is
+/// *view*-space and a segment is indexed locally, so getting the subtraction or the `rev()` wrong
+/// reads a neighbour's value under this entity's identity.
+pub(crate) fn segment_row_of<'a>(
+    view: &str,
+    view_data: &'a tessera_store::read::ViewData,
+    entity: EntityId,
+) -> Result<Option<(&'a SegmentData, usize)>> {
+    let Some(row) = view_data.row_space.row_of(entity) else {
+        return Ok(None);
+    };
+    let segments = segments_with_row_bases(view, view_data)?;
+    let Some(&(segment, row_base)) = segments.iter().rev().find(|(_, base)| row.raw() >= *base)
+    else {
+        return Ok(None);
+    };
+    Ok(Some((segment, (row.raw() - row_base) as usize)))
+}
+
 /// A view's segments paired with their `row_base` in view row space, ascending.
 ///
 /// **Keyed on `seg_id`, never zipped positionally.** `Bundle::with_segment` appends to `segments`
@@ -4610,7 +7299,7 @@ struct TileSweepOut<'a> {
 /// and `Engine::item` resolves a single row to its owner; when `item` had its own version — take
 /// `segments.first()` and index it with a *view*-space row — a drill-down on any flushed item
 /// read past the build segment's end and panicked. A second copy is how the two come to disagree.
-fn segments_with_row_bases<'a>(
+pub(crate) fn segments_with_row_bases<'a>(
     view: &str,
     view_data: &'a tessera_store::read::ViewData,
 ) -> Result<Vec<(&'a SegmentData, u32)>> {
@@ -4667,6 +7356,97 @@ fn segments_with_row_bases<'a>(
 /// every later column left, which is the failure `gather_scalars` refuses at the write end.
 type ResolvedScalars<'a> = Vec<Option<ScalarSlice<'a>>>;
 
+/// The **group-scoped** render columns a request under `view` carries in its row tail
+/// (`views.md` §5), in manifest order, as the declared scalars they are indistinguishable from
+/// once resolved.
+///
+/// **The view set is the scope's, and the gate is inside it.** A family renders under a view of
+/// its own group, and under a view of a group declaring `members` of that group — the keys being
+/// the owner's by construction (§3.3) — and under nothing else: that is the rule
+/// `per-point-attributes.md` §3.9 gives `render_in`, with the view set decided by the scope
+/// instead of listed. A principal whose group gate fails takes the answer an undeclared attribute
+/// takes, here as at every other surface (§5, §6): the column is absent from the response's
+/// schema, so the sealed group is named in no response such a principal receives.
+///
+/// **A family with no column for this view is not in the list**, which is what a view created
+/// after the build has: `scoped_scalars[..].views` names the views that *have* a column, and no
+/// batch can write one (a buffered row's scalars are positional against `declared_scalars`, which
+/// a family is deliberately absent from). Absence there is decided by the manifest; absence in a
+/// *segment* of a view that does have one — anything a flush wrote — is
+/// [`gather_tile_columns`]'s, and comes out as the row's placeholder.
+fn scoped_render_scalars(
+    manifest: &tessera_store::manifest::Manifest,
+    view: &str,
+    visible: &crate::gate::VisibleViews,
+) -> Vec<DeclaredScalar> {
+    scoped_render_families(manifest, view)
+        .into_iter()
+        .filter(|f| visible.contains_group(&f.group))
+        .map(|f| DeclaredScalar {
+            name: f.name.clone(),
+            arrow_type: f.arrow_type,
+            vocabulary: f.vocabulary.clone(),
+            analyser: f.analyser.clone(),
+            index: f.index,
+            render: true,
+        })
+        .collect()
+}
+
+/// The **group-scoped** render families whose column `view`'s row tail carries — the gate-free
+/// half of [`scoped_render_scalars`], and the one statement of which lanes a view's rows hold.
+///
+/// **The write path asks this and the read path asks the wrapper above.** A writer has no
+/// principal and must produce the lane whatever any session may see; a request narrows the same
+/// list by the session's visible-view set. Splitting them here is what stops the two rules — which
+/// row spaces carry a lane, and which of those a principal is told about — from being restated in
+/// a second place and coming to disagree: a merge or a fold taking a *narrower* list would drop a
+/// lane the build wrote, and the rows would read as the ordinary absence below.
+pub(crate) fn scoped_render_families<'a>(
+    manifest: &'a tessera_store::manifest::Manifest,
+    view: &str,
+) -> Vec<&'a tessera_store::manifest::ScopedScalar> {
+    // This view's roster record — the group it belongs to and the key it holds there. Matched
+    // against the roster rather than parsed out of the id: a view id is `<group>:<key>` by
+    // construction, and the roster is what decides which group and which key that is.
+    let Some(roster) = manifest.groups.iter().find_map(|g| {
+        let key = view
+            .strip_prefix(g.name.as_str())?
+            .strip_prefix(tessera_store::GROUP_SEPARATOR)?;
+        g.views
+            .iter()
+            .any(|v| v.key == key)
+            .then_some((g.name.as_str(), key))
+    }) else {
+        return Vec::new();
+    };
+    let members_of = |name: &str| {
+        manifest
+            .groups
+            .iter()
+            .find(|g| g.name == name)?
+            .members_of
+            .as_deref()
+    };
+    manifest
+        .groups
+        .iter()
+        .flat_map(|g| g.scoped_scalars.iter())
+        .filter(|f| f.render)
+        .filter(|f| {
+            // §3.3's rule, stated once in `owning_key_of`, and then the family's own list: a view
+            // of the group that has no column — one created since the build — renders nothing.
+            owning_key_of(roster, members_of, &f.group).is_some_and(|key| {
+                f.views.contains(&format!(
+                    "{}{}{key}",
+                    f.group,
+                    tessera_store::GROUP_SEPARATOR
+                ))
+            })
+        })
+        .collect()
+}
+
 /// Resolve `declared` against one segment's columns, once.
 fn resolve_scalars<'a>(
     segment: &'a SegmentData,
@@ -4698,10 +7478,21 @@ fn resolve_scalars<'a>(
 /// rather than a silently skipped column. That cannot arise from a bundle this codebase wrote —
 /// `gather_scalars` refuses it at the write end for every producer — and the alternative is to
 /// append a short or wrongly-typed buffer under a name that does not describe it.
+///
+/// **`scoped_from` is the one exception, and it is absence rather than malformation**
+/// (`views.md` §5). From that index on, the columns are a group-scoped family's
+/// ([`scoped_render_scalars`]), and only the *build* writes one: a segment a flush produced
+/// carries the bundle-wide tail and nothing per family, because a batch's scalars are positional
+/// against `declared_scalars` and a family has no slot there. Such a segment's rows take the
+/// column's placeholder — the type's zero, exactly what the build writes into the slot of an
+/// entity that has no value, decision 0064's absence for the tail. A
+/// *wrong type* under the name is still malformed, scoped or not: that is a segment disagreeing
+/// with the manifest, not a segment that predates the family.
 fn gather_tile_columns(
     parts: &SelectionParts<'_>,
     rows: &[u32],
     declared: &[DeclaredScalar],
+    scoped_from: usize,
 ) -> Result<PointColumns> {
     let placed: Vec<(u32, u32)> = rows
         .iter()
@@ -4743,20 +7534,26 @@ fn gather_tile_columns(
         // The typed slice per part is resolved BEFORE the row loop, so the loop below carries no
         // `match` at all — that hoist is the whole reason this shape is cheaper than the
         // row-major one it replaced.
+        // A segment that may lawfully not hold this column — see `scoped_from` on this function.
+        let absent_is_ok = ci >= scoped_from;
         macro_rules! build {
             ($(($v:ident, $t:ty)),* $(,)?) => {
                 match d.arrow_type {
                     $(ScalarType::$v => {
-                        let mut per_part: Vec<&[$t]> = Vec::with_capacity(resolved.len());
+                        let mut per_part: Vec<Option<&[$t]>> = Vec::with_capacity(resolved.len());
                         for r in &resolved {
                             match r[ci] {
-                                Some(ScalarSlice::$v(s)) => per_part.push(s),
+                                Some(ScalarSlice::$v(s)) => per_part.push(Some(s)),
+                                None if absent_is_ok => per_part.push(None),
                                 _ => return Err(malformed(d)),
                             }
                         }
                         let mut out = Vec::with_capacity(rows.len());
                         for &(part, local) in &placed {
-                            out.push(per_part[part as usize][local as usize]);
+                            out.push(match per_part[part as usize] {
+                                Some(s) => s[local as usize],
+                                None => <$t>::default(),
+                            });
                         }
                         ColumnBuf::$v(out)
                     })*
@@ -4764,13 +7561,17 @@ fn gather_tile_columns(
                         let mut per_part = Vec::with_capacity(resolved.len());
                         for r in &resolved {
                             match r[ci] {
-                                Some(ScalarSlice::Bool(a)) => per_part.push(a),
+                                Some(ScalarSlice::Bool(a)) => per_part.push(Some(a)),
+                                None if absent_is_ok => per_part.push(None),
                                 _ => return Err(malformed(d)),
                             }
                         }
                         let mut out = Vec::with_capacity(rows.len());
                         for &(part, local) in &placed {
-                            out.push(per_part[part as usize].value(local as usize));
+                            out.push(match per_part[part as usize] {
+                                Some(a) => a.value(local as usize),
+                                None => false,
+                            });
                         }
                         ColumnBuf::Bool(out)
                     }
@@ -4781,13 +7582,17 @@ fn gather_tile_columns(
                         let mut per_part = Vec::with_capacity(resolved.len());
                         for r in &resolved {
                             match r[ci] {
-                                Some(ScalarSlice::Utf8(a)) => per_part.push(a),
+                                Some(ScalarSlice::Utf8(a)) => per_part.push(Some(a)),
+                                None if absent_is_ok => per_part.push(None),
                                 _ => return Err(malformed(d)),
                             }
                         }
                         let mut out = Vec::with_capacity(rows.len());
                         for &(part, local) in &placed {
-                            out.push(per_part[part as usize].value(local as usize).to_string());
+                            out.push(match per_part[part as usize] {
+                                Some(a) => a.value(local as usize).to_string(),
+                                None => String::new(),
+                            });
                         }
                         ColumnBuf::Utf8(out)
                     }
@@ -4801,6 +7606,11 @@ fn gather_tile_columns(
         tessera_ids,
         codes,
         scalars,
+        membership: Vec::new(),
+        // The gather is mask-blind by construction — it reads the segment's columns for rows
+        // selection already chose — so the highlight's bits are attached by the emit pass beside
+        // the membership columns rather than read here.
+        highlighted: None,
     })
 }
 
@@ -5084,7 +7894,8 @@ mod tests {
         // first kid — which is what makes the skipped `Entity` the one under test. The images are
         // already crossed against the domain by the caller, so they are unaffected.
         let mut next_image = 0usize;
-        let out = eval_row_expr(&tree, &images, &mut next_image, &[], &[])
+        let scope = RowScope::Domain(croaring::Bitmap::new());
+        let out = eval_row_expr(&tree, &images, &mut next_image, &[], &[], &scope)
             .expect("an empty domain scans cleanly");
 
         assert_eq!(

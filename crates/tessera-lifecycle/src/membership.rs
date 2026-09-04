@@ -27,9 +27,11 @@
 //! consumes it, and nothing serialises it to a client — because a corpus-wide count over items a
 //! principal may not see is C8's row, one careless line from being served beside a masked one.
 
+use std::any::Any;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
-use croaring::{Bitmap, Portable};
+use croaring::{Bitmap, BitmapView, Portable};
 use tessera_types::EntityId;
 
 /// Execute a layer's `withdraw_on_member_deletion` declaration against one record, for the members
@@ -40,6 +42,13 @@ use tessera_types::EntityId;
 /// That is [decision 0076](../../../docs/decisions/0076-an-artifact-is-served-whole-or-not-at-all.md)
 /// reached from the write side: the alternative is serving the identity and the count with the
 /// description missing, which is the in-between state the decision forbids.
+///
+/// **Permissive shrinks a generating set; it does not empty one.** A content whose last source this
+/// fold deleted leaves with the strict arm's contents rather than staying behind on the empty set,
+/// because the empty set is contained in every mask and would serve corpus-derived text to every
+/// principal who can see any member ([decision 0107](../../../docs/decisions/0107-a-generating-set-with-no-survivors-is-not-served.md),
+/// `annotation-write-cycle.md` §2.1). Content that requires only inherited visibility carries no
+/// generating set at all and is not reached by either arm.
 ///
 /// Returns whether the record moved, which is what tells [`ArtifactStore::retire`] whether the
 /// level's version has to move with it: a level a fold walked over and did not change has a row
@@ -56,13 +65,29 @@ fn apply_deletion_policy(record: &mut ArtifactRecord, retired: &Bitmap, withdraw
         }
         false => {
             let mut moved = false;
-            for content in &mut record.contents {
+            record.contents.retain_mut(|content| {
                 if content.generated_from.and_cardinality(retired) == 0 {
-                    continue;
+                    return true;
                 }
                 content.generated_from.andnot_inplace(retired);
                 moved = true;
-            }
+                // **A generating set with no survivors is not served**
+                // ([decision 0107](../../../docs/decisions/0107-a-generating-set-with-no-survivors-is-not-served.md)).
+                // Containment is a subset test, and the empty set is a subset of every mask — so a
+                // content whose last source this fold deleted would read as *satisfied* for every
+                // principal who can see any member, and corpus-derived text written from documents
+                // they were never entitled to would serve to all of them. Permissive says the
+                // content survives *its survivors*; with none, there is nothing for it to survive
+                // on. The publish path already refuses to accept such content
+                // (`registry.rs`, C28); this is the only other route to the state, and it is
+                // closed the same way the strict arm closes it — the content leaves, and an
+                // artifact left with no contents on a layer that declares them is withheld.
+                //
+                // Inherited content is untouched: it legitimately carries an empty generating set,
+                // it names none of the retired entities, and the early return above is what it
+                // takes.
+                !content.generated_from.is_empty()
+            });
             moved
         }
     }
@@ -75,53 +100,129 @@ fn apply_deletion_policy(record: &mut ArtifactRecord, retired: &Bitmap, withdraw
 /// packer takes them apart again immediately.
 pub type PendingExtent = (String, u32, u32, Vec<Vec<u8>>);
 
+/// One level's not-yet-published **range**: `(layer, level, ordinal_lo, count)` — the same four
+/// things a [`PendingExtent`] names, with the blobs left where they are for a caller that will
+/// encode them one at a time. See [`ArtifactStore::pending_ranges`].
+pub type PendingRange = (String, u32, u32, u32);
+
+/// One artifact's canonical shapes — **one per view of its layer, as bytes this crate stores and
+/// never interprets** (`polygon-membership.md` §4.3, §6.6).
+///
+/// A shape is declared once and resolved per view, because each view quantises in its own frame:
+/// the canonical form is grid units, so the same boundary is a different byte sequence in each
+/// view it is drawn in. What travels here is the engine's own encoding (`tessera_spatial::shape`,
+/// `Shape::encode`): the reader that decodes it is the one that resolves it, and this crate holds
+/// the pair `(view, bytes)` exactly as it holds a membership's Roaring bytes — addressed, never
+/// arithmetic on.
+///
+/// **Never empty, and never an empty entry.** An artifact of a shape layer with no shape has no
+/// membership rule at all — it counts zero for every viewer and is absent under any criterion,
+/// which no client can tell from an artifact whose members are simply invisible to them — so the
+/// constructor refuses the shapes that would produce that state, and the blob decoder refuses the
+/// bytes that would.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ArtifactShapes {
+    /// `(view, canonical bytes)`, ascending by view, no view twice.
+    by_view: Vec<(String, Vec<u8>)>,
+}
+
+impl ArtifactShapes {
+    /// `None` for no views, a view named twice, or a view whose bytes are empty.
+    pub fn new(mut by_view: Vec<(String, Vec<u8>)>) -> Option<Self> {
+        if by_view.is_empty() || by_view.iter().any(|(_, bytes)| bytes.is_empty()) {
+            return None;
+        }
+        by_view.sort_by(|a, b| a.0.cmp(&b.0));
+        if by_view.windows(2).any(|w| w[0].0 == w[1].0) {
+            return None;
+        }
+        Some(ArtifactShapes { by_view })
+    }
+
+    /// The canonical bytes for one view, or `None` where the shape was not canonicalised for it.
+    pub fn for_view(&self, view: &str) -> Option<&[u8]> {
+        self.by_view
+            .binary_search_by(|(v, _)| v.as_str().cmp(view))
+            .ok()
+            .map(|i| self.by_view[i].1.as_slice())
+    }
+
+    pub fn views(&self) -> impl Iterator<Item = (&str, &[u8])> {
+        self.by_view.iter().map(|(v, b)| (v.as_str(), b.as_slice()))
+    }
+
+    /// The bytes held, summed over the views — what a shape layer costs at rest, for the reports.
+    pub fn byte_len(&self) -> usize {
+        self.by_view.iter().map(|(v, b)| v.len() + b.len()).sum()
+    }
+
+    /// The per-view bytes as an **authored content** carries them (`polygon-membership.md` §6.1,
+    /// §6.6): the same per-view wrapper the record's shape tail holds, hex-spelled so that it
+    /// fits the utf8 content slot every supplied kind occupies. A content value is text by the
+    /// record blob's construction, and the shape's canonical bytes are not, so the spelling is
+    /// the whole of what this adds; nothing about the geometry changes. Read back by
+    /// [`Self::from_content_text`], and never served — the wire carries the rings.
+    pub fn content_text(&self) -> String {
+        let mut bytes = Vec::with_capacity(self.byte_len() + 8);
+        self.encode_into(&mut bytes);
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for b in bytes {
+            use std::fmt::Write;
+            let _ = write!(out, "{b:02x}");
+        }
+        out
+    }
+
+    /// The inverse of [`Self::content_text`]; `None` for anything that is not one — a supplied
+    /// `polygon` that reached the store as an opaque string under the earlier reading, or a
+    /// truncated value — which withholds the shape rather than drawing a guess.
+    pub fn from_content_text(text: &str) -> Option<Self> {
+        if !text.len().is_multiple_of(2) || !text.is_ascii() {
+            return None;
+        }
+        let bytes: Option<Vec<u8>> = (0..text.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&text[i..i + 2], 16).ok())
+            .collect();
+        let bytes = bytes?;
+        let mut at = 0usize;
+        let mut take = |n: usize| -> Option<&[u8]> {
+            let end = at.checked_add(n)?;
+            let view = bytes.get(at..end)?;
+            at = end;
+            Some(view)
+        };
+        let views = u16::from_le_bytes(take(2)?.try_into().ok()?) as usize;
+        let mut by_view = Vec::with_capacity(views);
+        for _ in 0..views {
+            let view_len = u16::from_le_bytes(take(2)?.try_into().ok()?) as usize;
+            let view = std::str::from_utf8(take(view_len)?).ok()?.to_string();
+            let shape_len = u32::from_le_bytes(take(4)?.try_into().ok()?) as usize;
+            by_view.push((view, take(shape_len)?.to_vec()));
+        }
+        if at != bytes.len() {
+            return None;
+        }
+        ArtifactShapes::new(by_view)
+    }
+
+    fn encode_into(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&(self.by_view.len() as u16).to_le_bytes());
+        for (view, bytes) in &self.by_view {
+            let view = view.as_bytes();
+            out.extend_from_slice(&(view.len() as u16).to_le_bytes());
+            out.extend_from_slice(view);
+            out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            out.extend_from_slice(bytes);
+        }
+    }
+}
+
 /// One artifact as a caller offers it, before the engine has given it an ordinal or an entity.
 ///
 /// **Members are entities, resolved at admission.** A caller names them by `tessera_id` and the
 /// control plane inverts them once, at the boundary, exactly as `/control/changes` does — so no
 /// blinded identifier reaches durable state, where a key rotation would silently redirect it (I10).
-/// An artifact's declared bounding box — the whole of a spatial layer's membership, before it is
-/// covered by tiles.
-///
-/// **The box is content and the tiles are the membership** (ruling R3). What is stored is the box,
-/// because it is what the author wrote and what a client is shown; what a request counts is the
-/// depth-`d` Morton tiles covering it, resolved against the generation's own segments. Storing the
-/// tiles instead would freeze the decomposition against a depth the declaration could later change,
-/// and storing the *rows* would freeze it against a geometry the next flush moves.
-///
-/// **Four `f64`s and no ordering guarantee at this type**: the box is checked where it is published
-/// (`LayerRegistry::prepare_artifacts`), so a reader here holds a box that already validated.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Bbox {
-    pub min_x: f64,
-    pub min_y: f64,
-    pub max_x: f64,
-    pub max_y: f64,
-}
-
-impl Bbox {
-    /// The four values in the order a declaration writes them, or `None` where the box is not one
-    /// this crate will store: a non-finite bound, or a maximum below its minimum.
-    ///
-    /// **Refused rather than normalised.** A box written `[max, min]` is a transposition, and
-    /// swapping it silently would serve a membership the author did not write — the covering tiles
-    /// of the corrected box, over a region they may not have meant to name at all.
-    pub fn new(min_x: f64, min_y: f64, max_x: f64, max_y: f64) -> Option<Self> {
-        let finite = [min_x, min_y, max_x, max_y].iter().all(|v| v.is_finite());
-        (finite && max_x >= min_x && max_y >= min_y).then_some(Bbox {
-            min_x,
-            min_y,
-            max_x,
-            max_y,
-        })
-    }
-
-    /// `[min_x, min_y, max_x, max_y]` — the spelling a declaration and the WAL both use.
-    pub fn as_array(&self) -> [f64; 4] {
-        [self.min_x, self.min_y, self.max_x, self.max_y]
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct IncomingArtifact {
     /// The caller's own name for this artifact. **Effectively mandatory for a layer another
@@ -143,7 +244,10 @@ pub struct IncomingArtifact {
     /// carries a `tessera_id` and never a position in a dense level (C8), so the caller holds no
     /// address for the target beyond the key they published it under.
     pub attached_to: Option<IncomingAttachment>,
-    /// The parent artifact in a hierarchical layer, named by the parent's own key.
+    /// The parent artifacts in a hierarchical layer, each named by the parent's own key. Empty at
+    /// a root; at most one on a `nested` or `tiered` layer, which refuse a second; as many as the
+    /// child sits beneath on a `dag` layer (`dag-hierarchies.md` §4, decision 0117). A key named
+    /// twice is one edge.
     ///
     /// **The lineage is declared upward only, and the downward list is deliberately absent.** A
     /// `children_keys` beside this was read, validated for cross-row agreement, and never walked:
@@ -151,11 +255,12 @@ pub struct IncomingArtifact {
     /// inverting the parent edges, because that is the direction an artifact can state without
     /// knowing what will later point at it. Two spellings of one edge is one more place for them
     /// to disagree.
-    pub parent_key: Option<String>,
-    /// The artifact's bounding box — required on a layer whose `shape` declares one, refused on
-    /// every other kind. It **is** the membership: `members` stays empty on such a layer, because
-    /// the tiles covering this box decide who belongs at request time.
-    pub shape: Option<Bbox>,
+    pub parent_keys: Vec<String>,
+    /// The artifact's canonical shapes, one per view — required on a layer whose `shape` declares
+    /// one, refused on every other kind. It **is** the membership: `members` stays empty on such a
+    /// layer, because the rows inside the shape are resolved from it at every segment's
+    /// publication.
+    pub shape: Option<ArtifactShapes>,
 }
 
 /// The target of an attachment, as a caller names it.
@@ -231,7 +336,7 @@ impl IncomingArtifact {
             members: bitmap_of_entities(members),
             contents: Vec::new(),
             attached_to: None,
-            parent_key: None,
+            parent_keys: Vec::new(),
             shape: None,
         }
     }
@@ -318,6 +423,175 @@ pub struct Degradation {
     pub contents_lost: Vec<(u32, u64)>,
 }
 
+/// One artifact's membership — **the bitmap, or a read-only view of the same bitmap's bytes
+/// somewhere the heap is not**.
+///
+/// # Why the field is not simply a `Bitmap`
+///
+/// A membership is a bitmap for its whole serving life and is never anything else; what this adds
+/// is where the *containers* live. At a build the store is filled at the layers stage and read
+/// again at the artifact pass, four stages later, and in between it holds one Roaring bitmap per
+/// artifact over the whole corpus. Measured on the 10⁷ MedCPT sample with 471,778,374 closed MeSH
+/// member rows, that is **+1.2 GB of anonymous memory** carried across the build's peak — about
+/// 2.7 bytes per closed member row, array containers almost throughout
+/// (`probes/2026-09-02-mapped-memberships/README.md`).
+///
+/// The bytes are written to the bundle's own membership extent a moment later, and the build maps
+/// that file back ([`Members::mapped`]). A view costs the heap its container *descriptors* and
+/// nothing else: the two-byte values themselves stay page cache the kernel may evict. There is no
+/// second format and no second write — the mapped bytes are the extent's, in the portable Roaring
+/// form [`serialise_members`] already wrote.
+///
+/// # What a view may and may not do
+///
+/// Reads go through [`Deref`](std::ops::Deref), so every caller that asks a membership a question is unchanged and
+/// cannot tell the two apart. A *write* takes [`Members::to_mut`], which materialises an owned
+/// bitmap first — growth and retirement therefore behave identically on either form, which is what
+/// keeps write-path §5.4's two removal rules the only routes a bit leaves a membership.
+///
+/// ⊘ **The mapping's lifetime is the owner's, and the owner is held here.** `bytes` points into an
+/// allocation `owner` keeps alive — at a build, the mapped extent file — so the view is valid for
+/// exactly as long as this value is. Nothing outside [`Members::mapped`] can construct one.
+pub struct Members(MembersInner);
+
+enum MembersInner {
+    Owned(Bitmap),
+    /// Declared in drop order: the view's header is freed before the bytes it addresses can go.
+    Mapped {
+        view: BitmapView<'static>,
+        bytes: &'static [u8],
+        owner: Arc<dyn Any + Send + Sync>,
+    },
+}
+
+/// `Bitmap` carries croaring's own `Send`/`Sync`, and a view over bytes nothing else may write is
+/// no weaker: every operation reachable through [`Deref`](std::ops::Deref) is a read of a `roaring_bitmap_t` and of
+/// the immutable slice behind it, and the one route to a mutation ([`Members::to_mut`]) needs
+/// `&mut self`. The owner is `Send + Sync` by its own bound.
+unsafe impl Send for Members {}
+unsafe impl Sync for Members {}
+
+impl Members {
+    /// The membership on the heap — what a publication, a WAL replay and every test produce.
+    pub fn owned(bitmap: Bitmap) -> Self {
+        Members(MembersInner::Owned(bitmap))
+    }
+
+    /// The membership read through `bytes`, which `owner` keeps alive.
+    ///
+    /// `bytes` must be the **portable** Roaring form [`serialise_members`] writes — the form the
+    /// packed extent carries — and must live inside an allocation `owner` owns. Answers `None`
+    /// where the bytes are not a bitmap at all, on [`deserialise_members`]'s rule: a membership
+    /// that decodes short is one with a low masked count for every viewer, which the existence
+    /// criterion renders as absent with nothing to notice.
+    ///
+    /// # Safety
+    ///
+    /// `bytes` must remain valid and unwritten for as long as `owner` is held, and dropping
+    /// `owner` must not free them earlier. Both hold for a slice of a read-only file mapping the
+    /// `owner` itself keeps open.
+    pub unsafe fn mapped(bytes: &[u8], owner: Arc<dyn Any + Send + Sync>) -> Option<Self> {
+        // The checked deserialiser first: `BitmapView::deserialize` is unchecked, and bytes that
+        // are not a bitmap would be read as containers at whatever the header claimed. This costs
+        // one decode of the header region and is the same validation the WAL replay applies.
+        let checked = deserialise_members(bytes)?;
+        drop(checked);
+        // SAFETY: the caller's contract above pins the bytes for `owner`'s life, and `owner` is
+        // moved into the value that holds the view, so the two cannot be separated.
+        let bytes: &'static [u8] = unsafe { std::mem::transmute::<&[u8], &'static [u8]>(bytes) };
+        let view = unsafe { BitmapView::deserialize::<Portable>(bytes) };
+        Some(Members(MembersInner::Mapped { view, bytes, owner }))
+    }
+
+    /// The membership as something that can be written to, materialising an owned copy where this
+    /// was a view. Every mutation in this module goes through it.
+    pub fn to_mut(&mut self) -> &mut Bitmap {
+        if let MembersInner::Mapped { view, .. } = &self.0 {
+            self.0 = MembersInner::Owned(view.to_bitmap());
+        }
+        match &mut self.0 {
+            MembersInner::Owned(bitmap) => bitmap,
+            MembersInner::Mapped { .. } => unreachable!("the arm above replaced it"),
+        }
+    }
+
+    /// Whether this membership is read through a mapping rather than held on the heap — for the
+    /// build's own accounting and its tests, and for nothing on a serving path.
+    pub fn is_mapped(&self) -> bool {
+        matches!(self.0, MembersInner::Mapped { .. })
+    }
+}
+
+impl std::ops::Deref for Members {
+    type Target = Bitmap;
+
+    fn deref(&self) -> &Bitmap {
+        match &self.0 {
+            MembersInner::Owned(bitmap) => bitmap,
+            MembersInner::Mapped { view, .. } => view,
+        }
+    }
+}
+
+impl From<Bitmap> for Members {
+    fn from(bitmap: Bitmap) -> Self {
+        Members::owned(bitmap)
+    }
+}
+
+impl Default for Members {
+    fn default() -> Self {
+        Members::owned(Bitmap::new())
+    }
+}
+
+impl Clone for Members {
+    /// A clone of a view is a view: the owner is an `Arc` and the bytes outlive both.
+    fn clone(&self) -> Self {
+        match &self.0 {
+            MembersInner::Owned(bitmap) => Members::owned(bitmap.clone()),
+            MembersInner::Mapped { bytes, owner, .. } => Members(MembersInner::Mapped {
+                // SAFETY: `bytes` is the slice this value's own view already addresses, and
+                // `owner` — cloned beside it — is what keeps it alive.
+                view: unsafe { BitmapView::deserialize::<Portable>(bytes) },
+                bytes,
+                owner: Arc::clone(owner),
+            }),
+        }
+    }
+}
+
+impl std::fmt::Debug for Members {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Members({}{})",
+            self.cardinality(),
+            if self.is_mapped() { ", mapped" } else { "" }
+        )
+    }
+}
+
+impl PartialEq for Members {
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+
+impl Eq for Members {}
+
+impl PartialEq<Bitmap> for Members {
+    fn eq(&self, other: &Bitmap) -> bool {
+        **self == *other
+    }
+}
+
+impl PartialEq<Members> for Bitmap {
+    fn eq(&self, other: &Members) -> bool {
+        *self == **other
+    }
+}
+
 /// One artifact's durable state, as the registry holds it.
 #[derive(Debug, Clone)]
 pub struct ArtifactRecord {
@@ -327,8 +601,9 @@ pub struct ArtifactRecord {
     /// layer's edges point into**: an edge names its target, and at publish time the caller holds
     /// no `tessera_id` for it.
     pub key: Option<String>,
-    /// Entity-space membership — the canonical, view-invariant record.
-    pub members: Bitmap,
+    /// Entity-space membership — the canonical, view-invariant record. Owned, or read through a
+    /// mapping of the bytes that carry it (see [`Members`]).
+    pub members: Members,
     /// The ranked contents of this artifact's supplied content, most specific first.
     ///
     /// **The values are not here.** This carries each content's *generating set* — the thing the
@@ -345,7 +620,8 @@ pub struct ArtifactRecord {
     /// target's disposition and reachability as well as on its own conjuncts, on **every** route —
     /// see [`Attachment`].
     pub attached_to: Option<Attachment>,
-    /// This artifact's parent in its layer's hierarchy.
+    /// This artifact's parents in its layer's hierarchy — ascending by `(level, ordinal)`,
+    /// deduplicated; empty at a root, one on a tree, several on a `dag` layer (decision 0117).
     ///
     /// **The opposite of an attachment in the one way that matters**: it is *not* a visibility term.
     /// A node's verdict is its own masked count against its own criterion, with no input from its
@@ -354,14 +630,15 @@ pub struct ArtifactRecord {
     /// a parent that is suppressed, deleted or below its bar withholds itself and nothing else. What
     /// the edge decides is only which of two artifacts that *both* passed is the one drawn.
     ///
-    /// A parent whose ordinal is now a hole leaves this node a root, which serves it: correct, since
-    /// it passed its own test, and the reason the fold does not have to rewrite these.
+    /// A parent whose ordinal is now a hole is a parent this node does not have, and a node whose
+    /// every parent is one is a root, which serves it: correct, since it passed its own test, and
+    /// the reason the fold does not have to rewrite these.
     ///
     /// **The level is carried because a layer's edges are one of two shapes.** A nested layer's run
     /// within one level, and the cut climbs them; a tiered layer's run between levels, and
     /// the cut does not — those are information about what contains what, not a ladder to coarsen
     /// along (owner ruling, 2026-08-18).
-    pub parent: Option<crate::wal::ParentRef>,
+    pub parents: Vec<crate::wal::ParentRef>,
 }
 
 /// The resolved target of an attachment: the edge `annotation-representation.md` §2.4 names, with
@@ -435,25 +712,31 @@ impl ArtifactRecord {
 #[derive(Debug, Clone, Default)]
 pub struct ArtifactStore {
     levels: BTreeMap<(String, u32), Vec<Option<ArtifactRecord>>>,
-    /// Per `(layer, level)`, each ordinal's declared bounding box — the membership of a layer whose
+    /// Per `(layer, level)`, each ordinal's canonical shapes — the membership of a layer whose
     /// `shape` declares one, and `None` everywhere else.
     ///
     /// **Beside the records rather than inside them, on [`ArtifactRecords`]' own split**
     /// (`tessera_engine::artifacts`): the two halves are read at different cadences. A record is
-    /// dereferenced on every verdict; a box is read **once per level per generation**, by the pass
-    /// that decomposes it into row ranges, and never by a verdict at all. Keeping it out of the
-    /// record keeps the type every serving path walks the same shape it was.
+    /// dereferenced on every verdict; a shape is read **once per level per publication**, by the
+    /// pass that decomposes it and holds the decomposition, and never by a verdict at all. Keeping
+    /// it out of the record keeps the type every serving path walks the same shape it was.
     ///
     /// **Written wherever a record is, in [`ArtifactStore::put`], so the two cannot come apart.**
     /// There is no route that sets one without the other, and a level's vectors are grown together;
-    /// a box for an ordinal with no record would be a membership rule for an artifact that does not
-    /// exist, and a record with no box on a shape layer is refused at publication.
-    shapes: BTreeMap<(String, u32), Vec<Option<Bbox>>>,
+    /// a shape for an ordinal with no record would be a membership rule for an artifact that does
+    /// not exist, and a record with no shape on a shape layer is refused at publication.
+    /// Nested for [`ArtifactStore::keys`]' reason: `shape_of` is asked once per artifact by
+    /// `unpublished`, and a tuple key made every one of those a `String` allocation.
+    shapes: BTreeMap<String, BTreeMap<u32, Vec<Option<ArtifactShapes>>>>,
     /// `(layer, level, key) → ordinal`. **An index, not a second copy of the truth**: it
     /// exists so a batch of ten thousand artifacts can be checked for duplicate keys in
     /// `O(n log n)` rather than rescanning the level per artifact, which is `O(n²)` and reachable
     /// at the sizes this stage publishes.
-    keys: BTreeMap<(String, u32, String), u32>,
+    /// Nested `layer → level → key` rather than a flat `(String, u32, String)` tuple, and that is
+    /// the whole reason for the shape: a `BTreeMap<String, _>` answers a `&str`, so a lookup
+    /// borrows where a tuple key forced two `String` allocations at every probe — on a path the
+    /// serving side takes as well as the build.
+    keys: BTreeMap<String, BTreeMap<u32, BTreeMap<String, u32>>>,
     /// Where the oldest surviving publication sits in the log — the bound rotation may not reclaim
     /// past. See [`ArtifactStore::oldest_wal_pos`].
     oldest_wal_pos: Option<u64>,
@@ -503,23 +786,27 @@ impl ArtifactStore {
         Self::default()
     }
 
-    /// Insert or replace one artifact, and the bounding box it declared if its layer declares a
-    /// shape. Growing the level's vectors to fit is what makes a publication that arrives out of
-    /// ordinal order land correctly.
+    /// Insert or replace one artifact, and the shapes it declared if its layer declares a kind.
+    /// Growing the level's vectors to fit is what makes a publication that arrives out of ordinal
+    /// order land correctly.
     ///
-    /// **One call sets both halves** — see [`ArtifactStore::shapes`] for why the box is beside the
-    /// record rather than in it, and why there is no route that writes one without the other.
+    /// **One call sets both halves** — see [`ArtifactStore::shapes`] for why the shape is beside
+    /// the record rather than in it, and why there is no route that writes one without the other.
     pub fn put(
         &mut self,
         layer: &str,
         level: u32,
         ordinal: u32,
         record: ArtifactRecord,
-        shape: Option<Bbox>,
+        shape: Option<ArtifactShapes>,
     ) {
         if let Some(key) = &record.key {
             self.keys
-                .insert((layer.to_string(), level, key.clone()), ordinal);
+                .entry(layer.to_string())
+                .or_default()
+                .entry(level)
+                .or_default()
+                .insert(key.clone(), ordinal);
         }
         let edge = record
             .attached_to
@@ -547,21 +834,26 @@ impl ArtifactStore {
                 entry.push(dependent);
             }
         }
-        let boxes = self.shapes.entry((layer.to_string(), level)).or_default();
-        if boxes.len() <= idx {
-            boxes.resize(idx + 1, None);
+        let shapes = self
+            .shapes
+            .entry(layer.to_string())
+            .or_default()
+            .entry(level)
+            .or_default();
+        if shapes.len() <= idx {
+            shapes.resize(idx + 1, None);
         }
-        boxes[idx] = shape;
+        shapes[idx] = shape;
     }
 
-    /// The bounding box the artifact at `ordinal` declared, or `None` where it declared none —
-    /// which is every artifact of every layer whose membership is not a shape.
-    pub fn shape_of(&self, layer: &str, level: u32, ordinal: u32) -> Option<Bbox> {
+    /// The shapes the artifact at `ordinal` declared, or `None` where it declared none — which is
+    /// every artifact of every layer whose membership is not a shape.
+    pub fn shape_of(&self, layer: &str, level: u32, ordinal: u32) -> Option<&ArtifactShapes> {
         self.shapes
-            .get(&(layer.to_string(), level))
-            .and_then(|boxes| boxes.get(ordinal as usize))
-            .copied()
-            .flatten()
+            .get(layer)
+            .and_then(|levels| levels.get(&level))
+            .and_then(|shapes| shapes.get(ordinal as usize))
+            .and_then(Option::as_ref)
     }
 
     /// Drop one record's outgoing dependency edge from the index.
@@ -621,9 +913,7 @@ impl ArtifactStore {
 
     /// The ordinal a caller's own key names in this level, if any.
     pub fn ordinal_of_key(&self, layer: &str, level: u32, key: &str) -> Option<u32> {
-        self.keys
-            .get(&(layer.to_string(), level, key.to_string()))
-            .copied()
+        self.keys.get(layer)?.get(&level)?.get(key).copied()
     }
 
     /// The log position of the oldest surviving publication, or `None` if none survives.
@@ -718,9 +1008,7 @@ impl ArtifactStore {
                 refused += 1;
                 continue;
             };
-            let shape = published
-                .shape
-                .and_then(|b| Bbox::new(b[0], b[1], b[2], b[3]));
+            let shape = published.shape.clone();
             self.put(
                 layer,
                 level,
@@ -728,7 +1016,7 @@ impl ArtifactStore {
                 ArtifactRecord {
                     entity: published.entity,
                     key: published.key.clone(),
-                    members,
+                    members: Members::owned(members),
                     contents,
                     attached_to: published.attached_to.clone().map(|a| Attachment {
                         layer: a.layer,
@@ -736,7 +1024,7 @@ impl ArtifactStore {
                         ordinal: a.ordinal,
                         entity: a.entity,
                     }),
-                    parent: published.parent,
+                    parents: published.parents.clone(),
                 },
                 shape,
             );
@@ -815,7 +1103,40 @@ impl ArtifactStore {
         else {
             return;
         };
-        record.members.or_inplace(joining);
+        record.members.to_mut().or_inplace(joining);
+    }
+
+    /// Replace one artifact's membership with the **same** membership held somewhere else — the
+    /// build's route from a heap bitmap to a view over the extent it has just written
+    /// ([`Members::mapped`]).
+    ///
+    /// **It refuses a membership that is not equal to the one it replaces**, by cardinality, which
+    /// a Roaring container answers from its own header and so costs the containers and not the
+    /// members. That check is the whole of what stands between a mis-sliced blob and an artifact
+    /// whose masked count is low for every viewer — the state the existence criterion renders as
+    /// absent with nothing anywhere to notice. `false` leaves the record exactly as it was.
+    ///
+    /// Nothing about what the artifact *is* changes: the same bits, addressed through a mapping.
+    pub fn rehouse_members(
+        &mut self,
+        layer: &str,
+        level: u32,
+        ordinal: u32,
+        members: Members,
+    ) -> bool {
+        let Some(record) = self
+            .levels
+            .get_mut(&(layer.to_string(), level))
+            .and_then(|slots| slots.get_mut(ordinal as usize))
+            .and_then(Option::as_mut)
+        else {
+            return false;
+        };
+        if members.cardinality() != record.members.cardinality() {
+            return false;
+        }
+        record.members = members;
+        true
     }
 
     pub fn get(&self, layer: &str, level: u32, ordinal: u32) -> Option<&ArtifactRecord> {
@@ -879,7 +1200,7 @@ impl ArtifactStore {
             self.bump(layer, level);
         }
         self.levels.retain(|(l, _), _| l != layer);
-        self.keys.retain(|(l, _, _), _| l != layer);
+        self.keys.remove(layer);
         self.dependents.clear();
         let edges: Vec<(EntityId, EntityId)> = self
             .levels
@@ -987,6 +1308,30 @@ impl ArtifactStore {
     /// would shift every later artifact's identity by one. A hole here means a publication landed
     /// out of order, which nothing does today.
     pub fn unpublished(&self) -> (Vec<PendingExtent>, Vec<(String, u32)>) {
+        let (ranges, skipped) = self.pending_ranges();
+        let ready = ranges
+            .into_iter()
+            .map(|(layer, level, ordinal_lo, count)| {
+                let blobs: Vec<Vec<u8>> = self
+                    .encode_pending(&layer, level, ordinal_lo, count)
+                    .map(|blob| blob.expect("pending_ranges returned a dense range"))
+                    .collect();
+                (layer, level, ordinal_lo, blobs)
+            })
+            .collect();
+        (ready, skipped)
+    }
+
+    /// The same levels [`Self::unpublished`] answers, as **ranges rather than blobs**:
+    /// `(layer, level, ordinal_lo, count)`, and the levels skipped for a hole.
+    ///
+    /// **What a caller that means to stream them asks instead**, [`Self::encode_at`] being the
+    /// other half. A build publishes every level of a corpus in one pass, so encoding them all
+    /// before the first is written holds the whole corpus's memberships a second time, beside the
+    /// bitmaps they came from; a level's ordinal range is enough to open the extent and take them
+    /// one at a time. The online publication materialises instead, and not from preference: it
+    /// reads this store under a lock it may not hold across an fsync.
+    pub fn pending_ranges(&self) -> (Vec<PendingRange>, Vec<(String, u32)>) {
         let mut ready = Vec::new();
         let mut skipped = Vec::new();
         for ((layer, level), slots) in &self.levels {
@@ -997,24 +1342,42 @@ impl ArtifactStore {
             if from >= slots.len() {
                 continue;
             }
-            let tail = &slots[from..];
-            if tail.iter().any(Option::is_none) {
+            if slots[from..].iter().any(Option::is_none) {
                 skipped.push((layer.clone(), *level));
                 continue;
             }
-            let blobs: Vec<Vec<u8>> = tail
-                .iter()
-                .enumerate()
-                .map(|(i, slot)| {
-                    encode_record(
-                        slot.as_ref().expect("checked dense just above"),
-                        self.shape_of(layer, *level, (from + i) as u32),
-                    )
-                })
-                .collect();
-            ready.push((layer.clone(), *level, from as u32, blobs));
+            ready.push((
+                layer.clone(),
+                *level,
+                from as u32,
+                (slots.len() - from) as u32,
+            ));
         }
         (ready, skipped)
+    }
+
+    /// The blobs of one pending range, **encoded as they are taken** — the other half of
+    /// [`Self::pending_ranges`].
+    ///
+    /// An item is `None` where the level holds no record at that ordinal. Inside a range
+    /// `pending_ranges` returned that is a bug rather than a hole: it reports a level with a hole
+    /// as skipped and never as a range.
+    ///
+    /// The level is looked up once, not once an artifact: the store is keyed by an owned
+    /// `(String, u32)`, so a lookup per ordinal would be a `String` allocation per artifact on the
+    /// one path that walks every artifact of the corpus.
+    pub fn encode_pending<'a>(
+        &'a self,
+        layer: &'a str,
+        level: u32,
+        ordinal_lo: u32,
+        count: u32,
+    ) -> impl Iterator<Item = Option<Vec<u8>>> + 'a {
+        let slots = self.levels.get(&(layer.to_string(), level));
+        (ordinal_lo..ordinal_lo + count).map(move |ordinal| {
+            let record = slots?.get(ordinal as usize)?.as_ref()?;
+            Some(encode_record(record, self.shape_of(layer, level, ordinal)))
+        })
     }
 
     /// What this fold's deletions took away from every artifact that held one — the sweep behind
@@ -1161,16 +1524,16 @@ impl ArtifactStore {
                     if retired.contains(record.entity.raw() as u32) {
                         return Vec::new();
                     }
-                    // **The box survives a fold unchanged**, and that is what makes a shape
-                    // layer's membership fold-invariant: a box is geometry, not rows, so nothing
-                    // the fold renumbers reaches it. What a deletion removes from such a layer is
-                    // the *point*, which leaves the mask — the artifact's rule is untouched.
+                    // **The shape survives a fold unchanged**: it is geometry, not rows, so nothing
+                    // the fold renumbers reaches it; the fold re-resolves the rows against it. What
+                    // a deletion removes from such a layer is the *point*, which leaves the mask —
+                    // the artifact's rule is untouched.
                     let shape = self.shape_of(layer, *level, ordinal as u32);
                     if retired.is_empty() {
                         return encode_record(record, shape);
                     }
                     let mut record = record.clone();
-                    record.members.andnot_inplace(retired);
+                    record.members.to_mut().andnot_inplace(retired);
                     let _ = apply_deletion_policy(&mut record, retired, on_deletion);
                     encode_record(&record, shape)
                 })
@@ -1208,7 +1571,11 @@ impl ArtifactStore {
                 let Some(record) = slot else { continue };
                 if retired.contains(record.entity.raw() as u32) {
                     if let Some(key) = &record.key {
-                        self.keys.remove(&(layer.clone(), *level, key.clone()));
+                        if let Some(levels) = self.keys.get_mut(layer.as_str()) {
+                            if let Some(keys) = levels.get_mut(level) {
+                                keys.remove(key.as_str());
+                            }
+                        }
                     }
                     if let Some(attachment) = &record.attached_to {
                         gone.push((attachment.entity, record.entity));
@@ -1222,7 +1589,7 @@ impl ArtifactStore {
                 // question the version needs without a second copy of the membership to compare
                 // against.
                 let shrinks = record.members.and_cardinality(retired) != 0;
-                record.members.andnot_inplace(retired);
+                record.members.to_mut().andnot_inplace(retired);
                 changed |= shrinks;
                 changed |= apply_deletion_policy(record, retired, on_deletion);
             }
@@ -1404,7 +1771,7 @@ impl ArtifactStore {
         level: u32,
         ordinal: u32,
         record: ArtifactRecord,
-        shape: Option<Bbox>,
+        shape: Option<ArtifactShapes>,
     ) {
         self.put(layer, level, ordinal, record, shape);
         let entry = self
@@ -1438,17 +1805,23 @@ impl ArtifactStore {
 ///             | u32 LE members_len | membership bytes (portable Roaring)
 ///             | content*
 ///             | attachment
-///             | parent
+///             | parents
 ///             | shape
 /// content    := u32 LE set_len | generating-set bytes (portable Roaring)
 /// attachment := u8 0                                     -- unattached
 ///             | u8 1 | u16 LE layer_len | layer bytes (UTF-8)
 ///                    | u32 LE level | u32 LE ordinal | u64 LE target entity
-/// parent     := u8 0                                     -- a root
-///             | u8 1 | u32 LE level | u32 LE ordinal
-/// shape      := u8 0                                     -- no declared box
-///             | u8 1 | f64 LE min_x | f64 LE min_y | f64 LE max_x | f64 LE max_y
+/// parents    := u16 LE parent_count                      -- 0 at a root
+///             | per parent, ascending by (level, ordinal): u32 LE level | u32 LE ordinal
+/// shape      := u8 0                                     -- no declared shape
+///             | u8 3 | u16 LE views
+///                    | per view: u16 LE view_len | view bytes (UTF-8)
+///                                | u32 LE shape_len | canonical shape bytes
 /// ```
+///
+/// The canonical shape bytes are `tessera_spatial::shape`'s own encoding (`polygon-membership.md`
+/// §6.6 — tag 1 a box, 2 a conic, 4 a polygon), held here opaquely; tag 3 is the per-view wrapper
+/// and is this blob's, which is why the shape module leaves it unused.
 ///
 /// **The attachment is stored and not re-derived**, on the reason [`Attachment`] gives: it is a
 /// term of the visibility predicate, so an artifact restored without it is one that serves where
@@ -1468,7 +1841,7 @@ impl ArtifactStore {
 /// `tessera-store` holds this as an opaque blob and addresses it by ordinal. **That split is the
 /// layering**: the store owns which bytes belong to which artifact, this crate owns what the bytes
 /// mean, and the bitmap library stays on one side of the boundary.
-pub fn encode_record(record: &ArtifactRecord, shape: Option<Bbox>) -> Vec<u8> {
+pub fn encode_record(record: &ArtifactRecord, shape: Option<&ArtifactShapes>) -> Vec<u8> {
     let key = record.key.as_deref().unwrap_or_default().as_bytes();
     let members = serialise_members(&record.members);
     let sets: Vec<Vec<u8>> = record
@@ -1520,33 +1893,57 @@ pub fn encode_record(record: &ArtifactRecord, shape: Option<Bbox>) -> Vec<u8> {
             out.extend_from_slice(&attachment.entity.raw().to_le_bytes());
         }
     }
-    // The parent, on the attachment's discriminant rule: absent is one byte and never zero, so
-    // *this node is a root* and *this reader does not know whether it had a parent* cannot encode
-    // the same. Here the second answer would serve a child beside the ancestor that should have
-    // replaced it — a duplicate on the map rather than a disclosure, but wrong either way.
-    match record.parent {
-        None => out.push(0),
-        Some(parent) => {
-            out.push(1);
+    // The parents, counted: a root is an explicit zero and never an absent field, so *this node
+    // is a root* and *this reader does not know whether it had a parent* cannot encode the same.
+    // Here the second answer would serve a child beside the ancestor that should have replaced it
+    // — a duplicate on the map rather than a disclosure, but wrong either way. More parents than a
+    // `u16` counts is a record this encoding cannot read back, refused at encode on the key's and
+    // the contents' rule rather than written as a prefix of the lineage.
+    let parent_count = u16::try_from(record.parents.len()).unwrap_or(u16::MAX);
+    out.extend_from_slice(&parent_count.to_le_bytes());
+    if parent_count != u16::MAX {
+        for parent in &record.parents {
             out.extend_from_slice(&parent.level.to_le_bytes());
             out.extend_from_slice(&parent.ordinal.to_le_bytes());
         }
     }
-    // **The box, on the same discriminant rule** — and here the fail-closed reading is the loud
-    // one. A spatial artifact restored *without* its box has no membership rule at all, so it
+    // **The shape, on the same discriminant rule** — and here the fail-closed reading is the loud
+    // one. A spatial artifact restored *without* its shape has no membership rule at all, so it
     // counts zero for every viewer and is absent under any criterion; the decoder refuses such a
     // blob rather than restoring a shapeless artifact, which is what makes the absence a fault
     // somebody sees instead of a boundary that quietly stopped holding anything.
     match shape {
         None => out.push(0),
-        Some(box_) => {
-            out.push(1);
-            for value in box_.as_array() {
-                out.extend_from_slice(&value.to_le_bytes());
-            }
+        Some(shapes) => {
+            out.push(3);
+            shapes.encode_into(&mut out);
         }
     }
     out
+}
+
+/// Where one packed blob's membership bytes are, without decoding a bitmap.
+///
+/// **The build's one use for it**: an extent it has just written is mapped back, and a record's
+/// heap bitmap is replaced by a view over these bytes ([`Members::mapped`]). Nothing is copied and
+/// nothing is parsed but the three lengths [`encode_record`] puts in front — which is the whole
+/// reason the membership carries an explicit length rather than being the blob's tail.
+///
+/// `None` where the framing does not hold, on [`decode_record`]'s rule: the caller keeps the
+/// bitmap it already has rather than adopting bytes it could not locate.
+pub fn members_bytes(blob: &[u8]) -> Option<&[u8]> {
+    let key_len = u16::from_le_bytes(blob.get(0..2)?.try_into().ok()?) as usize;
+    if key_len == u16::MAX as usize {
+        return None;
+    }
+    let at = 2 + key_len;
+    let count = u16::from_le_bytes(blob.get(at..at + 2)?.try_into().ok()?) as usize;
+    if count == u16::MAX as usize {
+        return None;
+    }
+    let at = at + 2;
+    let members_len = u32::from_le_bytes(blob.get(at..at + 4)?.try_into().ok()?) as usize;
+    blob.get(at + 4..at + 4 + members_len)
 }
 
 /// The inverse, refusing anything it cannot read back exactly.
@@ -1555,7 +1952,10 @@ pub fn encode_record(record: &ArtifactRecord, shape: Option<Bbox>) -> Vec<u8> {
 /// key was lost is one no edge can name, and an artifact whose membership decoded short is one with
 /// a low masked count for every viewer — which the existence criterion renders as *absent*, with no
 /// error anywhere to notice. Both must be a decode failure the caller alarms on.
-pub fn decode_record(entity: EntityId, blob: &[u8]) -> Option<(ArtifactRecord, Option<Bbox>)> {
+pub fn decode_record(
+    entity: EntityId,
+    blob: &[u8],
+) -> Option<(ArtifactRecord, Option<ArtifactShapes>)> {
     let mut at = 0usize;
     let mut take = |n: usize| -> Option<&[u8]> {
         let end = at.checked_add(n)?;
@@ -1609,25 +2009,42 @@ pub fn decode_record(entity: EntityId, blob: &[u8]) -> Option<(ArtifactRecord, O
         }
         _ => return None,
     };
-    let parent = match take(1)?[0] {
-        0 => None,
-        1 => Some(crate::wal::ParentRef {
+    let parent_count = u16::from_le_bytes(take(2)?.try_into().ok()?) as usize;
+    if parent_count == u16::MAX as usize {
+        return None;
+    }
+    // **Strictly ascending, or a decode failure.** The writer keeps the list sorted and
+    // deduplicated, so a list that is not is one this reader did not write — and reading it
+    // would hand the engine a lineage whose duplicate edges count twice and whose order is
+    // whatever the bytes happened to say.
+    let mut parents = Vec::with_capacity(parent_count);
+    for _ in 0..parent_count {
+        let parent = crate::wal::ParentRef {
             level: u32::from_le_bytes(take(4)?.try_into().ok()?),
             ordinal: u32::from_le_bytes(take(4)?.try_into().ok()?),
-        }),
-        _ => return None,
-    };
-    // **The box goes through [`Bbox::new`] rather than being assembled from the bytes**, so a blob
-    // carrying an inverted or non-finite box is a decode failure and not an artifact whose
-    // membership is a region nobody wrote. One constructor, at both ends.
+        };
+        if parents.last().is_some_and(|last| *last >= parent) {
+            return None;
+        }
+        parents.push(parent);
+    }
+    // **The shapes go through [`ArtifactShapes::new`] rather than being assembled from the
+    // bytes**, so a blob carrying no view or an empty shape is a decode failure and not an artifact
+    // whose membership is a region nobody wrote. One constructor, at both ends. Whether the bytes
+    // *decode as a shape* is the engine's question, asked where the shape is held; a stale format
+    // refuses there, loudly, rather than here silently.
     let shape = match take(1)?[0] {
         0 => None,
-        1 => {
-            let mut values = [0f64; 4];
-            for value in values.iter_mut() {
-                *value = f64::from_le_bytes(take(8)?.try_into().ok()?);
+        3 => {
+            let views = u16::from_le_bytes(take(2)?.try_into().ok()?) as usize;
+            let mut by_view = Vec::with_capacity(views);
+            for _ in 0..views {
+                let view_len = u16::from_le_bytes(take(2)?.try_into().ok()?) as usize;
+                let view = std::str::from_utf8(take(view_len)?).ok()?.to_string();
+                let shape_len = u32::from_le_bytes(take(4)?.try_into().ok()?) as usize;
+                by_view.push((view, take(shape_len)?.to_vec()));
             }
-            Some(Bbox::new(values[0], values[1], values[2], values[3])?)
+            Some(ArtifactShapes::new(by_view)?)
         }
         _ => return None,
     };
@@ -1641,10 +2058,10 @@ pub fn decode_record(entity: EntityId, blob: &[u8]) -> Option<(ArtifactRecord, O
         ArtifactRecord {
             entity,
             key,
-            members,
+            members: Members::owned(members),
             contents,
             attached_to,
-            parent,
+            parents,
         },
         shape,
     ))
@@ -1705,10 +2122,10 @@ mod tests {
         ArtifactRecord {
             entity: EntityId::new(entity),
             key: None,
-            members: Bitmap::of(members),
+            members: Members::owned(Bitmap::of(members)),
             contents: Vec::new(),
             attached_to: None,
-            parent: None,
+            parents: Vec::new(),
         }
     }
 
@@ -1767,6 +2184,38 @@ mod tests {
         );
     }
 
+    /// **The streaming route and the materialising one answer the same thing.** A build takes
+    /// ranges and encodes an artifact at a time; the online publication takes the blobs. Two routes
+    /// to one set of bytes is one place for them to drift, so the equality is asserted rather than
+    /// argued — including which levels are skipped for a hole, where the two must agree exactly or
+    /// a build would pack around one.
+    #[test]
+    fn the_ranges_and_the_blobs_describe_the_same_pending_levels() {
+        let mut store = ArtifactStore::new();
+        store.put("clusters/a", 0, 0, record(100, &[1, 2, 3]), None);
+        store.put("clusters/a", 0, 1, record(101, &[4]), None);
+        store.put("clusters/a", 1, 0, record(102, &[]), None);
+        // A level with a hole: reported as skipped by both, and never as a range.
+        store.put("holed/h", 0, 1, record(103, &[7]), None);
+
+        let (ready, skipped) = store.unpublished();
+        let (ranges, skipped_ranges) = store.pending_ranges();
+        assert_eq!(skipped, skipped_ranges);
+        assert_eq!(skipped, vec![("holed/h".to_string(), 0)]);
+        assert_eq!(ready.len(), ranges.len());
+        for ((layer, level, lo, blobs), (r_layer, r_level, r_lo, count)) in
+            ready.iter().zip(ranges.iter())
+        {
+            assert_eq!((layer, level, lo), (r_layer, r_level, r_lo));
+            assert_eq!(blobs.len(), *count as usize);
+            let streamed: Vec<Vec<u8>> = store
+                .encode_pending(r_layer, *r_level, *r_lo, *count)
+                .map(|blob| blob.expect("a range holds a record at every ordinal"))
+                .collect();
+            assert_eq!(*blobs, streamed);
+        }
+    }
+
     #[test]
     fn a_level_is_dense_and_a_hole_answers_absent() {
         // A publication that skips an ordinal — one artifact still in flight, or one a fold has
@@ -1786,7 +2235,7 @@ mod tests {
         // deletion that shrinks the membership shrinks the denominator with it, in one place.
         let mut r = record(100, &[1, 2, 3, 4]);
         assert_eq!(r.declared_size(), 4);
-        r.members.remove(3);
+        r.members.to_mut().remove(3);
         assert_eq!(r.declared_size(), 3);
     }
 
@@ -1907,6 +2356,108 @@ mod tests {
         out
     }
 
+    /// **A membership read through bytes is the membership**, and a write to it materialises
+    /// first. The two together are what let the build swap where a membership lives without any
+    /// caller being able to tell — and what keep growth and retirement the only routes a bit
+    /// changes, whichever form the record happens to be in.
+    #[test]
+    fn a_mapped_membership_answers_as_the_bitmap_it_views() {
+        let bitmap = Bitmap::of(&[1, 2, 3, 70_000, 70_001]);
+        let bytes: Arc<Vec<u8>> = Arc::new(serialise_members(&bitmap));
+        let owner: Arc<dyn Any + Send + Sync> = bytes.clone();
+        let mapped = unsafe { Members::mapped(&bytes, owner) }.expect("the bytes are a bitmap");
+        assert!(mapped.is_mapped());
+        assert_eq!(mapped, bitmap);
+        assert_eq!(mapped.cardinality(), 5);
+        assert_eq!(
+            mapped.iter().collect::<Vec<u32>>(),
+            vec![1, 2, 3, 70_000, 70_001]
+        );
+        // A clone of a view is a view over the same bytes, and outlives the value it came from.
+        let clone = mapped.clone();
+        drop(mapped);
+        assert_eq!(clone, bitmap);
+
+        let mut written = clone;
+        written.to_mut().add(9);
+        assert!(!written.is_mapped(), "a write materialises before it lands");
+        assert_eq!(written.cardinality(), 6);
+        assert!(written.contains(9));
+        // And the bytes it viewed are untouched — the mapping is read-only by construction.
+        assert_eq!(deserialise_members(&bytes).expect("still a bitmap"), bitmap);
+    }
+
+    /// **Bytes that are not a bitmap are refused rather than read as containers.** The view
+    /// constructor is unchecked in croaring; this is the check in front of it, and it is the same
+    /// refusal [`deserialise_members`] makes for the same reason.
+    #[test]
+    fn a_mapped_membership_refuses_bytes_that_are_not_a_bitmap() {
+        let bytes: Arc<Vec<u8>> = Arc::new(vec![0xAB; 32]);
+        let owner: Arc<dyn Any + Send + Sync> = bytes.clone();
+        assert!(unsafe { Members::mapped(&bytes, owner) }.is_none());
+    }
+
+    /// **A rehousing that is not the same membership is refused**, and the record keeps what it
+    /// had. A view over another artifact's bytes would be a masked count that is low for every
+    /// viewer — served as absent, with nothing to notice.
+    #[test]
+    fn rehousing_refuses_a_membership_that_is_not_the_one_it_replaces() {
+        let mut store = ArtifactStore::new();
+        store.put("clusters/a", 0, 0, record(100, &[1, 2, 3]), None);
+
+        let wrong: Arc<Vec<u8>> = Arc::new(serialise_members(&Bitmap::of(&[1, 2])));
+        let owner: Arc<dyn Any + Send + Sync> = wrong.clone();
+        let members = unsafe { Members::mapped(&wrong, owner) }.expect("a bitmap");
+        assert!(!store.rehouse_members("clusters/a", 0, 0, members));
+        assert_eq!(
+            store.get("clusters/a", 0, 0).expect("still there").members,
+            Bitmap::of(&[1, 2, 3])
+        );
+
+        let right: Arc<Vec<u8>> = Arc::new(serialise_members(&Bitmap::of(&[1, 2, 3])));
+        let owner: Arc<dyn Any + Send + Sync> = right.clone();
+        let members = unsafe { Members::mapped(&right, owner) }.expect("a bitmap");
+        assert!(store.rehouse_members("clusters/a", 0, 0, members));
+        let record = store.get("clusters/a", 0, 0).expect("still there");
+        assert!(record.members.is_mapped());
+        assert_eq!(record.members, Bitmap::of(&[1, 2, 3]));
+        // An ordinal naming no record adopts nothing, exactly as a growth does not resurrect one.
+        let spare: Arc<Vec<u8>> = Arc::new(serialise_members(&Bitmap::new()));
+        let owner: Arc<dyn Any + Send + Sync> = spare.clone();
+        let members = unsafe { Members::mapped(&spare, owner) }.expect("a bitmap");
+        assert!(!store.rehouse_members("clusters/a", 0, 7, members));
+    }
+
+    /// **The membership's bytes are where [`members_bytes`] says they are**, over a record with a
+    /// key, contents and an attachment in front of and behind them — the framing the build's
+    /// rehousing walks without decoding a bitmap.
+    #[test]
+    fn members_bytes_finds_the_membership_encode_record_wrote() {
+        let mut record = record(100, &[1, 2, 3, 70_000]);
+        record.key = Some("a-key".to_string());
+        record.contents = vec![ContentSet {
+            values: Some(vec!["topic".to_string()]),
+            generated_from: Bitmap::of(&[2, 3]),
+        }];
+        record.attached_to = Some(Attachment {
+            layer: "labels/x".to_string(),
+            level: 0,
+            ordinal: 3,
+            entity: EntityId::new(400),
+        });
+        let blob = encode_record(&record, None);
+        let bytes = members_bytes(&blob).expect("the framing holds");
+        assert_eq!(
+            deserialise_members(bytes).expect("a bitmap"),
+            Bitmap::of(&[1, 2, 3, 70_000]),
+            "the slice must be the membership and not a content's generating set"
+        );
+        // **A blob cut inside the membership answers None rather than a shorter one** — which is
+        // the whole point of the explicit length `encode_record` puts in front of it.
+        let end = bytes.as_ptr() as usize - blob.as_ptr() as usize + bytes.len();
+        assert!(members_bytes(&blob[..end - 1]).is_none());
+    }
+
     fn check_round_trip(members: &Bitmap) {
         let bytes = serialise_members(members);
         let broken = out_of_order_containers(&bytes);
@@ -2002,6 +2553,66 @@ mod tests {
     /// **An attachment survives the packed extent, and a lost one is a decode failure.** A label
     /// restored as unattached is a label that serves when its cluster is suppressed — the fail-open
     /// the term exists to close, reappearing at a restart, with nothing anywhere reporting a fault.
+    /// **Several parents round-trip, and a list the writer could not have produced is refused**
+    /// (`dag-hierarchies.md` §7, decision 0117). The list is what `BUNDLE_FORMAT` 5 guards: the
+    /// previous encoding was one byte and at most one parent.
+    #[test]
+    fn several_parents_round_trip_and_an_unsorted_list_is_refused() {
+        use crate::wal::ParentRef;
+        let mut r = record(100, &[1, 2, 3]);
+        r.parents = vec![
+            ParentRef {
+                level: 0,
+                ordinal: 3,
+            },
+            ParentRef {
+                level: 0,
+                ordinal: 7,
+            },
+            ParentRef {
+                level: 1,
+                ordinal: 0,
+            },
+        ];
+        let blob = encode_record(&r, None);
+        let (back, _) = decode_record(r.entity, &blob).expect("a whole blob decodes");
+        assert_eq!(back.parents, r.parents, "every parent, in order");
+
+        let mut root = r.clone();
+        root.parents.clear();
+        let (back, _) = decode_record(root.entity, &encode_record(&root, None)).unwrap();
+        assert!(back.parents.is_empty(), "a root is an explicit zero");
+
+        // A duplicate edge or an out-of-order list is not one this writer produced: the record is
+        // kept ascending and deduplicated, so the reader treats anything else as another format.
+        let mut twice = r.clone();
+        twice.parents.push(ParentRef {
+            level: 1,
+            ordinal: 0,
+        });
+        assert!(
+            decode_record(twice.entity, &encode_record(&twice, None)).is_none(),
+            "a duplicate edge refuses"
+        );
+        let mut backwards = r.clone();
+        backwards.parents.reverse();
+        assert!(
+            decode_record(backwards.entity, &encode_record(&backwards, None)).is_none(),
+            "an unsorted list refuses"
+        );
+
+        // Every truncation inside the list refuses rather than decoding as fewer parents.
+        let whole = decode_record(root.entity, &encode_record(&root, None)).is_some();
+        assert!(whole);
+        for len in 0..blob.len() {
+            assert!(
+                decode_record(r.entity, &blob[..len]).is_none(),
+                "a blob truncated to {len} of {} bytes must refuse",
+                blob.len()
+            );
+        }
+    }
+
     #[test]
     fn an_attachment_round_trips_and_a_truncated_one_is_refused() {
         let mut r = record(100, &[1, 2, 3]);
@@ -2017,19 +2628,27 @@ mod tests {
             entity: EntityId::new(4_294_901_759),
         });
 
-        let shape = Bbox::new(-1.5, 0.0, 2.5, 4.0);
-        let blob = encode_record(&r, shape);
+        let shape = ArtifactShapes::new(vec![
+            ("world".into(), vec![1, 2, 3]),
+            ("map".into(), vec![9]),
+        ]);
+        let blob = encode_record(&r, shape.as_ref());
         let (back, back_shape) = decode_record(r.entity, &blob).expect("a whole blob decodes");
         assert_eq!(back.attached_to, r.attached_to);
         assert_eq!(back.key, r.key);
         assert_eq!(
             back_shape, shape,
-            "the box is the membership of a shape layer"
+            "the shapes are the membership of a shape layer"
         );
+        assert_eq!(
+            back_shape.as_ref().unwrap().for_view("map"),
+            Some(&[9u8][..])
+        );
+        assert_eq!(back_shape.as_ref().unwrap().for_view("nowhere"), None);
 
-        // An unattached artifact with no box round-trips too, each carrying its own absence byte —
-        // *unattached* and *this reader could not tell* must not encode the same, and neither must
-        // *no box* and *a box this reader could not read*.
+        // An unattached artifact with no shape round-trips too, each carrying its own absence byte
+        // — *unattached* and *this reader could not tell* must not encode the same, and neither
+        // must *no shape* and *a shape this reader could not read*.
         let mut plain = r.clone();
         plain.attached_to = None;
         let plain_blob = encode_record(&plain, None);
@@ -2038,20 +2657,20 @@ mod tests {
         assert_eq!(restored.members, plain.members);
         assert_eq!(restored_shape, None);
 
-        // **An inverted box is a decode failure, not a swapped one.** The blob is written by hand
-        // here because `Bbox::new` refuses to build one — which is the point: the only way such a
-        // blob exists is a writer that did not go through the constructor, and the reader must not
-        // accept what the writer could not have produced.
-        let mut inverted = encode_record(&plain, None);
-        inverted.pop();
-        inverted.push(1);
-        for value in [5.0f64, 0.0, 1.0, 4.0] {
-            inverted.extend_from_slice(&value.to_le_bytes());
-        }
+        // **A shape with no view, or an empty one, is a decode failure.** The blob is written by
+        // hand here because the constructor refuses to build one — which is the point: the only
+        // way such a blob exists is a writer that did not go through the constructor, and the
+        // reader must not accept what the writer could not have produced.
+        let mut viewless = encode_record(&plain, None);
+        viewless.pop();
+        viewless.push(3);
+        viewless.extend_from_slice(&0u16.to_le_bytes());
         assert!(
-            decode_record(plain.entity, &inverted).is_none(),
-            "a box whose maximum is below its minimum names a region nobody wrote"
+            decode_record(plain.entity, &viewless).is_none(),
+            "a shape for no view is an artifact with no membership rule"
         );
+        assert!(ArtifactShapes::new(vec![("a".into(), vec![])]).is_none());
+        assert!(ArtifactShapes::new(vec![("a".into(), vec![1]), ("a".into(), vec![2])]).is_none());
 
         // Every truncation from the end of the contents onwards refuses. The one that matters is
         // the shortest: it is byte-for-byte the unattached artifact's blob without its absence
@@ -2096,7 +2715,7 @@ mod tests {
                 members: serialise_members(&Bitmap::of(members)),
                 contents: Vec::new(),
                 attached_to: None,
-                parent: None,
+                parents: Vec::new(),
                 shape: None,
             }],
         }

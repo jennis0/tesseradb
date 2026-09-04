@@ -272,13 +272,22 @@ fn fixture() -> Fixture {
     let schema = Config::parse(&schema_path, &HashMap::new()).unwrap().schema;
 
     build(&BuildArgs {
-        point_fields: Default::default(),
-        points: points.clone(),
+        arena_order: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: points.clone(),
+            point_fields: Default::default(),
+            select: None,
+            access: tessera_build::config::AccessInput::relation(pairs.clone()),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
-        access: tessera_build::config::AccessInput::relation(pairs.clone()),
         out: bundle.clone(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: "000102030405060708090a0b0c0d0e0f".to_string(),
@@ -286,6 +295,7 @@ fn fixture() -> Fixture {
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
         mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
@@ -306,11 +316,14 @@ fn fixture() -> Fixture {
         &bundle.join(&prefix),
         &phash,
         &opened.manifest.declared_scalars,
+        &opened.manifest.scoped_scalars(),
+        &|view: &str| opened.manifest.incarnation_of(view),
         &opened.manifest.vocabularies,
         // A freshly built bundle has flushed nothing, so its columns are the base layer alone.
         &opened.partitions[&phash].manifest.attr_extents,
         &opened.partitions[&phash].manifest.record_extents,
         &opened.partitions[&phash].manifest.artifact_record_extents,
+        &[],
         &opened.partitions[&phash].manifest.text_extents,
         // Mapped, which is what the engine does at session open — so the round-trip these tests
         // assert is the one a served request actually takes.
@@ -623,6 +636,7 @@ fn ingest_and_flush_with(
     let row = UnallocatedRow {
         external_id: Some(external.as_bytes().to_vec()),
         view: "s0".to_string(),
+        join: None,
         descriptors: vec![b"0".to_vec()],
         x: 5.0,
         y: 5.0,
@@ -639,6 +653,7 @@ fn ingest_and_flush_with(
             bonus,
         ],
         terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
     };
     let allocated = engine
         .accept_ingest(vec![row], external.to_string(), [0u8; 32])
@@ -1098,8 +1113,11 @@ fn an_extent_file_the_manifest_names_but_that_is_absent_refuses_to_open() {
             &prefix,
             &phash,
             &opened.manifest.declared_scalars,
+            &opened.manifest.scoped_scalars(),
+            &|view: &str| opened.manifest.incarnation_of(view),
             &opened.manifest.vocabularies,
             extents,
+            &[],
             &[],
             &[],
             &[],
@@ -1176,12 +1194,17 @@ fn an_extent_overlapping_an_earlier_layer_is_refused() {
     let (overlapping, dict) = keyword_extent(&[0], &["collision".to_string()]);
     let err = fx
         .columns
-        .with_extents(&[(
-            "title".to_string(),
-            "attrs/title/extents/overlapping.arrow".to_string(),
-            overlapping,
-            Some(dict),
-        )], &[], &[])
+        .with_extents(
+            &[(
+                "title".to_string(),
+                "attrs/title/extents/overlapping.arrow".to_string(),
+                overlapping,
+                Some(dict),
+            )],
+            &[],
+            &[],
+            &[],
+        )
         .expect_err("an extent claiming entity 0 overlaps the base column");
     assert!(format!("{err}").contains("I9"), "{err}");
 
@@ -1190,12 +1213,17 @@ fn an_extent_overlapping_an_earlier_layer_is_refused() {
     let (stray, stray_dict) = keyword_extent(&[N as u32 + 1], &["stray".to_string()]);
     assert!(fx
         .columns
-        .with_extents(&[(
-            "no_such_column".to_string(),
-            "attrs/no_such_column/extents/stray.arrow".to_string(),
-            stray,
-            Some(stray_dict),
-        )], &[], &[])
+        .with_extents(
+            &[(
+                "no_such_column".to_string(),
+                "attrs/no_such_column/extents/stray.arrow".to_string(),
+                stray,
+                Some(stray_dict),
+            )],
+            &[],
+            &[],
+            &[]
+        )
         .is_err());
 }
 
@@ -1215,12 +1243,14 @@ fn a_row_with_the_wrong_scalar_count_is_refused_rather_than_panicking() {
     let short = UnallocatedRow {
         external_id: Some(b"short".to_vec()),
         view: "s0".to_string(),
+        join: None,
         descriptors: vec![b"0".to_vec()],
         x: 5.0,
         y: 5.0,
         // The schema declares five columns.
         scalars: vec![WalScalar::Utf8("eng".to_string())],
         terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
     };
     let err = engine
         .accept_ingest(vec![short], "batch-short".to_string(), [1u8; 32])
@@ -1235,6 +1265,7 @@ fn a_row_with_the_wrong_scalar_count_is_refused_rather_than_panicking() {
     let good = UnallocatedRow {
         external_id: Some(b"good".to_vec()),
         view: "s0".to_string(),
+        join: None,
         descriptors: vec![b"0".to_vec()],
         x: 5.0,
         y: 5.0,
@@ -1248,6 +1279,7 @@ fn a_row_with_the_wrong_scalar_count_is_refused_rather_than_panicking() {
             WalScalar::Null,
         ],
         terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
     };
     assert!(engine
         .accept_ingest(vec![good], "batch-good".to_string(), [2u8; 32])
@@ -1430,8 +1462,7 @@ fn a_filter_serves_every_match_up_to_the_cap_even_with_theta_live() {
     );
     for tile in &filtered.tiles {
         assert_eq!(
-            tile.served,
-            tile.matched,
+            tile.served, tile.matched,
             "below the cap, every matched row in a tile is served"
         );
     }
@@ -1446,7 +1477,11 @@ fn a_filter_serves_every_match_up_to_the_cap_even_with_theta_live() {
             ViewportRequest::new("s0", 0, FULL_VIEWPORT, 5).filter(leaf("department", eng)),
         )
         .expect("a capped filtered viewport answers");
-    assert_eq!(capped.points.len(), 5, "the cap governs when matches exceed it");
+    assert_eq!(
+        capped.points.len(),
+        5,
+        "the cap governs when matches exceed it"
+    );
     assert_eq!(
         capped.points.tessera_ids,
         filtered.points.tessera_ids[..5],
@@ -1725,6 +1760,7 @@ fn an_entity_whose_value_is_not_yet_reachable_matches_no_negation() {
     let row = UnallocatedRow {
         external_id: Some(b"buffered".to_vec()),
         view: "s0".to_string(),
+        join: None,
         descriptors: vec![b"0".to_vec()],
         x: 5.0,
         y: 5.0,
@@ -1736,6 +1772,7 @@ fn an_entity_whose_value_is_not_yet_reachable_matches_no_negation() {
             WalScalar::Null,
         ],
         terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
     };
     let buffered = engine
         .accept_ingest(vec![row], "batch-buffered".to_string(), [9u8; 32])
@@ -1821,6 +1858,49 @@ fn none_of_every_offered_value_proves_no_unoffered_value_exists() {
         got.cardinality()
     );
     let _ = session;
+}
+
+/// **`count` is the viewer's own `and_cardinality`**, and it agrees with the filter that resolves
+/// the same value under the same candidate — which is the only cross-check available, the two being
+/// different code over the same postings and the same extents.
+///
+/// The property that makes the arithmetic sound is disjointness: the extents sweep counts entities
+/// ingested since the build and the postings cover the build, so the halves add. A test that only
+/// exercised a bundle with no extents would pass with the halves multiplied.
+///
+/// **Mutations this kills:** counting extent codes as a set rather than per entity; counting the
+/// posting whole instead of against the candidate; adding a half twice.
+#[test]
+fn a_values_count_is_what_a_filter_on_that_value_returns() {
+    let fx = fixture();
+    let (engine, cand) = candidate_for(&fx, &subset_credential());
+    let generation = engine.generation();
+    let membership = generation
+        .filter_columns
+        .category_membership("department", &cand)
+        .expect("a `derived` category carries membership postings");
+
+    for (key, code) in &fx.codes {
+        let resolved = generation
+            .filter_columns
+            .resolve(
+                "department",
+                &tessera_engine::filter::FilterOperand::Equals(AttrLocalId::new(*code)),
+                &cand,
+            )
+            .expect("a declared category resolves");
+        assert_eq!(
+            membership.count(*code).unwrap(),
+            resolved.cardinality(),
+            "{key} (code {code})"
+        );
+        // And the boolean is the count's own emptiness, so the two gates cannot disagree.
+        assert_eq!(
+            membership.carries(*code).unwrap(),
+            resolved.cardinality() > 0,
+            "{key}: carries and count disagree"
+        );
+    }
 }
 
 /// A `none_of` naming two columns is refused, because it would have to pick which column's presence
@@ -2222,8 +2302,13 @@ fn reopen(fx: &Fixture) -> std::io::Result<FilterColumns> {
         &fx.bundle.join(&fx.prefix),
         &fx.phash,
         &fx.declared,
+        // No group-scoped family: this fixture declares no view group (`views.md` §5), so no
+        // incarnation is ever asked for.
+        &[],
+        &|_view: &str| None,
         &fx.vocabularies,
         &fx.extents,
+        &[],
         &[],
         &[],
         &[],
@@ -3630,20 +3715,25 @@ fn a_coalesced_layer_that_does_not_cover_its_window_is_refused() {
     let second = "attrs/bonus/extents/b.arrow".to_string();
     let columns = fx
         .columns
-        .with_extents(&[
-            (
-                "bonus".to_string(),
-                first.clone(),
-                extent(&[100, 101]),
-                None,
-            ),
-            (
-                "bonus".to_string(),
-                second.clone(),
-                extent(&[200, 201]),
-                None,
-            ),
-        ], &[], &[])
+        .with_extents(
+            &[
+                (
+                    "bonus".to_string(),
+                    first.clone(),
+                    extent(&[100, 101]),
+                    None,
+                ),
+                (
+                    "bonus".to_string(),
+                    second.clone(),
+                    extent(&[200, 201]),
+                    None,
+                ),
+            ],
+            &[],
+            &[],
+            &[],
+        )
         .expect("two extents above the build's high-water compose");
 
     let window =
@@ -3654,7 +3744,7 @@ fn a_coalesced_layer_that_does_not_cover_its_window_is_refused() {
             values,
         };
     let err = columns
-        .with_coalesced(&[window(extent(&[100, 101, 200]))], &[])
+        .with_coalesced(&[window(extent(&[100, 101, 200]))], &[], None, None)
         .expect_err("a coalesced layer short of its window is refused");
     assert!(format!("{err}").contains("coverage"), "{err}");
 
@@ -3664,11 +3754,11 @@ fn a_coalesced_layer_that_does_not_cover_its_window_is_refused() {
     stray
         .consumed
         .push("attrs/bonus/extents/never.arrow".to_string());
-    assert!(columns.with_coalesced(&[stray], &[]).is_err());
+    assert!(columns.with_coalesced(&[stray], &[], None, None).is_err());
 
     // The well-formed replace, which is what the pass actually publishes.
     let next = columns
-        .with_coalesced(&[window(extent(&[100, 101, 200, 201]))], &[])
+        .with_coalesced(&[window(extent(&[100, 101, 200, 201]))], &[], None, None)
         .expect("the coalesced layer covers exactly its window");
     let mut cand = Bitmap::new();
     cand.add_range(0..300);

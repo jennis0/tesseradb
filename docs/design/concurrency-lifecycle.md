@@ -305,13 +305,13 @@ tokio for HTTP and sockets; one lifecycle thread per partition (the single write
 
 Caches are concurrent maps of immutable entries, keyed by design §8.5's keys verbatim; **invalidation is key rotation, never mutation**, and nothing here ever modifies a cached value. What the cache adds beyond that is capacity management and single-flight build, and both have consequences a one-clause description hides.
 
-**A waiter blocks, bounded and cancellable, and this is visible to clients** *(decision [0058](../decisions/0058-a-single-flight-racer-waits-rather-than-being-refused.md), superseding r7's "waiters do not block")*. A miss makes the arriving caller the builder: it publishes a `Building` slot, releases the map lock, runs the build with no lock held, then re-acquires to publish. A *concurrent* arrival on a key already building **parks on that build and is served its result**. The 429 survives as the answer at the end of a wait that did not finish — a wait budget expiring, or the request's cancellation token being flipped, which returns a cancellation rather than backpressure.
+**A waiter blocks, bounded and cancellable, and this is visible to clients** *(decision 0058, superseding r7's "waiters do not block")*. A miss makes the arriving caller the builder: it publishes a `Building` slot, releases the map lock, runs the build with no lock held, then re-acquires to publish. A *concurrent* arrival on a key already building **parks on that build and is served its result**. The 429 survives as the answer at the end of a wait that did not finish — a wait budget expiring, or the request's cancellation token being flipped, which returns a cancellation rather than backpressure.
 
 The motivation is measured, not aesthetic. The original row-projection cache ran the entity-space-to-row-space crossing — seconds at 10⁹ rows — **inside** the map lock on a miss, so every distinct session's first viewport serialised behind one global mutex. The signature at c=1000: throughput halves, server CPU *drops*, p99 reaches 1.04 s. Threads blocked on a lock, not doing work.
 
 The refusal it replaced was not backpressure and calling it that hid the defect: the server is idle and the work is already succeeding on another thread, so refusing sheds no load. What broke was the arithmetic — a full row-projection rebuild is a measured 4,550 ms at 10⁹ against a client retry budget of 1 s then 2 s, so a client racing *itself* exhausted its retries before work that was always going to succeed finished, and rendered a blank map. The budget is therefore argued from the build it must outlast (`serve.single_flight_wait_ms`, defaulting to 6,000 ms) rather than inherited from the admission gate's 250 ms or the client's `Retry-After: 1`.
 
-**The cost the old rule named is real and is now bounded rather than avoided.** A parked caller holds a compute-admission permit while consuming no CPU. That occupancy is bounded by the budget, and by nothing per-principal: decision [0059](../decisions/0059-per-principal-admission-is-not-capped.md) declines a per-principal cap on the grounds that the ceiling on admitted requests does not move, that a principal can already occupy every permit with *distinct* cold keys at real CPU cost, and that a fixed cap binds hardest when the server is idle. It is instrumented instead — parked callers are a gauge, and waits satisfied a counter beside the refusals they used to be. The refusal rate that remains is bounded by *same-key* concurrency; a working set that does not fit produces rebuilds, never refusals.
+**The cost the old rule named is real and is now bounded rather than avoided.** A parked caller holds a compute-admission permit while consuming no CPU. That occupancy is bounded by the budget, and by nothing per-principal: decision 0059 declines a per-principal cap on the grounds that the ceiling on admitted requests does not move, that a principal can already occupy every permit with *distinct* cold keys at real CPU cost, and that a fixed cap binds hardest when the server is idle. It is instrumented instead — parked callers are a gauge, and waits satisfied a counter beside the refusals they used to be. The refusal rate that remains is bounded by *same-key* concurrency; a working set that does not fit produces rebuilds, never refusals.
 
 **One caller must not wait, and it is not a policy choice.** The background refresh runs on a rayon worker, and the build it would park behind installs work on that same pool; parking workers on work that needs workers is a starvation deadlock. It keeps the non-waiting entry point and skips a key it finds building. The request path resolves on its own calling thread and is free to block.
 
@@ -332,7 +332,7 @@ The refusal it replaced was not backpressure and calling it that hid the defect:
 
 Four properties of §4 occur only when durability *fails*: a suppression applied despite a disk-full append, a poisoned WAL tripping the not-ready posture, an ack that must not precede its swap, a deny that must not queue behind work. None is reachable by a test that can only ask the executor to succeed. The write path therefore carries a fault switchboard — WAL append and fsync failures, and five pause sites: two on the ack contract, and three at the publication seams a crash test needs and an arbitrary kill essentially never lands on (before a side-manifest commits into the live prefix, before the fold's `CURRENT` flip, and between a merge's execution on the pool and its publication on the executor).
 
-The switchboard reaches a build by exactly two routes, and no default-features build carries it (decision [0071](../decisions/0071-fault-injection-reaches-a-served-binary-by-its-own-build.md)): the self dev-dependencies, which is how every test in the tree gets it, and a declared, default-off `fault-injection` feature on `tessera-server` and `tessera-cli` — the correctness suite's *faults build*, which carries a bearer-gated `/control/faults/*` arming surface (arm a named site, observe a thread has arrived, release) and goes to its own target directory, never `target/release/tessera`. `check-layers.sh` rule 2 asserts the guarantee from the resolved feature graph, in both directions: the default resolution reaches no `fault-injection`, and the faults build does.
+The switchboard reaches a build by exactly two routes, and no default-features build carries it (decision 0071): the self dev-dependencies, which is how every test in the tree gets it, and a declared, default-off `fault-injection` feature on `tessera-server` and `tessera-cli` — the correctness suite's *faults build*, which carries a bearer-gated `/control/faults/*` arming surface (arm a named site, observe a thread has arrived, release) and goes to its own target directory, never `target/release/tessera`. `check-layers.sh` rule 2 asserts the guarantee from the resolved feature graph, in both directions: the default resolution reaches no `fault-injection`, and the faults build does.
 
 **The fidelity rule: an injected failure must be indistinguishable from a real one, in variant and in order.** A real WAL returns an IO error on the failing call and a poisoned error on every call after it, so an injected failure does the same. Returning "poisoned" on the *first* call would diverge on precisely the error that the 500 mapping, the operator alarm and the deny-apply-anyway branch all switch on — the one call whose variant matters most. The real sequence is pinned independently by a test that provokes a genuine IO error; if the two ever disagree, everything depending on injection is measuring the harness.
 
@@ -371,98 +371,3 @@ Two ack sites, not one, because one cannot discriminate the ordering it exists t
 8. **Single-flight waiters block, bounded and cancellable** *(amended by decision 0058 — was "waiters do not block", a concurrent arrival refused with a 429 rather than parked)*: a concurrent arrival on a building key is served that build's result, and the 429 remains only for a wait that outran its budget. Still a caching decision with a client-visible outcome, and the permit occupancy it admits is bounded by the budget rather than by a per-principal cap (decision 0059) — §7.2.
 9. **The ack contract is carried by a type**, not by call ordering: a success receipt requires proof that the generation carrying its effect is live — §4.
 10. **Injected failures are indistinguishable from real ones in variant and order**, and the conformance harness extends this mechanism rather than adding a second — §7.3.
-
-## Appendix R — Review record
-
-**r11** (2026-08-15) applies decision
-[0071](../decisions/0071-fault-injection-reaches-a-served-binary-by-its-own-build.md) to §7.3.
-**The claim that changed sides is "nothing `cargo build` produces can carry it"** — true while the
-self dev-dependency was the only enablement route, and false the moment the feature became
-declarable on `tessera-server` and `tessera-cli` for the correctness suite's faults build. The
-guarantee narrowed to *no default-features build carries it*, which is what every deployment gets,
-and `check-layers.sh` rule 2 now asserts it in both directions from the resolved feature graph.
-The switchboard also gained the three publication-seam pause sites and the faults build's arming
-surface, so "two pause sites" became five. The fidelity rule, the no-abort rule and the
-hold-no-lock rule are unchanged; the ack-ordering argument is untouched.
-
-**r10** (2026-08-14) is a correction. §3.2 carried a marker saying no compaction fold exists and
-that nothing but an unsuppress retires; the fold is built, normative and reviewed against its
-implementation ([`compaction.md`](compaction.md) r11), and it retires deletions against an executed
-set derived from what its publication removed. The marker is withdrawn and §9's rule 5 says both
-rules are built. **No mechanism changes, and Rule S is untouched** — a suppression still retires
-only on its unsuppress, which is the half that is fail-open if it ever acquires a second route.
-
-**r9** (2026-08-09) applies decisions
-[0058](../decisions/0058-a-single-flight-racer-waits-rather-than-being-refused.md) and
-[0059](../decisions/0059-per-principal-admission-is-not-capped.md) to §7.2 and to decision 8.
-**The claim that changed sides is "waiters do not block"** — stated here since r7 with its
-motivation (a parked waiter holds admission budget while burning no CPU) and now false of the
-built system. The motivation was not wrong; it was the wrong answer to the case it was applied to,
-which the arithmetic settles: a 4,550 ms cold build against a client retry budget of 1 s then 2 s
-means the refusal loses the client an answer that was always coming.
-
-**That arithmetic has narrowed and the ruling survives it, but not for the original reason.** The
-cold build is now a measured 1 277 ms (`probes/2026-08-14-project-decomposition/`), which a 1 s +
-2 s retry budget *does* cover — so the refusal would no longer reliably lose the client its answer,
-and the premise as written no longer holds. What keeps the wait correct is the weaker claim that
-outlives the numbers: a racer that waits is served the build it waited for, where a refused one
-re-queues work already in flight and re-enters the gate to do it. Decision 0058 should be read as
-resting on that, and its cost argument as historical. §7.2 records the wait, its
-budget, the one caller that still must not wait and why that one is a deadlock rather than a
-preference, and the two-write argument that no wake can be missed. Nothing else in the section
-changed: the four eviction rules, the byte bound's reach and the deliberate cross-crate
-duplication all stand as written, and the F4 measurement that motivated the slot-state map is
-untouched — same-key callers serialising is what single-flight *is*, and F4 is about distinct
-keys.
-
-**r8** (2026-08-06) applies decision
-[0048](../decisions/0048-no-deployments-exist-so-delete-rather-than-support.md): the evaluate
-machinery is deleted, not carried, there being no deployment whose WAL could replay an entry.
-§3.1's overlay becomes **two** stores rather than three and its precedence loses the `evaluate`
-term; §3.2's Rule F governs deletions alone; **§3.4 stops being a ⊘ and becomes a deletion
-record** — it specified a fold for entries that can no longer exist, so there is nothing left to
-build there, and the argument it rested on survives at Rule F. §1's marker note and §5.3's
-compaction summary follow. **This removes an obligation and adds none**: one of the two markers a
-reader was warned to take seriously is gone because its subject is gone, not because it was built.
-
-**r7** (2026-08-04) performs [`write-path.md`](write-path.md)'s §13.1 supersession at its
-promotion. The write-side sections named there are reduced to **pointers**, keeping only the rule
-each one carries and the reason it exists: §1.3 (the single writer and the deny lane), §3.1 (the
-three stores), §3.2 and §3.4 (Rule S / Rule F, replacing the stamp ledger and the retirement floor
-outright), §4's write half (record set, ack ordering, group commit, rotation — §4 keeps
-**recovery**, which is the read-back half), §5.1 (flush and the commit window), §5.2 (merge, now
-publishing in both halves), and §8's flush/merge/coalesce rows. `flush-and-merge.md` is deleted;
-write-path.md carries it.
-
-**No rule changed in this revision** — every statement reduced here is restated there, and where
-the two would have disagreed the text was already stale rather than in conflict. What did change
-is ownership: two full copies of a mechanism is how they come to disagree, which is the whole
-reason for the reduction.
-
-**r6** (2026-08-04) is a marker refresh, not a design change, applied with the write-path
-consolidation (`write-path.md`, then provisional; its supersession map named which of this
-document's sections it would absorb on promotion — r7 performed them). Updated to the built system: §1.1 (the
-generation's shape under flush), §1.2 (`segments_version` process-local, moved by flush), §1.3
-(the second publisher is gone — #59), §2.4 (the fragment rebuild is built; its incremental form
-is not, and decision 0044 obliges it off the request thread), §4 (the `Flush` record and
-rotation exist; the write-only record was then deleted at `WAL_VERSION` 4, with `Lease`), §5.1 (flush built; `flush_max_items` deleted —
-decision 0045), §5.2 (merge publishes in both halves — the entity-space coalesce without a `segments_version` bump, the row-space merge as its own swap behind 0044's background refresh), §8 (the
-mid-flush row is tested behaviour). §3.2 and §3.4's stamp-ledger/retirement-floor machinery is
-annotated **superseded by ruling** (2026-08-03: Rule S / Rule F, retirement at the fold under an
-identity match); decisions 5 and 6 amended to match. No surviving rule changed.
-
-r1 was reviewed independently (verdict: needs-rework — the generation/single-writer/ledger architecture survives; four fail-open paths in the retirement rules did not). r2 closed all fifteen findings; r3 generalised the retirement floor over both retirement kinds, scoped the ledger structures worker-locally, gated side-manifest publication on WAL durability, and gave the `RETIRED` marker a writer and a home. r4 named flush as the ingest-visibility mechanism and added group-commit allocation, superseding an arena-based sketch that bought the same sort scope by leasing a range and abandoning unfilled positions — group commit needs no ID slack, sizes itself after the window's signature mix is known rather than guessing at lease time, and does not make the maximum ID *written* understate the range *consumed*.
-
-**r5** is the audit pass against the built system. No rule changed and no argument was withdrawn; what changed is that every claim about absent machinery now says so at the claim.
-
-Marked **⊘** in r6: the `Generation` shape (§1.1); `segments_version`'s movement (§1.2); the single-writer claim (§1.3, partial — two publishers); the `RETIRED` marker (§2.2); the deletion-retirement ledger and its floor (§3.2); the evaluate-entry fold (§3.4); the `Flush` WAL record (§4); flush (§5.1); denies sharing the commit window (§5.1); merge (§5.2); compaction (§5.3); the router/worker protocol in its entirety (§6); four rows of the crash matrix (§8). **What remains marked at r7**: Rule F's retirement and the evaluate fold (§3.2, §3.4), denies sharing the commit window (§5.1), compaction (§5.3), the router/worker protocol (§6), and two rows of the crash matrix (§8).
-
-Corrected in this revision, against the built system:
-
-1. **§2.1's "a pin is an `Arc<Generation>`"** described the fail-open the code refuses. A drain entry is slimmed geometry precisely because holding a generation would retain the superseded overlay and buffer — the R-open failure. The document's own sentence was the bug.
-2. **§5.1's flush sentence** is true of the current system as well as the end state, and its marker says so explicitly: it misleads in the fail-*closed* direction, which is why it survived unchallenged.
-3. **§1.3's latency framing** ("bounded by fsync") is corrected by measurement: under sustained ingest a deny acks in 165 ms p50 at 1 M buffered, dominated by an `O(buffered)` clone, not by fsync. The lane's unboundedness in memory, and ingest starvation under a deny flood, are stated.
-
-Added in this revision, from mechanisms the corpus did not describe: single-flight caching's non-blocking waiters, its 429, its four eviction rules and its deliberate cross-crate duplication (§7.2); fault injection and its fidelity rule, with the note that it pre-empts conformance §5 (§7.3); `ExecutorPosture` (§4); the WAL's type-enforced ack contract and the two positional-CRC guards (§4); the commit window's honest calibration, its closed idempotency item, and its refusal to carry denies (§5.1); the overlay's three-field representation as the structural reason `delete → suppress → unsuppress` cannot re-expose (§3.1).
-
-**Actions raised against companions, all applied**: compaction's fold obligation extends to evaluate entries and the carry-forward rule to post-snapshot tombstones and the suppression set (SA §6.6); the effective watermark in I1 composition is always the fragment's own (design §11.2, §2.6, I11; SA §6.4; contracts §2.3); `seg_id`s never reused (contracts §2.1); five lifecycle conformance tests raised against the plan — suppression persistence; the eviction→retire→cold-miss rebuild excluding deleted items; its fold variant; post-snapshot tombstone survival; positional CRC fail-closed. **Four of those five test the machinery §3.2, §3.4 and §5.3 mark as unbuilt**; conformance's own audit (conformance r4 §F) records which are written.

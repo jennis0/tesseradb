@@ -47,14 +47,19 @@ use crate::write::{write_segment, RunWriter};
 /// on that one; the engine converts. `x`/`y` are still the caller's coordinates — quantisation
 /// happens here, once, against the bundle's own `quantisation` (contracts §2.5), so there is no
 /// second place a coordinate could become a cell under bounds that have drifted.
+///
+/// They are `f64` because the whole coordinate path is (`projections.md` §6), and this is its last
+/// stop: an `f32` here would decide the cell rather than the sub-cell position at any frame past
+/// roughly zoom offset 8, and would do it after the wire and the log had both carried the value
+/// the caller sent.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FlushRow {
     pub entity_id: EntityId,
     /// `None` for an item ingested without one (contracts §3.4 r6): addressable only by its
     /// `tessera_id`, present in no external-id extent, and given the locator's absent sentinel.
     pub external_id: Option<Vec<u8>>,
-    pub x: f32,
-    pub y: f32,
+    pub x: f64,
+    pub y: f64,
     /// One value per **render** column, in declared order. [`ScalarValue::Null`] is a legal member
     /// and is the caller's only way to say "this item has no value here": the writer records it in
     /// the column's presence bitmap and stores the type's zero in the row (decision 0064).
@@ -65,6 +70,9 @@ pub struct FlushRow {
 /// Everything one flush needs to write one segment.
 pub struct FlushInput<'a> {
     pub seg_id: &'a str,
+    /// The incarnation of the view this segment is written into (decision 0115), stamped into the
+    /// descriptor so that a key created again cannot adopt it.
+    pub incarnation: tessera_types::view::ViewIncarnation,
     /// **Ascending by `entity_id`, with deleted entities already removed** (§3.5: a deletion's ID
     /// stays burned and no row is created for it). Contiguity is I9's doing — ids are issued
     /// monotonically from the high-water — and it is what makes the extent dense.
@@ -129,17 +137,18 @@ pub fn write_flush_segment(
             ),
         })?;
 
+    // **`view_rel`, never the joined id** (`views.md` §3.2): a group's view lays its files down
+    // at `views/<group>/<key>/` and a `files` key spelled `views/<group>:<key>/` names a path no
+    // reader will look at — every file under the view unverifiable, which the loader reads as a
+    // corrupt bundle. The path below and the key here must come from one derivation.
     let rel = |name: &str| {
         format!(
-            "partitions/{partition}/views/{view}/segments/{}/{name}",
+            "partitions/{partition}/{}/segments/{}/{name}",
+            crate::view_rel(view),
             input.seg_id
         )
     };
-    let seg_dir = prefix_dir
-        .join("partitions")
-        .join(partition)
-        .join("views")
-        .join(view)
+    let seg_dir = crate::view_path(&prefix_dir.join("partitions").join(partition), view)
         .join("segments")
         .join(input.seg_id);
     fs::create_dir_all(&seg_dir).map_err(|source| StoreError::Io {
@@ -158,8 +167,8 @@ pub fn write_flush_segment(
     for row in &input.rows {
         items.push(TilerItem {
             tessera_id: tessera_id_of(input.identity_key, input.shard_id, row.entity_id)?,
-            qx: fixed32(row.x as f64, q.x_min, q.x_max),
-            qy: fixed32(row.y as f64, q.y_min, q.y_max),
+            qx: fixed32(row.x, q.x_min, q.x_max),
+            qy: fixed32(row.y, q.y_min, q.y_max),
             scalars: row.scalars.clone(),
         });
     }
@@ -265,6 +274,7 @@ pub fn write_flush_segment(
     Ok(FlushOutput {
         segment: SegmentDescriptor {
             view: view.to_string(),
+            incarnation: input.incarnation,
             seg_id: input.seg_id.to_string(),
             row_count: input.rows.len() as u32,
             entity_lo,
@@ -439,7 +449,7 @@ mod tests {
         }
     }
 
-    fn row(entity: u64, x: f32, score: ScalarValue) -> FlushRow {
+    fn row(entity: u64, x: f64, score: ScalarValue) -> FlushRow {
         FlushRow {
             entity_id: EntityId::new(entity),
             external_id: None,
@@ -460,6 +470,7 @@ mod tests {
             "p",
             "s",
             FlushInput {
+                incarnation: 0,
                 seg_id: "seg-1",
                 rows,
                 quantisation: quantisation(),

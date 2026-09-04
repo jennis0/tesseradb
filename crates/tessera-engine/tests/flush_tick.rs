@@ -101,11 +101,13 @@ fn a_requested_flush_executes_promptly_through_the_tick_path() {
     let row = tessera_lifecycle::UnallocatedRow {
         external_id: Some(b"prompt-flush".to_vec()),
         view: "s0".to_string(),
+        join: None,
         descriptors: vec![b"0".to_vec()],
         x: 0.5,
         y: 0.5,
         scalars: Vec::new(),
         terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
     };
     engine
         .accept_ingest(vec![row], "prompt-flush-batch".to_string(), [7u8; 32])

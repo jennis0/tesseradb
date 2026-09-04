@@ -42,6 +42,27 @@ proptest! {
         prop_assert_eq!(a.terms(e), b.terms(e));
     }
 
+    /// **Prefix-stable, the partition arm included.** The partition value is the one item column
+    /// whose *population* legitimately scales with *n* (`partition.rs`), and until 2026-08-30 the
+    /// stride was derived from that population, so an entity moved to a different artifact as the
+    /// corpus grew — a re-assignment, not the truncation the generator's rule promises. The stride
+    /// is a constant now and the count is derived from it, which is this: entity *e* is in the same
+    /// artifact at every *n*, on every layer.
+    #[test]
+    fn the_partition_arm_is_prefix_stable_too(
+        seed in any::<u64>(),
+        layer in 0u64..6,
+        e in 0u64..1u64 << 20,
+        n1 in 0u64..1u64 << 22,
+        n2 in 0u64..1u64 << 22,
+    ) {
+        let (a, b) = (corpus(seed, n1), corpus(seed, n2));
+        prop_assert_eq!(
+            a.partition_artifact_of(layer, e),
+            b.partition_artifact_of(layer, e)
+        );
+    }
+
     /// **Named in its own row.** `fx_key` is a bijection of *e* under the seed: it inverts
     /// exactly, in both directions, for every value — which is what lets `tessera corpus items`
     /// take served keys and answer with items, holding no table.
@@ -95,8 +116,8 @@ fn the_two_axes_are_independent() {
     let on_diagonal = (0u64..65_536)
         .filter(|&e| {
             let item = c.item(e);
-            tessera_spatial::cell(f64::from(item.x), e_bounds.x_min, e_bounds.x_max)
-                == tessera_spatial::cell(f64::from(item.y), e_bounds.y_min, e_bounds.y_max)
+            tessera_spatial::cell(item.x, e_bounds.x_min, e_bounds.x_max)
+                == tessera_spatial::cell(item.y, e_bounds.y_min, e_bounds.y_max)
         })
         .count();
     assert!(
@@ -117,7 +138,11 @@ fn terms_do_not_track_position() {
         let per_tile = c.census(1, &Grant::parse("0").unwrap());
         let total: u64 = per_tile.iter().map(|(_, count)| count).sum();
         assert!(total > 512, "seed {seed}: term 0 has only {total} carriers");
-        assert_eq!(per_tile.len(), 4, "seed {seed}: a quadrant holds no carriers at all");
+        assert_eq!(
+            per_tile.len(),
+            4,
+            "seed {seed}: a quadrant holds no carriers at all"
+        );
         for &(tile, count) in &per_tile {
             let expected = total / 4;
             let deviation = count.abs_diff(expected);
@@ -137,10 +162,8 @@ fn terms_do_not_track_position() {
 fn fx_keys_are_not_affine_in_e() {
     let c = corpus(6, 0);
     let keys: Vec<u64> = (0..1_000).map(|e| c.item(e).fx_key).collect();
-    let diffs: std::collections::HashSet<u64> = keys
-        .windows(2)
-        .map(|w| w[1].wrapping_sub(w[0]))
-        .collect();
+    let diffs: std::collections::HashSet<u64> =
+        keys.windows(2).map(|w| w[1].wrapping_sub(w[0])).collect();
     assert!(
         diffs.len() >= 990,
         "{} distinct consecutive differences in 1,000 keys",
@@ -219,18 +242,84 @@ fn census_tiles_agree_with_morton_code_ranges() {
     let zoom = 5u8;
     let e_bounds = grid();
     for (tile, count) in c.census(zoom, &grant) {
-        let (lo, hi) = Tile { prefix: tile, depth: zoom }.code_range();
+        let (lo, hi) = Tile {
+            prefix: tile,
+            depth: zoom,
+        }
+        .code_range();
         let by_code = (0..c.n())
             .filter(|&e| {
                 if !c.visible(e, &grant) {
                     return false;
                 }
                 let item = c.item(e);
-                let code =
-                    u64::from(morton_of(f64::from(item.x), f64::from(item.y), &e_bounds).raw());
+                let code = u64::from(morton_of(item.x, item.y, &e_bounds).raw());
                 code >= lo && code < hi
             })
             .count() as u64;
         assert_eq!(by_code, count, "tile {tile} at zoom {zoom}");
+    }
+}
+
+/// **The partition arm truncates, exhaustively over a prefix.** The proptest above samples the
+/// property; this walks it — every entity of the smaller corpus, its artifact and its artifact's
+/// membership, checked against the larger one. The forward direction is checked too, because a
+/// reverse answer that agreed while the member lists disagreed would be a partition of nothing:
+/// the smaller corpus's artifacts are the larger's clipped to `n`, with no entity gained, lost or
+/// moved. Against the pre-2026-08-30 formulation — stride derived from an *n*-derived count — the
+/// units differ (≈103 against ≈100 at these two sizes) and this fails at the first entity past the
+/// first artifact.
+#[test]
+fn a_smaller_corpus_is_the_partition_truncated() {
+    let small = corpus(0x5EED, 4_000);
+    let large = corpus(0x5EED, 400_000);
+    let layer = 3;
+
+    for e in 0..small.n() {
+        assert_eq!(
+            small.partition_artifact_of(layer, e),
+            large.partition_artifact_of(layer, e),
+            "entity {e} was re-assigned by the corpus growing"
+        );
+    }
+
+    // The forward direction: every artifact of the smaller corpus is the larger's, clipped.
+    let count = small.partition_count(layer);
+    assert!(
+        count > 1,
+        "the fixture is too small to have a tail to truncate"
+    );
+    for a in 0..count {
+        let want: Vec<u64> = large
+            .partition_members(layer, a)
+            .into_iter()
+            .filter(|e| *e < small.n())
+            .collect();
+        assert_eq!(
+            small.partition_members(layer, a),
+            want,
+            "artifact {a}'s membership is not the larger corpus's clipped to n"
+        );
+    }
+    // And nothing past the smaller corpus's own count is claimed by it.
+    assert!(
+        small.partition_members(layer, count).is_empty(),
+        "an artifact past the truncation point still holds members"
+    );
+}
+
+/// **Total over `u64`, because `tessera corpus items` is.** A served `fx_key` inverts to an
+/// arbitrary entity id, so the partition lookup is asked about entities far past any corpus — the
+/// top of the range included, where the artifact above holds a boundary that does not fit in a
+/// `u64`. Every one of them answers, and the answer contains the entity it was asked about.
+#[test]
+fn the_partition_lookup_answers_at_the_top_of_entity_space() {
+    let c = corpus(0x5EED, 0);
+    for e in [0, 1, u64::MAX / 2, u64::MAX - 100, u64::MAX - 1, u64::MAX] {
+        let a = c.partition_artifact_of(1, e);
+        assert!(
+            e / 100 <= a + 1 && a <= e / 100 + 1,
+            "entity {e} landed in artifact {a}, outside the stride's own bound"
+        );
     }
 }

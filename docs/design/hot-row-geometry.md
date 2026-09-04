@@ -263,23 +263,3 @@ an argument.
   where the engine floors at `2¹⁶` — so benchmark figures re-baseline. Inherent, not a choice.
 
 ---
-
-## Appendix R — review trail
-
-**2026-08-04 — the streaming marker retired.** Flush is built ([write-path](write-path.md) §4), so a
-buffered row acquires a row in `columns.arrow` carrying its residual, and §8's marker now names
-only what is left: the ingest body's `f32` cap on a streamed point. No rule changed.
-
-**Reviewed 2026-08-02**, three lenses (conformance/oracle, performance, implementability) across
-successive drafts.
-
-The findings that changed the design: removing `x`/`y` destroys the oracle's independent geometry
-input, which is what §5 answers; a packed single column is sound and is rejected on reviewability
-rather than on correctness (§2.1); and the scaled corpora carry only 16 bits per axis,
-which makes the precision claim a statement about storage capacity rather than about any existing
-bundle (§2.2).
-
-Corrected against the corpus: the residency arithmetic (Appendix A's row counts `columns.arrow`
-alone, and `morton.u32` is untabulated); the `api_version` argument (deviation 10 already carries
-the no-published-reader case and has been applied to a breaking change); and `test_byte_scan.py`'s
-treatment of `x`/`y`, which is floor-filtering rather than exclusion (§5.3).

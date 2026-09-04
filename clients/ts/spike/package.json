@@ -1,5 +1,5 @@
 {
-  "name": "@tessera/spike",
+  "name": "@tesseradb/spike",
   "private": true,
   "type": "module",
   "scripts": {

@@ -6,7 +6,7 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use arrow::array::{Float32Array, UInt64Array};
+use arrow::array::{Float64Array, UInt64Array};
 use arrow::record_batch::RecordBatch;
 use tessera_corpus::{Corpus, Grant};
 use tessera_spatial::Bounds;
@@ -74,7 +74,7 @@ fn items_answers_served_keys_with_their_items() {
         .column_by_name("x")
         .unwrap()
         .as_any()
-        .downcast_ref::<Float32Array>()
+        .downcast_ref::<Float64Array>()
         .unwrap();
     for (i, key) in keys.iter().enumerate() {
         assert_eq!(fx.value(i), *key);
@@ -184,20 +184,23 @@ fn the_corpus_schema_parses_under_the_builds_parser() {
     // the parse is what this case is about.
     let config = tessera_build::config::Config::parse(&path, &Default::default())
         .expect("the corpus schema must parse");
-    // The declaration also has to *acquire*: the suite builds with `--view s0`, so the generator's
-    // view name, its geometry source and its label relation must be the ones the build asks for.
-    // Checked here rather than left to the suite, which cannot run without a corpus on disk.
+    // The declaration also has to *acquire*: the generator's view name, its geometry source and
+    // its label relation must be the ones the build asks for. Checked here rather than left to
+    // the suite, which cannot run without a corpus on disk.
     let acquired = config
-        .acquire("s0")
+        .acquire()
         .expect("the corpus config acquires its own inputs");
-    assert_eq!(acquired.points, dir.path().join("points.parquet"));
+    let registry = config.build_views().expect("the registry compiles");
+    let view = tessera_build::config::acquire_view(&registry[0])
+        .expect("the view acquires its own inputs");
+    assert_eq!(view.points, dir.path().join("points.parquet"));
     assert!(
         matches!(
-            &acquired.access.source,
+            &view.access.source,
             tessera_build::config::AccessSource::Relation(p) if *p == dir.path().join("pairs.parquet")
         ),
         "{:?}",
-        acquired.access
+        view.access
     );
     assert_eq!(
         acquired.attribute_sources.len(),

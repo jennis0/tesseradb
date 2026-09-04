@@ -21,29 +21,13 @@ export type Dataset = {
 
 export type ViewerConfig = {
   /**
-   * Every dataset a server is running for, from `datasets.json`.
+   * Every dataset a server is running for, from the document `?datasets=` names.
    *
    * Never empty: with no document to read, this falls back to a single entry built from the
    * environment, which is the shape every earlier version of this viewer had.
    */
   datasets: Dataset[];
   sessionCredential: string;
-  /**
-   * Mark radius in pixels, and whether marks are pickable.
-   *
-   * **Two knobs that exist to answer one question the platform will not.** `painted` — the gap from
-   * handing deck.gl its layers to the next frame — is the largest remaining cost, and deck's
-   * `gpuTime` reads zero on this hardware because the GPU timer query extension is absent under
-   * ANGLE, so the GPU half of that gap cannot be measured directly. It can be measured by
-   * difference: halve the radius and, if `painted` falls, the cost is fill rate; turn picking off
-   * and, if it falls, the cost is the per-instance picking-colour buffer deck regenerates whenever
-   * the data object changes.
-   *
-   * Debug knobs, not settings. Both alter what is drawn or what can be clicked, so neither is
-   * something to leave changed.
-   */
-  radius: number;
-  pickable: boolean;
   /**
    * Bytes anticipation may absorb per still pause (`?ring=`, in MB).
    *
@@ -54,14 +38,6 @@ export type ViewerConfig = {
    * is deliberately modest for that reason; a dev box exploring a large corpus wants more.
    */
   ringBytes: number;
-  /**
-   * Whether the slab owns its GPU buffers and uploads dirty spans itself (`?gpu=0` to disable).
-   *
-   * The off switch exists because the external-buffer path leans on deck internals that have
-   * surprised this client before (see the note at the end of `viewportLayer.ts`): if marks ever
-   * misrender, `?gpu=0` restores the typed-array path in one reload and names the culprit.
-   */
-  gpuBuffers: boolean;
   /**
    * Zoom layers kept resident-but-undrawn beneath the current depth (`?layers=`, default 1).
    *
@@ -85,10 +61,7 @@ export function readConfig(): ViewerConfig {
   const env = import.meta.env;
   const query = typeof location === 'undefined' ? null : new URLSearchParams(location.search);
   return {
-    radius: Number(query?.get('radius') ?? '') || 1.6,
-    pickable: query?.get('pickable') !== '0',
     ringBytes: (Number(query?.get('ring') ?? '') || 8) * 1_000_000,
-    gpuBuffers: query?.get('gpu') !== '0',
     prefetchLayers: query?.has('layers') ? Math.max(0, Number(query.get('layers')) || 0) : 1,
     datasets: [],
     sessionCredential: env.VITE_TESSERA_SESSION_CREDENTIAL ?? ''
@@ -96,16 +69,20 @@ export function readConfig(): ViewerConfig {
 }
 
 /**
- * Load the dataset list — `datasets.json` if `run_demo.sh` wrote one, else the single server the
+ * Load the dataset list — the document `?datasets=<url>` names, else the single server the
  * environment names.
  *
  * **Fetched rather than imported**, and that is the point: a bundled import would fix the list at
  * build time, so restarting the demo against a different set of bundles would need a viewer rebuild.
- * It also means this file no longer has to be rewritten in the repository to change what is served —
- * the previous shape rewrote a *tracked* `presets.json` on every run.
  *
- * A missing or malformed document is not an error. Falling back keeps `npm run dev` against a
- * hand-started server working, which is what the environment variables are for.
+ * **The URL carries the location, and no path here is fixed.** `run_demo.sh` writes its document
+ * outside this package — the demo writes nothing into the source tree — and prints a URL naming it
+ * through Vite's `/@fs/` route. A viewer that fetched a fixed `/datasets.json` could only ever read
+ * a document sitting in `public/`, which is one slot per checkout and the reason two sessions
+ * overwrote each other's picker.
+ *
+ * A missing, unreachable or malformed document is not an error. Falling back keeps `npm run dev`
+ * against a hand-started server working, which is what the environment variables are for.
  */
 export async function loadDatasets(): Promise<Dataset[]> {
   const env = import.meta.env;
@@ -118,8 +95,15 @@ export async function loadDatasets(): Promise<Dataset[]> {
     sessionUrl: env.VITE_TESSERA_SESSION_URL ?? 'http://127.0.0.1:49303',
     presets: []
   };
+  // `?datasets=` on the address, else the document the demo named in the environment — so the
+  // bare address works for whoever typed it, without a file under `public/` to go stale.
+  const source =
+    typeof location === 'undefined'
+      ? null
+      : (new URLSearchParams(location.search).get('datasets') ?? env.VITE_TESSERA_DATASETS ?? null);
+  if (!source) return [fallback];
   try {
-    const response = await fetch('/datasets.json', {cache: 'no-store'});
+    const response = await fetch(source, {cache: 'no-store'});
     if (!response.ok) return [fallback];
     const body = (await response.json()) as {datasets?: Dataset[]};
     const datasets = (body.datasets ?? []).filter((d) => d.id && d.viewerUrl && d.sessionUrl);

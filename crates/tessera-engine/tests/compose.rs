@@ -456,10 +456,12 @@ fn insert_buffered(buffer: &mut IngestBuffer, entity: u64, terms: Vec<TermId>) {
         external_id: Some(entity.to_le_bytes().to_vec()),
         entity_id: e(entity),
         view: "s0".to_string(),
+        join: false,
         descriptors: Vec::new(),
         x: 0.0,
         y: 0.0,
         scalars: Vec::new(),
+        scoped: Vec::new(),
     };
     buffer.insert_row_with_terms(&row, terms);
 }
@@ -494,19 +496,23 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
                     external_id: Some(ext_x.clone()),
                     entity_id: e(ENTITY_X),
                     view: "s0".to_string(),
+                    join: false,
                     descriptors: vec![b"term-x".to_vec()],
                     x: 0.0,
                     y: 0.0,
                     scalars: Vec::new(),
+                    scoped: Vec::new(),
                 },
                 WalRow {
                     external_id: Some(ext_y.clone()),
                     entity_id: e(ENTITY_Y),
                     view: "s0".to_string(),
+                    join: false,
                     descriptors: vec![b"term-y".to_vec()],
                     x: 0.0,
                     y: 0.0,
                     scalars: Vec::new(),
+                    scoped: Vec::new(),
                 },
             ],
         })
@@ -556,7 +562,12 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
 
     // Reopen: fresh replay from disk, not the in-memory `Overlay`/`IngestBuffer` above.
     let (_wal, records) = Wal::open(&wal_path).unwrap();
-    let (overlay, buffer, _established, _resolver) = replay(&records, &dict, Overlay::new());
+    let (overlay, buffer, _established, _resolver) = replay(
+        &records,
+        &dict,
+        Overlay::new(),
+        &tessera_lifecycle::owner_id_only,
+    );
 
     assert!(
         overlay.is_deleted(e(ENTITY_X)),

@@ -14,7 +14,7 @@ found the security argument sound, the read-side cost argument sound with figure
 the seams not yet survivable; every finding was applied per its recommendation, and the six
 then-open rulings were made the same day (owner, 2026-08-12 — §12, and decisions
 [0067](../decisions/0067-term-timing-is-accepted-for-text-and-keyword-postings.md),
-[0068](../decisions/0068-a-row-space-operand-bounded-by-the-requests-domain-is-admitted.md),
+0068,
 [0069](../decisions/0069-filter-do-not-rank-sharpens-to-no-corpus-global-statistics.md)).
 §11's scale measurements run inside the epics per §12's dataset amendment and gate the corpus-scale
 claims and the large dataset tiers, not the work's start. The evidence base is
@@ -36,14 +36,14 @@ baseline the last two measure against.
 [`filter-surface.md`](filter-surface.md) §2, §4–§5, §7 (**surface §n**);
 [`per-point-attributes.md`](per-point-attributes.md) §2–§3 (**attrs §n**);
 [`write-path.md`](write-path.md) §2.3, §4.3, §5.4; decisions
-[0013](../decisions/0013-mark-specified-vs-implemented.md),
+0013,
 [0021](../decisions/0021-rust-not-jvm.md),
-[0039](../decisions/0039-multi-valued-categoricals-are-slow-path-only.md),
+0039,
 [0048](../decisions/0048-no-deployments-exist-so-delete-rather-than-support.md),
 [0062](../decisions/0062-filters-compose-as-a-boolean-tree-inside-the-candidate.md),
 [0063](../decisions/0063-category-postings-serve-public-listings-and-never-per-viewer-ones.md),
-[0064](../decisions/0064-an-absent-number-is-a-presence-bitmap-beside-the-column.md),
-[0065](../decisions/0065-the-inverse-permutation-is-stored-for-the-filtered-viewport.md),
+0064,
+0065,
 [0066](../decisions/0066-none-of-requires-a-value-and-names-one-column.md),
 [0067](../decisions/0067-term-timing-is-accepted-for-text-and-keyword-postings.md).
 **Citation convention:** unprefixed §n is the architecture design; this document's own sections are
@@ -213,6 +213,16 @@ per-field presence structure — a field's absence is its absence from the row �
 whole carries the one has-row bitmap; the two statements are about different things and both hold.
 One block read returns an entity's whole residual record; drill-down assembles the rest from the
 other two homes by array index.
+
+**The drill-down carries the item's satisfied labels beside its record** *(2026-08-31,
+[decision 0114](../decisions/0114-the-drill-down-serves-the-satisfied-labels-only.md),
+`architecture.md` §7.4, `contracts.md` §3.2)*. `labels` is the intersection of the item's own term
+set with the asking session's satisfied set, spelled by the authorisation plugin and sorted — never
+the full label set, which would tell a viewer that this item also sits in a compartment they do not
+hold. It is not a **fourth home**: a label is not a declared column, it appears in no schema, and
+no filter reads it. It comes from a fourth artefact, `entities/terms/` — the term postings'
+transpose, addressed by has-row rank exactly as the blob above is, for the same reason (an entity
+with no list costs nothing) — read after the visibility verdict like every other home.
 
 **The blob read is fail-closed against its one new failure class** (review B6). The other two
 homes are positional, so there is no offset to get wrong; the blob's indirection is new, and a
@@ -491,7 +501,7 @@ tokens — but the absolute cost does not, so a corpus of abstracts sizes at ~15
 rather than ~23. **The index scales with prose length, not with entity count alone.**
 
 **An analyser is a named, versioned pipeline, and a `text` column declares which one it uses**
-([decision 0070](../decisions/0070-analysers-are-named-and-declared-per-column.md), amending this
+(decision 0070, amending this
 section's original "one pipeline … with no per-column configuration"). One pipeline cannot be right
 for a column of abstracts and a column of stack traces at once: identifiers split on case and
 punctuation boundaries that prose must not, and prose wants folding that an identifier must not, so
@@ -1178,7 +1188,7 @@ six the review left open were ruled on r3's presentation (owner, 2026-08-12).
 2. **`text` is in scope** (§4.4) — **yes**, as specified: token index plus blob record,
    `match`/m-of-n on the icu4x analyser.
 3. **The row-space operand and its route rule** (§6.2) — **yes**;
-   [decision 0068](../decisions/0068-a-row-space-operand-bounded-by-the-requests-domain-is-admitted.md)
+   decision 0068
    records it, being an amendment to §8.2's contract shape.
 4. **Multi-value lifts for every non-render placement** (§5) — **yes**: `multi = true` is
    admissible everywhere except rendered columns, with the list semantics as specified.
@@ -1259,129 +1269,3 @@ is still owed**; everything below them is made or is waiting on machinery that d
   §5's addressing.
 
 ---
-
-## Appendix R — review trail
-
-**2026-08-19 (r9) — §2's category requirement is spelled in the surface that exists.** It read
-"Categories additionally require `width`, `listing`, `vocabulary`", three words of a declaration
-that no longer parses: `width`, `value_set` and `visibility` live on the `[[vocabulary]]` block an
-attribute names, and `listing` is retired in favour of the two visibility axes
-([decision 0088](../decisions/0088-visibility-is-two-axes-and-the-membership-test-is-one.md),
-`configuration.md` §1, §5). Nothing about the family changes; §4.2's `listing` references are the
-manifest's field, which still carries that name, and are left alone.
-
-**2026-08-14 (r8) — the text family is built, and the corpus said otherwise in eight places.** A
-three-lens adversarial review over the implementation found the design's status claims trailing it
-badly: §4.4's own header called the read route, the flush extent and the fold unbuilt; §1's family
-table read "⊘ unbuilt"; §6.1 said "text has no route at all" and §6.3 that it "has no aggregate
-surface today"; and outside this document `architecture.md` §8.3 still named the retired `utf8`
-family, `filter-index.md` §2 said a schema naming `text` was refused, and `contracts.md` omitted
-`text` from `arrow_type`'s enumerated set while the build wrote it — so a second reader
-implementing the contract would have refused every manifest this build produces. All corrected
-here and there. Three claims were **wrong rather than stale** and are now stated: the 4.4× singleton
-figure quoted in §4.4 is a *keyword* measurement (`id`, `doi` — near-unique vocabularies) and is
-worth about 4% on prose; §7's flush paragraph gave a text extent "ordinals against it", which it
-cannot have, having no per-entity slot; and §7's file list promised a `presence.roaring` the text
-base does not write. §9's "no analyser configuration" was superseded by decision 0070 and now
-distinguishes *selection* from *configuration*. §5 is marked ⊘ throughout — it was written in the
-present tense over machinery the parse refuses. Appendix C gained **C26** for the blob drill-down
-timing note review X1 named, and **C25** its measured figures and the second possession bound
-review X2 required.
-
-**2026-08-13 (r7) — analysers are named and declared per column** (owner ruling,
-[decision 0070](../decisions/0070-analysers-are-named-and-declared-per-column.md)). §4.4's "one
-pipeline … with no per-column configuration" is replaced: an analyser is a named, versioned
-pipeline, a `text` column declares which one, and the manifest records the resolved identity per
-column. `unicode` is the one that ships and its absent transforms — stemming, stopwords, diacritic
-folding, synonyms — become statements about *it* rather than about analysers, which is what makes a
-future identifier or stemming pipeline an addition rather than a contradiction. ⊘ Not plugins:
-built-in variants, because a loaded analyser would demote the golden vectors from pinning the
-analyser to pinning a default, and determinism is load-bearing for I9 and §7's merge. §4.4 also
-gains the measured coverage picture — no coverage hole across twenty-one scripts, and a quality
-shortfall in the no-space ones that is per-script and is what the named shape lets a deployment
-answer.
-
-**2026-08-13 (r6) — the keyword family is built, and §4.3's `contains` band is corrected to the
-shipped one.** The dictionary, the ordinal column, both `contains` routes, the coalesce content
-guard and the fold are implemented; `utf8` is retired as a declared type and its flat column is
-deleted. The correction is what two follow-up campaigns and an adversarial review found: the
-retirement fence's arms hoisted substring searchers the shipped routes built per key and per
-candidate entity, and its best cell used a bench-local ordinal bitset — so r5's **1.5–71×**
-described the tree plus three changes, where the tree itself was **2.5–144×**. All three have since
-landed (`KeyMatcher`; the narrow route's deduplicated block walk; the domain-sized ordinal table),
-so the recorded band is now the shipped one rather than an aspiration.
-
-**The third of them is a disclosure fix.** The ordinal test was a binary search over the matching
-ordinals, whose count is a corpus-wide property of the needle against the vocabulary — 1.41 ns per
-candidate slot at five matching keys against 27.72 at 399,554, under a traversal that never varied
-and a work harness that therefore could not see it. §8's claim that a scan's work is a function of
-`(candidate, column)` alone was true of the dictionary walk and false of the scan after it; §4.3
-and §8 now state the table that makes it true of both.
-
-What remains open behind this revision is the crossover: it prices the narrow route at an upper
-bound now well above its typical cost, taking the broad route where the narrow one is 3.5× cheaper,
-and choosing better means reading the candidate's distinct ordinal count — an §8.2 admissibility
-question the owner has not ruled on
-([`contains-recovery`](../evidence/memos/2026-08-13-contains-recovery.md), which also costs two
-further levers and names the one — needle-dependent pruning of the walk — that needs a ruling
-rather than a patch).
-
-**2026-08-12 (r5) — epic 1 is built, and §4.2's exemption narrows to its readers** (owner). The
-declaration surface, the record blob through its whole lifecycle, drill-down's assembly from the
-three homes and §6.2's row-space route are implemented; the ⊘ markers on those move. The narrowing
-is what building it found: r3 stated the category exemption as the family's, and the build grants
-the entity-space floor to an `index`ed or `per_viewer` category only — so a `public` category with
-neither flag had no home at all and its values were dropped silently. §4.2 now states the floor as
-its readers' and §3's rule — a field is blob-resident exactly when it has no other home — as the
-one both placement passes ask. No mechanism moved; the exemption's argument is unchanged where its
-premise holds.
-
-**2026-08-12 (r4) — the six open rulings are made** (owner): keyword, text, the row-space operand
-([decision 0068](../decisions/0068-a-row-space-operand-bounded-by-the-requests-domain-is-admitted.md)),
-multi-value, the §8.3 sharpening
-([decision 0069](../decisions/0069-filter-do-not-rank-sharpens-to-no-corpus-global-statistics.md)),
-and the standard dataset — the last **amended in the ruling**: the 2.4M tier builds now, the 25M
-and 10⁹ tiers wait for the string families and are built once, full-schema. §13's order pulls text
-ahead of multi-value accordingly, and §11's scale gates move inside the dataset stage. Nothing
-else changed; no section's mechanism moved.
-
-**2026-08-12 (r3) — adversarially reviewed once, three lenses; every finding dispositioned in one
-pass, all applied as the memo recommended** (owner, 2026-08-12;
-[the review memo](../evidence/memos/2026-08-12-records-and-search-review.md) carries the findings
-and the failed attacks). The verdict: security argument sound, read-side cost argument sound with
-corrections, seams not survivable as drafted. What changed: **categories are exempt from
-store-once by construction** — their entity-space structures are what the vocabulary machinery
-runs on, and r2 had silently dropped placement §2.1's membership bound (B1); **the keyword
-coalesce carries its own content guard and atomic layer record**, the "same shape as the authz
-merge" claim being false in the load-bearing respect (B2); **the text fold is a postings merge
-with an equivalence argument**, not a rebuild from a column text does not have (B3); **the write
-side is priced**, modelled, with §11 item 7 owed (B4); **the blob's addressing, oversize rule,
-manifest home and fail-closed read are specified** — has-row rank, whole-row blocks, `record_extents`,
-bounds checks and an entity discriminant — and its storage total corrected to ~59 GB (B5, B6);
-**the oracle keeps the fixture-input relation** (strictly stronger than the artefact-reading claim
-r2 made) with one narrow addressing check added (B7); and **the owed-amendments enumeration
-exists** (B8). Non-blocking: the whole-value-operators tripwire 0067 depends on (N1); the
-composed-verdict rule stated bindingly over the new routes (N2); the dictionary figures re-scoped
-to the decodable format (N3); the row-space constants re-marked probe-only (N4); the `contains`
-walk re-modelled per-key (N5); the list-postings claim corrected to "up to ~50×, one losing cell"
-(N6); the blob-versus-dictionary note restated per column shape (N7); the payload sidecar's
-coalesce behaviour stated (N8); the analyser moved to flush execution (N9); `record` reserved
-(N10); the blob timing note and the two possession bounds registered for Appendix C (X1, X2); the
-rendered-number regression named with its restoration path (X3); and five figure attributions
-corrected (X4), including the planner-caught error that the SWAR packing machinery survives the
-`utf8` retirement. Nothing was rejected on verification; no disposition changed the design's
-shape, so no re-review is triggered under the process's own rule.
-
-**2026-08-12 (r2) — reshaped in an owner exchange, same day.** Five directions: `searchable` was
-nearly vacuous and became the three-home rule with the key renamed **`index`**; the term-timing
-channel was accepted (decision 0067); the analyser was respecified for the language requirement
-(icu4x, dictionary segmentation, reuse over rebuild); scoring entered staged and quality-led
-under the Truman-consistent statistics rule; and exact phrase was priced by a probe run for the
-question ([`phrase-cost`](../../probes/2026-08-12-phrase-cost/)) — bigram terms refuted,
-positional payloads shared with scoring's TF, verify-against-record as v1. Multi-text pinned
-field-scoped; §4.3 gained the `contains` two-route rule and the `utf8` retirement costs.
-
-**2026-08-12 (r1) — drafted**, from the day's two memos and three probe campaigns, one run for
-the draft ([`keyword-and-list-storage`](../../probes/2026-08-12-keyword-and-list-storage/)): it
-settled the keyword layout (dictionary + ordinals) and closed the memo §4 authors question (the
-synthetic CSR-versus-postings storage inversion does not survive real values).

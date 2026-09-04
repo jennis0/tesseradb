@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en-GB">
+  <head>
+    <meta charset="utf-8" />
+    <title>Tessera — plain HTML</title>
+    <link rel="icon" href="data:," />
+    <style>
+      html, body { margin: 0; height: 100%; font: 14px system-ui, sans-serif; }
+      body { display: grid; grid-template-rows: auto 1fr; }
+      header { display: flex; gap: 1rem; align-items: center; padding: 0.5rem 1rem; border-bottom: 1px solid #ddd; }
+      tessera-explorer { --tessera-explorer-height: 100%; min-height: 0; }
+    </style>
+    <!-- The self-contained bundle, one file, by relative path, with the integrity hash it was built
+         with: the browser refuses a file that differs from what the hash names. No build step. -->
+    <script type="module" src="./tessera-components.js" integrity="__SRI__"></script>
+  </head>
+  <body>
+    <header>
+      <strong>Tessera</strong>
+      <label>signed in as <select id="principal"></select></label>
+      <span id="who"></span>
+    </header>
+    <main id="mount"></main>
+    <script type="module">
+      // The token comes from this page's own server (`server.mjs`), which holds the session
+      // credential and authorises the signed-in user; the page never sees the credential. The
+      // viewer plane is reached on this origin: `/v1/*` is proxied by the same server.
+      const principal = document.getElementById('principal');
+      const users = await (await fetch('/users')).json();
+      for (const u of users) principal.add(new Option(u.label, u.name));
+
+      async function signIn(user) {
+        // A different user is a different session: the explorer that drew the previous one is
+        // disposed and a new one mounted, so nothing of the old picture sits under the new.
+        const mount = document.getElementById('mount');
+        for (const old of mount.querySelectorAll('tessera-explorer')) old.dispose();
+        mount.replaceChildren();
+        const {token} = await (await fetch(`/token?user=${encodeURIComponent(user)}`, {method: 'POST'})).json();
+        const explorer = document.createElement('tessera-explorer');
+        explorer.setAttribute('viewer-url', location.origin);
+        explorer.setAttribute('token', token);
+        explorer.setAttribute('layout', 'overlay');
+        mount.append(explorer);
+        document.getElementById('who').textContent = user;
+      }
+      principal.addEventListener('change', () => signIn(principal.value));
+      // Open on the broadest user, the last in the list.
+      principal.value = users.at(-1).name;
+      await signIn(principal.value);
+    </script>
+  </body>
+</html>

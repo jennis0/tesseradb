@@ -193,3 +193,61 @@ def catalogue_density_server(tmp_path_factory, catalogue_bundle_root: Path):
     srv, proc = spawn_server(catalogue_bundle_root, tmp_dir, theta_target_marks=16)
     yield srv
     stop_server(proc)
+
+
+# ---------------------------------------------------------------------------------------------
+# The multi-view corpus (`views.md` §11's conformance row)
+# ---------------------------------------------------------------------------------------------
+#
+# A second designed corpus beside the catalogue, and session-scoped for the same reason: it has one
+# designed entity-ID layout, and two builds of it would be two different `tessera_id` orderings of
+# the same items. Its own module doc says why it is not a widening of the catalogue.
+
+
+@pytest.fixture(scope="session")
+def multiview_bundle_root() -> Path:
+    """The multi-view corpus's bundle — four views over one entity space, built once per machine."""
+    from oracle.multiview import build_multiview_bundle  # noqa: PLC0415
+
+    return build_multiview_bundle()
+
+
+@pytest.fixture(scope="session")
+def multiview_bundle(multiview_bundle_root: Path):
+    """The bundle with **one source geometry per view** attached.
+
+    Per view, not once: a view owns its positions and its frame (`views.md` §1, decision 0040), so
+    there is no single points file the whole bundle was built from and a single attachment would
+    answer three views against the fourth's layout. Each file is read against its own view's
+    declared extent, which is the frame the build quantised it with.
+    """
+    from oracle.bundle import Bundle, read_source_geometry  # noqa: PLC0415
+    from oracle import multiview as mv  # noqa: PLC0415
+
+    bundle = Bundle(multiview_bundle_root)
+    # **Every view, the gated group's included.** A gate decides which principal may reach a view
+    # and nothing about what the view holds, so the oracle needs each one's source geometry to
+    # answer for the principal who passes it.
+    for view_id in mv.ALL_VIEW_IDS:
+        bundle.attach_source_geometry(
+            read_source_geometry(mv.points_path(view_id), mv.extent_of(view_id)),
+            view_id=view_id,
+        )
+    return bundle
+
+
+@pytest.fixture(scope="session")
+def multiview_server(tmp_path_factory, multiview_bundle_root: Path):
+    """θ **saturated**, so `served(T) == vis(T)` and the served-set assertions are equalities.
+
+    The multi-view differential's subject is which entities a view may serve, and a live threshold
+    would thin the served set for a reason that has nothing to do with views — leaving every
+    assertion a subset check that a view-leaking engine would also pass. θ itself is covered per
+    view elsewhere, over a corpus designed for it (`test_i7_selection.py`).
+    """
+    from oracle.harness import spawn_server, stop_server  # noqa: PLC0415
+
+    tmp_dir = tmp_path_factory.mktemp("multiview-serve")
+    srv, proc = spawn_server(multiview_bundle_root, tmp_dir)
+    yield srv
+    stop_server(proc)

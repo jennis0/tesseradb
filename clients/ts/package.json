@@ -4,7 +4,15 @@
   "workspaces": [
     "spike",
     "core",
-    "viewer"
+    "deck",
+    "components",
+    "react",
+    "viewer",
+    "harness",
+    "wire-example",
+    "examples/plain-html",
+    "examples/react-explorer",
+    "examples/canvas-store"
   ],
   "scripts": {
     "test": "npm run test --workspaces --if-present",

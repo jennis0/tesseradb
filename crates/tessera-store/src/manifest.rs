@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use tessera_spatial::tiler::ScalarType;
+use tessera_spatial::Projection;
 use tessera_types::layer::{RegisteredLayer, ServingLayout};
 use tessera_types::{IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
@@ -283,7 +284,8 @@ pub struct ManifestVocabularyValue {
     pub title: Option<String>,
 }
 
-/// `quantisation`: the extent Morton codes are computed against (contracts §2.5).
+/// `views[..].quantisation`: the extent Morton codes are computed against (contracts §2.5), and
+/// a property of the **view** rather than the bundle (decision 0040).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Quantisation {
     pub x_min: f64,
@@ -306,11 +308,8 @@ impl Quantisation {
     /// occupies the top of the grid and belongs there. **NaN fails in both directions** and is
     /// therefore outside — right, because a NaN coordinate has no cell either, and `as u32`
     /// saturates it to zero rather than erroring.
-    pub fn contains(&self, x: f32, y: f32) -> bool {
-        (x as f64) >= self.x_min
-            && (x as f64) <= self.x_max
-            && (y as f64) >= self.y_min
-            && (y as f64) <= self.y_max
+    pub fn contains(&self, x: f64, y: f64) -> bool {
+        x >= self.x_min && x <= self.x_max && y >= self.y_min && y <= self.y_max
     }
 }
 
@@ -428,6 +427,323 @@ impl IdentityDescriptor {
 pub struct ViewDescriptor {
     pub id: String,
     pub display_name: String,
+    /// **Which incarnation of this key the view currently is** (decision 0115) — the one place a
+    /// reader with a view id gets the number every artifact of the view is stamped with.
+    ///
+    /// **Internal, and on no wire.** `/v1/meta` publishes the id and the roster record; this
+    /// number is not part of either, and no response carries it, so a principal cannot tell a
+    /// recreated key from one created for the first time.
+    ///
+    /// [`DECLARED_INCARNATION`] for a view the build declared. A create while the service runs
+    /// mints the next value and [`Manifest::with_roster`] stamps it here; a drop takes the
+    /// descriptor out, and a create of the same key puts back a descriptor at a higher one — which
+    /// is what makes every segment, column and derived structure of the predecessor unreachable.
+    ///
+    /// **Required, not `default`**, on `quantisation`'s rule and with a sharper consequence: an
+    /// absent incarnation reads as the build's, which is the one value a leftover artifact of a
+    /// dropped-and-recreated key could carry, so a default here would adopt exactly the artifacts
+    /// the field exists to keep out.
+    pub incarnation: ViewIncarnation,
+    /// The frame every position in this view is quantised against (contracts §2.5), immutable
+    /// for the view's life — which is what makes a Morton prefix a permanent address in this view
+    /// (decision 0040).
+    ///
+    /// **Here rather than on the bundle, because the frame is declared per view**: two views of
+    /// one bundle may quantise differently, and an embedding and a map cannot share a frame
+    /// without one of them wasting most of the grid (`views.md` §2). A single bundle-wide key
+    /// would have to pick one of them.
+    ///
+    /// **Required, not `default`, and there is no bundle-level fallback** — the same rule as
+    /// `projection` below, for the same reason: a view whose frame went missing is malformed, not
+    /// unframed, and every position it holds decodes against whatever a reader guessed. A
+    /// manifest omitting it refuses at open, loudly. No bundle predates the move (decision 0048).
+    pub quantisation: Quantisation,
+    /// What placed every position in this view before the frame did (`projections.md` §3).
+    ///
+    /// **Here rather than on the bundle, because a projection is declared per view**, exactly as
+    /// the frame above it is: two views of one bundle may be projected differently.
+    ///
+    /// **Required, not `default`.** The frame alone does not imply a projection — a `[0, 1]`
+    /// extent is a legal frame for a view with no projection at all — so a bundle that carries
+    /// projected positions and cannot say so is one every second reader has to be told about out
+    /// of band: the write path, which would otherwise quantise a degree as though it were a frame
+    /// coordinate, and the differential oracle, which re-quantises source coordinates against the
+    /// recorded frame. Defaulting the field to `none` is exactly the misread the field exists to
+    /// stop, so a manifest omitting it is malformed rather than unprojected, and the
+    /// `bundle_format` bump that introduced it (4) makes every bundle written before it refuse at
+    /// open.
+    ///
+    /// **The declared name is the format, not the transform's parameters.** An equirectangular
+    /// alias differs from its siblings only in the world aspect a client draws
+    /// (`projections.md` §5.2), and serialising the standard parallel structurally would put a
+    /// display parameter into the artifact — which is what makes that family one entry rather
+    /// than five. An unknown name refuses the whole manifest, per [`scalar_type_name`]'s rule: a
+    /// reader that cannot resolve the projection cannot invert a stored position, and reading it
+    /// as `none` is the misread again.
+    #[serde(with = "projection_name")]
+    pub projection: Projection,
+    /// **This view's own gate** (`views.md` §6): an access label a principal must satisfy to reach
+    /// the view at all, or `None` for `public` — the label every principal holds by construction
+    /// ([decision 0088](../../../docs/decisions/0088-visibility-is-two-axes-and-the-membership-test-is-one.md)),
+    /// which is why the ordinary case stores nothing rather than storing the word.
+    ///
+    /// **The one input the gate evaluation reads for a view's own half.** For a view of a group
+    /// this is the roster record's own label ([`GroupViewDescriptor::visibility`]) and the two are
+    /// checked equal at [`Manifest::validate_groups`], on the discipline
+    /// [`ScopedScalar::group`] already sets: the roster is what `/v1/meta` publishes and this is
+    /// what `Engine::authorise` evaluates, so a manifest whose two copies disagree refuses at open
+    /// rather than serving a view under a gate nobody wrote. The group's own half is
+    /// [`GroupDescriptor::visibility`], and the two are conjunctive — a view's gate narrows its
+    /// group's and never widens it.
+    ///
+    /// **Required, not `default`.** A gate that went missing would read as `public`, which is the
+    /// one direction a disclosure control must not fail in; a manifest omitting it is malformed
+    /// rather than ungated. No bundle predates the field (decision 0048).
+    pub visibility: Option<String>,
+}
+
+/// `groups` entry: one view group and its roster (`views.md` §3.1, §3.2).
+///
+/// **The roster's durable home is the manifest**, not the WAL: rotation reclaims WAL records, so
+/// a roster that lived only in the log is lost at the first rotation, and a reused key silently
+/// repoints every client cache keyed on the view (decision 0029, `views.md` §3.2).
+///
+/// A group is **not** a view: it cannot be named on a viewer verb, has no row space and no
+/// permutation. What it carries is the half of a view that is the same for all of them, beside
+/// the roster that differs — and each of its views appears in [`Manifest::views`] under the
+/// joined `group:key` id, which is what a request names.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupDescriptor {
+    pub name: String,
+    /// The group's human-readable title, served on `/v1/meta` as `groups[..].title`
+    /// (`configuration.md` §1, contracts §3.2). `None` where the declaration gave none, and
+    /// served as `null` there — presentation metadata on an object whose visibility is already
+    /// decided, so it discloses nothing the name does not.
+    pub title: Option<String>,
+    /// The group whose keys these are, where this group declares `members`
+    /// (`views.md` §3.3); `None` where it owns them. Chains are refused at the declaration, so
+    /// this always names an owner.
+    pub members_of: Option<String>,
+    /// The frame every view of this group is quantised against, and what placed its positions
+    /// before that frame did.
+    ///
+    /// **Here as well as on each view, because a view of this group may not exist yet.** A group
+    /// grows at a running service (`views.md` §3.2) and the view a create mints takes both from
+    /// the group — reading them off a sibling view is correct only while the group has one, and a
+    /// group whose whole roster was dropped, or which was declared empty, has none. They are the
+    /// same values every view of the group already carries: a group's views share every setting
+    /// by construction, which is what makes a key set meaningful.
+    pub quantisation: Quantisation,
+    #[serde(with = "projection_name")]
+    pub projection: Projection,
+    /// The per-view metadata names and types this group declared, in declaration order. Empty on
+    /// a `members` group, whose metadata belongs to the owner, and on a group whose views carry
+    /// none — which is the one group a first ingest batch may create a view of (`views.md` §3.2).
+    pub metadata: Vec<GroupMetadataField>,
+    /// **The group's gate, the outer bound over every view of it** (`views.md` §6): a view of a
+    /// group is reachable only where its group is, so this is conjunctive with each view's own
+    /// label and a view gate can narrow it and can never widen it — the relation decision 0089
+    /// gives an artifact to its layer, and the I12 direction. `None` is `public`.
+    ///
+    /// **A `members` group carries its own**, not the owner's: two groups sharing one key set are
+    /// two layouts, and which principals may see each layout is a fact about the layout
+    /// (`views.md` §3.3).
+    ///
+    /// Required, for the reason [`ViewDescriptor::visibility`] gives.
+    pub visibility: Option<String>,
+    /// The roster, in creation order — which at a build is declaration order, and afterwards is
+    /// the order the creations were appended in (`views.md` §3.2). There is no stored number: the
+    /// order is the record order (decision 0113).
+    pub views: Vec<GroupViewDescriptor>,
+    /// The **group-scoped attribute column families** this group owns (`views.md` §5): one
+    /// entity-space column per view of the roster above, under
+    /// `attrs/<column>/<group>/<key>/`.
+    ///
+    /// **Here rather than in [`Manifest::declared_scalars`]**, which is one flat bundle-wide list
+    /// addressed positionally by the record blob's field tags and by every segment's scalar tail:
+    /// a family has no slot in it, and a scoped column placed there would take a slot in every
+    /// row and a whole-corpus `attrs/<column>/` of its own, both absent for every entity. The
+    /// group is where it belongs instead, beside the keys a pinned leaf's `@<key>` resolves
+    /// against.
+    ///
+    /// Empty is the ordinary case — a group with no attribute scoped to it — and a `members`
+    /// group's is always empty: its views are the owner's, so a family over them is the owner's
+    /// (`views.md` §3.3).
+    pub scoped_scalars: Vec<ScopedScalar>,
+}
+
+/// `groups[..].scoped_scalars` entry: one group-scoped attribute's column family (`views.md` §5).
+///
+/// The declaration is an ordinary attribute's — same types, same `index` and `render` — and what
+/// the scope changes is only **which column file** a predicate reads: one per view of the owning
+/// group instead of one for the corpus. Evaluation stays in entity space, which is what keeps a
+/// scoped attribute inside I2's argument: every value is indexed by entity, a predicate answers a
+/// bitmap in entity space, and the mask meets it there before any permutation is applied.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScopedScalar {
+    /// The column's name, as a filter leaf spells it before any pin — unique bundle-wide across
+    /// the entity-scoped columns and the scoped families alike, so a leaf naming it is never
+    /// ambiguous about which of the two it means.
+    pub name: String,
+    /// The group that owns the views this family has a column per — [`GroupDescriptor::name`],
+    /// repeated here so the flattened list [`Manifest::scoped_scalars`] hands a reader is
+    /// self-contained: a refusal names the group, and a bare leaf resolves against it. Checked
+    /// against the descriptor it hangs off at [`Manifest::validate_groups`], so the two cannot
+    /// come to disagree.
+    pub group: String,
+    /// The column's storage type, spelt exactly as [`DeclaredScalar::arrow_type`] is.
+    #[serde(with = "scalar_type_name")]
+    pub arrow_type: ScalarType,
+    /// For a category column, the [`ManifestVocabulary::name`] its codes index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vocabulary: Option<String>,
+    /// For a `text` column, the analyser identity that produced its terms (decision 0070).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analyser: Option<String>,
+    /// Declared `index = true` — this family's columns carry an entity-space value column a
+    /// filter may be answered from.
+    pub index: bool,
+    /// Declared `render = true` — this family's column occupies a slot in every row of
+    /// `columns.arrow` **in each view of its group**, and of any group sharing those views via
+    /// `members`, and in no other view (`views.md` §5).
+    ///
+    /// **The per-view counterpart of [`DeclaredScalar::render`]**, and the whole difference is the
+    /// view set: an entity-scoped column's slot is in every row space the bundle has, a family's
+    /// is in the row spaces its scope names. A view the family has no column for — one created
+    /// after the build, [`Self::views`] naming those that have one — carries no slot at all, which
+    /// a reader sees as the column's absence rather than as a row of placeholders.
+    pub render: bool,
+    /// The view ids that have a column, in roster order — the joined `group:key`
+    /// form, which is what [`crate::view_path_components`] turns into the column's directory.
+    ///
+    /// **Named rather than derived from the roster**, because the two can differ: a view created
+    /// after the build has no column until one is written for it, and reading the roster instead
+    /// would make an absent file a missing artefact rather than a view with no values yet.
+    pub views: Vec<String>,
+}
+
+impl ScopedScalar {
+    /// Is this family on the filter surface — an operand `/v1/meta` publishes, a leaf may name,
+    /// and `/v1/categories` answers a value list for (`views.md` §5)?
+    ///
+    /// **`index`, or `render`**, the two being one rule since the asymmetry between them closed
+    /// (2026-08-31, owner ruling). `text` is excluded from the render arm because `render` on a
+    /// scoped `text` family is refused at the declaration — a manifest carrying the combination
+    /// would name a token index no pass produced.
+    ///
+    /// **Here, at the record, because the build and the engine both decide on it** and neither may
+    /// depend on the other: `check-layers.sh` denies the build the engine, so the engine's
+    /// `filter::scoped_is_filterable` calls this and the build's `scoped_postings_are_owed` calls
+    /// [`Self::licence_of`] over its own declaration. The two agreed by argument until this
+    /// existed — the build spelled it `index || render` and the engine spelled it with the `text`
+    /// arm — and a divergence would have the open demand a `postings.arrow` no pass wrote.
+    pub fn is_filterable(&self) -> bool {
+        Self::licence_of(
+            self.arrow_type,
+            self.vocabulary.is_some(),
+            self.index,
+            self.render,
+        )
+    }
+
+    /// [`Self::is_filterable`] over the four facts, rather than over the record that carries them
+    /// — what a build's own declaration, which is not a [`ScopedScalar`] yet, asks.
+    ///
+    /// `vocabulary` is whether the family names one, which is the category arm of the family
+    /// classification: a category over a `text` storage type is not the text family, and takes the
+    /// render arm like every other category.
+    pub fn licence_of(
+        arrow_type: ScalarType,
+        vocabulary: bool,
+        index: bool,
+        render: bool,
+    ) -> bool {
+        index || (render && (vocabulary || arrow_type != ScalarType::Text))
+    }
+
+    /// Does this family's per-view column have a **value column and a presence bitmap on disc** —
+    /// the pair a drill-down reads one entity's value out of (`views.md` §5)?
+    ///
+    /// **Every family but `text`**, whatever its flags, which is where this parts from
+    /// [`Self::is_filterable`]: the build writes `values.arrow` and `presence.roaring` per view
+    /// for a family with neither flag exactly as it does for an indexed one, and a `text` family
+    /// has no per-entity slot at all — its entity-space artefacts are a token dictionary and the
+    /// postings over it.
+    ///
+    /// This is what gives a neither-flag declaration its meaning (owner ruling 2026-09-01): stored,
+    /// served on `POST /v1/items/{tessera_id}`, on no filter surface and in no row tail.
+    pub fn has_value_column(&self) -> bool {
+        self.vocabulary.is_some() || self.arrow_type != ScalarType::Text
+    }
+}
+
+/// One entry of `scoped_columns`: a group-scoped family, and the view whose column of it a flush
+/// wrote (`views.md` §5).
+///
+/// **The pair, because the family's columns share one name.** `column` is the family's own
+/// `ScopedScalar::name` and `view` the joined `group:key` id, which is what
+/// [`Manifest::with_scoped_columns`] adds to the family's list and what
+/// [`crate::view_path_components`] turns into the column's directory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopedColumn {
+    pub column: String,
+    pub view: String,
+    /// The view's incarnation when the column was written (decision 0115).
+    ///
+    /// **Carried, not resolved.** This list is complete current state carried forward for ever,
+    /// so an entry outlives the drop that made it garbage; without the stamp a key created again
+    /// would find its predecessor's pair in the list and publish the old column as its own.
+    pub incarnation: ViewIncarnation,
+}
+
+/// One view of a group, as the roster records it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupViewDescriptor {
+    /// The caller's own key. `<group>:<key>` is the view id, and is the [`ViewDescriptor::id`]
+    /// this roster entry must have.
+    pub key: String,
+    /// This view's own gate, as the roster records it and as `/v1/meta` publishes the roster;
+    /// `None` is `public` (`views.md` §6).
+    ///
+    /// **Evaluated through [`ViewDescriptor::visibility`], which carries the same label**, the two
+    /// being checked equal at [`Manifest::validate_groups`]: one input decides a view's own half
+    /// of the gate whether the view is a plain one or a group's, and the copy that would otherwise
+    /// drift is refused at open instead.
+    pub visibility: Option<String>,
+    /// The typed per-view values this view carries, one per name the owning group declared.
+    /// Empty on a `members` group's views, whose metadata belongs to the owner.
+    pub metadata: BTreeMap<String, ViewMetadataValue>,
+}
+
+/// The roster's own types live in `tessera-types`, because the WAL record that makes a create
+/// durable travels through `tessera-lifecycle`, which does not depend on this crate
+/// (`tessera_types::view`). Re-exported here so a manifest reader still names one module.
+pub use tessera_types::view::{
+    CreatedView, DeadIncarnation, GroupMetadataField, ViewIncarnation, ViewMetadataType,
+    ViewMetadataValue, DECLARED_INCARNATION,
+};
+
+/// `views[..].projection` as the name a declaration writes (`projections.md` §5), refusing one
+/// outside the set rather than defaulting it.
+mod projection_name {
+    use super::Projection;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(p: &Projection, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(p.name())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> std::result::Result<Projection, D::Error> {
+        let name = String::deserialize(d)?;
+        Projection::from_name(&name).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "'{name}' is not a projection this build can place points under \
+                 (projections.md §5)"
+            ))
+        })
+    }
 }
 
 /// `partitions` entry. This build writes exactly one, `phash == "default"`.
@@ -458,10 +774,20 @@ pub struct Manifest {
     /// its absence buys a reader that does not exist and costs the check that does.
     pub vocabularies: Vec<ManifestVocabulary>,
     pub small_term_threshold: u32,
-    pub quantisation: Quantisation,
     pub entity_id_high_water: u64,
     pub identity: IdentityDescriptor,
+    /// The declared views, each carrying its own frame (decision 0040). There is no bundle-level
+    /// extent: [`Manifest::quantisation_of`] is how a caller that has a view id gets one, and a
+    /// caller that has no view id is asking a question the bundle cannot answer.
     pub views: Vec<ViewDescriptor>,
+    /// The view groups and their rosters (`views.md` §3.2), in declaration order.
+    ///
+    /// **Required, not `default`**, on `vocabularies`' rule: a manifest that omits it is
+    /// malformed rather than group-free, and the two are indistinguishable under `default` — a
+    /// bundle whose views are a group's and whose roster went missing would open and serve views
+    /// no client can order or name. No bundle predates the field (decision 0048). Empty is the
+    /// ordinary case: a declaration of plain views alone.
+    pub groups: Vec<GroupDescriptor>,
     pub partitions: Vec<PartitionDescriptor>,
     #[serde(default)]
     pub provenance: serde_json::Value,
@@ -469,6 +795,333 @@ pub struct Manifest {
 }
 
 impl Manifest {
+    /// The frame a named view's positions are quantised against, or `None` for a view this bundle
+    /// does not declare.
+    ///
+    /// **Keyed by view, never bundle-wide** (decision 0040): the extent is the view's, so a single
+    /// answer would have to pick one of two differently framed views. Reading the *first* declared
+    /// view instead is correct only while a bundle carries one and fails silently rather than
+    /// loudly on the day one carries two — every position decoded against the wrong frame, with
+    /// nothing to notice afterwards.
+    ///
+    /// An unknown name is `None` and the caller refuses; there is no default frame to fall back
+    /// on, for the reason [`ViewDescriptor::quantisation`] gives.
+    /// Refuse a manifest whose roster and whose views disagree (`views.md` §3.2).
+    ///
+    /// **The roster is not a second list of views; it is what orders and names them.** Every
+    /// roster entry must have its `group:key` view declared, and every view whose id carries the
+    /// group separator must be on a roster — either direction failing leaves a view a client can
+    /// see and cannot address, or a roster entry that resolves to nothing.
+    pub fn validate_groups(&self) -> std::result::Result<(), String> {
+        let mut rostered: Vec<String> = Vec::new();
+        for group in &self.groups {
+            if group.name.contains(crate::GROUP_SEPARATOR) {
+                return Err(format!(
+                    "group '{}' carries the reserved separator '{}'",
+                    group.name,
+                    crate::GROUP_SEPARATOR
+                ));
+            }
+            let mut keys: Vec<&str> = group.views.iter().map(|v| v.key.as_str()).collect();
+            keys.sort_unstable();
+            if keys.windows(2).any(|w| w[0] == w[1]) {
+                return Err(format!(
+                    "group '{}' carries a key twice; a key is a view's only address and is never \
+                     reused (views §3.2)",
+                    group.name
+                ));
+            }
+            for view in &group.views {
+                let id = format!("{}{}{}", group.name, crate::GROUP_SEPARATOR, view.key);
+                let Some(descriptor) = self.views.iter().find(|v| v.id == id) else {
+                    return Err(format!(
+                        "the roster of group '{}' names view '{id}', which the manifest does not \
+                         declare",
+                        group.name
+                    ));
+                };
+                // **The gate is written twice and must be written once** (`views.md` §6): the
+                // roster record is what `/v1/meta` publishes and `ViewDescriptor::visibility` is
+                // what `Engine::authorise` evaluates, so a manifest whose two copies disagree
+                // would serve a view under a gate nobody wrote — and the direction that matters
+                // is the one where the descriptor says `public` and the roster says otherwise,
+                // which is a control accepted and never enforced. Refused at open, in the
+                // direction that costs a load rather than a disclosure.
+                if descriptor.visibility != view.visibility {
+                    return Err(format!(
+                        "view '{id}' records the gate {:?} and the roster of group '{}' records \
+                         {:?}; a view's gate is one label, published on the roster and evaluated \
+                         from the view (views §6)",
+                        descriptor.visibility, group.name, view.visibility
+                    ));
+                }
+                rostered.push(id);
+            }
+            // **A family's columns are its group's views.** A named view the roster does not
+            // carry would send the opener at a directory outside the group's own, and a family on
+            // a `members` group would duplicate the owner's columns under a second name.
+            for family in &group.scoped_scalars {
+                if group.members_of.is_some() {
+                    return Err(format!(
+                        "group '{}' declares `members` and carries the scoped column family \
+                         '{}'; a family over shared views belongs to the group that owns them \
+                         (views §3.3, §5)",
+                        group.name, family.name
+                    ));
+                }
+                if family.group != group.name {
+                    return Err(format!(
+                        "the scoped column family '{}' of group '{}' records the group '{}'",
+                        family.name, group.name, family.group
+                    ));
+                }
+                for view in &family.views {
+                    let key = view
+                        .split_once(crate::GROUP_SEPARATOR)
+                        .filter(|(g, _)| *g == group.name)
+                        .map(|(_, key)| key);
+                    if !key.is_some_and(|key| group.views.iter().any(|v| v.key == key)) {
+                        return Err(format!(
+                            "the scoped column family '{}' of group '{}' names view '{view}', \
+                             which is not a view of that group (views §5)",
+                            family.name, group.name
+                        ));
+                    }
+                }
+            }
+        }
+        for view in &self.views {
+            if view.id.contains(crate::GROUP_SEPARATOR) && !rostered.contains(&view.id) {
+                return Err(format!(
+                    "view '{}' is a group's view and no roster carries it, so nothing gives it a \
+                     key (views §3.2)",
+                    view.id
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Every group's scoped column families, in manifest order (`views.md` §5).
+    ///
+    /// **Flattened, because the group is already inside each family's view ids**: a reader that
+    /// opens or publishes a family needs the family, not the roster it hangs off, and the
+    /// `<group>:<key>` id carries the group's own name. Cloned rather than borrowed so a caller
+    /// can hold the list across a generation swap, which is what both openers do.
+    pub fn scoped_scalars(&self) -> Vec<ScopedScalar> {
+        self.groups
+            .iter()
+            .flat_map(|g| g.scoped_scalars.iter().cloned())
+            .collect()
+    }
+
+    /// The group that **owns** `group`'s keys — itself, unless it declares `members`
+    /// (`views.md` §3.3). A group this manifest does not declare owns its own keys, which is the
+    /// answer a caller can act on: it names no sharing groups either.
+    pub fn owner_of_group(&self, group: &str) -> String {
+        self.groups
+            .iter()
+            .find(|g| g.name == group)
+            .and_then(|g| g.members_of.clone())
+            .unwrap_or_else(|| group.to_string())
+    }
+
+    /// Every view id one key of `owner` resolves to: the owning group's, and one for **every group
+    /// whose views are the owner's** (`members`, `views.md` §3.3).
+    ///
+    /// **One definition, because a key is not one view.** A create lands on every sharing group at
+    /// the same moment and a drop takes it off every one of them, so anything that acts on "the
+    /// views of this key" — [`Self::with_roster`]'s death loop, the drop's buffer prune, its
+    /// `delete_dangling` probe, and the WAL replay's own prune — must expand the same way. Three
+    /// copies of the expansion is how one of them comes to prune a single spelling and leave the
+    /// other's rows to be adopted by whatever takes the key next
+    /// ([decision 0115](../../../docs/decisions/0115-a-dropped-view-key-is-reusable.md)).
+    ///
+    /// The caller passes the **owner**: `owner_of_group` is what turns the group a request named
+    /// into it.
+    pub fn view_ids_for_key(&self, owner: &str, key: &str) -> Vec<String> {
+        self.groups
+            .iter()
+            .filter(|g| g.name == owner || g.members_of.as_deref() == Some(owner))
+            .map(|g| format!("{}{}{}", g.name, crate::GROUP_SEPARATOR, key))
+            .collect()
+    }
+
+    /// This manifest as the **live roster** makes it: the views a build declared, plus every view
+    /// created while the service runs, minus every key that has been dropped (`views.md` §3.2,
+    /// §3.4).
+    ///
+    /// **One derivation, two callers.** `Engine::open` builds it after replay, and the create and
+    /// drop operations build it again when they publish — so the roster a request resolves against
+    /// is the same function of the same state whether it was reached by a restart or by a `PUT`.
+    /// Everything downstream — `/v1/meta`, view resolution on both planes, the flush's frame
+    /// lookup — reads the manifest and needs no second notion of which views exist.
+    ///
+    /// **A create names the owner group and lands on every group sharing its views**
+    /// (`views.md` §3.3): a key belongs to the group that owns it, so
+    /// `quarter:2026-Q5` creates `quarter_map:2026-Q5` at the same moment, empty, and a request
+    /// naming it is answered rather than 404ed. A drop of the key takes both away.
+    ///
+    /// A create naming a group this manifest does not declare is **dropped rather than expanded**:
+    /// it cannot arise from the create operation, which refuses an unknown group, and a rebuild is
+    /// free to remove a group — in which case its views are not views of this bundle either.
+    pub fn with_roster(&self, created: &[CreatedView], dead: &[DeadIncarnation]) -> Manifest {
+        let mut manifest = self.clone();
+        // **The deaths first, then the creations** (decision 0115). A key may be dropped and
+        // created again, and both lists are complete current state rather than a diff — so this
+        // order is what decides whether the recreate survives. Taking the dead incarnation's
+        // descriptors out first lets the creation put back a descriptor at the live incarnation;
+        // the other order would delete the view the caller was just told it had. A death whose key
+        // nothing recreated simply leaves the group without it.
+        for stone in dead {
+            // **The owner's groups and every group sharing its views** — the one expansion
+            // `Self::view_ids_for_key` defines, which the drop's own prunes take too.
+            let ids = manifest.view_ids_for_key(&stone.group, &stone.key);
+            for group in &mut manifest.groups {
+                if group.name == stone.group
+                    || group.members_of.as_deref() == Some(stone.group.as_str())
+                {
+                    group.views.retain(|v| v.key != stone.key);
+                    // **And the families' own lists** (`views.md` §5). A family names the views
+                    // that have a column, and [`Self::validate_groups`] holds every one of them to
+                    // being a view of the group — so a list that kept a dropped key would make the
+                    // manifest refuse to load at the next restart. The column's files are left
+                    // behind with the prefix, exactly as the view's segments are: §3.4's
+                    // reclamation is by omission, and the incarnation is what keeps a key created
+                    // again from adopting them.
+                    let dropped = format!("{}{}{}", group.name, crate::GROUP_SEPARATOR, stone.key);
+                    for family in &mut group.scoped_scalars {
+                        family.views.retain(|v| *v != dropped);
+                    }
+                }
+            }
+            manifest.views.retain(|v| !ids.contains(&v.id));
+        }
+        for view in created {
+            // The owner, then every group whose views are the owner's.
+            let sharing: Vec<String> = manifest
+                .groups
+                .iter()
+                .filter(|g| {
+                    g.name == view.group || g.members_of.as_deref() == Some(view.group.as_str())
+                })
+                .map(|g| g.name.clone())
+                .collect();
+            for group_name in sharing {
+                let group = manifest
+                    .groups
+                    .iter_mut()
+                    .find(|g| g.name == group_name)
+                    .expect("named from this list");
+                if group.views.iter().any(|v| v.key == view.key) {
+                    continue;
+                }
+                group.views.push(GroupViewDescriptor {
+                    key: view.key.clone(),
+                    visibility: view.visibility.clone(),
+                    // Metadata belongs to the group that owns the views; a sharing group's copies
+                    // carry none, exactly as a build writes them.
+                    metadata: if group.name == view.group {
+                        view.metadata.clone()
+                    } else {
+                        BTreeMap::new()
+                    },
+                });
+                let (quantisation, projection) = (group.quantisation, group.projection);
+                let id = format!("{group_name}{}{}", crate::GROUP_SEPARATOR, view.key);
+                if !manifest.views.iter().any(|v| v.id == id) {
+                    manifest.views.push(ViewDescriptor {
+                        display_name: id.clone(),
+                        id,
+                        // **The record's own gate, on both copies** (`views.md` §6): the roster
+                        // entry above and this descriptor carry one label, which
+                        // `Manifest::validate_groups` holds them to.
+                        visibility: view.visibility.clone(),
+                        // **The record's incarnation** (decision 0115), which is what every
+                        // consumer with a view id resolves an artifact's stamp against. A key
+                        // created again lands here at a higher number than the segments and
+                        // columns its predecessor left behind, so none of them is composed.
+                        incarnation: view.incarnation,
+                        // **The group's frame and the group's projection**: a view of a group
+                        // shares every setting with its siblings, which is what makes a key set
+                        // one coordinate system observed at several keys.
+                        quantisation,
+                        projection,
+                    });
+                }
+            }
+        }
+        manifest
+    }
+
+    /// Which incarnation the view with this id currently is, or `None` if this manifest declares
+    /// no such view (decision 0115).
+    ///
+    /// **The one resolution site for an artifact's stamp, and it fails closed**: a caller that
+    /// gets `None` must treat the artifact as unreachable, never as live.
+    pub fn incarnation_of(&self, view: &str) -> Option<ViewIncarnation> {
+        self.views
+            .iter()
+            .find(|v| v.id == view)
+            .map(|v| v.incarnation)
+    }
+
+    /// Is this artifact's `(view, incarnation)` stamp the live one?
+    ///
+    /// The predicate every carry-forward and every open filters on. A stamp naming a view this
+    /// manifest does not declare, or naming an incarnation that is not the live one, is an
+    /// artifact of a dropped view: unreachable, and the fold's to reclaim.
+    pub fn is_live_incarnation(&self, view: &str, incarnation: ViewIncarnation) -> bool {
+        self.incarnation_of(view) == Some(incarnation)
+    }
+
+    /// This manifest with each `(family, view)` pair added to the family's own `views` list —
+    /// what a flush that wrote the **first** column of a family for a view publishes
+    /// (`views.md` §5).
+    ///
+    /// **The list means "the views that have a column", and only a writer can extend it.** A view
+    /// created while the service runs has none until a flush of it carries a value; that flush
+    /// writes the base and the extent, and this is where the manifest starts saying so — which is
+    /// what `/v1/meta`'s `scoped_scalars[..].views` reports and what `FilterColumns::open` walks
+    /// at the next restart. A pair the list already holds is a no-op, and a pair naming a family
+    /// or a view this manifest does not declare is **dropped rather than expanded**, on
+    /// [`Self::with_roster`]'s rule: a rebuild is free to remove either, in which case the column
+    /// is not this bundle's either.
+    /// **A pair of a dead incarnation is dropped, not published** (decision 0115): the column is
+    /// on disc under the same path a key created again would use, and adding it to the family's
+    /// list would serve the predecessor's values as the new view's. The pair is checked against
+    /// this manifest's own incarnation, which is the live one by construction.
+    pub fn with_scoped_columns(&self, columns: &[(String, String, ViewIncarnation)]) -> Manifest {
+        let mut manifest = self.clone();
+        for (column, view, incarnation) in columns {
+            if !manifest.is_live_incarnation(view, *incarnation) {
+                continue;
+            }
+            let Some((group_name, key)) = view.split_once(crate::GROUP_SEPARATOR) else {
+                continue;
+            };
+            let Some(group) = manifest.groups.iter_mut().find(|g| g.name == group_name) else {
+                continue;
+            };
+            if !group.views.iter().any(|v| v.key == key) {
+                continue;
+            }
+            if let Some(family) = group.scoped_scalars.iter_mut().find(|f| f.name == *column) {
+                if !family.views.contains(view) {
+                    family.views.push(view.clone());
+                }
+            }
+        }
+        manifest
+    }
+
+    pub fn quantisation_of(&self, view: &str) -> Option<Quantisation> {
+        self.views
+            .iter()
+            .find(|v| v.id == view)
+            .map(|v| v.quantisation)
+    }
+
     /// The declared scalars that occupy a slot in every row — `columns.arrow`'s tail, in order.
     ///
     /// **Every segment-facing consumer must use this rather than `declared_scalars` directly.** The
@@ -505,6 +1158,15 @@ impl Manifest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SegmentDescriptor {
     pub view: String,
+    /// The view's incarnation when this segment was written (decision 0115).
+    ///
+    /// **Carried rather than resolved, and this is the class the stamp exists for.** A dropped
+    /// view's segments stay in the live side-manifest until a fold reclaims them; a key created
+    /// again is declared once more, so the "is this view still declared" test that omits them
+    /// today would start answering yes and the new view would serve the predecessor's points —
+    /// the silent wrong answer. The restart path can check this with no ordering argument: it has
+    /// the manifest and the roster, and needs nothing about when either was written.
+    pub incarnation: ViewIncarnation,
     pub seg_id: String,
     pub row_count: u32,
     pub entity_lo: u64,
@@ -583,8 +1245,28 @@ pub struct DictExtent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttrExtent {
     /// The [`DeclaredScalar::name`] this extends — the column's declared name, never a path
-    /// segment to be parsed back.
+    /// segment to be parsed back. For a **group-scoped** family (`views.md` §5) it is the
+    /// family's name, and [`Self::view`] says which of its columns this extends.
     pub column: String,
+    /// The view whose column of a **group-scoped family** this extends — `None` for the ordinary
+    /// entity-scoped column, which has one column bundle-wide.
+    ///
+    /// **Named rather than parsed out of the values path.** A family has one column per view of
+    /// its group and the column *name* is shared between them, so every consumer that keys on
+    /// `column` alone — the coalesce's window selection, the fold's per-column merge — would
+    /// otherwise treat two views' extents as one column's layers and merge Q3's values into Q4's.
+    /// The pair `(column, view)` is the identity; the path is the artefact.
+    ///
+    /// The `Option`'s absence is the field's own — an entity-scoped column belongs to no view —
+    /// and not tolerance of an older manifest ([`AttrExtent::dict`]'s note).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<String>,
+    /// The incarnation of [`Self::view`] when this extent was written — `Some` exactly when
+    /// `view` is, an entity-scoped column belonging to no view (decision 0115). Carried for
+    /// [`SegmentDescriptor::incarnation`]'s reason: the list is carried forward for ever, so an
+    /// extent outlives the drop that orphaned it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incarnation: Option<ViewIncarnation>,
     /// Prefix-relative path of the values file.
     pub values: String,
     /// Prefix-relative path of the presence bitmap.
@@ -637,8 +1319,19 @@ pub struct AttrExtent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TextExtent {
-    /// The column this extent belongs to.
+    /// The column this extent belongs to — a declared column's name, or a **group-scoped**
+    /// family's, in which case [`Self::view`] says which of its columns this extends.
     pub column: String,
+    /// The view whose column of a group-scoped family this extends — `None` for the ordinary
+    /// entity-scoped column. [`AttrExtent::view`]'s field, for its reason: a family's columns
+    /// share one name, so `(column, view)` is the identity and the path is the artefact. The
+    /// `Option`'s absence is the field's own, not tolerance of an older manifest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<String>,
+    /// The incarnation of [`Self::view`] when this extent was written — `Some` exactly when
+    /// `view` is. [`AttrExtent::incarnation`]'s field, for its reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incarnation: Option<ViewIncarnation>,
     /// Prefix-relative path of the extent's **own** front-coded token dictionary. An extent's
     /// postings are positions in this dictionary and name nothing against another's.
     pub dict: String,
@@ -679,6 +1372,27 @@ pub struct RecordExtent {
     pub hasrow: String,
     /// Prefix-relative path of the extent's block directory and rank-indexed offsets.
     pub directory: String,
+}
+
+/// One entry of `entity_terms_extents`: one flush's slice of the entity→term transpose
+/// (`entities/terms/`, contracts §2.4; `crate::entity_terms` for the format).
+///
+/// The same shape and the same argument as [`RecordExtent`]: three files named explicitly rather
+/// than recovered from a path convention, layers disjoint in entity space by **I9**, and a
+/// missing or short file refusing the open rather than reading as "those entities carry no
+/// terms". The stakes differ from the blob's by direction, not by degree — a record read short
+/// omits a field from a drill-down, a term list read short omits a *label*, which is what the
+/// join rule's `409` compares against.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EntityTermsExtent {
+    /// Prefix-relative path of the extent's has-row Roaring bitmap — the entities this flush
+    /// minted a term list for. Rank in it addresses `offsets`.
+    pub hasrow: String,
+    /// Prefix-relative path of the extent's `(cardinality + 1)` ascending `u32` offsets.
+    pub offsets: String,
+    /// Prefix-relative path of the extent's concatenated `u32` term ordinals.
+    pub terms: String,
 }
 
 /// One entry of `membership_extents`: one publication's packed artifact memberships for one level
@@ -793,6 +1507,11 @@ pub struct TileIndexExtent {
     pub path: String,
     /// The view whose row space these extents are in.
     pub view: String,
+    /// The view's incarnation when this structure was written (decision 0115). Carried for
+    /// [`SegmentDescriptor::incarnation`]'s reason: a derived structure is addressed by *row*, so
+    /// one written over a dropped incarnation's row space would label the rows of a key created
+    /// again with the predecessor's artifacts.
+    pub incarnation: ViewIncarnation,
     pub layer: String,
     pub level: u32,
     /// The level's version when this column was projected. **Also the adoption test.**
@@ -822,6 +1541,11 @@ pub struct RowColumnExtent {
     pub path: String,
     /// The view whose row space this column is addressed in.
     pub view: String,
+    /// The view's incarnation when this structure was written (decision 0115). Carried for
+    /// [`SegmentDescriptor::incarnation`]'s reason: a derived structure is addressed by *row*, so
+    /// one written over a dropped incarnation's row space would label the rows of a key created
+    /// again with the predecessor's artifacts.
+    pub incarnation: ViewIncarnation,
     pub layer: String,
     pub level: u32,
     /// The level's version when this column was written. **Also the adoption test.**
@@ -831,6 +1555,72 @@ pub struct RowColumnExtent {
     /// Never [`ServingLayout::ArtifactMajor`]: that layout has no column, so an entry claiming it
     /// names a file no writer produces, and the reader refuses it.
     pub layout: ServingLayout,
+}
+
+/// One entry of `shape_rows_extents`: one `(view, layer, level)`'s membership of **one segment**,
+/// resolved against the level's shapes and written as the row form (`membership.rs`'s
+/// `pack_shape_rows`) by the build and by every fold, so an open claims it instead of resolving
+/// the segment again (`polygon-membership.md` §6.3).
+///
+/// **[`RowColumnExtent`]'s coordinate with the segment beside it**, and the segment is the whole
+/// of the difference: a piece is rows of one segment, keyed by a `seg_id` that is never reused,
+/// so the same file answers for that segment in every generation that carries it and for no
+/// other. The level version is the other half of the key — a publication into the level moves it
+/// and the piece then describes shapes the level no longer holds — and both are equality tests.
+/// A piece that fails either is resolved again from the geometry, never adapted (I11).
+///
+/// Written for a spatial level whose serving layout is artifact-major; a row-major level's
+/// persisted form is its column, which the open inverts into the same piece.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ShapeRowsExtent {
+    /// Prefix-relative path of the packed row form.
+    pub path: String,
+    /// The view whose segment the rows are of.
+    pub view: String,
+    /// The view's incarnation when this structure was written (decision 0115). Carried for
+    /// [`SegmentDescriptor::incarnation`]'s reason: a derived structure is addressed by *row*, so
+    /// one written over a dropped incarnation's row space would label the rows of a key created
+    /// again with the predecessor's artifacts.
+    pub incarnation: ViewIncarnation,
+    pub layer: String,
+    pub level: u32,
+    /// The level's version when the segment was resolved. **Also the adoption test.**
+    pub level_version: u64,
+    /// The segment the rows are of, and the other adoption test.
+    pub seg_id: String,
+    /// The segment's row count when it was resolved — a segment is immutable, so a mismatch is a
+    /// file written for another segment under a reused name, which contracts §2.1 forbids.
+    pub row_count: u32,
+}
+
+/// One entry of `shape_held_extents`: one `(view, layer, level)`'s **decompositions** — every
+/// artifact's interior tiles, boundary cells and bounds (`polygon-membership.md` §6.3), written
+/// by the build and by every fold so an open assembles the held form from the file instead of
+/// descending every shape again, which on Overture's part 0 was 8.9 of a 9.3 s open.
+///
+/// **[`TileIndexExtent`]'s coordinate**, and the same equality rule: the level version is the
+/// adoption test, and inside the file each entry also carries the length and a digest of the
+/// canonical bytes it was decomposed from, so an entry is used only for the shape that produced
+/// it. A decomposition is a pure function of the canonical shape, so a mismatch is not a
+/// disclosure, but it is refused all the same and the shape decomposed again — a form written by
+/// a different descent would place rows in the wrong cells.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ShapeHeldExtent {
+    /// Prefix-relative path of the packed decompositions.
+    pub path: String,
+    /// The view the shapes were canonicalised for.
+    pub view: String,
+    /// The view's incarnation when this structure was written (decision 0115). Carried for
+    /// [`SegmentDescriptor::incarnation`]'s reason: a derived structure is addressed by *row*, so
+    /// one written over a dropped incarnation's row space would label the rows of a key created
+    /// again with the predecessor's artifacts.
+    pub incarnation: ViewIncarnation,
+    pub layer: String,
+    pub level: u32,
+    /// The level's version when the decompositions were written. **Also the adoption test.**
+    pub level_version: u64,
 }
 
 /// One entry of `locator_extents`: the **reverse** external-id direction for one flush segment's
@@ -902,6 +1692,56 @@ pub struct SegmentsManifest {
     /// must not come to mean something else. A tombstone list that forgot would let a recreated
     /// layer silently inherit every stale reference to the old one.
     pub layer_tombstones: Vec<String>,
+    /// Every view **created while the service runs**, complete current state (`views.md` §3.2).
+    ///
+    /// **This is the roster's durable home, and the WAL is not.** The create and drop records are
+    /// WAL entries for replay, but rotation reclaims them — so a roster that lived only in the log
+    /// is lost at the first rotation, and a reused key silently repoints every client cache keyed
+    /// on the view (decision 0029). Carried forward for ever, exactly as
+    /// [`SegmentsManifest::entity_id_low_water`] and [`SegmentsManifest::layer_tombstones`] are
+    /// and for the same reason.
+    ///
+    /// The views a *build* declared are in `MANIFEST.json` and are not restated here: this list
+    /// is the additions, and the served roster is the two together plus the WAL's own overlay.
+    ///
+    /// No `serde(default)`, on `layers`' argument: a manifest omitting it is malformed, not
+    /// creation-free, and the two are indistinguishable under a default while only one is safe to
+    /// serve — an absent list reads as *no view was ever created*, which is what a lost list looks
+    /// like, and the roster then serves a group as though nothing had ever been added to it.
+    pub views: Vec<CreatedView>,
+    /// Every `(group-scoped family, view)` pair a **flush** has written a column or a render lane
+    /// for, complete current state (`views.md` §5).
+    ///
+    /// **The durable half of `scoped_scalars[..].views`, and the reason it cannot be derived.** A
+    /// family's list in `MANIFEST.json` names the views the *build* wrote a column for; a view
+    /// created while the service runs acquires one at its first flush carrying values, and
+    /// `MANIFEST.json` is rewritten only by a fold. Deriving the pairs from `attr_extents` instead
+    /// would recover a filterable family's — its extents name their view — and lose a
+    /// **render-only** family's, which writes a row lane and no entity-space extent at all: the
+    /// column would come back from a restart as one the manifest does not know exists, and its
+    /// values would be served as the ordinary absence below.
+    ///
+    /// Carried forward for ever and never pruned, exactly as [`Self::views`] is: a view's column
+    /// is on disc until a fold rewrites the prefix, and a fold writes the derived list into the
+    /// new `MANIFEST.json` rather than leaving it here.
+    ///
+    /// No `serde(default)`, on `layers`' argument: a manifest omitting it is malformed, not
+    /// column-free, and the two are indistinguishable under a default while only one is safe to
+    /// serve.
+    pub scoped_columns: Vec<ScopedColumn>,
+    /// Every **incarnation of a key that has died** and whose artifacts a fold has not yet
+    /// reclaimed (`views.md` §3.4, decision 0115).
+    ///
+    /// **This is bookkeeping, not a refusal.** It was a tombstone list, and a create measured
+    /// itself against it; a dropped key is now reusable, and what remains is what the reuse needs
+    /// — the record that an incarnation's row spaces, columns and derived structures are on disc
+    /// and unreachable. Renamed rather than repurposed under the old name, so that nothing reads
+    /// it as the burn it no longer is.
+    ///
+    /// Carried forward at every publication, on `layer_tombstones`' argument: a mark that lives
+    /// only in the log is lost at the first rotation, and a reclaim that forgot an incarnation
+    /// would leave its files on disc for ever.
+    pub dead_view_incarnations: Vec<DeadIncarnation>,
     /// Every packed membership extent this partition holds — see [`MembershipExtent`]. Empty in a
     /// bundle straight out of `tessera build`, which registers no layers and publishes no artifacts.
     ///
@@ -947,6 +1787,16 @@ pub struct SegmentsManifest {
     /// a list that silently emptied itself would turn a fold's consolidation into a stall on
     /// whichever request arrived first, with nothing reporting a fault.
     pub row_column_extents: Vec<RowColumnExtent>,
+    /// Every persisted shape row form this partition holds — see [`ShapeRowsExtent`]. Empty in a
+    /// bundle with no spatial layer, and in one whose spatial levels are all served row-major.
+    ///
+    /// No `serde(default)`, on `row_column_extents`' argument: an unclaimed piece is resolved again
+    /// on open and the answer is the same, but a list that silently emptied itself would put the
+    /// whole re-resolution back into every open with nothing reporting a fault.
+    pub shape_rows_extents: Vec<ShapeRowsExtent>,
+    /// Every persisted decomposition this partition holds — see [`ShapeHeldExtent`]. Empty in a
+    /// bundle with no spatial layer. No `serde(default)`, on `shape_rows_extents`' argument.
+    pub shape_held_extents: Vec<ShapeHeldExtent>,
     /// Every record-blob extent holding **artifact supplied content** — the same format, reader and
     /// store as [`SegmentsManifest::record_extents`], listed separately.
     ///
@@ -1000,6 +1850,14 @@ pub struct SegmentsManifest {
     /// No `serde(default)`, per [`SegmentsManifest::attr_extents`]'s argument: a manifest that
     /// omits it is malformed, not extent-free.
     pub record_extents: Vec<RecordExtent>,
+    /// Every entity→term transpose extent this partition holds — see [`EntityTermsExtent`].
+    /// Empty in a bundle straight out of `tessera build`, whose base layer
+    /// (`entities/terms/*`) covers every entity it knows about. Oldest first, and disjoint in
+    /// entity space (**I9**), so order decides only which layer answers first.
+    ///
+    /// No `serde(default)`, per [`SegmentsManifest::attr_extents`]'s argument: a manifest that
+    /// omits it is malformed, not extent-free.
+    pub entity_terms_extents: Vec<EntityTermsExtent>,
     /// One flush's text layer per entry, oldest first — the base build's index is not in this list
     /// and is opened from the column's own directory, exactly as `record_extents` treats the base
     /// blob.
@@ -1064,6 +1922,12 @@ pub const HONOURED_STATE: &[&str] = &[
     // reserved run available for reissue — which is the fail-open this list exists to close.
     "layers",
     "layer_tombstones",
+    // The roster's runtime half, on the same argument: a reader carrying created views and
+    // ignoring them would serve a bundle as though the views did not exist — every request naming
+    // one a 404 — and, worse, would admit a create on a key a live or tombstoned view already
+    // holds, when a key is a view's only address and is never reused (`views.md` §3.2, §3.4).
+    "views",
+    "dead_view_incarnations",
 ];
 
 /// The subset of state fields a manifest carries **because a deny was accepted** (contracts
@@ -1153,6 +2017,11 @@ impl SegmentsManifest {
             ),
             ("layers", !self.layers.is_empty()),
             ("layer_tombstones", !self.layer_tombstones.is_empty()),
+            ("views", !self.views.is_empty()),
+            (
+                "dead_view_incarnations",
+                !self.dead_view_incarnations.is_empty(),
+            ),
         ]
         .into_iter()
         .filter(|(name, carried)| *carried && !HONOURED_STATE.contains(name))
@@ -1293,17 +2162,23 @@ mod tests {
             entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
             layers: Vec::new(),
             layer_tombstones: Vec::new(),
+            views: Vec::new(),
+            scoped_columns: Vec::new(),
+            dead_view_incarnations: Vec::new(),
             membership_extents: Vec::new(),
             level_versions: Vec::new(),
             containment_extents: Vec::new(),
             tile_index_extents: Vec::new(),
             row_column_extents: Vec::new(),
+            shape_rows_extents: Vec::new(),
+            shape_held_extents: Vec::new(),
             artifact_record_extents: Vec::new(),
             segments: Vec::new(),
             deltas: Vec::new(),
             dict_extents: Vec::new(),
             attr_extents: Vec::new(),
             record_extents: Vec::new(),
+            entity_terms_extents: Vec::new(),
             text_extents: Vec::new(),
             external_id_runs: Vec::new(),
             locator_extents: Vec::new(),
@@ -1412,6 +2287,8 @@ mod tests {
                 "vocabulary_extensions",
                 "layers",
                 "layer_tombstones",
+                "views",
+                "dead_view_incarnations",
             ],
             "deltas: `build_fragment_with_deltas` unions every live tier into a fragment. \
              deny/tombstones: the loader seeds the initial overlay from them and WAL replay \
@@ -1422,7 +2299,13 @@ mod tests {
              before replaying the WAL over the top, which is what makes a registration survive the \
              rotation that reclaims its `LayerCreate` record — a reader carrying them and ignoring \
              them would open a bundle as though no layer had ever been registered, every gate \
-             absent and every reserved run free for reissue"
+             absent and every reserved run free for reissue. views/dead_view_incarnations: \
+             `Engine::open` seeds the `ViewRoster` from them and amends the bundle's own manifest \
+             with what it holds, before replaying the WAL over the top — which is what makes a \
+             view created while the service ran survive the rotation that reclaims its \
+             `ViewCreate` record; a reader carrying them and ignoring them would 404 every \
+             request naming such a view and would admit a create on a key a live or tombstoned \
+             view already holds"
         );
     }
 

@@ -1,6 +1,6 @@
 # Per-point attributes and categories — design
 
-**Date:** 2026-08-02
+**Date:** 2026-08-02 · **Revised:** 2026-09-02
 **Status:** **Provisional — reviewed, no open decisions.** **A field is declared by a `type` and
 three booleans** — `render`, `index`, `multi`, each defaulting false —
 [`records-and-search.md`](records-and-search.md) §2–§3 being the design that owns the declaration
@@ -19,12 +19,12 @@ therefore stands unqualified.
 **Reads against:** architecture §4 (I2, I3, I9, I12), §5.3, §8.2, §8.3, §10.3, §10.5, Appendix A,
 Appendix C (C8, C11); contracts §2.1–§2.4, §3.2, §3.4; [`write-path.md`](write-path.md) §1.2, §4.3,
 §5.4; [`records-and-search.md`](records-and-search.md) §2–§3, §4.2, §5 (cited as **records §n**);
-`views-and-multi-table.md` §51, §53, §61, §80, §87 (itself provisional);
+`views.md` §51, §53, §61, §80, §87 (itself provisional);
 `system-architecture.md` §7; design memo 2026-07-29 (secondary attribute indexing);
-decisions [0013](../decisions/0013-mark-specified-vs-implemented.md),
-[0039](../decisions/0039-multi-valued-categoricals-are-slow-path-only.md),
-[0064](../decisions/0064-an-absent-number-is-a-presence-bitmap-beside-the-column.md),
-[0068](../decisions/0068-a-row-space-operand-bounded-by-the-requests-domain-is-admitted.md).
+decisions 0013,
+0039,
+0064,
+0068.
 **Citation convention:** unprefixed §n is the architecture design; this document's own sections are
 cited as **spec §n**.
 
@@ -321,7 +321,7 @@ access.
 indexed column or a blob-resident one — and never with `render = true`. A rendered mark has one
 colour, so declaring `render` on a multi-valued attribute is
 refused at parse with that reason — and **no projection, derived value or summary of one earns a
-hot column on its behalf either** (decision [0039](../decisions/0039-multi-valued-categoricals-are-slow-path-only.md)).
+hot column on its behalf either** (decision 0039).
 A caller who wants to colour by a value drawn from a multi-valued field declares an ordinary
 single-valued attribute carrying that value: they say which single value they mean, in a column
 that means exactly that, with no mechanism between the declaration and the row.
@@ -390,6 +390,18 @@ caller could enumerate hidden values by observing which keys are refused. This f
 §3.2's unmatched-token precedent, and makes "no such value" and "a value you cannot see"
 indistinguishable in outcome *and* in work.
 
+**The in-work half is a filter's property, and does not carry to the two listing surfaces**
+(2026-09-02; [decision 0121](../decisions/0121-the-suggestion-walk-probes-per-request-and-its-timing-is-accepted.md),
+[`value-suggestion.md`](value-suggestion.md) §3). A `derived` column's operand is answered by the
+masked scan and never by the postings, so its work is a function of `(candidate, column)` and of
+nothing the caller named — which is why the property holds there structurally (Appendix C, C24).
+`/v1/categories` and the suggestion verb *do* read the postings, one per value walked, so their
+service time is a function of how many values are walked: the whole vocabulary on the enumeration,
+and the values under a caller's typed prefix on the suggestion verb, hidden ones included. Both
+listing surfaces are indistinguishable **in outcome** — no status, no field and no gap in the page
+separates an invisible value from an absent one — and carry that timing channel, registered as
+**C31**.
+
 **Counts are a different question.** A legend with counts is C8, not C11: every count is an
 `and_cardinality` against `M_auth`, never precomputed. Colour-by-category leads there quickly, and
 this design does not (§7).
@@ -427,12 +439,20 @@ and postings*, not that every entity has every attribute.
 
 **`render` is per-view; `index` and the blob are not.** They are entity-space, declared once,
 applying everywhere. `render` is row-space, so an attribute declared for a document corpus would
-otherwise materialise a column of 10⁸ `absent` codes in an unrelated sensor view — views §53
+otherwise materialise a column of 10⁸ `absent` codes in an unrelated sensor view — views §5
 already permits per-view columns. ⊘ **`render_in` is refused at parse**: `MANIFEST.declared_scalars`
 is one flat bundle-wide list, so accepting it would put the column in every view anyway and
 silently, which is the opposite of what it asks for. Omitting it *is* every view — the expensive
-default, and the one the plan step warns about (§2.3). Per-view enumeration needs contracts §2.6
-and belongs with the views epic (§6).
+default, and the one the plan step warns about (§2.3).
+
+**A `scope` says which views render it, where `render_in` would have listed them** (`views.md` §5,
+built 2026-08-31). A group-scoped attribute declaring `render = true` occupies a slot in the row
+tail of every view of its group, and of any group sharing those views, and of no other — this
+paragraph's rule, with the view set derived from the scope rather than enumerated. It is not
+`render_in` arriving by another door: the column is a *family*, one per view, recorded on the
+group rather than in the flat `declared_scalars` list, and its values are that view's own. What
+`render_in` asked for — one bundle-wide column materialised in some views and not others — is
+still refused, and still needs contracts §2.6's per-view enumeration.
 
 **Codes are shared across views**, being vocabulary-scoped and entity-space, so the same code means
 the same key in every view that renders the attribute. A legend built for one view is correct for
@@ -535,8 +555,13 @@ describe**. Nothing here is waiting on someone to type it out.
 
 ## 7. What this does not do
 
-- **No aggregation.** Category counts are C8's existing shape; a breakdown surface is a separate
-  design against §8.2.
+- **No aggregation.** Category counts are C8's existing shape — an `and_cardinality` against
+  `M_auth`, per request, never precomputed — and a breakdown surface is a separate design against
+  §8.2. The one place a count is served is beside a **suggestion**, on request
+  (decision 0122,
+  `value-suggestion.md` §3): the caller chose the prefix and the page is at most `limit` values, and
+  the number never orders it. ⊘ Not built. `/v1/categories` still serves none, because a count
+  beside every code a client drew is the per-viewport breakdown this design does not do.
 - **No multi-valued attributes** (⊘, §3.7). No cold `inspect` sidecar either — the placement is
   gone rather than deferred, the record blob having taken over §10.3's per-interaction intention.
 - **No server-side multi-view composition** (§3.9).
@@ -562,96 +587,3 @@ The fixtures carry no attribute tail today, so no arm can see any of this.
   stopping short of that will report attribute cost as free and be wrong.
 
 ---
-
-## Appendix R — review trail
-
-**2026-08-18 — the configuration surface is rebuilt on two axes, and enumerated.** §4.0 is new: the
-whole surface in one place, six blocks, every key and every enumerated value. It is worth having
-because the set is **closed** — `deny_unknown_fields` on every block, an enumerated set behind every
-value that is a word rather than a caller's string — and closure is what the leak register rests on,
-the register being exhaustive because the surface is enumerable. A key added without an entry there
-is a disclosure control nobody has reasoned about.
-
-**2026-08-18 — the rebuild itself.** §4 is replaced wholesale and
-§3.8 and §3.9 follow it.
-[Decision 0088](../decisions/0088-visibility-is-two-axes-and-the-membership-test-is-one.md) is the
-ruling and
-[`../evidence/memos/2026-08-18-configuration-surface.md`](../evidence/memos/2026-08-18-configuration-surface.md)
-is the design; two reviews of its first draft — user experience and fail-closed properties — are
-what produced most of what changed. **No rule of this design is weakened**: every refusal in the
-old §4.3 survives under the new keys, and three are added where the collapse would otherwise have
-opened a hole (an unresolved vocabulary reference, a closed vocabulary with no source, and widths
-disagreeing across a shared vocabulary — the last now inexpressible rather than refused).
-
-What changed: `listing` and the layer's `gate`/`ungated`/`artifacts_carry_own` become `visibility`
-and a member default; `visible_when` and `corpus_derived` merge into
-`require_member_visibility`; `derived` is retired as a word meaning two quantifiers and returns as
-one setting of that key; `public` becomes a reserved access label at term `0` rather than a config
-keyword; vocabularies become objects, taking `width` with them; every object declares its own
-`source` and an optional `fields` override map, replacing five CLI flags with `--file`; and `slice`
-becomes `view` throughout. ⊘ A view's own gate remains specified and not implemented.
-
-**2026-08-12 — corrected against the built declaration surface.** The placement set this document
-introduced is gone: a field is a `type` and three booleans, `render` and `index` are the two words a
-caller writes, and a declaration claiming neither is **blob-resident** rather than refused. Records
-§2–§3 owns that rule and the three homes; this document keeps the category, its vocabulary and its
-disclosure controls. `inspect` disappears as a placement and not as a capability — §10.3's
-per-interaction cadence is the record blob's, so there is nothing left to opt into. Three claims
-were false against the parser and are now marked at the site: `render_in` is refused rather than
-defaulted (§3.9), `listing = "public"` on a discovered vocabulary warns rather than refuses (§4.3),
-and `index` on a **rendered** number or datetime is admitted, decision 0064's presence bitmap beside the hot column being what the row route needs to tell an absence from a stored zero
-(§4.3) — a combination that worked under the old surface, walked back deliberately, since
-store-once would answer that filter from a hot column storing absence as zero. No rule of this
-design changed.
-
-**2026-08-07 — corrected against the built `render` placement, and against five owner rulings.**
-No rule of this design changed; what changed is which of its claims are still true.
-
-§1's marker no longer says the design is unexercisable — the render half runs end to end — and it
-no longer names §3.5's attribute dictionary as where a minted category value would land. That was
-the day's sharpest correction: a **category needs no attribute dictionary**, because the vocabulary
-already enumerates its values and the code is the identifier, so nothing caller-supplied is
-interned and §3.5's authorisation-bypass hazard cannot arise for one. §3.5's separation still
-governs attribute *terms*; it was over-applied to categories here.
-
-§6 becomes a **status list**, because executing it as written would now deliver two things decided
-against — per-slice hot columns (`render_in` is refused; the flat `declared_scalars` cannot express
-them) and an attribute dictionary for categories — and three whose content the rulings changed.
-
-The rulings, none of which alters a rule above: **cardinality is not a threat** (an ordinal leaking
-set size is accepted, so §3.4's dense-code guidance is a preference rather than a control, and what
-must be enforced is that a principal sees a value only if it belongs to data they can see);
-**aggregates over categories are masked**, C8's existing `and_cardinality` shape; **no residency
-ceiling** (Appendix A gains none; §2.3's report-never-refuse stands unqualified); **`listing =
-"public"` on a discovered vocabulary is permitted with a warning** rather than refused — §3.8's
-prohibition relaxes, an operator may have reason to publish; and the **legend is global, served as
-metadata**, with per-viewport counts deferred to the filter contract.
-
-One measurement now exists where the design had a prediction. §3.3's membership sets were sized at
-**0.31–1.01× the render column they index**, across two label sets chosen to bracket entity-space
-contiguity, with a full 171-value legend evaluating in 0.013–1.10 ms
-(`probes/2026-08-07-category-membership/`). §3.3's expectation that sparse principals are cheapest
-is **supported, not confirmed** — it held on one corpus and was untested on the other. The probe
-also found the cost model's own asymmetry in a new place: many narrow grants cost more than a few
-wide ones at a fifteenth of the mask cardinality, so the expensive principal is term count, not
-coverage.
-
-**2026-08-04 — corrected against the built write path.** Flush and descriptor promotion exist, so
-§1's streaming marker names what is actually missing (§3.5's attribute dictionary) rather than flush;
-the retirement citations move to write-path §5.4's Rule S and Rule F, which replaced lifecycle §3's
-stamp ledger; and `overlay_version` exists, which §3.3's cache key assumed it did not. No rule
-changed.
-
-**Reviewed 2026-08-02**, three lenses across successive drafts.
-
-The findings that changed the design: a namespace tag inside the descriptor is insufficient, because
-`DictWriter` interns caller-supplied bytes — hence separate dictionaries and postings files (§3.5);
-dense codes on the wire are a cardinality lower bound, closed structurally by random assignment
-rather than accepted into the register (§3.4); a filter naming an invisible value must contribute an
-empty operand or become an existence oracle (§3.8); membership-derived visibility retires correctly
-only against the composed verdict, since a suppression never touches postings (§3.3); and attributes
-sharing a vocabulary could disagree on `listing` (§3.9).
-
-Corrected against the corpus: Appendix A carries no residency ceiling, so the plan step reports
-rather than refuses (§2.3); and the claim that category codes cost the same at any width is assumed
-rather than measured, the repo's own gather arm modelling cost per column by width (§3.6).

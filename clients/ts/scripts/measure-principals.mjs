@@ -14,11 +14,15 @@
 // once, and each needs its own measured list.
 //
 // With `--ranks` (scripts/rank_terms.py's output) it also composes COVERAGE principals — sparse
-// ~1%, medium ~10%, heavy ~50% of the corpus — because at a 4.8 x 10^4-term dictionary any single
+// ~1%, medium ~10%, heavy ~85% of the corpus — because at a 4.8 x 10^4-term dictionary any single
 // term is a sliver and "switch principal" demonstrates nothing. Each is the shortest prefix of the
 // ranked terms whose visible set reaches the target, found by binary search on the prefix length
 // with the REAL visible measured per probe — the ranking orders candidates, the service decides
-// sizes, and nothing here is estimated from pair counts.
+// sizes, and nothing here is estimated from pair counts. **`full` holds every ranked term** and
+// is the denominator the bands are measured against: it is the principal who sees everything, not
+// the top of the ranking (owner ruling, 2026-09-02 — a heavy 80–90% band sits beneath it rather
+// than standing in for it). Only when the session refuses a dictionary-sized `auth_data` does
+// `full` fall back to the top 4096 terms, and its label says so.
 //
 // Note it decodes only the TILE stream, which is the response's first frame — so this script needs
 // none of core's frame walking beyond one header, and stays plain JS.
@@ -61,7 +65,7 @@ const metaResp = await fetch(`${viewer}/v1/meta`, {
 });
 if (!metaResp.ok) throw new Error(`meta: ${metaResp.status} ${await metaResp.text()}`);
 const meta = await metaResp.json();
-const q = meta.quantisation;
+const q = meta.views[0].quantisation; // the frame is the view's (decision 0040)
 const view = meta.views[0].id;
 
 /** The `visible` total from a zoom-0, full-extent call: this principal's visible-set size. */
@@ -129,9 +133,19 @@ if (args.ranks) {
   // The denominator is the corpus a maximal principal can see, not the item count — measured the
   // same way as everything else. The whole dictionary in one authorise call would be a megabyte of
   // auth_data; the top view of a Zipf-shaped ranking is within a hair of the same union.
-  const CORPUS_PROBE_TERMS = Math.min(ranked.length, 4096);
-  const corpus = await visibleFor(ranked.slice(0, CORPUS_PROBE_TERMS));
-  console.log(`corpus visible (top ${CORPUS_PROBE_TERMS} ranked terms): ${corpus.toLocaleString()}`);
+  let fullTerms = ranked;
+  let fullLabel = `full — all ${ranked.length} terms`;
+  let corpus;
+  try {
+    corpus = await visibleFor(fullTerms);
+  } catch (e) {
+    // A dictionary-sized `auth_data` the session would not take: measure the head instead, and
+    // say so in the label rather than calling the head "full".
+    fullTerms = ranked.slice(0, Math.min(ranked.length, 4096));
+    fullLabel = `full — top ${fullTerms.length} of ${ranked.length} terms (session refused all: ${e.message})`;
+    corpus = await visibleFor(fullTerms);
+  }
+  console.log(`corpus visible (${fullLabel}): ${corpus.toLocaleString()}`);
 
   // **A small target cannot start at the head of a Zipf ranking** — the head term alone was 5.5%
   // of this corpus, so no prefix is 1%. Each target instead starts at the first term whose own
@@ -161,30 +175,34 @@ if (args.ranks) {
       if ((await unionOf(mid)) >= target) hi = mid;
       else lo = mid + 1;
     }
-    return {n: lo, visible: await unionOf(lo)};
+    // The first run at or over the target can overshoot it by a lot when terms overlap heavily —
+    // rung 3's MeSH branches jump from 71% to 99.6% in one term — so take whichever of that run and
+    // the one before sits closer to the target, on either side of it.
+    const over = await unionOf(lo);
+    if (lo > 1) {
+      const under = await unionOf(lo - 1);
+      if (Math.abs(target - under) < Math.abs(over - target)) return {n: lo - 1, visible: under};
+    }
+    return {n: lo, visible: over};
   };
 
   /** @type {[string, number][]} */
   const bands = [
     ['sparse', 0.01],
     ['medium', 0.1],
-    ['heavy', 0.5]
+    ['heavy', 0.85]
   ];
   for (const [label, fraction] of bands) {
     const start = startFor(fraction);
     const {n, visible} = await runReaching(start, corpus * fraction);
     const pct = (100 * visible) / corpus;
     chosen.push({
-      label: `${label} — ${pct < 10 ? pct.toFixed(1) : Math.round(pct)}% (${n} terms)`,
+      label: `${label} — ${pct < 10 || pct > 99 ? pct.toFixed(1) : Math.round(pct)}% (${n} terms)`,
       terms: ranked.slice(start, start + n),
       visible
     });
   }
-  chosen.push({
-    label: `full — top ${CORPUS_PROBE_TERMS} terms`,
-    terms: ranked.slice(0, CORPUS_PROBE_TERMS),
-    visible: corpus
-  });
+  chosen.push({label: fullLabel, terms: fullTerms, visible: corpus});
 } else {
   const allTerms = measured.map((m) => m.term);
   chosen.push({
@@ -196,8 +214,8 @@ if (args.ranks) {
 
 // `--out` because presets are **per bundle** and the demo now serves more than one: a term id names
 // a different set in each dictionary, so one shared file would mislabel every principal on whichever
-// dataset it was not measured against. `run_demo.sh` composes the per-dataset files into
-// `datasets.json`.
+// dataset it was not measured against. `run_demo.sh` composes the per-dataset files
+// into the dataset document under `tessera-demo/`, which it hands the viewer in the URL it prints.
 const out =
   args.out ?? join(dirname(fileURLToPath(import.meta.url)), '..', 'viewer', 'presets.json');
 await writeFile(out, `${JSON.stringify(chosen, null, 2)}\n`);

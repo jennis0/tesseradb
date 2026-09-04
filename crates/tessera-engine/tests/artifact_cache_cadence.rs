@@ -35,6 +35,7 @@ const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 /// artifact that appeared or vanished — the distinction these cases turn on.
 fn declaration(name: &str, kind: HierarchyKind) -> LayerDeclaration {
     LayerDeclaration {
+        scope: Default::default(),
         name: name.into(),
         title: Some(format!("{name} (title)")),
         views: vec!["s0".into()],
@@ -115,7 +116,7 @@ fn node(
     sources: std::ops::Range<u64>,
 ) -> IncomingArtifact {
     let mut artifact = IncomingArtifact::from_entities(Some(key.into()), fx.members(sources));
-    artifact.parent_key = parent.map(str::to_string);
+    artifact.parent_keys = parent.into_iter().map(str::to_string).collect();
     artifact
 }
 
@@ -233,8 +234,9 @@ fn a_write_to_one_layer_leaves_another_layers_row_form_alone() {
     );
     assert_eq!(
         engine.artifact_cache_builds().0,
-        warm + 1,
-        "exactly one form was rebuilt: the level that was written to, and no other layer's"
+        warm,
+        "no form was rebuilt at all: the write applied its own delta to the form it moved, so \
+         neither the level that was written to nor any other layer's was projected again"
     );
     assert_eq!(
         served(&engine, "clusters/b"),
@@ -496,4 +498,157 @@ fn a_fold_rebuilds_every_row_form_and_only_the_lineages_it_moved() {
         "the fold warmed both, so the first request after the flip derives nothing — which is the \
          stall it exists to keep off a request"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Derived geometry: the third structure held between requests, and the one that is per principal.
+// ---------------------------------------------------------------------------------------------
+
+/// A layer that declares the expensive property, so its artifacts have geometry worth holding.
+fn hulled(name: &str) -> LayerDeclaration {
+    let mut declaration = flat(name);
+    declaration.content.computed = vec!["centroid".into(), "box".into(), "hull".into()];
+    declaration
+}
+
+/// A pan: overlapping viewports that walk across the map, as a viewer dragging it produces.
+///
+/// Each step is a real `/v1/viewport` through the serving path, so what is being counted is the
+/// derivations a *sequence of requests* makes rather than a rate computed from a key's shape.
+fn pan(engine: &Engine, session: &tessera_engine::Session, steps: usize) {
+    for step in 0..steps {
+        let x = 40.0 * step as f64;
+        engine
+            .viewport(
+                session,
+                ViewportRequest::new("s0", 0, [x, 0.0, x + 700.0, 1000.0], N_ITEMS as usize),
+            )
+            .expect("a viewport");
+    }
+}
+
+/// **The headline for derived geometry: a pan re-serves the same artifacts and derives them once.**
+///
+/// A hull is the most expensive thing a response does per artifact — a *measured* p90 of 14 ms and
+/// 84 ms on the corpus root — and before this cache the identical request three times running cost
+/// 2.4 s, 2.9 s and 2.8 s. The freshness half is the test below; neither is worth writing alone,
+/// which is this file's own rule.
+#[test]
+fn a_pan_derives_each_shape_once_and_re_serves_it() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(hulled("clusters/a")).unwrap();
+    publish(
+        &engine,
+        "clusters/a",
+        (0..8)
+            .map(|k| node(&fx, &format!("c{k}"), None, k * 400..(k + 1) * 400))
+            .collect(),
+    );
+
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    pan(&engine, &session, 8);
+
+    let stats = engine.derived_cache_stats();
+    assert!(
+        stats.misses <= 8,
+        "{} derivations for 8 artifacts — a pan is re-deriving",
+        stats.misses
+    );
+    assert!(
+        stats.hits > stats.misses,
+        "{} hits against {} misses over a pan",
+        stats.hits,
+        stats.misses
+    );
+    println!(
+        "pan of 8 viewports over 8 artifacts: {} hits, {} misses, hit rate {:.2}",
+        stats.hits,
+        stats.misses,
+        stats.hit_rate().expect("the pan made lookups")
+    );
+}
+
+/// The freshness half: a membership that moved is a shape that moved, on the very next request.
+///
+/// The key carries the level's own write counter, so a publication rotates it rather than editing
+/// anything — the same rule the row form and the masked-count histogram beside it follow.
+#[test]
+fn a_write_re_derives_the_shape_it_moved() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(hulled("clusters/a")).unwrap();
+    publish(&engine, "clusters/a", vec![node(&fx, "c0", None, 0..200)]);
+
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let hull_of = |engine: &Engine| -> Vec<Vec<Vec<[u32; 2]>>> {
+        engine
+            .viewport(
+                &session,
+                ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
+            )
+            .expect("a viewport")
+            .artifacts
+            .into_iter()
+            .find(|a| a.layer == "clusters/a")
+            .expect("the artifact is served")
+            .derived
+            .shape
+            .expect("a declared hull")
+    };
+    let before = hull_of(&engine);
+    assert_eq!(before, hull_of(&engine), "the second request re-derived");
+
+    // Members join the artifact that exists — publication is append-only, so growth is how a
+    // membership widens, and it is the ordinary write this cache has to notice.
+    engine
+        .grow_memberships(
+            "clusters/a".into(),
+            0,
+            vec![IncomingGrowth::from_entities(
+                "c0".into(),
+                fx.members(200..2_000),
+            )],
+        )
+        .expect("points joining an artifact that exists is an ordinary write");
+    let after = hull_of(&engine);
+    assert_ne!(
+        before, after,
+        "the shape from before the publication was served after it"
+    );
+}
+
+/// **A shape is never shared across principals**, which is the term the whole safety of holding one
+/// rests on: a hull is derived from `membership ∩ M_auth`, so one principal's is not an answer to
+/// another's request for the same artifact.
+#[test]
+fn two_principals_over_one_artifact_get_two_shapes() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(hulled("clusters/a")).unwrap();
+    publish(&engine, "clusters/a", vec![node(&fx, "c0", None, 0..600)]);
+
+    let hull_for = |credential: &[u8]| -> Vec<Vec<Vec<[u32; 2]>>> {
+        let session = engine.authorise(credential).unwrap();
+        engine
+            .viewport(
+                &session,
+                ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
+            )
+            .expect("a viewport")
+            .artifacts
+            .into_iter()
+            .find(|a| a.layer == "clusters/a")
+            .expect("the artifact is served")
+            .derived
+            .shape
+            .expect("a declared hull")
+    };
+    let broad = hull_for(&full_coverage_credential());
+    let narrow = hull_for(&subset_credential());
+    assert_ne!(
+        broad, narrow,
+        "the broad principal's shape was served to the narrow one"
+    );
+    assert_eq!(engine.derived_cache_stats().misses, 2);
 }

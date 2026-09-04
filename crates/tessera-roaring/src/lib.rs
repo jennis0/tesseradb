@@ -55,7 +55,11 @@ pub const BLOCK: usize = 1 << 16;
 /// 64-bit words in one block's bitset container.
 pub const WORDS: usize = BLOCK / 64;
 /// croaring's array/bitset threshold: a container holding more than this is stored as a bitset.
-const ARRAY_MAX: u32 = 4096;
+///
+/// **Public because it is the caller's choice of encoder**, not just this module's: a caller that
+/// holds its members as a sorted list rather than as words picks [`Sink::push_members`] below the
+/// threshold and stamps words for [`Sink::push_block`] above it.
+pub const ARRAY_MAX: u32 = 4096;
 /// Containers staged before a stream is handed to croaring. Bounds the transient buffer at roughly
 /// a megabyte rather than the whole serialized result, which at half of 10⁹ would be 125 MB.
 const STAGE: usize = 128;
@@ -70,6 +74,9 @@ pub struct Sink {
     payload: Vec<u8>,
     stream: Vec<u8>,
     out: Bitmap,
+    /// Containers staged before a flush — [`STAGE`] ordinarily, and every container there will
+    /// ever be for a sink built by [`Sink::unstaged`].
+    stage: usize,
 }
 
 /// `new()` takes no arguments and carries no state a caller chooses, so `Default` is exactly it.
@@ -88,6 +95,31 @@ impl Sink {
             payload: Vec::new(),
             stream: Vec::new(),
             out: Bitmap::new(),
+            stage: STAGE,
+        }
+    }
+
+    /// A sink that flushes **once, at [`Self::finish`]** — for a caller building many bitmaps at
+    /// the same time, where the staged flush is the cost rather than the bound it exists to be.
+    ///
+    /// Each flush hands croaring a stream and unions it into the result, and a union clones every
+    /// container it takes: so a bitmap arriving in *n* flushes has each of its containers
+    /// allocated and copied once to deserialise it and again to merge it, and at a few hundred
+    /// members a container that overhead is the whole cost. Flushing once removes the merge
+    /// entirely — the first stream *becomes* the result (see [`Self::flush`]).
+    ///
+    /// **The caller is choosing memory for it.** The payload held is the finished bitmap's
+    /// serialized size rather than a megabyte, so a caller with a thousand sinks open holds a
+    /// thousand bitmaps' worth of bytes. `RowColumn::transpose` is the caller this exists for: it
+    /// builds a level's whole membership at once, one sink per artifact, and its payload is the
+    /// row form it is about to produce anyway.
+    ///
+    /// A stream is still flushed early if the payload would outgrow the format's `u32` offsets,
+    /// which is the one thing staging is load-bearing for.
+    pub fn unstaged() -> Self {
+        Sink {
+            stage: usize::MAX,
+            ..Sink::new()
         }
     }
 
@@ -109,6 +141,7 @@ impl Sink {
         if card == 0 {
             return;
         }
+        self.room_for(WORDS * 8);
         self.keys.push(key);
         self.cards.push(card);
         self.starts.push(self.payload.len() as u32);
@@ -132,7 +165,85 @@ impl Sink {
                 }
             }
         }
-        if self.keys.len() == STAGE {
+        if self.keys.len() >= self.stage {
+            self.flush();
+        }
+    }
+
+    /// Stage the container for `key` from the block's **members themselves** — ascending, absolute
+    /// values, at most [`ARRAY_MAX`] of them.
+    ///
+    /// **The array form of [`Self::push_block`], for a caller that already holds a sorted list.**
+    /// The bitset form is the right shape for a caller that evaluated a predicate into a bit per
+    /// value or stamped looked-up rows into a bit array; a caller that produced its members by a
+    /// counting sort holds them as a list, and stamping them into 8 KB of words for `push_block`
+    /// to scan back out is 1,024 word reads per container however few members it holds. That is
+    /// the whole cost at a sparse container, and it is what this exists to remove: transposing
+    /// rung 3's `mesh/descriptors` measured **16.7 s through `push_block` against 5.0 s through
+    /// this** for the same 1.66×10⁹ members, whose containers hold a few hundred each.
+    ///
+    /// **A repeat of the previous value is dropped**, so a caller whose source could name the same
+    /// member twice — a row column listing one artifact twice for a row — stages a container whose
+    /// descriptor and payload agree rather than one croaring will read as a different set. Members
+    /// that are not ascending are a caller bug and are caught by `debug_assert`; in release they
+    /// stage a container croaring reads as the sorted array it is not, which is why the assertion
+    /// is here and not left to the reader.
+    ///
+    /// Above [`ARRAY_MAX`] the format requires a bitset payload, so this stamps the words and
+    /// defers to [`Self::push_block`] rather than writing an array croaring would misread.
+    pub fn push_members(&mut self, key: u16, members: &[u32]) {
+        if members.is_empty() {
+            return;
+        }
+        if members.len() > ARRAY_MAX as usize {
+            let mut words = [0u64; WORDS];
+            let mut card = 0u32;
+            for value in members {
+                let low = (*value & 0xFFFF) as usize;
+                let bit = 1u64 << (low & 63);
+                if words[low >> 6] & bit == 0 {
+                    words[low >> 6] |= bit;
+                    card += 1;
+                }
+            }
+            self.push_block(key, card, &words);
+            return;
+        }
+        debug_assert!(
+            members.windows(2).all(|pair| pair[0] <= pair[1]),
+            "push_members takes an ascending run"
+        );
+        self.room_for(members.len() * 2);
+        let start = self.payload.len() as u32;
+        let mut card = 0u32;
+        // Reserved once for the run rather than grown per member: this is two bytes a member and a
+        // capacity check per pair is what stops a payload copy being the cost of the encoder.
+        self.payload.reserve(members.len() * 2);
+        // `u64::MAX` is outside the members' `u32` universe, so the first member is never a repeat
+        // — an `Option` here is a branch and a discriminant on the hottest loop in the crate.
+        let mut last = u64::MAX;
+        for value in members {
+            if last == u64::from(*value) {
+                continue;
+            }
+            last = u64::from(*value);
+            card += 1;
+            self.payload
+                .extend_from_slice(&((*value & 0xFFFF) as u16).to_le_bytes());
+        }
+        self.keys.push(key);
+        self.cards.push(card);
+        self.starts.push(start);
+        if self.keys.len() >= self.stage {
+            self.flush();
+        }
+    }
+
+    /// Flush early where one more payload would carry the offset table past the `u32` the portable
+    /// format writes it in. A staged sink never comes near it; an unstaged one holds a whole
+    /// bitmap's bytes and could.
+    fn room_for(&mut self, bytes: usize) {
+        if self.payload.len() + bytes > u32::MAX as usize {
             self.flush();
         }
     }
@@ -150,6 +261,10 @@ impl Sink {
         }
         self.assemble();
         match Bitmap::try_deserialize::<Portable>(&self.stream) {
+            // **The first stream becomes the result**, rather than being merged into an empty
+            // bitmap: a union clones every container it takes, and for a sink that flushes once
+            // that clone is the whole of the encoder's remaining cost.
+            Some(bitmap) if self.out.is_empty() => self.out = bitmap,
             Some(bitmap) => self.out.or_inplace(&bitmap),
             None => {
                 debug_assert!(false, "the packed stream must be a valid portable bitmap");
@@ -246,6 +361,61 @@ mod tests {
         assert_eq!(sink.finish(), want);
     }
 
+    /// **An unstaged sink is the same bitmap as a staged one**, over more containers than a stage
+    /// holds — which is the case the two differ in at all, since below the stage neither flushes
+    /// until `finish`. Both encodings, so the fast path that takes the first stream whole is
+    /// exercised beside the merge it replaces.
+    #[test]
+    fn an_unstaged_sink_is_the_staged_sink() {
+        for card in [3usize, 5000] {
+            let mut staged = Sink::new();
+            let mut unstaged = Sink::unstaged();
+            let mut want = Bitmap::new();
+            for key in 0..(STAGE as u16 * 2 + 3) {
+                let base = u32::from(key) << 16;
+                let members: Vec<u32> = (0..card).map(|i| base + (i as u32) * 11).collect();
+                staged.push_members(key, &members);
+                unstaged.push_members(key, &members);
+                want.add_many(&members);
+            }
+            assert_eq!(staged.finish(), want);
+            assert_eq!(unstaged.finish(), want);
+        }
+    }
+
+    /// **The two entry points stage the same container**, which is what lets a caller pick by the
+    /// shape it holds its members in rather than by what the format wants: a sorted run through
+    /// [`Sink::push_members`], stamped words through [`Sink::push_block`]. Across the threshold in
+    /// both directions, and over a repeat, which the list form drops and the words form cannot
+    /// represent.
+    #[test]
+    fn the_list_form_and_the_words_form_stage_the_same_container() {
+        for card in [1usize, 2, 4095, 4096, 4097, 9000] {
+            for key in [0u16, 7] {
+                let base = u32::from(key) << 16;
+                // Spread over the block rather than packed at its start, so the array payload is
+                // not accidentally the identity.
+                let members: Vec<u32> = (0..card).map(|i| base + (i as u32) * 7).collect();
+                let mut words = [0u64; WORDS];
+                for value in &members {
+                    let low = (*value & 0xFFFF) as usize;
+                    words[low >> 6] |= 1u64 << (low & 63);
+                }
+                let mut listed = Sink::new();
+                listed.push_members(key, &members);
+                let mut stamped = Sink::new();
+                stamped.push_block(key, card as u32, &words);
+                let want: Bitmap = members.iter().copied().collect();
+                assert_eq!(listed.finish(), want, "the list form differs at {card}");
+                assert_eq!(stamped.finish(), want, "the words form differs at {card}");
+            }
+        }
+        // A repeated member is one member.
+        let mut sink = Sink::new();
+        sink.push_members(3, &[(3u32 << 16) + 4, (3u32 << 16) + 4, (3u32 << 16) + 9]);
+        assert_eq!(sink.finish(), [(3u32 << 16) + 4, (3u32 << 16) + 9].iter().copied().collect::<Bitmap>());
+    }
+
     /// A bitset container — above croaring's 4,096 threshold, where the payload is the words
     /// themselves.
     #[test]
@@ -336,5 +506,87 @@ mod tests {
             assert_eq!(packed.finish(), want);
             assert_eq!(rebuilt.finish(), want, "sparse={sparse}");
         }
+    }
+
+    /// **The block path is taken at all**, which every test above is blind to: they compare the
+    /// finished bitmap with one built by insertion, and an implementation that quietly *became*
+    /// that insertion would satisfy all of them while giving up the whole reason this crate
+    /// exists — `CLAUDE.md`'s measured cost model, bitmap operations costing O(containers
+    /// touched) rather than O(cardinality). The projection measured 8,267 ms against 1,277 ms at
+    /// 10⁹ on exactly that difference.
+    ///
+    /// Asserted structurally rather than by timing: `correctness-suite.md` §17 keeps timing
+    /// assertions out of tests that run on developer machines. The observables are the staged
+    /// container itself — one descriptor per non-empty block, a payload of exactly the width its
+    /// cardinality selects, and `out` still **empty**, because a sink that inserted values would
+    /// have populated it before any stream was assembled — and then the stream croaring is
+    /// actually handed, which must deserialise, since `flush`'s fallback to `rebuild_staged` is
+    /// the per-value path this test exists to keep off the hot route.
+    ///
+    /// Mutations this kills: `push_block` rewritten to stamp entities into `out` directly;
+    /// emitting a bitset payload for an array container or the reverse; a descriptor or offset
+    /// that disagrees with the payload, which croaring refuses and `flush` then answers correctly
+    /// but slowly.
+    #[test]
+    fn a_block_is_staged_as_a_container_rather_than_inserted_value_by_value() {
+        let mut sink = Sink::new();
+        let mut want = Bitmap::new();
+        // Two blocks, one either side of the array/bitset threshold, and fewer than `STAGE` so
+        // nothing flushes underneath the assertions.
+        for (key, step) in [(0u16, 2usize), (5u16, 1_000usize)] {
+            let mut words = [0u64; WORDS];
+            let mut card = 0u32;
+            for slot in (0..BLOCK).step_by(step) {
+                words[slot >> 6] |= 1u64 << (slot & 63);
+                card += 1;
+                want.add((u32::from(key) << 16) + slot as u32);
+            }
+            sink.push_block(key, card, &words);
+        }
+
+        assert_eq!(
+            sink.keys,
+            vec![0u16, 5],
+            "one descriptor per non-empty block"
+        );
+        assert!(
+            sink.cards[0] > ARRAY_MAX && sink.cards[1] <= ARRAY_MAX,
+            "the fixture must straddle the threshold, or this test proves nothing: {:?}",
+            sink.cards
+        );
+        assert_eq!(
+            sink.payload.len(),
+            WORDS * 8 + 2 * sink.cards[1] as usize,
+            "the payload must be one bitset container's words followed by one array container's \
+             u16s — a sink that inserted its entities would have staged no payload at all"
+        );
+        assert_eq!(
+            sink.starts,
+            vec![0u32, (WORDS * 8) as u32],
+            "the second container must begin exactly where the first one ends"
+        );
+        assert!(
+            sink.out.is_empty(),
+            "no entity may reach the result before a stream is handed to croaring: value-by-value \
+             insertion is what this crate exists to avoid"
+        );
+
+        // The stream `flush` hands croaring. It must deserialise: `flush`'s fallback answers
+        // correctly by rebuilding entity by entity, so a stream croaring refuses is exactly the
+        // regression this test is for, and `debug_assert` would only catch it in a debug build.
+        sink.assemble();
+        assert_eq!(sink.stream[0..4], COOKIE_NO_RUN.to_le_bytes());
+        assert_eq!(sink.stream[4..8], 2u32.to_le_bytes());
+        assert_eq!(sink.stream[8..10], 0u16.to_le_bytes(), "first key");
+        assert_eq!(
+            sink.stream[10..12],
+            ((sink.cards[0] - 1) as u16).to_le_bytes(),
+            "cardinality is stored one less than it is"
+        );
+        let deserialized = Bitmap::try_deserialize::<Portable>(&sink.stream)
+            .expect("the assembled stream must be a portable bitmap, or flush rebuilds per value");
+        assert_eq!(deserialized, want, "and it must carry the set it staged");
+
+        assert_eq!(sink.finish(), want);
     }
 }

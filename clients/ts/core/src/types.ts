@@ -19,7 +19,14 @@ export type ArrowType =
   | 'f32'
   | 'f64'
   | 'timestamp_us'
-  | 'utf8';
+  | 'utf8'
+  // The two spellings a prose column takes, and they were missing: the server writes `keyword` and
+  // `text` for the two analysed string kinds (`ScalarType::arrow_type_name`), and a client whose
+  // union stopped at `utf8` could not name the column a corpus titles its points by. Nothing drew
+  // them, which is why the gap survived — a text column is refused `render` and never reaches the
+  // marks (records-and-search §3); it reaches `/v1/items`, which is where a name comes from.
+  | 'keyword'
+  | 'text';
 
 /**
  * What makes a column a category rather than a plain integer.
@@ -86,6 +93,18 @@ export type FilterOperandSet = {
   family: 'category' | 'keyword' | 'string' | 'text' | 'numeric';
   /** The operator names this column accepts — `eq`, `in`, `prefix`, `contains`, `match`, `phrase`, `range`. */
   operands: string[];
+  /**
+   * Present only on a **group-scoped** attribute: the view group whose views this column's values
+   * are per (`views.md` §5). Absent is entity scope — one value per entity, the same under every
+   * view — which is the ordinary case and says itself.
+   *
+   * Under a view of that group, or of a group sharing its views, the leaf is sent bare and the
+   * request's own view decides which column it reads. Under any other view the leaf must **pin**
+   * one: `column@key`, the key being a view's only address.
+   * An unpinned leaf there is a 422 naming the group, and a pin naming no view of it is the same
+   * 404 an unknown view gets.
+   */
+  scope?: {group: string};
 };
 
 /**
@@ -102,7 +121,57 @@ export type FilterExpr =
   | {all_of: FilterExpr[]}
   | {any_of: FilterExpr[]}
   | {none_of: FilterExpr[]}
+  | {region: RegionOperand}
+  | {member_of: MemberOfOperand}
   | {[column: string]: FilterOperator};
+
+/**
+ * The `region` leaf (`selection-operand.md` §2; `polygon-membership.md` §8): exactly one of a
+ * shape in the view's own data space — `polygon` (at least three vertices, implicitly closed),
+ * `bbox` (`[x0, y0, x1, y1]`), `circle` (`[cx, cy, r]`), `ellipse` (`[cx, cy, a, b,
+ * angle_degrees]`) — with `space` (`view`, the only value a view honours today), or `artifact`, a
+ * published shape's `tessera_id` as a decimal string. `region` is a reserved column name.
+ */
+export type RegionOperand =
+  | {polygon: [number, number][]; space?: 'view'}
+  | {bbox: [number, number, number, number]; space?: 'view'}
+  | {circle: [number, number, number]; space?: 'view'}
+  | {ellipse: [number, number, number, number, number]; space?: 'view'}
+  | {artifact: string};
+
+/**
+ * The `member_of` leaf (`highlight-and-hierarchy.md` §3; contracts §3.2 r73): one artifact of one
+ * layer, resolved
+ * inside the trust boundary to that artifact's membership intersected with `M_auth`.
+ *
+ * Spelled like `region` and a reserved column name, refused at the build. It sits in `filters` or
+ * in `highlight` identically, so *narrow to this cluster* and *light this descriptor* are the
+ * same clause in two positions.
+ *
+ * **An artifact this principal was never served is an empty operand, never a refusal.** An
+ * identifier is a *value*, and answering `422` to one would make the leaf an existence oracle
+ * over exactly what the criterion withholds. An unknown *layer* is `422`, being deployment
+ * schema — so a client may spell a layer name wrong and hear about it, and may not learn whether
+ * an artifact exists.
+ */
+export type MemberOfOperand = {
+  layer: string;
+  /**
+   * The artifact's opaque `tessera_id` (I10) as a **decimal string**, which is how the `region`
+   * leaf already spells one (`polygon-membership.md` §8) and for the same reason: a `tessera_id`
+   * is `u64` and JSON has no 64-bit integer, so a number here would lose the top of the range
+   * silently. `memberOf` builds it from the `bigint` a client holds.
+   */
+  artifact: string;
+};
+
+/**
+ * `x-tessera-region` (`selection-operand.md` §6): whether every region leaf's answer is exact for
+ * the shape against each point's stored position, or exact for a **cover** of it — a superset —
+ * taken at `depth` because the shape's perimeter exceeded `max_region_cells`. A function of the
+ * shape and the grid alone, never of the rows.
+ */
+export type RegionVerdict = {exact: true; depth: null} | {exact: false; depth: number};
 
 /** One column's predicate. Exactly one key — the server refuses a leaf carrying two. */
 export type FilterOperator =
@@ -140,14 +209,39 @@ export type Layer = {
    * Where the layer's lineage lives, and the **default** cut depth — not its only setting, since a
    * request may ask for more detail (`artifactBudget`).
    */
-  hierarchy: {kind: 'flat' | 'nested' | 'stacked'; pruneChildren: boolean};
+  /**
+   * The five kinds the wire declares (`tessera-types`' `HierarchyKind`): `flat` (no lineage),
+   * `nested` (a tree in the edges, no levels), `dag` (several parents per child, decision 0117),
+   * and the two levelled shapes `stacked` and `tiered`. `tiered` was missing here until
+   * 2026-08-28 and `dag` until 2026-09-02 — the union is what the fetch model classifies layers
+   * by, and what the hierarchy panel walks, so an absent member is a layer silently treated as
+   * something it is not.
+   */
+  hierarchy: {kind: 'flat' | 'nested' | 'dag' | 'stacked' | 'tiered'; pruneChildren: boolean};
   /**
    * The resolutions the layer declares. **Empty for a treed layer**, which declares none: its
    * lineage is in its edges, and a level number would say nothing about position in it.
    */
   levels: {level: number; title: string; zoom: [number, number] | null}[];
-  /** The derived vocabulary a client must know to draw anything the layer's artifacts carry. */
-  derivedContent: string[];
+  /**
+   * Which computed properties the layer **declares** — `centroid`, `box`, `hull` — as `/v1/meta`
+   * publishes them in `computed_content` (contracts §3.2 r42). It is the declaration and not a
+   * property of any one artifact: a layer that declares `hull` serves one for every artifact that
+   * exists for this principal, though the viewport asks for centroids and boxes and a client
+   * fetches a shape by identifier when it needs one.
+   */
+  computedContent: string[];
+  /**
+   * **Which kind the layer's one drawn geometry is** (`polygon-membership.md` §7.1), or `null`
+   * where it draws none: `derived` — the hull over the members this principal can see, which
+   * moves with the principal; `predicate` — the membership shape of a spatial layer, the same for
+   * every principal served the artifact; `authored` — a supplied drawing, likewise. A client
+   * draws from this — a box drawn for an artifact whose layer declares a shape is a placeholder
+   * for one on its way, and the map draws nothing rather than a rectangle that becomes the shape
+   * a moment later — and it decides what may be held across principals: a derived shape is never
+   * kept against a `tesseraId` across a change of principal, and the other two may be.
+   */
+  shape: ShapeKind | null;
   /** The kinds of supplied content its artifacts carry. */
   suppliedContent: string[];
   depsOn: string[];
@@ -155,11 +249,131 @@ export type Layer = {
   version: number;
 };
 
+/** The names a view's `projection` may take — the closed set of `projections.md` §5. */
+export type ProjectionName = 'web_mercator' | 'equirectangular' | 'gall_isographic' | 'none';
+
+/**
+ * The tile schemes a view's frame may be addressed in. One: the slippy-map `z/x/y` every basemap
+ * server publishes. It is a scheme rather than a flag because a frame can be aligned to a tiling
+ * nobody serves — see {@link ViewInfo.tileScheme}.
+ */
+export type TileScheme = 'xyz';
+
+/**
+ * One declared view, and what it is a picture of (`projections.md` §9).
+ *
+ * The frame and the four projection fields are **deployment constants, identical for every
+ * principal**, and they are what a host decides a basemap by. `projection.ts` holds the two
+ * things a client does with them.
+ */
+export type ViewInfo = {
+  id: string;
+  displayName: string;
+  /**
+   * The extent this view's positions are quantised against — what every wire coordinate is a
+   * fraction of, and what a client turns a grid unit back into a data coordinate with.
+   *
+   * **Per view and not per bundle** (decision 0040): two views of one bundle may quantise
+   * differently — an embedding and a map cannot share a frame without one of them wasting most
+   * of the grid — so a client holding one extent for the deployment would decode every position
+   * of the second view against the first's ground.
+   */
+  quantisation: Quantisation;
+  /** What placed this view's positions; `'none'` for a view that projects nothing. */
+  projection: ProjectionName;
+  /**
+   * The ratio the world should be drawn at, width ÷ height — 1 for `web_mercator`, `2cos φ₁` for
+   * an equirectangular alias, and `null` for `none`, which has no world to draw.
+   */
+  worldAspect: number | null;
+  /**
+   * The tile scheme this view's frame addresses, and **the field that decides whether a basemap
+   * may be drawn**. `null` — the answer for every projection but an aligned `web_mercator` one —
+   * means draw the points and draw no basemap. It is a scheme's name rather than a flag because
+   * an equirectangular frame is aligned to a square tiling no server publishes, so alignment
+   * alone would have a host draw a Mercator basemap under a corpus that cannot line up with one.
+   */
+  tileScheme: TileScheme | null;
+  /** The tile this view's frame is under {@link tileScheme}. Present exactly when it is. */
+  tile: {z: number; x: number; y: number} | null;
+  /**
+   * Where this view sits in its group's roster (`views.md` §3.2), or `null` for a plain view —
+   * which has no group and no key, so the three fields are null together.
+   */
+  roster: ViewRoster | null;
+};
+
+/**
+ * One view's roster record: its group, the caller's key, and the typed per-view metadata its
+ * group declared.
+ *
+ * **The key is the view's only address** — `<group>:<key>` wherever a view id goes — and the
+ * order of a group's views is the order {@link Meta.groups} lists them in, which is creation
+ * order. A client offering previous-and-next walks that list rather than comparing keys: a key is
+ * the caller's own string and means nothing to a client.
+ */
+export type ViewRoster = {
+  group: string;
+  key: string;
+  /**
+   * One entry per metadata name the group declared, typed. Empty on a `members` group's views,
+   * whose metadata belongs to the group that owns the keys (`views.md` §3.3).
+   */
+  metadata: Record<string, ViewMetadataValue>;
+};
+
+/**
+ * One roster metadata value, typed as the declaration typed it. `timestamp_us` is microseconds
+ * since the Unix epoch — the one unit that type may hold, so a client need not guess whether a
+ * large integer is a count or an instant.
+ *
+ * **Not an attribute**: one value per view rather than one per (entity, view), and it filters
+ * nothing.
+ */
+export type ViewMetadataValue =
+  | {type: 'bool'; value: boolean}
+  | {type: 'int'; value: number}
+  | {type: 'float'; value: number}
+  | {type: 'text'; value: string}
+  | {type: 'timestamp_us'; value: number};
+
+/**
+ * One view group: its name and its view ids in creation order (`views.md` §3.2).
+ *
+ * **A group is not a view** — it cannot be named on a viewer verb — and it carries no frame,
+ * projection or gate of its own here: every one of those is already on each of its views, and a
+ * second copy would be a second thing to disagree with the first.
+ */
+export type ViewGroup = {
+  name: string;
+  /**
+   * The group's human-readable title, or `null` where the deployment declared none — in which
+   * case a picker has the name and nothing else to show.
+   */
+  title: string | null;
+  /**
+   * The group whose keys these are, where this group is a second layout over
+   * another's views (`views.md` §3.3); `null` where it owns them.
+   */
+  membersOf: string | null;
+  /** This group's view ids, in creation order — the `group:key` form a request names. */
+  views: string[];
+};
+
 export type Meta = {
   apiVersion: number;
   idset: number;
-  views: {id: string; displayName: string}[];
-  quantisation: Quantisation;
+  /**
+   * The declared views in serving order (`views.md` §3.2) — the plain views first, then each
+   * group's views in creation order — each carrying its own frame, see
+   * {@link ViewInfo.quantisation}.
+   */
+  views: ViewInfo[];
+  /**
+   * The view groups and their orderings — see {@link ViewGroup}. Empty where the deployment
+   * declares plain views alone, which is the ordinary case.
+   */
+  groups: ViewGroup[];
   /** The column schema in full — see {@link DeclaredScalar}. Order is the declaration order. */
   declaredScalars: DeclaredScalar[];
   /**
@@ -178,6 +392,19 @@ export type Meta = {
      * page that means "the set ended" from one that means "the deployment truncated".
      */
     maxCategoryValues: number;
+    /** The most vertices a `region` leaf's polygon may carry; over it the request is a `422`. */
+    maxRegionVertices: number;
+    /**
+     * The most boundary cells a `region` leaf's descent may hold at one depth. Not a refusal:
+     * over it the answer is a cover, said on `x-tessera-region` ({@link RegionVerdict}).
+     */
+    maxRegionCells: number;
+    /**
+     * `POST /v1/artifacts/browse`' page ceiling and default (`highlight-and-hierarchy.md` §4). A
+     * client that pages needs it for the reason it needs `maxCategoryValues`: to tell a short page
+     * that means *the set ended* from one that means *the deployment truncated*.
+     */
+    maxBrowseRows: number;
   };
   /** `serve.max_tiles_per_request` — the client's own bound when it chooses a request depth. */
   maxTilesPerRequest: number;
@@ -201,6 +428,50 @@ export type CategoryValue = {
   /** Presentation, amendable without a build. Absent for every value a discovered vocabulary mints. */
   title: string | null;
 };
+
+/**
+ * Where a suggestion's match sits, **in characters of the served string** (`key` or `title`, per
+ * `field`) — so a client highlights with `<mark>` over the string it is about to draw, and never
+ * re-implements the fold to find the span itself (`value-suggestion.md` §4).
+ */
+export type MatchSpan = {
+  field: 'key' | 'title';
+  start: number;
+  len: number;
+};
+
+/** One suggested value: `/v1/categories/{column}` fields, plus where it matched and, on request, a count. */
+export type SuggestValue = {
+  code: number;
+  key: string;
+  title: string | null;
+  match: MatchSpan;
+  /** Present iff the request carried `counts: true` — the viewer's own count, exact, per request. */
+  count?: number;
+};
+
+/** `GET /v1/categories/{column}/suggest`'s wire shape (`value-suggestion.md` §5.1). */
+export type SuggestPage = {
+  /** The caller's own spelling, echoed. */
+  column: string;
+  /** The query as received, not folded — so a caller matches a page to the request in flight. */
+  q: string;
+  values: SuggestValue[];
+  /**
+   * `true` iff the walk stopped before its range was exhausted — the page filled, or
+   * `selection.maxSuggestionWalk` values were examined. There is no cursor: either way the
+   * client's answer is the same, type more.
+   */
+  more: boolean;
+};
+
+/**
+ * The outcome of {@link TesseraClient.suggest}. A `429` — at most one suggest in flight per
+ * session — surfaces as `superseded` rather than a thrown `TesseraError`, because it is the
+ * *expected* shape of a caller that does not debounce quite enough, and a debounced caller's
+ * right answer is to retry after `retryAfterS`, not to render a refusal.
+ */
+export type SuggestResult = ({status: 'ok'} & SuggestPage) | {status: 'superseded'; retryAfterS: number};
 
 export type ViewportRequest = {
   view: string;
@@ -242,15 +513,71 @@ export type ViewportRequest = {
    */
   filters?: FilterExpr | null;
   /**
-   * Which annotation layers to answer for. Omitted means every layer this principal reaches; `[]`
-   * means none, and costs the server nothing.
+   * The highlight expression, in exactly `filters`' grammar, or null for no highlight
+   * (`highlight-and-hierarchy.md` §2; contracts §3.2 r74).
+   *
+   * **It never changes which rows the response holds.** The cap clause, the density sampling and
+   * `served` run over the `filters` candidate exactly as they would without it, so the set of
+   * points a viewer sees is the same with and without a highlight and a point they were looking
+   * at stays where it is with its brightness changed. What it adds is one count per tile
+   * (`highlighted`), one bit per served point and one bit per served artifact, each the answer to
+   * `all_of[filters, highlight]` — the conjunction with the candidate, by construction.
+   *
+   * Two highlights are one expression under `all_of` or `any_of`; there is no list of them, for
+   * the reason `filters` is one expression.
+   */
+  highlight?: FilterExpr | null;
+  /**
+   * Which columns each served point answers with (`highlight-and-hierarchy.md` §2, contracts §3.2
+   * r74), mirroring
+   * `artifactRows`. Omitted or `'full'` is every column; `'highlight'` is the same points as
+   * `(tessera_id, highlighted)`.
+   *
+   * **The row set and the `served` split are identical under either value; only the columns
+   * change** — which is what it is for: the served set does not depend on the highlight, so a
+   * client that changes only the highlight holds every point it needs and wants only the bits,
+   * joined to what it holds by `tessera_id`.
+   *
+   * **Bound to a generation.** The served set is deterministic within one, so a stamp move
+   * (`x-tessera-stale`) means the held set may no longer be what the same request serves and the
+   * client re-asks with `'full'`. A client asking for it while holding nothing meets identifiers
+   * it cannot draw and re-asks the same way.
+   */
+  pointRows?: 'full' | 'highlight';
+  /**
+   * Which annotation layers to answer for. **Omitted or `[]` means none**; the string `'all'`
+   * means every layer this principal reaches; an array is those layers ∩ the reachable set.
    *
    * **It narrows and never widens.** Naming a layer this principal cannot reach is not a way to
-   * learn it exists — the response is what it would have been without the name. A client fetching
-   * points it will not draw artifacts against should send `[]` rather than omitting this, so a
-   * deployment with layers does not pay for them on every tile request.
+   * learn it exists — the response is what it would have been without the name. A client that wants
+   * artifacts names the layers that are on (or `'all'`); a point-fetching client that wants none
+   * sends `[]` or omits this, so a deployment with layers does not pay for them on every tile
+   * request. The old convention — omitted meant *all* — was replaced server-side; do not rely on
+   * omission meaning anything but *none*.
    */
-  layers?: string[];
+  layers?: string[] | 'all';
+  /**
+   * Which of each named layer's declared levels to answer for.
+   *
+   * **Omitted follows the layer's own declaration** — the levels whose declared zoom range covers
+   * this request's `zoom`, which is what `/v1/meta`'s zoom→level map has always described and which
+   * nothing on the wire could previously ask for. `'all'` answers for every level; an array answers
+   * for exactly those.
+   *
+   * **The default is the useful one and the expensive answer is the one you ask for by name** —
+   * the opposite arrangement from `layers`, and deliberately: naming a layer has already opted into
+   * the artifact pass, so what is left is which of its rungs to pay for. A five-level administrative
+   * hierarchy answered whole at the overview is a response two orders of magnitude larger than the
+   * one a client draws.
+   *
+   * **Inert on a layer that declares no zoom ranges**, which is every treed layer (they declare no
+   * levels at all) and any levelled layer whose author declared none — those serve every level in
+   * all three cases.
+   *
+   * A level a layer does not hold is absent from the answer rather than a refusal, the same way an
+   * unreachable layer name is.
+   */
+  levels?: number[] | 'all';
   /**
    * How many artifacts the client wants back at most, in the same shape as `k` beside it.
    *
@@ -260,7 +587,55 @@ export type ViewportRequest = {
    * would be a wrong map rather than half a map.
    */
   artifactBudget?: number;
+  /**
+   * Which of each layer's **declared** computed properties — `'centroid'`, `'box'`, `'shape'` — the
+   * response should carry.
+   *
+   * **Omitted is the layer's own declaration**, so a client that never thinks about geometry is
+   * answered exactly as it was before this field existed. An array answers for those, intersected
+   * with what each layer declared; the empty array is counts and no geometry.
+   *
+   * **It narrows and never widens.** Naming `'shape'` on a layer that draws none serves none.
+   *
+   * The reason to narrow is cost, and it is large: a hull is derived per artifact per request from
+   * the members this principal can see, and a viewport carrying 197 clusters derives 197 of them
+   * while the map draws one. Measured on a 2.42M-member corpus, that was 2.03 s against 0.17 s for
+   * the same request asking for `['centroid', 'box']`. Ask the drill-down route
+   * ({@link TesseraClient.artifact}) for the one hull that is drawn.
+   */
+  computed?: ComputedProperty[];
+  /**
+   * Which columns each served artifact row answers with (contracts §3.2 r44). Omitted or `'full'`
+   * is every column; `'identity'` is the same rows in the fixed four-column schema
+   * ({@link ArtifactIdentity}). **The row set, the `matched` bits and the `rung` values are
+   * identical under either value; only the columns change** — which is what it is for: a filter
+   * change over rows the caller already holds, the bit being the one field a filter moves.
+   */
+  artifactRows?: 'full' | 'identity';
 };
+
+/**
+ * The three geometries a request may ask for. `shape` is the layer's one drawn geometry of
+ * whichever kind {@link Meta} publishes for it — a hull, a membership shape or an authored one —
+ * so a request asks for the drawing without knowing its derivation; `hull` is the declaration's
+ * word (`computedContent`) and not an ask word.
+ */
+export type ComputedProperty = 'centroid' | 'box' | 'shape';
+
+/** The three kinds of a layer's one drawn geometry (`polygon-membership.md` §7.1). */
+export type ShapeKind = 'derived' | 'predicate' | 'authored';
+
+/**
+ * A served shape: **parts, then rings, then vertices**, in grid units. A part's first ring is
+ * its outer and the rest are holes — the nesting deck's `PolygonLayer` takes — and two parts are
+ * two shapes, never a shape with a gap. A derived hull is one part per α-group, with no holes.
+ *
+ * **A served shape is a drawing and never the predicate.** It is generalised to the pixel at the
+ * zoom it was asked at and may differ from the membership by up to a cell, so a client must never
+ * test a point against these rings to decide whether the point is a member: the wire's
+ * `membership:<layer>` column is that answer, and the only one (`polygon-membership.md` §7.1).
+ */
+export type Shape = [number, number][][][];
 
 /**
  * One tile's exact masked counts.
@@ -269,7 +644,22 @@ export type ViewportRequest = {
  * `served` is what was drawn; `visible` is what exists inside the mask. Any surface showing one
  * without the other lets a sample read as a set.
  */
-export type TileCounts = {tile: bigint; visible: bigint; matched: bigint; served: bigint};
+export type TileCounts = {
+  tile: bigint;
+  visible: bigint;
+  matched: bigint;
+  served: bigint;
+  /**
+   * Of this tile's `matched`, how many also satisfy the request's `highlight`
+   * (`highlight-and-hierarchy.md` §2) — **equal to `matched` when the request carried none**, so
+   * a reader never has to ask whether the field means anything. `highlighted ≤ matched ≤ visible`
+   * per tile, by construction.
+   *
+   * This is what shows the members the cap clause did not draw: a highlight over 27 million
+   * articles draws 66,000 of them and washes the rest.
+   */
+  highlighted: bigint;
+};
 
 export type SubCell = {cell: bigint; count: bigint};
 
@@ -311,8 +701,16 @@ export type Artifact = {
   centroid: [number, number] | null;
   /** `[minX, minY, maxX, maxY]`, grid units. */
   box: [number, number, number, number] | null;
-  /** Convex hull vertices, counter-clockwise, grid units. */
-  hull: [number, number][] | null;
+  /**
+   * The artifact's one drawn geometry ({@link Shape}), of the kind its layer's {@link Meta}
+   * `shape` names, or `null` where the layer draws none or the request did not ask (contracts
+   * §3.2 item 4). For a derived hull, each α-group of the visible members is its own part: a
+   * membership that is two separated clouds is two parts, never one polygon over the gap between
+   * them, and a group of one or two members is a ring of one or two vertices — rounding one up to
+   * a triangle would claim an area no member occupies. Two parts of one artifact may overlap,
+   * which costs nothing: both are this artifact.
+   */
+  shape: Shape | null;
   /**
    * The publisher's supplied content — label text, an authored name, a polygon — as **one
    * entry of the artifact's ranked contents, entire**, positional to the layer's `suppliedContent`
@@ -326,20 +724,91 @@ export type Artifact = {
    */
   content: string[];
   /**
-   * This artifact's parent, **and only ever one that is in the same response**.
+   * This artifact's parents, **and only ever those in the same response**, ascending by
+   * `tesseraId` (contracts §3.2 r71; decision 0117).
    *
    * The structure to nest what you draw, or to filter to one subtree while still drawing the rest
    * of the map — which is what a levelled layer's edges are for, since its resolution comes from
-   * choosing a level rather than from coarsening along them.
+   * choosing a level rather than from coarsening along them. A tree serves at most one entry; a
+   * `dag` layer may serve several, and a client that wants one parent takes the first, which the
+   * server's ordering makes the same one every time (`dag-hierarchies.md` §7).
    *
-   * **`null` means "no parent in this response", not "no parent".** It covers a root and a parent
-   * this principal was not served — below its own criterion for them, suppressed, or dropped by
-   * the layer's frontier — and the two are one value deliberately: distinguishing them would
-   * disclose that a coarser artifact exists which they may not see. Build the tree from what you
-   * were given and treat unlinked artifacts as roots of it; do not model a "hidden parent" state,
-   * because there is nothing to fill it from.
+   * **Empty means "no parent in this response", not "no parent".** It covers a root, a flat
+   * artifact, and a parent this principal was not served — below its own criterion for them,
+   * suppressed, or dropped by the layer's frontier — and the three are one value deliberately:
+   * distinguishing them would disclose that a coarser artifact exists which they may not see.
+   * The control is per entry (C29): a withheld parent is simply absent from the list. Build the
+   * tree from what you were given and treat unlinked artifacts as roots of it; do not model a
+   * "hidden parent" state, because there is nothing to fill it from.
    */
-  parentId: bigint | null;
+  parentIds: bigint[];
+  /**
+   * **The resolution a client draws this artifact at**, computed the right way for its layer's
+   * kind (contracts §3.2 r44): the declared level on a **levelled** layer — a fact about the
+   * artifact, agreeing across principals, indexing the level set `/v1/meta` publishes — the
+   * **response-local parent-chain depth** on a **treed** one, computed after the cut so the root
+   * of a re-rooted subtree reads 0, and `0` on a flat one.
+   *
+   * **A client draws by this column and never derives it.** Which derivation a layer kind wants
+   * — declared level or chain count — was a documented per-client trap, fallen into once; the
+   * server now serves the right number for every kind, so counting `parentIds` links here answers
+   * no question this field does not.
+   */
+  rung: number;
+  /**
+   * **Whether this artifact holds a member the current filter admits** — one this principal may
+   * see, inside the requested tiles.
+   *
+   * `null` where the request carried no filter: there was no question, and `false` would answer
+   * one that was never asked. Draw on the distinction — a `false` is a cluster with nothing in it
+   * for this search, a `null` is every cluster as it always looked.
+   *
+   * **The only field here a filter moves.** Existence, `maskedCount` and the geometry are what
+   * this principal may see, filter or no filter, so a filter never makes an artifact appear or
+   * vanish and never changes its count.
+   *
+   * **Do not derive this from the points you hold**: they are a *sample* of the matches, so a
+   * cluster whose few matching members were not sampled looks empty — false for exactly the small
+   * clusters a filter is used to find.
+   *
+   * **It answers about the members in view**, where `maskedCount` and the geometry answer about
+   * the whole visible membership. An artifact whose only matches sit off screen reads `false`
+   * until the view moves over them.
+   */
+  matched: boolean | null;
+  /**
+   * Decision 0104's `matched` bit computed for the **conjunction** `all_of[filters, highlight]`
+   * (`highlight-and-hierarchy.md` §2): true where a member this principal may see, inside the
+   * request's tiles, satisfies both.
+   *
+   * `null` where the request carried no `highlight`, for the reason `matched` is null with no
+   * filter — there was no question. Every caution on `matched` holds here unchanged: it is a bit
+   * and not a count, it answers about the members in view, and it must not be derived from the
+   * points in hand, which are a sample.
+   */
+  highlighted: boolean | null;
+};
+
+/**
+ * One row of the identity projection (`artifact_rows: "identity"`, contracts §3.2 r74): the same
+ * row set a full answer to the identical request would carry, in a fixed five-column schema.
+ *
+ * The row set, the `matched` and `highlighted` bits and the `rung` values are identical under
+ * either value of `artifact_rows`; only the columns change. The payload columns are absent from the schema rather
+ * than null, so a caller resolves each row against payloads it already holds by
+ * `(layer, tesseraId)` — and one meeting an identifier its store cannot resolve knows it, and
+ * re-asks with `"full"`: one round trip, never a wrong map.
+ */
+export type ArtifactIdentity = {
+  layer: string;
+  /** Wire identity, u64 — never narrowed to a number. */
+  tesseraId: bigint;
+  /** See {@link Artifact.rung} — identical to the full row's value. */
+  rung: number;
+  /** See {@link Artifact.matched} — identical to the full row's value, null with no filter. */
+  matched: boolean | null;
+  /** See {@link Artifact.highlighted} — identical to the full row's value, null with no highlight. */
+  highlighted: boolean | null;
 };
 
 export type ViewportResult = {
@@ -378,6 +847,40 @@ export type ViewportResult = {
    * See {@link ScalarColumn} for why these are typed arrays rather than `unknown[]`.
    */
   scalars: Record<string, ScalarColumn>;
+  /**
+   * The per-point membership column per served layer (D12, contracts §3.2 r39, design §5.10),
+   * already hashed to a **response-local index**: `index[i]` is `0` for a point under no served
+   * artifact of that layer, else `1 + d` where `ids[d]` is the `tessera_id` of the deepest served
+   * artifact holding it — always one in this response's {@link ViewportResult.artifacts}. Keyed by
+   * layer name. Empty when the response served no artifacts, which is also what a request naming
+   * no layers gets.
+   *
+   * The session ordinal a band carries is assigned on the main thread from the short `ids` list
+   * (`bands.ts`); the decoder cannot name it, its lanes sharing no table.
+   */
+  membership: Record<string, MembershipColumn>;
+  /**
+   * The per-point highlight bit, one byte a point in the response's own point order — `1` where
+   * the served point satisfies the request's `highlight`, `0` where it does not
+   * (`highlight-and-hierarchy.md` §2).
+   *
+   * **`null` when the request carried no `highlight`**, and the column is absent from the frame
+   * then rather than all-`1`: the draw is unchanged by a highlight, so a client with no highlight
+   * set has no bit to read and none is sent.
+   *
+   * A byte rather than a boolean array because it is a per-point attribute the renderer uploads,
+   * and the one thing this column is for is being written into a buffer.
+   */
+  highlighted: Uint8Array | null;
+  /**
+   * Which projection the points frames were in, read off their schema
+   * (`highlight-and-hierarchy.md` §2; contracts §3.2 r74) — `'full'` for every ordinary response.
+   *
+   * `'highlight'` is `(tessera_id, highlighted)` and nothing else: {@link codes},
+   * {@link positions}, {@link world} and {@link scalars} are **empty**, and a caller joins the
+   * bits to points it already holds by `tessera_id`.
+   */
+  pointsProjection: 'full' | 'highlight';
   subCells: SubCell[] | null;
   /**
    * The artifacts this viewport served — empty when none did.
@@ -388,6 +891,21 @@ export type ViewportResult = {
    * a principal reaches at all comes from `GET /v1/meta`.
    */
   artifacts: Artifact[];
+  /**
+   * The identity projection's rows, where the response answered `artifact_rows: "identity"` —
+   * `null` where the frame was full or absent. Exactly one of this and a non-empty
+   * {@link ViewportResult.artifacts} is populated: the projection is read off the frame's own
+   * schema (four columns against the full frame's fourteen-or-more), never off the request.
+   */
+  artifactsIdentity: ArtifactIdentity[] | null;
+};
+
+/** One layer's membership column as the decoder hands it over — see {@link ViewportResult.membership}. */
+export type MembershipColumn = {
+  /** Per point, `0` for none, else one past the position in `ids`. `Uint16Array` where it fits. */
+  index: Uint16Array | Uint32Array;
+  /** The distinct `tessera_id`s the column named, in first-seen order. */
+  ids: BigUint64Array;
 };
 
 /**
@@ -429,6 +947,26 @@ export type Timings = {
   stageNs: number[] | null;
 };
 
+/**
+ * One points frame of a streamed response, with the counts its points satisfy.
+ *
+ * **A part is a set of whole bands, never a fragment of one.** The server flushes at whole tiles
+ * (`streamed-serving.md` §2), so the tiles here are exactly the run this part's points cover, in
+ * the response's own order, and a consumer stores them exactly as it stores a whole response.
+ *
+ * It carries its own identity and content coordinates rather than reading them from the response,
+ * because the response has not resolved yet — a part landed under one principal must never be
+ * stored under another, and a part from a request a pan has superseded must be recognisable as
+ * belonging to the answer it came from.
+ */
+export type ViewportPart = {
+  result: ViewportResult;
+  /** See {@link ViewportResponse.identityKey}. */
+  identityKey: string;
+  /** See {@link ViewportResponse.contentKey}. */
+  contentKey: string;
+};
+
 export type ViewportResponse = {
   result: ViewportResult;
   timings: Timings;
@@ -466,6 +1004,11 @@ export type ViewportResponse = {
    * Nothing expires and no response is withheld while it is `true`.
    */
   stale: boolean;
+  /**
+   * The region leaves' verdict — `null` when the request carried none. `exact: false` sets
+   * `Masked.exact` false on every number the region produced.
+   */
+  region: RegionVerdict | null;
   bytes: number;
 };
 
@@ -475,7 +1018,51 @@ export type ViewportResponse = {
  * A category arrives already resolved to its vocabulary key, and a column the item carries no value
  * for is absent from `fields` rather than present as null.
  */
-export type ItemDetail = {fields: Record<string, unknown>; externalId: string | null};
+export type ItemDetail = {
+  fields: Record<string, unknown>;
+  externalId: string | null;
+  /**
+   * **The views this item is in that this session may reach**, sorted by id, each with the
+   * position that view places it at (contracts §3.2).
+   *
+   * Gate-filtered by the server: a view the gate refuses is absent exactly as a view nobody
+   * declared is. So an empty array means *none of this item's views is one you can reach* and
+   * never *this item is in no view* — the two are deliberately one shape, and a client must not
+   * present the second.
+   *
+   * `x` and `y` are **that view's own grid units** — 32-bit fixed point against the frame
+   * {@link Meta.views} publishes for that view, which is what {@link dequantise} takes. Two views
+   * quantise differently, so the same item has a different position in each.
+   */
+  views: ItemViewPosition[];
+  /**
+   * **The group-scoped attribute values, by family name and then by the group's key**
+   * (`views.md` §5) — `{mood: {'2026-Q1': 'calm'}}`.
+   *
+   * The key is a view's only address, so two views sharing a key through a `members` group share
+   * one entry. Which group a family's keys belong to is on {@link Meta.scopedScalars}; it is not
+   * repeated here. Gate-filtered per key on the same set `views` is.
+   */
+  scoped: Record<string, Record<string, unknown>>;
+  /**
+   * **The item's access labels that this session satisfies, and only those** (contracts §3.2,
+   * decision 0114) — as the deployment's authorisation plugin presents them, sorted.
+   *
+   * Never the item's full label set: a viewer is not told about a compartment they do not hold.
+   * So this answers *which of my grants admits me to this item*, and a client must not present it
+   * as *what this item is labelled* — the two differ by exactly what the server withheld. Empty
+   * is a real answer and not a missing field.
+   */
+  labels: string[];
+};
+
+/** Where one view puts an item — see {@link ItemDetail.views}. */
+export type ItemViewPosition = {
+  /** The view's id: a plain view's name, or `<group>:<key>`. */
+  id: string;
+  x: number;
+  y: number;
+};
 
 /**
  * One artifact opened by identifier — see {@link TesseraClient.artifact}.
@@ -485,4 +1072,86 @@ export type ItemDetail = {fields: Record<string, unknown>; externalId: string | 
  * declared size**: what a drill-down adds over the wire's own row is a name for the layer, not a
  * way behind the count.
  */
-export type ArtifactDetail = {layer: string; key: string | null; maskedCount: bigint};
+export type ArtifactDetail = {
+  layer: string;
+  key: string | null;
+  maskedCount: bigint;
+  /**
+   * The artifact's declared geometry, computed for this principal — the same values and the same
+   * grid units the viewport's artifacts frame carries, from the same predicate. `null` where the
+   * layer declares none.
+   *
+   * **This route is where a shape is fetched from.** The viewport asks for centroids and boxes
+   * and this asks for the one shape that draws, which is what the drawing has always needed and
+   * what the viewport was paying 197× over to supply (see {@link ViewportRequest.computed}).
+   */
+  centroid: [number, number] | null;
+  box: [number, number, number, number] | null;
+  shape: Shape | null;
+};
+
+
+/**
+ * `POST /v1/artifacts/browse` (`highlight-and-hierarchy.md` §4; contracts §3.2 r75): a layer's
+ * hierarchy **by lineage
+ * rather than by viewport**, in three forms under one gate.
+ *
+ * - **Roots** — neither `parent` nor `q`: the layer's artifacts with no served parent. `level`
+ *   names which level's artifacts are the roots on a `stacked` or `tiered` layer, and is `422` on
+ *   the one-level kinds (`flat`, `nested`, `dag`) — a kind's levels are deployment schema, and a
+ *   parameter accepted and ignored is a wrong answer that looks right.
+ * - **Children** — `parent`: the artifacts naming it among their parents, with the requested
+ *   artifact's own parents beside them. On a `dag` layer a child is served under each served
+ *   parent, as the artifacts frame already does (decision 0117).
+ * - **Search** — `q`: the layer's artifacts whose key, or whose first supplied text, contains `q`
+ *   case-insensitively.
+ *
+ * Every form is paged, ordered by `matchedCount` where `filters` is present and by `maskedCount`
+ * otherwise, then by `tesseraId` ascending — a total order, so a cursor over tied counts neither
+ * duplicates nor drops a row. Independent of the viewport: it opens on the roots whatever the
+ * zoom and does not move when the map does.
+ */
+export type BrowseRequest = {
+  /**
+   * Which view's row space the counts are taken in — required here for the reason it is required
+   * on the drill-down: a masked count is an intersection in row space and row space is per view.
+   */
+  view: string;
+  layer: string;
+  level?: number;
+  parent?: bigint;
+  q?: string;
+  /**
+   * The viewport's own filter object, evaluated by the same routes, so a filtered map and a
+   * filtered tree read the same numbers. **Existence and `maskedCount` never move with it** — the
+   * same anchoring as everywhere else — and a row whose `matchedCount` is zero is still served.
+   */
+  filters?: FilterExpr | null;
+  /** Clamped to `meta.selection.maxBrowseRows`; `0` is a `422`, on `/v1/categories`' argument. */
+  limit?: number;
+  cursor?: string;
+};
+
+/** One row of a browse page: the artifacts frame's identity row, a name, and the counts. */
+export type BrowseRow = {
+  /** Wire identity, u64 — carried as a decimal string in the JSON and never narrowed here. */
+  tesseraId: bigint;
+  key: string | null;
+  /** The first supplied text content, where this principal may read it. */
+  name: string | null;
+  /** `|membership ∩ M_auth|`, per request and never precomputed (C8). */
+  maskedCount: bigint;
+  /** `|membership ∩ M_auth ∩ filter|`; `null` where the request carried no `filters`. */
+  matchedCount: bigint | null;
+  rung: number;
+  /** C29 per entry: a parent this principal may not see is simply absent. */
+  parentIds: bigint[];
+};
+
+export type BrowsePage = {
+  artifacts: BrowseRow[];
+  /** The requested artifact's own parents — the children form only; `[]` on the others. */
+  parents: BrowseRow[];
+  /** The cursor for the next page, or `null` where this was the last. */
+  next: string | null;
+};

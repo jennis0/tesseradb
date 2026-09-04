@@ -55,6 +55,13 @@ use crate::render_presence::{render_presence_path, RenderPresence, RENDER_PRESEN
 pub struct ViewData {
     pub row_space: RowSpace,
     pub segments: Vec<Arc<SegmentData>>,
+    /// **Which incarnation of the key these files belong to** (decision 0115). Read off the
+    /// segments this data was built from, or off the manifest for a view that has none yet.
+    ///
+    /// [`Bundle::with_views`] is what it is for: a dropped key may be created again, and the
+    /// recreated view is declared under the same id, so "is this view still declared" no longer
+    /// tells the predecessor's row space from the successor's. This does.
+    pub incarnation: tessera_types::view::ViewIncarnation,
 }
 
 /// One loaded segment: its row count, its Morton codes (row order, ascending), and a zero-copy
@@ -171,6 +178,10 @@ impl Bundle {
             Ok(ViewData {
                 row_space,
                 segments,
+                // **The view's own, unchanged**: a flush and a merge write into the incarnation
+                // that is live, and neither crosses a drop — a dropped view has no row space to
+                // extend and no segments to collapse.
+                incarnation: view_data.incarnation,
             })
         })
     }
@@ -211,6 +222,10 @@ impl Bundle {
             Ok(ViewData {
                 row_space,
                 segments,
+                // **The view's own, unchanged**: a flush and a merge write into the incarnation
+                // that is live, and neither crosses a drop — a dropped view has no row space to
+                // extend and no segments to collapse.
+                incarnation: view_data.incarnation,
             })
         })
     }
@@ -238,7 +253,56 @@ impl Bundle {
             Ok(ViewData {
                 row_space: view_data.row_space.clone(),
                 segments: view_data.segments.clone(),
+                incarnation: view_data.incarnation,
             })
+        })
+    }
+
+    /// This bundle carrying a different **top-level manifest**, with the per-view map brought
+    /// into step with the views it declares (`views.md` §3.2).
+    ///
+    /// The one edit a view create and a view drop make to a live bundle, and the only site that
+    /// touches `Bundle::manifest` at all: a created view gains an **empty** row space, because it
+    /// owns nothing on disc until its first flush and a view absent from this map is read as
+    /// *unknown view* by the viewport and as *the mask and the bundle disagree* by the deny mask;
+    /// a dropped view leaves it, which is what makes a request naming it the same 404 as one that
+    /// never existed. **No file is read, written or removed**: the dropped view's files are
+    /// garbage the fold reclaims, and until then they are simply unreachable.
+    ///
+    /// Side-manifests are untouched — the roster's durable half is published by the ordinary
+    /// deny-state path at the next tick, on the mechanism `layer_tombstones` already uses.
+    pub fn with_views(&self, manifest: Manifest) -> Arc<Bundle> {
+        let mut partitions = self.partitions.clone();
+        for partition in partitions.values_mut() {
+            // **Declared *and* at the live incarnation** (decision 0115). A dropped key may be
+            // created again, and the recreated view carries the same id — so declaration alone
+            // stopped being the question the moment the burn was withdrawn. A view whose data was
+            // built over a dead incarnation is dropped here exactly as an undeclared one is, and
+            // the seeding below puts an **empty** view back in its place: the predecessor's files
+            // stay on disc, reachable by nothing, until the fold reclaims them.
+            partition
+                .views
+                .retain(|id, data| manifest.is_live_incarnation(id, data.incarnation));
+            for view in &manifest.views {
+                partition
+                    .views
+                    .entry(view.id.clone())
+                    .or_insert_with(|| ViewData {
+                        row_space: RowSpace::new(
+                            Arc::new(
+                                crate::permutation::Permutation::empty()
+                                    .expect("an anonymous mapping of one page"),
+                            ),
+                            0,
+                        ),
+                        segments: Vec::new(),
+                        incarnation: view.incarnation,
+                    });
+            }
+        }
+        Arc::new(Bundle {
+            manifest,
+            partitions,
         })
     }
 
@@ -289,8 +353,8 @@ impl Bundle {
 }
 
 /// Open `root` (a bundle directory containing `CURRENT`) following the read protocol
-/// (contracts §2.3): `CURRENT` → digest-checked `MANIFEST.json` (refusing `bundle_format` newer
-/// than this reader) → per partition, the highest `SEGMENTS-<n>.json` whose listed files (and
+/// (contracts §2.3): `CURRENT` → digest-checked `MANIFEST.json` (refusing a `bundle_format` other
+/// than this reader's own) → per partition, the highest `SEGMENTS-<n>.json` whose listed files (and
 /// `MANIFEST.json`'s) all verify by size and SHA-256, stepping down on failure. Any failure at
 /// any stage is a typed error — fail-closed, per the invariant this method exists to uphold:
 /// serving must never treat a partially-verified bundle as ready.
@@ -357,7 +421,7 @@ enum Verification {
 /// parses are the ones it computed from the bytes it had in hand. Re-reading them proves nothing
 /// that the write did not already prove, and costs the whole bundle in IO.
 ///
-/// Kept, all of it: the `bundle_format` ceiling, `identity.validate()`, every path-component
+/// Kept, all of it: the `bundle_format` check, `identity.validate()`, every path-component
 /// sanitisation, the `ensure_verified` membership check (a file the loader reads must appear in a
 /// `files` map — cheap, and it catches a manifest that names a file it does not digest), the
 /// `row_count` agreement between the manifest and `morton.u32`/`columns.arrow`, and every extent's
@@ -392,16 +456,28 @@ fn open_prefix(
             source,
         })?;
 
-    if manifest.bundle_format > BUNDLE_FORMAT {
+    // **Exactly the current format, not at most.** A ceiling alone would open a bundle written at
+    // an earlier number, and the numbers exist because an earlier bundle's bytes decode as
+    // something else under this reader — format 4's artifact record reads its one-byte parent tag
+    // as the low byte of a parent count. No bundle predates the current format (decision 0048),
+    // so the refusal costs a rebuild and nothing more.
+    if manifest.bundle_format != BUNDLE_FORMAT {
         return Err(StoreError::UnsupportedBundleFormat {
             found: manifest.bundle_format,
-            max_supported: BUNDLE_FORMAT,
+            supported: BUNDLE_FORMAT,
         });
     }
 
     // A bundle written by a different `tessera_id` construction (or round count) must not be
     // silently read by this one (contracts §2.6 r6) — fail closed before any segment is opened.
     manifest.identity.validate()?;
+
+    // The roster against the views it names, and the views against the roster (`views.md` §3.2).
+    // Before any segment is opened, for the reason above it: a view a client can see and cannot
+    // address is a bundle to refuse, not one to serve part of.
+    manifest
+        .validate_groups()
+        .map_err(|detail| StoreError::MalformedBundle { detail })?;
 
     // The MANIFEST-level `files` set (dictionary extents and anything else it names) is
     // verified once, up front — it isn't partition-specific, and the reader protocol requires
@@ -428,23 +504,64 @@ fn open_prefix(
         let selected = load_verifying_segments_manifest(&prefix_dir, &partition_dir, verification)?;
         let segments_manifest = selected.manifest;
 
+        // **One incarnation per view, and it is the newest** (decision 0115). A drop leaves its
+        // segments in the live side-manifest until a fold reclaims them, so after a key has been
+        // created again this list can name two incarnations of one view id. Their row spaces are
+        // unrelated — each is dense from its own base — so composing them would be nonsense
+        // before it was a disclosure. Incarnations are minted monotonically, so the newest is the
+        // live one; the rest are the fold's to reclaim and are not opened. `with_views` then
+        // checks even that one against the roster and blanks the view if it disagrees, which is
+        // where the *fail-closed* half lives: this pass has the manifest and not yet the log.
+        let mut newest: HashMap<&str, tessera_types::view::ViewIncarnation> = HashMap::new();
+        for seg_desc in &segments_manifest.segments {
+            let seen = newest.entry(seg_desc.view.as_str()).or_default();
+            *seen = (*seen).max(seg_desc.incarnation);
+        }
         let mut views: HashMap<String, ViewData> = HashMap::new();
         for seg_desc in &segments_manifest.segments {
-            sanitize_component("view id", &seg_desc.view)?;
+            if newest.get(seg_desc.view.as_str()) != Some(&seg_desc.incarnation) {
+                continue;
+            }
+            // **Per component the path derivation will lay down**, not on the joined id: a
+            // group's view is `group:key` and `:` is exactly the character the two-component path
+            // exists for (`views.md` §3.2).
+            for component in crate::view_path_components(&seg_desc.view) {
+                sanitize_component("view id", component)?;
+            }
             sanitize_component("segment id", &seg_desc.seg_id)?;
 
-            let view_dir = partition_dir.join("views").join(&seg_desc.view);
+            let view_dir = crate::view_path(&partition_dir, &seg_desc.view);
             let is_new_view = !views.contains_key(&seg_desc.view);
+            let perm_path = view_dir.join("permutation.bin");
+            let perm_rel = format!(
+                "partitions/{}/{}/permutation.bin",
+                partition_desc.phash,
+                crate::view_rel(&seg_desc.view)
+            );
+            // **A view need not have a base at all** (`views.md` §3.2). Every view a build or a
+            // fold wrote has one, and its first segment is the build segment `permutation.bin`
+            // addresses; a view *created while the service runs* owns no row space until its
+            // first flush, and every segment it ever takes is an extent over an empty base. The
+            // manifest is what says which — a view whose permutation no manifest names has none,
+            // and reading that as a missing file would refuse the bundle for a view that is
+            // simply new.
+            let has_base = segments_manifest.files.contains_key(&perm_rel)
+                || manifest.files.contains_key(&perm_rel);
+            let is_base_segment = is_new_view && has_base;
             let view_entry = match views.get_mut(&seg_desc.view) {
                 Some(entry) => entry,
                 None => {
-                    let perm_path = view_dir.join("permutation.bin");
-                    let perm_rel = format!(
-                        "partitions/{}/views/{}/permutation.bin",
-                        partition_desc.phash, seg_desc.view
-                    );
-                    ensure_verified(&perm_rel, &segments_manifest, &manifest.files, &perm_path)?;
-                    let permutation = Permutation::load(&perm_path)?;
+                    let permutation = if has_base {
+                        ensure_verified(
+                            &perm_rel,
+                            &segments_manifest,
+                            &manifest.files,
+                            &perm_path,
+                        )?;
+                        Permutation::load(&perm_path)?
+                    } else {
+                        Permutation::empty()?
+                    };
 
                     // `row-entity.u32` beside it, the other direction
                     // (`crate::row_entity`). **Optional, and its absence is not a refusal**: it is
@@ -454,9 +571,9 @@ fn open_prefix(
                     // refusal, because a wrong row→entity mapping would put another entity's
                     // filter verdict on a row.
                     let row_entity_rel = format!(
-                        "partitions/{}/views/{}/{}",
+                        "partitions/{}/{}/{}",
                         partition_desc.phash,
-                        seg_desc.view,
+                        crate::view_rel(&seg_desc.view),
                         crate::row_entity::ROW_ENTITY_FILE
                     );
                     let row_entity = if segments_manifest.files.contains_key(&row_entity_rel)
@@ -479,8 +596,13 @@ fn open_prefix(
                     // The first segment named for a view is its build segment: `permutation.bin`
                     // addresses that one's row space, and every later segment arrives as an
                     // extent above it.
-                    let mut row_space =
-                        RowSpace::new(std::sync::Arc::new(permutation), seg_desc.row_count);
+                    // A base-less view's rows all belong to extents, so its base owns none:
+                    // `base_rows` is this segment's count only where the permutation is what
+                    // addresses it.
+                    let mut row_space = RowSpace::new(
+                        std::sync::Arc::new(permutation),
+                        if has_base { seg_desc.row_count } else { 0 },
+                    );
                     if let Some(table) = row_entity {
                         row_space = row_space.with_row_entity(table);
                     }
@@ -489,6 +611,7 @@ fn open_prefix(
                         ViewData {
                             row_space,
                             segments: Vec::new(),
+                            incarnation: seg_desc.incarnation,
                         },
                     );
                     views.get_mut(&seg_desc.view).expect("just inserted")
@@ -499,12 +622,16 @@ fn open_prefix(
             let morton_path = seg_dir.join("morton.u32");
             let columns_path = seg_dir.join("columns.arrow");
             let morton_rel = format!(
-                "partitions/{}/views/{}/segments/{}/morton.u32",
-                partition_desc.phash, seg_desc.view, seg_desc.seg_id
+                "partitions/{}/{}/segments/{}/morton.u32",
+                partition_desc.phash,
+                crate::view_rel(&seg_desc.view),
+                seg_desc.seg_id
             );
             let columns_rel = format!(
-                "partitions/{}/views/{}/segments/{}/columns.arrow",
-                partition_desc.phash, seg_desc.view, seg_desc.seg_id
+                "partitions/{}/{}/segments/{}/columns.arrow",
+                partition_desc.phash,
+                crate::view_rel(&seg_desc.view),
+                seg_desc.seg_id
             );
             ensure_verified(
                 &morton_rel,
@@ -536,9 +663,9 @@ fn open_prefix(
                         source,
                     })?;
                     let rel = format!(
-                        "partitions/{}/views/{}/segments/{}/{RENDER_PRESENCE_DIR}/{}",
+                        "partitions/{}/{}/segments/{}/{RENDER_PRESENCE_DIR}/{}",
                         partition_desc.phash,
-                        seg_desc.view,
+                        crate::view_rel(&seg_desc.view),
                         seg_desc.seg_id,
                         entry.file_name().to_string_lossy()
                     );
@@ -569,7 +696,7 @@ fn open_prefix(
             // row bound against that segment's `row_count` the first time we see it (I11/I4 —
             // a corrupt permutation must never hand out a `RowId` that indexes `columns.arrow`
             // out of range). Only meaningful once, against the one segment a Phase-1 view has.
-            if is_new_view && verification == Verification::Digests {
+            if is_base_segment && verification == Verification::Digests {
                 view_entry
                     .row_space
                     .base()
@@ -583,7 +710,7 @@ fn open_prefix(
             // well-formedness, so a manifest listing segments out of entity order, or one whose
             // `row_count` disagrees with what the extent actually owns, fails closed here rather
             // than serving rows under the wrong entity.
-            if !is_new_view {
+            if !is_base_segment {
                 let row_base = u32::try_from(view_entry.row_space.total_rows()).map_err(|_| {
                     StoreError::MalformedBundle {
                         detail: format!(
@@ -621,6 +748,26 @@ fn open_prefix(
                 morton,
                 columns,
             }));
+        }
+
+        // **Every declared view is a view, with or without rows** (`views.md` §3.2). The map
+        // above is built from the segments, because that is where a row space comes from; a view
+        // that has taken no flush yet has no segment and would otherwise be absent from it — and
+        // absent is read as *unknown view* by the viewport (404) and as *the deny mask and the
+        // bundle disagree* by the mask derivation (500). A view created while the service runs is
+        // in exactly that state between its create and its first flush, and it must answer
+        // **empty** in both places, so it is seeded here.
+        for view in &manifest.views {
+            views.entry(view.id.clone()).or_insert_with(|| ViewData {
+                row_space: RowSpace::new(
+                    std::sync::Arc::new(
+                        Permutation::empty().expect("an anonymous mapping of one page"),
+                    ),
+                    0,
+                ),
+                segments: Vec::new(),
+                incarnation: view.incarnation,
+            });
         }
 
         partitions.insert(
@@ -738,22 +885,24 @@ fn ensure_verified(
 /// bounded by *refusing* what it could not examine, never by ignoring it.
 ///
 /// **Known residuals, out of scope here.** A deny-carrying manifest is still stepped past when
-/// this loop cannot tell that it carries one — three ways, all of them the same shape:
+/// this loop cannot tell that it carries one — two ways, both of them the same shape:
 ///
 /// - it does not **parse** (`serde_json` error below),
-/// - it cannot be **read** (I/O error below — a permission or media fault),
-/// - it is present under a **non-canonical name** ([`list_segments_manifests`] parses
-///   `SEGMENTS-01.json` to `n = 1` and the loop then reads `SEGMENTS-1.json`, a different or
-///   absent file).
+/// - it cannot be **read** (I/O error below — a permission or media fault).
 ///
-/// None is closable here, and none should be closed by guessing: an ordinary torn write must
-/// not become a hard partition failure, and a manifest whose bytes are unavailable tells the
-/// reader nothing about what it carried. **The bound on all three is time, and that bound does
+/// Neither is closable here, and neither should be closed by guessing: an ordinary torn write
+/// must not become a hard partition failure, and a manifest whose bytes are unavailable tells
+/// the reader nothing about what it carried. **The bound on both is time, and that bound does
 /// not exist yet** — the `readyz` freshness gate (contracts §2.3) is unbuilt, so a replica in this
 /// state serves the older manifest indefinitely.
 ///
+/// A third residual — a manifest present under a **non-canonical name** — is closed:
+/// [`list_segments_manifests`] refuses such a name rather than parsing it (contracts §2.1), so a
+/// padded `SEGMENTS-01.json` is a typed error and never a step-past. It differed from the other
+/// two in being decidable without reading anything.
+///
 /// **The deny writer has shipped and the gate has not**, which an earlier note here said must
-/// never happen. The rule was stated wider than the condition it protected: all three residuals
+/// never happen. The rule was stated wider than the condition it protected: both residuals
 /// require a *replica* — a reader seeded from a manifest it did not write — and this deployment
 /// has one node, which replays its own WAL over the seed. The gate bounds how stale a synced
 /// replica's view may be, and there is nothing to sync. It ships with replication (owner ruling,
@@ -767,14 +916,10 @@ fn load_verifying_segments_manifest(
     partition_dir: &Path,
     verification: Verification,
 ) -> Result<SelectedManifest> {
-    let mut candidates = list_segments_manifests(partition_dir)?;
-    // Highest n first.
-    candidates.sort_unstable_by(|a, b| b.cmp(a));
-    let highest_candidate_n = candidates.first().copied();
-
     // Bundle-root-relative rather than the bare phash: this process swaps bundles at runtime, so
     // a log line or an error naming only `default` cannot say *which* bundle's `default` it
     // means. Short enough to stay a decent structured field, and free of the absolute prefix.
+    // Built before the listing because the listing can itself refuse (a non-canonical name).
     let partition_label = match (prefix_dir.file_name(), partition_dir.file_name()) {
         (Some(prefix), Some(phash)) => format!(
             "{}/partitions/{}",
@@ -783,6 +928,11 @@ fn load_verifying_segments_manifest(
         ),
         _ => partition_dir.display().to_string(),
     };
+
+    let mut candidates = list_segments_manifests(partition_dir, &partition_label)?;
+    // Highest n first.
+    candidates.sort_unstable_by(|a, b| b.cmp(a));
+    let highest_candidate_n = candidates.first().copied();
 
     // The **first** failure recorded, not the last: the loop walks highest-first, so the first
     // is the newest manifest's — the one an operator must fix. Overwriting per iteration leaves
@@ -895,7 +1045,23 @@ struct SelectedManifest {
 
 /// List the `n` values of every `SEGMENTS-<n>.json` present in `partition_dir` (unordered,
 /// unverified — candidates only).
-fn list_segments_manifests(partition_dir: &Path) -> Result<Vec<u64>> {
+///
+/// **A candidate whose name is not the canonical spelling of its `n` is refused, not parsed**
+/// (contracts §2.1, [`StoreError::NonCanonicalManifestName`]). `n` is unpadded decimal, and the
+/// caller reconstructs `SEGMENTS-{n}.json` to read from — so parsing `SEGMENTS-01.json` to
+/// `n = 1` discovers a manifest and then reads a different or absent file, which the candidate
+/// walk records as an I/O failure and steps past. That step-past carries the reader past a
+/// manifest that may hold a `deny`, and is indistinguishable from the file not being there at
+/// all. §2.1: "Parsing leniently and reconstructing canonically is the combination that hides
+/// it." The refusal is what makes the two distinguishable.
+///
+/// The test is canonical-spelling equality — the parsed number, re-rendered, must equal what was
+/// read — which admits `0` and `11` and refuses a leading zero, an empty or non-numeric part, a
+/// sign, whitespace, and anything past `u64`. It is deliberately confined to the
+/// `SEGMENTS-<…>.json` family: the `SEGMENTS-<n>.json.tmp` orphan a crashed manifest write
+/// leaves behind ([`crate::manifest_write`]) does not end in `.json`, is not a candidate, and
+/// must not become a partition failure.
+fn list_segments_manifests(partition_dir: &Path, partition_label: &str) -> Result<Vec<u64>> {
     let entries = match std::fs::read_dir(partition_dir) {
         Ok(entries) => entries,
         // No such directory at all is not itself a hard read error here: the caller reports a
@@ -916,8 +1082,16 @@ fn list_segments_manifests(partition_dir: &Path) -> Result<Vec<u64>> {
             .strip_prefix("SEGMENTS-")
             .and_then(|r| r.strip_suffix(".json"))
         {
-            if let Ok(n) = rest.parse::<u64>() {
-                found.push(n);
+            // Canonical-spelling equality, before anything reads the file: `rest.parse()`
+            // alone accepts `007` and yields `7`, and the caller then opens `SEGMENTS-7.json`.
+            match rest.parse::<u64>() {
+                Ok(n) if n.to_string() == rest => found.push(n),
+                _ => {
+                    return Err(StoreError::NonCanonicalManifestName {
+                        partition: partition_label.to_string(),
+                        name: name.into_owned(),
+                    })
+                }
             }
         }
     }
@@ -1802,7 +1976,7 @@ fn gallop(codes: &[u32], from: usize, target: u64) -> usize {
 /// Called once per tile, [`tile_ranges`] does two full-column binary searches. A viewport asks
 /// for a few hundred tiles, so a sparse request spends most of its time binary searching
 /// `morton.u32` several hundred times over — measured at 26–64% of a low-density request
-/// (`docs/evidence/memos/2026-07-30-f1-selection-overdraw.md`), and *flat in density*, because the
+/// (docs/evidence/memos/2026-07-30-f1-selection-overdraw.md), and *flat in density*, because the
 /// cost is the searching, not the rows found. At 2.42M rows, zoom 8, 289 tiles, that is ~20 µs of
 /// a 31 µs request.
 ///

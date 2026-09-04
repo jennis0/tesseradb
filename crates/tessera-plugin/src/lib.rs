@@ -98,6 +98,25 @@ pub trait Plugin: Send + Sync {
     /// Map a credential's `auth_data` bytes to the descriptors it authorises (the *auth* side).
     fn terms_of_auth(&self, auth_data: &[u8]) -> Result<AuthTerms, PluginError>;
 
+    /// Map descriptors to the strings a viewer is shown for them — the *presentation* side
+    /// (design §6.1, decision 0114).
+    ///
+    /// The one caller is the item drill-down's `labels` array, and what it hands in is already
+    /// the intersection of the item's own terms with the asking session's **satisfied** set: a
+    /// descriptor reaches this method only if the credential that opened the session presented it.
+    /// So a plugin cannot widen a disclosure here however it implements this — the set is decided
+    /// before the call, and this decides only how each member is spelled.
+    ///
+    /// Positional: one string per descriptor, in the order given. A plugin that returned a
+    /// different count would leave the caller unable to say which label it had failed to present,
+    /// so the count is checked and a mismatch is fail-closed.
+    ///
+    /// Required, deliberately without a default, on [`Plugin::terms_of_labels`]' argument: a
+    /// default would be a presentation rule a plugin author never wrote. For a plugin whose
+    /// descriptors *are* display strings, the identity is the correct implementation and saying so
+    /// takes one line.
+    fn present_terms(&self, descriptors: &[Descriptor]) -> Result<Vec<String>, PluginError>;
+
     /// The plugin's sizing declarations.
     fn declared_bounds(&self) -> DeclaredBounds;
 
@@ -168,6 +187,30 @@ impl Plugin for Passthrough {
             }
         }
         Ok(labels.to_vec())
+    }
+
+    /// **The identity, and it is this plugin's real answer rather than a fallback.** A
+    /// passthrough descriptor *is* the caller's own label string — `terms_of_label` splits the
+    /// wire's `access` bytes into them and `terms_of_labels` takes a build's term column verbatim
+    /// — so the string a viewer should be shown for a descriptor is the descriptor. There is no
+    /// mapping to look up and none to omit.
+    ///
+    /// Non-UTF-8 is refused rather than lossily converted. `terms_of_label` already requires the
+    /// wire's bytes to be UTF-8, so a descriptor that is not is one a build's term column
+    /// supplied, and replacing its bytes with substitution characters would show a viewer a label
+    /// no principal holds.
+    fn present_terms(&self, descriptors: &[Descriptor]) -> Result<Vec<String>, PluginError> {
+        descriptors
+            .iter()
+            .map(|d| {
+                String::from_utf8(d.clone()).map_err(|e| {
+                    PluginError::Malformed(format!(
+                        "a descriptor is not valid UTF-8 and this plugin presents descriptors \
+                         verbatim: {e}"
+                    ))
+                })
+            })
+            .collect()
     }
 
     fn terms_of_auth(&self, auth_data: &[u8]) -> Result<AuthTerms, PluginError> {
@@ -254,6 +297,21 @@ mod tests {
         let p = Passthrough::new();
         assert!(p.terms_of_labels(&[]).unwrap().is_empty());
         assert!(p.terms_of_labels(&[b"cs.LG".to_vec(), Vec::new()]).is_err());
+    }
+
+    /// The presentation seam is the identity for this plugin: the caller's own strings, verbatim
+    /// and in order, because a passthrough descriptor is the label string.
+    #[test]
+    fn present_terms_serves_the_callers_own_strings_verbatim() {
+        let p = Passthrough::new();
+        let descriptors = vec![b"cs.LG".to_vec(), b" spaced ".to_vec(), b"1207".to_vec()];
+        assert_eq!(
+            p.present_terms(&descriptors).unwrap(),
+            vec!["cs.LG".to_string(), " spaced ".to_string(), "1207".to_string()]
+        );
+        assert!(p.present_terms(&[]).unwrap().is_empty());
+        // Fail-closed rather than lossy: a substitution character is a label nobody holds.
+        assert!(p.present_terms(&[vec![0xff, 0xfe]]).is_err());
     }
 
     #[test]

@@ -1,0 +1,236 @@
+# arXiv — 2,422,486 preprints, the ladder's bottom rung and its only embedding corpus.
+#
+# Produced by `prepare.py`, which copies this file next to the parquets it writes; `[sources]` is
+# relative to the declaring document (configuration.md §3), so the copy beside the data is what
+# `tessera build` reads and this one is what gets reviewed.
+#
+# **The optional second stage edits the copy, never this file.** `toponymy.py` injects its four
+# sources at the marker in `[sources]` and appends the layer block from `toponymy.toml`. Both files
+# are valid TOML on their own so that both are reviewable; the markers are comments for the same
+# reason. A missing marker is a refusal rather than a silent no-op.
+#
+# **Every path is named once.** A `source` anywhere below names one of these keys rather than
+# repeating a path, so staging one of them elsewhere is a single `--file` override that moves
+# everything reading it. `[defaults].source` is what a view or a column takes when it names none —
+# here the anchor view's points file, which carries identity, geometry and every attribute column.
+
+[sources]
+points                = "points.parquet"
+points_pca64          = "points-pca64.parquet"
+archive               = "archive.parquet"
+primary_category      = "primary_category.parquet"
+kmeans                = "clusters-kmeans.parquet"
+kmeans_members        = "clusters-kmeans-members.parquet"
+hdbscan               = "clusters-hdbscan.parquet"
+hdbscan_members       = "clusters-hdbscan-members.parquet"
+# <toponymy-sources>
+
+[defaults]
+source          = "points"
+entity_id_field = "entity_id"
+
+# **Required, this declaration carrying more than one view** (decision 0112): within a signature
+# group, entity ids are ordered by the item's Morton code in the *anchor* view, then by external
+# id. Written explicitly so that reordering the view blocks below cannot silently re-key a rebuild
+# — the ids are permanent (I9). `knn` is the anchor because it is the layout the clusterings are
+# computed over; what matters is that it is named rather than inferred.
+allocation_view = "knn"
+
+# ---------------------------------------------------------------------------------------------
+# Two views over one entity space — the same papers positioned twice — and **the frames cannot be
+# shared**. Each route's UMAP output has its own coordinate range, so `extent = "auto"` fits a
+# different box to each; declaring one frame for both would put one route's points in a corner of
+# the other's grid, with no clamp and no error to say so. Quantisation *clamps* rather than
+# filters, so a frame that does not fit the data produces a well-formed bundle with the geometry
+# wrong — which is why the build's frame report is the thing to read before believing a map
+# (`README.md`).
+#
+# `projection = "none"` is the default and is written for clarity: an embedding layout is not a
+# map, and there is no transform between these coordinates and any ground.
+#
+# **The view names are the route names.** A figure quoted against a view says which projection
+# produced it without a lookup, which is the whole point of running them side by side.
+# ---------------------------------------------------------------------------------------------
+
+[[view]]
+name             = "knn"
+title            = "Topic map"
+projection       = "none"
+extent           = "auto"
+source           = "points"
+visibility       = "public"
+point_visibility = { field = "categories", default = "public" }
+
+[[view]]
+name             = "pca64"
+title            = "Topic map (PCA-64)"
+projection       = "none"
+extent           = "auto"
+source           = "points_pca64"
+visibility       = "public"
+point_visibility = { field = "categories", default = "public" }
+
+# arXiv's archive names and subject classes are published taxonomy, so the value sets disclose
+# nothing about this corpus's contents. Closed: a paper filed under something neither set names is
+# a refusal rather than a quietly minted category.
+[[vocabulary]]
+name       = "archive"
+title      = "arXiv archive"
+width      = "u8"
+value_set  = "closed"
+visibility = "public"
+source     = "archive"
+
+[[vocabulary]]
+name       = "primary_category"
+title      = "arXiv subject class"
+width      = "u16"
+value_set  = "closed"
+visibility = "public"
+source     = "primary_category"
+
+# The attribute columns are **entity-space** and ride the anchor view's file alone: a paper's title
+# is not a property of a projection, and the second view's file carries identity, position and the
+# access column and nothing else.
+
+[[attribute]]
+name       = "archive"
+title      = "Archive"
+type       = "category"
+vocabulary = "archive"
+render     = true
+index      = true
+
+[[attribute]]
+name       = "primary_category"
+title      = "Primary category"
+type       = "category"
+vocabulary = "primary_category"
+render     = true
+index      = true
+
+# `timestamp_us` rather than `i64`, so the unit is a fact the client reads off `/v1/meta` rather
+# than a convention it has to be told. Indexed as well as rendered: a map of papers is asked for a
+# date range before it is asked for anything else, and a `render` column answers no filter.
+[[attribute]]
+name   = "submitted_at"
+title  = "Submitted"
+type   = "timestamp_us"
+render = true
+index  = true
+
+# Prose lives in the record blob and reaches a client at drill-down: `render` on a text column is
+# refused, the hot column being a fixed-width slot per row. `index` builds the token index behind
+# `match` and `phrase`.
+[[attribute]]
+name  = "title"
+type  = "text"
+index = true
+
+[[attribute]]
+name  = "abstract"
+type  = "text"
+index = true
+
+# The surnames `corpus.parquet` carries, joined. Text and therefore drill-down and `match`, never
+# `render`; one paper carries 2,832 of them, which is why this is not a category.
+[[attribute]]
+name  = "authors"
+title = "Authors"
+type  = "text"
+index = true
+
+[[attribute]]
+name  = "arxiv_id"
+title = "arXiv ID"
+type  = "keyword"
+index = true
+
+# ---------------------------------------------------------------------------------------------
+# Two layers, **both named on both views**, and that is what the second view is for: a `computed`
+# content is recomputed per viewer from `membership ∩ M_auth` — and, a view being a row space of
+# its own, per view — so every cluster carries a centroid, a box and a hull in each layout over one
+# membership. Both are drawn over the same 2D positions the `knn` view holds, which is why they
+# draw something: a k-means cell and an HDBSCAN cluster are compact in the layout they were fitted
+# in, where a published category is not (see the withdrawal note at the end of this file).
+#
+# **A cluster carries its own title.** The c-TF-IDF description is supplied `text` content on the
+# cluster artifact itself, ranked — the description first, a generic fallback second — rather than
+# an artifact of its own on a `topics/*` layer that a client had to join by attachment. A client
+# names an artifact from its own first content, so a cluster shows its title with no join.
+#
+# Every layer states its two disclosure controls, because neither has a default: `visibility` is
+# the label a viewer must hold to know the layer exists at all, and `require_member_visibility` is
+# how much of a cluster a viewer must already see before that cluster is served to them. The
+# content carries a third, at its own grain, and it is a **provenance declaration**: the text is a
+# synthesis of the titles it was drawn from, so `all` — it is read only by a viewer who can already
+# read every one of them.
+# ---------------------------------------------------------------------------------------------
+
+[[layer]]
+name       = "clusters/kmeans"
+title      = "k-means clusters"
+source     = "kmeans"
+views      = ["knn", "pca64"]
+membership = "enumerated"
+hierarchy  = { kind = "flat", prune_children = false }
+
+visibility          = "public"
+artifact_visibility = { default = "inherited" }
+# The absolute form: a fixed floor, whatever the cluster's size.
+require_member_visibility = { count = 50 }
+
+  # Membership in its own source: one row per (artifact, entity). A row with a `rank` is the
+  # generating set of that ranked content rather than membership.
+  [layer.members]
+  source = "kmeans_members"
+
+  # `hull` beside the box: the explorer draws a cluster as its served hull, and every computed
+  # property is recomputed per viewer from `membership ∩ M_auth`, so a hull discloses no more than
+  # the box did.
+  [layer.content]
+  computed = ["centroid", "box", "hull"]
+
+    [[layer.content.supplied]]
+    name                      = "topic"
+    type                      = "text"
+    require_member_visibility = "all"
+
+[[layer]]
+name       = "clusters/hdbscan"
+title      = "HDBSCAN clusters"
+source     = "hdbscan"
+views      = ["knn", "pca64"]
+membership = "enumerated"
+hierarchy  = { kind = "nested", prune_children = false }
+
+visibility          = "public"
+artifact_visibility = { default = "inherited" }
+# The proportional form: a share of the cluster's own size, so the bar scales. Expect holes in the
+# lineage — a share does not shrink downward, so a small child can clear what its parent cannot,
+# each cluster having passed its own test. A layer declaring this form must expect them.
+require_member_visibility = { fraction = 0.05 }
+
+  [layer.members]
+  source = "hdbscan_members"
+
+  [layer.content]
+  computed = ["centroid", "box", "hull"]
+
+    [[layer.content.supplied]]
+    name                      = "topic"
+    type                      = "text"
+    require_member_visibility = "all"
+
+# ⊘ **`taxonomy/arxiv` was a third layer here and is withdrawn** (owner ruling, 2026-09-01), on
+# the same rule Overture's taxonomy was withdrawn on: a layer earns its place by *drawing*
+# something in the view it is declared over. An archive's papers are scattered across the whole
+# embedding, so its box is a tenth of the map and its hull is the map; 97-98% of its artifacts came
+# back `everywhere` in the build's report, so all 209 of them were served on every viewport request
+# to draw outlines that say nothing. `README.md` carries the measured spread against the two
+# clusterings.
+#
+# **The classification itself is not gone.** It is the `archive` and `primary_category` attributes
+# above — rendered, so a client colours by them, and indexed, so a client filters on them. That is
+# what a published taxonomy over scattered points is good for here; a hierarchy of artifacts over
+# it was not.

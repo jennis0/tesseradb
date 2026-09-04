@@ -66,11 +66,13 @@ fn ingest_novel(engine: &Engine, i: usize) -> EntityId {
     let row = UnallocatedRow {
         external_id: Some(format!("ext-{i}").into_bytes()),
         view: "s0".to_string(),
+        join: None,
         descriptors: vec![descriptor.clone()],
         x: 5.0,
         y: 5.0,
         scalars: Vec::new(),
         terms: engine.resolve_terms(&[descriptor]),
+        scoped: Vec::new(),
     };
     engine
         .accept_ingest(vec![row], format!("batch-{i}"), [i as u8; 32])
@@ -304,6 +306,219 @@ fn a_configured_coalesce_width_reaches_selection_and_changes_when_the_pass_fires
             Some(*entity),
             "external id {} lost its binding to the coalesce",
             String::from_utf8_lossy(external_id)
+        );
+    }
+}
+
+/// **The seventh axis: the entity→term transpose's extents come down to one, and every entity
+/// answers what it answered.**
+///
+/// Without this pass the transpose accumulates one extent per flush until the next fold, and both
+/// its readers — the drill-down's `labels` array and the join rule's label arm — pay a file handle
+/// and a linear probe per lookup for every tick since the last fold.
+///
+/// **Mutation:** drop the merge's ascending walk (emit each layer's entities in layer order) and
+/// the writer refuses; drop the re-derivation in `publish_coalesce` and the *live* layer count
+/// assertion fails while the manifest one still passes, which is the whole difference between
+/// bounding the reader and bounding a restart.
+#[test]
+fn a_coalesce_merges_the_entity_term_extents_and_every_entity_answers_the_same() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture_n(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+        64,
+    );
+    let engine = engine_at(tmp.path(), &root);
+
+    let mut ingested: Vec<EntityId> = Vec::new();
+    for i in 0..WIDTH {
+        ingested.push(ingest_novel(&engine, i));
+        let flushes = engine.write_executor_stats().flushes;
+        engine.request_flush();
+        wait_until("the flush to publish", || {
+            engine.write_executor_stats().flushes > flushes
+        });
+    }
+
+    let before = manifest_of(&root);
+    assert_eq!(
+        before.entity_terms_extents.len(),
+        WIDTH,
+        "one transpose extent per flush"
+    );
+    // The build's base plus one layer per flush — what the reader probes before the pass.
+    assert_eq!(
+        engine.generation().filter_columns.entity_terms().layers(),
+        WIDTH + 1
+    );
+    let labels_before: Vec<Option<Vec<_>>> = ingested
+        .iter()
+        .map(|entity| engine.flushed_terms(*entity))
+        .collect();
+    assert!(
+        labels_before
+            .iter()
+            .all(|l| l.as_ref().is_some_and(|t| !t.is_empty())),
+        "each ingest carried a novel descriptor, so each entity has a label: {labels_before:?}"
+    );
+    // And the same through the drill-down, which is what the transpose exists to answer: the
+    // served `labels` array, intersected with a session holding every novel descriptor.
+    let credential = format!(
+        r#"{{"terms": [{}]}}"#,
+        (0..WIDTH)
+            .map(|i| format!("\"novel-{i}\""))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let drill_down = |engine: &Engine| -> Vec<Vec<String>> {
+        let session = engine
+            .authorise(credential.as_bytes())
+            .expect("the session authorises");
+        ingested
+            .iter()
+            .map(|entity| {
+                let id = engine.tessera_id_of(*entity).expect("an opaque id");
+                engine
+                    .item(&session, id, None)
+                    .expect("the drill-down answers")
+                    .expect("the entity is visible to a session holding its descriptor")
+                    .labels
+            })
+            .collect()
+    };
+    let served_before = drill_down(&engine);
+    assert!(
+        served_before.iter().all(|labels| !labels.is_empty()),
+        "each entity's own novel descriptor is satisfied, so each drill-down names it"
+    );
+
+    engine.request_flush();
+    wait_until("the coalesce to publish", || {
+        engine.write_executor_stats().coalesces >= 1
+    });
+
+    let after = manifest_of(&root);
+    assert_eq!(
+        after.entity_terms_extents.len(),
+        1,
+        "{WIDTH} transpose extents became one: {:?}",
+        after.entity_terms_extents
+    );
+    assert_eq!(
+        engine.generation().filter_columns.entity_terms().layers(),
+        2,
+        "the live stack is the base plus the coalesced layer, or the bound is only realised at \
+         the next restart"
+    );
+    for (entity, before) in ingested.iter().zip(&labels_before) {
+        assert_eq!(
+            &engine.flushed_terms(*entity),
+            before,
+            "an entity's label set changed across the coalesce"
+        );
+    }
+    assert_eq!(
+        drill_down(&engine),
+        served_before,
+        "the served labels changed across a pass that merges what is there, verbatim"
+    );
+
+    // And a restart opens what was committed, with the same answers again.
+    drop(engine);
+    let reopened = engine_at(tmp.path(), &root);
+    assert_eq!(
+        reopened.generation().filter_columns.entity_terms().layers(),
+        2
+    );
+    for (entity, before) in ingested.iter().zip(&labels_before) {
+        assert_eq!(&reopened.flushed_terms(*entity), before);
+    }
+}
+
+/// **A coalesce retires nothing** (Rule S / Rule F, write-path §5.4). An entity awaiting a
+/// deletion keeps its term list across the pass — the merge has no tombstone parameter and no
+/// route to one — and it is the read gate that hides the item, not the artefact.
+///
+/// **Mutation:** filter the merge on the overlay's deleted set and this fails, which is the point:
+/// retiring here would put a Rule F retirement on a route that is not the fold's fold.
+#[test]
+fn a_pending_deletion_keeps_its_terms_across_a_coalesce() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture_n(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+        64,
+    );
+    let engine = engine_at(tmp.path(), &root);
+
+    let mut ingested: Vec<EntityId> = Vec::new();
+    for i in 0..WIDTH {
+        ingested.push(ingest_novel(&engine, i));
+        let flushes = engine.write_executor_stats().flushes;
+        engine.request_flush();
+        wait_until("the flush to publish", || {
+            engine.write_executor_stats().flushes > flushes
+        });
+    }
+
+    // The first flushed entity is deleted, and the deletion is pending until a fold executes it.
+    let doomed = ingested[0];
+    let terms_before = engine.flushed_terms(doomed).expect("a flushed label set");
+    engine
+        .accept_change(doomed, tessera_lifecycle::wal::ChangeOp::Delete)
+        .expect("the delete is accepted");
+
+    engine.request_flush();
+    wait_until("the coalesce to publish", || {
+        engine.write_executor_stats().coalesces >= 1
+    });
+    assert_eq!(manifest_of(&root).entity_terms_extents.len(), 1);
+
+    assert_eq!(
+        engine.flushed_terms(doomed),
+        Some(terms_before),
+        "a coalesce merges what is there, verbatim: the deletion retires at the fold that \
+         executes it (Rule F), never here"
+    );
+
+    // The fold is what retires it — and pass 4c runs over the *merged* shape, one extent where it
+    // used to find `WIDTH`.
+    let before = engine.write_executor_stats();
+    engine.request_fold();
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let now = engine.write_executor_stats();
+        assert_eq!(
+            now.fold_failures, before.fold_failures,
+            "the fold was discarded rather than published"
+        );
+        if now.folds > before.folds {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the fold did not publish");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let folded = manifest_of(&root);
+    assert!(
+        folded.entity_terms_extents.is_empty(),
+        "the fold rewrites the base and carries no extent forward: {:?}",
+        folded.entity_terms_extents
+    );
+    assert_eq!(
+        engine.flushed_terms(doomed),
+        None,
+        "the fold retires the deleted entity's list"
+    );
+    for entity in &ingested[1..] {
+        assert!(
+            engine.flushed_terms(*entity).is_some_and(|t| !t.is_empty()),
+            "a surviving entity lost its labels at the fold after a coalesce"
         );
     }
 }

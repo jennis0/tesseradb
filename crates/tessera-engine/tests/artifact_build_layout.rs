@@ -34,7 +34,7 @@ use arrow::record_batch::RecordBatch;
 use common::*;
 use parquet::arrow::ArrowWriter;
 use tessera_build::BuildArgs;
-use tessera_engine::ViewportRequest;
+use tessera_engine::{LayerSelection, ViewportRequest};
 use tessera_types::layer::ServingLayout;
 
 const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
@@ -183,13 +183,22 @@ fn fixture() -> Fixture {
     write_members(&tmp.path().join("clumped_members.parquet"), &clumped_rows);
 
     let args = BuildArgs {
-        point_fields: Default::default(),
+        arena_order: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: points.clone(),
+            point_fields: Default::default(),
+            select: None,
+            access: tessera_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: Vec::new(),
-        points,
-        access: tessera_build::config::AccessInput::relation(pairs),
         out: root.clone(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -197,6 +206,7 @@ fn fixture() -> Fixture {
         shard_id: 0,
         layers: config.layers,
         layer_inputs: config.layer_sources,
+        scoped_layers: Default::default(),
         mint_external_ids: false,
         emit_oracle_pairs: false,
         batch_items: None,
@@ -344,7 +354,8 @@ fn the_first_request_over_a_fresh_bundle_adopts_and_composes_nothing() {
     let out = engine
         .viewport(
             &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, 0).layers(Some(&[SPREAD, CLUMPED])),
+            ViewportRequest::new("s0", 0, WHOLE_MAP, 0)
+                .layers(LayerSelection::Named(&[SPREAD, CLUMPED])),
         )
         .expect("the first viewport over a freshly built bundle");
     let elapsed = started.elapsed();
@@ -390,7 +401,7 @@ fn the_flipped_level_answers_what_the_artifact_major_route_answers() {
     let row_major = engine
         .viewport(
             &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, 0).layers(Some(&[SPREAD])),
+            ViewportRequest::new("s0", 0, WHOLE_MAP, 0).layers(LayerSelection::Named(&[SPREAD])),
         )
         .expect("a viewport over the row-major level")
         .artifacts;
@@ -400,7 +411,7 @@ fn the_flipped_level_answers_what_the_artifact_major_route_answers() {
     let artifact_major = engine
         .viewport(
             &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, 0).layers(Some(&[CLUMPED])),
+            ViewportRequest::new("s0", 0, WHOLE_MAP, 0).layers(LayerSelection::Named(&[CLUMPED])),
         )
         .expect("a viewport over the artifact-major level")
         .artifacts;

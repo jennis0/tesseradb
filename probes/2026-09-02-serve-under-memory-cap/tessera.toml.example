@@ -1,0 +1,24 @@
+[bundle]
+path  = "/home/joe/code/tessera/data/ladder/medcpt/bundle"
+cache = "/tmp/claude-1000/-home-joe-code-tessera/33360fbb-27d0-434f-9d43-7de275c80a32/scratchpad/cgroup-serve/cache"
+wal   = "/tmp/claude-1000/-home-joe-code-tessera/33360fbb-27d0-434f-9d43-7de275c80a32/scratchpad/cgroup-serve/wal.log"
+
+[build]
+schema = "/home/joe/code/tessera/data/ladder/medcpt/corpus.toml"
+
+[plugin]
+module = "builtin:passthrough"
+
+[identity]
+env = "TESSERA_IDENTITY_KEY"
+
+[disclosure]
+token_max_lifetime = 3600
+
+[serve]
+viewer  = "127.0.0.1:8121"
+session = "127.0.0.1:8122"
+control = "127.0.0.1:8123"
+max_k   = 5000
+session_credential_env  = "TESSERA_MEDCPT_SESSION_CRED"
+operator_credential_env = "TESSERA_MEDCPT_OPERATOR_CRED"

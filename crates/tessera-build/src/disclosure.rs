@@ -27,7 +27,7 @@ use std::path::Path;
 use serde::Serialize;
 use serde_json::json;
 use tessera_types::layer::{
-    ExistenceCriterion, MemberDefault, MembershipSource, ShapeKind, SuppliedRequirement,
+    ExistenceCriterion, MemberDefault, MembershipSource, SuppliedRequirement,
 };
 
 use crate::config::{Config, ValueSet};
@@ -48,6 +48,10 @@ pub struct Disclosure {
 /// diff (`configuration.md` §2).
 #[derive(Debug, Clone, Serialize)]
 pub struct ViewDisclosure {
+    /// A `[[view]]`'s name, or a `[[view_group]]`'s — the two share one namespace, so this is
+    /// unambiguous, and a group's point-label rule is one decision shared by every view of it
+    /// (`views.md` §3.1). A reviewer diffing two declarations would otherwise see a group's
+    /// default change with nothing to show for it.
     pub name: String,
     /// `field`, `relation`, or `default_only` — which of the three shapes `point_visibility`
     /// declares.
@@ -86,6 +90,14 @@ pub struct AttributeDisclosure {
     pub placement: &'static str,
     /// The value set this column draws on, for a category.
     pub vocabulary: Option<String>,
+    /// The group whose views this column is one value per (`views.md` §5); `None` is the
+    /// entity-scoped default, one value per entity under every view.
+    ///
+    /// **A family is disclosed as a column and not as a schema entry**, which is the same
+    /// distinction the manifest makes: `MANIFEST.declared_scalars` carries the entity-scoped ones
+    /// and a family has no slot there, but a reviewer reading this report is owed every declared
+    /// column and what it is bound to.
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -113,14 +125,20 @@ pub struct LayerDisclosure {
     /// - `enumerated` — a stored set per artifact;
     /// - `attribute:<field>` — a predicate over that value column, whose distinct values are the
     ///   layer's artifacts;
-    /// - `spatial:<kind>:depth=<d>` — each artifact's own shape, covered by depth-`d` tiles.
+    /// - `spatial:<kind>` — each artifact's own shape, exactly: `bbox`, `circle`, `ellipse` or
+    ///   `polygon`.
     ///
-    /// **The depth is here because it *is* the membership** (ruling R3): a box covered at depth 4
-    /// and the same box at depth 8 hold different points, so a report naming the kind alone would
-    /// say less about who may see what than the declaration does. ⊘ `spatial:no-shape` is a layer
+    /// ⊘ `spatial:no-shape` is a layer
     /// declared for a shape it does not carry, which holds no artifacts.
     pub membership: String,
     pub content: ContentDisclosure,
+    /// Which kind the layer's **one drawn geometry** is (`polygon-membership.md` §7.1): `derived`
+    /// — the hull over `membership ∩ M_auth`, per principal; `predicate` — the membership shape,
+    /// the same for every principal; `authored` — a supplied `polygon`, `circle` or `ellipse`
+    /// content, gated by that content's own requirement. Null where the layer draws none. A
+    /// disclosure fact because the three are gated differently, and a reviewer reading the kind
+    /// reads which gate the outline is behind.
+    pub shape: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -156,17 +174,27 @@ pub struct SuppliedDisclosure {
 impl Disclosure {
     /// Read every disclosure decision out of a parsed declaration.
     pub fn of(config: &Config) -> Disclosure {
+        // Every view and every group, in declaration order: a group's `point_visibility` is one
+        // decision governing every view of it, and it is as much a disclosure decision as a plain
+        // view's.
         let views = config
             .views
             .iter()
-            .map(|view| ViewDisclosure {
-                name: view.name.clone(),
-                labels_from: match (&view.point_visibility.field, &view.point_visibility.source) {
+            .map(|view| (&view.name, &view.point_visibility))
+            .chain(
+                config
+                    .view_groups
+                    .iter()
+                    .map(|group| (&group.name, &group.point_visibility)),
+            )
+            .map(|(name, point_visibility)| ViewDisclosure {
+                name: name.clone(),
+                labels_from: match (&point_visibility.field, &point_visibility.source) {
                     (_, Some(_)) => "relation",
                     (Some(_), None) => "field",
                     (None, None) => "default_only",
                 },
-                default: view.point_visibility.default.clone(),
+                default: point_visibility.default.clone(),
             })
             .collect();
 
@@ -191,11 +219,11 @@ impl Disclosure {
             })
             .collect();
 
-        let attributes = config
-            .schema
-            .attributes
-            .iter()
-            .map(|attribute| AttributeDisclosure {
+        // The entity-scoped columns in declaration order — which is the stored column order —
+        // then the group-scoped families, which have no place in that order because they are not
+        // stored in it (`views.md` §5).
+        let disclose = |attribute: &crate::config::Attribute, scope: Option<String>| {
+            AttributeDisclosure {
                 name: attribute.name.clone(),
                 field: attribute.column().to_string(),
                 ty: attribute.ty.arrow_type_name(),
@@ -206,7 +234,20 @@ impl Disclosure {
                     (false, false) => "blob",
                 },
                 vocabulary: attribute.vocabulary.clone(),
-            })
+                scope,
+            }
+        };
+        let attributes: Vec<AttributeDisclosure> = config
+            .schema
+            .attributes
+            .iter()
+            .map(|attribute| disclose(attribute, None))
+            .chain(
+                config
+                    .scoped_attributes
+                    .iter()
+                    .map(|scoped| disclose(&scoped.attribute, Some(scoped.group.clone()))),
+            )
             .collect();
 
         let layers = config
@@ -233,19 +274,12 @@ impl Disclosure {
                 depends_on: layer.depends_on.clone(),
                 membership: match &layer.membership {
                     MembershipSource::Enumerated => "enumerated".to_string(),
-                    // **The shape's depth is disclosed with the kind**, because it *is* the
-                    // membership: a box covered by depth-`d` tiles holds different points at a
-                    // different `d`, so a report naming the kind alone would say less than the
-                    // declaration does. ⊘ A spatial layer that declares no shape holds no
+                    // **The kind is disclosed, and nothing else needs to be**: every kind is
+                    // exact — the members are the rows inside the shape — so the kind says the
+                    // whole of who belongs. ⊘ A spatial layer that declares no shape holds no
                     // artifacts, and says so here rather than reading as one that does.
                     MembershipSource::Spatial => match &layer.shape {
-                        Some(shape) => format!(
-                            "spatial:{}:depth={}",
-                            match shape.kind {
-                                ShapeKind::Bbox => "bbox",
-                            },
-                            shape.depth
-                        ),
+                        Some(shape) => format!("spatial:{}", shape.kind.as_str()),
                         None => "spatial:no-shape".to_string(),
                     },
                     MembershipSource::Attribute(field) => format!("attribute:{field}"),
@@ -267,6 +301,7 @@ impl Disclosure {
                         .collect(),
                     withdraw_on_member_deletion: layer.content.withdraw_on_member_deletion,
                 },
+                shape: layer.drawn_shape().map(|k| k.name().to_string()),
             })
             .collect();
 

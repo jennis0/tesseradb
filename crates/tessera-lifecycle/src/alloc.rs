@@ -254,10 +254,15 @@ pub fn high_water_from(records: &[WalRecord]) -> u64 {
             // hand every point id below the row-less region away in a single step. A growth
             // allocates nothing at all — it names an artifact that already has its ordinal and its
             // entity — so it moves neither mark.
+            // A view create and a drop allocate nothing at all: a view is a coordinate system
+            // and holds no entity, which is what keeps entity space the invariant plane
+            // (`views.md` §1).
             WalRecord::LayerCreate { .. }
             | WalRecord::LayerDrop { .. }
             | WalRecord::ArtifactPublish { .. }
-            | WalRecord::ArtifactGrow { .. } => {}
+            | WalRecord::ArtifactGrow { .. }
+            | WalRecord::ViewCreate { .. }
+            | WalRecord::ViewDrop { .. } => {}
         }
     }
     hw
@@ -391,6 +396,7 @@ pub fn assign_sorted(items: &mut [PendingItem], alloc: &mut Allocator) -> Result
     let mut order: Vec<(usize, Vec<u32>)> = items
         .iter()
         .enumerate()
+        .filter(|(_, item)| item.entity_id.is_none())
         .map(|(i, item)| (i, signature_sort_key(&item.terms)))
         .collect();
     order.sort_by(|(a, ka), (b, kb)| {
@@ -398,7 +404,12 @@ pub fn assign_sorted(items: &mut [PendingItem], alloc: &mut Allocator) -> Result
             .then_with(|| items[*a].external_id.cmp(&items[*b].external_id))
     });
 
-    let ids = alloc.allocate(items.len() as u64)?;
+    // **A row that arrives with an entity is a join** (`views.md` §4): the same document in a
+    // second view, whose identity was decided when it was first ingested. It takes no id and no
+    // rank — allocating one would mint a second entity for one document, and the join rule exists
+    // precisely so that cannot happen — so the allocation is sized by the rows that need one.
+    let wanted = order.len();
+    let ids = alloc.allocate(wanted as u64)?;
     for (rank, (idx, _)) in order.into_iter().enumerate() {
         items[idx].entity_id = Some(EntityId::new(ids.start + rank as u64));
     }
@@ -511,6 +522,7 @@ mod tests {
         };
         WalRecord::LayerCreate {
             declaration: Box::new(tessera_types::layer::LayerDeclaration {
+                scope: Default::default(),
                 name: format!("l{entity}"),
                 title: Some("l".into()),
                 views: Vec::new(),
@@ -618,10 +630,12 @@ mod tests {
                 external_id: Some(entity_id.to_le_bytes().to_vec()),
                 entity_id: EntityId::new(entity_id),
                 view: "default".to_string(),
+                join: false,
                 descriptors: Vec::new(),
                 x: 0.0,
                 y: 0.0,
                 scalars: Vec::new(),
+                scoped: Vec::new(),
             }],
         }
     }

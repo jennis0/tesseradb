@@ -50,6 +50,9 @@ use crate::Generation;
 pub(crate) struct MergePlan {
     pub(crate) partition: String,
     pub(crate) view: String,
+    /// The incarnation of `view` the inputs carry and the output takes (decision 0115). A merge
+    /// never crosses a drop: its inputs are the live row space's own extents.
+    pub(crate) incarnation: tessera_types::view::ViewIncarnation,
     pub(crate) inputs: Vec<MergeInput>,
     /// Where the merged extent begins in view row space — the first consumed extent's `row_base`.
     pub(crate) row_base: u32,
@@ -67,6 +70,18 @@ pub(crate) fn plan_merge(generation: &Generation, policy: MergePolicy) -> Option
         return None;
     }
     for (view, view_data) in &partition_data.views {
+        // **The view's live incarnation, or this view is not merged** (decision 0115). The bundle
+        // and its manifest are brought into step by `Bundle::with_views`, so a mismatch here is a
+        // state the composition already refuses to serve; failing closed costs a merge and never
+        // publishes one over a dead row space.
+        let incarnation = view_data.incarnation;
+        if !generation
+            .bundle
+            .manifest
+            .is_live_incarnation(view, incarnation)
+        {
+            continue;
+        }
         // **Only extents may be merged, never the base segment.** The base is the one segment with
         // no extent — `permutation.bin` addresses it — so restricting selection to the extent list
         // excludes it structurally rather than by the size bound alone.
@@ -78,6 +93,7 @@ pub(crate) fn plan_merge(generation: &Generation, policy: MergePolicy) -> Option
             .iter()
             .map(|extent| SegmentDescriptor {
                 view: view.clone(),
+                incarnation,
                 seg_id: extent.seg_id.clone(),
                 row_count: extent.row_count(),
                 entity_lo: extent.entity_lo,
@@ -98,6 +114,7 @@ pub(crate) fn plan_merge(generation: &Generation, policy: MergePolicy) -> Option
         return Some(MergePlan {
             partition: partition.clone(),
             view: view.clone(),
+            incarnation,
             inputs: descriptors
                 .iter()
                 .filter(|d| chosen.contains(&d.seg_id))
@@ -120,7 +137,10 @@ fn segment_bytes(
     view: &str,
     seg_id: &str,
 ) -> u64 {
-    let dir = format!("partitions/{partition}/views/{view}/segments/{seg_id}/");
+    let dir = format!(
+        "partitions/{partition}/{}/segments/{seg_id}/",
+        tessera_store::view_rel(view)
+    );
     manifest
         .files
         .iter()
@@ -138,6 +158,9 @@ pub(crate) struct MergeContext {
     pub(crate) identity_key: IdentityKey,
     pub(crate) shard_id: u32,
     pub(crate) scalar_schema: Vec<(String, tessera_spatial::tiler::ScalarType)>,
+    /// Where the schema's group-scoped render suffix begins (`views.md` §5) — from there on, a
+    /// column an input segment lacks is the ordinary absence and takes the render placeholder.
+    pub(crate) scoped_from: usize,
     /// The live partition watermark and allocator high-water, **passed through untouched**. A
     /// merge moves neither: deriving `entity_hi + 1` from the inputs would move the watermark
     /// *backwards* on any interior merge, and composition treats everything at or above it as
@@ -198,11 +221,13 @@ pub(crate) fn execute(plan: MergePlan, ctx: MergeContext) -> Result<CompletedMer
         &plan.partition,
         &plan.view,
         MergeSpec {
+            incarnation: plan.incarnation,
             seg_id: &ctx.seg_id,
             inputs: &plan.inputs,
             identity_key: &ctx.identity_key,
             shard_id: ctx.shard_id,
             scalar_schema: &ctx.scalar_schema,
+            scoped_from: ctx.scoped_from,
             row_base: plan.row_base,
             watermark: ctx.watermark,
             entity_id_high_water: ctx.entity_id_high_water,
@@ -210,14 +235,12 @@ pub(crate) fn execute(plan: MergePlan, ctx: MergeContext) -> Result<CompletedMer
     )
     .map_err(|e| MergeFailed(format!("merge: {e}")))?;
 
-    let seg_dir = ctx
-        .prefix_dir
-        .join("partitions")
-        .join(&plan.partition)
-        .join("views")
-        .join(&plan.view)
-        .join("segments")
-        .join(&ctx.seg_id);
+    let seg_dir = tessera_store::view_path(
+        &ctx.prefix_dir.join("partitions").join(&plan.partition),
+        &plan.view,
+    )
+    .join("segments")
+    .join(&ctx.seg_id);
     let segment = SegmentData {
         seg_id: ctx.seg_id.clone(),
         row_count: output.segment.row_count,
@@ -310,8 +333,9 @@ pub(crate) fn rebase_into(
     // has removed, which refuses at the next open.
     for seg_id in &consumed {
         let seg_rel = format!(
-            "partitions/{}/views/{}/segments/{seg_id}",
-            plan.partition, plan.view
+            "partitions/{}/{}/segments/{seg_id}",
+            plan.partition,
+            tessera_store::view_rel(&plan.view)
         );
         for name in [
             "morton.u32",
@@ -345,11 +369,17 @@ pub(crate) fn rebase_into(
 }
 
 fn run_path(partition: &str, view: &str, seg_id: &str) -> String {
-    format!("partitions/{partition}/views/{view}/segments/{seg_id}/external-ids.arrow")
+    format!(
+        "partitions/{partition}/{}/segments/{seg_id}/external-ids.arrow",
+        tessera_store::view_rel(view)
+    )
 }
 
 fn locator_path(partition: &str, view: &str, seg_id: &str) -> String {
-    format!("partitions/{partition}/views/{view}/segments/{seg_id}/ext-locator.u32")
+    format!(
+        "partitions/{partition}/{}/segments/{seg_id}/ext-locator.u32",
+        tessera_store::view_rel(view)
+    )
 }
 
 /// Where `needle` sits in `haystack` as a contiguous run of equal keys, in order.

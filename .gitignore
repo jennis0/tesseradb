@@ -18,13 +18,16 @@ reference/.pytest_cache/
 **/__pycache__/
 node_modules/
 clients/ts/**/dist/
-clients/ts/.dev/
 clients/ts/tessera.toml
-# What `run_demo.sh` is actually serving right now — a fact about an invocation, not about the
-# repository, and the reason the demo no longer rewrites a tracked file to record it.
-clients/ts/viewer/public/datasets.json
+# Everything `run_demo.sh` produces — bundles, caches, WALs, the deployments it generates, the
+# measured presets and the dataset document naming what is actually being served. Facts about an
+# invocation rather than about the repository, which is why the demo writes none of them into the
+# source tree and why a second session can put them elsewhere with `TESSERA_DEMO_DIR`.
+/tessera-demo/
 # Where `publish-clusters.mjs` put the clusters it published into *this* server's WAL. Layers live
 # in the WAL rather than the bundle, so the names in it mean nothing to another server — and the
 # script is re-run per server anyway, a layer name never being reusable.
 clients/ts/viewer/public/clusters.json
 *.env.local
+clients/ts/.vite.out
+**/target/

@@ -90,6 +90,13 @@ impl RecordStack {
         Ok(Self { layers })
     }
 
+    /// How many layers this stack holds — the base, where the schema had a blob-resident column,
+    /// plus one per extent opened onto it. Diagnostic: a caller that wants a *row* asks
+    /// [`Self::fields_of`], and this says only how many probes a miss costs.
+    pub fn layer_count(&self) -> usize {
+        self.layers.len()
+    }
+
     /// The blob-resident fields of `entity`, from whichever layer holds its row; `Ok(None)` when
     /// no layer does — the ordinary case for an entity all of whose fields live in the other two
     /// homes.
@@ -100,6 +107,26 @@ impl RecordStack {
             }
         }
         Ok(None)
+    }
+
+    /// The rows of the entities in `wanted`, from whichever layers hold them — the read a caller
+    /// that wants many rows takes instead of looping [`Self::fields_of`], and whose cost is the
+    /// blocks touched rather than the entities asked for
+    /// ([`RecordBlob::for_each_row_in`] carries the argument).
+    ///
+    /// Ascending within a layer and layer by layer across the stack, so a caller wanting one
+    /// global order must impose it. Disjointness (I9) is why that is a presentation question and
+    /// not a correctness one: no two layers hold the same entity, so no entity is visited twice
+    /// whatever the order.
+    pub fn for_each_row_in(
+        &self,
+        wanted: &croaring::Bitmap,
+        f: &mut dyn FnMut(u32, Vec<RecordField>) -> Result<(), RecordError>,
+    ) -> Result<(), RecordError> {
+        for layer in &self.layers {
+            layer.for_each_row_in(wanted, f)?;
+        }
+        Ok(())
     }
 
     /// Whether any layer holds a row for `entity`.

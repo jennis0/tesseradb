@@ -39,6 +39,10 @@ fn err(text: &str) -> String {
     format!("{}", parse_str(text).expect_err("expected a refusal"))
 }
 
+fn ok(text: &str) -> Config {
+    parse_str(text).expect("expected the declaration to compile")
+}
+
 /// One view, one closed vocabulary, one category over it.
 ///
 /// **`[sources]` names files nothing here reads**, and that is what a source table is: the paths
@@ -184,6 +188,7 @@ fn the_accepted_key_set_is_configuration_ms_table() {
             "sources",
             "defaults",
             "view",
+            "view_group",
             "vocabulary",
             "attribute",
             "layer",
@@ -192,7 +197,7 @@ fn the_accepted_key_set_is_configuration_ms_table() {
     expect_keys(
         "[defaults]\nnonesuch = 1\n",
         "[defaults]",
-        &["source", "entity_id_field"],
+        &["source", "entity_id_field", "allocation_view"],
     );
     expect_keys(
         "[[view]]\nname = \"s0\"\nnonesuch = 1\n",
@@ -200,6 +205,7 @@ fn the_accepted_key_set_is_configuration_ms_table() {
         &[
             "name",
             "title",
+            "projection",
             "source",
             "fields",
             "extent",
@@ -210,12 +216,35 @@ fn the_accepted_key_set_is_configuration_ms_table() {
     expect_keys(
         "[[view]]\nname = \"s0\"\nextent = { nonesuch = 1 }\n",
         "extent",
-        &["auto", "margin", "min", "max", "x", "y"],
+        &["auto", "margin", "min", "max", "x", "y", "lon", "lat"],
     );
     expect_keys(
         "[[view]]\nname = \"s0\"\npoint_visibility = { nonesuch = 1 }\n",
         "point_visibility",
         &["field", "source", "default"],
+    );
+    expect_keys(
+        "[[view_group]]\nname = \"g\"\nnonesuch = 1\n",
+        "[[view_group]]",
+        &[
+            "name",
+            "title",
+            "projection",
+            "source",
+            "fields",
+            "extent",
+            "point_visibility",
+            "visibility",
+            "members",
+            "metadata",
+            "view",
+            "views",
+        ],
+    );
+    expect_keys(
+        "[[view_group]]\nname = \"g\"\n[view_group.views]\nnonesuch = 1\n",
+        "[view_group.views]",
+        &["source", "fields"],
     );
     expect_keys(
         "[[vocabulary]]\nname = \"v\"\nnonesuch = 1\n",
@@ -248,6 +277,8 @@ fn the_accepted_key_set_is_configuration_ms_table() {
             "multi",
             "render_in",
             "analyser",
+            "scope",
+            "fields",
         ],
     );
     expect_keys(
@@ -257,6 +288,7 @@ fn the_accepted_key_set_is_configuration_ms_table() {
             "name",
             "title",
             "views",
+            "scope",
             "source",
             "fields",
             "artifacts",
@@ -274,6 +306,7 @@ fn the_accepted_key_set_is_configuration_ms_table() {
             "members",
             "labels",
             "shape",
+            "default_space",
         ],
     );
     expect_keys(
@@ -285,6 +318,10 @@ fn the_accepted_key_set_is_configuration_ms_table() {
             "members",
             "excluding",
             "bbox",
+            "circle",
+            "ellipse",
+            "wkt",
+            "space",
             "contents",
             "parent",
             "attached_layer",
@@ -875,16 +912,41 @@ fn a_point_default_may_not_be_inherited() {
     );
 }
 
-/// A view's own gate is specified and not implemented, so it is refused rather than recorded.
+/// A view's own gate is a label the manifest records and `Engine::authorise` evaluates
+/// (`views.md` §6). What is refused is a label the plugin cannot read, or one that names no terms
+/// at all — a gate satisfied by nobody, the view being reachable by no principal including the
+/// author.
 #[test]
-fn a_views_own_visibility_is_refused_as_unbuilt() {
+fn a_views_own_visibility_is_a_label_the_plugin_can_read() {
     let text = with_line(SEVERITY, "").replace(
         "name             = \"s0\"",
         "name             = \"s0\"\nvisibility       = \"ir:analyst\"",
     );
-    let message = err(&text);
-    assert!(message.contains("specified and not built"), "{message}");
-    assert!(message.contains("views §3"), "{message}");
+    let config = ok(&text);
+    assert_eq!(
+        config.views[0].visibility.as_deref(),
+        Some("ir:analyst"),
+        "the label reaches the compiled view"
+    );
+
+    let empty = with_line(SEVERITY, "").replace(
+        "name             = \"s0\"",
+        "name             = \"s0\"\nvisibility       = \" , , \"",
+    );
+    let message = err(&empty);
+    assert!(message.contains("names no terms"), "{message}");
+}
+
+/// `public` is the documented default and the current behaviour, so writing it records nothing
+/// that is not already true — and the fixture corpora write it for clarity.
+#[test]
+fn a_view_may_declare_the_public_gate_it_already_has() {
+    let text = with_line(SEVERITY, "").replace(
+        "name             = \"s0\"",
+        "name             = \"s0\"\nvisibility       = \"public\"",
+    );
+    let config = parse_str(&text).expect("`public` is the default, written out");
+    assert_eq!(config.views[0].visibility, None);
 }
 
 /// **The extent belongs to the view, not to the invocation** (§1). Four spellings, and each one
@@ -985,6 +1047,323 @@ fn half_an_extent_is_refused_rather_than_completed() {
         message.contains("not a fraction of the data span"),
         "{message}"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// `projections.md` §2 and §4.2: what a projected view declares, and what it may not
+// ---------------------------------------------------------------------------------------------
+
+/// The declaration with `line` written in place of `SEVERITY`'s bare `extent = "auto"`.
+fn projected(line: &str) -> String {
+    SEVERITY.replace("extent           = \"auto\"", line)
+}
+
+fn view_of(line: &str) -> View {
+    parse_str(&projected(line))
+        .unwrap_or_else(|e| panic!("{line}: {e}"))
+        .views[0]
+        .clone()
+}
+
+/// **`none` is the default, so a corpus with no geography is never asked to name a projection**
+/// (`projections.md` §5.3), and every other name comes from the closed set.
+#[test]
+fn a_view_declares_a_projection_from_the_closed_set() {
+    assert_eq!(view_of("extent = \"auto\"").projection, Projection::None);
+    for (name, want) in [
+        ("web_mercator", Projection::WebMercator),
+        ("equirectangular", Projection::PLATE_CARREE),
+        ("plate_carree", Projection::PLATE_CARREE),
+        ("gall_isographic", Projection::GALL_ISOGRAPHIC),
+        ("none", Projection::None),
+    ] {
+        let view = view_of(&format!("projection = \"{name}\"\nextent = \"auto\""));
+        assert_eq!(view.projection, want, "{name}");
+    }
+}
+
+/// A projection outside the set is refused **listing the set**, because the arithmetic of a
+/// projection is part of the stored format: there is no reading of an unknown name that could be
+/// approximated safely.
+#[test]
+fn a_projection_outside_the_set_is_refused() {
+    let message = err(&projected(
+        "projection = \"lambert_cylindrical_equal_area\"\nextent = \"auto\"",
+    ));
+    assert!(message.contains("not one of the projections"), "{message}");
+    for name in [
+        "web_mercator",
+        "equirectangular",
+        "plate_carree",
+        "gall_isographic",
+        "none",
+    ] {
+        assert!(message.contains(name), "{name} missing from: {message}");
+    }
+}
+
+/// **A projected view's frame is a box in longitude and latitude, or `auto`** (§4.2).
+#[test]
+fn a_projected_view_states_its_frame_in_degrees() {
+    let view = view_of(
+        "projection = \"web_mercator\"\nextent = { lon = [-8.6, 1.8], lat = [49.9, 60.9] }",
+    );
+    assert_eq!(
+        view.extent,
+        Extent::LonLat(LonLatBox {
+            lon_min: -8.6,
+            lon_max: 1.8,
+            lat_min: 49.9,
+            lat_max: 60.9
+        })
+    );
+    let view = view_of("projection = \"web_mercator\"\nextent = \"auto\"");
+    assert_eq!(view.extent, Extent::AutoLonLat);
+}
+
+/// **The three other spellings are refused on a projected view**, each naming the one to write.
+///
+/// `min`/`max` and `x`/`y` state a frame in the space the projection *produces*, which is the
+/// output of a calculation nobody should do by hand; `margin` is headroom the outward snap already
+/// supplies, and a margin inside an aligned square would only shrink the frame away from the
+/// alignment it exists to have.
+#[test]
+fn the_unprojected_extent_spellings_are_refused_on_a_projected_view() {
+    let refused = |extent: &str| {
+        err(&projected(&format!(
+            "projection = \"web_mercator\"\n{extent}"
+        )))
+    };
+
+    let message = refused("extent = { min = -25.0, max = 25.0 }");
+    assert!(message.contains("names min, max"), "{message}");
+    assert!(message.contains("lon = ["), "{message}");
+
+    let message = refused("extent = { x = [-18, 19], y = [-22, 24] }");
+    assert!(message.contains("names x, y"), "{message}");
+    assert!(message.contains("lon = ["), "{message}");
+
+    let message = refused("extent = { auto = true, margin = 0.25 }");
+    assert!(message.contains("outward snap"), "{message}");
+    assert!(message.contains("extent = \"auto\""), "{message}");
+
+    // Half a box is still half a box.
+    let message = refused("extent = { lon = [-8.6, 1.8] }");
+    assert!(message.contains("`lon` without `lat`"), "{message}");
+}
+
+/// The reverse: a degree box on a view with nothing to transform it, which would quantise two
+/// degrees as though they were the file's own units.
+#[test]
+fn a_degree_box_is_refused_on_an_unprojected_view() {
+    let message = err(&projected(
+        "extent = { lon = [-8.6, 1.8], lat = [49.9, 60.9] }",
+    ));
+    assert!(message.contains("no projection"), "{message}");
+    assert!(message.contains("web_mercator"), "{message}");
+}
+
+/// **A value outside ±180 or ±90 is not a coordinate** (§2), on either axis.
+#[test]
+fn a_frame_outside_the_wgs84_range_is_refused() {
+    let refused = |extent: &str| {
+        err(&projected(&format!(
+            "projection = \"web_mercator\"\n{extent}"
+        )))
+    };
+
+    let message = refused("extent = { lon = [-190.0, 1.8], lat = [49.9, 60.9] }");
+    assert!(message.contains("not a longitude"), "{message}");
+    assert!(message.contains("WGS84"), "{message}");
+
+    let message = refused("extent = { lon = [-8.6, 1.8], lat = [49.9, 95.0] }");
+    assert!(message.contains("not a latitude"), "{message}");
+}
+
+/// **A box crossing the antimeridian is refused**, naming the wider box that does not cross: a
+/// frame is one aligned square and an aligned square does not wrap.
+#[test]
+fn a_box_crossing_the_antimeridian_is_refused() {
+    let message = err(&projected(
+        "projection = \"web_mercator\"\nextent = { lon = [170.0, -170.0], lat = [-10.0, 10.0] }",
+    ));
+    assert!(message.contains("antimeridian"), "{message}");
+    assert!(message.contains("lon = [-170, 170]"), "{message}");
+
+    // Latitude cannot wrap at all, so an inverted one is only ever inverted.
+    let message = err(&projected(
+        "projection = \"web_mercator\"\nextent = { lon = [-8.6, 1.8], lat = [60.9, 49.9] }",
+    ));
+    assert!(
+        message.contains("runs south from its own maximum"),
+        "{message}"
+    );
+    assert!(message.contains("lat = [49.9, 60.9]"), "{message}");
+}
+
+/// **A projected view spells its coordinate columns `lon` and `lat`** (§2), and the resolved map
+/// puts them on the canonical axes so every reader below sees one coordinate pair.
+#[test]
+fn a_projected_view_reads_lon_and_lat() {
+    let base = "projection = \"web_mercator\"\nextent = { lon = [-180, 180], lat = [-85, 85] }";
+
+    // With no `fields` map at all, the columns are `lon` and `lat` — which is the whole of what
+    // makes those the projected view's names.
+    let view = view_of(base);
+    assert_eq!(view.fields.of("x"), "lon");
+    assert_eq!(view.fields.of("y"), "lat");
+
+    // A map moves them, under the geographic names.
+    let view = view_of(&format!(
+        "{base}\nsource = \"other\"\nfields = {{ lon = \"longitude\", lat = \"latitude\" }}"
+    ));
+    assert_eq!(view.fields.of("x"), "longitude");
+    assert_eq!(view.fields.of("y"), "latitude");
+
+    // `x`/`y` is refused there, naming the geographic spelling: a corpus built with the two
+    // exchanged is silently mirrored about the diagonal.
+    let message = err(&projected(&format!(
+        "{base}\nsource = \"other\"\nfields = {{ x = \"a\", y = \"b\" }}"
+    )));
+    assert!(
+        message.contains("`fields.x` on a projected view"),
+        "{message}"
+    );
+    assert!(message.contains("`fields.lon`"), "{message}");
+
+    // And the reverse, on a view with no projection to read a degree with.
+    let message = err(&projected(
+        "extent = \"auto\"\nsource = \"other\"\nfields = { lon = \"a\", lat = \"b\" }",
+    ));
+    assert!(
+        message.contains("`fields.lon` on a view that declares no projection"),
+        "{message}"
+    );
+    assert!(message.contains("`fields.x`"), "{message}");
+
+    // A Morton code is a position already placed, so there is no longitude to transform.
+    let message = err(&projected(&format!(
+        "{base}\nsource = \"other\"\nfields = {{ morton = \"m\" }}"
+    )));
+    assert!(
+        message.contains("`fields.morton` on a projected view"),
+        "{message}"
+    );
+}
+
+/// **The snap, against hand-computed squares.** Each frame below is arithmetic a reader can redo:
+/// `x = (lon + 180)/360` under either projection, and `y = 0.5 - lat/180` under equirectangular.
+///
+/// * `lon [-180, 180], lat [-85.0511287798066, 85.0511287798066]` under `web_mercator` is the unit
+///   square exactly — the projection's own domain — and only the whole world holds it.
+/// * `lon [-180, -90], lat [45, 90]` under `equirectangular` is `x [0, 0.25], y [0, 0.25]`, whose
+///   maxima sit **on** the z2 boundary and so belong to the next tile: it spans two and snaps to
+///   z1 (0, 0). The frame must contain the box, which is what decides this.
+/// * `lon [-144, -36], lat [-72, -18]` is `x [0.1, 0.4], y [0.6, 0.9]` — strictly inside z1 (0, 1)
+///   and straddling the z2 boundary at x = 0.25, so z1 (0, 1).
+/// * A single point takes the offset cap and is reported **floored** rather than fitted (§4.2).
+#[test]
+fn a_stated_box_snaps_to_the_smallest_containing_square() {
+    let snap = |projection: &str, extent: &str| {
+        let view = view_of(&format!("projection = \"{projection}\"\n{extent}"));
+        let Extent::LonLat(asked) = view.extent else {
+            panic!("{extent} did not compile to a longitude/latitude box");
+        };
+        snap_lon_lat(view.projection, &asked)
+    };
+
+    let world = snap(
+        "web_mercator",
+        "extent = { lon = [-180.0, 180.0], lat = [-85.0511287798066, 85.0511287798066] }",
+    );
+    assert_eq!(world.square, tessera_spatial::AlignedSquare::WORLD);
+    assert!(!world.floored);
+    assert_eq!(
+        world.square.bounds(),
+        Bounds {
+            x_min: 0.0,
+            x_max: 1.0,
+            y_min: 0.0,
+            y_max: 1.0
+        }
+    );
+
+    let boundary = snap(
+        "equirectangular",
+        "extent = { lon = [-180.0, -90.0], lat = [45.0, 90.0] }",
+    );
+    assert_eq!(
+        boundary.square,
+        tessera_spatial::AlignedSquare { z: 1, x: 0, y: 0 }
+    );
+    assert!(!boundary.floored);
+
+    let inside = snap(
+        "equirectangular",
+        "extent = { lon = [-144.0, -36.0], lat = [-72.0, -18.0] }",
+    );
+    assert_eq!(
+        inside.square,
+        tessera_spatial::AlignedSquare { z: 1, x: 0, y: 1 }
+    );
+
+    // A single point: contained in aligned squares at every offset, so it takes the cap of 16 and
+    // says the frame was floored. `x = (0 + 180)/360 = 0.5` and `y = 0.5 - 0/180 = 0.5`, so the
+    // square is 32768 on each axis.
+    let point = snap(
+        "equirectangular",
+        "extent = { lon = [0.0, 0.0], lat = [0.0, 0.0] }",
+    );
+    assert_eq!(
+        point.square,
+        tessera_spatial::AlignedSquare {
+            z: 16,
+            x: 32768,
+            y: 32768
+        }
+    );
+    assert!(point.floored);
+}
+
+/// **`tessera check` prints the frame and the snap for a stated box without opening a data file**
+/// (`projections.md` §8), and says it cannot under `auto`.
+///
+/// The declaration here names no points source at all, which is legal, so nothing readable exists:
+/// the frame still comes out, because a stated box's square is a function of the projection and the
+/// box alone.
+#[test]
+fn a_check_answers_a_projected_views_frame_from_the_declaration_alone() {
+    let stated = parse_str(&projected(
+        "projection = \"equirectangular\"\nextent = { lon = [-180.0, -90.0], lat = [45.0, 90.0] }",
+    ))
+    .expect("the declaration parses");
+    let report = crate::check::check(&stated);
+    assert_eq!(report.frames.len(), 1);
+    assert_eq!(report.frames[0].view, "s0");
+    assert_eq!(report.frames[0].projection, "equirectangular");
+    let (asked, snap) = report.frames[0].snapped.expect("a stated box snaps");
+    assert_eq!(asked.lon_min, -180.0);
+    // `x [0, 0.25], y [0, 0.25]`, whose maxima are the z2 boundary and so belong to the next tile.
+    assert_eq!(
+        snap.square,
+        tessera_spatial::AlignedSquare { z: 1, x: 0, y: 0 }
+    );
+    assert!(!snap.floored);
+
+    let fitted = parse_str(&projected(
+        "projection = \"web_mercator\"\nextent = \"auto\"",
+    ))
+    .expect("the declaration parses");
+    let report = crate::check::check(&fitted);
+    assert_eq!(report.frames.len(), 1);
+    assert!(
+        report.frames[0].snapped.is_none(),
+        "under `auto` the frame is a function of the data and a check cannot answer it"
+    );
+
+    // An unprojected view has no projected frame to preview, and does not appear.
+    let plain = parse_str(SEVERITY).expect("the declaration parses");
+    assert!(crate::check::check(&plain).frames.is_empty());
 }
 
 #[test]
@@ -1458,8 +1837,9 @@ fn a_layer_may_pin_its_serving_layout() {
     assert!(message.contains("is not a layout"), "{message}");
     assert!(message.contains("column"), "{message}");
 
-    // **A predicate layer's form follows from its membership, so every pin is refused** — refused
-    // here, by the same `validate` the online registration calls.
+    // **An attribute layer's form follows from its membership, so every pin is refused** —
+    // refused here, by the same `validate` the online registration calls. A spatial layer's
+    // membership is a per-row source once the flush resolves it, so a pin on it holds.
     for word in ServingLayout::PIN_VOCABULARY {
         let spatial = predicate_fixture().replace(
             "membership                = \"enumerated\"\n",
@@ -1467,10 +1847,10 @@ fn a_layer_may_pin_its_serving_layout() {
                 "membership                = \"spatial\"\nlayout                    = \"{word}\"\n"
             ),
         );
-        assert!(
-            err(&spatial).contains("per-row source"),
-            "{}",
-            err(&spatial)
+        assert_eq!(
+            parse_str(&spatial).unwrap().layers[0].layout,
+            ServingLayout::parse_pin(word),
+            "layout = \"{word}\" on a spatial layer"
         );
         let attribute = predicate_fixture().replace(
             "membership                = \"enumerated\"\n",
@@ -1486,13 +1866,9 @@ fn a_layer_may_pin_its_serving_layout() {
     }
 }
 
-/// `[layer.shape]` — what a spatial layer's artifacts are shaped like, and how deep they are drawn.
-///
-/// **The depth is the membership rather than a tuning key**, so there is no value for it to default
-/// to and none outside the Morton code space to accept — a box covered at depth 4 and the same box
-/// at depth 8 hold different points.
+/// `[layer.shape]` — what kind of shape a spatial layer's artifacts carry, and nothing else.
 #[test]
-fn a_spatial_layer_declares_its_shape_and_its_depth() {
+fn a_spatial_layer_declares_its_shape_kind_and_no_depth() {
     // The block is appended, because `[layer.shape]` is a sub-table of the `[[layer]]` above it and
     // a TOML sub-table header ends the key section it follows.
     let spatial = |body: &str| {
@@ -1505,52 +1881,99 @@ fn a_spatial_layer_declares_its_shape_and_its_depth() {
         )
     };
 
-    let declared = spatial("\n  [layer.shape]\n  kind = \"bbox\"\n  depth = 6\n");
-    assert_eq!(
-        parse_str(&declared).unwrap().layers[0].shape,
-        Some(ShapeDeclaration {
-            kind: ShapeKind::Bbox,
-            depth: 6
-        })
-    );
-    // One kind, so spelling it is a courtesy rather than a choice.
-    let implied = spatial("\n  [layer.shape]\n  depth = 6\n");
-    assert_eq!(
-        parse_str(&implied).unwrap().layers[0].shape,
-        Some(ShapeDeclaration {
-            kind: ShapeKind::Bbox,
-            depth: 6
-        })
-    );
-
-    for body in [
-        "\n  [layer.shape]\n  kind = \"bbox\"\n",
-        "\n  [layer.shape]\n  depth = 0\n",
-        "\n  [layer.shape]\n  depth = 17\n",
+    for (word, kind) in [
+        ("bbox", ShapeKind::Bbox),
+        ("circle", ShapeKind::Circle),
+        ("ellipse", ShapeKind::Ellipse),
+        ("polygon", ShapeKind::Polygon),
     ] {
-        let text = spatial(body);
-        assert!(
-            err(&text).contains("must be an integer between 1 and 16"),
-            "{}",
-            err(&text)
+        let declared = spatial(&format!("\n  [layer.shape]\n  kind = \"{word}\"\n"));
+        assert_eq!(
+            parse_str(&declared).unwrap().layers[0].shape,
+            Some(ShapeDeclaration { kind })
         );
     }
 
-    // ⊘ A polygon is refused rather than covered approximately: the tiles that cover a shape *are*
-    // its membership, so an approximate cover is a membership wider than the declaration.
-    let polygon = spatial("\n  [layer.shape]\n  kind = \"polygon\"\n  depth = 6\n");
+    // **`depth` is deleted** (`polygon-membership.md` §6.1, ruling (g)): every kind is exact, so
+    // one written is refused naming where it went rather than as an unknown key.
+    let depth = spatial("\n  [layer.shape]\n  kind = \"bbox\"\n  depth = 6\n");
     assert!(
-        err(&polygon).contains("is not \"bbox\""),
+        err(&depth).contains("polygon-membership.md") && err(&depth).contains("depth"),
         "{}",
-        err(&polygon)
+        err(&depth)
+    );
+    // Four kinds, so the word is a choice and not a courtesy: absent is refused naming them.
+    let absent = spatial("\n  [layer.shape]\n");
+    assert!(
+        err(&absent).contains("bbox, circle, ellipse, polygon"),
+        "{}",
+        err(&absent)
+    );
+    let unknown = spatial("\n  [layer.shape]\n  kind = \"radius\"\n");
+    assert!(
+        err(&unknown).contains("is not a shape kind"),
+        "{}",
+        err(&unknown)
     );
 
     // A shape beside a membership that reads none is a rule nothing evaluates.
-    let enumerated = format!("{}\n  [layer.shape]\n  depth = 6\n", predicate_fixture());
+    let enumerated = format!(
+        "{}\n  [layer.shape]\n  kind = \"bbox\"\n",
+        predicate_fixture()
+    );
     assert!(
         err(&enumerated).contains("is a rule nothing evaluates"),
         "{}",
         err(&enumerated)
+    );
+
+    // **The space lives with the submission** (§4.3): `default_space` on the layer and `space` on
+    // a row. `wgs84` asks the view to project, so it is honourable only where the view declares a
+    // projection — and this fixture's view declares none, which is a refusal naming that
+    // (`projections.md` §5.3).
+    let with_space = |word: &str, body: &str| {
+        spatial(body).replace(
+            "membership                = \"spatial\"",
+            &format!(
+                "default_space             = \"{word}\"\nmembership                = \"spatial\""
+            ),
+        )
+    };
+    let view = with_space("view", "\n  [layer.shape]\n  kind = \"bbox\"\n");
+    assert!(parse_str(&view).is_ok(), "{}", err(&view));
+    let wgs84 = with_space("wgs84", "\n  [layer.shape]\n  kind = \"bbox\"\n");
+    assert!(err(&wgs84).contains("projections.md"), "{}", err(&wgs84));
+    let spaceless = with_space("view", "");
+    assert!(
+        err(&spaceless).contains("neither `[layer.shape]` nor an authored shape content"),
+        "{}",
+        err(&spaceless)
+    );
+
+    // **An authored shape content is geometry a space governs too** (`polygon-membership.md`
+    // §6.1): it is read in the space its row declares exactly as a membership shape is, so a
+    // layer that declares one and no `[layer.shape]` may still name the space its drawings are
+    // written in — and is refused for the same unhonourable pair.
+    let authored = |word: &str| {
+        format!(
+            "{}\n  [[layer.content.supplied]]\n  name = \"outline\"\n  type = \"polygon\"\n  \
+             require_member_visibility = \"inherited\"\n",
+            predicate_fixture().replace(
+                "membership                = \"enumerated\"",
+                &format!(
+                    "default_space             = \"{word}\"\nmembership                = \
+                     \"enumerated\""
+                ),
+            )
+        )
+    };
+    let drawn = authored("view");
+    assert!(parse_str(&drawn).is_ok(), "{}", err(&drawn));
+    let drawn_wgs84 = authored("wgs84");
+    assert!(
+        err(&drawn_wgs84).contains("projections.md"),
+        "{}",
+        err(&drawn_wgs84)
     );
 }
 
@@ -2426,12 +2849,14 @@ fn a_label_layer_sharing_a_name_with_a_layer_is_refused() {
 fn acquisition_names_the_files_this_build_reads() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = parse_at(dir.path(), ACQUIRED, &HashMap::new()).unwrap();
-    let acquired = config.acquire("s0").expect("the view is declared");
-    assert_eq!(acquired.points, dir.path().join("geometry.parquet"));
+    let acquired = config.acquire().expect("the entity-space inputs acquire");
+    let registry = config.build_views().expect("the registry compiles");
+    let view = crate::config::acquire_view(&registry[0]).expect("the view is declared");
+    assert_eq!(view.points, dir.path().join("geometry.parquet"));
     assert!(
-        matches!(&acquired.access.source, crate::config::AccessSource::Relation(p) if *p == dir.path().join("pairs.parquet")),
+        matches!(&view.access.source, crate::config::AccessSource::Relation(p) if *p == dir.path().join("pairs.parquet")),
         "{:?}",
-        acquired.access
+        view.access
     );
     assert_eq!(
         acquired.attribute_sources[0].path,
@@ -2439,7 +2864,7 @@ fn acquisition_names_the_files_this_build_reads() {
     );
     assert!(acquired.layers.is_empty());
     assert_eq!(
-        acquired.extent,
+        registry[0].extent,
         Extent::Auto {
             margin: DEFAULT_AUTO_MARGIN
         }
@@ -2459,7 +2884,7 @@ fn a_layer_names_its_artifacts_and_its_members() {
     );
     let config =
         parse_at(dir.path(), &text, &HashMap::new()).expect("the layer's two sources are declared");
-    let acquired = config.acquire("s0").unwrap();
+    let acquired = config.acquire().unwrap();
     assert_eq!(
         artifact_path(&acquired.layers[0]),
         Some(dir.path().join("hdbscan.parquet"))
@@ -2471,7 +2896,7 @@ fn a_layer_names_its_artifacts_and_its_members() {
     // And the members source is overridable on its own name, without disturbing the roster.
     let config = parse_at(dir.path(), &text, &files(&["hdbscan_members"]))
         .expect("one source staged elsewhere");
-    let acquired = config.acquire("s0").unwrap();
+    let acquired = config.acquire().unwrap();
     assert_eq!(
         artifact_path(&acquired.layers[0]),
         Some(dir.path().join("hdbscan.parquet"))
@@ -2505,7 +2930,7 @@ fn two_layers_read_their_own_files() {
     let dir = tempfile::tempdir().expect("tempdir");
     let text = format!("{ACQUIRED}{first}{second}");
     let config = parse_at(dir.path(), &text, &HashMap::new()).expect("both layers parse");
-    let acquired = config.acquire("s0").expect("both sources acquire");
+    let acquired = config.acquire().expect("both sources acquire");
     let paths: Vec<Option<PathBuf>> = acquired.layers.iter().map(artifact_path).collect();
     assert_eq!(
         paths,
@@ -2516,13 +2941,21 @@ fn two_layers_read_their_own_files() {
     );
 }
 
-/// The build materialises one view and reads its source, so a `--view` it cannot find is a build
-/// with no geometry rather than a default one.
+/// The anchor view is a declaration, not a default (decision 0112), so one naming a view the
+/// registry does not carry refuses listing the candidates.
 #[test]
-fn a_build_refuses_a_view_the_config_does_not_declare() {
+fn a_build_refuses_an_anchor_the_config_does_not_declare() {
     let config = parse_bound(ACQUIRED, &HashMap::new()).unwrap();
-    let message = format!("{}", config.acquire("s9").expect_err("expected a refusal"));
-    assert!(message.contains("--view 's9'"), "{message}");
+    let registry = config.build_views().unwrap();
+    let mut config = config;
+    config.allocation_view = Some("s9".to_string());
+    let message = format!(
+        "{}",
+        config
+            .anchor_view(&registry)
+            .expect_err("expected a refusal")
+    );
+    assert!(message.contains("allocation_view"), "{message}");
     assert!(
         message.contains("s0"),
         "the refusal must list them: {message}"
@@ -2537,7 +2970,11 @@ fn a_build_refuses_a_view_with_no_source() {
         .replace("source           = \"geometry\"\n", "")
         .replace("[defaults]\nsource = \"corpus\"\n", "");
     let config = parse_bound(&text, &HashMap::new()).unwrap();
-    let message = format!("{}", config.acquire("s0").expect_err("expected a refusal"));
+    let registry = config.build_views().unwrap();
+    let message = format!(
+        "{}",
+        crate::config::acquire_view(&registry[0]).expect_err("expected a refusal")
+    );
     assert!(
         message.contains("`source` is required to build"),
         "{message}"
@@ -2554,7 +2991,8 @@ fn every_label_route_acquires() {
         "{ field = \"categories\", default = \"public\" }",
     );
     let config = parse_bound(&field, &HashMap::new()).unwrap();
-    let acquired = config.acquire("s0").expect("a field route acquires");
+    let registry = config.build_views().unwrap();
+    let acquired = crate::config::acquire_view(&registry[0]).expect("a field route acquires");
     assert!(
         matches!(&acquired.access.source, AccessSource::Field(f) if f == "categories"),
         "{:?}",
@@ -2567,7 +3005,8 @@ fn every_label_route_acquires() {
         "{ default = \"ir:analyst\" }",
     );
     let config = parse_bound(&only_default, &HashMap::new()).unwrap();
-    let acquired = config.acquire("s0").expect("a default alone acquires");
+    let registry = config.build_views().unwrap();
+    let acquired = crate::config::acquire_view(&registry[0]).expect("a default alone acquires");
     assert!(
         matches!(acquired.access.source, AccessSource::Default),
         "{:?}",
@@ -2588,7 +3027,7 @@ fn a_build_refuses_an_attribute_with_no_source() {
         config.attribute_sources.is_empty(),
         "no source named, so no group to read"
     );
-    let message = format!("{}", config.acquire("s0").expect_err("expected a refusal"));
+    let message = format!("{}", config.acquire().expect_err("expected a refusal"));
     assert!(message.contains("name no `source`"), "{message}");
     assert!(
         message.contains("severity"),
@@ -2646,4 +3085,984 @@ fn layers_keep_their_declaration_order() {
             .collect::<Vec<_>>(),
         ["clusters/a", "topics/x"]
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// View groups (`views.md` §3), their rosters, their metadata and the scopes that name them
+// ---------------------------------------------------------------------------------------------
+
+/// One group over [`SEVERITY`]'s sources, form A: two views, one file each, two typed metadata
+/// names. Appended to `SEVERITY`, which declares the plain view `s0` beside it.
+const GROUP: &str = r#"
+[[view_group]]
+name             = "quarter"
+title            = "By quarter"
+extent           = { min = -40.0, max = 40.0 }
+visibility       = "public"
+point_visibility = { field = "categories", default = "public" }
+metadata         = { label = "text", starts = "timestamp_us" }
+
+[[view_group.view]]
+key    = "2026-Q2"
+source = "topics"
+label  = "Q2 2026"
+starts = 2026-04-01T00:00:00Z
+
+[[view_group.view]]
+key    = "2026-Q3"
+source = "other"
+label  = "Q3 2026"
+starts = 2026-07-01T00:00:00Z
+"#;
+
+/// The same group written in form B: one points file behind a discriminator, and the roster as a
+/// table of its own.
+const GROUP_B: &str = r#"
+[[view_group]]
+name             = "quarter"
+extent           = { min = -40.0, max = 40.0 }
+source           = "topics"
+fields           = { view = "quarter" }
+point_visibility = { field = "categories", default = "public" }
+metadata         = { label = "text" }
+
+[view_group.views]
+source = "other"
+fields = { key = "quarter" }
+"#;
+
+fn with_group(extra: &str) -> String {
+    format!("{SEVERITY}{GROUP}{extra}")
+}
+
+#[test]
+fn a_group_compiles_its_roster_its_metadata_and_its_shared_settings() {
+    let config = parse_str(&with_group("")).expect("the group parses");
+    assert_eq!(config.views.len(), 1, "a group is not a view");
+    let group = &config.view_groups[0];
+    assert_eq!(group.name, "quarter");
+    assert_eq!(group.source, None, "form A declares no group-level source");
+    assert_eq!(group.point_visibility.default, "public");
+    assert_eq!(
+        group
+            .metadata
+            .iter()
+            .map(|m| (m.name.as_str(), m.ty.arrow_type_name()))
+            .collect::<Vec<_>>(),
+        [("label", "text"), ("starts", "timestamp_us")]
+    );
+    assert_eq!(group.declared_keys(), ["2026-Q2", "2026-Q3"]);
+    let Roster::Inline(views) = &group.roster else {
+        panic!("form A compiles to an inline roster");
+    };
+    assert_eq!(
+        views[0].metadata.get("label"),
+        Some(&MetadataValue::Text("Q2 2026".to_string()))
+    );
+    // 2026-04-01T00:00:00Z, in the one unit a `timestamp_us` may hold.
+    assert_eq!(
+        views[0].metadata.get("starts"),
+        Some(&MetadataValue::TimestampUs(1_775_001_600_000_000))
+    );
+    assert!(views[0].source.is_some(), "each view names its own points");
+}
+
+#[test]
+fn a_group_compiles_the_roster_table_form() {
+    let config = parse_str(&format!("{SEVERITY}{GROUP_B}")).expect("form B parses");
+    let group = &config.view_groups[0];
+    assert!(group.source.is_some(), "form B's points are the group's");
+    assert_eq!(group.fields.of("view"), "quarter", "the discriminator");
+    let Roster::Table(table) = &group.roster else {
+        panic!("form B compiles to a roster table");
+    };
+    assert_eq!(table.fields.of("key"), "quarter");
+    assert!(group.declared_keys().is_empty(), "the keys are in the file");
+}
+
+/// **The roster is declared once.** The two forms say different things about where the points
+/// are, so a group writing both has said they are in two places.
+#[test]
+fn declaring_both_roster_forms_is_refused() {
+    let text = format!("{SEVERITY}{GROUP}\n[view_group.views]\nsource = \"other\"\n");
+    let message = err(&text);
+    assert!(message.contains("both roster forms"), "{message}");
+    assert!(message.contains("Write one of them"), "{message}");
+}
+
+/// Neither form and no `source`: the group's points come from nowhere, and `[defaults].source`
+/// deliberately does not reach a group.
+#[test]
+fn a_group_with_no_roster_and_no_source_is_refused() {
+    let text = format!(
+        "{SEVERITY}\n[[view_group]]\nname = \"quarter\"\nextent = \"auto\"\n\
+         point_visibility = {{ default = \"public\" }}\n"
+    );
+    let message = err(&text);
+    assert!(message.contains("come from nowhere"), "{message}");
+    assert!(message.contains("`[defaults].source`"), "{message}");
+}
+
+/// Form B is two files, and the group needs both: the roster lists the views, and the group's own
+/// `source` holds their points behind the discriminator.
+#[test]
+fn a_roster_table_without_the_groups_points_is_refused() {
+    let text = format!("{SEVERITY}{GROUP_B}").replace("source           = \"topics\"\n", "");
+    let message = err(&text);
+    assert!(
+        message.contains("a `[view_group.views]` roster and no `source`"),
+        "{message}"
+    );
+
+    // And the roster table's own file, which is not the group's.
+    let text = format!("{SEVERITY}{GROUP_B}").replace(
+        "[view_group.views]\nsource = \"other\"\n",
+        "[view_group.views]\n",
+    );
+    assert!(
+        err(&text).contains("`source` is required"),
+        "{}",
+        err(&text)
+    );
+}
+
+/// **Under form A the file is the view**, so a group-level `source` beside inline blocks is a
+/// second place the points could be.
+#[test]
+fn a_group_level_source_beside_inline_views_is_refused() {
+    let text = with_group("").replace(
+        "name             = \"quarter\"",
+        "name             = \"quarter\"\nsource           = \"topics\"",
+    );
+    let message = err(&text);
+    assert!(
+        message.contains("`source` beside `[[view_group.view]]` blocks"),
+        "{message}"
+    );
+}
+
+/// A group declaring neither roster form mints its views from the discriminator, and there is no
+/// roster record for a metadata value to sit on.
+#[test]
+fn metadata_with_no_roster_is_refused() {
+    let text = format!(
+        "{SEVERITY}\n[[view_group]]\nname = \"quarter\"\nextent = \"auto\"\nsource = \"topics\"\n\
+         metadata = {{ label = \"text\" }}\npoint_visibility = {{ default = \"public\" }}\n"
+    );
+    let message = err(&text);
+    assert!(message.contains("`metadata` with no roster"), "{message}");
+}
+
+/// **Chains are refused, so the owner of a key set is always one hop away** (§3.3).
+#[test]
+fn a_members_chain_is_refused() {
+    let text = with_group(
+        "\n[[view_group]]\nname = \"quarter_map\"\nmembers = \"quarter\"\nextent = \"auto\"\n\
+         source = \"other\"\npoint_visibility = { default = \"public\" }\n\
+         \n[[view_group]]\nname = \"quarter_third\"\nmembers = \"quarter_map\"\nextent = \"auto\"\n\
+         source = \"topics\"\npoint_visibility = { default = \"public\" }\n",
+    );
+    let message = err(&text);
+    assert!(message.contains("chains are refused"), "{message}");
+    assert!(
+        message.contains("Name 'quarter' here instead"),
+        "the refusal must name the owner: {message}"
+    );
+}
+
+#[test]
+fn a_members_group_takes_the_owners_views_and_declares_no_roster() {
+    let sharing = "\n[[view_group]]\nname = \"quarter_map\"\nmembers = \"quarter\"\n\
+                   extent = \"auto\"\nsource = \"other\"\nfields = { view = \"quarter\" }\n\
+                   point_visibility = { default = \"public\" }\n";
+    let config = parse_str(&with_group(sharing)).expect("a members group parses");
+    let shared = &config.view_groups[1];
+    assert_eq!(shared.members.as_deref(), Some("quarter"));
+    assert!(matches!(shared.roster, Roster::Discriminator));
+    assert!(shared.metadata.is_empty());
+
+    // Keys, ordinals and metadata belong to the group that owns the views.
+    let message = err(&with_group(&sharing.replace(
+        "extent = \"auto\"",
+        "extent = \"auto\"\nmetadata = { label = \"text\" }",
+    )));
+    assert!(message.contains("`metadata` on a group"), "{message}");
+    assert!(message.contains("Declare it on 'quarter'"), "{message}");
+
+    let message = err(&with_group(&format!(
+        "{sharing}\n[[view_group.view]]\nkey = \"2026-Q2\"\nsource = \"topics\"\n"
+    )));
+    assert!(message.contains("a roster on a group"), "{message}");
+}
+
+/// **A title is the layout's, not the key set's** (`views.md` §3.3, contracts §3.2 r61). Two
+/// groups over one roster are two layouts, and the group descriptor's `title` is taken from the
+/// group that declared it — so a `members` group with a title of its own publishes that one, and a
+/// `members` group with none publishes **none** rather than inheriting the owner's. The second
+/// half is the one worth pinning: inheriting would put the owner's name on a second layout that a
+/// principal may reach without reaching the owner at all.
+#[test]
+fn a_members_groups_title_is_its_own_and_is_never_the_owners() {
+    let sharing = |title: &str| {
+        format!(
+            "\n[[view_group]]\nname = \"quarter_map\"\nmembers = \"quarter\"\n{title}\
+             extent = \"auto\"\nsource = \"other\"\nfields = {{ view = \"quarter\" }}\n\
+             point_visibility = {{ default = \"public\" }}\n"
+        )
+    };
+
+    let titles = |text: &str| {
+        let config = parse_str(text).expect("both groups parse");
+        let registry = config.build_views().expect("a form A roster needs no file");
+        let resolved = stub_view_args(&registry);
+        config
+            .group_registry(&registry, &resolved)
+            .into_iter()
+            .map(|group| (group.name, group.title))
+            .collect::<Vec<_>>()
+    };
+
+    // The owner declares one (`GROUP`'s own `title`), and the sharing group declares its own.
+    assert_eq!(
+        titles(&with_group(&sharing("title = \"Quarters on the map\"\n"))),
+        [
+            ("quarter".to_string(), Some("By quarter".to_string())),
+            (
+                "quarter_map".to_string(),
+                Some("Quarters on the map".to_string())
+            ),
+        ]
+    );
+
+    // And with none declared it is `None` — served as `null`, not as the owner's title.
+    assert_eq!(
+        titles(&with_group(&sharing(""))),
+        [
+            ("quarter".to_string(), Some("By quarter".to_string())),
+            ("quarter_map".to_string(), None),
+        ]
+    );
+}
+
+/// The two fields [`Config::group_registry`] reads off a resolved view — its id and its frame —
+/// with the rest of [`crate::ViewArgs`] filled in inertly. A test of the registry is a test of the
+/// declaration's own arithmetic, and building the acquisition half would be building a corpus.
+fn stub_view_args(registry: &[BuildView]) -> Vec<crate::ViewArgs> {
+    registry
+        .iter()
+        .map(|view| crate::ViewArgs {
+            view_id: view.id.clone(),
+            projection: view.projection,
+            extent: tessera_spatial::Bounds {
+                x_min: -40.0,
+                x_max: 40.0,
+                y_min: -40.0,
+                y_max: 40.0,
+            },
+            points: PathBuf::new(),
+            point_fields: Fields::default(),
+            select: None,
+            access: AccessInput {
+                source: AccessSource::Default,
+                default: "public".to_string(),
+            },
+            visibility: view.visibility.clone(),
+        })
+        .collect()
+}
+
+#[test]
+fn members_naming_no_group_is_refused() {
+    let text = with_group(
+        "\n[[view_group]]\nname = \"quarter_map\"\nmembers = \"quarterly\"\nextent = \"auto\"\n\
+         source = \"other\"\npoint_visibility = { default = \"public\" }\n",
+    );
+    let message = err(&text);
+    assert!(
+        message.contains("names no `[[view_group]]` block"),
+        "{message}"
+    );
+    assert!(message.contains("quarter"), "{message}");
+}
+
+/// `:`, `#` and `@` are reserved out of a view name and a key, because each is what makes an id or
+/// a pinned filter leaf unambiguous (`views.md` §3.2).
+#[test]
+fn the_reserved_characters_are_refused_in_a_name_and_in_a_key() {
+    let message = err(&with_group("").replace("\"quarter\"", "\"quarter:one\""));
+    assert!(message.contains("reserved out of a view name"), "{message}");
+
+    // `#` is no longer reserved by name — it addressed an ordinal and ordinals are gone
+    // (decision 0113) — so it falls to the charset like any other punctuation.
+    let message = err(&with_group("").replace("\"2026-Q2\"", "\"2026#Q2\""));
+    assert!(message.contains("column-name charset"), "{message}");
+
+    let message = err(&with_group("").replace("\"2026-Q2\"", "\"2026.Q2\""));
+    assert!(message.contains("column-name charset"), "{message}");
+
+    let message = err(&SEVERITY.replace("name             = \"s0\"", "name             = \"s@0\""));
+    assert!(message.contains("reserved out of a view name"), "{message}");
+}
+
+#[test]
+fn two_views_of_one_group_may_not_share_a_key() {
+    let message = err(&with_group("").replace("\"2026-Q3\"", "\"2026-Q2\""));
+    assert!(message.contains("declared twice"), "{message}");
+}
+
+/// A layer's `views` and a scope's `group` name either kind, so one word for both is ambiguous
+/// wherever they meet.
+#[test]
+fn a_group_and_a_view_may_not_share_a_name() {
+    let message = err(&with_group("").replace(
+        "name             = \"quarter\"",
+        "name             = \"s0\"",
+    ));
+    assert!(
+        message.contains("has the name of a `[[view]]` block"),
+        "{message}"
+    );
+
+    // And two groups of one name, on the same argument the duplicate-view rule rests on.
+    let message = err(&with_group(GROUP));
+    assert!(message.contains("is declared twice"), "{message}");
+}
+
+/// **Metadata names are bounded by the roster's own keys** (§3.2): the inline block mixes them
+/// with the closed set, so a name in both is a key with two readings.
+#[test]
+fn a_metadata_name_may_not_take_a_roster_key() {
+    for reserved in ["key", "source", "visibility"] {
+        let text = with_group("").replace("label = \"text\"", &format!("{reserved} = \"text\""));
+        let message = err(&text);
+        assert!(
+            message.contains("a name the roster already uses"),
+            "{reserved}: {message}"
+        );
+    }
+    // And the discriminator, where the group carries one.
+    let text = format!("{SEVERITY}{GROUP_B}").replace("label = \"text\"", "quarter = \"text\"");
+    let message = err(&text);
+    assert!(message.contains("discriminator column"), "{message}");
+}
+
+/// The three settings a group's views share by definition, refused on a view of it — and named as
+/// group-level keys rather than reported as unknown ones.
+#[test]
+fn a_roster_entry_may_not_declare_a_group_level_key() {
+    for (key, value) in [
+        ("extent", "\"auto\""),
+        ("projection", "\"web_mercator\""),
+        ("point_visibility", "{ default = \"public\" }"),
+    ] {
+        let text = with_group("").replace(
+            "key    = \"2026-Q2\"",
+            &format!("key    = \"2026-Q2\"\n{key} = {value}"),
+        );
+        let message = err(&text);
+        assert!(message.contains("is a group-level key"), "{key}: {message}");
+        assert!(message.contains("Write `"), "{key}: {message}");
+    }
+}
+
+/// The block cannot be a `deny_unknown_fields` struct — it mixes a closed set with the declared
+/// metadata names — so the closure is kept by hand, and this is the assertion that it is kept.
+#[test]
+fn an_unknown_key_in_a_roster_entry_is_refused_against_the_declared_names() {
+    let text = with_group("").replace("key    = \"2026-Q2\"", "key    = \"2026-Q2\"\nnonesuch = 1");
+    let message = err(&text);
+    assert!(
+        message.contains("is not a key of a `[[view_group.view]]` block"),
+        "{message}"
+    );
+    assert!(message.contains("label, starts"), "{message}");
+}
+
+/// A roster record is immutable (decision 0108), so a metadata value left out is a view served
+/// with that field missing for the whole of its life.
+#[test]
+fn a_roster_entry_carries_every_declared_metadata_name() {
+    let text = with_group("").replace("label  = \"Q2 2026\"\n", "");
+    let message = err(&text);
+    assert!(message.contains("no `label`"), "{message}");
+    assert!(message.contains("immutable"), "{message}");
+}
+
+#[test]
+fn a_metadata_value_is_typed_against_its_declaration() {
+    let text = with_group("").replace("starts = 2026-04-01T00:00:00Z", "starts = \"April\"");
+    let message = err(&text);
+    assert!(message.contains("timestamp_us"), "{message}");
+
+    let text = with_group("").replace("label = \"text\"", "label = \"u8\"");
+    let message = err(&text);
+    assert!(message.contains("write an integer"), "{message}");
+
+    let text = with_group("")
+        .replace("label = \"text\"", "label = \"u8\"")
+        .replace("label  = \"Q2 2026\"", "label  = 900");
+    let message = err(&text);
+    assert!(message.contains("0 to 255"), "{message}");
+
+    let text = with_group("").replace("starts = \"timestamp_us\"", "starts = \"nonesuch\"");
+    let message = err(&text);
+    assert!(message.contains("unknown type 'nonesuch'"), "{message}");
+}
+
+/// A local date-time names an instant only against a time zone nobody declared.
+#[test]
+fn a_metadata_timestamp_needs_an_offset() {
+    let text = with_group("").replace("2026-04-01T00:00:00Z", "2026-04-01T00:00:00");
+    let message = err(&text);
+    assert!(
+        message.contains("needs a date, a time and an offset"),
+        "{message}"
+    );
+}
+
+/// A group's own gate and a roster record's own are stored where the evaluation reads them: the
+/// group's on the group, the record's on its view (`views.md` §6).
+#[test]
+fn a_groups_gate_and_a_roster_records_gate_are_both_recorded() {
+    let text = with_group("").replace(
+        "visibility       = \"public\"",
+        "visibility       = \"ir:analyst\"",
+    );
+    let config = ok(&text);
+    assert_eq!(
+        config.view_groups[0].visibility.as_deref(),
+        Some("ir:analyst")
+    );
+
+    let text = with_group("").replace(
+        "key    = \"2026-Q2\"",
+        "key    = \"2026-Q2\"\nvisibility = \"ir:analyst\"",
+    );
+    let config = ok(&text);
+    let gated = config
+        .view_groups
+        .iter()
+        .filter_map(|g| match &g.roster {
+            crate::config::Roster::Inline(views) => Some(views),
+            _ => None,
+        })
+        .flatten()
+        .filter(|v| v.visibility.as_deref() == Some("ir:analyst"))
+        .count();
+    assert_eq!(gated, 1, "one roster record carries the gate, and one only");
+}
+
+#[test]
+fn an_attribute_scopes_to_a_group_that_owns_its_views() {
+    let scoped = with_group("").replace(
+        "[[attribute]]\nname       = \"severity\"",
+        "[[attribute]]\nscope      = { group = \"quarter\" }\nname       = \"severity\"",
+    );
+    let config = parse_str(&scoped).expect("a scoped attribute parses");
+    assert_eq!(config.scopes.attribute("severity"), Some("quarter"));
+
+    let message = err(&scoped.replace("group = \"quarter\"", "group = \"quarterly\""));
+    assert!(
+        message.contains("names no `[[view_group]]` block"),
+        "{message}"
+    );
+
+    let message = err(&scoped.replace(
+        "scope      = { group = \"quarter\" }",
+        "scope      = \"quarterly\"",
+    ));
+    assert!(message.contains("not a value this key takes"), "{message}");
+}
+
+/// **The group named is the one that owns the members** (§5): a scope on a `members` group would
+/// be a second name for one column family.
+#[test]
+fn a_scope_naming_a_members_group_points_at_the_owner() {
+    let text = with_group(
+        "\n[[view_group]]\nname = \"quarter_map\"\nmembers = \"quarter\"\nextent = \"auto\"\n\
+         source = \"other\"\nfields = { view = \"quarter\" }\n\
+         point_visibility = { default = \"public\" }\n",
+    )
+    .replace(
+        "[[attribute]]\nname       = \"severity\"",
+        "[[attribute]]\nscope      = { group = \"quarter_map\" }\nname       = \"severity\"",
+    );
+    let message = err(&text);
+    assert!(
+        message.contains("declares `members = \"quarter\"`"),
+        "{message}"
+    );
+    assert!(
+        message.contains("scope = { group = \"quarter\" }"),
+        "the refusal must point at the owner: {message}"
+    );
+}
+
+/// **A scoped attribute may declare its own `source`, and that file carries the discriminator**
+/// (`views.md` §5): one row per `(entity, view)`, `fields.view` saying which view each row's value
+/// is for. Without it the file would be read as entity space, which would take one arbitrary
+/// view's values as every view's.
+#[test]
+fn a_scoped_attribute_may_read_its_own_source_through_fields_view() {
+    let text = with_group(
+        "\n[[attribute]]\nname = \"sentiment\"\ntype = \"f32\"\n\
+         scope = { group = \"quarter\" }\nindex = true\nsource = \"other\"\n\
+         fields = { view = \"quarter\" }\nentity_id_field = \"doc\"\n",
+    );
+    let config = ok(&text);
+    let scoped = &config.scoped_attributes[0];
+    assert_eq!(scoped.group, "quarter");
+    let source = scoped.source.as_ref().expect("its own source is recorded");
+    assert_eq!(source.view_field, "quarter");
+    assert_eq!(source.entity_id, "doc");
+    assert!(source.path.ends_with("other.parquet"));
+    assert!(
+        !config
+            .schema
+            .attributes
+            .iter()
+            .any(|a| a.name == "sentiment"),
+        "a family is not one of the declared scalars, whatever it reads from"
+    );
+
+    // `fields.view` is optional and defaults to `view`, the same default a scoped layer's
+    // artifacts source takes — one word, one meaning, across the declaration.
+    let defaulted = text.replace("fields = { view = \"quarter\" }\n", "");
+    assert_eq!(
+        ok(&defaulted).scoped_attributes[0]
+            .source
+            .as_ref()
+            .unwrap()
+            .view_field,
+        "view"
+    );
+}
+
+/// `fields` names the view discriminator and nothing else, so the two declarations that have
+/// nothing to say with it are refused rather than reading it as a default.
+#[test]
+fn fields_on_an_attribute_that_has_no_view_to_choose_is_refused() {
+    let entity_scope = with_group(
+        "\n[[attribute]]\nname = \"weight\"\ntype = \"f32\"\nindex = true\n\
+         source = \"other\"\nfields = { view = \"quarter\" }\n",
+    );
+    assert!(
+        err(&entity_scope).contains("entity scope"),
+        "{}",
+        err(&entity_scope)
+    );
+
+    let no_source = with_group(
+        "\n[[attribute]]\nname = \"sentiment\"\ntype = \"f32\"\n\
+         scope = { group = \"quarter\" }\nindex = true\nfields = { view = \"quarter\" }\n",
+    );
+    assert!(
+        err(&no_source).contains("there is no `source` here"),
+        "{}",
+        err(&no_source)
+    );
+
+    let stray = with_group(
+        "\n[[attribute]]\nname = \"sentiment\"\ntype = \"f32\"\n\
+         scope = { group = \"quarter\" }\nindex = true\nsource = \"other\"\n\
+         fields = { entity_id = \"doc\" }\n",
+    );
+    assert!(
+        err(&stray).contains("`fields.entity_id` is not a field"),
+        "{}",
+        err(&stray)
+    );
+}
+
+/// **A scoped `text` column must be indexed**: the record blob is one bundle-wide list addressed
+/// by a column's position in it, and a family has no position — so the token index is the only
+/// home its prose has, and a declaration without one stores nothing at all.
+#[test]
+fn a_scoped_text_column_without_an_index_is_refused() {
+    let text = with_group(
+        "\n[[attribute]]\nname = \"note\"\ntype = \"text\"\n\
+         scope = { group = \"quarter\" }\n",
+    );
+    let message = err(&text);
+    assert!(message.contains("`index = true`"), "{message}");
+    assert!(message.contains("record blob"), "{message}");
+}
+
+/// A layer may be drawn on a whole group, and a **scoped** layer only on that group's views.
+#[test]
+fn a_layer_may_name_a_group_and_a_scoped_one_may_name_only_its_own() {
+    let over_group = with_group(&LAYER.replace(
+        "views                     = [\"s0\"]",
+        "views                     = [\"quarter\"]",
+    ));
+    let config = parse_str(&over_group).expect("a layer over a group parses");
+    assert_eq!(config.layers[0].views, ["quarter"]);
+    assert_eq!(config.scopes.layer("clusters/a"), None);
+
+    let scoped = over_group.replace(
+        "views                     = [\"quarter\"]",
+        "views                     = [\"quarter\"]\nscope                     = { group = \"quarter\" }",
+    );
+    let config = parse_str(&scoped).expect("a scoped layer parses");
+    assert_eq!(config.scopes.layer("clusters/a"), Some("quarter"));
+
+    let message = err(&scoped.replace(
+        "views                     = [\"quarter\"]\nscope",
+        "views                     = [\"quarter\", \"s0\"]\nscope",
+    ));
+    assert!(message.contains("Nameable here: quarter"), "{message}");
+
+    let message = err(&over_group.replace(
+        "views                     = [\"quarter\"]",
+        "views                     = [\"nonesuch\"]",
+    ));
+    assert!(
+        message.contains("no `[[view]]` or `[[view_group]]` block declares"),
+        "{message}"
+    );
+    assert!(message.contains("quarter"), "{message}");
+}
+
+/// `fields.view` says where a scoped layer's discriminator is, and an unscoped layer has none —
+/// the map says *where*, never *whether* (`configuration.md` §8).
+#[test]
+fn fields_view_on_an_unscoped_layer_is_refused() {
+    let text = with_group(&LAYER.replace(
+        "views                     = [\"s0\"]",
+        "views                     = [\"s0\"]\nsource                    = \"hdbscan\"\n\
+         fields                    = { view = \"quarter\" }",
+    ));
+    let message = err(&text);
+    assert!(
+        message.contains("names a field this object never declared"),
+        "{message}"
+    );
+    assert!(message.contains("entity-scoped"), "{message}");
+}
+
+/// ⊘ The multi-view build is specified and not implemented (`views.md` §7), so a declaration
+/// carrying a group refuses at the build rather than materialising its plain views alone.
+#[test]
+fn a_declaration_with_a_group_materialises_the_groups_views_too() {
+    let config = parse_str(&with_group("")).expect("the group parses");
+    let registry = config.build_views().expect("the registry compiles");
+    assert!(
+        registry.iter().any(|v| v.id.contains(':')),
+        "a group's views are `group:key`: {:?}",
+        registry.iter().map(|v| v.id.as_str()).collect::<Vec<_>>()
+    );
+    // With several views the anchor is a declaration rather than a default (decision 0112).
+    let message = format!(
+        "{}",
+        config
+            .anchor_view(&registry)
+            .expect_err("several views and no anchor")
+    );
+    assert!(message.contains("allocation_view"), "{message}");
+    // One view, and naming it is noise.
+    let one = parse_str(SEVERITY).unwrap();
+    let registry = one.build_views().unwrap();
+    assert_eq!(registry.len(), 1);
+    assert_eq!(registry[one.anchor_view(&registry).unwrap()].id, "s0");
+}
+
+/// **The fixture is the acceptance case**, read from the repository rather than copied: it is
+/// `test_corpora/multiview/`'s own `corpus.toml`, written against `views.md` r6 before any of this
+/// existed, and its README's feature table is the checklist this stage is measured against.
+#[test]
+fn the_multiview_fixture_parses() {
+    let declared =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test_corpora/multiview/corpus.toml");
+    let text = std::fs::read_to_string(&declared).expect("the fixture is in the repository");
+    // **Written beside a vocabulary file rather than parsed in place.** A closed `[[vocabulary]]`
+    // naming a source is *read* at parse — the values are part of the declaration — and the
+    // fixture's parquets are derived data `prepare.py` writes, not committed beside it. So the
+    // declaration is the repository's, byte for byte, and the one file this parse opens is a
+    // minimal stand-in for `kind`'s nine keys.
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_keys(&dir.path().join("vocab-kind.parquet"), &["A", "P"]);
+    let path = dir.path().join("corpus.toml");
+    std::fs::write(&path, text).expect("write the fixture's declaration");
+    let config = Config::parse(&path, &HashMap::new()).expect("the multiview fixture parses");
+    assert_eq!(
+        config
+            .views
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>(),
+        ["world", "world_flat"]
+    );
+    assert_eq!(
+        config
+            .view_groups
+            .iter()
+            .map(|g| g.name.as_str())
+            .collect::<Vec<_>>(),
+        ["quarter", "quarter_alt"]
+    );
+    assert_eq!(
+        config.view_groups[0].declared_keys(),
+        ["2026-Q1", "2026-Q2", "2026-Q3", "2026-Q4"]
+    );
+    assert_eq!(config.view_groups[1].members.as_deref(), Some("quarter"));
+    assert_eq!(config.view_groups[1].fields.of("view"), "quarter");
+    assert_eq!(config.scopes.attribute("sentiment"), Some("quarter"));
+    assert_eq!(config.scopes.layer("quarter_clusters"), Some("quarter"));
+    assert_eq!(config.scopes.layer("collections"), None);
+    // **The shape layer spans two frames** (decision 0111): its two views place their points by
+    // different functions, which the pre-0111 parse refused outright.
+    let regions = config
+        .layers
+        .iter()
+        .find(|l| l.name == "regions")
+        .expect("the shape layer");
+    assert_eq!(regions.views, ["world", "world_flat"]);
+    assert_eq!(
+        config
+            .views
+            .iter()
+            .filter(|v| regions.views.contains(&v.name))
+            .map(|v| v.projection.name())
+            .collect::<Vec<_>>(),
+        ["web_mercator", "equirectangular"]
+    );
+    // The group-scoped attribute names no source of its own, so it is read from each view's own
+    // points file rather than from `[defaults].source` (`views.md` §5).
+    assert!(
+        !config
+            .attribute_sources
+            .iter()
+            .flat_map(|s| s.attributes.iter())
+            .any(|&i| config.schema.attributes[i].name == "sentiment"),
+        "a scoped attribute with no source does not take `[defaults].source`"
+    );
+}
+
+/// A one-column vocabulary file: `key`, and the codes assigned in the order given.
+fn write_keys(path: &Path, keys: &[&str]) {
+    let schema = std::sync::Arc::new(arrow::datatypes::Schema::new(vec![
+        arrow::datatypes::Field::new("key", arrow::datatypes::DataType::Utf8, false),
+    ]));
+    let batch = arrow::record_batch::RecordBatch::try_new(
+        schema.clone(),
+        vec![std::sync::Arc::new(arrow::array::StringArray::from(
+            keys.to_vec(),
+        ))],
+    )
+    .expect("one column");
+    let file = std::fs::File::create(path).expect("create the vocabulary file");
+    let mut writer =
+        parquet::arrow::ArrowWriter::try_new(file, schema, None).expect("open the writer");
+    writer.write(&batch).expect("write");
+    writer.close().expect("close");
+}
+
+// ---------------------------------------------------------------------------------------------
+// The roster minted from the discriminator (`views.md` §3.1's third form)
+// ---------------------------------------------------------------------------------------------
+
+/// A points file behind a discriminator: `entity_id`, `quarter`, and nothing else this parse
+/// reads. The `quarter` column is whatever `discriminator` holds, so a case can write a null or
+/// another type into it as easily as a key.
+fn write_discriminator(path: &Path, discriminator: arrow::array::ArrayRef, nullable: bool) {
+    let schema = std::sync::Arc::new(arrow::datatypes::Schema::new(vec![
+        arrow::datatypes::Field::new("entity_id", arrow::datatypes::DataType::UInt64, false),
+        arrow::datatypes::Field::new("quarter", discriminator.data_type().clone(), nullable),
+    ]));
+    let ids: Vec<u64> = (0..discriminator.len() as u64).collect();
+    let batch = arrow::record_batch::RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            std::sync::Arc::new(arrow::array::UInt64Array::from(ids)),
+            discriminator,
+        ],
+    )
+    .expect("two columns");
+    let file = std::fs::File::create(path).expect("create the points file");
+    let mut writer =
+        parquet::arrow::ArrowWriter::try_new(file, schema, None).expect("open the writer");
+    writer.write(&batch).expect("write");
+    writer.close().expect("close");
+}
+
+/// The ordinary case: one row per key, in the order given, so a case can assert the mint does
+/// **not** take file order.
+fn write_discriminated(path: &Path, keys: &[&str]) {
+    write_discriminator(
+        path,
+        std::sync::Arc::new(arrow::array::StringArray::from(keys.to_vec())),
+        false,
+    );
+}
+
+/// A group declaring neither roster form, its points behind `fields.view` — the third form of
+/// `views.md` §3.1.
+const MINTED: &str = r#"
+[[view_group]]
+name             = "quarter"
+extent           = { min = -40.0, max = 40.0 }
+source           = "topics"
+fields           = { view = "quarter" }
+point_visibility = { field = "categories", default = "public" }
+"#;
+
+/// Parse `SEVERITY` plus `MINTED` against a `topics.parquet` carrying `keys`, and return the
+/// registry — or the refusal the mint made.
+fn minted_registry(keys: &[&str]) -> Result<Vec<BuildView>> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_discriminated(&dir.path().join("topics.parquet"), keys);
+    let text = format!("{SEVERITY}{MINTED}");
+    let config = parse_at(dir.path(), &text, &HashMap::new()).expect("the declaration parses");
+    config.build_views()
+}
+
+/// **A group with no roster mints one view per distinct discriminator value, in key-byte order**
+/// (`views.md` §3.1). The file's own order is `2026-Q3, 2026-Q1, 2026-Q3, 2026-Q2` and the roster
+/// is not: roster order is served order (decision 0113), so a mint that took appearance order
+/// would make the served order a property of how the source's rows happen to be arranged.
+#[test]
+fn a_group_with_no_roster_mints_its_views_from_the_discriminator() {
+    let registry =
+        minted_registry(&["2026-Q3", "2026-Q1", "2026-Q3", "2026-Q2"]).expect("the mint succeeds");
+    let minted: Vec<&str> = registry
+        .iter()
+        .filter(|v| v.group.is_some())
+        .map(|v| v.id.as_str())
+        .collect();
+    assert_eq!(
+        minted,
+        ["quarter:2026-Q1", "quarter:2026-Q2", "quarter:2026-Q3"]
+    );
+    // Every minted view is an ordinary roster record: the group's own source selected by the
+    // discriminator, no metadata, and the group's own gate.
+    for view in registry.iter().filter(|v| v.group.is_some()) {
+        let membership = view.group.as_ref().expect("a minted view is a group's");
+        assert_eq!(membership.group, "quarter");
+        assert!(membership.metadata.is_empty(), "a minted view carries none");
+        assert_eq!(view.visibility, None, "the group's own gate, which is public");
+        let select = view.select.as_ref().expect("selected by the discriminator");
+        assert_eq!(select.column, "quarter");
+        assert_eq!(select.value, membership.key);
+        assert_eq!(select.keys, ["2026-Q1", "2026-Q2", "2026-Q3"]);
+    }
+}
+
+/// **A distinct value that cannot be a key is a refusal naming the value and the column**, not a
+/// skip and not a mangling: a value no view was minted for is one whose rows belong to no view.
+#[test]
+fn a_minted_key_outside_the_charset_is_refused() {
+    let message = format!(
+        "{}",
+        minted_registry(&["2026-Q1", "2026 Q2"]).expect_err("expected a refusal")
+    );
+    assert!(message.contains("'2026 Q2'"), "{message}");
+    assert!(message.contains("column 'quarter'"), "{message}");
+    assert!(message.contains("ASCII letters"), "{message}");
+}
+
+/// **A source with no rows mints no views**, and a group with none is a declaration promising
+/// coordinate systems the bundle would not carry — the refusal a roster table with no rows earns.
+#[test]
+fn a_group_with_no_roster_and_no_rows_is_refused() {
+    let message = format!(
+        "{}",
+        minted_registry(&[]).expect_err("expected a refusal")
+    );
+    assert!(message.contains("carries no rows"), "{message}");
+    assert!(message.contains("view group 'quarter'"), "{message}");
+}
+
+/// A `members` group whose **owner** declares no roster: the only arrangement where the mint runs
+/// against a file that is not the minting group's own.
+const MINTED_MEMBERS: &str = r#"
+[[view_group]]
+name             = "quarter_map"
+members          = "quarter"
+extent           = { min = -40.0, max = 40.0 }
+source           = "other"
+fields           = { view = "quarter" }
+point_visibility = { field = "categories", default = "public" }
+"#;
+
+/// **A `members` group takes the owner's minted keys** (`views.md` §3.3): the keys are read from
+/// the *owner's* points, and this group's own points are its own file, selected by the same
+/// discriminator. Two layouts over one key set, neither of which declared the set.
+#[test]
+fn a_members_group_takes_the_owners_minted_keys() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // The owner's file names the keys; the member's carries the same keys in another order and in
+    // another layout, as a second layout over one key set does.
+    write_discriminated(&dir.path().join("topics.parquet"), &["2026-Q2", "2026-Q1"]);
+    write_discriminated(&dir.path().join("other.parquet"), &["2026-Q1", "2026-Q2"]);
+    let text = format!("{SEVERITY}{MINTED}{MINTED_MEMBERS}");
+    let config = parse_at(dir.path(), &text, &HashMap::new()).expect("both groups parse");
+    let registry = config.build_views().expect("the owner's roster is minted once");
+    assert_eq!(
+        registry.iter().map(|v| v.id.as_str()).collect::<Vec<_>>(),
+        [
+            "s0",
+            "quarter:2026-Q1",
+            "quarter:2026-Q2",
+            "quarter_map:2026-Q1",
+            "quarter_map:2026-Q2"
+        ]
+    );
+    // Each group's points are its own file, and both select on the keys the owner's file named.
+    for view in registry.iter().filter(|v| v.group.is_some()) {
+        let membership = view.group.as_ref().expect("a group's view");
+        let file = match membership.group.as_str() {
+            "quarter" => "topics.parquet",
+            _ => "other.parquet",
+        };
+        assert_eq!(view.source.as_deref(), Some(dir.path().join(file).as_path()));
+        let select = view.select.as_ref().expect("selected by the discriminator");
+        assert_eq!(select.keys, ["2026-Q1", "2026-Q2"]);
+    }
+}
+
+/// **A null in the discriminator is refused**: a row that names no view is in no view, and the
+/// mint is the first reader to see it.
+#[test]
+fn a_null_discriminator_is_refused_at_the_mint() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_discriminator(
+        &dir.path().join("topics.parquet"),
+        std::sync::Arc::new(arrow::array::StringArray::from(vec![
+            Some("2026-Q1"),
+            None,
+        ])),
+        true,
+    );
+    let text = format!("{SEVERITY}{MINTED}");
+    let message = format!(
+        "{}",
+        parse_at(dir.path(), &text, &HashMap::new())
+            .expect("the declaration parses")
+            .build_views()
+            .expect_err("expected a refusal")
+    );
+    assert!(message.contains("has a null in it"), "{message}");
+    assert!(message.contains("a row that names no view is in no view"), "{message}");
+}
+
+/// **A discriminator that is not a string is refused, not coerced**: a key read out of another
+/// type would mint a view under a name nobody wrote (`views.md` §3.2's charset).
+#[test]
+fn a_discriminator_of_another_type_is_refused_at_the_mint() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_discriminator(
+        &dir.path().join("topics.parquet"),
+        std::sync::Arc::new(arrow::array::Int64Array::from(vec![1_i64, 2])),
+        false,
+    );
+    let text = format!("{SEVERITY}{MINTED}");
+    let message = format!(
+        "{}",
+        parse_at(dir.path(), &text, &HashMap::new())
+            .expect("the declaration parses")
+            .build_views()
+            .expect_err("expected a refusal")
+    );
+    assert!(message.contains("has type Int64"), "{message}");
+    assert!(message.contains("a view key is a string"), "{message}");
 }

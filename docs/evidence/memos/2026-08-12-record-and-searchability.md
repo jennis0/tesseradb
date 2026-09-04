@@ -12,12 +12,12 @@ this reads against rather than re-measures.
 [`per-point-attributes.md`](../../design/per-point-attributes.md) §1–§2.1, §3.7, §4.3; architecture
 §4 (I2, I7, I12), §8.2, §10.3; the companion memo
 [`2026-08-12-filter-placement.md`](2026-08-12-filter-placement.md), cited as **placement §n**;
-decisions [0013](../../decisions/0013-mark-specified-vs-implemented.md),
-[0039](../../decisions/0039-multi-valued-categoricals-are-slow-path-only.md),
+decisions 0013,
+0039,
 [0062](../../decisions/0062-filters-compose-as-a-boolean-tree-inside-the-candidate.md),
 [0063](../../decisions/0063-category-postings-serve-public-listings-and-never-per-viewer-ones.md),
-[0064](../../decisions/0064-an-absent-number-is-a-presence-bitmap-beside-the-column.md),
-[0065](../../decisions/0065-the-inverse-permutation-is-stored-for-the-filtered-viewport.md),
+0064,
+0065,
 [0066](../../decisions/0066-none-of-requires-a-value-and-names-one-column.md).
 
 ---

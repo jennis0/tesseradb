@@ -1,0 +1,158 @@
+{
+ "open_s": 30.1,
+ "before_1": {
+  "served": true,
+  "wall_s": 4.87,
+  "server_ms": 242.668
+ },
+ "before_2": {
+  "served": true,
+  "wall_s": 5.0,
+  "server_ms": 127.64
+ },
+ "grow_s": 2.99,
+ "grow": {
+  "status": 200,
+  "body": "{\"accepted\":1,\"over_bound\":0,\"over_bound_ids\":[],\"clipped\":0,\"tessera_ids\":[7889953827089086312],\"minted\":0}"
+ },
+ "withdraw": 200,
+ "flushes_after_grow": 0,
+ "after_growth_1": {
+  "served": true,
+  "wall_s": 5.6,
+  "server_ms": 264.22
+ },
+ "after_growth_2": {
+  "served": true,
+  "wall_s": 4.92,
+  "server_ms": 132.261
+ },
+ "status": {
+  "compaction": {
+   "fold_failures": 0,
+   "fold_requested": false,
+   "folds": 0,
+   "last_attr_bytes_read": 0,
+   "last_attr_bytes_written": 0,
+   "last_rss_bytes": 0,
+   "last_secs": 0,
+   "live_rows": 35920666,
+   "passes": []
+  },
+  "compute": {
+   "admission": 48,
+   "in_flight": 0,
+   "queue": 96,
+   "shed_total": 0,
+   "streaming": 0,
+   "waiting": 0
+  },
+  "entity_id_high_water": 35920667,
+  "fragment_cache": {
+   "bound_bytes": 1073741824,
+   "building_refusals": 0,
+   "bytes": 4945,
+   "entries": 1,
+   "evictions": 0,
+   "hits": 4,
+   "misses": 1,
+   "oversized_admissions": 0,
+   "rebuilds": 1,
+   "thrashing": false,
+   "young_evictions": 0
+  },
+  "fragmentation": {
+   "allocation": {
+    "containers": 5,
+    "postings": 5,
+    "rows": 1,
+    "runs": 5,
+    "scope": "commit-window-allocation",
+    "windows": 1
+   },
+   "containers": 0,
+   "postings": 0,
+   "postings_per_container": null,
+   "rows": 0,
+   "run_ratio": null,
+   "runs": 0,
+   "scope": "delta-tiers",
+   "tiers": 0
+  },
+  "ingest": {
+   "admission": 64,
+   "in_flight": 0,
+   "max_batch_bytes": 16777216,
+   "max_batch_rows": 10000,
+   "shed_total": 0
+  },
+  "overlay": {
+   "depth": 1,
+   "retirable": 1,
+   "soft_limit_alarms": 0
+  },
+  "partitions": [
+   {
+    "partition": "default",
+    "readiness": true,
+    "segments_version": 0,
+    "watermark": 35920666
+   }
+  ],
+  "row_projection_cache": {
+   "bound_bytes": 2147483648,
+   "building_refusals": 0,
+   "bytes": 18007232,
+   "entries": 4,
+   "evictions": 0,
+   "hits": 0,
+   "misses": 4,
+   "oversized_admissions": 0,
+   "thrashing": false,
+   "waiters_now": 0,
+   "waits_satisfied": 0,
+   "young_evictions": 0
+  },
+  "segments": [
+   {
+    "count": 1,
+    "partition": "default",
+    "view": "knn"
+   }
+  ],
+  "sessions": {
+   "retained": 5,
+   "sweep_at": 16,
+   "sweeps": 0,
+   "swept_total": 0
+  },
+  "write_executor": {
+   "apply_nanos_max": 17839,
+   "apply_nanos_total": 32674,
+   "coalesces": 0,
+   "deny_submitted": 1,
+   "flush": {
+    "buffered_items": 0,
+    "flush_failures": 0,
+    "flush_requested": false,
+    "flush_skips": 0,
+    "flushable_items": 0,
+    "flushes": 0,
+    "overlay_publications": 2,
+    "refreshes": 0,
+    "ticks": 0
+   },
+   "merges": 0,
+   "posture": "running",
+   "ready": true,
+   "wal_appends": 3,
+   "wal_fsyncs": 2,
+   "wal_recoveries": 0,
+   "work_completed": 1,
+   "work_depth": 0,
+   "work_in_flight_nanos": 0,
+   "work_service_nanos_ewma": 2982021263,
+   "work_submitted": 1
+  }
+ }
+}

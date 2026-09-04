@@ -49,3 +49,13 @@ parking_lot = "0.12"
 # second consumer (tessera-store's step-down warn, tessera-server's request logging) per the
 # workspace convention that a dependency taken by two crates is versioned in one place.
 tracing = "0.1"
+
+# Debug info in dev and test builds is line tables only. The 161 integration-test binaries each
+# statically link the engine; with full debug info they ran 300–600 MB apiece, every upstream
+# edit gave each a fresh hash, and cargo never removes the old one — `target/debug/deps` reached
+# 311 GB across 7,024 files on 2026-09-02. Line tables keep backtraces and panics resolvable to a
+# file and line; only stepping through locals in a debugger wants more, and that can be asked for
+# with `CARGO_PROFILE_DEV_DEBUG=full` on the one build that needs it. A nightly `cargo sweep
+# --time 2` in the user crontab removes what accumulates regardless.
+[profile.dev]
+debug = "line-tables-only"

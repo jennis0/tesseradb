@@ -33,15 +33,19 @@ make the mechanism unaffordable at exactly the sizes it exists for.
 
 ## Materialisation — the shim, and why it exists
 
-The corpus reaches the build as files — points, pairs, `config.toml` — written by the crate's own
-materialisers, and **the CLI carries no verb that writes them**: `tessera corpus` has `items` and
-`census` only, which answer expectations but cannot produce the build's inputs, and §12.1's
-"the corpus emits a batch and the driver posts it" names no route from Python to
-`Corpus::ingest_batch` either. So [`materialise_corpus`] compiles a two-file cargo shim against
-`crates/tessera-corpus` itself and runs it. This is the same trust chain as invoking the CLI — the
-one Rust generator, reached through a build — and deliberately not a Python restatement of the
-materialisers, for §12.1's reason. The shim is cached at a fixed path per machine and shares the
-workspace's target directory, so after the first run its cost is a cargo fingerprint check.
+The corpus reaches the build as files — points, pairs, the artifact rosters and their
+memberships, `config.toml` — written by the crate's own materialisers. `tessera corpus
+materialise` writes that set, but it writes only that set: §12.1's "the corpus emits a batch and
+the driver posts it" needs one `/control/ingest` body drawn from the same generator over an
+arbitrary item range, and no verb takes a range. So [`materialise_corpus`] compiles a two-file
+cargo shim against `crates/tessera-corpus` itself and runs it, calling the same materialisers the
+verb calls and then `Corpus::ingest_batch` beside them. This is the same trust chain as invoking
+the CLI — the one Rust generator, reached through a build — and deliberately not a Python
+restatement of the materialisers, for §12.1's reason. Two writers of one input set is the cost:
+the shim's calls and `Corpus::config_toml`'s declaration are one obligation held apart in two
+crates, which `test_materialisation.py` exists to keep matched. The shim is cached at a fixed
+path per machine and shares the workspace's target directory, so after the first run its cost is
+a cargo fingerprint check.
 
 ## What the harness owns, and the two rules a naive harness breaks
 
@@ -151,6 +155,11 @@ fn main() -> ExitCode {
     let corpus = tessera_corpus::Corpus::new(seed, n, extent).expect("corpus");
     corpus.write_points_parquet(&out.join("points.parquet")).expect("points");
     corpus.write_pairs_parquet(&out.join("pairs.parquet")).expect("pairs");
+    // Every remaining source `config_toml` declares — the four artifact rosters and their three
+    // membership relations — in one call. The declaration is a constant, so the file set it names
+    // and the file set written here are one obligation, checked by
+    // `test_materialisation.py::test_every_declared_source_is_a_file_the_shim_wrote`.
+    corpus.write_artifact_fixtures(&out).expect("artifact fixtures");
     std::fs::write(out.join("config.toml"), corpus.config_toml()).expect("config");
     if hi > lo {
         let batch = corpus.ingest_batch(lo..hi);
@@ -254,7 +263,7 @@ def materialise_corpus(
     )
 
 
-def build_bundle(files: CorpusFiles, bundle_root: Path, *, view_id: str = "s0") -> None:
+def build_bundle(files: CorpusFiles, bundle_root: Path) -> None:
     """`tessera build` over the materialised inputs — the same invocation shape as the catalogue's
     (`oracle.catalogue._build_argv`): a deployment file naming the declaration and the output,
     external ids minted from the source entity id (the denies address items by exactly those
@@ -262,7 +271,10 @@ def build_bundle(files: CorpusFiles, bundle_root: Path, *, view_id: str = "s0") 
 
     Nothing names a source or an extent here: the generator's own declaration sits beside the two
     parquet files it names, and carries the grid extent this corpus's expected answers are stated
-    in (`configuration.md` §1, §3). `view_id` is the view that declaration declares.
+    in (`configuration.md` §1, §3) — the view it declares included, which is why nothing here names
+    one either: `tessera build` materialises every view the declaration carries and takes no
+    `--view` (fixed 2026-08-31; this function had kept the flag after the catalogue's own
+    invocation dropped it, so every caller of it died at `build` with exit 2).
     """
     ensure_cli_built()
     deployment = write_deployment(
@@ -272,7 +284,6 @@ def build_bundle(files: CorpusFiles, bundle_root: Path, *, view_id: str = "s0") 
         [
             str(CLI_BIN), "build",
             "--deployment", str(deployment),
-            "--view", view_id,
             "--out", str(bundle_root),
             "--mint-external-ids",
         ],
@@ -662,9 +673,67 @@ def check_meta(canon: Json, declaration: Declaration, reasons: list[str]) -> Non
         reasons.append(
             f"/v1/meta declares {served_shape} where the schema compiled {declared_shape}"
         )
-    extent = canon.payload["quantisation"]
-    if (extent["x_min"], extent["x_max"], extent["y_min"], extent["y_max"]) != GRID_EXTENT:
-        reasons.append(f"/v1/meta quantisation {extent} is not the fixture's extent")
+    # The frame rides with the view it belongs to (decision 0040): every view must state one,
+    # and every one of them must be the fixture's.
+    for view in canon.payload["views"]:
+        extent = view.get("quantisation")
+        if extent is None:
+            reasons.append(f"/v1/meta view {view['id']!r} publishes no quantisation extent")
+            continue
+        if (extent["x_min"], extent["x_max"], extent["y_min"], extent["y_max"]) != GRID_EXTENT:
+            reasons.append(
+                f"/v1/meta view {view['id']!r} quantisation {extent} is not the fixture's extent"
+            )
+    check_roster(canon, reasons)
+
+
+def check_roster(canon: Json, reasons: list[str]) -> None:
+    """The roster and the views agree (`views.md` §3.2).
+
+    The fixture declares plain views alone, so what this asserts on it is that *nothing* claims a
+    group — which is the case the shape could get wrong in the quiet direction, a served view
+    carrying a key no group lists. The other direction is checked too, and both bite the moment a
+    grouped fixture exists: a view a client can see and cannot address, or a roster entry that
+    resolves to nothing, is a picker that offers a view the server will 404.
+
+    **A view is addressed by its key and by nothing else** (decision 0113), so there is no number
+    to check here: what orders a group is the order its `views` list is in, and a served record
+    carrying an `ordinal` field would be the removed machinery come back.
+    """
+    views = {view["id"]: view for view in canon.payload["views"]}
+    rostered: set[str] = set()
+    for group in canon.payload["groups"]:
+        for view_id in group["views"]:
+            rostered.add(view_id)
+            view = views.get(view_id)
+            if view is None:
+                reasons.append(
+                    f"/v1/meta group {group['name']!r} lists {view_id!r}, which it does not serve"
+                )
+                continue
+            if view["group"] != group["name"]:
+                reasons.append(
+                    f"/v1/meta view {view_id!r} is listed by group {group['name']!r} and names "
+                    f"group {view['group']!r}"
+                )
+            if view["id"] != f"{view['group']}:{view['key']}":
+                reasons.append(
+                    f"/v1/meta view {view_id!r} is not the join of its group and its key"
+                )
+    for view_id, view in views.items():
+        if "ordinal" in view:
+            reasons.append(
+                f"/v1/meta view {view_id!r} carries an `ordinal`; a view is addressed by its key "
+                f"alone and a group's order is its list's order (decision 0113)"
+            )
+        record = [view["group"], view["key"], view["metadata"]]
+        if view_id in rostered:
+            if any(field is None for field in record):
+                reasons.append(f"/v1/meta view {view_id!r} is on a roster with a partial record")
+        elif any(field is not None for field in record):
+            reasons.append(
+                f"/v1/meta view {view_id!r} carries a roster record and is on no group's roster"
+            )
 
 
 def check_categories(

@@ -1,0 +1,47 @@
+t,line
+0.014,"warning: vocabulary 'type': `visibility = ""public""` with `value_set = ""open""` publishes data-derived value names on nobody's authority (per-point-attributes §3.8, relaxed from a refusal to a warning by owner ruling 2026-08-07). Confirm this is intended"
+0.549,"view 'knn': quantising against x [-15.293811359405517, 20.43458703994751], y [-18.086785354614257, 17.64161304473877]"
+0.549,"        the data spans x [-14.943532943725586, 20.084308624267578], y [-13.08940315246582, 12.644230842590332] — 64252 x 47204 of the 65536 x 65536 cells"
+0.549,"        10000000 point(s) placed, none on the frame's edge"
+0.549,"schema: 6 column(s), 5.12 B/row against the 12 B fixed row (+43%)"
+0.549,        0.05 GiB resident at 10000000 items
+0.549,        4.77 GiB per 10^9 items — unalterable without rewriting the corpus
+0.549,        every column materialises in EVERY view — including ones whose items carry no value for it (§3.9). Per-view columns need contracts §2.6's per-view enumeration
+0.825,stage       source_ids      0.28s  rows=10000000     peak=   179 MiB
+2.572,stage       dictionary      1.75s  rows=12           peak=   259 MiB
+4.231,stage    geometry_read      1.66s  rows=10000000     peak=   526 MiB
+4.231,stage       pairs_pack      0.00s  rows=10000000     peak=   526 MiB
+4.591,stage   signature_sort      0.36s  rows=10000000     peak=   606 MiB
+7.313,stage       assignment      2.72s  rows=10000000     peak=   648 MiB
+7.385,stage       assignment      0.07s  rows=10000000     peak=   648 MiB
+7.685,stage   postings_write      0.30s  rows=10000000     peak=   648 MiB
+7.685,stage     external_ids      0.00s  rows=0            peak=   648 MiB
+244.208,"attribute 'publication_year': 9,732,002 of 10,000,000 entities have a value"
+244.208,"attribute 'type': 10,000,000 of 10,000,000 entities have a value"
+244.208,"attribute 'is_oa': 9,734,441 of 10,000,000 entities have a value"
+244.208,"attribute 'openalex_id': 10,000,000 of 10,000,000 entities have a value"
+244.208,"attribute 'title': 10,000,000 of 10,000,000 entities have a value"
+244.208,"attribute 'abstract': 10,000,000 of 10,000,000 entities have a value"
+244.208,        0 source row(s) named entities this build did not load
+244.208,stage   attribute_tail    236.52s  rows=10000000     peak=  8753 MiB
+251.592,stage           layers      7.38s  rows=2            peak=  8753 MiB
+462.035,stage       text_index    178.37s  rows=11583490     peak= 15705 MiB
+462.036,stage  filter_postings     32.07s  rows=10000000     peak= 15705 MiB
+536.052,stage      record_blob     74.02s  rows=10000000     peak= 15705 MiB
+538.004,stage   column_release      1.95s  rows=10000000     peak= 15705 MiB
+538.350,stage       tiler_sort      0.35s  rows=10000000     peak= 15705 MiB
+538.907,stage    segment_write      0.56s  rows=10000000     peak= 15705 MiB
+540.871,"artifact layouts, chosen from the bundle's own row space (1961 ms):"
+540.871,"  clusters/kmeans level 0 [knn]: 250 artifact(s) with rows, 0.448 everywhere, 3.9 blocks/artifact, disjoint — served rows"
+540.871,"  topics/openalex level 0 [knn]: 4 artifact(s) with rows, 1.000 everywhere, 153.0 blocks/artifact, disjoint — served rows"
+540.871,"  topics/openalex level 1 [knn]: 26 artifact(s) with rows, 1.000 everywhere, 147.8 blocks/artifact, disjoint — served rows"
+540.871,"  topics/openalex level 2 [knn]: 252 artifact(s) with rows, 1.000 everywhere, 115.0 blocks/artifact, disjoint — served rows"
+540.871,"  topics/openalex level 3 [knn]: 4516 artifact(s) with rows, 1.000 everywhere, 53.0 blocks/artifact, disjoint — served column"
+540.871,"  wrote 4 tile index(es), 1 row-major column(s), 5 containment partition(s), 0 shape row form(s), 0 decomposition file(s)"
+540.871,"  topics/openalex: 4798 artifact(s) across 4 levels — what a response naming it carries at `levels: ""all""`. Omitting `levels` serves the levels whose declared zoom range covers the request's depth:"
+540.871,"    level 0 [knn]: 4 artifact(s), zoom 0–4"
+540.871,"    level 1 [knn]: 26 artifact(s), zoom 3–8"
+540.871,"    level 2 [knn]: 252 artifact(s), zoom 7–12"
+540.872,"    level 3 [knn]: 4516 artifact(s), zoom 11–16"
+544.943,stage        manifests      6.04s  rows=7439976083   peak= 15705 MiB
+545.004,view 'knn': 10000000 point(s) landed in 9436998 distinct cell(s) — 94.4% of them have a position of their own

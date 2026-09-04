@@ -29,14 +29,21 @@ by the source's own name. `--extent`, `--id-key`, `--id-key-file`, `--points`, `
 `--artifacts`, `--artifact-members`, `--schema`, `--layers`, `schema.toml` as a fixed name and
 `layers.toml` are all gone. What is **not** built, and is refused rather than accepted and ignored,
 each naming what is absent per
-[decision 0013](../decisions/0013-mark-specified-vs-implemented.md):
+decision 0013:
 
-- **A view's own `visibility`**, and `withdraw_on_member_deletion = true` on a **layer** (not on
-  its content, which needs a fold path) — each refused at parse rather than accepted and ignored.
+- **`withdraw_on_member_deletion = true` on a *layer*** (not on its content, which needs a fold
+  path) — refused at parse rather than accepted and ignored. A view's or a view group's own
+  `visibility` **is built and no longer refused** (2026-08-31, `views.md` §6): a label compiles,
+  is checked at parse against the plugin that will evaluate it, and gates the view for every
+  principal whose satisfied terms it does not meet.
+- **A `[[view_group]]` builds** (`views.md` §7): every plain view and every view of every group is
+  materialised over one entity space, whichever roster form declared it — the roster-less form
+  included, since 2026-08-31, its keys minted from the discriminator's distinct values.
 
 ⊘ A `title` on a view, an attribute or a vocabulary is compiled and **not yet published** — the
 manifest carries no slot for one, and adding three is a contracts change; a level's title and a
-layer's are served today, as is each vocabulary *value*'s.
+layer's are served today, as is each vocabulary *value*'s, and a **view group's** is since
+2026-08-31 (contracts §3.2 r61, `/v1/meta`'s `groups` entry).
 
 ## 1. The surface in full
 
@@ -47,7 +54,7 @@ value it does not list is refused. That closure is what the leak register rests 
 exhaustive *because* the surface is enumerable, and a key added without an entry here is a control
 nobody has reasoned about.
 
-Eleven blocks. `R` = required, `D` = defaulted, `O` = optional with no default and no fallback.
+Fourteen blocks. `R` = required, `D` = defaulted, `O` = optional with no default and no fallback.
 **`source`, `fields` and inline data are acquisition keys** — a build reads them and a deployment
 writing through the service omits them entirely (§2), so an `R` on one of those means *required to
 build from a file*, never *required to declare*.
@@ -68,6 +75,7 @@ scores   = "sentiment.parquet"
 |---|---|---|
 | `source` | O | a `[sources]` key, taken by a `[[view]]` or an `[[attribute]]` that names none |
 | `entity_id_field` | D `entity_id` | the column an entity id is read from, wherever one is read |
+| `allocation_view` | R when several views are declared | the view whose Morton code breaks entity-id ties within a signature group at a build (decision 0112); with one view, that view, and naming it is noise. **Read**, and refused absent naming the candidates |
 
 **A `source` names a key, never a path, and there is no fallback between the two.** A name
 `[sources]` does not carry is refused, listing the names that do exist. Reading an unmatched name
@@ -112,12 +120,71 @@ no `fields` map and so has no way to say otherwise; it is `(entity_id, term_id)`
 | Key | | Value |
 |---|---|---|
 | `name` | R | identity; tombstoned on drop, never reused |
-| `title` | O | human-readable, served on `/v1/meta` |
+| `title` | O | human-readable. ⊘ On a plain view it is compiled and published nowhere; **on a `[[view_group]]` it is served** on `/v1/meta`'s `groups` entry (contracts §3.2 r61) |
+| `projection` | D `none` | `web_mercator`, `equirectangular`, `plate_carree`, `gall_isographic` or `none` — what turns this view's input coordinates into positions in its frame ([`projections.md`](projections.md) §5). See below |
 | `source` | D | a `[sources]` key; `[defaults].source` where absent |
-| `fields` | D | canonical `entity_id`, `x`, `y`, or `morton` + `residual` — the geometry shapes are mutually exclusive (§8). `entity_id` defaults to `[defaults].entity_id_field` |
-| `extent` | R | the quantisation frame: `"auto"`, `{ auto = true, margin = f }`, `{ min, max }` or `{ x = [a,b], y = [c,d] }`. See below |
+| `fields` | D | canonical `entity_id`, and `x`, `y` or `morton` + `residual` — or `lon`, `lat` under a projection. The geometry shapes are mutually exclusive (§8). `entity_id` defaults to `[defaults].entity_id_field` |
+| `extent` | R | the quantisation frame: `"auto"`, `{ auto = true, margin = f }`, `{ min, max }` or `{ x = [a,b], y = [c,d] }` — and under a projection, `"auto"` or `{ lon = [a,b], lat = [c,d] }`. See below |
 | `point_visibility` | R | `{ field, default }`, or `{ source, default }` — where each point's label is, and what a point carrying none gets. See below |
-| `visibility` | ⊘ | the view's own gate; specified, not implemented (views §3) |
+| `visibility` | D `public` | the view's own gate — an access label, or `public` ([`views.md`](views.md) §6). A label is resolved to its term set by the plugin and satisfied where that set meets the principal's; `public` is the label every principal holds and compiles to no gate. A label the plugin cannot read, or one naming no terms, is refused at parse — it would gate the view against everybody |
+
+**`[[view_group]]`** — a set of views sharing every setting, differing by a key and per-view
+metadata ([`views.md`](views.md) §3,
+decision 0108). Repeatable. **It takes
+every `[[view]]` key above, with the same meaning**, and adds the four below. Its `title` is the
+one served on `/v1/meta`'s `groups` entry — a view's own is still compiled and published nowhere. A group is not a
+view: it cannot be named on a viewer verb and has no row space of its own; its views are, each
+addressed `<group>:<key>`, which is a view's only address (decision 0113).
+
+| Key | | Value |
+|---|---|---|
+| `members` | O | another `[[view_group]]`'s name: this group's views are that group's (views §3.3). Chains are refused, and a group naming it declares no `metadata` and no roster — those belong to the group that owns the keys |
+| `metadata` | O | the per-view values a view carries, `name = type` over the `[[attribute]]` types; a category is `{ type = "category", vocabulary = … }`. A name the roster already uses — `key`, `source`, `visibility`, or the discriminator's own column — is refused |
+| `[[view_group.view]]` | O, repeatable | **form A**: one view per block — `key`, `source`, `visibility`, and one key per declared metadata name. The file *is* the view, so the group declares no `source` of its own |
+| `[view_group.views]` | O | **form B**: the roster as a table — `source` and `fields` over the canonical `key`, `visibility` and the metadata names — beside the group's own `source`, whose `fields.view` says which view each row of points lands in |
+
+**The roster decides where the points come from**, and declaring both forms is refused, as `source`
+beside inline `artifacts` is. A group declaring **neither** has its views minted from the
+discriminator's distinct values and carries no metadata; it needs the group-level `source` that the
+other two spellings of that arrangement need. **`[defaults].source` does not reach a group**: which
+of those arrangements a defaulted file meant is not something a default can decide.
+
+**The roster-less form declares no keys at all**, which is its whole surface: name the group's
+`source` and its `fields.view`, write neither `[[view_group.view]]` nor `[view_group.views]`, and
+the build takes one view per distinct value of that column. Five things are refused, each naming
+what it read (views §3.1): a value outside the key charset; a `metadata` line, there being no
+roster record for a per-view value to sit on; a source with no rows, which would leave the group
+with no views; a null in the discriminator, a row that names no view being in no view; and a
+discriminator column that is not a string, a key read out of another type being a view under a name
+nobody wrote. The keys are served in **key-byte order**, and every minted view takes the
+group's own `visibility`; both are recoverable defaults rather than guarantees.
+
+```toml
+[[view_group]]                      # the roster-less form: the data names the views
+name             = "quarter"
+extent           = { x = [-40.0, 40.0], y = [-40.0, 40.0] }
+source           = "quarter_papers"
+fields           = { view = "quarter" }
+point_visibility = { field = "access", default = "public" }
+```
+
+A view's `name` and a group's `name` and keys take the **column-name charset**, and `:`, `#` and
+`@` are reserved out of them (views §3.2): the first two build a view id and the third pins a
+group-scoped attribute to a view, so a name carrying one would make a request mean two things.
+
+```toml
+[[view_group]]
+name             = "quarter"
+extent           = { x = [-40.0, 40.0], y = [-40.0, 40.0] }
+point_visibility = { field = "access", default = "public" }
+metadata         = { label = "text", starts = "timestamp_us" }
+
+[[view_group.view]]
+key    = "2026-Q2"
+source = "q2"
+label  = "Q2 2026"
+starts = 2026-04-01T00:00:00Z
+```
 
 **`[[vocabulary]]`** — a named value set. Repeatable.
 
@@ -127,7 +194,7 @@ no `fields` map and so has no way to say otherwise; it is `(entity_id, term_id)`
 | `title` | O | human-readable |
 | `width` | R | `u8` \| `u16` \| `u32` — the **code space's** width (`per-point-attributes.md` §3.6, `per-point-attributes.md` §3.9) |
 | `value_set` | R | `closed` \| `open` — is an unknown key at ingest refused, or minted? |
-| `visibility` | R | `public` \| `derived` — one axis, two settings; the slot takes no label ([decision 0090](../decisions/0090-a-vocabulary-has-one-visibility-axis.md)) |
+| `visibility` | R | `public` \| `derived` — one axis, two settings; the slot takes no label (decision 0090) |
 | `source` | R for `closed`, unless inline | a `[sources]` key. **`[defaults].source` does not reach here** — an absent vocabulary source is a set that mints rather than reads (§8) |
 | `fields` | D | canonical `key`, `code`, `title`; `code` may be absent — see below |
 | `values` | R for `closed`, unless sourced | inline: an array of keys, or a `key = code` table |
@@ -149,6 +216,8 @@ no `fields` map and so has no way to say otherwise; it is `(entity_id, term_id)`
 | `analyser` | D | `text` only; `unicode` is the default and, today, the only one — see below |
 | `multi` | ⊘ | refused at parse (`per-point-attributes.md` §3.7, records §6) |
 | `render_in` | ⊘ | refused at parse (`per-point-attributes.md` §3.9) |
+| `scope` | D `entity` | `"entity"` — one value per entity, under every view — or `{ group = "<view_group>" }`, one per view of that group ([`views.md`](views.md) §5, decision 0109). A scope naming a group that declares `members` is refused, pointing at the owner. A scoped attribute that names no `source` of its own is read from each of the group's views' own points files, so `[defaults].source` does not reach it; one that names a `source` reads it through `fields.view` below. A scoped `text` column requires `index = true` — the record blob is bundle-wide and a family has no slot in it, so the token index is its only home. ⊘ The ingest rule is specified and not built |
+| `fields` | O | **group-scoped with its own `source` only**: `{ view = "<column>" }`, the discriminator saying which view each row's value is for; `view` where absent. Refused on an entity-scoped column and on a scoped one that names no `source`, neither having a view to choose between ([`views.md`](views.md) §5) |
 
 **The extent is the frame every stored position is relative to**, and it belongs to the view rather
 than to the invocation that built it. A coordinate is quantised across it into 32 bits — the top 16
@@ -183,6 +252,39 @@ needs headroom or the first out-of-range ingest clamps. A caller who knows the b
 There is no constant for the full float range: spanning ±3.4×10³⁸ over 65,536 cells makes each cell
 10³⁴ wide, so every real dataset lands in one of them — it avoids clamping by destroying all
 resolution.
+
+**A `projection` makes the view a coordinate system on the Earth, and changes what its other three
+keys mean.** The function itself, the closed set it is drawn from and the frame model it implies are
+[`projections.md`](projections.md) §4–§5; what belongs here is the declaration.
+
+```toml
+[[view]]
+name       = "world"
+projection = "web_mercator"
+extent     = { lon = [-8.6, 1.8], lat = [49.9, 60.9] }
+```
+
+- **The coordinate columns become `lon` and `lat`**, in that order, and `fields.x` or `fields.y` on
+  such a view is refused naming the geographic spelling. A corpus built with the two exchanged is
+  mirrored about the diagonal and nothing downstream can see that it is. `fields.lon` on a view with
+  no projection is refused the same way: there is nothing to turn a degree into a coordinate.
+  `morton`/`residual` is refused too — a code is a position already placed, so there is no longitude
+  to transform.
+- **The extent is written in longitude and latitude**, and is projected and then **snapped outward
+  to the smallest aligned square containing it**, with the zoom offset capped at 16. `"auto"` is the
+  same operation over the data's own longitude/latitude box. The other three spellings are refused:
+  `{ min, max }` and `{ x, y }` state a frame in the space the projection *produces*, and
+  `{ auto = true, margin = f }` asks for headroom the snap already supplies.
+- **A coordinate outside ±180 or ±90 is not a coordinate**, in the extent or in a row, and is
+  refused naming WGS84. So is a box crossing the antimeridian, which an aligned square cannot wrap;
+  the refusal names the wider box that does not cross.
+- **A latitude outside the projection's own domain is clipped, counted and never refused** — it is
+  moved onto the frame's edge, where the clamp rule below says nothing is clamped, so the two counts
+  are separate and neither can stand in for the other.
+
+The frame a stated box snaps to is a function of the declaration alone, so `tessera check` prints it
+— the square, and whether the offset cap chose it rather than the box. Under `"auto"` it cannot, the
+frame being a function of the data, and it says so.
 
 **Every build reports what the frame does to the data, and past half the corpus it refuses.** The
 extent alone is four plausible-looking numbers whatever the corpus holds, so the build prints the
@@ -343,7 +445,7 @@ Code `0` stays the *absent* sentinel: it is refused in a pinned set and never as
 tokens, and the set is closed the way every other value word here is: **a name this list does not
 carry is refused, with no fallback** — falling back would index a column with a pipeline its
 declaration did not ask for, which is the silent mismatch
-[decision 0070](../decisions/0070-analysers-are-named-and-declared-per-column.md) exists to
+decision 0070 exists to
 prevent.
 
 | Name | Identity | What it does |
@@ -367,15 +469,17 @@ the mis-split word does not find the document. `lindera` is the design's named e
 |---|---|---|
 | `name` | R | identity; tombstoned on drop |
 | `title` | O | human-readable; absent is served as absent |
-| `views` | R | the views this layer's artifacts are drawn on |
+| `views` | R | the views this layer's artifacts are drawn on. A name here is a `[[view]]` or a whole `[[view_group]]`, and naming a group draws the layer on every view of it, present and future ([`views.md`](views.md) §3.5) |
+| `scope` | D `entity` | `"entity"` — one artifact set, drawn on every view the layer names — or `{ group = "<view_group>" }`, a different set per view of that group (views §3.5, decision 0109). A scoped layer's rows carry a `view` column (`fields.view`), its artifacts are keyed per `(layer, view)`, and its `views` may name only that group and groups sharing its views |
 | `source` | R unless inline | a `[sources]` key: one file per layer, so no discriminator field exists. Declaring it beside `artifacts` is refused. **`[defaults].source` does not reach here** — a layer with no source is declared and empty (§8) |
-| `fields` | D | canonical `key`, `contents`, `parent`, `attached_layer`, `attached_key`, `min_x`, `min_y`, `max_x`, `max_y`, and `members` or `excluding` where membership rides the artifact row. Naming both memberships is refused, as is a map beside inline `artifacts` |
+| `fields` | D | canonical `key`, `contents`, `parent`, `attached_layer`, `attached_key`, the shape kind's own columns (`min_x`, `min_y`, `max_x`, `max_y`; `cx`, `cy`, `r`; `cx`, `cy`, `a`, `b`, `angle`; `geometry`) and `space` on a layer declaring `shape`, and `members` or `excluding` where membership rides the artifact row. Naming both memberships is refused, as is a map beside inline `artifacts` |
+| `default_space` | D `view` | the space the artifact table's shapes are written in where a row carries no `space` of its own ([`polygon-membership.md`](polygon-membership.md) §4.3). `view` is the space the points are stored in; `wgs84` is longitude and latitude, honoured on a view that declares a projection and refused on one that does not, and the shape goes through that view's own transform — the same function the points went through, which is what stops it selecting the wrong rows ([`projections.md`](projections.md) §10). Only on a layer declaring `shape` |
 | `artifacts` | O | inline array, instead of `source`, for an authored layer — the keys below |
-| `membership` | R | `enumerated` \| `spatial` \| `{ attribute = <field> }`. The last two are **predicates**: their artifacts are derived from a rule rather than published, so such a layer declares no `content`, no `depends_on`, no `levels`, no `artifact_visibility.field`, no `layout` and no hierarchy but `flat` — each of those would register a layer that is reachable and serves nothing. `spatial` reads `[layer.shape]`; `{ attribute = f }` reads the indexed column `f`, whose distinct values are its artifacts |
+| `membership` | R | `enumerated` \| `spatial` \| `{ attribute = <field> }`. `{ attribute = f }` is a **predicate**: its artifacts are derived from the indexed column `f`, whose distinct values they are, so such a layer declares no `content`, no `depends_on`, no `levels`, no `artifact_visibility.field`, no `layout` and no hierarchy but `flat` — each of those would register a layer that is reachable and serves nothing. `spatial` reads `[layer.shape]`, and its artifacts are **published rows** each carrying a shape ([`polygon-membership.md`](polygon-membership.md) §6.2): a spatial layer may declare content, `depends_on`, `levels`, any hierarchy and a `layout` pin; what it may not declare is a proportional criterion or `artifact_visibility.field` |
 | `value_set` | D `closed` | whether a member key the layer's artifacts do not declare is refused, or creates an artifact carrying nothing but its name ([`artifacts-from-points.md`](artifacts-from-points.md) §3). `closed` makes `artifacts` the roster; `open` makes it enrichment, so a cluster the points name and the table omits exists without a title, a cluster the table carries and no point names is an artifact with no members, and neither is an error. **It governs both entry points**: a build mints from a member source, and an ingest batch mints from a column named for the layer, at the close of the commit window that allocates the points. What `open` costs is that a mistyped key becomes a permanent object rather than a refusal — reported, at both entry points, and not bounded |
-| `hierarchy` | R | `{ kind = flat \| nested \| stacked \| tiered, prune_children = bool }` — see below |
-| `layout` | O | the **serving-layout pin**: `rows` (one row-space bitmap per artifact), `column` (one artifact label per row, for a level whose memberships partition the corpus) or `list` (a list of labels per row, where they overlap). Absent — the pick is automatic, taken **at the build** from the bundle's own row space and re-evaluated at every compaction fold ([decision 0094](../decisions/0094-the-serving-layout-is-chosen-at-build-and-re-evaluated-at-the-fold.md)). What it reads is the level's **`everywhere` fraction** — how much of the level is too wide for any node of the tile index — and its artifact count; ⊘ the threshold on the first is provisional (`tessera_store::derived::ROW_MAJOR_EVERYWHERE_FRACTION`). Blocks per artifact is **reported and no longer read** (decision 0092's (c), now emitted by the build itself): the 2026-08-22 bracket moved it 6 → 12 with the cost *falling*, and the one quantity tracking the cost was the `everywhere` fraction. Present, it pins **every level of the layer**, at the build and at every fold after it, and a fold never overturns it. **Nothing on the wire names a layout** — both forms answer identically, so this is a latency choice and not a contract. A word outside the three is refused, and **any** pin on a predicate membership is refused: a shape has no per-row source and a single-valued attribute's membership *is* the column, so neither has a second form for a pin to select between. ⊘ `column` on a level whose memberships turn out to **overlap** cannot be refused at parse — single-valuedness is a property of the data — so it is checked at the first fold, which composes the level artifact-major and says so in its trace rather than writing a column whose labels would each be whichever artifact wrote last |
-| `shape` | O | `{ kind = "bbox", depth = <d> }` — **only** on `membership = "spatial"`, and refused elsewhere as a rule nothing evaluates. Each artifact then declares `min_x`, `min_y`, `max_x`, `max_y` on its own row (or inline `bbox = [min_x, min_y, max_x, max_y]`), and its membership is the depth-`d` Morton tiles covering that box. **`depth` is the membership, not a tuning key** — a box covered at depth 4 and the same box at depth 8 hold different points ([R3](../evidence/memos/2026-08-21-artifact-serving-scale-review.md): the ranges *are* the membership, the polygon is content) — so it has no default and must lie in `1..=16`, where the Morton code space ends. `kind` may be omitted; ⊘ `bbox` is the only shape decoded and a polygon or radius is refused rather than covered approximately, an approximate cover being a membership *wider* than the declaration. ⊘ A `spatial` layer with **no** `shape` is the state this surface has always had: declared, registered, and holding nothing, because it has no shape to publish artifacts against |
+| `hierarchy` | R | `{ kind = flat \| nested \| dag \| stacked \| tiered, prune_children = bool }` — see below |
+| `layout` | O | the **serving-layout pin**: `rows` (one row-space bitmap per artifact), `column` (one artifact label per row, for a level whose memberships partition the corpus) or `list` (a list of labels per row, where they overlap). Absent — the pick is automatic, taken **at the build** from the bundle's own row space and re-evaluated at every compaction fold (decision 0094). What it reads is the level's **`everywhere` fraction** — how much of the level is too wide for any node of the tile index — and its artifact count; ⊘ the threshold on the first is provisional (`tessera_store::derived::ROW_MAJOR_EVERYWHERE_FRACTION`). Blocks per artifact is **reported and no longer read** (decision 0092's (c), now emitted by the build itself): the 2026-08-22 bracket moved it 6 → 12 with the cost *falling*, and the one quantity tracking the cost was the `everywhere` fraction. Present, it pins **every level of the layer**, at the build and at every fold after it, and a fold never overturns it. **Nothing on the wire names a layout** — both forms answer identically, so this is a latency choice and not a contract. A word outside the three is refused, and a pin on an attribute membership is refused: a single-valued attribute's membership *is* the column, so it has no second form for a pin to select between. A spatial layer takes a pin: its membership is resolved into a per-row source when a segment is published, and the pin selects between the same forms it selects between for an enumerated layer. ⊘ `column` on a level whose memberships turn out to **overlap** cannot be refused at parse — single-valuedness is a property of the data — so it is checked at the first fold, which composes the level artifact-major and says so in its trace rather than writing a column whose labels would each be whichever artifact wrote last |
+| `shape` | O | `{ kind = "bbox" \| "circle" \| "ellipse" \| "polygon" }` — **only** on `membership = "spatial"`, and refused elsewhere as a rule nothing evaluates. The kind and nothing else: every kind is **exact** — the members are the rows whose stored position is inside the shape, closed on every side for a box, even-odd with an edge inside for a polygon ([`polygon-membership.md`](polygon-membership.md) §4.1) — so there is no depth, and a `depth` written is refused naming §6.1 of that design. Each artifact carries its geometry in the kind's own fields: `min_x`, `min_y`, `max_x`, `max_y` (inline `bbox = [min_x, min_y, max_x, max_y]`); `cx`, `cy`, `r` (`circle = [cx, cy, r]`); `cx`, `cy`, `a`, `b`, `angle` (`ellipse = [cx, cy, a, b, angle]`, the angle in degrees anticlockwise from the x axis); a WKB `geometry` column — GeoParquet's own name — for a polygon (`wkt = "POLYGON ((…))"` inline). A polygon is an OGC `MultiPolygon`: parts, each a ring and its holes. The shape is canonicalised at the build to the view's grid and what that did is **reported, never refused** — clipped to the extent, wholly outside, rings dropped, a table that looks written in degrees for a view that is not; what refuses is a coordinate that is not one, an inverted box, a non-positive radius or axis, and a polygon over the deployment's `max_shape_vertices` (default 10⁶). A row with no geometry is published with an empty shape and reported. A layer may span several views: the geometry is declared once and resolved per view; ⊘ views declare no `projection` yet, so a layer in more than one is warned rather than refused. ⊘ A `spatial` layer with **no** `shape` is the state this surface has always had: declared, registered, and holding nothing, because it has no shape to publish artifacts against |
 | `visibility` | R | an access label, or `public` |
 | `artifact_visibility` | R | `{ field, default }`; `default` may be `inherited` |
 | `require_member_visibility` | R | `all` \| `any` \| `{ fraction = p }` \| `{ count = n }` \| `none` |
@@ -391,7 +495,8 @@ the canonical spelling, so there is no `fields` map beside it and no file for on
 | `level` | D `0` | the resolution it sits at |
 | `members` | O | the membership, by inclusion |
 | `excluding` | O | the membership, by exclusion. Declaring both is refused |
-| `bbox` | O | `[min_x, min_y, max_x, max_y]` — required on a layer declaring `shape`, refused on every other. It is the artifact's whole membership |
+| `bbox`, `circle`, `ellipse`, `wkt` | O | the artifact's shape, in its layer's kind's field and no other — `[min_x, min_y, max_x, max_y]`, `[cx, cy, r]`, `[cx, cy, a, b, angle]`, or WKT text. Refused on a layer declaring no `shape`. It is the artifact's whole membership |
+| `space` | D `view` | the space this row's shape is written in, overriding the layer's `default_space` |
 | `contents` | D `[]` | the ranking, best first: one entry per rank, each a value per supplied kind |
 | `parent` | O | the parent artifact, by key |
 | `attached_layer`, `attached_level`, `attached_key` | O | the edge this artifact hangs from; half an edge is refused |
@@ -449,27 +554,32 @@ the positions mean is the hierarchy kind the layer already declares
 under `nested`, where entry *k* is the parent of entry *k+1* and every artifact sits at level 0. The
 declaration and the data must agree — a variable-length list against `stacked` or `tiered`, or a
 fixed-size one against `nested`, is refused rather than guessed, since choosing one reading would
-publish a hierarchy the caller did not write. **Under `flat` a list is plain multi-membership**: no
-positions are read, and the point is a member of every artifact its list names, which is what the
-same membership written as several member rows has always meant. So is **a child named under
-two different parents**, whether the two come from two rows of the column or from the column and an
-artifact row's `parent`. A null or `-1` entry places the point at no artifact *at that level* and
+publish a hierarchy the caller did not write. So is **a child named under two different parents**,
+whether the two come from two rows of the column or from the column and an artifact row's `parent`.
+**Under `flat` and `dag` a list is plain multi-membership**: no positions are read, and the point is
+a member of every artifact its list names, which is what the same membership written as several
+member rows has always meant. A tree node's ancestor closure is a chain, so a `nested` list states
+memberships and edges at once; a DAG node's is a set with no linear order, so a `dag` list has no
+adjacency to read, and the layer's edges are spelled on the artifact row's `parent`, which may
+itself be a list ([`dag-hierarchies.md`](dag-hierarchies.md) §4;
+[decision 0125](../decisions/0125-a-dag-list-column-is-membership-not-lineage.md)). A null or `-1` entry places the point at no artifact *at that level* and
 links nothing across itself; a row of nothing but those is one unclustered row. A `level` column
 beside a list key is ignored and said so, the positions being what carry the levels.
 
-**The four hierarchy kinds, and which of them carry levels.** The kind is declared and never
+**The five hierarchy kinds, and which of them carry levels.** The kind is declared and never
 inferred from the edges, and the levels rule follows from it:
 
 | `kind` | Lineage | `[[layer.levels]]` |
 |---|---|---|
 | `flat` | none | optional |
 | `nested` | a tree in the edges, every artifact at level 0 | **refused** — a tree's structure is its edges, not a ladder |
+| `dag` | a directed acyclic graph in the edges, every artifact at level 0 — `nested` in every respect but two: **a child may name several parents**, on the artifact row's `parent` list, and a list key column is multi-membership, as under `flat` ([`dag-hierarchies.md`](dag-hierarchies.md); decisions 0117 and [0125](../decisions/0125-a-dag-list-column-is-membership-not-lineage.md)) | **refused**, as for `nested` |
 | `stacked` | none; independent analyses, one per level | **required** |
 | `tiered` | containment edges running coarser → finer between levels | **required** |
 
 `nested` and `tiered` differ in what their edges are *for* — roll-up the cut climbs, against
 information a client nests with — which is
-[decision 0087](../decisions/0087-cross-level-edges-are-information-not-rollup.md)'s subject and
+decision 0087's subject and
 `annotations.md`'s to state; the config's part is that the two are declared, never guessed. Three
 further refusals: a layer declaring no lineage that carries an edge, an edge running against the
 levels, and a parent key resolving in two coarser levels.
@@ -482,7 +592,7 @@ two levels one base and a gap would reserve a run no address reaches.
 |---|---|---|
 | `level` | R | the number. **Explicit, not array position**, because edges reference `(layer, level, ordinal)` and reordering the file would silently renumber them |
 | `title` | O | human-readable; the metadata endpoint publishes the zoom→level map |
-| `zoom` | O | `[min, max]`, **advisory** — it bounds no work; a tiered layer's response is bounded by the level asked for and a treed layer's by the request's artifact budget |
+| `zoom` | O | `[min, max]` — **the default bound on this layer's response** (2026-08-28). A `/v1/viewport` naming no `levels` is answered at the levels whose range covers the depth asked at; naming them overrides it, and a layer where no level declares a range serves every level. A treed layer declares no levels, so its response is bounded by the request's artifact budget as before. *(Was advisory and bounded nothing: this table asserted the bound while nothing on the wire could ask for a level.)* |
 
 **`[layer.content]`** — what this layer's artifacts carry, in three parts.
 
@@ -588,7 +698,7 @@ for the two hand-written blocks as well. **A check became a property.**
 | Word | Where | Collides with a label? |
 |---|---|---|
 | `public` | anywhere a label appears | **No** — it *is* a label, reserved at term `0` (`per-point-attributes.md` §3.8) |
-| `derived` | a vocabulary's `visibility` | **No** — that slot takes no label ([decision 0090](../decisions/0090-a-vocabulary-has-one-visibility-axis.md)) |
+| `derived` | a vocabulary's `visibility` | **No** — that slot takes no label (decision 0090) |
 | `inherited` | a member default, and supplied content | **Yes** — an access label spelled `inherited` is refused at parse |
 
 ## 2. Declaring without building
@@ -649,7 +759,7 @@ arbitrary.**
 |---|---|
 | Artifacts, layers | **Yes, today.** That is the control plane's whole job; the build plane exists only so a 10⁷-artifact level need not ride the trickle path (`annotation-write-cycle.md` §6.1) |
 | Vocabulary values | **By design, no endpoint.** Appending a value and retiring one are both safe — a new code is assigned, a retired one moves to `reserved` and is never reassigned (`per-point-attributes.md` §2.2) — but ⊘ `/control/categories` is still owed, so today the route exists on paper only |
-| Views | ⊘ **Specified, not implemented.** Creation is a control verb carrying `{name, gate, projection provenance}`, WAL'd and materialised at the next flush (views §6); a bundle has one coordinate system, so nothing evaluates it yet |
+| Views | **A group's view: yes, since 2026-08-31.** `PUT /control/views/{group}/{key}` creates it — WAL'd, the roster's durable home the segments manifest, serving empty until its first flush (views §3.2) — and `DELETE` drops it, freeing the key for a later create (decision 0115). A plain view or a new group is a rebuild, deliberately (decision 0108) |
 | Attributes | **Deliberately not online.** Adding `index` is a build pass with no row rewrite; adding `render` rewrites every segment; changing a width or a type is refused outright. The convention is Elasticsearch's, and stolen on purpose: *mappings are immutable; you reindex* |
 
 ⊘ **Declaring a wholly new attribute after a build is not specified**, as distinct from altering an
@@ -721,7 +831,7 @@ design, `fields` locating what is declared rather than asserting it (§8).
 | File | Written by | Holds |
 |---|---|---|
 | `containment.json` | the build | edges whose child holds a member its parent does not, and the splits that lose the most |
-| `disclosure.json` | the build, and `tessera check` computes the same document | every layer's `visibility`, `require_member_visibility` and **`membership`** — the last spelled `enumerated`, `attribute:<field>` or `spatial:<kind>:depth=<d>`, because a predicate *is* who belongs and a shape's depth decides which points its box holds — every vocabulary's `visibility` and `value_set`, every attribute's placement, each view's point-label default, and which layers `[layer.labels]` wrote and for whom |
+| `disclosure.json` | the build, and `tessera check` computes the same document | every layer's `visibility`, `require_member_visibility` and **`membership`** — the last spelled `enumerated`, `attribute:<field>` or `spatial:<kind>`, because a predicate *is* who belongs and every shape kind is exact — every vocabulary's `visibility` and `value_set`, every attribute's placement, each view's point-label default, and which layers `[layer.labels]` wrote and for whom |
 
 **`disclosure.json` exists for the diff.** The controls it records are individually small and
 collectively the whole of who may see what, and a reviewer's real question — *which disclosure
@@ -758,6 +868,45 @@ schema = "schema.toml"            # the corpus declaration. This is the default
 [identity]
 env = "TESSERA_IDENTITY_KEY"      # the variable carrying the key, never the key. This is the default
 ```
+
+**Two of the serving side's keys belong in this document even so**, because they are disclosure
+controls rather than tuning and §1's closure argument applies to them: a control nobody has
+enumerated is a control nobody has reasoned about. Both name browser origins, both are absent by
+default, and **neither takes a wildcard** — a list carrying `*` is refused at startup, naming the
+key, because an origin list is a deployment's statement about which pages may call it and `*` is
+not a statement.
+
+| Key | | Which planes | Value |
+|---|---|---|---|
+| `serve.dev_cors_origins` | O | viewer **and session** | a development affordance. It opens `/session/authorise` to a browser, which means the page holds the deployment's **session credential** — the secret that decides who may mint tokens at all. Logged at `warn` on every start |
+| `serve.cors_origins` | O | **viewer only** | the production list ([decision 0102](../decisions/0102-the-viewer-plane-gains-an-enumerated-cors-origin-list.md)). A page it names may present a **token** — already per-principal, already scoped to what the server decided that principal may see, already expiring — and can reach `/session/authorise` no more than any other origin can. Silent at startup |
+
+**The difference between them is which bearer a browser ends up holding**, and that is why the
+production key stops at the viewer plane rather than covering both for symmetry. Letting a named
+origin present a token creates no authority that did not already exist; letting one present the
+credential creates the authority to mint tokens for anybody. Both lists may be set at once, and an
+origin appearing in both is not an error.
+
+**An origin list is not an authorisation boundary**, and nothing in the engine may come to treat it
+as one. It decides which page a browser will hand a response to. What the response *contains* is
+settled by the bearer and by `M_auth`, before CORS is consulted at all — which is also why the six
+headers a client keys and revalidates a replica by are explicitly exposed (`delta-serving.md` §2):
+a browser that cannot read them is a browser that cannot cache, not one that is being protected
+from something. The control plane is never wrapped by either list.
+
+The rest of `[serve]` and all of `[ingest]` are tuning, documented at SA §7 under its own rule —
+performance knobs default, disclosure controls do not. Four of them are the shape work's and are
+named here because a reader of `[layer.shape]` will look for them: `max_shape_vertices` (default
+10⁶ — a published shape over it is refused at the build and at `PUT /control/layers`, the one
+input a caller can simplify; the held decomposition is reported and never capped),
+`max_region_vertices` (10,000 — a `region` leaf's polygon over it is `422` naming the cap),
+`max_region_cells` (262,144 — the crossing tiles a region leaf's descent may hold at one depth;
+**not a refusal**: over it the descent stops at the deepest depth that fits and the answer is a
+cover, said on `x-tessera-region`), and `region_cache_bytes` (256 MiB — the decomposition cache,
+shared across principals, pruned per generation; eviction costs latency and nothing else). The
+first three are published on `/v1/meta` so a client can predict a refusal rather than discover it
+([`polygon-membership.md`](polygon-membership.md) §9, [`selection-operand.md`](selection-operand.md)
+§2).
 
 **Every path in it resolves against its own directory**, on the same rule a `source` follows — a
 relative `bundle.path` that moved with the shell's working directory would make `cd crates &&
@@ -1025,16 +1174,20 @@ for drill-down to return.
   function of `membership ∩ M_auth`, and reaching one artifact's membership on such a level costs a
   scan of the whole column;
 - **`[layer.shape]` on a layer whose `membership` is not `spatial`** — the members come from the
-  stored set or the predicate the membership names, so a box beside them decides nothing — and a
-  `shape.depth` outside `1..=16`, which is where the Morton code space ends. There is no default:
-  the depth *is* the membership. A `shape.kind` other than `bbox` is refused rather than covered
-  approximately, an approximate cover being a membership *wider* than the declaration;
-- **an artifact's `bbox` and its layer's `shape` written apart** — a box on a layer that declares no
-  shape is a region nothing evaluates; an artifact with no box on a layer that does has no
-  membership rule at all, so it would count zero for every viewer. A **transposed** box (a maximum
-  below its minimum) or a non-finite bound is refused rather than corrected: swapping it would
-  publish a membership over a region nobody wrote. A `min_x`/`min_y`/`max_x`/`max_y` set with some
-  of the four present is the same refusal;
+  stored set or the predicate the membership names, so a shape beside them decides nothing — a
+  `shape.depth`, which every kind being exact has nothing to hold ([`polygon-membership.md`](polygon-membership.md)
+  §6.1), and a `shape.kind` outside `bbox`, `circle`, `ellipse` and `polygon`;
+- **an artifact's shape and its layer's `shape` written apart** — a shape on a layer that declares
+  no kind is a region nothing evaluates, and a shape of another kind is in a field the layer never
+  declared. A **transposed** box (a maximum below its minimum), a non-finite coordinate or a
+  non-positive radius or axis is refused rather than corrected: swapping it would publish a
+  membership over a region nobody wrote. A kind's numbers with some present and some absent is the
+  same refusal. A row with **no** shape is not refused: it is published with an empty shape, holds
+  no rows, and is reported;
+- **`space = "wgs84"`** on a view that declares no projection — naming
+  [`projections.md`](projections.md) §10: a view with one space has no second space to convert
+  from, and a shape placed by a function other than the one the points went through would select
+  the wrong rows. On a projected view it is honoured;
 - **an artifact declaring no attachment in a layer that declares `depends_on`**, and one attaching
   into a layer that layer did not name. A dependent is served only where what it depends on is
   served ([decision 0089](../decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md)),
@@ -1043,11 +1196,12 @@ for drill-down to return.
 - an access label spelled `inherited`, the one reserved word occupying a slot that otherwise takes
   a label (§5). `public` is **not** refused: it is a label (`per-point-attributes.md` §3.8), and `derived` and `none` sit
   in slots that admit no label;
-- **a `layout` outside `rows`, `column` and `list`**, and **any** pin on a predicate membership.
+- **a `layout` outside `rows`, `column` and `list`**, and a pin on an attribute membership.
   The first is the surface's ordinary rule — a pin the build ignored would leave an operator having
   declared a layout and got another — and the second names a form the layer cannot be stored in: a
-  shape's members are row ranges recomputed per request and a single-valued attribute's members
-  *are* the column, so neither has a second form for a pin to select between. This is a
+  single-valued attribute's members *are* the column, so it has no second form for a pin to select
+  between. A spatial layer's membership is resolved into a per-row source at every segment's
+  publication, so it takes a pin as an enumerated layer does. This is a
   **performance** knob and it still refuses rather than ignoring, which is not a contradiction with
   SA §9's rule: what defaults is the *absence* of the key, and an absent pin is a complete statement
   — *no opinion, pick automatically*.
@@ -1091,6 +1245,13 @@ turns a silent empty column into a build failure. Silence is the whole reason it
 geometry column puts every point at the origin, and an absent access column puts every point in no
 principal's mask. A map with no `source` is refused too: it locates fields in a file the object
 never names.
+
+**`fields.view` is a discriminator, and it exists only where something declares one.** On a
+`[[view_group]]` it is form B's own key — the column saying which view a row of points lands in —
+and on a `[[layer]]` it is `scope = { group = … }` that asserts it, a layer with one artifact set
+having no row that could say which view an artifact belongs to. Named on either without that
+declaration, it is refused as a field the object never declared, which is this section's rule and
+not a new one.
 
 **`level` and `attached_level` are read under their own names.** A layer's `fields` map is closed
 to the names §1's tables give it, and a level is an address rather than a value — it is what makes
@@ -1189,290 +1350,3 @@ disclosing nothing.
 | The secret in the environment, its name in the file | twelve-factor, and this repo's own `*_credential_env` |
 
 ---
-
-
-## Appendix R — review trail
-
-**2026-08-20 — `[sources]` names the files, `[defaults]` replaces `[corpus]`, and an attribute may
-read from its own.** Two shapes went, and both were arbitrary. A `source` was a path, so a file
-three blocks read was three paths to keep in step and three `--file` keys to remember; it is now a
-**name**, and `[sources]` is where the paths live — one entry per file, still relative to this
-document, still no absolute path. Every `source` in the declaration names one of those keys, and a
-name the table does not carry is refused listing the ones it does: the one refusal this adds, and
-it exists because a name that resolves to nothing has no correct reading, where reading it as a
-relative path would turn a typo into a missing file rather than a declaration that does not
-resolve. `--file` follows the same key, so `--file points=/mnt/staged/papers.parquet` moves
-everything reading that source at once — where the object-keyed form left the block you missed
-quietly reading the old file.
-
-`[corpus]` is deleted and `[defaults]` takes its place, with the constraint removed rather than
-renamed: `source` and `entity_id_field` are now defaults any block may write over, so a column may
-name its own file and its own identity column and a file carrying entity ids joins whatever it
-calls them. Nothing is lost — what `[corpus]` guaranteed, that every attribute lands in one entity
-space, is guaranteed by the entity id and never was by the file. The default `source` reaches a
-`[[view]]` and an `[[attribute]]` and deliberately nothing else, because elsewhere an absent source
-is itself a declaration (a vocabulary that mints, a layer declared empty, a membership that is not
-stored, labels riding the points' own column); `entity_id_field` reaches every reader that can say
-otherwise, and not the exploded label relation, which takes no `fields` map and so has nowhere to.
-
-The attribute pass is now **grouped by source** — one merge sweep per `(source, identity column)`
-against this build's ordinals, where before it was one pass over one corpus file. The sweep itself
-is unchanged, its measured cost and the correction to an earlier overstatement of it intact. What
-changed is what an unmatched row means: it was `input_changed`, on the reasoning that the file
-could only be the points file having moved under the build, and it is now **counted and reported**,
-because a source covering a superset of this build's entities is the ordinary case for a column
-that lives elsewhere. Every build prints, per source, how many entities came away with a value and
-how many rows named entities it did not load — **entities covered is the denominator**, since a
-legitimate superset and a broken join both drop an overwhelming fraction and only the first number
-separates them. Zero coverage says so emphatically and still builds: recoverable, disclosing
-nothing, and the operator is the one who knows whose ids those were.
-
-**2026-08-20 — `value_set` now governs both entry points, and its row loses its marker.** No key is
-added and none changes meaning: `open` said *a key no artifact declares creates one*, and until now
-it said it of a build alone. It now says it of an ingest batch too — a column named for the layer
-carrying a key nothing holds creates the artifact, at the close of the commit window that allocates
-the points, with a lineage's chain created and linked in the same batch
-([`artifacts-from-points.md`](artifacts-from-points.md) §6.3). What the row gains is the cost stated
-plainly: under `open` a mistyped key is a permanent object rather than a refusal, which is reported
-at both entry points and deliberately not bounded.
-
-**2026-08-20 — the wire takes a membership column, and the acquisition split is what decides its
-name.** No key is added and no block changes: `/control/ingest` now accepts a column named for a
-declared layer, which §2's list of what the write path already consumes gains a bullet for. The
-name is the *declaration's* — the layer's `name` — because `[layer.members]`'s `fields` maps a
-file's column onto the canonical meaning and a deployment writing through the service has no file;
-that is the same split `[[attribute]]` has between its `name` and its `field`, and this document's
-§2 rule ("`source`, `fields` and inline data are acquisition keys") is what settles it rather than a
-new decision. Full argument in [`artifacts-from-points.md`](artifacts-from-points.md) §6.2.
-
-**2026-08-19 — a member key column may be a list, and the hierarchy kind says what its positions
-mean.** No key is added and no block changes: a hierarchical clusterer's one list per point is
-already one row per `(artifact, entity)`, several times over, and `hierarchy.kind` was already the
-declaration of what a layer's lineage is. What the surface gains is a paragraph saying which shapes
-agree with which kind and which disagreement refuses. Full argument in
-[`artifacts-from-points.md`](artifacts-from-points.md) §4.
-
-**2026-08-19 — `value_set` reaches a layer, and a key column may be an integer.** A clusterer emits
-one integer per point and no artifact table, which the surface could not express: membership had to
-be a roster plus a member table, a key had to be UTF-8, and a null key — the ordinary output of
-every clusterer, at a fifth to a quarter of the points — refused the build. The declaration gains
-one key, `value_set`, which is the word this document already uses for *is an unknown key refused or
-minted* on a vocabulary, asked of a layer's artifacts; the readers gained two types and one skip
-rule, neither of which is a surface change. `[layer.members]` itself needed nothing at all — a point
-table with a cluster column already is one row per `(artifact, entity)`, asserted by a build from a
-points file and a build from a member table producing the same bundle byte for byte. The key sits on
-`[[layer]]` rather than on `[layer.members]` because ingest has no member block and the same key must
-govern the write path. Full argument in
-[`artifacts-from-points.md`](artifacts-from-points.md).
-
-**2026-08-19 — a vocabulary keeps one visibility key, and the contradiction with decision 0088 is
-closed** ([decision 0090](../decisions/0090-a-vocabulary-has-one-visibility-axis.md)). 0088 declared
-the word `derived` retired; this document kept it, and the two have read as disagreeing since. The
-design was right. A vocabulary is not merging two axes into one word — it has no label axis at all,
-and `public`/`derived` are *no membership requirement* and *any member*: one axis, two settings.
-0088's objection was the collision with supplied content, which expired when content moved to
-`all`/`inherited`.
-
-The two-key form was written and reverted rather than merely argued about. Splitting the key
-appears to buy label-gating a vocabulary, and does not: a vocabulary hangs off a column, a column
-reaches a principal through six surfaces, and a gate at two of them is fail-open. What landed was
-`visibility` with one legal value and the capability absent — worse than either alternative. The
-decision records the six surfaces so a future attempt starts from a column-level gate.
-
-**2026-08-19 — the frame report also says how much resolution the corpus actually got.** The clamp
-count caught data *outside* the frame and nothing else, so the opposite failure was still silent:
-data far too small for its frame clamps nothing, every stored position is correct, and nearly all
-the resolution is gone — coordinates spanning 100…118 against a 0…65536 frame with **zero** clamps.
-The bounding box already printed could not close it either, being derived from the extremes, so two
-outliers make the box look healthy while the corpus shares a handful of cells. Every build now
-counts **how many cells the points actually landed in** and prints it with the point count and the
-average points per occupied cell, warning emphatically past ten per cell. A ratio rather than a
-count, because ten points in ten cells is a well-framed tiny corpus; ten because uniformly spread
-data averages about 1.1 per occupied cell even at 10⁹ and heavy clustering only reaches about 1.2,
-so an order of magnitude past it is a statement about the frame. **A warning and never a refusal**
-(owner's ruling): a clamped corpus is stored wrong, a sparse one is stored correctly but coarsely,
-which a pilot corpus or a deliberately wide frame may well mean. Counted at each build's segment
-write off the codes bound for `morton.u32`, which are already in `(morton, tessera_id)` order — one
-comparison per point, nothing retained, and the same figure from the linear build and the streaming
-pipeline, which the byte-equality oracle now asserts.
-
-**2026-08-19 — the build says what the frame does to the data, and `tessera check` is the CI half.**
-Three things, and the first is the one that matters. **The clamp report**: a coordinate is
-quantised across its view's extent and quantisation *clamps*, and the notebook shipped a
-grid-shaped extent over UMAP coordinates spanning about −17…18 — every point folded into a
-nineteen-cell corner, the bundle well-formed, and the build silent. `extent = "auto"` only moved
-that trap, since a caller who states a frame by hand still got silence. So every build now prints
-the data's own bounds beside the extent it was given, how much of the grid that leaves the data
-occupying, and how many points land on the boundary rather than where they were written — and
-**refuses past half of them**, on the argument that a clamped point's position is the frame's
-rather than its own, so a frame misplacing the majority of a corpus is not that corpus's frame. A
-point exactly at the maximum is not counted: cells are half-open and it lands in the top cell by
-construction. The cost is the pass `auto` already paid, now paid either way, which is what stops a
-caller avoiding the report by writing their extent out. **`tessera check`** parses the declaration
-and reads only Parquet schemas — every declared attribute against the field that must carry it,
-every source present, every located field there — collecting every finding rather than stopping at
-the first, and printing the disclosure decisions as a table. It resolves through the same code
-`tessera build` does, so the two cannot see different files. Its `--payloads` closes §2's ⊘: the
-control-plane bodies a declare-only deployment used to author a second time by hand are a
-serialisation of the type the build already compiled to. And **`reports/disclosure.json`** lands
-beside `containment.json`, written to be diffed between builds — stable order, no timestamp, no
-path — so which disclosure decision moved is a question with a cheap answer for the first time.
-`depends_on` is in it, decision 0089 having made a dependency edge a gate.
-
-**2026-08-19 — a dependency edge carries deletion and visibility, so one refusal became a
-property.** `depends_on` declared an edge and said nothing about what it meant once both ends
-existed. It now means both things the member grain already means at the other grain
-([decision 0089](../decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md)): an
-artifact is deleted when the artifact it attaches to is deleted, and served only where that
-artifact is served — **per artifact, not per layer**, and neither configurable. Two consequences
-reach this document. Every artifact of a layer declaring `depends_on` must declare an attachment
-into a declared layer, refused at build and at ingest alike, because an artifact with no dependency
-has nothing for the prerequisite to gate on. And the **`public`-under-a-gated-parent refusal is
-deleted**: it was the one place the sugar was stricter than the two `[[layer]]` blocks it expands
-to, and rule 2 makes it unnecessary rather than merely inconsistent — a viewer who cannot reach the
-cluster cannot reach its labels, whatever the label layer's own gate says. With it gone,
-`[layer.labels]` supplies mechanism only.
-
-**2026-08-19 — a membership names its column, and the label sugar is real.** Two changes, and the
-second retires the last ⊘ on a whole block. **`membership` is two words and a table**:
-`{ attribute = "<field>" }` names the value column an attribute membership is a predicate over,
-because a rule with nothing to evaluate is not a declaration — and a column no `[[attribute]]`
-block declares is refused at parse, on the rule an undeclared vocabulary reference follows. The
-bare word `"attribute"` is refused with the table to write instead — it was the spelling, and a caller who writes it is
-looking for a column to name, not for a fourth kind of membership. **`[layer.labels]` builds**: it
-expands to a `[[layer]]` block *before anything compiles*, so the sugar meets every refusal, every
-allocator rule and every reader a hand-written layer meets, and the two spellings are asserted to
-produce a **byte-identical bundle** — the same statement the three membership spellings carry, and
-for the same reason. The expansion supplies the parent's views, a flat hierarchy, `depends_on` the
-parent, the content wrapper around `type`, and `artifact_visibility = { default = "inherited" }`.
-Two things fell out of building it. The block needs **`[layer.labels.members]`**, added to its key
-table above: a ranked content's generating set is a `(artifact, rank, entity)` row and there is no
-other shape that carries one, so without it the sugar could declare content the build would refuse
-to publish — the worked example in §6 was in exactly that state and is corrected with it. And the
-**"never wider" rule is only checkable at `public`**: two opaque access labels carry no ordering
-the build could compute, so the general case is admitted and marked as unenforceable at the claim
-rather than enforced by a check that could not do what it appeared to.
-
-**2026-08-19 — one source per layer, one row per artifact, and membership by exclusion.** The
-artifact grain was one row per `(artifact, rank)` in one file for every layer, which needed a
-`layer` discriminator column, repeated each artifact's key, parent and attachment on every row of
-it, and needed a cross-row agreement refusal to catch the copies disagreeing. **A layer now names
-its own source**, so the discriminator is gone — there is no second layer's rows to tell apart —
-and **an artifact is one row carrying its `contents` as a ranked list**, so the agreement refusal
-is retired rather than replaced: the condition it detected is not expressible when a key appears
-once. What one row per artifact does admit — the same key written twice — is refused as two
-artifacts under one name. **A layer's `fields` map reaches its readers**, the ⊘ that held it back
-being exactly the discriminator and the two columns this grain no longer has; `level` and
-`attached_level` stay unmovable, this section's tables not naming them. **`artifacts = [{ … }]`
-writes a layer out in the declaration** for what a person authors, with its own key table above and
-its own row in §1's closure test. **`excluding` names the entities a membership leaves out**,
-complemented once at build against the corpus and materialised: the three pairs of spellings —
-inline against sourced, `excluding` against `members`, a row's membership against a
-`[layer.members]` source — are each asserted to produce a **byte-identical bundle**, which is the
-strongest statement of the property and the one that makes *no request-time complement* structural.
-An excluded id this build did not assign refuses the build, an exclusion resolving to nothing being
-a silent widening where an unknown member is a silent narrowing.
-
-**2026-08-19 — the artifact and member readers take `rank` and `entity`.** §1's field tables were
-already written on these names; the readers now use them, so §8's unbuilt note narrows: what still
-keeps a layer's `fields` map refused is the `layer` discriminator column, the per-row `values` and
-`parent_key`, not the membership grain's own columns. The caller's key is `key` throughout — the
-qualifier in `stable_key` said nothing the type did not. Names only; no refusal, no default and no
-disclosure control moved.
-
-**2026-08-18 — the plugin takes a term list, and the comma stops being a delimiter.** The build no
-longer joins an item's terms into one `access` string for the plugin to split apart: it hands the
-plugin the list it already has, through a second data-side entry point (`terms_of_labels`) that
-`builtin:passthrough` implements as the identity — one descriptor per term, verbatim, in order,
-with an empty element refused because an empty descriptor is not a grant. So **an access term or a
-declared label may contain a comma**, and the two refusals that held that line — one in the access
-column decode, one at the declaration — are deleted along with the paragraph above that recorded
-them; a term is whatever the caller wrote, whole. The wire path is unchanged: an ingest request
-carries one opaque `access` byte string and still goes through `terms_of_label`, which still
-splits on commas, because only the plugin can decompose it. The plugin identity moves to
-`builtin:passthrough:2`, which moves both hashes — the auth side is untouched, but sharing one
-identity string means fragment caches recompute and tokens re-mint, which is the conservative
-direction and is why the hash is in `MANIFEST.json` at all.
-
-**2026-08-18 — the readers take the names, and a point's terms come from a field.** Two changes,
-and only the second moves a request. **Every object but a layer now reads its source under the
-names its `fields` map resolved** — a view's geometry, `[corpus]`'s identity, a vocabulary's
-`key`/`code`/`title`, an attribute's `field` — so §8's third refusal exists at last: a declared
-field the file does not carry is a build failure naming the object, the field, the column looked
-for and the columns the file has, where before it would have read an empty column and said nothing.
-A layer's map stays refused, its readers still spelling `layer`, `values` and `parent_key`.
-**`point_visibility = { field }` reads each point's access terms from a `list<string>` (or a plain
-`string`) column of the view's own source**, and `{ default }` alone gives every point one label —
-so all three shapes §1 declares now acquire. Terms are trimmed; a null value and an empty list both
-mean *no access terms*, which is *visible to no principal* rather than unrestricted, and are what a
-`default` fills; filling never overrides. **`public` is interned at term `0` by every build and
-added to every principal's resolved term set inside the engine** — not by grant and not in the
-plugin. ⊘ The `source` route fills nothing, where the `field`
-route does; that divergence is recorded above and is the narrow half.
-
-**2026-08-18 — the invocation is `tessera build`.** The previous revision made acquisition real and
-produced a nine-flag command line beside a detailed config, which is the problem it was meant to
-solve, moved. Three changes close it. **A `source` is a path relative to the document that declares
-it**: the rule §4 was protecting is narrower than it was written — what must not appear is an
-*absolute or machine-specific* path, and a relative one travels in git with the declaration around
-it. An absolute `source` is refused, naming the override; `--file` survives keyed by the **object**
-whose source it replaces, since the source string is a path now rather than a name. **`extent` moves
-into `[[view]]`** in §1's four spellings, `--extent` is deleted, and `auto` reads the points source
-to fit a squared box with a 1% margin — a whole pass over two columns, not the file's statistics,
-which are per row group and would make every stored cell depend on the producer's layout. **A
-`tessera.toml` names the deployment** and both verbs walk up to find it, so the build's output path
-and the server's `bundle_path` are one value declared once; its absence is a refusal naming what to
-create. The identity key comes from the environment variable that file names, from a `.env` beside
-it, or from `--identity-file`: `--id-key` is deleted, its own help having already said why. One
-thing changed that this did not set out to: **a serving credential is now read at startup rather
-than at parse**, because `tessera build` reads the same file and had begun refusing to write a
-bundle until two serving secrets were exported. `--view` also became optional where a declaration
-has exactly one view; several with none named is refused listing them.
-
-**2026-08-18 — acquisition is real.** Every object that has data names a logical key and
-`--file KEY=PATH` binds it; `--points`, `--pairs`, `--values`, `--artifacts` and
-`--artifact-members` are deleted, and `--config` is now required because the config is what says
-where the corpus is. §8's three fail-closed rules are one mechanism — declared-and-unbound,
-bound-and-undeclared, and never a fall-through — with a fourth that fell out of building it: one
-key binds one path, since two bindings of one key are two corpora. `point_visibility` gained a
-`source` beside its `field`, which is where the exploded `(entity_id, term_id)` relation now
-arrives; `[corpus].source` and a view's are separate keys, usually bound to one file, and that is
-what lets a build read attributes from entity space and geometry from the view. Two corrections
-this made necessary: §8 claimed two field refusals where there are three (a name that is not one of
-the object's fields at all was missing, and the *absent from the source* one is the readers'
-rather than the parser's), and it named §10, which does not exist. Field **renames** are refused
-until the readers take names — accepted-and-disregarded is the one shape this surface exists to
-prevent — so the map's validation is built and its effect is not.
-
-**2026-08-18 — the declaration half is built.** One parser reads one document
-(`tessera-build`'s `config` module); `schema.toml`, `layers.toml`, `--schema` and `--layers` are
-deleted. §1's table is a **test**: the parser's own accepted key set is read out of serde's
-unknown-field message and compared against the table block by block, so the assertion fails both
-when a key here disappears and when one this document does not name appears. Every refusal §7
-states exists and has a case, plus the three new ones — an attribute naming an undeclared
-vocabulary (at parse, before a data file opens), two vocabulary blocks of one name, and
-`value_set = "closed"` with no value source. Two corrections fell out of building it: §6 had
-`reserved` inside `[vocabulary.values]`, where a bare key array cannot carry it and where §1 does
-not put it, and §7 listed `index` on a rendered number as refused, which decision 0064's presence
-bitmap admitted and every other document already says. The acquisition half is unbuilt and refused
-rather than ignored — see the ⊘ note at the head.
-
-**2026-08-18 — the two halves are separated.** §2 is added: the surface splits into a declaration
-that is route-independent and an acquisition half that only a build reads, and a deployment writing
-through the service omits the second entirely. Nothing moved to say it — the declaration was
-already what `/control/ingest` and `PUT /control/layers` consume, down to attributes riding in
-declared order and categories arriving as value keys — but the document read as though a build were
-the only route, and an `R` against `source` said *required* where it meant *required to build from a
-file*. ⊘ The two routes remain one implementation and two authored formats; nothing yet emits
-control-plane payloads from this config.
-
-**2026-08-18 — extracted, and enumerated.** This surface lived as `per-point-attributes.md` §5,
-which was where it began: a schema for per-point attributes. It outgrew that document — of the six
-blocks it declares, only `[[attribute]]` and `[[vocabulary]]` are that document's subject — so it
-moves here whole, on the rebuild that
-[decision 0088](../decisions/0088-visibility-is-two-axes-and-the-membership-test-is-one.md) ruled.
-§1 is new: the whole surface in one table, which is worth having because the set is **closed** —
-`deny_unknown_fields` on every block, an enumerated set behind every value that is a word rather
-than a caller's string. Closure is what the leak register rests on, the register being exhaustive
-because the surface is enumerable, so a key added without an entry in §1 is a disclosure control
-nobody has reasoned about.

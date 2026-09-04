@@ -161,6 +161,30 @@ fn extent_in(dir: &std::path::Path, descriptors: &[&[u8]]) -> Vec<std::path::Pat
     writer.finish().unwrap()
 }
 
+/// A viewport, with `ProjectionBuilding` retried on a bounded deadline. The shed is decision
+/// 0058's park-then-shed exhausting its wait budget — documented on the variant as retryable and
+/// mapped to a 429 with `Retry-After` at the server boundary — so a conforming caller retries,
+/// and this test is not the place to treat the shed as a verdict.
+fn viewport_settling(
+    engine: &tessera_engine::Engine,
+    session: &tessera_engine::Session,
+) -> tessera_engine::ViewportOut {
+    use tessera_engine::ViewportRequest;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let request = ViewportRequest::new("s0", 2, [0.0, 0.0, 1000.0, 1000.0], N_ITEMS as usize);
+        match engine.viewport(session, request) {
+            Ok(response) => return response,
+            Err(tessera_engine::EngineError::ProjectionBuilding)
+                if std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => panic!("the viewport neither answered nor kept shedding: {e:?}"),
+        }
+    }
+}
+
 /// **A session authorised after a promoting flush must be served the post-flush visible set**
 /// ([#112](https://github.com/jennis0/tessera-index/issues/112)).
 ///
@@ -182,9 +206,10 @@ fn extent_in(dir: &std::path::Path, descriptors: &[&[u8]]) -> Vec<std::path::Pat
 ///
 /// So the viewport below is not incidental to the reproduction; without it the memo entry is never
 /// written and the bug does not appear.
+
+
 #[test]
 fn a_credential_re_presented_after_a_promoting_flush_sees_the_promoted_descriptor() {
-    use tessera_engine::ViewportRequest;
     use tessera_lifecycle::UnallocatedRow;
 
     let tmp = tempfile::TempDir::new().unwrap();
@@ -214,11 +239,13 @@ fn a_credential_re_presented_after_a_promoting_flush_sees_the_promoted_descripto
         let row = UnallocatedRow {
             external_id: Some(external.as_bytes().to_vec()),
             view: "s0".to_string(),
+            join: None,
             descriptors: vec![b"novel".to_vec()],
-            x: 10.0 + i as f32,
-            y: 10.0 + i as f32,
+            x: 10.0 + i as f64,
+            y: 10.0 + i as f64,
             scalars: Vec::new(),
             terms: engine.resolve_terms(&[b"novel".to_vec()]),
+            scoped: Vec::new(),
         };
         engine
             .accept_ingest(vec![row], external, [0u8; 32])
@@ -237,12 +264,7 @@ fn a_credential_re_presented_after_a_promoting_flush_sees_the_promoted_descripto
 
     // **The poisoning step.** The pre-flush session asks for a viewport, which brings its frozen
     // `satisfied` forward against the *new* generation.
-    engine
-        .viewport(
-            &stale,
-            ViewportRequest::new("s0", 2, [0.0, 0.0, 1000.0, 1000.0], N_ITEMS as usize),
-        )
-        .expect("the stale session is still served");
+    viewport_settling(&engine, &stale);
 
     // Same bytes, re-presented. This resolves `novel` and must be served its posting.
     let fresh = engine.authorise(&credential).unwrap();
@@ -283,7 +305,7 @@ fn a_credential_re_presented_after_a_promoting_flush_sees_the_promoted_descripto
 #[test]
 fn a_background_refresh_does_not_poison_a_later_authorise_of_the_same_credential() {
     use std::time::{Duration, Instant};
-    use tessera_engine::{Engine, EngineConfig, ViewportRequest};
+    use tessera_engine::{Engine, EngineConfig};
     use tessera_lifecycle::UnallocatedRow;
 
     let tmp = tempfile::TempDir::new().unwrap();
@@ -315,23 +337,20 @@ fn a_background_refresh_does_not_poison_a_later_authorise_of_the_same_credential
     assert_eq!(resolved(&stale), 1, "the fixture must not know `novel`");
 
     // A resident projection is what makes this session visible to the refresh at all.
-    engine
-        .viewport(
-            &stale,
-            ViewportRequest::new("s0", 2, [0.0, 0.0, 1000.0, 1000.0], N_ITEMS as usize),
-        )
-        .expect("the first viewport establishes the session's entry");
+    viewport_settling(&engine, &stale);
 
     for i in 0..8u32 {
         let external = format!("refresh-novel-{i}");
         let row = UnallocatedRow {
             external_id: Some(external.as_bytes().to_vec()),
             view: "s0".to_string(),
+            join: None,
             descriptors: vec![b"novel".to_vec()],
-            x: 10.0 + i as f32,
-            y: 10.0 + i as f32,
+            x: 10.0 + i as f64,
+            y: 10.0 + i as f64,
             scalars: Vec::new(),
             terms: engine.resolve_terms(&[b"novel".to_vec()]),
+            scoped: Vec::new(),
         };
         engine
             .accept_ingest(vec![row], external, [0u8; 32])

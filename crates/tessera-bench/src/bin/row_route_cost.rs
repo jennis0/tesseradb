@@ -75,7 +75,14 @@ struct Fixture {
 /// the manifest — a filter leaf names a *code*, and the manifest is where the binding lives.
 fn inspect(root: &Path) -> Result<Fixture, Box<dyn std::error::Error>> {
     let bundle = open_bundle(root)?;
-    let q = bundle.manifest.quantisation;
+    // The frame is the view's (decision 0040); a built bundle declares one, and this harness
+    // measures against it.
+    let q = bundle
+        .manifest
+        .views
+        .first()
+        .expect("a built bundle declares a view")
+        .quantisation;
     let view = bundle
         .partitions
         .values()

@@ -113,13 +113,19 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
         entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
         layers: Vec::new(),
         layer_tombstones: Vec::new(),
+        views: Vec::new(),
+        scoped_columns: Vec::new(),
+        dead_view_incarnations: Vec::new(),
         membership_extents: Vec::new(),
         level_versions: Vec::new(),
         containment_extents: Vec::new(),
         tile_index_extents: Vec::new(),
         row_column_extents: Vec::new(),
+        shape_rows_extents: Vec::new(),
+        shape_held_extents: Vec::new(),
         artifact_record_extents: Vec::new(),
         segments: vec![SegmentDescriptor {
+            incarnation: 0,
             view: "main".to_string(),
             seg_id: "seg0".to_string(),
             row_count: items.len() as u32,
@@ -130,6 +136,7 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
         dict_extents: vec![],
         attr_extents: Vec::new(),
         record_extents: Vec::new(),
+        entity_terms_extents: Vec::new(),
         text_extents: Vec::new(),
         external_id_runs: vec![],
         locator_extents: vec![],
@@ -145,19 +152,13 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
     .expect("write SEGMENTS-0.json");
 
     let manifest = Manifest {
-        bundle_format: 3,
+        bundle_format: 5,
         created_at: created_at.to_string(),
         data_plugin_hash: tessera_plugin::Passthrough::new().data_plugin_hash(),
         declared_bounds: serde_json::json!({}),
         declared_scalars: vec![],
         vocabularies: vec![],
         small_term_threshold: 32,
-        quantisation: Quantisation {
-            x_min: extent.x_min,
-            x_max: extent.x_max,
-            y_min: extent.y_min,
-            y_max: extent.y_max,
-        },
         entity_id_high_water: n,
         identity: IdentityDescriptor {
             construction: IDENTITY_CONSTRUCTION.to_string(),
@@ -166,9 +167,20 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
             shard_id: 0,
             idset: 1,
         },
+        groups: Vec::new(),
         views: vec![ViewDescriptor {
+            incarnation: 0,
+            visibility: None,
             id: "main".to_string(),
             display_name: "Main".to_string(),
+            // The frame is the view's, not the bundle's (decision 0040).
+            quantisation: Quantisation {
+                x_min: extent.x_min,
+                x_max: extent.x_max,
+                y_min: extent.y_min,
+                y_max: extent.y_max,
+            },
+            projection: tessera_spatial::Projection::None,
         }],
         partitions: vec![PartitionDescriptor {
             phash: "default".to_string(),
@@ -196,7 +208,7 @@ fn write_manifest_json_then_write_current_round_trips_through_open_bundle() {
     write_current(dir.path(), "v00000", &digest).expect("write_current");
 
     let bundle = open_bundle(dir.path()).expect("open_bundle over a bundle these writers built");
-    assert_eq!(bundle.manifest.bundle_format, 3);
+    assert_eq!(bundle.manifest.bundle_format, 5);
     assert_eq!(bundle.manifest.entity_id_high_water, 64);
     assert_eq!(bundle.manifest.identity.idset, 1);
 
@@ -312,17 +324,23 @@ fn manifest_fixture() -> SegmentsManifest {
         entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
         layers: Vec::new(),
         layer_tombstones: Vec::new(),
+        views: Vec::new(),
+        scoped_columns: Vec::new(),
+        dead_view_incarnations: Vec::new(),
         membership_extents: Vec::new(),
         level_versions: Vec::new(),
         containment_extents: Vec::new(),
         tile_index_extents: Vec::new(),
         row_column_extents: Vec::new(),
+        shape_rows_extents: Vec::new(),
+        shape_held_extents: Vec::new(),
         artifact_record_extents: Vec::new(),
         segments: Vec::new(),
         deltas: Vec::new(),
         dict_extents: Vec::new(),
         attr_extents: Vec::new(),
         record_extents: Vec::new(),
+        entity_terms_extents: Vec::new(),
         text_extents: Vec::new(),
         external_id_runs: Vec::new(),
         locator_extents: Vec::new(),

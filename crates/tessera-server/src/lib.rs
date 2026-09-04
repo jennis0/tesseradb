@@ -280,6 +280,10 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
     // gives: it exists for a deployment that has a row-major layer at all, which is a property of
     // the corpus rather than of the box.
     engine.set_masked_count_cache_bytes(config.masked_count_cache_bytes);
+    // The region leaf's two knobs (selection-operand §2, §6): the cell budget the descent stops
+    // at, and the bound on the decompositions held across principals.
+    engine.set_max_region_cells(config.max_region_cells);
+    engine.set_region_cache_bytes(config.region_cache_bytes);
     // `single_flight_wait_ms`' consumer — how long a request parks on another request's
     // row-projection build before it is shed (decision 0058).
     engine.set_single_flight_wait_ms(config.single_flight_wait_ms);
@@ -307,6 +311,14 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         sessions: Mutex::new(SessionRegistry::default()),
         max_k: config.max_k,
         max_category_values: config.max_category_values,
+        max_suggestions: config.max_suggestions,
+        max_suggestion_walk: config.max_suggestion_walk,
+        max_suggest_set_entities: config.max_suggest_set_entities,
+        suggest_admission: state::SuggestAdmission::new(),
+        max_shape_vertices: config.max_shape_vertices,
+        max_region_vertices: config.max_region_vertices,
+        max_region_cells: config.max_region_cells,
+        max_browse_rows: config.max_browse_rows,
         // Gates only /v1/viewport, /v1/items and /session/authorise (each handler wraps its own
         // closure); never the control plane, and never /healthz, /readyz, /meta or /revoke — the
         // probes are deliberately off the control plane and outside every gate
@@ -329,6 +341,7 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         session_credential,
         operator_credential,
         dev_cors_origins: config.dev_cors_origins.clone(),
+        cors_origins: config.cors_origins.clone(),
         #[cfg(feature = "fault-injection")]
         faults,
     });
@@ -337,6 +350,10 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
     // session token and the session credential to this process. It is a development affordance;
     // T2 (server-mediated, with verified assertions) remains the documented integration topology —
     // client-interaction §7 tabulates the four topologies and names the two anti-patterns.
+    //
+    // `serve.cors_origins` gets no warning of its own. It is a deployment's deliberate statement
+    // about which pages may present its tokens, not a seam left open by accident, and a warning
+    // on every start would train an operator to read this one past as well (decision 0102).
     if !config.dev_cors_origins.is_empty() {
         tracing::warn!(
             origins = ?config.dev_cors_origins,

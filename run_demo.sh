@@ -9,17 +9,53 @@
 #
 #   ./run_demo.sh                 # build what is missing, serve every scale, open the viewer
 #   ./run_demo.sh --scale 2m4     # one scale only. Repeatable; the order is the picker's order
+#   ./run_demo.sh --scale notebook # the notebook corpus: the HDBSCAN tree, its topics, the taxonomy
+#   ./run_demo.sh --scale notebook-2m4  # the same pipeline over the whole corpus, plus toponymy
 #   ./run_demo.sh --bundle PATH   # serve a bundle you already have, on its own
+#   ./run_demo.sh --deployment D/tessera.toml --terms "$(cat D/country-terms.txt)" --ranks D/country-ranks.json
+#                                 # …a rung of the dataset ladder, served on its own deployment:
+#                                 # its ports, its credentials, its disclosure floor, unrewritten
+#   ./run_demo.sh --bundle PATH --terms GB,FR,DE [--ranks R.json] [--label 'Name'] [--prose name]
+#                                 # …whose dictionary is its own, not the fixtures' 0..200
 #   ./run_demo.sh --no-viewer     # servers only (for curl, the golden capture, the smoke script)
 #   ./run_demo.sh --rebuild       # discard and rebuild the demo bundles
 #
-# ## The four scales, and why they differ
+# ## Where it writes — `./tessera-demo/`, and nothing in the source tree
 #
-#     scale   items          prose indexed        bundle
-#     2m4     2,422,486      title + abstract     ~1.4 GB
-#     25m     25,200,000     title                ~2.7 GB
-#     250m    250,000,000    none                 ~5 GB
-#     1b      1,000,000,000  none                 ~20 GB
+# Bundles, cache, WALs, the generated `tessera-<scale>.toml` deployments, the measured presets, the
+# build timings and the dataset document all live under `./tessera-demo/` at the checkout root,
+# which is gitignored. `TESSERA_DEMO_DIR` names somewhere else — a second session on one checkout
+# wants its own, because the layout holds one slot per scale and two runs sharing it overwrite each
+# other's picker.
+#
+# Nothing is written under `clients/`. The viewer is told where the dataset document is through the
+# URL this script prints (`?datasets=/@fs/<absolute path>`), and its session credential through the
+# environment of the `npm run dev` process rather than a `.env.local`. `VITE_PORT` moves the viewer
+# off 5173, and whatever port it lands on is what the generated deployments enumerate in
+# `serve.dev_cors_origins`.
+#
+# ## The five scales, and why they differ
+#
+#     scale         items          prose indexed        bundle
+#     notebook      50,000         title + abstract     ~35 MB
+#     notebook-2m4  2,422,486      title + abstract     ~2.3 GB
+#     2m4        2,422,486      title + abstract     ~1.4 GB
+#     25m        25,200,000     title                ~2.7 GB
+#     250m       250,000,000    none                 ~5 GB
+#     1b         1,000,000,000  none                 ~20 GB
+#
+# `notebook` is the odd one out, and it is in the picker for what the other four lack. They
+# publish one flat k-means layer; `notebook` is `data/notebook/`, which the ladder's arXiv rung
+# (`test_corpora/arxiv/`) writes — a uniform sample of the same corpus carrying **five declared layers**: k-means flat
+# under a `{ count = 50 }` floor, HDBSCAN's condensed tree nested under `{ fraction = 0.05 }`, a
+# TF-IDF topic label attached to every cluster of each, and arXiv's own classification as a tiered
+# layer whose two levels are joined by containment edges. It builds in seconds. Its principals are
+# written in the corpus's own vocabulary — an arXiv category is a term — where the others' are the
+# integer ids of a synthetic dictionary, so its presets read `math.AG` rather than `14`. The item
+# count is whatever the notebook sampled, read from the points file rather than tabled here.
+# `notebook-2m4` is `data/notebook-2m4-live/`: the whole corpus through the same pipeline, with a
+# fourth clustering — `clusters/toponymy`, four tiered levels named by a language model — and a
+# label layer over it. It builds in minutes rather than seconds.
 #
 # The two large scales are worth starting deliberately rather than by default: between them they
 # are ~135 GB of bundle and the better part of an afternoon to build. `--scale 2m4 --scale 25m`
@@ -30,7 +66,7 @@
 # controls from `/v1/meta`, so the abstract box is simply absent on the large bundle — the honest
 # rendering of a column that is not there, and not a case the client special-cases.
 #
-# Both are built from `data/demo/`, which `probes/build_demo_datasets.py` writes. Run that first if
+# The four arXiv scales are built from `data/demo/`, which `probes/build_demo_datasets.py` writes. Run that first if
 # the directory is missing; it needs `probes/build_prose.py`'s output, which is a scan of the raw
 # arXiv snapshot.
 #
@@ -65,16 +101,16 @@
 # any other mark, and deliberately carrying no counts: the count channel is what stops a superset
 # being read as density) and the server's stage breakdown.
 #
-# `http://localhost:5173/?prefetch=0` turns look-ahead off and leaves the cache on. That is the A/B
-# the measurements use: the cache decides what a request is *answered from*, look-ahead decides
-# what is *asked for*, and they are worth judging separately.
+# Adding `&prefetch=0` to the URL this script prints turns look-ahead off and leaves the cache on.
+# That is the A/B the measurements use: the cache decides what a request is *answered from*,
+# look-ahead decides what is *asked for*, and they are worth judging separately.
 #
-# `?dataset=25m` opens straight onto a scale, skipping the switch.
+# `&dataset=25m` opens straight onto a scale, skipping the switch.
 #
 # ## Recording a session — `?trace=1`
 #
-# `http://localhost:5173/?trace=1` records what you did, what the client did about it, and how long
-# each frame took, into a file you can hand to someone else. It exists because the browser-free
+# Adding `&trace=1` to the printed URL records what you did, what the client did about it, and how
+# long each frame took, into a file you can hand to someone else. It exists because the browser-free
 # harness (`probes/2026-08-09-client-pipeline/`) cannot see the three costs a user actually feels:
 # GPU upload, frame scheduling, and the delay between an input and the paint answering it.
 #
@@ -124,30 +160,65 @@ REPO="$PWD"
 # `data/` is gitignored, so it exists in the primary checkout and not in a worktree. Point
 # TESSERA_DATA at wherever the fixtures actually live.
 DATA="${TESSERA_DATA:-$REPO/data}"
-DEV="$REPO/clients/ts/.dev"                     # gitignored: cache, WAL, and the built bundles
-ENV_LOCAL="$REPO/clients/ts/viewer/.env.local"  # gitignored
-# Served by Vite from `public/`, and gitignored: it names what is actually running, which is a fact
-# about this invocation rather than about the repository. The viewer fetches it at startup, so
-# restarting against a different set of scales needs no rebuild — and, unlike the `presets.json` it
-# replaces, nothing tracked is rewritten by running the demo.
-DATASETS="$REPO/clients/ts/viewer/public/datasets.json"
+# Everything this run produces: the bundles, their caches and WALs, the generated deployments, the
+# measured presets and the timings. Directory-local rather than under `$HOME`, and gitignored —
+# running the demo writes nothing into the source tree, which is what lets two checkouts, or two
+# sessions with `TESSERA_DEMO_DIR` set, run it without overwriting each other.
+DEMO="${TESSERA_DEMO_DIR:-$REPO/tessera-demo}"
+# What is actually running, which is a fact about this invocation rather than about the repository.
+# The viewer fetches it at startup — restarting against a different set of scales needs no rebuild —
+# and is told where it is by the `?datasets=` parameter in the URL printed at the end, because the
+# document lives outside the viewer's package and Vite serves it over `/@fs/`.
+DATASETS="$DEMO/datasets.json"
 
 # Vite is `strictPort`, and this origin is what gets written into `dev_cors_origins`. A silent
-# fallback to 5174 would surface as a CORS failure that reads like a broken server.
-VITE_PORT=5173
+# fallback to another port would surface as a CORS failure that reads like a broken server. Set
+# `VITE_PORT` to run a second viewer beside one already holding 5173.
+VITE_PORT="${VITE_PORT:-5173}"
 
 export TESSERA_SESSION_CRED="${TESSERA_SESSION_CRED:-dev-session-credential}"
 export TESSERA_OPERATOR_CRED="${TESSERA_OPERATOR_CRED:-dev-operator-credential}"
 
 bundle_override=""
+# A `tessera.toml` an operator already has — a dataset-ladder rung's, which `prepare.py` writes
+# beside its parquets. Unlike `--bundle`, nothing here is generated: the bundle path, the three
+# ports, the plugin, the disclosure floor and the credential variable names are that file's, and it
+# is read rather than rewritten. It is the only route that serves a bundle whose credentials are
+# not the demo's, and the only one that leaves the deployment under the operator's control.
+deployment_override=""
 run_viewer=1
 rebuild=0
 build_only=0
 scales=()
+# **`--bundle` alone cannot serve a corpus with its own dictionary**, and these are why. The
+# candidate terms below default to `0..200`, which is the *demo* fixtures' synthetic dictionary —
+# against any other corpus every principal measures empty and the viewer opens on a blank map with
+# nothing to say why. A term id names a different set in every dictionary, so there is no list that
+# could be right for all of them; the bundle's own terms have to be named.
+#
+#   --terms  a comma-separated candidate list, or `lo..hi`
+#   --ranks  `[{term, pairs}]`, most-covering first — what composes the sparse/medium/heavy
+#            coverage principals, which is the whole of what "switch principal" demonstrates once
+#            a dictionary is large enough that any single term is a sliver
+terms_override=''
+ranks_override=''
+# What the picker calls this bundle. Without it the entry is the bundle's absolute path, which is
+# what the operator typed rather than what the corpus is.
+label_override=''
+# The prose columns the picker's source panel names for a `--bundle` or `--deployment` entry. It is
+# a caption, not a control — the filter surface itself is `/v1/meta`'s `filter_operands` — but a
+# panel saying "prose indexed: none" over a corpus with an indexed text column is a caption that is
+# wrong, so the corpus's own columns can be named.
+prose_override=''
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --scale)      scales+=("$2"); shift 2 ;;
     --bundle)     bundle_override="$2"; shift 2 ;;
+    --deployment) deployment_override="$2"; shift 2 ;;
+    --terms)      terms_override="$2"; shift 2 ;;
+    --ranks)      ranks_override="$2"; shift 2 ;;
+    --label)      label_override="$2"; shift 2 ;;
+    --prose)      prose_override="$2"; shift 2 ;;
     --no-viewer)  run_viewer=0; shift ;;
     --build-only) build_only=1; shift ;;
     --rebuild)    rebuild=1; shift ;;
@@ -155,6 +226,16 @@ while [[ $# -gt 0 ]]; do
     *)            echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+# **`--ranks` is resolved here, against the working directory the operator typed it in.** The
+# measurement loop below runs from `clients/ts`, and a relative path that stops resolving there was
+# not an error: the loop passes `--ranks` only when the file is present, so the presets silently
+# came back as three single terms and no coverage bands at all. A path that names nothing is a
+# refusal now, since an operator who typed one asked for it.
+if [[ -n "$ranks_override" ]]; then
+  [[ -f "$ranks_override" ]] || { echo "no such ranks file: $ranks_override" >&2; exit 1; }
+  ranks_override="$(cd "$(dirname "$ranks_override")" && pwd)/$(basename "$ranks_override")"
+fi
+
 # `1b` is deliberately NOT in the default set, and the reason is the served side rather than the
 # build: its hot columns alone are 11.16 GiB resident (the figure the build prints), so on a
 # machine that does not have that to spare *on top of* the other scales, adding it to the picker
@@ -178,31 +259,166 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-say "building the release binary"
-cargo build --release -p tessera-cli
+# `TESSERA_BIN` serves a binary built elsewhere — a second worktree sharing one machine's release
+# build rather than paying for its own — and is otherwise this checkout's, built here.
+if [[ -n "${TESSERA_BIN:-}" ]]; then
+  BIN="$TESSERA_BIN"
+  [[ -x "$BIN" ]] || { echo "TESSERA_BIN=$BIN is not an executable" >&2; exit 1; }
+  say "using $BIN"
+else
+  say "building the release binary"
+  cargo build --release -p tessera-cli
+  BIN="./target/release/tessera"
+fi
 
 # Per scale: items, the label the picker shows, and the port triple. Ports are fixed per scale
 # rather than allocated, so a `curl` in a second terminal keeps working across restarts and the
 # smoke scripts need no discovery step.
-items_of()   { case "$1" in 2m4) echo 2422486 ;; 25m) echo 25200000 ;; 250m) echo 250000000 ;; 1b) echo 1000000000 ;; *) echo 0 ;; esac; }
-prose_of()   { case "$1" in 2m4) echo '"title","abstract"' ;; 25m) echo '"title"' ;; *) echo '' ;; esac; }
-viewer_of()  { case "$1" in 2m4) echo 37585 ;; 25m) echo 37586 ;; 250m) echo 37587 ;; 1b) echo 37588 ;; *) echo 0 ;; esac; }
-session_of() { case "$1" in 2m4) echo 49303 ;; 25m) echo 49304 ;; 250m) echo 49305 ;; 1b) echo 49306 ;; *) echo 0 ;; esac; }
-control_of() { case "$1" in 2m4) echo 45721 ;; 25m) echo 45722 ;; 250m) echo 45723 ;; 1b) echo 45724 ;; *) echo 0 ;; esac; }
+items_of() {
+  case "$1" in
+    2m4) echo 2422486 ;; 25m) echo 25200000 ;; 250m) echo 250000000 ;; 1b) echo 1000000000 ;;
+    # The notebook decides its own sample; the Parquet footer is the record of what it chose.
+    notebook*) python3 -c "import pyarrow.parquet as pq, sys; print(pq.ParquetFile(sys.argv[1]).metadata.num_rows)" \
+                "$(notebook_dir_of "$1")/points.parquet" ;;
+    *) echo 0 ;;
+  esac
+}
+prose_of()   { case "$1" in 2m4|notebook*) echo '"title","abstract"' ;; 25m) echo '"title"' ;; *) echo '' ;; esac; }
+viewer_of()  { case "$1" in 2m4) echo 37585 ;; 25m) echo 37586 ;; 250m) echo 37587 ;; 1b) echo 37588 ;; notebook) echo 37589 ;; notebook-2m4) echo 37590 ;; *) echo 0 ;; esac; }
+session_of() { case "$1" in 2m4) echo 49303 ;; 25m) echo 49304 ;; 250m) echo 49305 ;; 1b) echo 49306 ;; notebook) echo 49307 ;; notebook-2m4) echo 49308 ;; *) echo 0 ;; esac; }
+control_of() { case "$1" in 2m4) echo 45721 ;; 25m) echo 45722 ;; 250m) echo 45723 ;; 1b) echo 45724 ;; notebook) echo 45725 ;; notebook-2m4) echo 45726 ;; *) echo 0 ;; esac; }
+# The two notebook scales are directories the notebook wrote, each holding its points, its
+# per-layer files and its own declaration; empty for every other scale.
+notebook_dir_of() { case "$1" in notebook) echo "$DATA/notebook" ;; notebook-2m4) echo "$DATA/notebook-2m4-live" ;; *) echo '' ;; esac; }
+# The declaration each scale is built from. The notebook writes its own beside its files, with
+# every source path relative to it (configuration.md §3); the demo scales share one generator.
+schema_of()  { case "$1" in notebook*) echo "$(notebook_dir_of "$1")/schema.toml" ;; *) echo "$DATA/demo/config-$1.toml" ;; esac; }
 
 # `--bundle` is the escape hatch: one server, one entry in the picker, no build.
 if [[ -n "$bundle_override" ]]; then
   [[ -d "$bundle_override" ]] || { echo "no such bundle: $bundle_override" >&2; exit 1; }
   scales=(custom)
-  items_of()   { echo 0; }
-  prose_of()   { echo ''; }
-  viewer_of()  { echo 37585; }
-  session_of() { echo 49303; }
-  control_of() { echo 45721; }
+  items_of()   { python3 -c "
+import json,sys,pathlib
+b = pathlib.Path('$bundle_override')
+m = sorted(b.glob('v*/MANIFEST.json'))
+print(json.load(open(m[-1]))['entity_id_high_water'] if m else 0)
+" 2>/dev/null || echo 0; }
+  prose_of()   { if [[ -n "$prose_override" ]]; then printf '"%s"' "${prose_override//,/\",\"}"; fi; }
+  schema_of()  { echo ''; }
+  # **Its own ports, not 2m4's.** Sharing them meant a `--bundle` run beside an already-running
+  # 2m4 bound nothing, found that port ready anyway, and measured its principals against the other
+  # corpus — which is exactly the confusion `--bundle` exists to avoid.
+  viewer_of()  { echo 37599; }
+  session_of() { echo 49399; }
+  control_of() { echo 45799; }
+fi
+
+# `--deployment` is the other escape hatch, and it differs from `--bundle` in what it *does not*
+# do: it writes no deployment file. A ladder rung's `tessera.toml` — the one its `prepare.py`
+# generated beside the parquets — carries the bundle, the three ports, the disclosure floor and the
+# names of the variables holding its credentials, and none of that is the demo's to overwrite.
+#
+# The secrets are read from a `.env` beside that file when the environment does not already carry
+# them. `tessera serve` reads credentials from the process environment alone (the `.env` route in
+# the binary is the *identity key*'s, and that key is the build's rather than the server's), so a
+# rung whose credentials live only in its `.env` would otherwise refuse to start with nothing said
+# about where its secret was.
+if [[ -n "$deployment_override" ]]; then
+  [[ -n "$bundle_override" ]] && { echo "--deployment and --bundle name the same thing twice" >&2; exit 2; }
+  [[ -f "$deployment_override" ]] || { echo "no such deployment: $deployment_override" >&2; exit 1; }
+  deployment_override="$(cd "$(dirname "$deployment_override")" && pwd)/$(basename "$deployment_override")"
+  DEPLOY_DIR="$(dirname "$deployment_override")"
+
+  # A scalar out of one `[section]`, quotes stripped. The keys read here are addresses, paths and
+  # variable names — one line each — so this is the whole of the TOML this script needs, and the
+  # system python3 here has no `tomllib`.
+  toml_scalar() {
+    awk -v want_section="$1" -v want_key="$2" '
+      /^[[:space:]]*\[/ { section = $0; gsub(/[][[:space:]]/, "", section); next }
+      { line = $0; sub(/#.*/, "", line)
+        if (section == want_section && match(line, /^[[:space:]]*[A-Za-z_]+[[:space:]]*=/)) {
+          key = substr(line, 1, index(line, "=") - 1); gsub(/[[:space:]]/, "", key)
+          if (key == want_key) {
+            value = substr(line, index(line, "=") + 1)
+            gsub(/^[[:space:]]*["'"'"']?|["'"'"']?[[:space:]]*$/, "", value)
+            print value; exit
+          }
+        }
+      }' "$deployment_override"
+  }
+  port_of_addr() { echo "${1##*:}"; }
+
+  bundle_override="$(toml_scalar bundle path)"
+  [[ -n "$bundle_override" ]] || { echo "$deployment_override: no [bundle].path" >&2; exit 1; }
+  # `[bundle].path` is resolved against the deployment file, as the binary resolves it
+  # (configuration.md §3) — a rung's own file says `path = "bundle"`.
+  [[ "$bundle_override" = /* ]] || bundle_override="$DEPLOY_DIR/$bundle_override"
+  [[ -d "$bundle_override" ]] || { echo "$deployment_override names a bundle that is not there: $bundle_override" >&2; exit 1; }
+
+  # The credentials this deployment declares, taken from the environment first and from the `.env`
+  # beside the file second — the same precedence the binary gives the identity key, and for the
+  # same reason: an exported variable is more specific than a file.
+  for role in session operator; do
+    var="$(toml_scalar serve "${role}_credential_env")"
+    [[ -n "$var" ]] || continue
+    if [[ -z "${!var:-}" && -f "$DEPLOY_DIR/.env" ]]; then
+      value="$(sed -n "s/^[[:space:]]*\(export[[:space:]]\+\)\?$var=//p" "$DEPLOY_DIR/.env" | head -1 | sed "s/^[\"']//;s/[\"']$//")"
+      [[ -n "$value" ]] && export "$var=$value"
+    fi
+    [[ -n "${!var:-}" ]] || { echo "$deployment_override declares $var for the $role plane and nothing sets it (not the environment, not $DEPLOY_DIR/.env)" >&2; exit 1; }
+    # The presets script and the viewer read the demo's variable names, not this deployment's.
+    if [[ "$role" == session ]]; then
+      export TESSERA_SESSION_CRED="${!var}"
+    else
+      export TESSERA_OPERATOR_CRED="${!var}"
+    fi
+  done
+
+  # The browser talks to this server directly, so an origin the deployment does not enumerate is a
+  # CORS failure that reads like a broken server (client-interaction §7). Reported, not refused:
+  # `--no-viewer` wants no origin at all.
+  if [[ $run_viewer -eq 1 ]] && ! grep -q "localhost:$VITE_PORT" "$deployment_override"; then
+    echo "warning: $deployment_override does not list http://localhost:$VITE_PORT in [serve].dev_cors_origins;" >&2
+    echo "         the viewer will load and every request from it will fail CORS." >&2
+  fi
+
+  # The WAL and the cache the deployment names, whose *parents* the server does not create: it
+  # refuses with `wal io error: No such file or directory` and names no path, and a rung's
+  # `prepare.py` writes the deployment without ever opening one. `write_deployment` does the same
+  # `mkdir` for the demo scales a few lines below.
+  for relative in "$(toml_scalar bundle wal)" "$(toml_scalar bundle cache)"; do
+    [[ -n "$relative" ]] || continue
+    absolute="$relative"
+    [[ "$absolute" = /* ]] || absolute="$DEPLOY_DIR/$absolute"
+    mkdir -p "$(dirname "$absolute")"
+  done
+
+  scales=(custom)
+  items_of()   { python3 -c "
+import json,sys,pathlib
+b = pathlib.Path('$bundle_override')
+m = sorted(b.glob('v*/MANIFEST.json'))
+print(json.load(open(m[-1]))['entity_id_high_water'] if m else 0)
+" 2>/dev/null || echo 0; }
+  prose_of()   { if [[ -n "$prose_override" ]]; then printf '"%s"' "${prose_override//,/\",\"}"; fi; }
+  schema_of()  { echo ''; }
+  # This deployment's own ports, whatever they are: two rungs served at once are two files, and
+  # the picker offers both.
+  viewer_of()  { port_of_addr "$(toml_scalar serve viewer)"; }
+  session_of() { port_of_addr "$(toml_scalar serve session)"; }
+  control_of() { port_of_addr "$(toml_scalar serve control)"; }
+  label_override="${label_override:-$(basename "$DEPLOY_DIR")}"
 fi
 
 bundle_of() {
-  if [[ -n "$bundle_override" ]]; then echo "$bundle_override"; else echo "$DEV/bundle-$1"; fi
+  if [[ -n "$bundle_override" ]]; then echo "$bundle_override"; else echo "$DEMO/bundle-$1"; fi
+}
+
+# Which `tessera.toml` a scale is built and served against: the operator's under `--deployment`,
+# and otherwise the one `write_deployment` generates below.
+deployment_of() {
+  if [[ -n "$deployment_override" ]]; then echo "$deployment_override"; else echo "$DEMO/tessera-$1.toml"; fi
 }
 
 # ------------------------------------------------------------------------------------ the builds
@@ -213,17 +429,20 @@ bundle_of() {
 # paths are absolute because this file is generated per machine and never committed — a `source` in
 # the *declaration* is the one that has to travel.
 write_deployment() {
+  # `--deployment` names a file this script did not write and must not: it is the rung's own, and
+  # rewriting it would replace its ports, its credentials and its disclosure floor with the demo's.
+  [[ -n "$deployment_override" ]] && return 0
   local scale="$1" bundle
   bundle="$(bundle_of "$scale")"
-  mkdir -p "$DEV/$scale"
-  cat > "$DEV/tessera-$scale.toml" <<EOF
+  mkdir -p "$DEMO/$scale"
+  cat > "$DEMO/tessera-$scale.toml" <<EOF
 [bundle]
 path  = "$bundle"
-cache = "$DEV/$scale/cache"
-wal   = "$DEV/$scale/wal.log"
+cache = "$DEMO/$scale/cache"
+wal   = "$DEMO/$scale/wal.log"
 
 [build]
-schema = "$DATA/demo/config-$scale.toml"
+schema = "$(schema_of "$scale")"
 
 [plugin]
 module = "builtin:passthrough"
@@ -245,8 +464,9 @@ EOF
 build_scale() {
   local scale="$1" bundle points config
   bundle="$(bundle_of "$scale")"
+  config="$(schema_of "$scale")"
   points="$DATA/demo/points-$scale.parquet"
-  config="$DATA/demo/config-$scale.toml"
+  [[ -n "$(notebook_dir_of "$scale")" ]] && points="$(notebook_dir_of "$scale")/points.parquet"
 
   [[ $rebuild -eq 1 ]] && rm -rf "$bundle"
   # `CURRENT` is written last, so its presence — not the directory's — is what says the build
@@ -263,11 +483,22 @@ build_scale() {
     rm -rf "$bundle"
   fi
 
-  for f in "$points" "$config" "$DATA/demo/archive.parquet" \
-           "$DATA/demo/primary_category.parquet" \
-           "$DATA/scaled/pairs/categories-subclass.pairs.parquet"; do
+  # The notebook's declaration names every file it reads, so the points and the declaration are
+  # the two worth checking here; `tessera check` in the build reports the rest by name.
+  local -a fixtures=("$points" "$config")
+  [[ -n "$(notebook_dir_of "$scale")" ]] || fixtures+=("$DATA/demo/archive.parquet"
+           "$DATA/demo/primary_category.parquet"
+           "$DATA/scaled/pairs/categories-subclass.pairs.parquet")
+  for f in "${fixtures[@]}"; do
     [[ -f "$f" ]] || {
       echo "missing fixture: $f" >&2
+      if [[ -n "$(notebook_dir_of "$scale")" ]]; then
+        echo "the notebook corpus is written by the ladder's arXiv rung:" >&2
+        echo "  ~/venvs/arxiv/bin/python -m test_corpora.arxiv.prepare \\" >&2
+        echo "      --sample 50000 --out $(notebook_dir_of "$scale")" >&2
+        echo "  (add 'python -m test_corpora.arxiv.toponymy' for the named-topic layer)" >&2
+        exit 1
+      fi
       echo "build the demo inputs first:" >&2
       echo "  reference/.venv/bin/python probes/build_prose.py \\" >&2
       echo "      ~/.cache/kagglehub/datasets/Cornell-University/arxiv/versions/296/arxiv-metadata-oai-snapshot.json \\" >&2
@@ -280,7 +511,7 @@ build_scale() {
   done
 
   say "building the $scale bundle ($(items_of "$scale") items)"
-  mkdir -p "$DEV"
+  mkdir -p "$DEMO"
   write_deployment "$scale"
 
   # **Minting is dropped above 10⁸ items, and the reason is a pass the memory budget cannot
@@ -305,7 +536,10 @@ build_scale() {
   # the builtin reports no memory.
   local t0=$SECONDS
   # `--limit` matches the points file: the pairs file covers a larger corpus, and an unlimited
-  # build refuses rather than silently dropping the entities it cannot place.
+  # build refuses rather than silently dropping the entities it cannot place. The notebook's
+  # files are all one corpus, so it takes no limit.
+  local -a limit=(--limit "$(items_of "$scale")")
+  [[ -n "$(notebook_dir_of "$scale")" ]] && limit=()
   # `--mint-id-key` starts a throwaway identity lineage, which is right for a demo bundle and
   # wrong for anything else — every `tessera_id` it mints is meaningless outside this directory,
   # and in particular means nothing to the *other* scale's bundle. A real deployment puts its key
@@ -345,17 +579,17 @@ build_scale() {
            -p "MemorySwapMax=0")
   fi
   "${scope[@]}" \
-  /usr/bin/time -v -o "$DEV/build-$scale.time" \
-  ./target/release/tessera build \
-    --deployment "$DEV/tessera-$scale.toml" \
-    --limit "$(items_of "$scale")" \
+  /usr/bin/time -v -o "$DEMO/build-$scale.time" \
+  "$BIN" build \
+    --deployment "$(deployment_of "$scale")" \
+    "${limit[@]}" \
     ${TESSERA_BUILD_MEMORY_BUDGET:+--memory-budget "$TESSERA_BUILD_MEMORY_BUDGET"} \
     $mint_external --mint-id-key --no-oracle-pairs
   local peak
-  peak=$(awk '/Maximum resident set size/ {printf "%.1f GiB", $NF / 1048576}' "$DEV/build-$scale.time")
+  peak=$(awk '/Maximum resident set size/ {printf "%.1f GiB", $NF / 1048576}' "$DEMO/build-$scale.time")
   printf 'built %s in %dm%02ds, peak %s, %s on disk\n' \
     "$scale" "$(( (SECONDS - t0) / 60 ))" "$(( (SECONDS - t0) % 60 ))" \
-    "$peak" "$(du -sh "$bundle" | cut -f1)" | tee -a "$DEV/build-times.txt"
+    "$peak" "$(du -sh "$bundle" | cut -f1)" | tee -a "$DEMO/build-times.txt"
 }
 
 if [[ -z "$bundle_override" ]]; then
@@ -380,8 +614,24 @@ start_scale() {
   # yet, and rewriting it is idempotent either way.
   write_deployment "$scale"
 
+  # **A port already in use is a refusal, not a race.** The readiness poll below asks the *port*
+  # whether it is ready, not the process this function started — so a server left over from another
+  # run answers immediately, `start_scale` reports success, and everything downstream talks to a
+  # different bundle. That has happened: a stale 2m4 server made a `--bundle` run measure its
+  # principals against arXiv and fail with "no candidate term is visible to anyone", which names
+  # neither the port nor the cause.
+  for port in "$viewer_port" "$(session_of "$scale")" "$(control_of "$scale")"; do
+    if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+      exec 3<&- 3>&-
+      echo "port $port is already in use, so $scale cannot be served on it." >&2
+      echo "Something is already listening — most likely a tessera serve from an earlier run." >&2
+      echo "Stop it, or serve this bundle on other ports." >&2
+      exit 1
+    fi
+  done
+
   say "starting tessera serve for $scale on :$viewer_port"
-  ./target/release/tessera serve --deployment "$DEV/tessera-$scale.toml" &
+  "$BIN" serve --deployment "$(deployment_of "$scale")" &
   SERVE_PIDS+=($!)
   local pid=${SERVE_PIDS[-1]}
 
@@ -402,17 +652,18 @@ start_scale() {
 
 for scale in "${scales[@]}"; do start_scale "$scale"; done
 
-cat > "$ENV_LOCAL" <<EOF
-VITE_TESSERA_VIEWER_URL=http://127.0.0.1:$(viewer_of "${scales[0]}")
-VITE_TESSERA_SESSION_URL=http://127.0.0.1:$(session_of "${scales[0]}")
-VITE_TESSERA_SESSION_CREDENTIAL=$TESSERA_SESSION_CRED
-EOF
-
-if [[ $run_viewer -eq 0 ]]; then
-  say "servers only; Ctrl-C to stop"
-  wait
-  exit 0
-fi
+# The viewer's configuration, in the environment rather than in a `.env.local` under `clients/`:
+# Vite exposes `VITE_`-prefixed process variables to `import.meta.env` exactly as it does the ones
+# in a file, and a variable leaves nothing behind for the next run — or the next session — to read.
+# These name the *fallback* server, which is what the viewer uses when no dataset document reaches
+# it; the picker's entries come from `$DATASETS`.
+export VITE_TESSERA_VIEWER_URL="http://127.0.0.1:$(viewer_of "${scales[0]}")"
+export VITE_TESSERA_SESSION_URL="http://127.0.0.1:$(session_of "${scales[0]}")"
+export VITE_TESSERA_SESSION_CREDENTIAL="$TESSERA_SESSION_CRED"
+# The dataset document, through Vite's `/@fs/` route, so the bare address finds the picker's
+# entries without `?datasets=` — the address printed below still carries it for a link.
+export VITE_TESSERA_DATASETS="/@fs$DATASETS"
+export VITE_PORT
 
 cd "$REPO/clients/ts"
 [[ -d node_modules ]] || { say "npm ci"; npm ci; }
@@ -421,43 +672,115 @@ cd "$REPO/clients/ts"
 
 # Presets are measured **per bundle**: a term id names a different set in each dictionary, so one
 # shared list would mislabel every principal on whichever bundle it was not measured against.
+#
+# The candidates differ by corpus. The demo scales' dictionary is synthetic and its terms are the
+# integers `0..200`, ranked by `scripts/rank_terms.py` so coverage principals can be composed. The
+# notebook's terms are arXiv categories, read off the points file's `categories` column; the ranks
+# are counted from the same column here, in the same `[{term, pairs}]` shape, so the one script
+# composes the same five bands over both — narrow, sparse, medium, heavy, full.
 say "measuring principals per dataset"
-mkdir -p "$(dirname "$DATASETS")" "$DEV/presets"
+mkdir -p "$(dirname "$DATASETS")" "$DEMO/presets"
 RANKS="$DATA/scaled/pairs/categories-subclass.pairs.parquet.term-ranks.json"
 for scale in "${scales[@]}"; do
+  terms="${terms_override:-0..200}"
+  # An overridden term list means an overridden dictionary, so the demo fixtures' ranking is not
+  # merely unhelpful for it — it names terms this bundle does not have.
+  ranks="${ranks_override:-$([[ -n "$terms_override" ]] && echo '' || echo "$RANKS")}"
+  if [[ -n "$(notebook_dir_of "$scale")" ]]; then
+    ranks="$DEMO/presets/$scale.term-ranks.json"
+    terms="$(python3 - "$(notebook_dir_of "$scale")/points.parquet" "$ranks" <<'CANDIDATES'
+import collections, json, sys
+import pyarrow.parquet as pq
+counts = collections.Counter(
+    t for cats in pq.read_table(sys.argv[1], columns=["categories"]).column("categories").to_pylist()
+    for t in (cats or []))
+ranked = [{"term": t, "pairs": n} for t, n in counts.most_common()]
+open(sys.argv[2], "w").write(json.dumps(ranked) + "\n")
+print(",".join(r["term"] for r in ranked))
+CANDIDATES
+)"
+  fi
   node scripts/measure-principals.mjs \
     --viewer "http://127.0.0.1:$(viewer_of "$scale")" \
     --session "http://127.0.0.1:$(session_of "$scale")" \
-    --terms 0..200 --out "$DEV/presets/$scale.json" \
-    ${RANKS:+$([[ -f "$RANKS" ]] && echo --ranks "$RANKS")}
+    --terms "$terms" --out "$DEMO/presets/$scale.json" \
+    $([[ -f "$ranks" ]] && echo --ranks "$ranks")
 done
 
+# This run's entries, one per scale, in the order given: the viewer opens on the first.
+fresh="$DEMO/presets/datasets-this-run.json"
 {
-  echo '{"datasets":['
+  echo '['
   first=1
   for scale in "${scales[@]}"; do
     [[ $first -eq 1 ]] || echo ','
     first=0
     label="$scale"
     case "$scale" in
+      notebook) label="arXiv $(items_of notebook | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta') · notebook corpus: HDBSCAN tree, topics, taxonomy" ;;
+      notebook-2m4) label="arXiv $(items_of notebook-2m4 | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta') · notebook pipeline, whole corpus: HDBSCAN tree, toponymy, topics, taxonomy" ;;
       2m4) label="arXiv 2.4M · titles + abstracts" ;;
       25m) label="arXiv 25M · titles" ;;
       250m) label="arXiv 250M · no prose" ;;
       1b) label="arXiv 1B · no prose" ;;
-      custom) label="$bundle_override" ;;
+      custom) label="${label_override:-$bundle_override}" ;;
     esac
     printf '{"id":"%s","label":"%s","items":%s,"prose":[%s],' \
       "$scale" "$label" "$(items_of "$scale")" "$(prose_of "$scale")"
     printf '"viewerUrl":"http://127.0.0.1:%s","sessionUrl":"http://127.0.0.1:%s","presets":' \
       "$(viewer_of "$scale")" "$(session_of "$scale")"
-    cat "$DEV/presets/$scale.json"
+    cat "$DEMO/presets/$scale.json"
     printf '}'
   done
-  echo ']}'
-} > "$DATASETS"
+  echo ']'
+} > "$fresh"
+
+# **Merged with what is already running, not overwritten.** Two invocations serve two sets of
+# scales on their fixed ports — `--scale 2m4` in one terminal, `--scale notebook` in another — and
+# the picker should offer both. An entry this run did not write is kept if its viewer plane still
+# answers `/readyz` and dropped if it does not, so the document names what is actually up.
+python3 - "$DATASETS" "$fresh" <<'MERGE'
+import json, pathlib, sys, urllib.request
+dest, fresh = pathlib.Path(sys.argv[1]), json.loads(pathlib.Path(sys.argv[2]).read_text())
+mine = {d["id"] for d in fresh}
+# **The port answering is not evidence the entry is true**, and taking it for evidence put a
+# `geonames` row in the picker pointing at an overture server: the ladder's rungs share one port
+# triple, so a rung served now answers `/readyz` on the address a rung served yesterday recorded.
+# An entry naming an address this run claimed is a stale entry whatever answers there.
+ours = {d["viewerUrl"] for d in fresh}
+kept = []
+if dest.exists():
+    for d in json.loads(dest.read_text()).get("datasets", []):
+        if d["id"] in mine:
+            continue
+        if d["viewerUrl"] in ours:
+            print(f"  dropping {d['id']}: {d['viewerUrl']} is served by this run's "
+                  + ", ".join(e["id"] for e in fresh if e["viewerUrl"] == d["viewerUrl"]))
+            continue
+        try:
+            urllib.request.urlopen(d["viewerUrl"] + "/readyz", timeout=2)
+            kept.append(d)
+        except Exception:
+            print(f"  dropping {d['id']}: nothing answers at {d['viewerUrl']}")
+dest.write_text(json.dumps({"datasets": fresh + kept}, indent=2) + "\n")
+print(f"  {', '.join(d['id'] for d in fresh)} written" + (f"; {', '.join(d['id'] for d in kept)} kept" if kept else ""))
+MERGE
 echo "wrote $DATASETS"
 
-say "viewer on http://localhost:$VITE_PORT — Ctrl-C to stop everything"
+if [[ $run_viewer -eq 0 ]]; then
+  say "servers only; Ctrl-C to stop"
+  wait
+  exit 0
+fi
+
+# **The whole URL matters, not just the port.** The dataset document is outside the viewer's
+# package, so the viewer is handed its location rather than fetching a fixed path: Vite serves any
+# file under an allowed root at `/@fs/<absolute path>` (`vite.config.ts` allows `$DEMO`), and
+# `?datasets=` names it. Opening the bare port still works and falls back to the single server the
+# environment above names — one entry, no picker.
+VIEWER_URL="http://localhost:$VITE_PORT/?datasets=/@fs$DATASETS"
+
+say "viewer on $VIEWER_URL — Ctrl-C to stop everything"
 echo "Opens on the broadest principal, the largest mark budget, coloured by archive."
 echo
 echo "Filters are in the left column, driven by what each bundle publishes as filterable."
@@ -466,6 +789,7 @@ echo "  Watch 'visible' hold and 'matched' fall in Counts — the filter never m
 echo "  'exact phrase' is ~200x the cost of 'all words'; reach for it deliberately."
 echo
 echo "To watch the replica: zoom in a few notches, then pan away and back."
-echo "To record a session for someone else: add ?trace=1, press m when it feels wrong, download."
-echo "http://localhost:$VITE_PORT/?prefetch=0 turns look-ahead off, cache still on, for comparison."
-npm run dev -w @tessera/viewer
+echo "To record a session for someone else: add &trace=1, press m when it feels wrong, download."
+echo "Add &prefetch=0 to turn look-ahead off, cache still on, for comparison."
+echo "The smoke scripts take the whole URL: --url '$VIEWER_URL'"
+npm run dev -w @tesseradb/viewer

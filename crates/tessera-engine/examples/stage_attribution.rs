@@ -65,13 +65,24 @@ fn ensure_bundle() -> PathBuf {
     if !bundle_root.join("CURRENT").exists() {
         let root = workspace_root();
         let args = BuildArgs {
-            point_fields: Default::default(),
-            points: root.join("data/scaled/geometry.parquet"),
+            arena_order: Default::default(),
+            views: vec![tessera_build::ViewArgs {
+                visibility: None,
+                view_id: "s0".to_string(),
+                projection: tessera_spatial::Projection::None,
+                extent: extent(),
+                points: root.join("data/scaled/geometry.parquet"),
+                point_fields: Default::default(),
+                select: None,
+                access: tessera_build::config::AccessInput::relation(
+                    root.join("data/scaled/pairs/categories-subclass.pairs.parquet"),
+                ),
+            }],
+            anchor: 0,
+            groups: Vec::new(),
+            scoped_attributes: Vec::new(),
             attribute_sources: Vec::new(),
-            access: tessera_build::config::AccessInput::relation(root.join("data/scaled/pairs/categories-subclass.pairs.parquet")),
             out: bundle_root.clone(),
-            extent: extent(),
-            view_id: "s0".to_string(),
             limit: Some(ITEM_LIMIT),
             identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
             identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -79,6 +90,7 @@ fn ensure_bundle() -> PathBuf {
             shard_id: 0,
             layers: Vec::new(),
             layer_inputs: Vec::new(),
+            scoped_layers: Default::default(),
             mint_external_ids: false,
             batch_items: None,
             memory_budget: None,
@@ -277,10 +289,7 @@ fn main() {
             "    stamp_compare_ns         {:>8}",
             avg(sums.stamp_compare_ns)
         );
-        println!(
-            "    view_lookup_ns        {:>8}",
-            avg(sums.view_lookup_ns)
-        );
+        println!("    view_lookup_ns        {:>8}", avg(sums.view_lookup_ns));
         println!(
             "    row_projection_ns      {:>8}",
             avg(sums.row_projection_ns)

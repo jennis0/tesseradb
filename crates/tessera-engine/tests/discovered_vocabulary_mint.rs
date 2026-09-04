@@ -94,7 +94,9 @@ vocabulary = "band"
 fn parse_schema(tmp: &Path, text: &str) -> Schema {
     let path = tmp.join("config.toml");
     std::fs::write(&path, text).unwrap();
-    Config::parse(&path, &std::collections::HashMap::new()).map(|c| c.schema).expect("the fixture schema parses")
+    Config::parse(&path, &std::collections::HashMap::new())
+        .map(|c| c.schema)
+        .expect("the fixture schema parses")
 }
 
 /// `points.parquet` with `entity_id`, `x`, `y`, and a `category` utf8 column always null — every
@@ -127,13 +129,25 @@ fn write_points_with_absent_category(path: &Path, n: u64, column: &str) {
 
 fn build_args(points: &Path, pairs: &Path, out: &Path, schema: Schema) -> BuildArgs {
     BuildArgs {
-        point_fields: Default::default(),
-        points: points.to_path_buf(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.to_path_buf(), &schema),
-        access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
+        arena_order: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: points.to_path_buf(),
+            point_fields: Default::default(),
+            select: None,
+            access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
+        attribute_sources: tessera_build::config::AttributeSource::over(
+            points.to_path_buf(),
+            &schema,
+        ),
         out: out.to_path_buf(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -141,6 +155,7 @@ fn build_args(points: &Path, pairs: &Path, out: &Path, schema: Schema) -> BuildA
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
         mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
@@ -193,11 +208,13 @@ fn ingest_row(engine: &Engine, external_id: &str, scalar: WalScalar) -> EntityId
             vec![UnallocatedRow {
                 external_id: Some(external_id.as_bytes().to_vec()),
                 view: "s0".to_string(),
+                join: None,
                 descriptors: vec![b"0".to_vec()],
                 x: 1.0,
                 y: 1.0,
                 scalars: vec![scalar],
                 terms: engine.resolve_terms(&[b"0".to_vec()]),
+                scoped: Vec::new(),
             }],
             format!("batch-{external_id}"),
             [0u8; 32],
@@ -326,11 +343,13 @@ fn two_rows_in_one_window_with_the_same_novel_key_mint_once() {
     let row = |external_id: &str| UnallocatedRow {
         external_id: Some(external_id.as_bytes().to_vec()),
         view: "s0".to_string(),
+        join: None,
         descriptors: vec![b"0".to_vec()],
         x: 1.0,
         y: 1.0,
         scalars: vec![WalScalar::Utf8("finance".to_string())],
         terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
     };
 
     let entities = engine
@@ -495,11 +514,13 @@ fn a_minted_code_survives_a_restart_and_is_never_redrawn() {
             vec![UnallocatedRow {
                 external_id: Some(b"one-too-many".to_vec()),
                 view: "s0".to_string(),
+                join: None,
                 descriptors: vec![b"0".to_vec()],
                 x: 1.0,
                 y: 1.0,
                 scalars: vec![WalScalar::Utf8("one-too-many".to_string())],
                 terms: engine.resolve_terms(&[b"0".to_vec()]),
+                scoped: Vec::new(),
             }],
             "batch-one-too-many".to_string(),
             [9u8; 32],

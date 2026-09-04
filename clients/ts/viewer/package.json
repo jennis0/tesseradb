@@ -1,20 +1,21 @@
 {
-  "name": "@tessera/viewer",
+  "name": "@tesseradb/viewer",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test": "vitest run",
-    "typecheck": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.smoke.json",
     "preview": "vite preview"
   },
   "dependencies": {
     "@deck.gl/core": "^9.3.7",
-    "@deck.gl/geo-layers": "^9.3.7",
     "@deck.gl/layers": "^9.3.7",
     "@luma.gl/core": "^9.3.6",
-    "@tessera/client": "*"
+    "@tesseradb/client": "*",
+    "@tesseradb/components": "*",
+    "@tesseradb/deck": "*",
+    "lit": "^3.3.0"
   },
   "devDependencies": {
     "playwright": "^1.62.1",

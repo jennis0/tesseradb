@@ -9,7 +9,7 @@ Companion to `delta-serving.md`, whose §7 prefix-drawing licence is what makes 
 this stream drawable, and to `client-interaction.md` §8.6(2), whose length-prefix-everything
 item this delivers. `contracts.md` §3.2 r26 now carries the wire byte layout and governs.
 All three flagged rulings are settled (owner, 2026-08-11): the streaming-occupancy posture is
-[decision 0060](../decisions/0060-a-stream-lives-at-most-the-whole-stream-deadline.md), the I13a
+decision 0060, the I13a
 carve-out is ratified as [decision 0061](../decisions/0061-i13a-forbids-undetectable-partials-not-streaming.md),
 and Appendix C's C4 row records the accepted granularity change within its open status.
 
@@ -154,7 +154,7 @@ async side:
   not outlive `serve.stream_deadline_ms` (default 60 s) from first flush — without the second, a
   reader that accepts one flush per `stall_ms − ε` holds its slot for minutes, legally (review
   finding 2). Nothing is ever buffered unboundedly (client criterion 6). **The whole-stream
-  deadline is the ruled posture** ([decision 0060](../decisions/0060-a-stream-lives-at-most-the-whole-stream-deadline.md)):
+  deadline is the ruled posture** (decision 0060):
   it bounds slot occupancy at `slots × deadline` absolutely, at the cost of cutting a genuinely
   slow link on a large response; the alternatives (a separate streaming-lane bound; acceptance
   with arithmetic) were considered and declined there, with the separate lane named as the
@@ -236,6 +236,19 @@ frames; the SDK grows a collect helper; `Engine::viewport` remains the in-proces
 surface. The tile-addressed adapter (`tile-addressed-integration.md`) consumes the engine API
 and is unaffected. No `?stream=0` mode: two framings is two conformance surfaces forever.
 
+**The TypeScript client reads the body as it arrives** (built 2026-08-28): it frames the byte
+stream incrementally, decodes each points frame the moment it is whole, and lands its tiles as
+bands before the next frame has been received — so a wide answer draws progressively instead of
+after its last byte. The two properties this rests on are §2's and §3's: a frame is an
+independently decodable Arrow stream, and it holds whole tiles in the tiles batch's order, so the
+run of counts a frame satisfies is found by adding up the `served` the server already sent. §6's
+rules are unchanged by it — the trailer's presence is still what marks the response complete, and
+a body that ends without one is still refused after every whole frame it did deliver has been
+handed over. Its batch path is unchanged and is what a reader holding a whole body still uses.
+Measured on GeoNames at depth 10 over 24,960 tiles (65.4 MB, 60 point frames, 14,343 bands, Node,
+inline decoder, loopback): first band **435–549 ms → 31–39 ms**, whole response 438–553 →
+280–317 ms.
+
 ## 9. Edits this lands (the implementation's checklist)
 
 - `tessera-wire`: frame writer (`kind` + length + payload), per-frame encoders, **in
@@ -264,7 +277,7 @@ and is unaffected. No `?stream=0` mode: two framings is two conformance surfaces
   (first-flush header, frame pacing) where today it is double-gated behind `bench-timing`; the
   register entry records the granularity change (review findings 3–4).
 - Consumers, in lockstep: `reference/oracle/wire.py`, `clients/ts/core` (`frame.ts`,
-  `decode.ts` — batch-wise; incremental decode is the client track's work),
+  `decode.ts`; the TypeScript client decodes **incrementally** — built 2026-08-28, §8),
   `tessera-server/tests/http.rs`'s decoder, conformance tests that touch framing, bench
   scripts reading `x-tessera-server-us` (meaning narrows to first-flush; the gate keeps it)
   and `x-tessera-stage-ns` (moves to the trailer).
@@ -280,67 +293,3 @@ and is unaffected. No `?stream=0` mode: two framings is two conformance surfaces
   the selection scan itself produces, so the first flush is gated on the sweep by the
   definition, not by the implementation.
 - **A second, monolithic wire mode** — declined (§8).
-
-## Appendix R — review trail
-
-**r1 → r2 (2026-08-11).** One independent adversarial review, thirteen findings, dispositioned
-in a single pass; the reviewer's verdict was "needs rework on the permit lifecycle, not on the
-wire or the engine seam", and r2 is that rework. All thirteen accepted:
-
-1. *(major)* Slot-release point unenforceable at "stream end" → released at emit-loop exit;
-   post-closure residue stated (§5).
-2. *(major)* Client-paced slot occupancy is a new DoS shape 0059 never priced → whole-stream
-   deadline added, marked provisional pending the owner ruling the server-reply memo
-   already flagged (since ruled — [decision 0060](../decisions/0060-a-stream-lives-at-most-the-whole-stream-deadline.md)).
-3. *(major)* I13a's headline text contradicts streamed truncation → architecture §4 annotation
-   at the claim, flagged for owner ratification (§9).
-4. *(major)* C4's register entry describes the coarser channel → Appendix C annotation for the
-   granularity change (§9).
-5. *(minor)* "499" did not exist → status text corrected; `Cancelled → 500` mapping kept (§5).
-6. *(minor)* `counts()` could not express the underlay presence rule → `Option<&[SubCellCount]>`
-   (§4).
-7. *(minor)* Deleting `viewport_ipc` could vacate check-layers' filename grep → frame writer
-   bound to `payload.rs` (§9).
-8. *(minor)* `waiting` gauge corrupted by the split lifecycle → `streaming` gauge added (§5).
-9. *(minor)* Blocking-pool claim implicit → arithmetic stated (§5).
-10. *(minor)* Trailer total conflated with server cost → renamed `stream_us`; gate figure
-    pinned to the first-flush header; `gather_ns` brackets gather only (§6).
-11. *(minor)* Stale doc text (`ViewportRequest::tiles`, boundary dedup) → in the edit list, and
-    the dedup rule promoted to contract (§9).
-12. *(note)* Trailer excluded wholesale would un-guard a body region → trailer canonicalised by
-    key set instead (§7).
-13. *(note)* Generation/geometry retention now stream-scoped → stated, bounded by the deadline
-    (§5).
-
-What the review attacked and could not break, recorded so it is not re-litigated: the
-delivered-prefix soundness claim (stronger than stated — whole-tile frames make every
-delivered tile an *exact* band), the determinism claim, head-before-sweep, the emit-phase
-error class, the engine seam's lifetimes, and the tile-order change's safety
-(`tile_ranges_all` verified order-independent at the interface).
-
-**Implementation review (2026-08-11).** A second independent adversarial review, of the built
-code against this document. Verdict: faithful at every load-bearing point; the
-handler/producer/body triangle survived every interleaving the reviewer could construct; no
-finding above minor. Six findings, all accepted and fixed the same day:
-
-1. *(minor)* The emit loop could flush an empty points chunk (`k = 0` — a legal counts-only
-   request — with a Utf8 declared scalar, whose offset table is 4 estimate bytes at zero rows)
-   → `!buf.is_empty()` guard, pinned by `a_zero_k_request_streams_counts_and_no_points_chunks`.
-2. *(minor)* An unbounded flush threshold could accumulate a frame past the wire's `u32` length
-   (a panic there) → the emit pass caps frames at `MAX_POINTS_FRAME_BYTES` (1 GiB) regardless
-   of threshold.
-3. *(minor)* A stale "already sorted" comment survived at a range-derivation call site →
-   corrected to the r26 order contract.
-4. *(note)* The dev-CORS expose list still named the retired stage header and omitted the
-   delta-serving coordinates → `etag`/`x-tessera-identity-key`/`x-tessera-stale` exposed,
-   `x-tessera-stage-ns` removed and pinned absent.
-5. *(note)* The three independent readers enforced the frame grammar unevenly → all three now
-   refuse a second tiles frame and a mispositioned sub-cells frame identically.
-6. *(note)* `StreamBody` was not fused past its abort error → fused.
-
-The review also named the dark paths; the stall-shed, mid-stream-disconnect and `streaming`
-gauge behaviours are now covered end to end by
-`a_stalled_or_disconnected_stream_is_shed_and_the_gauge_returns_to_zero` (which measured its
-own first premise: a ~5 MB response "streams" whole into loopback socket buffers without the
-producer ever parking, so the fixture is sized to ~32 MB). Producer-panic and mid-body
-engine-fault injection remain untested, accepted as such.

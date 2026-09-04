@@ -6,7 +6,9 @@
 //! `/control/changes` or `/control/ingest` acceptance advances the overlay/buffer, or a
 //! `tessera build` advances the bundle.
 
+pub mod artifact_content;
 pub mod artifacts;
+pub mod browse;
 mod cache;
 pub mod cancel;
 mod categories;
@@ -16,17 +18,23 @@ pub mod compose;
 pub mod containment;
 pub mod cut;
 pub mod derived;
+pub mod derived_cache;
 pub mod filter;
 mod flush;
+pub mod gate;
 mod geometry;
 pub mod histogram;
 pub mod layout;
+pub mod membership_column;
 mod merge;
-pub mod ranges;
 mod refresh;
+pub mod region;
 pub mod row_column;
 pub mod select;
 pub mod session;
+pub mod shapes;
+pub mod suggest;
+pub mod suggest_set;
 mod single_flight;
 pub mod tile_index;
 pub mod timing;
@@ -42,7 +50,9 @@ use tessera_lifecycle::{IngestBuffer, Overlay};
 use tessera_store::Bundle;
 
 pub use cancel::CancelToken;
-pub use categories::{CategoryColumn, CategoryPage, CategoryQuery, CategoryValue};
+pub use categories::{
+    CategoryColumn, CategoryPage, CategoryQuery, CategoryValue, MatchSpan, SuggestPage, Suggestion,
+};
 // The fold's automatic trigger, as a value an operator's configuration builds. `tessera-server`
 // parses `ingest.compaction_*` into one of these and hands it over in `EngineConfig`; the executor
 // is the only reader. The rest of `compact` stays private — what a fold *is* is this crate's
@@ -52,10 +62,11 @@ pub use compose::{compose, denied_rows_of, visible_to, EffectiveMask, RowProject
 // The publication guard's refusal, which a publisher outside this crate must handle.
 // `check_publishable` itself stays private: whether a geometry may be published is this crate's
 // judgement, and a caller that could ask separately could also act on a stale answer.
+pub use gate::VisibleViews;
 pub use geometry::{GeometryPublication, GeometryRefused, GeometryRefusedReason};
 pub use session::{
-    default_compute_threads, Engine, EngineConfig, EngineError, PartitionStatus, Session,
-    ViewSegments,
+    default_compute_threads, Engine, EngineConfig, EngineError, PartitionStatus,
+    Session, ViewSegments,
 };
 // The row-projection cache's gauges. `single_flight` itself stays private — the cache, its slot
 // state machine and its four eviction rules are engine-internal — but the numbers
@@ -69,12 +80,17 @@ pub use single_flight::{CacheStats, DEFAULT_WAIT_BUDGET_MS as DEFAULT_SINGLE_FLI
 // `deny tessera-server tessera-authz`), and `tessera_authz::CacheStats` is not a public path even
 // for a crate that could — its module is private there. Whoever wires `/control/status`
 // writes `use tessera_engine::FragmentCacheStats;` and nothing else.
+pub use derived::ComputedProperty;
+pub use membership_column::MembershipColumn;
+pub use region::{RegionRows, RegionVerdict, DEFAULT_MAX_REGION_CELLS};
 pub use tessera_authz::fragment::CacheStats as FragmentCacheStats;
 pub use timing::{Probe, StageTimings};
 pub use viewport::{
-    ArtifactOut, ColumnBuf, EngineMeta, ItemOut, PointColumns, ScalarOut, SinkClosed, SinkResult,
-    SubCellCount, TileCount, ViewCoordinates, ViewportHead, ViewportOut, ViewportRequest,
-    ViewportSink,
+    ArtifactOut, ArtifactRows, ColumnBuf, ComputedSelection, EngineMeta, ItemOut, LayerSelection,
+    LeafColumn, LevelSelection, MetaGroup, MetaRoster, MetaView, PointColumns, PointRows, ScalarOut,
+    SinkClosed,
+    SinkResult, SubCellCount, TileAddress, TileCount, ViewCoordinates, ViewportHead, ViewportOut,
+    ViewportRequest, ViewportSink,
 };
 // `EngineMeta::declared_scalars`' element type, re-exported for the same layering reason
 // `FragmentCacheStats` is: `check-layers.sh` denies a `tessera-server → tessera-store` edge
@@ -88,9 +104,21 @@ pub use tessera_store::manifest::{
     ManifestVocabulary, ManifestVocabularyValue, Visibility, VocabularyKind,
 };
 pub use tessera_store::vocabulary::{Vocabularies, VocabularyMinter, ABSENT_CODE};
+// `MetaRoster::metadata`'s value type. `/v1/meta` publishes a view's roster metadata typed
+// (`views.md` §3.2), so the server has to name the variants to write the wire's `type` tag —
+// re-exported for the same layering reason `DeclaredScalar` is.
+pub use tessera_store::manifest::ViewMetadataValue;
+// `EngineMeta::scoped_scalars`' element type. `/v1/meta` publishes a scoped family's operand entry
+// with the group it is scoped to (`views.md` §5), so the server has to name it — re-exported for
+// the same layering reason `DeclaredScalar` is.
+pub use tessera_store::manifest::ScopedScalar;
 // `DeclaredScalar::arrow_type`'s type, and `wire_type`'s. The server names it to widen a code to
 // its column's storage width, and reaches it here rather than transcribing the table again.
 pub use tessera_spatial::tiler::ScalarType;
+// `MetaView::projection`'s type. `/control/ingest` reads it to decide what a batch's coordinate
+// columns are called and what the numbers in them mean (`projections.md` §3), so the type has to
+// be nameable from the crate that decodes the batch — the same reason `ScalarType` is here.
+pub use tessera_spatial::Projection;
 // `EngineMeta::quantisation`'s type, re-exported for the same layering reason `DeclaredScalar` is:
 // `check-layers.sh` denies a `tessera-server → tessera-store` edge (SA §3), and `/control/ingest`
 // validates an ingested coordinate against this declaration (§6), so the type needs to be nameable
@@ -241,6 +269,16 @@ pub struct Generation {
     /// published prefix, so a new bundle brings new columns and a session reading the old
     /// generation keeps reading the old ones. Empty when the schema declares nothing filterable.
     pub filter_columns: Arc<crate::filter::FilterColumns>,
+    /// Every category vocabulary's suggestion index (`value-suggestion.md` §6.1).
+    ///
+    /// **Carried across publications rather than rebuilt with them.** A flush changes which
+    /// entities carry a value and changes nothing this index holds — it is over the value set, and
+    /// the mask never enters it — so a per-generation rebuild would pay a sort measured in tens of
+    /// seconds at 10⁷ values for a change it cannot see. It is on the generation all the same,
+    /// because a *mint* publishes: a novel key acquires its code at a commit window's close and
+    /// must be suggestible on the next keystroke, so the side map grows exactly when
+    /// [`Generation::vocabularies`] does and travels with it.
+    pub suggest: Arc<crate::suggest::SuggestIndexes>,
 }
 
 impl Generation {
@@ -280,17 +318,23 @@ pub(crate) fn synthetic_generation_parts() -> (Arc<FragmentCache>, Arc<session::
         entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
         layers: Vec::new(),
         layer_tombstones: Vec::new(),
+        views: Vec::new(),
+        scoped_columns: Vec::new(),
+        dead_view_incarnations: Vec::new(),
         membership_extents: Vec::new(),
         level_versions: Vec::new(),
         containment_extents: Vec::new(),
         tile_index_extents: Vec::new(),
         row_column_extents: Vec::new(),
+        shape_rows_extents: Vec::new(),
+        shape_held_extents: Vec::new(),
         artifact_record_extents: Vec::new(),
         segments: Vec::new(),
         deltas: Vec::new(),
         dict_extents: Vec::new(),
         attr_extents: Vec::new(),
         record_extents: Vec::new(),
+        entity_terms_extents: Vec::new(),
         text_extents: Vec::new(),
         external_id_runs: Vec::new(),
         locator_extents: Vec::new(),
@@ -307,12 +351,6 @@ pub(crate) fn synthetic_generation_parts() -> (Arc<FragmentCache>, Arc<session::
         declared_scalars: vec![],
         vocabularies: vec![],
         small_term_threshold: 32,
-        quantisation: Quantisation {
-            x_min: 0.0,
-            x_max: 1.0,
-            y_min: 0.0,
-            y_max: 1.0,
-        },
         entity_id_high_water: 0,
         identity: tessera_store::manifest::IdentityDescriptor {
             construction: "siphash-2-4".to_string(),
@@ -321,6 +359,7 @@ pub(crate) fn synthetic_generation_parts() -> (Arc<FragmentCache>, Arc<session::
             shard_id: 0,
             idset: 1,
         },
+        groups: Vec::new(),
         views: vec![],
         partitions: vec![],
         provenance: serde_json::json!({}),

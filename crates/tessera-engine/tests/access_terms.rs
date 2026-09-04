@@ -101,16 +101,25 @@ fn write_points(path: &Path, access: impl Fn(u64) -> Option<Vec<&'static str>>) 
 
 fn args(points: &Path, out: &Path, default: &str) -> BuildArgs {
     BuildArgs {
-        points: points.to_path_buf(),
-        point_fields: Default::default(),
+        arena_order: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: points.to_path_buf(),
+            point_fields: Default::default(),
+            select: None,
+            access: AccessInput {
+                source: AccessSource::Field("categories".to_string()),
+                default: default.to_string(),
+            },
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: Vec::new(),
-        access: AccessInput {
-            source: AccessSource::Field("categories".to_string()),
-            default: default.to_string(),
-        },
         out: out.to_path_buf(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -118,6 +127,7 @@ fn args(points: &Path, out: &Path, default: &str) -> BuildArgs {
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
         mint_external_ids: false,
         emit_oracle_pairs: false,
         batch_items: None,
@@ -205,7 +215,7 @@ fn a_default_alone_gives_every_point_the_declared_label() {
         &dir.path().join("bundle"),
         "public",
     );
-    args.access.source = AccessSource::Default;
+    args.views[0].access.source = AccessSource::Default;
     build(&args).expect("a default-only view builds");
     assert_eq!(visible(dir.path(), &[]), N);
 }

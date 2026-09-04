@@ -97,6 +97,10 @@ pub struct VerifyDeepReport {
     /// External-id run rows confirmed to agree with the locator side in both directions; 0 where
     /// the deployment minted no external ids — the ordinary case, not a degraded one.
     pub external_id_bindings: u64,
+    /// `(segment, column)` pairs confirmed to hold a group-scoped **render** family's lane
+    /// ([`check_scoped_render_lanes`]); 0 where no family declares `render`, which is every
+    /// bundle whose attributes are entity-scoped.
+    pub scoped_render_lanes: u64,
 }
 
 /// Deep-verify the bundle at `root`: the shallow [`crate::verify`] pass, then §11's structural
@@ -123,6 +127,7 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
         pairs_rows: 0,
         dict_records: 0,
         external_id_bindings: 0,
+        scoped_render_lanes: 0,
     };
 
     // Sorted so two runs over the same defective bundle refuse with the same message.
@@ -138,9 +143,111 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
         )?;
         check_dict_extents(&prefix_dir, &partition.manifest, &mut report)?;
         check_external_ids(&prefix_dir, &bundle.manifest, &partition.manifest, &mut report)?;
+        check_scoped_render_lanes(&bundle.manifest, phash, partition, &mut report)?;
     }
 
     Ok(report)
+}
+
+/// **A rendered group-scoped family's lane is present in every build segment of every view that
+/// renders it** (`views.md` §5).
+///
+/// The lane is what `render` on a family *is*: one column in the row tail of each view of the
+/// group, and of any group sharing those views. It is the one artefact of the placement whose
+/// absence is silent — serving reads a missing scoped column as the ordinary absence a flush
+/// leaves, so a build that wrote no lane at all is indistinguishable, at the wire, from one whose
+/// rows genuinely carry no value. Nothing else in this pass would notice: the file digests match
+/// (the lane changes `columns.arrow`, which is digested as a whole), the row space is a bijection
+/// either way, and the identity column is untouched.
+///
+/// **Every segment of a view of the family's own group is checked, the build's and the write
+/// path's alike.** A flush of such a view writes the lane from the row's own scoped values, and a
+/// merge and a fold take the view's schema rather than the bundle's — so a missing lane there is
+/// the same silent defect it is at a build, not the write half's deliberate absence it once was.
+///
+/// ⊘ **A view of a group that declares `members` keeps the build-only exemption.** Its rows render
+/// the owner's family, but no batch into it may carry a value: the column is the owner's, and a
+/// second writer for one `(entity, view)` column is two layers claiming one entity (`views.md`
+/// §5's ingest paragraph). A flush of such a view writes the lane holding absences once the family
+/// lists the key — and cannot before, the owner's own first flush being what puts it there — so a
+/// segment of a sharing group's view may legitimately hold no lane and requiring one would refuse
+/// a bundle that has ingested in that order. A build segment is one whose `columns.arrow` is named
+/// in `MANIFEST.files`, which is contracts §2.2's own division: that map covers what existed at
+/// build time and `SEGMENTS-<n>.files` covers what has appeared since.
+fn check_scoped_render_lanes(
+    manifest: &tessera_store::manifest::Manifest,
+    phash: &str,
+    partition: &tessera_store::read::PartitionData,
+    report: &mut VerifyDeepReport,
+) -> Result<()> {
+    let families: Vec<_> = manifest
+        .scoped_scalars()
+        .into_iter()
+        .filter(|f| f.render)
+        .collect();
+    if families.is_empty() {
+        return Ok(());
+    }
+    for (view_id, view) in &partition.views {
+        // Which families this view renders — its own group's, or those of the group it declares
+        // `members` of, the keys being the owner's (§3.3). Stated here off the manifest's roster,
+        // as the engine states it off the same roster at the request and the build off its
+        // arguments; all three must agree, and this is the one that can catch a disagreement.
+        let Some((group, key)) = manifest.groups.iter().find_map(|g| {
+            let key = view_id
+                .strip_prefix(g.name.as_str())?
+                .strip_prefix(tessera_store::GROUP_SEPARATOR)?;
+            g.views
+                .iter()
+                .any(|v| v.key == key)
+                .then_some((g.name.as_str(), key))
+        }) else {
+            continue;
+        };
+        let owner = manifest
+            .groups
+            .iter()
+            .find(|g| g.name == group)
+            .and_then(|g| g.members_of.as_deref())
+            .unwrap_or(group);
+        let owed: Vec<_> = families
+            .iter()
+            .filter(|f| {
+                f.group == owner
+                    && f.views
+                        .contains(&format!("{owner}{}{key}", tessera_store::GROUP_SEPARATOR))
+            })
+            .collect();
+        if owed.is_empty() {
+            continue;
+        }
+        for segment in &view.segments {
+            // The `files` map's own key: partition-qualified, forward slashes, exactly as the
+            // build laid it down (contracts §2.2).
+            let rel = format!(
+                "partitions/{phash}/{}/segments/{}/columns.arrow",
+                tessera_store::view_rel(view_id),
+                segment.seg_id
+            );
+            if owner != group && !manifest.files.contains_key(&rel) {
+                continue;
+            }
+            for family in &owed {
+                if segment.columns.scalar(&family.name).is_none() {
+                    return Err(BuildError::Invalid(format!(
+                        "view '{view_id}', segment '{}': the manifest declares '{}' as a \
+                         `render` family of group '{}' with a column for this view, and the \
+                         segment's tail does not hold it. A rendered scoped column is served from \
+                         the row tail, and its absence is read as an absent value rather than as \
+                         a fault (views §5)",
+                        segment.seg_id, family.name, family.group
+                    )));
+                }
+                report.scoped_render_lanes += 1;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Join a manifest-supplied, forward-slash relative path onto the prefix directory, refusing

@@ -441,6 +441,10 @@ pub(crate) struct PlannedSegment {
 /// One view's half of a fold plan.
 pub(crate) struct FoldViewPlan {
     pub(crate) view: String,
+    /// The incarnation of `view` this plan folds (decision 0115) — the bundle's own, which
+    /// `Bundle::with_views` has already held to the live roster. Stamped into the new base
+    /// segment so that the fold's output is the successor's and not a predecessor's.
+    pub(crate) incarnation: tessera_types::view::ViewIncarnation,
     /// Every live segment of this view at the snapshot — the base plus every extent. Pass 1 merges
     /// them all; order does not matter to it, since the merge is driven by a heap over each
     /// cursor's `(morton, tessera_id)` key.
@@ -482,6 +486,9 @@ pub(crate) struct FoldPlan {
     /// folded into the new base blob, under [`FoldPlan::attr_extents`]'s all-or-nothing argument:
     /// the folded state is a function of the schema, never of deletion history.
     pub(crate) record_extents: Vec<RecordExtent>,
+    /// The entity→term transpose's extents at the snapshot — folded into the new base by pass 4c,
+    /// exactly as the record extents are folded into the new blob.
+    pub(crate) entity_terms_extents: Vec<tessera_store::manifest::EntityTermsExtent>,
     /// Every text extent the side-manifest named at the snapshot — **all** consumed and merged into
     /// the new base index, under the same all-or-nothing argument.
     pub(crate) text_extents: Vec<tessera_store::manifest::TextExtent>,
@@ -690,12 +697,14 @@ pub(crate) fn plan_fold(
             .map_or(row_space.base().bound(), |extent| extent.entity_hi + 1);
         views.push(FoldViewPlan {
             view: view.clone(),
+            incarnation: view_data.incarnation,
             segments: view_data
                 .segments
                 .iter()
                 .map(|segment| PlannedSegment {
                     dir: format!(
-                        "partitions/{partition}/views/{view}/segments/{}",
+                        "partitions/{partition}/{}/segments/{}",
+                        tessera_store::view_rel(view),
                         segment.seg_id
                     ),
                     seg_id: segment.seg_id.clone(),
@@ -781,6 +790,7 @@ pub(crate) fn plan_fold(
             .collect(),
         attr_extents: manifest.attr_extents.clone(),
         record_extents: manifest.record_extents.clone(),
+        entity_terms_extents: manifest.entity_terms_extents.clone(),
         text_extents: manifest.text_extents.clone(),
         tombstones,
         entity_bound,
@@ -808,7 +818,13 @@ pub(crate) struct FoldContext {
     pub(crate) to_prefix_dir: PathBuf,
     pub(crate) identity_key: IdentityKey,
     pub(crate) shard_id: u32,
-    pub(crate) scalar_schema: Vec<(String, ScalarType)>,
+    /// **One writer schema per view**, keyed by view id: the bundle-wide render tail plus that
+    /// view's group-scoped render lanes (`views.md` §5, `write::view_scalar_schema_of`). A single
+    /// bundle-wide schema was the defect — a fold rewriting a group's view dropped the family's
+    /// lane, and its values came back as the type's zero.
+    pub(crate) scalar_schema: BTreeMap<String, Vec<(String, ScalarType)>>,
+    /// Where each view's schema's group-scoped render suffix begins (`views.md` §5).
+    pub(crate) scoped_from: BTreeMap<String, usize>,
     /// The new base segment's id, one per view — never reused, so a discarded fold's orphans can
     /// never be mistaken for a later one's output (contracts §2.1).
     pub(crate) seg_id: String,
@@ -821,7 +837,101 @@ pub(crate) struct FoldContext {
     /// files are missing is an error, and a directory scan finds what is there where a declaration
     /// says what must be.
     pub(crate) declared_scalars: Vec<DeclaredScalar>,
+    /// Every group's **group-scoped** column families (`views.md` §5), flattened. The attribute
+    /// pass owes each of them one folded column *per view of its group*, exactly as it owes an
+    /// entity-scoped column one bundle-wide — and without them a fold writes a prefix in which the
+    /// families' directories simply are not there, which is a bundle that does not open.
+    pub(crate) scoped_scalars: Vec<tessera_store::manifest::ScopedScalar>,
+    /// Which incarnation each view of the roster is, taken from the same manifest
+    /// `scoped_scalars` came from (decision 0115). A scoped column's directory carries it above
+    /// the build's, so the fold that rewrites those columns has to place them where the opener
+    /// will look — the one derivation being `tessera_store::scoped_column_rel`.
+    pub(crate) view_incarnations:
+        std::collections::HashMap<String, tessera_types::view::ViewIncarnation>,
     pub(crate) vocabularies: Vec<ManifestVocabulary>,
+}
+
+/// The path one view's column of a scoped family folds into, or `None` where this manifest cannot
+/// say which incarnation the view is (decision 0115).
+///
+/// **`None` skips the column rather than guessing one.** A family naming a view the roster cannot
+/// place is a manifest whose two halves disagree; `FilterColumns::open` skips it for the same
+/// reason, so the fold writing nothing there produces exactly the state the opener already
+/// tolerates instead of a folded column at a path nothing reads.
+fn scoped_job_rel(plan: &FoldPlan, ctx: &FoldContext, family: &str, view: &str) -> Option<String> {
+    let incarnation = ctx.view_incarnations.get(view)?;
+    Some(tessera_store::scoped_column_rel(
+        &plan.partition,
+        family,
+        view,
+        *incarnation,
+    ))
+}
+
+/// One column the attribute pass folds: where its files live, and what its declaration says about
+/// them. **One shape for both scopes** — an entity-scoped column at `attrs/<column>/` and one view
+/// of a group-scoped family at `attrs/<column>/<group>/<key>/` — because the fold of a column is
+/// the same merge either way, and the only thing the scope decides is the directory and which
+/// extents belong to it (`views.md` §5).
+struct ColumnJob {
+    /// Prefix-relative directory, the same under both prefixes.
+    rel: String,
+    name: String,
+    /// The view this column belongs to, for a scoped family — `None` for an entity-scoped column.
+    /// The extent filter's other half: a family's columns share one name.
+    view: Option<String>,
+    arrow_type: ScalarType,
+    /// Does the folded column owe rebuilt keyed postings? A category's, and only a category's —
+    /// `d.vocabulary.is_some()` bundle-wide and `filter::scoped_owes_postings` per family, which
+    /// is where the two scopes' rules differ (`filter-index.md` §2.3, `views.md` §5).
+    postings: bool,
+}
+
+/// Every column the attribute pass folds, entity-scoped then group-scoped, in manifest order.
+///
+/// **The predicate is the opener's**, `filter::owes_value_column` and
+/// `filter::scoped_owes_postings`, so the set of columns this pass writes and the set
+/// `FilterColumns::open` demands are one rule: a column folded and not opened is dead bytes, and
+/// one opened and not folded is a prefix that refuses at the first read.
+fn value_column_jobs(plan: &FoldPlan, ctx: &FoldContext) -> Vec<ColumnJob> {
+    let mut jobs: Vec<ColumnJob> = ctx
+        .declared_scalars
+        .iter()
+        .filter(|d| crate::filter::owes_value_column(d, &ctx.vocabularies))
+        .map(|d| ColumnJob {
+            rel: format!("partitions/{}/attrs/{}", plan.partition, d.name),
+            name: d.name.clone(),
+            view: None,
+            arrow_type: d.arrow_type,
+            postings: d.vocabulary.is_some(),
+        })
+        .collect();
+    for family in &ctx.scoped_scalars {
+        // Text owes no value column, per view exactly as bundle-wide: its whole index is a token
+        // dictionary and the postings over it, which `fold_text_columns` merges.
+        //
+        // **The condition is the value column and not the filter licence**, and it must be the
+        // same one `write_scoped_extents` writes on: a family carrying neither `index` nor
+        // `render` is stored and served at the drill-down (owner ruling), so its column has
+        // layers, and a fold that skipped it would leave those layers behind — the extents it
+        // folded away are gone from the manifest and the values with them.
+        if !crate::filter::scoped_has_value_column(family) {
+            continue;
+        }
+        for view in &family.views {
+            let Some(rel) = scoped_job_rel(plan, ctx, &family.name, view) else {
+                continue;
+            };
+            jobs.push(ColumnJob {
+                rel,
+                name: family.name.clone(),
+                view: Some(view.clone()),
+                arrow_type: family.arrow_type,
+                postings: crate::filter::scoped_owes_postings(family),
+            });
+        }
+    }
+    jobs
 }
 
 /// The process's resident set as `/proc/self/status` reports it, in bytes: total, anonymous,
@@ -957,7 +1067,21 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
     let mut segments: Vec<SegmentDescriptor> = Vec::with_capacity(plan.views.len());
     let mut base_segment_bytes = 0u64;
     for view in &plan.views {
-        let view_rel = format!("partitions/{}/views/{}", plan.partition, view.view);
+        // **This view's own writer schema** (`views.md` §5). Refused rather than defaulted: an
+        // empty schema writes a segment with no scalar tail at all, which every reader takes for a
+        // corpus that declares none — the silent shape this whole change exists to remove.
+        let Some(view_schema) = ctx.scalar_schema.get(&view.view) else {
+            return Err(FoldFailed(format!(
+                "pass 1 (row space): this fold holds no writer schema for view '{}', though \\
+                 its plan names it; the two disagree about what is being folded",
+                view.view
+            )));
+        };
+        let view_rel = format!(
+            "partitions/{}/{}",
+            plan.partition,
+            tessera_store::view_rel(&view.view)
+        );
         let view_dir = ctx.to_prefix_dir.join(&view_rel);
         std::fs::create_dir_all(&view_dir).map_err(|e| failed("creating the view", &e))?;
         let segment_rel = format!("{view_rel}/segments/{}", ctx.seg_id);
@@ -983,7 +1107,12 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
                 inputs: &inputs,
                 identity_key: &ctx.identity_key,
                 shard_id: ctx.shard_id,
-                scalar_schema: &ctx.scalar_schema,
+                scalar_schema: view_schema,
+                scoped_from: ctx
+                    .scoped_from
+                    .get(&view.view)
+                    .copied()
+                    .unwrap_or(view_schema.len()),
                 // `D₀`, whole and unmodified. See the module doc.
                 tombstones: &plan.tombstones,
                 permutation_bound: view.permutation_bound,
@@ -1014,6 +1143,7 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
 
         segments.push(SegmentDescriptor {
             view: view.view.clone(),
+            incarnation: view.incarnation,
             seg_id: ctx.seg_id.clone(),
             row_count: out.row_count,
             entity_lo: 0,
@@ -1147,12 +1277,9 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
     // postings over it, and the generic merge below would have nothing to merge.
     fold_text_columns(&plan, &ctx, &mut written, &mut attr_read, &mut attr_written)?;
 
-    for scalar in ctx
-        .declared_scalars
-        .iter()
-        .filter(|d| crate::filter::owes_value_column(d, &ctx.vocabularies))
-    {
-        let column_rel = format!("partitions/{}/attrs/{}", plan.partition, scalar.name);
+    for job in value_column_jobs(&plan, &ctx) {
+        let scalar = &job;
+        let column_rel = job.rel.clone();
         let from_dir = ctx.from_prefix_dir.join(&column_rel);
         let to_dir = ctx.to_prefix_dir.join(&column_rel);
         std::fs::create_dir_all(&to_dir).map_err(|e| failed("pass 4a (attributes)", &e))?;
@@ -1171,7 +1298,11 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
         attr_read += file_len(&from_dir.join(tessera_filter::VALUES_FILE))
             + file_len(&from_dir.join(tessera_filter::PRESENCE_FILE));
         let mut extents = Vec::new();
-        for extent in plan.attr_extents.iter().filter(|e| e.column == scalar.name) {
+        for extent in plan
+            .attr_extents
+            .iter()
+            .filter(|e| e.column == scalar.name && e.view == job.view)
+        {
             extents.push(
                 tessera_filter::open_extent(
                     &ctx.from_prefix_dir.join(&extent.values),
@@ -1197,7 +1328,11 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
                 )
                 .map_err(|e| failed("pass 4a (attributes: the base dictionary)", &e))?,
             );
-            for extent in plan.attr_extents.iter().filter(|e| e.column == scalar.name) {
+            for extent in plan
+                .attr_extents
+                .iter()
+                .filter(|e| e.column == scalar.name && e.view == job.view)
+            {
                 let Some(dict_rel) = extent.dict.as_ref() else {
                     return Err(FoldFailed(format!(
                         "pass 4a (attributes): keyword column '{}' has an extent with no \
@@ -1268,7 +1403,7 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
             written.push((presence_rel, presence_path.clone()));
         }
 
-        if scalar.vocabulary.is_none() {
+        if !job.postings {
             continue;
         }
         // **Rebuilt from the folded column**, read back rather than from the layers it was merged
@@ -1387,6 +1522,92 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
 
     record("4a attributes", &mut cost, &mut mark);
 
+    // ---- pass 4c — the entity→term transpose ---------------------------------------------------
+    //
+    // The same shape as the record blob's fold and the same retention: base plus every snapshot
+    // extent, streamed in entity order into one new base, with `D₀`'s entities emitting nothing.
+    // **Rule F only** — a suppression is not in `D₀`, and a suppressed entity's list streams
+    // through unchanged, which is correct: a suppression hides an item and does not unlabel it.
+    //
+    // **No ordinal is remapped, and that is a property of the dictionary rather than a choice
+    // here.** A stored ordinal is a position in the concatenation of `dict_extents` in listed
+    // order; pass 4b carries that list forward verbatim by hard link, never renumbered and never
+    // shrunk, and `coalesce_dict_extents` preserves positions for the same reason. So the numbers
+    // this pass copies mean the same terms in the new prefix — unlike a keyword column's
+    // ordinals, which are positions in a per-layer dictionary the fold rebuilds.
+    //
+    // Unconditional, unlike the blob's pass: every entity has a label set, so a base always
+    // exists.
+    {
+        let terms_rel = format!(
+            "partitions/{}/{}",
+            plan.partition,
+            tessera_store::ENTITY_TERMS_DIR
+        );
+        let from_dir = ctx.from_prefix_dir.join(&terms_rel);
+        let to_dir = ctx.to_prefix_dir.join(&terms_rel);
+        std::fs::create_dir_all(&to_dir).map_err(|e| failed("pass 4c (entity terms)", &e))?;
+
+        let mut extent_paths = Vec::with_capacity(plan.entity_terms_extents.len());
+        for extent in &plan.entity_terms_extents {
+            extent_paths.push(tessera_store::EntityTermsExtentPaths {
+                hasrow: ctx.from_prefix_dir.join(&extent.hasrow),
+                offsets: ctx.from_prefix_dir.join(&extent.offsets),
+                terms: ctx.from_prefix_dir.join(&extent.terms),
+            });
+            for rel in [&extent.hasrow, &extent.offsets, &extent.terms] {
+                attr_read += file_len(&ctx.from_prefix_dir.join(rel));
+            }
+        }
+        for name in [
+            tessera_store::ENTITY_TERMS_HASROW_FILE,
+            tessera_store::ENTITY_TERMS_OFFSETS_FILE,
+            tessera_store::ENTITY_TERMS_TERMS_FILE,
+        ] {
+            attr_read += file_len(&from_dir.join(name));
+        }
+        let layers = tessera_store::EntityTermsStack::open(Some(&from_dir), &extent_paths)
+            .map_err(|e| failed("pass 4c (entity terms: the layers)", &e))?;
+        let mut writer = tessera_store::EntityTermsWriter::create(&to_dir)
+            .map_err(|e| failed("pass 4c (entity terms: the rewrite)", &e))?;
+        // One ascending pass over the union of the layers' has-row sets, which is the order the
+        // writer requires and the order every layer already holds.
+        let live = layers.entity_set();
+        for entity in live.iter() {
+            if plan.tombstones.contains(entity) {
+                continue;
+            }
+            let Some(terms) = layers
+                .terms_of(entity)
+                .map_err(|e| failed("pass 4c (entity terms: a layer)", &e))?
+            else {
+                continue;
+            };
+            writer
+                .push(entity, &terms)
+                .map_err(|e| failed("pass 4c (entity terms: the rewrite)", &e))?;
+        }
+        for path in writer
+            .finish()
+            .map_err(|e| failed("pass 4c (entity terms: the rewrite)", &e))?
+        {
+            attr_written += file_len(&path);
+            let rel = format!(
+                "{terms_rel}/{}",
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default()
+            );
+            written.push((rel, path));
+        }
+    }
+
+    // **Its own line, because it is its own pass.** The bytes above join `attr_read`/`attr_written`
+    // — the fold's streamed-IO total covers every entity-space artefact it rewrites, and the
+    // transpose is one — but the *time and resident bytes* are the staircase's business, and a
+    // pass folded into its neighbour's row is a pass an operator reading the report cannot see.
+    record("4c entity terms", &mut cost, &mut mark);
+
     // ---- pass 4b — the dictionary --------------------------------------------------------------
     //
     // Carried forward verbatim, hard-linked, never renumbered and never shrunk — and the linking
@@ -1504,12 +1725,42 @@ fn fold_text_columns(
     let file_len = |path: &Path| std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let failed = |what: &str, e: &dyn std::fmt::Display| FoldFailed(format!("{what}: {e}"));
 
-    for scalar in ctx
+    // The entity-scoped indexed text columns, then one job per view of each indexed **scoped**
+    // text family (`views.md` §5): a family's per-view index is the same three artefacts in a
+    // per-view directory, and the merge does not care which it is folding.
+    let mut jobs: Vec<ColumnJob> = ctx
         .declared_scalars
         .iter()
         .filter(|d| d.arrow_type == ScalarType::Text && d.index)
+        .map(|d| ColumnJob {
+            rel: format!("partitions/{}/attrs/{}", plan.partition, d.name),
+            name: d.name.clone(),
+            view: None,
+            arrow_type: d.arrow_type,
+            postings: false,
+        })
+        .collect();
+    for family in ctx
+        .scoped_scalars
+        .iter()
+        .filter(|f| f.arrow_type == ScalarType::Text && f.index)
     {
-        let column_rel = format!("partitions/{}/attrs/{}", plan.partition, scalar.name);
+        for view in &family.views {
+            let Some(rel) = scoped_job_rel(plan, ctx, &family.name, view) else {
+                continue;
+            };
+            jobs.push(ColumnJob {
+                rel,
+                name: family.name.clone(),
+                view: Some(view.clone()),
+                arrow_type: family.arrow_type,
+                postings: false,
+            });
+        }
+    }
+    for job in &jobs {
+        let scalar = job;
+        let column_rel = job.rel.clone();
         let from_dir = ctx.from_prefix_dir.join(&column_rel);
         let to_dir = ctx.to_prefix_dir.join(&column_rel);
         std::fs::create_dir_all(&to_dir).map_err(|e| failed("pass 4a (text)", &e))?;
@@ -1538,7 +1789,11 @@ fn fold_text_columns(
             ];
         *attr_read += file_len(&from_dir.join(tessera_filter::DICT_FILE))
             + file_len(&from_dir.join("postings.arrow"));
-        for extent in plan.text_extents.iter().filter(|e| e.column == scalar.name) {
+        for extent in plan
+            .text_extents
+            .iter()
+            .filter(|e| e.column == scalar.name && e.view == job.view)
+        {
             dicts.push(
                 tessera_filter::SortedDict::open(
                     &ctx.from_prefix_dir.join(&extent.dict),
@@ -1638,6 +1893,7 @@ mod tests {
 
     fn segment(seg_id: &str, entity_lo: u64, entity_hi: u64) -> SegmentDescriptor {
         SegmentDescriptor {
+            incarnation: 0,
             view: "s0".to_string(),
             seg_id: seg_id.to_string(),
             row_count: (entity_hi - entity_lo + 1) as u32,

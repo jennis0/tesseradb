@@ -46,6 +46,9 @@ impl Plugin for CappedTerms {
     fn terms_of_auth(&self, auth_data: &[u8]) -> Result<AuthTerms, PluginError> {
         Passthrough::new().terms_of_auth(auth_data)
     }
+    fn present_terms(&self, descriptors: &[Vec<u8>]) -> Result<Vec<String>, PluginError> {
+        Passthrough::new().present_terms(descriptors)
+    }
     fn declared_bounds(&self) -> DeclaredBounds {
         DeclaredBounds {
             max_distinct_terms: self.0,
@@ -115,11 +118,13 @@ fn ingest_with(engine: &Engine, external_id: &str, descriptors: &[&[u8]]) -> Ent
     let row = UnallocatedRow {
         external_id: Some(external_id.as_bytes().to_vec()),
         view: "s0".to_string(),
+        join: None,
         descriptors: descriptors.clone(),
         x: 5.0,
         y: 5.0,
         scalars: Vec::new(),
         terms: engine.resolve_terms(&descriptors),
+        scoped: Vec::new(),
     };
     engine
         .accept_ingest(vec![row], external_id.to_string(), [0u8; 32])

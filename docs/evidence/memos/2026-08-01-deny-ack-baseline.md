@@ -115,7 +115,7 @@ saturating the work lane does not touch the deny lane.
    rename note ("named for what it measures") fixed the clone-vs-apply confusion and left the
    lane confusion in place.
 2. **`crates/tessera-bench/src/arms/ingest.rs:80-84`** and
-   **`docs/evidence/memos/2026-07-31-ingest-baseline-pre-task3a.md:99-102`** — "`accept_change` is
+   **docs/evidence/memos/2026-07-31-ingest-baseline-pre-task3a.md:99-102** — "`accept_change` is
    not benchmarked at all" / "no baseline, before or after". **Stale**:
    `crates/tessera-bench/src/arms/changes.rs` has existed since 2026-07-30 with measured ack, tail
    and visibility-arithmetic cells in its own module doc. What was genuinely missing is what this

@@ -110,13 +110,22 @@ fn build_fixture_with_sparse_term(out: &Path, points_path: &Path, pairs_path: &P
     write_points_n(points_path, N_ITEMS);
     write_pairs_with_sparse_term(pairs_path, N_ITEMS);
     let args = BuildArgs {
-        point_fields: Default::default(),
-        points: points_path.to_path_buf(),
+        arena_order: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: points_path.to_path_buf(),
+            point_fields: Default::default(),
+            select: None,
+            access: tessera_build::config::AccessInput::relation(pairs_path.to_path_buf()),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: Vec::new(),
-        access: tessera_build::config::AccessInput::relation(pairs_path.to_path_buf()),
         out: out.to_path_buf(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         // No declared columns: this fixture's subject is the sparse *term*, not the scalar tail,
         // and an empty schema is what `common`'s builder uses for the same reason.
         schema: Default::default(),
@@ -127,6 +136,7 @@ fn build_fixture_with_sparse_term(out: &Path, points_path: &Path, pairs_path: &P
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
         mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
@@ -165,6 +175,14 @@ fn engine_over_fixture_with_sparse_term(tmp: &Path, root: &Path, config: EngineC
 fn fold(engine: &Engine) {
     let before = engine.write_executor_stats();
     engine.request_fold();
+    wait_for_fold_publication(engine, &before);
+}
+
+/// Block until a fold requested against `before` has published, asserting it was not discarded.
+///
+/// **Its own deadline**, per [`wait_for`]'s rule: this is the last wait of every paused-fold case,
+/// so a deadline shared with the waits before it would expire here whatever step actually stalled.
+fn wait_for_fold_publication(engine: &Engine, before: &tessera_engine::ExecutorStats) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     loop {
         let now = engine.write_executor_stats();
@@ -308,11 +326,13 @@ fn ingest_with_descriptors(
     let row = UnallocatedRow {
         external_id: Some(external_id),
         view: "s0".to_string(),
+        join: None,
         descriptors: descriptors.to_vec(),
         x: 5.0,
         y: 5.0,
         scalars: Vec::new(),
         terms: engine.resolve_terms(descriptors),
+        scoped: Vec::new(),
     };
     engine
         .accept_ingest(vec![row], batch.to_string(), [0u8; 32])
@@ -591,86 +611,84 @@ fn the_old_prefix_is_reclaimed_whole_and_its_carry_forwards_are_links_not_copies
     assert!(visible(&engine, &session) > 0);
 }
 
-/// **Obligation 9: the fold discards rather than forces when a merge published under it, leaving
-/// orphans and a re-plannable state.**
+/// Block until `cond` holds, **pulling a tick each time round**, or fail naming what was waited on.
 ///
-/// A fold plans against a snapshot and spends minutes to hours away from it. If a merge or coalesce
-/// publishes in that time, the artefacts the fold consumed are no longer the live ones — its new
-/// base was folded from segments the bundle has since replaced — and publishing anyway would drop
-/// every row the merge wrote. The rebase check is what stops that, and **its answer is to throw the
-/// fold away**: hours of IO discarded rather than a bundle silently missing rows. Suspension makes
-/// this rare; the check is what makes it safe (compaction §7).
+/// [`wait_for`]'s shape for a condition only a tick can bring about: `dispatch_merge` runs from
+/// `tick_if_due` and reads the generation loaded at the *top* of that tick, so the tick that
+/// publishes a flush is one pass too early to select it. A plain wait on an idle engine would
+/// therefore sit until `flush_max_age_secs`.
+fn wait_ticking(engine: &Engine, what: &str, mut cond: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !cond() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
+        tick(engine);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// Publish one flush segment, ingesting a row named for `round` and waiting for the publication.
 ///
-/// # Constructing the window, which is real and not a contrivance
+/// The shape both suspension cases need: `tier_width` is 4, so three published segments are one
+/// short of a selectable merge and the fourth is what makes one.
+fn publish_one_segment(engine: &Engine, round: &mut usize) {
+    ingest(
+        engine,
+        format!("seg-{}", *round).into_bytes(),
+        &format!("s{}", *round),
+    )
+    .expect("ingest is accepted");
+    *round += 1;
+    let flushes = engine.write_executor_stats().flushes;
+    engine.request_flush();
+    wait_for("a flush to publish", || {
+        engine.write_executor_stats().flushes > flushes
+    });
+}
+
+/// **A merge does not dispatch while a completed fold is still unpublished** — compaction §12's
+/// obligation 9, from the side the property is now upheld on.
 ///
-/// Merge and coalesce are suspended for `fold_in_flight`'s duration, so this cannot be produced by
-/// racing them from outside. The window is the one the fold's own thread opens: it clears
-/// `fold_in_flight` **after** sending its result, so an executor already inside `tick_if_due` reads
-/// the cleared flag and dispatches a merge that publishes before the completed fold is drained.
-/// Microseconds wide in production. `set_fold_publication_paused_for_test` holds the completed fold
-/// undrained, which is that state exactly, for as long as the test needs it.
+/// A fold plans against a snapshot of which artefacts the manifest lists and a merge changes
+/// exactly that, so the two exclude one another. The boundary that matters is **publication, not
+/// completion**: between the fold thread clearing `fold_in_flight` and the executor draining the
+/// result, the fold is invisible to a dispatcher reading in-flight flags alone, and the executor's
+/// own loop straddles that gap — it drains at the top of an iteration and dispatches later in the
+/// same one. Every outcome was fail-closed and the cost was still a whole discarded corpus rewrite,
+/// minutes to hours at scale, plus an orphan prefix nothing sweeps; measured at 3 of 93 runs of
+/// this binary and 12 of 480 runs of the single test, ~3%, under 3–4 concurrent lanes.
 ///
-/// # What it pins is the outcome, because three guards catch this and each masks the next
+/// **Suspended, not refused**: the merge is not rejected and no intent is lost, because
+/// `dispatch_merge` re-plans from scratch on every tick. `Executor::fold_outstanding` argues why
+/// that is the only treatment that makes sense — a merge plan names specific segments, so a plan
+/// made before a fold and held until after would be a plan against a generation the fold is about
+/// to replace.
 ///
-/// Measured by mutation, and worth stating because it is not what a reader would guess. A merge
-/// disturbs three things at once — the segment list, the tiers and runs beneath it, and the entity
-/// span the locator covers — and `publish_fold` checks all three independently. Disabling the
-/// consumed-artefact rebase check alone still discards, at *"a carried-forward segment begins below
-/// the fold's own base permutation"*; disabling that too still discards, at *"a carried-forward
-/// locator extent begins below the fold's own base locator"*. Only with all three gone does the
-/// fold get past them, and then this test fails.
-///
-/// So the mutation it kills is **the conjunction**, not any one check, and the assertions are
-/// written to the property rather than to a mechanism: discarded rather than published, the merge's
-/// rows still served, orphans left, and the next fold able to plan. A test written against one
-/// check would pass while that check was deleted, which is the failure this note exists to prevent
-/// someone rediscovering.
-///
-/// It does also kill, on its own: counting a discard as a publication, and a discard that leaves
-/// the node unable to plan again.
+/// **Mutations this kills** (each run): reverting `dispatch_merge`'s gate to `merge_in_flight ||
+/// fold_in_flight` — the merge publishes under the held fold and the release below discards it,
+/// failing both the merge count and the publication; and dropping the fold's own
+/// completed-unpublished gate, which the same reversion reaches through `dispatch_fold`.
 #[test]
-fn a_fold_discards_when_a_merge_published_under_it_and_the_state_is_re_plannable() {
+fn a_merge_is_suspended_while_a_completed_fold_is_unpublished() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
     let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
 
-    // **The bundle must already hold segments the merge will want, or this case is the benign
-    // one.** Measured, not supposed: with a fold planned against a fresh bundle, the merge selects
-    // only the post-snapshot flush segments, the fold's own inputs are all still listed, the rebase
-    // check correctly passes and the fold publishes. The harmful interleaving needs the merge to
-    // consume something the *plan* named — so three segments exist before the fold is requested
-    // (`tier_width` is 4, so three is one short of selecting) and the fourth arrives during its
-    // flight.
     let mut round = 0usize;
-    let publish_one = |engine: &Engine, round: &mut usize| {
-        ingest(
-            engine,
-            format!("merge-{}", *round).into_bytes(),
-            &format!("m{}", *round),
-        )
-        .expect("ingest is accepted");
-        *round += 1;
-        let flushes = engine.write_executor_stats().flushes;
-        engine.request_flush();
-        wait_for("a flush to publish", || {
-            engine.write_executor_stats().flushes > flushes
-        });
-    };
-    publish_one(&engine, &mut round);
-    publish_one(&engine, &mut round);
-    publish_one(&engine, &mut round);
+    publish_one_segment(&engine, &mut round);
+    publish_one_segment(&engine, &mut round);
+    publish_one_segment(&engine, &mut round);
     let before = engine.write_executor_stats();
     assert_eq!(
         before.merges, 0,
-        "nothing has merged yet — the base segment is not selectable at this size, so three flush \
-         segments are one short of `tier_width`"
+        "three segments are one short of `tier_width`"
     );
 
-    // Both hooks, and each opens a different half of the window. `fold_paused` holds the thread
-    // after its passes, which is how this waits on "the passes are done" rather than guessing;
-    // releasing it lets the thread send and clear `fold_in_flight`, which lifts merge's suspension.
-    // `fold_publication_paused` then keeps the executor from draining the result, which is the
-    // state a real fold occupies for microseconds.
+    // Both hooks, and each opens a different half of the window: `fold_paused` waits on "the
+    // passes are done", and releasing it lets the thread send and clear `fold_in_flight` — which is
+    // the moment the old gate stopped suspending merge.
     engine.set_fold_publication_paused_for_test(true);
     engine.set_fold_paused_for_test(true);
     engine.request_fold();
@@ -678,82 +696,100 @@ fn a_fold_discards_when_a_merge_published_under_it_and_the_state_is_re_plannable
         engine.fold_is_holding_for_test()
     });
     engine.set_fold_paused_for_test(false);
+    wait_for("the completed fold to be held undrained", || {
+        engine.fold_publication_is_held_for_test()
+    });
 
-    // The fourth flush segment. The merge now selects four adjacent same-tier segments — three of
-    // which the held fold's plan named as its own inputs.
-    publish_one(&engine, &mut round);
-    // **The tick is pulled while waiting, and that is not impatience.** `dispatch_merge` runs from
-    // `tick_if_due` and nowhere else, so the merge's chance to dispatch is a tick — and the tick
-    // that followed the fourth flush may have read `fold_in_flight` before the fold's thread
-    // cleared it, in which case merge was still suspended. On an idle engine the next tick is
-    // `flush_max_age_secs` away. A flush request with an empty buffer publishes nothing and pulls
-    // the tick, which is the one operator lever that does (`request_flush`).
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while engine.write_executor_stats().merges == before.merges {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "no merge published under the held fold, so this case never arose: {:?}",
-            engine.write_executor_stats()
+    // The fourth segment: four adjacent same-tier segments, three of them the held fold's own
+    // inputs. Every gate a merge passes is now satisfied except the one under test.
+    publish_one_segment(&engine, &mut round);
+    // Ten ticks, because `dispatch_merge` runs from `tick_if_due` and nowhere else: this is ten
+    // chances declined, not a sleep. (Unfixed, the merge publishes within one or two.)
+    for _ in 0..10 {
+        tick(&engine);
+        assert_eq!(
+            engine.write_executor_stats().merges,
+            before.merges,
+            "a merge dispatched into a completed, unpublished fold — the plan it would orphan is \
+             still sitting in the channel"
         );
-        engine.request_flush();
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
 
-    let held = engine.write_executor_stats();
-    assert_eq!(
-        (held.folds, held.fold_failures),
-        (before.folds, before.fold_failures),
-        "the fold must still be held, undrained, at the moment the merge has published"
-    );
-
+    // And the payoff, which is the half the suspension alone would not show: the fold that the
+    // merge used to discard publishes.
     engine.set_fold_publication_paused_for_test(false);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while engine.write_executor_stats().fold_failures == before.fold_failures {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the held fold was neither published nor discarded: {:?}",
-            engine.write_executor_stats()
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    wait_for_fold_publication(&engine, &before);
     assert_eq!(
-        engine.write_executor_stats().folds,
-        before.folds,
-        "a discard is not a publication — the counter an operator alarms on must not move"
+        engine.write_executor_stats().merges,
+        before.merges,
+        "the folded corpus is one base segment, so nothing is selectable afterwards either"
     );
 
-    // **Orphans, and CURRENT untouched.** The discarded fold's five passes are on disc under a
-    // prefix nothing names; the bundle is still the one it planned against, plus the merge.
-    assert!(
-        root.join("v00001").exists(),
-        "the discarded fold's output stands as an orphan (compaction §7), which is what the \
-         startup sweep exists for"
-    );
-    assert!(
-        root.join("v00000").exists(),
-        "and every artefact it consumed is still live — nothing was reclaimed on this path"
-    );
-
-    // **Re-plannable**, which is the half a discard that wedged the node would fail: the next fold
-    // plans against the merged bundle and publishes, into a prefix past the orphan.
     let session = engine.authorise(&full_coverage_credential()).unwrap();
-    let live = visible(&engine, &session);
     assert_eq!(
-        live,
+        visible(&engine, &session),
         N_ITEMS + round as u64,
-        "the merge's rows survived the discard — publishing the stale fold would have dropped them"
+        "every row is served across the flip, the four flushed ones included"
     );
-    fold(&engine);
-    assert!(
-        root.join("v00002").exists(),
-        "the next fold takes a fresh prefix"
-    );
-    let after = engine.authorise(&full_coverage_credential()).unwrap();
-    assert_eq!(
-        visible(&engine, &after),
-        live,
-        "and it folds the merged bundle, losing nothing"
-    );
+}
+
+/// **A fold does not dispatch while a completed merge is still unpublished**, and the request it
+/// was asked for is deferred rather than dropped.
+///
+/// The mirror of `a_merge_is_suspended_while_a_completed_fold_is_unpublished`, and the direction
+/// nothing measured — symmetry is the point, since the hazard is a property of the pair rather than
+/// of either job. A fold dispatched here would plan against a segment list the held merge is about
+/// to replace, and would discard hours of IO at its rebase check.
+///
+/// **Suspension, not refusal, is what the second half asserts**, and `dispatch_fold` keeps the two
+/// apart: it consumes the request flag only when it *refuses* — a fold already running is a state
+/// an operator must be told about — and a publication one pass away is not that. So the request
+/// stays armed and the fold happens as soon as the merge is drained, which is what makes this
+/// exclusion free of an operator-visible cost.
+///
+/// **Mutations this kills** (each run): reverting `dispatch_fold`'s gate to `merge_in_flight ||
+/// coalesce_in_flight` — the fold dispatches inside the hold, which the loop below catches;
+/// consuming `fold_requested` on this path — the fold never happens after the release and the
+/// second wait times out.
+#[test]
+fn a_fold_is_suspended_while_a_completed_merge_is_unpublished() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
+
+    let before = engine.write_executor_stats();
+    engine.set_merge_publication_paused_for_test(true);
+    let mut round = 0usize;
+    for _ in 0..4 {
+        publish_one_segment(&engine, &mut round);
+    }
+    wait_ticking(&engine, "the merge to complete and hold", || {
+        engine.merge_publication_is_held_for_test()
+    });
+
+    engine.request_fold();
+    for _ in 0..10 {
+        tick(&engine);
+        let now = engine.write_executor_stats();
+        assert_eq!(
+            (now.folds, now.fold_failures),
+            (before.folds, before.fold_failures),
+            "a fold dispatched into a completed, unpublished merge"
+        );
+        assert!(
+            !root.join("v00001").exists(),
+            "and it did not even begin — a dispatched fold writes its passes into the next prefix \
+             before any counter moves"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    engine.set_merge_publication_paused_for_test(false);
+    wait_for("the merge to publish", || {
+        engine.write_executor_stats().merges > before.merges
+    });
+    wait_for_fold_publication(&engine, &before);
 }
 
 /// **Compaction §7's startup sweep: an orphaned prefix is reclaimed when a write executor starts,
@@ -1262,24 +1298,15 @@ fn fold_with_a_flush_in_flight(engine: &Engine, key: Vec<u8>) -> (EntityId, u64,
 
     // Wait until the fold's passes are done and it is holding: from here everything published is
     // post-snapshot and must be carried forward rather than folded.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while !engine.fold_is_holding_for_test() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never reached its hold"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+    wait_for("the fold to reach its hold", || {
+        engine.fold_is_holding_for_test()
+    });
 
     let entity = ingest(engine, key, "mid-flight").expect("ingest is accepted during a fold");
     engine.request_flush();
-    while engine.write_executor_stats().flushes == before.flushes {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the mid-flight flush never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    wait_for("the mid-flight flush to publish", || {
+        engine.write_executor_stats().flushes > before.flushes
+    });
 
     // The flush has published into the still-live (pre-flip) generation: this is "live", as
     // `publish_fold` will read it moments later, and it is the last point at which reading it is
@@ -1292,21 +1319,8 @@ fn fold_with_a_flush_in_flight(engine: &Engine, key: Vec<u8>) -> (EntityId, u64,
         .entity_id_high_water;
 
     engine.set_fold_paused_for_test(false);
-    loop {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded"
-        );
-        if now.folds > before.folds {
-            return (entity, mid_flight_watermark, mid_flight_high_water);
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    wait_for_fold_publication(engine, &before);
+    (entity, mid_flight_watermark, mid_flight_high_water)
 }
 
 /// **Obligation 8: a flush published during the fold's flight is carried forward**, and its items
@@ -1406,14 +1420,9 @@ fn a_delete_accepted_after_the_snapshot_survives_the_fold() {
     engine.set_fold_paused_for_test(true);
     let before = engine.write_executor_stats();
     engine.request_fold();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while !engine.fold_is_holding_for_test() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never reached its hold"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+    wait_for("the fold to reach its hold", || {
+        engine.fold_is_holding_for_test()
+    });
 
     let mid_flight = entity_of_source(&root, "v00000", 9);
     engine
@@ -1429,29 +1438,12 @@ fn a_delete_accepted_after_the_snapshot_survives_the_fold() {
     }
 
     engine.set_fold_paused_for_test(false);
-    loop {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded"
-        );
-        if now.folds > before.folds {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    wait_for_fold_publication(&engine, &before);
 
     let bundle = open_bundle(&root).expect("the folded bundle opens");
     let partition = &bundle.partitions["default"];
     assert!(
-        partition.views["s0"]
-            .row_space
-            .row_of(mid_flight)
-            .is_some(),
+        partition.views["s0"].row_space.row_of(mid_flight).is_some(),
         "the post-snapshot deletion keeps its row: the fold's passes ran over `D₀`, which did not \
          name it"
     );
@@ -1567,32 +1559,11 @@ fn a_deletion_a_carried_forward_segment_still_names_does_not_retire() {
     engine.set_fold_paused_for_test(true);
     let before = engine.write_executor_stats();
     engine.request_fold();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while !engine.fold_is_holding_for_test()
-        || engine.write_executor_stats().flushes == before.flushes
-    {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold and the flush never overlapped"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+    wait_for("the fold and the flush to overlap", || {
+        engine.fold_is_holding_for_test() && engine.write_executor_stats().flushes > before.flushes
+    });
     engine.set_fold_paused_for_test(false);
-    loop {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded"
-        );
-        if now.folds > before.folds {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    wait_for_fold_publication(&engine, &before);
 
     assert_eq!(
         engine.overlay_depth(),
@@ -1981,6 +1952,52 @@ fn item_lookup_answers_exactly_m_auth_across_a_fold() {
     );
 }
 
+/// **The drill-down's satisfied labels survive a fold, and a folded-away entity's list is gone**
+/// (contracts §2.4's `entities/terms/`, [decision 0114](../../../docs/decisions/0114-the-drill-down-serves-the-satisfied-labels-only.md)).
+///
+/// The transpose stores **ordinals**, and the fold rewrites it while carrying the dictionary
+/// forward by hard link — so the failure this pins is a fold that renumbered, truncated or simply
+/// did not write the new base: an item's labels would come back wrong or empty against a
+/// dictionary that still means what it always did, and every other post-fold assertion in this
+/// file would stay green. The pre-fold answer is captured rather than written as a literal, so the
+/// test is about the fold and not about the fixture's labelling.
+#[test]
+fn an_items_labels_survive_a_fold_and_a_folded_away_entitys_list_goes_with_it() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
+
+    // Source 6 is a multiple of 3, so it carries both terms — the only shape where a fold that
+    // dropped or renumbered one ordinal is visible in this array rather than in its emptiness.
+    let kept = entity_of_source(&root, "v00000", 3);
+    let deleted = entity_of_source(&root, "v00000", 6);
+    let full = engine.authorise(&full_coverage_credential()).unwrap();
+    let kept_id: TesseraId = engine.tessera_id_of(kept).unwrap();
+    let deleted_id: TesseraId = engine.tessera_id_of(deleted).unwrap();
+
+    let before = engine.item(&full, kept_id, None).unwrap().unwrap().labels;
+    assert!(
+        !before.is_empty(),
+        "the fixture must label this item, or the assertion below holds vacuously"
+    );
+
+    engine
+        .accept_change(deleted, ChangeOp::Delete)
+        .expect("a delete is accepted");
+    fold(&engine);
+    assert_eq!(engine.generation().prefix, "v00001");
+
+    assert_eq!(
+        engine.item(&full, kept_id, None).unwrap().unwrap().labels,
+        before,
+        "the folded base carries the same ordinals against the same dictionary"
+    );
+    assert!(
+        engine.item(&full, deleted_id, None).unwrap().is_none(),
+        "and the folded-away entity answers nothing at all, list included"
+    );
+}
+
 /// **Obligation 11: an individual term ordinal is unchanged across a fold, not merely the total.**
 ///
 /// `prefix_rotation.rs`'s `dict.len()` equality is a headcount: a rotation that renumbered every
@@ -2016,11 +2033,13 @@ fn term_ordinals_are_stable_across_a_fold() {
     let novel_row = UnallocatedRow {
         external_id: Some(b"novel-holder".to_vec()),
         view: "s0".to_string(),
+        join: None,
         descriptors: vec![b"novel".to_vec()],
         x: 5.0,
         y: 5.0,
         scalars: Vec::new(),
         terms: engine.resolve_terms(&[b"novel".to_vec()]),
+        scoped: Vec::new(),
     };
     engine
         .accept_ingest(vec![novel_row], "promote-novel".to_string(), [0u8; 32])
@@ -2385,13 +2404,20 @@ fn the_dead_bytes_route_dispatches_a_fold_on_a_bundle_with_nothing_deleted() {
             window_min_segments: 0,
             max_segments: None,
             after_deletions: None,
-            // **5%, not compaction §9's default of 1.0, and the number is not the subject.** The
+            // **3%, not compaction §9's default of 1.0, and the number is not the subject.** The
             // default means "paying double for storage", which is the measured no-compaction steady
             // state of a *running* deployment (2.0–2.6×) and takes more churn to reach than a test
             // should spend. What this case asserts is the route: a bundle with orphaned bytes and
             // nothing deleted folds, and one without does not.
+            //
+            // **It was 5% until the permutation was paged.** A present page is 2¹⁶ slots whatever
+            // the view's population, so every view of a fixture this small now carries a 256 KiB
+            // `permutation.bin` — live bytes, in the ratio's denominator, against a few thousand
+            // orphaned by the merge. The measured ratio fell to 0.048 and the route stopped
+            // firing. The floor asserted just below is what the threshold has to clear, and it is
+            // still two orders of magnitude away.
             tombstoned_rows_fraction: None,
-            dead_bytes_ratio: Some(0.05),
+            dead_bytes_ratio: Some(0.03),
         }),
     );
 

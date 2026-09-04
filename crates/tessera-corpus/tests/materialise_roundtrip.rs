@@ -5,11 +5,12 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use arrow::array::{
-    Array, ArrayAccessor, BinaryArray, Float32Array, StringArray, TimestampMicrosecondArray,
+    Array, ArrayAccessor, BinaryArray, Float64Array, StringArray, TimestampMicrosecondArray,
     UInt32Array, UInt64Array,
 };
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use tessera_corpus::materialise::PARTITION_LAYER;
 use tessera_corpus::Corpus;
 use tessera_spatial::Bounds;
 
@@ -56,8 +57,8 @@ fn points_parquet_rows_are_the_items() {
     let mut rows = 0u64;
     for batch in read_parquet(&path) {
         let entity_id = column::<UInt64Array>(&batch, "entity_id");
-        let x = column::<Float32Array>(&batch, "x");
-        let y = column::<Float32Array>(&batch, "y");
+        let x = column::<Float64Array>(&batch, "x");
+        let y = column::<Float64Array>(&batch, "y");
         let fx_key = column::<UInt64Array>(&batch, "fx_key");
         let weight = column::<UInt32Array>(&batch, "weight");
         let seen_at = column::<TimestampMicrosecondArray>(&batch, "seen_at");
@@ -111,7 +112,7 @@ fn a_smaller_points_file_is_a_prefix_of_a_larger_one() {
             .flat_map(|batch| {
                 let e = column::<UInt64Array>(batch, "entity_id");
                 let fx = column::<UInt64Array>(batch, "fx_key");
-                let x = column::<Float32Array>(batch, "x");
+                let x = column::<Float64Array>(batch, "x");
                 (0..batch.num_rows())
                     .map(|i| (e.value(i), fx.value(i), x.value(i).to_bits()))
                     .collect::<Vec<_>>()
@@ -179,20 +180,28 @@ fn ingest_batch_is_the_wire_shape_of_the_same_items() {
             "seen_at",
             "bay",
             "tag",
-            "blurb"
+            "blurb",
+            "partition"
         ]
     );
 
     let external_id = column::<BinaryArray>(&batch, "external_id");
-    let x = column::<Float32Array>(&batch, "x");
+    let x = column::<Float64Array>(&batch, "x");
     let access = column::<StringArray>(&batch, "access");
     let fx_key = column::<UInt64Array>(&batch, "fx_key");
     let bay = column::<StringArray>(&batch, "bay");
+    let partition = column::<UInt32Array>(&batch, "partition");
     for i in 0..batch.num_rows() {
         let e = 10 + i as u64;
         let item = c.item(e);
         assert_eq!(external_id.value(i), e.to_le_bytes());
         assert_eq!(x.value(i), item.x);
+        // Every row of this batch is past `n = 10`, which is the point: the partition value is a
+        // function of `(seed, layer, e)` and is answerable beyond the built prefix.
+        assert_eq!(
+            u64::from(partition.value(i)),
+            c.partition_artifact_of(PARTITION_LAYER, e)
+        );
         let expected_access = c
             .terms(e)
             .iter()
@@ -227,7 +236,7 @@ fn ingest_batch_is_the_wire_shape_of_the_same_items() {
 #[test]
 fn the_artifact_fixture_agrees_with_the_closed_forms() {
     use tessera_corpus::materialise::{
-        ArtifactFixtureCounts, BOUNDARY_LAYER, FIXTURE_LEVEL, FLAT_LAYER, PARTITION_LAYER,
+        ArtifactFixtureCounts, BOUNDARY_LAYER, FIXTURE_LEVEL, FLAT_LAYER,
     };
 
     let c = corpus(6_000);

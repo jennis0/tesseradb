@@ -45,14 +45,31 @@ use crate::wal::{ChangeOp, WalError, WalRow, WalScalar};
 ///
 /// `view` is resolved by the handler against the bundle's declared views — never defaulted here
 /// — for the reason given at [`WalRow`]'s own field.
+///
+/// `x`/`y` are **frame coordinates**, on the same rule and for the same reason as [`WalRow`]'s: a
+/// projected view's transform has already run at the wire boundary (`projections.md` §3), so every
+/// reader below this type — the engine's out-of-frame check, the WAL record, the buffer, the
+/// flush's quantiser — sees a position in the frame and none of them projects anything.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnallocatedRow {
     pub external_id: Option<Vec<u8>>,
     pub view: String,
+    /// The entity this row **joins**, where the handler resolved its `external_id` to one that
+    /// already exists and is in no such view (`views.md` §4). `None` is the ordinary case: an
+    /// unknown external id, or none at all, and the close allocates.
+    ///
+    /// **Carried rather than re-resolved on the executor**, on [`Command::Change`]'s rule: the
+    /// resolution happens once, at admission, and what travels is the entity. The executor's own
+    /// backstop re-reads the live map beside the same generation it will clone from, so a batch
+    /// that raced a delete cannot be admitted against a stale answer.
+    pub join: Option<tessera_types::EntityId>,
     pub descriptors: Vec<Vec<u8>>,
-    pub x: f32,
-    pub y: f32,
+    pub x: f64,
+    pub y: f64,
     pub scalars: Vec<WalScalar>,
+    /// This row's group-scoped attribute values ([`WalRow::scoped`], `views.md` §5) — positional
+    /// against the owning group's `scoped_scalars`, and empty for every view outside a scope.
+    pub scoped: Vec<WalScalar>,
     pub terms: Vec<TermId>,
 }
 
@@ -76,7 +93,10 @@ impl UnallocatedRow {
         PendingItem {
             external_id: self.external_id.take(),
             terms: std::mem::take(&mut self.terms),
-            entity_id: None,
+            // **A join arrives with its id already decided, and `assign_sorted` leaves it
+            // alone.** The entity exists; a second allocation for it would be a second identity
+            // for one document, which is the whole of what the join rule prevents.
+            entity_id: self.join,
         }
     }
 
@@ -105,10 +125,12 @@ impl UnallocatedRow {
                 external_id: pending.external_id,
                 entity_id,
                 view: self.view,
+                join: self.join.is_some(),
                 descriptors: self.descriptors,
                 x: self.x,
                 y: self.y,
                 scalars: self.scalars,
+                scoped: self.scoped,
             },
             pending.terms,
         )
@@ -216,6 +238,32 @@ pub enum Command {
     },
     /// Drop an annotation layer, tombstoning its name for ever.
     DropLayer { name: String },
+    /// Create a view of a view group (`views.md` §3.2).
+    ///
+    /// **The record travels unvalidated**, in the same shape and for the same reason as
+    /// [`Command::RegisterLayer`]'s declaration: the checks that decide a key is free — and the
+    /// ordinal that follows them — read state only the executor may write, so a handler that
+    /// validated first could be overtaken by a create of the same key between its check and the
+    /// enqueue, and would then have acked two views onto one key.
+    CreateView {
+        group: String,
+        key: String,
+        visibility: Option<String>,
+        metadata: std::collections::BTreeMap<String, tessera_types::view::ViewMetadataValue>,
+    },
+    /// Drop a view of a view group, tombstoning its key for ever (`views.md` §3.4).
+    ///
+    /// `delete_dangling` is **sugar and nothing else**: at the drop the executor computes the
+    /// entities of this view that hold a row in no other view — the commit-window buffer included
+    /// — and submits them as *ordinary* deletions, which enter the overlay and retire at the fold
+    /// like any deletion (Rule F, write-path §5.4). It is not a second retirement route and must
+    /// not become one; a drop that removed an entity any other way would be the fail-open the two
+    /// removal rules exist to prevent.
+    DropView {
+        group: String,
+        key: String,
+        delete_dangling: bool,
+    },
     /// Publish a batch of artifacts into one level of one layer.
     ///
     /// **Members are entities already.** The handler inverts the caller's `tessera_id`s once, at
@@ -430,6 +478,13 @@ pub enum Ack {
     LayerRegistered { entity: EntityId },
     /// A layer was dropped and its name tombstoned. Nothing to return: the caller named it.
     LayerDropped,
+    /// A view was created. Nothing to return: the caller named the group and the key, and the
+    /// key is the view's only address (decision 0113).
+    ViewCreated,
+    /// A view was dropped. `deleted` is how many entities `delete_dangling` submitted for
+    /// deletion — **reported because the operation is not undoable**, on the same rule
+    /// [`Ack::Ingested`]'s `minted` is reported by, and `0` for a drop that did not ask for it.
+    ViewDropped { deleted: u64 },
     /// Artifacts were published, in the caller's submitted order.
     ///
     /// **Entities, which the handler turns into `tessera_id`s — never the ordinals.** An ordinal is
@@ -520,6 +575,35 @@ pub enum ExecError {
     /// name tombstoned, a tree declaring levels — which is exactly the class of detail a caller can
     /// act on and cannot otherwise obtain. It names no entity, no path and no other layer's terms.
     LayerRefused { detail: String },
+    /// A view create or drop the roster refused on its own terms — the key's charset, the
+    /// metadata against the group's declaration, a gate this build cannot honour → **422**.
+    ViewRefused { detail: String },
+    /// A key that is already a view of the group, or one a drop has burnt → **409**. Separate from
+    /// [`Self::ViewRefused`] because the caller's remedy differs: a refused record is one to
+    /// correct and resubmit, and a taken key is one to replace — a roster record is immutable, so
+    /// there is no resubmission that would make it land (`views.md` §3.2).
+    ViewConflict { detail: String },
+    /// A group or a key this deployment does not carry → **404**, the same answer an unknown view
+    /// gets on every other surface.
+    ViewUnknown { detail: String },
+    /// The **join rule** refused this batch (`views.md` §4, §5) → HTTP **409**, no effect: a
+    /// joining row named a different access label, a different value for an entity-scoped
+    /// attribute, or a different value for a `(entity, attribute, key)` cell the deployment
+    /// already holds one for.
+    ///
+    /// **Evaluated on the serial writer, which is why it is an `ExecError`** (decision 0116).
+    /// These comparisons used to run in `/control/ingest`'s handler, a whole queue drain before
+    /// the map that decides which rows *are* joins — so a row promoted to a join in between skipped
+    /// every arm. The refusal is now taken beside `LiveState::established_collisions`, on the one
+    /// thread that also performs the apply, and before the WAL append: a refused batch leaves no
+    /// record, spends no entity id and moves nothing.
+    ///
+    /// **A rendered string, and it reaches the caller** — the same standing as
+    /// [`Self::LayerRefused`], and for the same reason. It names a row index, a column name and a
+    /// view key: the caller's own request measured against the deployment's published schema. It
+    /// names no entity id, no external id, no group the caller did not spell, and no value on
+    /// either side (**I10**).
+    JoinRefused { detail: String },
 }
 
 impl std::fmt::Display for ExecError {
@@ -538,6 +622,10 @@ impl std::fmt::Display for ExecError {
             ),
             ExecError::VocabularyRefused { detail } => write!(f, "{detail}"),
             ExecError::LayerRefused { detail } => write!(f, "{detail}"),
+            ExecError::ViewRefused { detail }
+            | ExecError::ViewConflict { detail }
+            | ExecError::ViewUnknown { detail }
+            | ExecError::JoinRefused { detail } => write!(f, "{detail}"),
         }
     }
 }
@@ -597,10 +685,12 @@ mod tests {
         UnallocatedRow {
             external_id: Some(b"ext-1".to_vec()),
             view: "default".to_string(),
+            join: None,
             descriptors: vec![b"dept:eng".to_vec(), b"region:emea".to_vec()],
             x: 1.5,
             y: -2.5,
             scalars: vec![WalScalar::U64(7), WalScalar::Utf8("s".into())],
+            scoped: Vec::new(),
             terms: vec![TermId::new(9), TermId::new(2)],
         }
     }

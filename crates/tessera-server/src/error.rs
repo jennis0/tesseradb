@@ -335,6 +335,10 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
         // to every principal alike in `/v1/meta`. Its sibling `FilterRefused` is an unreadable
         // artefact and stays a fail-closed 500 through the catch-all below.
         EngineError::FilterMalformed(detail) => ApiError::Contract(detail),
+        // Every arm of a browse refusal names deployment schema the caller reads off `/v1/meta` —
+        // a layer, a level, a page bound — so refusing discloses nothing they were not already
+        // told, and none of them is ever about an artifact (`highlight-and-hierarchy.md` §4).
+        browse @ EngineError::BrowseRefused(_) => ApiError::Contract(browse.to_string()),
         // Also a request the caller can fix by asking for less, and its Display names only the
         // caller's own numbers and the configured limit.
         too_many @ EngineError::TooManyTiles { .. } => ApiError::Contract(too_many.to_string()),
@@ -372,6 +376,15 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
         // catch-all would map it identically, so that the choice is visible here rather than
         // inherited.
         unavailable @ EngineError::VocabularyVisibilityUnavailable { .. } => {
+            ApiError::FailClosed(unavailable.to_string())
+        }
+        // `/v1/categories/{column}/suggest` on a `derived` column whose member sets could not be
+        // read, or a read that failed part-way through the walk (`value-suggestion.md` §3): the
+        // whole column is refused, exactly as `VocabularyVisibilityUnavailable` is above, and for
+        // the same reason — an empty page is a real answer and must stay distinguishable from an
+        // underivable predicate. Named explicitly, though the catch-all maps it identically, so
+        // the choice reads at the call site rather than being inherited.
+        unavailable @ EngineError::SuggestionUnavailable { .. } => {
             ApiError::FailClosed(unavailable.to_string())
         }
         other => ApiError::FailClosed(other.to_string()),
@@ -549,8 +562,28 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
         // WAL append, so the answer is a clean 422 with no effect, and a 422 the caller cannot read
         // is one they cannot fix.
         AcceptError::Exec(ExecError::LayerRefused { detail }) => ApiError::Contract(detail.clone()),
+        // **The roster's three answers, told apart because the caller's remedy differs**
+        // (`views.md` §3.2). A refused record is one to correct; a taken or burnt key is one to
+        // replace, a roster record being immutable; and an unknown group or key is the same 404
+        // an unknown view id is on every other surface, so the two planes cannot disagree about
+        // what "no such view" means.
+        AcceptError::Exec(ExecError::ViewRefused { detail }) => ApiError::Contract(detail.clone()),
+        AcceptError::Exec(ExecError::ViewConflict { detail }) => ApiError::Conflict(detail.clone()),
+        AcceptError::Exec(ExecError::ViewUnknown { detail }) => ApiError::Unknown(detail.clone()),
+        // **The join rule's refusal, and the detail is the whole answer** (`views.md` §4, decision
+        // 0116). It moved off the handler and onto the serial writer, and the body did not move
+        // with it: the text is the handler's own, byte for byte, so a caller cannot tell which site
+        // refused — which is the point, the two sites having been collapsed into one. It names a
+        // row index, a column and a view key, and nothing else.
+        AcceptError::Exec(ExecError::JoinRefused { detail }) => ApiError::Conflict(detail.clone()),
         // Both are the caller's row, malformed in a way the engine refused before anything was
         // acked or WAL-durable — a contract answer, not a fault.
+        // 404 and not 422, because that is what an unknown view id is on both planes
+        // (contracts §3.4): `resolve_view` answers `x-tessera-view` the same way, and two planes
+        // disagreeing about what an unknown view is would be a distinction with no meaning.
+        AcceptError::UnknownView { view, .. } => {
+            ApiError::Unknown(format!("unknown view '{view}'"))
+        }
         e @ (AcceptError::OutsideExtent { .. } | AcceptError::ScalarArity { .. }) => {
             ApiError::Contract(e.to_string())
         }
@@ -635,6 +668,7 @@ pub fn map_change_batch_error(
             // Refused before the submit, so it never reached the executor. Ingest-only in
             // practice; named rather than folded, per this function's own rule.
             AcceptError::OutsideExtent { .. }
+            | AcceptError::UnknownView { .. }
             | AcceptError::ScalarArity { .. }
             | AcceptError::SteppedDown => false,
         });
@@ -651,6 +685,7 @@ pub fn map_change_batch_error(
             AcceptError::Exec(e) => exec_failure_may_be_in_force(*op, e),
             AcceptError::Submit(e) => e.may_have_taken_effect(),
             AcceptError::OutsideExtent { .. }
+            | AcceptError::UnknownView { .. }
             | AcceptError::ScalarArity { .. }
             | AcceptError::SteppedDown => false,
         });
@@ -663,6 +698,7 @@ pub fn map_change_batch_error(
         AcceptError::Submit(e) => !e.may_have_taken_effect(),
         // Refused before the submit: certainly not applied, which is this half's sense exactly.
         AcceptError::OutsideExtent { .. }
+        | AcceptError::UnknownView { .. }
         | AcceptError::ScalarArity { .. }
         | AcceptError::SteppedDown => true,
     });
@@ -733,6 +769,18 @@ fn exec_failure_may_be_in_force(
         // and false is the honest answer anyway: a registry refusal happens before the append, so
         // nothing is in force.
         ExecError::LayerRefused { .. } => false,
+        // Not reachable from a `/control/changes` item either — a view verb is its own endpoint —
+        // and false is honest for the same reason: every one of the three is decided before the
+        // append. The deletions `delete_dangling` submits are ordinary `/control/changes` items
+        // and answer through the arms above, which is the whole point of it being sugar
+        // (`views.md` §3.4).
+        ExecError::ViewRefused { .. }
+        | ExecError::ViewConflict { .. }
+        | ExecError::ViewUnknown { .. } => false,
+        // Not reachable from a `/control/changes` item — the join rule is `/control/ingest`'s —
+        // and false is honest: every arm runs before the WAL append, so a refused batch has no
+        // record and nothing in force (decision 0116).
+        ExecError::JoinRefused { .. } => false,
         ExecError::Alloc(_) => false,
     }
 }
@@ -1161,6 +1209,61 @@ mod tests {
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(code, "conflict");
         assert_eq!(detail, "stale idset; re-resolve by external_id");
+    }
+
+    /// `UnderlayRefused` — the §3.3 underlay's three bounds (the configured offset ceiling, the
+    /// depth-16 grid limit, the total cell budget), refused and never clamped — maps to
+    /// `422 contract`, contracts §3.1's *shape* class: a request the caller can fix by asking for
+    /// less, and must not retry unchanged.
+    ///
+    /// **The detail is the engine's own, forwarded whole and deliberately.** Unlike the store and
+    /// join doors above, this one names only the caller's own numbers and the configured bound —
+    /// no path, no corpus fact — and a client that is told to ask for less needs to know by how
+    /// much. The `Display` prefix is *not* applied: the arm passes the inner string, so a change
+    /// to `ApiError::Contract(too_many.to_string())`-style wrapping here would be visible.
+    ///
+    /// **Mutations this kills:** deleting the arm, so the catch-all answers `500 fail-closed` —
+    /// which tells a client its own arithmetic was fine and the server broke, and the shipped
+    /// client has no way to learn otherwise. Also re-pointing it at `FailClosed`, `Unknown` or
+    /// `Backpressure`.
+    #[test]
+    fn map_engine_error_takes_a_refused_underlay_to_422_contract() {
+        let refused = EngineError::UnderlayRefused(
+            "offset 5 is above the configured maximum of 4".to_string(),
+        );
+        let (status, code, detail) = map_engine_error(refused).parts();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(code, "contract");
+        assert_eq!(
+            detail, "offset 5 is above the configured maximum of 4",
+            "the caller's own numbers and the configured bound reach the caller unchanged"
+        );
+    }
+
+    /// `TooManyTiles` — a `(zoom, bbox)` product above `max_tiles_per_request`, counted and
+    /// refused rather than allocated — maps to the same `422 contract` class, and for the same
+    /// reason: asking for less is the fix.
+    ///
+    /// This arm *does* apply the variant's `Display`, so the detail must name both the demanded
+    /// count and the limit; a rewrite that forwarded a bare string would drop the numbers a client
+    /// narrows its bbox by.
+    ///
+    /// **Mutations this kills:** deleting the arm (the catch-all answers `500 fail-closed`);
+    /// re-pointing it at any other `ApiError`; replacing `too_many.to_string()` with a fixed
+    /// string that carries neither number.
+    #[test]
+    fn map_engine_error_takes_too_many_tiles_to_422_contract() {
+        let (status, code, detail) = map_engine_error(EngineError::TooManyTiles {
+            demanded: 4_294_967_296,
+            limit: 262_144,
+        })
+        .parts();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(code, "contract");
+        assert!(
+            detail.contains("4294967296") && detail.contains("262144"),
+            "the detail must name both the demanded count and the limit, got: {detail}"
+        );
     }
 
     /// `Cancelled` is explicitly named in `map_engine_error`'s match (not caught only by the

@@ -1,0 +1,57 @@
+{
+  "_comment": "What both worked decodes — clients/ts/wire-example (apache-arrow) and reference/examples/decode_viewport.py (pyarrow) — must agree on over the golden fixtures in clients/ts/core/test/fixtures. Frame kinds in order, row counts per batch, and the first tessera_id of the points and artifacts batches as decimal strings. Re-derive when the fixtures are re-captured (clients/ts/scripts/capture-golden.mjs).",
+  "viewport-plain.bin": {
+    "frames": [
+      1,
+      3,
+      4
+    ],
+    "tiles": 5,
+    "sub_cells": null,
+    "artifacts": null,
+    "points": 48,
+    "first_point_tessera_id": "8549480826753018745",
+    "first_artifact_tessera_id": null
+  },
+  "viewport-underlay.bin": {
+    "frames": [
+      1,
+      2,
+      3,
+      4
+    ],
+    "tiles": 5,
+    "sub_cells": 12,
+    "artifacts": null,
+    "points": 48,
+    "first_point_tessera_id": "8549480826753018745",
+    "first_artifact_tessera_id": null
+  },
+  "viewport-artifacts.bin": {
+    "frames": [
+      1,
+      5,
+      4
+    ],
+    "tiles": 15,
+    "sub_cells": null,
+    "artifacts": 263,
+    "points": 0,
+    "first_point_tessera_id": null,
+    "first_artifact_tessera_id": "15635839221253775265"
+  },
+  "viewport-membership.bin": {
+    "frames": [
+      1,
+      5,
+      3,
+      4
+    ],
+    "tiles": 15,
+    "sub_cells": null,
+    "artifacts": 263,
+    "points": 248,
+    "first_point_tessera_id": "1559474477015133409",
+    "first_artifact_tessera_id": "15635839221253775265"
+  }
+}

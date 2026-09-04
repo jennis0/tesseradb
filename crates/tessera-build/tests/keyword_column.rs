@@ -110,18 +110,32 @@ fn parse_schema(text: &str) -> Schema {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("schema.toml");
     std::fs::write(&path, text).unwrap();
-    Config::parse(&path, &HashMap::new()).expect("schema parses").schema
+    Config::parse(&path, &HashMap::new())
+        .expect("schema parses")
+        .schema
 }
 
 fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs {
     BuildArgs {
-        point_fields: Default::default(),
-        points: points.to_path_buf(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.to_path_buf(), &schema),
-        access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
+        arena_order: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: points.to_path_buf(),
+            point_fields: Default::default(),
+            select: None,
+            access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
+        attribute_sources: tessera_build::config::AttributeSource::over(
+            points.to_path_buf(),
+            &schema,
+        ),
         out,
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -129,6 +143,7 @@ fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs 
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
         mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,

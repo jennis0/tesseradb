@@ -500,11 +500,19 @@ class Server:
         k: int | None = None,
         underlay_offset: int | None = None,
         filters: dict | None = None,
+        **extra,
     ) -> bytes:
         """Returns the raw framed body (matches the pre-refactor `reference/tests/conftest.py`
         behaviour exactly — the differential suite depends on getting bytes back here)."""
         return self.viewport_response(
-            token, view_id, zoom, bbox, k=k, underlay_offset=underlay_offset, filters=filters
+            token,
+            view_id,
+            zoom,
+            bbox,
+            k=k,
+            underlay_offset=underlay_offset,
+            filters=filters,
+            **extra,
         ).content
 
     def meta(self, token: str) -> dict:
@@ -528,11 +536,19 @@ class Server:
         k: int | None = None,
         underlay_offset: int | None = None,
         filters: dict | None = None,
+        **extra,
     ) -> requests.Response:
         """Like `viewport`, but returns the full `requests.Response` — for callers that need
         headers (e.g. `x-tessera-pin`) alongside the body."""
         resp = self.viewport_request(
-            token, view_id, zoom, bbox, k=k, underlay_offset=underlay_offset, filters=filters
+            token,
+            view_id,
+            zoom,
+            bbox,
+            k=k,
+            underlay_offset=underlay_offset,
+            filters=filters,
+            **extra,
         )
         resp.raise_for_status()
         return resp
@@ -546,17 +562,26 @@ class Server:
         k: int | None = None,
         underlay_offset: int | None = None,
         filters: dict | None = None,
+        **extra,
     ) -> requests.Response:
         """[`viewport_response`] without the raise — for tests whose subject *is* the refusal
         (contracts §3.2: an unknown filter column is a `422`, `none_of` is a `422`), where
         `raise_for_status` would convert the assertion target into a harness exception."""
         body = {"view": view_id, "zoom": zoom, "bbox": list(bbox)}
+        # `layers` omitted means no layers since contracts r38 (D9); the oracle wants every layer
+        # the principal reaches, which is what the I3 containment tests compare against.
+        body["layers"] = "all"
         if k is not None:
             body["k"] = k
         if underlay_offset is not None:
             body["underlay_offset"] = underlay_offset
         if filters is not None:
             body["filters"] = filters
+        # **Every other request field, passed through by name.** `highlight`, `point_rows`,
+        # `artifact_rows`, `computed`, `levels`: each is one JSON key with no harness-side
+        # translation, and naming them one by one here would make this file a second copy of the
+        # request schema that has to be edited whenever the first one is.
+        body.update({key: value for key, value in extra.items() if value is not None})
         return requests.post(
             f"{self.viewer_base}/v1/viewport",
             headers={"Authorization": f"Bearer {token}"},
@@ -584,6 +609,35 @@ class Server:
             headers={"Authorization": f"Bearer {self.operator_credential}"},
             json=[item],
             timeout=10,
+        )
+
+    def browse(self, token: str, **body) -> requests.Response:
+        """`POST /v1/artifacts/browse` (`highlight-and-hierarchy.md` §4) — the raw response, not
+        the parsed page, because half of what this verb has to be asked is its refusals."""
+        return requests.post(
+            f"{self.viewer_base}/v1/artifacts/browse",
+            headers={"Authorization": f"Bearer {token}"},
+            json={key: value for key, value in body.items() if value is not None},
+            timeout=30,
+        )
+
+    def register_layer(self, declaration: dict) -> requests.Response:
+        """`PUT /control/layers` — register one annotation layer. The body is the declaration
+        exactly as `tessera_types::layer::LayerDeclaration` serialises it."""
+        return requests.put(
+            f"{self.control_base}/control/layers",
+            headers={"Authorization": f"Bearer {self.operator_credential}"},
+            json=declaration,
+            timeout=30,
+        )
+
+    def publish_artifacts(self, layer: str, **body) -> requests.Response:
+        """`PUT /control/layers/{name}/artifacts` — one publication into one level."""
+        return requests.put(
+            f"{self.control_base}/control/layers/{layer}/artifacts",
+            headers={"Authorization": f"Bearer {self.operator_credential}"},
+            json=body,
+            timeout=60,
         )
 
     def changes(self, items: list[dict]) -> requests.Response:
@@ -678,8 +732,13 @@ def write_config(
     k_max_marks: int | None = None,
     max_k: int | None = None,
     max_underlay_cells: int | None = None,
+    serve_extra: str | None = None,
 ) -> Path:
     """Write a `tessera.toml`.
+
+    `serve_extra` is appended verbatim to the `[serve]` section — for a suite that means to
+    exercise one more knob (`max_region_cells`, say) without this signature growing a parameter
+    per knob.
 
     `theta_target_marks` defaults to a value large enough to **saturate** theta, which turns §7.2's
     selection into "serve every visible row up to the cap". Suites that assert masking or wire shape
@@ -711,7 +770,6 @@ wal = "{wal_path}"
 module = "builtin:passthrough"
 
 [disclosure]
-min_visible_members = 10
 token_max_lifetime = 3600
 
 [serve]
@@ -727,6 +785,8 @@ theta_target_marks = {theta_target_marks}
 """
     if max_underlay_cells is not None:
         config_text += f"max_underlay_cells = {max_underlay_cells}\n"
+    if serve_extra:
+        config_text += serve_extra.rstrip() + "\n"
     config_path = tmp_dir / "tessera.toml"
     config_path.write_text(config_text)
     return config_path
@@ -744,6 +804,7 @@ def spawn_server(
     k_max_marks: int | None = None,
     theta_target_marks: int | None = None,
     max_underlay_cells: int | None = None,
+    serve_extra: str | None = None,
 ) -> tuple[Server, subprocess.Popen]:
     """Start `tessera serve` against `bundle_root`, using `cache_dir`/`wal_path` (defaulting to
     `tmp_dir/cache`, `tmp_dir/wal.log`) for its durable state. Passing the SAME `cache_dir`/
@@ -777,6 +838,7 @@ def spawn_server(
         k_max_marks=k_max_marks,
         theta_target_marks=theta_target_marks,
         max_underlay_cells=max_underlay_cells,
+        serve_extra=serve_extra,
     )
 
     env = os.environ.copy()

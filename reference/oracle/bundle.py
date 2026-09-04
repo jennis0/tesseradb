@@ -24,9 +24,21 @@ from pyroaring import BitMap
 from . import identity as identity_mod
 from . import morton as morton_mod
 
+#: The separator between a group's name and a view's key in a view id — `quarter:2026-Q3`
+#: (`views.md` §3.2). Transcribed from the design rather than imported from the Rust, like
+#: everything else here; `Bundle.view_dir` is the one place it is split on.
+GROUP_SEPARATOR = ":"
+
 PERMUTATION_MAGIC = b"TSPM"
-PERMUTATION_VERSION = 1
+# Version 2 is the two-level paged form (contracts 2.6); version 1 was the flat array it
+# replaced, and this reader refuses that on the version field alone.
+PERMUTATION_VERSION = 2
 PERMUTATION_ABSENT = 0xFFFF_FFFF
+PERMUTATION_PAGE_SHIFT = 16
+PERMUTATION_PAGE_ENTRIES = 1 << PERMUTATION_PAGE_SHIFT
+PERMUTATION_PAGE_ABSENT = 0xFFFF_FFFF
+PERMUTATION_HEADER_LEN = 24
+PERMUTATION_PAGE_ALIGN = 4096
 
 # Finding 6 (task-5 review): an absent MANIFEST `identity` object is, per the memo, "a
 # typed reader error, not a default... it does not acquire a minted key, a zero key or a
@@ -164,9 +176,14 @@ def read_source_geometry(
     The per-row arithmetic is vectorised in numpy rather than written as the loop the rest of this
     oracle prefers. That is a deliberate exception to "definitions, not algorithms": the quantities
     are the same quantities, and a Python loop over even the 250,000-row prefix — let alone the
-    groups a coarser statistic fails to exclude — costs minutes per test session. The definitions
-    themselves (`fixed32`, the interleave) stay scalar in `morton.py`; what is vectorised here is
-    only the extraction.
+    groups a coarser statistic fails to exclude — costs minutes per test session.
+
+    **What is shared with `morton.py` and what is not.** The interleave is shared: `_compact64`
+    below is the array form of the same bit gather, and the scalar `split32` is `morton`'s. The
+    **quantiser is not** — `_fixed32_vec` is a second implementation of `morton.fixed32`'s
+    clamp-and-floor, and `morton.fixed32` is not called anywhere on this path. So a reader should
+    not take the definition to be the thing running here; what runs is a copy of it, and what
+    disciplines the copy is stated at `_fixed32_vec` itself.
     """
     import pyarrow.parquet as pq  # local: keeps the module's import surface to what it always uses
 
@@ -226,9 +243,15 @@ def read_source_geometry(
 
 
 def _fixed32_vec(v: np.ndarray, vmin: float, vmax: float) -> np.ndarray:
-    """[`morton.fixed32`] over an array. Pinned against the scalar definition by
-    `test_differential`'s byte-for-byte position check, which compares what this produces against
-    what the engine stored, so a divergence in the clamp or the rounding fails there."""
+    """[`morton.fixed32`] over an array — a second implementation of it, not a call to it.
+
+    What pins it is `test_differential`'s byte-for-byte position check, and that check compares
+    what this produces against **what the engine stored**, not against `morton.fixed32`. So a
+    divergence in the clamp or the rounding surfaces as an oracle-vs-engine disagreement rather
+    than as a silent pass — which is a real pin, but a pin against the implementation and not
+    against the definition. The two are known to differ on NaN alone today: the scalar raises,
+    this produces an undefined `uint32`.
+    """
     scaled = np.floor((v - vmin) / (vmax - vmin) * 4294967296.0)
     return np.clip(scaled, 0.0, 4294967295.0).astype(np.uint32).astype(np.uint64)
 
@@ -247,15 +270,71 @@ def _compact64(code: np.ndarray) -> np.ndarray:
 
 @dataclass
 class Permutation:
-    """`permutation.bin`: entity id -> row id (or absent), for one view's single segment."""
+    """`permutation.bin`: entity id -> row id (or absent), for one view's single segment.
+
+    The **two-level paged** form (contracts 2.6): a directory over pages of 2**16 consecutive
+    entity ids, an absent page meaning every entity in it has no row. A dense view has every
+    page present and is the flat array of earlier revisions; a sparse one -- a group's view
+    holding a fraction of entity space -- stores only the pages it lands in.
+
+    This is the second reader of the format, and it is deliberately not a port of the engine's:
+    it decodes the directory itself and refuses a non-canonical one, so a producer that wrote
+    the pages in some other order would fail here rather than round-trip through one reader's
+    assumptions.
+    """
 
     bound: int
-    slots: np.ndarray  # uint32, length == bound; PERMUTATION_ABSENT where entity has no row
+    directory: np.ndarray  # uint32, one entry per page: payload slot or PERMUTATION_PAGE_ABSENT
+    pages: np.ndarray  # uint32, (present_count, 2**16), in slot order
+
+    @classmethod
+    def from_slots(cls, slots: np.ndarray | list[int]) -> "Permutation":
+        """A permutation over `[0, len(slots))` from a flat entity->row array.
+
+        For callers that hold the mapping the flat way -- tests, and anything reasoning about
+        small bounds. The paging is a storage property, so building one this way is not a
+        second encoding: it produces exactly the pages the file would carry.
+        """
+        flat = np.asarray(slots, dtype="<u4")
+        bound = int(len(flat))
+        page_count = -(-bound // PERMUTATION_PAGE_ENTRIES)
+        padded = np.full(page_count * PERMUTATION_PAGE_ENTRIES, PERMUTATION_ABSENT, dtype="<u4")
+        padded[:bound] = flat
+        by_page = padded.reshape(page_count, PERMUTATION_PAGE_ENTRIES)
+        present = [p for p in range(page_count) if (by_page[p] != PERMUTATION_ABSENT).any()]
+        directory = np.full(page_count, PERMUTATION_PAGE_ABSENT, dtype="<u4")
+        for slot, page in enumerate(present):
+            directory[page] = slot
+        pages = (
+            by_page[present]
+            if present
+            else np.zeros((0, PERMUTATION_PAGE_ENTRIES), dtype="<u4")
+        )
+        return cls(bound=bound, directory=directory, pages=pages)
+
+    def page_of(self, page: int) -> np.ndarray | None:
+        """The 2**16 slots of `page`, or None where the page is absent."""
+        if page >= len(self.directory):
+            return None
+        slot = int(self.directory[page])
+        return None if slot == PERMUTATION_PAGE_ABSENT else self.pages[slot]
+
+    def present_pages(self) -> list[tuple[int, np.ndarray]]:
+        """Every present page as `(first entity id, slots)`, ascending."""
+        out = []
+        for page in range(len(self.directory)):
+            slots = self.page_of(page)
+            if slots is not None:
+                out.append((page * PERMUTATION_PAGE_ENTRIES, slots))
+        return out
 
     def row_of(self, entity_id: int) -> int | None:
         if entity_id >= self.bound:
             return None
-        row = int(self.slots[entity_id])
+        slots = self.page_of(entity_id >> PERMUTATION_PAGE_SHIFT)
+        if slots is None:
+            return None
+        row = int(slots[entity_id & (PERMUTATION_PAGE_ENTRIES - 1)])
         return None if row == PERMUTATION_ABSENT else row
 
 
@@ -283,13 +362,13 @@ class Bundle:
         self.manifest = json.loads(manifest_bytes)
         self._verify_files(self.manifest["files"])
 
-        self.quantisation = self.manifest["quantisation"]
-        self.extent = (
-            self.quantisation["x_min"],
-            self.quantisation["x_max"],
-            self.quantisation["y_min"],
-            self.quantisation["y_max"],
-        )
+        # The quantisation frame is the *view's*, not the bundle's (decision 0040): two views of
+        # one bundle may quantise differently, so there is no bundle-wide extent to read. A
+        # manifest whose view omits it is malformed and refuses here, as the Rust reader does.
+        self.views = {view["id"]: view for view in self.manifest["views"]}
+        for view_id, view in self.views.items():
+            if "quantisation" not in view:
+                raise ValueError(f"view '{view_id}' declares no quantisation extent")
 
         # `identity` (contracts r6, docs/evidence/memos/2026-07-30-tessera-id-construction.md
         # §2): the per-deployment key and the §13.3 shard prefix `tessera_id` is built
@@ -347,6 +426,11 @@ class Bundle:
         # columns: a fallback is exactly the tautology this input exists to prevent, and one
         # that only fires when the harness forgot to wire it up would be invisible.
         self.source_geometry: SourceGeometry | None = None
+        # Per-view source geometry, for a multi-view bundle. A view owns everything downstream of
+        # the permutation (`views.md` §1), positions included, so the same entity has a different
+        # position in each view and there is no one points file to attach. A bundle with one view
+        # attaches one source and never touches this map.
+        self._view_geometry: dict[str, SourceGeometry] = {}
         self._position_cache: dict[str, list[int]] = {}
 
     def _verify_files(self, files: dict) -> None:
@@ -362,16 +446,53 @@ class Bundle:
     def term_id_of(self, descriptor: bytes) -> int | None:
         return self.descriptor_to_term_id.get(descriptor)
 
+    def extent_of(self, view_id: str) -> tuple[float, float, float, float]:
+        """The frame a view's positions are quantised against, as `(x_min, x_max, y_min, y_max)`.
+
+        Per view and never bundle-wide (decision 0040). An unknown view raises rather than
+        falling back: a tile prefix decoded against another view's frame names different ground,
+        and nothing downstream would notice.
+        """
+        try:
+            q = self.views[view_id]["quantisation"]
+        except KeyError:
+            raise KeyError(f"the manifest declares no view '{view_id}'") from None
+        return (q["x_min"], q["x_max"], q["y_min"], q["y_max"])
+
+    @property
+    def extent(self) -> tuple[float, float, float, float]:
+        """The sole declared view's frame, for a caller that has no view id to hand.
+
+        Raises where the bundle declares more than one, because there is then no answer: the
+        extent belongs to the view (decision 0040), and picking the first would decode the
+        second's positions against ground they do not sit on. Use [`extent_of`] there.
+        """
+        if len(self.views) != 1:
+            raise ValueError(
+                f"this bundle declares {len(self.views)} views, so it has no single extent; "
+                "ask `extent_of(view_id)` for the one you mean"
+            )
+        return self.extent_of(next(iter(self.views)))
+
+    def view_dir(self, view_id: str) -> Path:
+        """`views/<view>/`, or `views/<group>/<key>/` — the one place a view id becomes a path.
+
+        **Nested rather than joined**, because `:` is not a path character everywhere: the id a
+        request names and the manifest carries is `group:key`, and the directory is two components
+        (`views.md` §3.2; `tessera_store::view_path`). A single joined component was what this
+        oracle laid down while every bundle had one plain view, and it named a directory no
+        multi-view build writes — so the failure would have been a missing file rather than a
+        wrong answer, which is the safe direction and still the wrong path.
+        """
+        path = self._partition_dir / "views"
+        for component in view_id.split(GROUP_SEPARATOR, 1):
+            path = path / component
+        return path
+
     def segment_dir(self, view_id: str) -> Path:
         for seg in self.segments_manifest["segments"]:
             if seg["view"] == view_id:
-                return (
-                    self._partition_dir
-                    / "views"
-                    / view_id
-                    / "segments"
-                    / seg["seg_id"]
-                )
+                return self.view_dir(view_id) / "segments" / seg["seg_id"]
         raise KeyError(f"no segment for view '{view_id}'")
 
     def segment(self, view_id: str) -> Segment:
@@ -381,27 +502,43 @@ class Bundle:
             self._segment_cache[view_id] = _read_segment(seg_dir, perm_path)
         return self._segment_cache[view_id]
 
-    def attach_source_geometry(self, source: SourceGeometry) -> None:
+    def attach_source_geometry(
+        self, source: SourceGeometry, *, view_id: str | None = None
+    ) -> None:
         """Hand the oracle the points file this bundle was built from (see [`SourceGeometry`]).
 
         A method rather than a constructor argument because `conformance.md` §1's layering rule is
         that the definitional modules never *find* an input; a driver supplies it. Attaching a
         second, different source after codes have been derived would silently mix two geometries,
         so the derived caches are dropped here.
+
+        `view_id` names the view the file is the geometry **of**. A multi-view corpus has one
+        points file per view — a view owns its positions and its frame, and the same entity sits
+        somewhere different in each (`views.md` §1) — so a driver calls this once per view and the
+        oracle answers each view from its own. Omitting it attaches the source for every view that
+        has none of its own, which is what a single-view bundle's driver has always done.
         """
-        self.source_geometry = source
+        if view_id is None:
+            self.source_geometry = source
+        else:
+            self._view_geometry[view_id] = source
         self._morton_cache.clear()
         self._position_cache.clear()
 
-    def _require_source(self) -> SourceGeometry:
-        if self.source_geometry is None:
+    def _require_source(self, view_id: str | None = None) -> SourceGeometry:
+        source = self._view_geometry.get(view_id) if view_id is not None else None
+        if source is None:
+            source = self.source_geometry
+        if source is None:
             raise ValueError(
-                "this Bundle has no source geometry attached: `columns.arrow` stores a residual, "
+                "this Bundle has no source geometry attached"
+                + (f" for view '{view_id}'" if view_id is not None else "")
+                + ": `columns.arrow` stores a residual, "
                 "not coordinates, so a geometry re-derivation would only be reading the build's "
                 "own answer back. Call `attach_source_geometry(read_source_geometry(points, "
-                "bundle.extent))` from the driver."
+                "bundle.extent_of(view)), view_id=view)` from the driver."
             )
-        return self.source_geometry
+        return source
 
     def row_source_ids(self, view_id: str) -> list[int]:
         """Every row's **source-corpus** id — the join the source geometry is keyed by.
@@ -435,7 +572,7 @@ class Bundle:
         purpose.
         """
         if view_id not in self._morton_cache:
-            source = self._require_source()
+            source = self._require_source(view_id)
             codes = []
             for source_id in self.row_source_ids(view_id):
                 qx, qy = source.position(source_id)
@@ -528,7 +665,7 @@ class Bundle:
 
     def permutation(self, view_id: str) -> Permutation:
         if view_id not in self._permutation_cache:
-            path = self._partition_dir / "views" / view_id / "permutation.bin"
+            path = self.view_dir(view_id) / "permutation.bin"
             self._permutation_cache[view_id] = _read_permutation(path)
         return self._permutation_cache[view_id]
 
@@ -784,15 +921,47 @@ def row_order_from_geometry(
 
 
 def _read_permutation(path: Path) -> Permutation:
+    """Decode the paged `permutation.bin`, refusing anything non-canonical.
+
+    The canonical encoding is what makes the file a function of the mapping: slots number
+    `0..present_count` in ascending page order. A permuted directory would serve every page
+    under some other page's rows -- every lookup wrong, none out of range -- so it is checked
+    here rather than trusted, exactly as the engine's reader checks it.
+    """
     data = path.read_bytes()
     if data[0:4] != PERMUTATION_MAGIC:
         raise ValueError(f"{path}: bad permutation magic {data[0:4]!r}")
     (version,) = struct.unpack_from("<H", data, 4)
     if version != PERMUTATION_VERSION:
         raise ValueError(f"{path}: unsupported permutation version {version}")
+    (page_shift,) = struct.unpack_from("<H", data, 6)
+    if page_shift != PERMUTATION_PAGE_SHIFT:
+        raise ValueError(f"{path}: page shift {page_shift}, expected {PERMUTATION_PAGE_SHIFT}")
     (bound,) = struct.unpack_from("<Q", data, 8)
-    slots = np.frombuffer(data, dtype="<u4", count=bound, offset=16)
-    return Permutation(bound=bound, slots=slots)
+    (page_count,) = struct.unpack_from("<I", data, 16)
+    (present_count,) = struct.unpack_from("<I", data, 20)
+    if page_count != -(-bound // PERMUTATION_PAGE_ENTRIES):
+        raise ValueError(f"{path}: {page_count} pages do not cover bound {bound}")
+    directory = np.frombuffer(
+        data, dtype="<u4", count=page_count, offset=PERMUTATION_HEADER_LEN
+    )
+    named = [int(s) for s in directory if int(s) != PERMUTATION_PAGE_ABSENT]
+    if named != list(range(present_count)):
+        raise ValueError(
+            f"{path}: the directory is not canonical -- slots must ascend with page index and "
+            f"number 0..{present_count}"
+        )
+    directory_end = PERMUTATION_HEADER_LEN + page_count * 4
+    payload = -(-directory_end // PERMUTATION_PAGE_ALIGN) * PERMUTATION_PAGE_ALIGN
+    if any(data[directory_end:payload]):
+        raise ValueError(f"{path}: the padding before the payload is not zero")
+    expected = payload + present_count * PERMUTATION_PAGE_ENTRIES * 4
+    if len(data) != expected:
+        raise ValueError(f"{path}: file is {len(data)} bytes, expected {expected}")
+    pages = np.frombuffer(
+        data, dtype="<u4", count=present_count * PERMUTATION_PAGE_ENTRIES, offset=payload
+    ).reshape(present_count, PERMUTATION_PAGE_ENTRIES)
+    return Permutation(bound=bound, directory=directory, pages=pages)
 
 
 def _entity_of_rows(perm: Permutation, rows: np.ndarray) -> dict[int, int]:
@@ -801,26 +970,23 @@ def _entity_of_rows(perm: Permutation, rows: np.ndarray) -> dict[int, int]:
     Contracts r6 removed the entity_id column from `columns.arrow`; the permutation is the
     only key-independent artefact relating the two spaces (§5.1, I4). Computed for the rows
     asked about rather than materialised whole: a full inversion at 10^9 needs ~17-20 GB
-    transient (brief), so the scan over `perm.slots` is chunked in views of 2**24 and only
-    entries landing in `rows` are collected.
+    transient (brief), so the scan runs a page at a time -- 2**16 entities, which is the unit
+    the file already stores -- and only entries landing in `rows` are collected. An absent page
+    is not scanned at all, so a sparse view costs its population rather than its bound.
     """
     wanted = np.asarray(rows, dtype=np.uint32)
     remaining = set(int(r) for r in wanted)
     result: dict[int, int] = {}
-    chunk = 1 << 24
-    bound = perm.bound
-    for start in range(0, bound, chunk):
+    for base, window in perm.present_pages():
         if not remaining:
             break
-        end = min(start + chunk, bound)
-        window = perm.slots[start:end]
         matches = np.isin(window, wanted)
         if not matches.any():
             continue
         for offset in np.nonzero(matches)[0]:
             row_val = int(window[offset])
             if row_val in remaining:
-                result[row_val] = start + int(offset)
+                result[row_val] = base + int(offset)
                 remaining.discard(row_val)
     return result
 

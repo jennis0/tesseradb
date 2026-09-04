@@ -1,0 +1,665 @@
+{
+  "layers": [
+    {
+      "name": "boundaries/divisions",
+      "shape": "predicate"
+    },
+    {
+      "name": "places/taxonomy",
+      "shape": null
+    },
+    {
+      "name": "programmes/source",
+      "shape": null
+    }
+  ],
+  "results": [
+    {
+      "principal": "full — top 47 terms",
+      "what": "lasso",
+      "status": "shown",
+      "matched": 1618017,
+      "exact": true,
+      "verdict": {
+        "exact": true,
+        "depth": null
+      },
+      "panel": {
+        "text": "1,618,017",
+        "exact": "true"
+      },
+      "requests": 11,
+      "withLeaf": 11,
+      "file": "lasso-full.png"
+    },
+    {
+      "principal": "full — top 47 terms",
+      "what": "filter to this",
+      "division": "5150307846326640424",
+      "cardCount": 838679,
+      "status": "shown",
+      "matched": 838679,
+      "exact": false,
+      "verdict": {
+        "exact": true,
+        "depth": null
+      },
+      "viewBefore": 4081953,
+      "viewFitted": 861768,
+      "viewAfter": 838679,
+      "file": "filter-full.png"
+    },
+    {
+      "principal": "heavy — 41% (46 terms)",
+      "what": "lasso",
+      "status": "shown",
+      "matched": 24500,
+      "exact": true,
+      "verdict": {
+        "exact": true,
+        "depth": null
+      },
+      "panel": {
+        "text": "24,500",
+        "exact": "true"
+      },
+      "requests": 11,
+      "withLeaf": 11,
+      "file": "lasso-heavy.png"
+    },
+    {
+      "principal": "heavy — 41% (46 terms)",
+      "what": "filter to this",
+      "division": "9693475924809385380",
+      "cardCount": 166817,
+      "status": "shown",
+      "matched": 166817,
+      "exact": false,
+      "verdict": {
+        "exact": true,
+        "depth": null
+      },
+      "viewBefore": 1390336,
+      "viewFitted": 264398,
+      "viewAfter": 166817,
+      "file": "filter-heavy.png"
+    }
+  ],
+  "requests": [
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 0,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": "polygon",
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": "polygon",
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": "polygon",
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": "polygon",
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": "polygon",
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": "polygon",
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": "polygon",
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": "polygon",
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": "polygon",
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": "polygon",
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": "polygon",
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 0,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 0,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 0,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": "artifact",
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": "artifact",
+      "k": 0,
+      "tiles": false
+    },
+    {
+      "leaf": "artifact",
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": "artifact",
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 0,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 0,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": "polygon",
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": "polygon",
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": "polygon",
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": "polygon",
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": "polygon",
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": "polygon",
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": "polygon",
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": "polygon",
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": "polygon",
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": "polygon",
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": "polygon",
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 0,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 0,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 0,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": "artifact",
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": "artifact",
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": "artifact",
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": "artifact",
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": "artifact",
+      "k": 0,
+      "tiles": false
+    },
+    {
+      "leaf": "artifact",
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": "artifact",
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": "artifact",
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": "artifact",
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 0,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    },
+    {
+      "leaf": null,
+      "k": 500,
+      "tiles": false
+    }
+  ]
+}

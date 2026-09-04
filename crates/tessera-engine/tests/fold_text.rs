@@ -142,13 +142,22 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
         .expect("the text schema parses")
         .schema;
     build(&BuildArgs {
-        point_fields: Default::default(),
+        arena_order: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: points.clone(),
+            point_fields: Default::default(),
+            select: None,
+            access: tessera_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
-        points,
-        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.to_path_buf(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -156,6 +165,7 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
         mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
@@ -189,11 +199,13 @@ fn ingest_and_flush(engine: &Engine, root: &Path) -> Vec<EntityId> {
         let row = UnallocatedRow {
             external_id: Some(external.as_bytes().to_vec()),
             view: "s0".to_string(),
+            join: None,
             descriptors: vec![b"0".to_vec()],
-            x: 10.0 + i as f32,
-            y: 10.0 + i as f32,
+            x: 10.0 + i as f64,
+            y: 10.0 + i as f64,
             scalars: vec![WalScalar::Utf8(flushed_prose(i))],
             terms: engine.resolve_terms(&[b"0".to_vec()]),
+            scoped: Vec::new(),
         };
         out.push(
             engine
@@ -541,11 +553,13 @@ fn a_text_extent_published_after_the_snapshot_is_carried_and_digested() {
         let row = UnallocatedRow {
             external_id: Some(external.as_bytes().to_vec()),
             view: "s0".to_string(),
+            join: None,
             descriptors: vec![b"0".to_vec()],
             x: 20.0,
             y: 20.0,
             scalars: vec![WalScalar::Utf8("corpus flightword".to_string())],
             terms: engine.resolve_terms(&[b"0".to_vec()]),
+            scoped: Vec::new(),
         };
         let id = engine
             .accept_ingest(vec![row], external, [0u8; 32])
@@ -613,11 +627,13 @@ fn a_flush_with_no_text_value_publishes_no_text_layer() {
         let row = UnallocatedRow {
             external_id: Some(name.as_bytes().to_vec()),
             view: "s0".to_string(),
+            join: None,
             descriptors: vec![b"0".to_vec()],
             x: 30.0,
             y: 30.0,
             scalars: vec![value],
             terms: engine.resolve_terms(&[b"0".to_vec()]),
+            scoped: Vec::new(),
         };
         engine
             .accept_ingest(vec![row], name.to_string(), [0u8; 32])

@@ -1,0 +1,152 @@
+import {css, html, nothing} from 'lit';
+import {property} from 'lit/decorators.js';
+import {type Artifact, type ArtifactsProjection, type Masked, type ServedLineage} from '@tesseradb/client';
+import {attachedTopics, displayName} from '@tesseradb/deck';
+import {TesseraElement, UNNAMED, emit, idString} from './base.js';
+import {attachContextRoot, defineOnce} from './define.js';
+import {renderState} from './states.js';
+import {chrome, tokens} from './tokens.js';
+import './count.js';
+
+/**
+ * `<tessera-artifact-list>` — what the layers served for this view (design §5.3 tier 2, §6): the
+ * boards' *IN VIEW · N clusters* list, a tree built from `parentIds` with a row's children beneath
+ * it, each with its name and its `Masked` count, the opened one highlighted. A click selects —
+ * the card and the outline — and never moves the camera.
+ *
+ * A row for an artifact with no name — no supplied text and no topic attached — shows its count
+ * beside {@link UNNAMED} and never its key, which is an id (the owner's review, 2026-08-26).
+ *
+ * The count is over the whole membership as this principal sees it and does not move with the
+ * viewport; only *whether* an artifact appears depends on where you are looking.
+ */
+export class TesseraArtifactList extends TesseraElement {
+  static override styles = [
+    tokens,
+    chrome,
+    css`
+      :host {
+        display: block;
+      }
+      [part='items'] {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        max-height: 240px;
+        overflow-y: auto;
+      }
+      [part='item'] {
+        padding-left: calc(6px + var(--depth, 0) * 18px);
+      }
+      [part='name'][data-unnamed] {
+        color: var(--tessera-ink-2);
+      }
+      [part='item'] tessera-count::part(count) {
+        margin-left: auto;
+        color: var(--tessera-ink-2);
+        font-size: 12px;
+        font-weight: 400;
+      }
+    `
+  ];
+
+  /** By property, for a host with its own served set. */
+  @property({attribute: false}) accessor artifacts: ArtifactsProjection | null = null;
+  /** How many rows before the list stops and says how many it did not show. */
+  @property({type: Number}) accessor rows = 40;
+
+  private get shown(): ArtifactsProjection | null {
+    return this.artifacts ?? this.resolvedStore?.get('artifacts') ?? null;
+  }
+
+  private open(a: Artifact): void {
+    void this.resolvedStore?.openArtifact(a.tesseraId);
+    emit(this, 'tessera-artifactselect', {id: idString(a.tesseraId), layer: a.layer});
+  }
+
+  override render() {
+    const a = this.shown;
+    const heading = (summary: unknown = nothing) => html`<h2 part="title">In view<span class="summary">${summary}</span></h2>`;
+    if (!a) return html`<div class="panel">${heading()}${renderState('detached', null)}</div>`;
+    if (a.layers.length === 0) return html`<div class="panel">${heading()}<span part="state" data-state="empty">No layer on</span></div>`;
+    if (a.status === 'idle' || a.status === 'loading') return html`<div class="panel">${heading()}${renderState('loading', this.resolvedStore?.get('status') ?? null)}</div>`;
+    if (a.status === 'refused') {
+      return html`<div class="panel">${heading()}<span part="state" data-state="refused"><span part="refusal">${a.refusal?.code}: ${a.refusal?.detail}</span></span></div>`;
+    }
+    if (a.served.length === 0) return html`<div class="panel">${heading()}<span part="state" data-state="empty">Nothing in this view</span></div>`;
+    const stale = this.resolvedStore?.get('status').stale ?? false;
+    const opened = this.resolvedStore?.get('selection').artifact?.id ?? null;
+    const topics = attachedTopics(a, this.resolvedStore?.get('meta') ?? null);
+    const listed = flatten(a.lineage).filter(({artifact}) => !topics.size || !(this.resolvedStore?.get('meta')?.layers.find((l) => l.name === artifact.layer)?.depsOn.length));
+    const shown = listed.slice(0, this.rows);
+    const n = a.lineage.linked ? a.lineage.roots.length : a.served.length;
+    return html`<div class="panel">${heading(`${n.toLocaleString('en-GB')} cluster${n === 1 ? '' : 's'}`)}
+      <span part="state" data-state="shown"></span>
+      <ul part="items" class="list">
+        ${shown.map(({artifact, depth}) => {
+          const masked: Masked = {value: Number(artifact.maskedCount), exact: true};
+          return html`<li
+            part="item"
+            class="item"
+            role="button"
+            tabindex="0"
+            style=${`--depth:${depth}`}
+            data-id=${idString(artifact.tesseraId)}
+            aria-selected=${opened === artifact.tesseraId ? 'true' : 'false'}
+            ?data-opened=${opened === artifact.tesseraId}
+            @click=${() => this.open(artifact)}
+            @keydown=${(e: KeyboardEvent) => {
+              if (e.key === 'Enter' || e.key === ' ') this.open(artifact);
+            }}
+          >
+            <span part="name" class="name" title=${artifact.layer} ?data-unnamed=${displayName(artifact, topics) === null}
+              >${displayName(artifact, topics) ?? UNNAMED}</span
+            >
+            <tessera-count part="count" .masked=${masked} .stale=${stale}></tessera-count>
+          </li>`;
+        })}
+      </ul>
+      ${listed.length > shown.length ? html`<div class="muted xs">and ${(listed.length - shown.length).toLocaleString('en-GB')} more</div>` : nothing}
+    </div>`;
+  }
+}
+
+/**
+ * The served tree as a list: parents immediately above their own children, largest count first
+ * at every level — a row's position says what contains it, which a flat sort by count loses.
+ *
+ * **An artifact appears once.** On a `dag` layer a child is served under several parents
+ * (decision 0117), and it is listed beneath the first one this walk reaches — a depth-first walk
+ * from the roots in count order, ties by lowest identifier, so the row it lands under is a
+ * function of the served set alone and never of the wire's row order. Whether it should instead
+ * appear under each served parent, and how a row would say *also under X*, is the components
+ * work's and is not decided here (`dag-hierarchies.md` §7).
+ */
+export function flatten(lineage: ServedLineage): {artifact: Artifact; depth: number}[] {
+  const out: {artifact: Artifact; depth: number}[] = [];
+  const bigger = (a: Artifact, b: Artifact) =>
+    a.maskedCount < b.maskedCount ? 1 : a.maskedCount > b.maskedCount ? -1 : a.tesseraId < b.tesseraId ? -1 : a.tesseraId > b.tesseraId ? 1 : 0;
+  const seen = new Set<bigint>();
+  const push = (into: {artifact: Artifact; depth: number}[], of: Artifact[], depth: number) => {
+    for (const artifact of [...of].sort(bigger).reverse()) into.push({artifact, depth});
+  };
+  const stack: {artifact: Artifact; depth: number}[] = [];
+  push(stack, lineage.roots, 0);
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    if (seen.has(node.artifact.tesseraId)) continue;
+    seen.add(node.artifact.tesseraId);
+    out.push(node);
+    push(stack, lineage.childrenOf.get(node.artifact.tesseraId) ?? [], node.depth + 1);
+  }
+  return out;
+}
+
+attachContextRoot();
+defineOnce('tessera-artifact-list', TesseraArtifactList);
+
+declare global {
+  interface HTMLElementTagNameMap {
+    'tessera-artifact-list': TesseraArtifactList;
+  }
+}

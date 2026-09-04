@@ -1,17 +1,17 @@
 # Annotations — artifacts, edges and layers
 
 **Date:** 2026-08-15 · **Promoted:** 2026-08-16
-**Status:** **Normative for the annotation model** — what an artifact, an edge and a layer *are*, and what governs whether one is served. Reviewed under three lenses (Stage 0, 2026-08-15; the record is [`2026-08-15-artifact-design-review.md`](../evidence/memos/2026-08-15-artifact-design-review.md)) and ruled by decisions [0074](../decisions/0074-row-less-entities-are-allocated-downward.md)–[0083](../decisions/0083-the-frontier-is-a-request-time-budget.md). The two amendments owed to the normative architecture are **performed** — §7.5's descent and §7.7's ladder, architecture r43, which also carries the register rows this design owes. `architecture.md` remains the specification and wins every conflict; [`annotation-write-cycle.md`](annotation-write-cycle.md) owns the write cycle, and where this document disagrees with it, that one wins.
-**⊘ Five things are open inside a normative document, each due at the stage that needs it** — this is deliberate, and they are marked ⊘ at their sites rather than held against promotion: search's containment gate (the review's ruling 5 — Stage 8), the filter axis (§11 — Stage 8), membership packaging ([`annotation-representation.md`](annotation-representation.md) §2.4 — Stage 2), the proportional criterion's denominator for predicate membership (§5 — Stage 6), and the edit pass ([decision 0077](../decisions/0077-supplied-content-lives-in-the-record-blob.md) defers it — Stage 7). None of them blocks the spine, and each is named where an implementer meets it. The measurements [`annotation-representation.md`](annotation-representation.md) §11.3 lists are owed on the same terms — allocated to stages, not to promotion.
+**Status:** **Normative for the annotation model** — what an artifact, an edge and a layer *are*, and what governs whether one is served. Reviewed under three lenses (Stage 0, 2026-08-15; the record is [`2026-08-15-artifact-design-review.md`](../evidence/memos/2026-08-15-artifact-design-review.md)) and ruled by decisions 0074–0083. The two amendments owed to the normative architecture are **performed** — §7.5's descent and §7.7's ladder, architecture r43, which also carries the register rows this design owes. `architecture.md` remains the specification and wins every conflict; [`annotation-write-cycle.md`](annotation-write-cycle.md) owns the write cycle, and where this document disagrees with it, that one wins.
+**⊘ Five things are open inside a normative document, each due at the stage that needs it** — this is deliberate, and they are marked ⊘ at their sites rather than held against promotion: search's containment gate (the review's ruling 5 — Stage 8), the filter axis (§11 — Stage 8), membership packaging ([`annotation-representation.md`](annotation-representation.md) §2.4 — Stage 2), the proportional criterion's denominator for predicate membership (§5 — Stage 6), and the edit pass (decision 0077 defers it — Stage 7). None of them blocks the spine, and each is named where an implementer meets it. The measurements [`annotation-representation.md`](annotation-representation.md) §11.3 lists are owed on the same terms — allocated to stages, not to promotion.
 **Supersedes** the retired `derived-artifact-gating.md`, whose taxonomy this collapses — three gates become one containment test plus one existence criterion (§4, §5); that document is deleted (2026-08-15). What existed nowhere else is carried here: the point-scale cardinality argument for edges and the structural form of an edge gate (§5), and the induced-subgraph sampling problem, parked by name (§11).
-**Reads against:** design §5.1, §7.5–§7.8, §8.4, §12.3, Appendix C (C1, C2, C3, C7, C11, C12, C17, C23); contracts §2.2, §2.6, §3.2; [`views-and-multi-table.md`](views-and-multi-table.md) §3; decisions [0005](../decisions/0005-tessera-id-keyed-bijection.md), [0006](../decisions/0006-per-session-handles-retired.md), [0028](../decisions/0028-postings-requirement-and-the-pair-relation.md).
+**Reads against:** design §5.1, §7.5–§7.8, §8.4, §12.3, Appendix C (C1, C2, C3, C7, C11, C12, C17, C23); contracts §2.2, §2.6, §3.2; [`views.md`](views.md) §3; decisions [0005](../decisions/0005-tessera-id-keyed-bijection.md), 0006, 0028.
 **Citation convention:** unprefixed §n is the architecture design; this document's own sections are cited as **spec §n**.
 
 > **⊘ Almost none of this is built.** There are no artifacts, no layers and no membership structure.
 > What exists is the entity allocation the design turns on
-> ([decision 0073](../decisions/0073-entity-ties-are-ordered-by-morton-code.md)'s Morton tiebreak, in
+> (decision 0073's Morton tiebreak, in
 > both build paths). Every other claim below describes a mechanism, never a property the system has
-> today. **Status lives in [`artifact-delivery.md`](../artifact-delivery.md)**, by owner direction —
+> today. **Status lives in artifact-delivery.md**, by owner direction —
 > not in issues [#13] and [#41], which describe the capability from outside and are not the record.
 
 ---
@@ -78,7 +78,7 @@ two, which earlier revisions did not.
 edge. Edges are declared, never derived: the engine asserts no relation the caller did not state.
 
 **A layer's parent edges are all within one level or all between levels, and which decides what they
-are for** ([decision 0087](../decisions/0087-cross-level-edges-are-information-not-rollup.md)).
+are for** (decision 0087).
 Within a level they are roll-up — the ladder a request's artifact budget climbs when it cannot draw
 everything. Between levels they are information — what contains what, so a client can nest what it
 draws or filter to one subtree — and a budget is inert, the resolution being the level the client
@@ -100,7 +100,7 @@ layers share nothing.
 | identity and name — what a registry lists | its artifact set |
 | the **gate**: whether a viewer may know this analysis exists | its ordinal space and reserved entity run |
 | lifecycle: create, drop, replace, tombstoned name | its representation and membership source |
-| hierarchy kind — flat, nested, stacked or tiered | its advisory zoom range |
+| hierarchy kind — flat, nested, stacked or tiered | its zoom range, which since 2026-08-28 is the default bound on a response (decision 0103) rather than advice |
 | the **own-terms flag** and **existence criterion** its artifacts use (§5) | its containment-verification result |
 | which views it appears in | |
 | relations to other layers | |
@@ -141,7 +141,7 @@ administrative level, zoom band, level of detail.
 | **layer** | MVT / QGIS / MapLibre **layer** — one-to-one on the wire |
 | **level** | admin level (`admin_0/1/2`), zoom band, level of detail |
 | **artifact** | **feature** |
-| a level's advisory zoom range | a tile schema's `minzoom` / `maxzoom` |
+| a level's zoom range | a tile schema's `minzoom` / `maxzoom` |
 
 An earlier revision called the layer a *family* and the level a *layer*, which collided with the
 corpus in its own tile-serving section and would have forced a translation on every style sheet
@@ -179,7 +179,7 @@ first, because only the first is a question about access.
 
 **An artifact's content is a ranked list, and each entry has its own gate. The list is
 ranked by the caller, and a viewer is served the first they satisfy — entire — or nothing at all**
-(decisions [0078](../decisions/0078-the-service-takes-no-opinion-on-which-variation.md),
+(decisions 0078,
 [0076](../decisions/0076-an-artifact-is-served-whole-or-not-at-all.md)). That is the whole
 mechanism, and nothing else about choosing what to show belongs in the service: the ordering is
 supplied, never derived, because only the caller knows why one entry precedes another.
@@ -216,14 +216,14 @@ first, because only the first is a question about access.
 survive.** If one entry turns out to disclose, suppress the **artifact** — immediate under Rule S,
 fail-closed, and the intermediate state is the safe one — then edit the bad entry out and
 unsuppress. **⊘ The edit step is deferred to a design pass of its own** *(owner, 2026-08-15;
-[decision 0077](../decisions/0077-supplied-content-lives-in-the-record-blob.md))*, so the path as
+decision 0077)*, so the path as
 written does not exist yet and the withdrawal that does is **suppress,
 then republish the layer without the offending content**. That is slower and it is not weaker: the
 suppression acts at the ack, fail-closed, and the republish makes it permanent.
 
 **Editing is not the obstacle it was drafted as, and the reason is worth keeping.** Supplied content
 lives in the record blob at the artifact's own entity
-([decision 0077](../decisions/0077-supplied-content-lives-in-the-record-blob.md)). Bundle files are
+(decision 0077). Bundle files are
 immutable and digest-verified, so nothing is mutated under a live reader — but every writer here
 already publishes rather than mutates, a record lives in a single 256 KiB block and never straddles
 two, and a publication is a write-then-rename. An edit is therefore a republish of the extent the
@@ -247,7 +247,7 @@ labels) declares one that stands for the artifact as a whole, knowing each entry
 its own set.
 
 **This reduces §7.7 from a mechanism to guidance**
-([decision 0078](../decisions/0078-the-service-takes-no-opinion-on-which-variation.md); ⊘ the
+(decision 0078; ⊘ the
 amendment to §7.7 is owed at promotion). Its five tiers remain what §7.8 uses them for — advice on
 which generating sets to produce. A caller wanting the ladder's behaviour expresses it as ranked
 contents; the service neither knows nor needs to know that is what they are doing.
@@ -358,7 +358,13 @@ client's obligations rather than the server's.
 A layer declares which derived properties its artifacts expose, from a closed vocabulary the engine
 implements — **`centroid`, `box` and `hull` as built** (Stage 3), each computed from the visible
 rows and served in the grid units the point path already uses, so a client needs no quantisation
-extent to draw one. A name outside the vocabulary is **refused at registration** rather than
+extent to draw one. A `membership = "spatial"` layer may declare them too: its artifacts are
+published rows and its membership is resolved into a per-row source when a segment is published
+([`polygon-membership.md`](polygon-membership.md) §6.2, §6.3), so a computed property costs it what
+it costs an enumerated layer. An attribute layer may not — reaching one artifact's membership there
+is a scan of the whole column. **`hull` is a concave (alpha) shape over the visible members, not their convex
+wrap, and it carries one ring per separated group of them rather than one ring per artifact** — see
+below. A name outside the vocabulary is **refused at registration** rather than
 accepted and quietly omitted: an artifact served without content its layer declared cannot be told
 apart, by a client, from one whose content was withheld — and nothing is withheld from a served
 artifact. ⊘ **`extractive_terms` is specified and not implemented**, and is therefore refused with
@@ -367,6 +373,46 @@ silence. **Count is intrinsic** — every artifact has a masked count, and the e
 requires it computed regardless. Everything else is opt-in, because a hull over masked members costs O(visible
 members) per artifact per request where a count is one bitmap operation, and a client drawing only
 centroids should not pay hull cost for every artifact on screen.
+
+**The hull follows the members rather than wrapping them.** A cluster found by density is an
+irregular region — crescent, branching, often both — and its convex wrap swallows the empty space
+between the arms, overlaps every sibling, and draws single straight edges across the whole viewport.
+The shape served is instead a concave one over the same visible members: start at the convex wrap,
+which contains every member, and repeatedly replace the longest edge `(a, b)` above α with
+`(a, c)` and `(c, b)`, where `c` is the visible member closest to the line through `a` and `b` among
+those on the interior side of it that project inside the segment. Being the *closest* is what makes
+the carved triangle empty of members, so the shape contains every visible member at every step; the
+whole construction is exact integer arithmetic, so it is a function of the member positions and of
+nothing else.
+
+**And it is several rings where the members are several clouds.** A membership can be two separated
+regions, and one ring around both claims the ground between them — a claim digging cannot undo,
+because it works inward from a boundary and a gap with a ring on both sides is reachable from
+neither. So the visible members are grouped first, at the same α, and a ring is dug per group; each
+ring holds every member of its own group. The geometry, the grouping rule and what it gives up are
+[`artifact-shapes.md`](artifact-shapes.md)'s, which is normative for them.
+
+Two parameters, and **neither is a caller's to set**. **α is derived from the shape's own edges** —
+three times the median edge of that principal's convex wrap — so two principals' shapes differ only
+because their memberships do, and a request cannot dial one; a densely sampled convex cloud keeps
+its wrap unchanged, and a point set in convex position keeps it exactly, whatever α is. And digging
+spends a **bounded vertex budget**, longest edge first and **per artifact rather than per ring**, so
+a shape carries at most 2,048 vertices beyond what its groups' wraps carried — a guard against a pathological membership, not a fidelity control: on every layer measured the digging terminates on its own well below it and several groups do not
+multiply the wire. The budget rather than an absolute cap is forced: every vertex is a visible
+member's position and every member is inside a ring, so the wraps' own vertex count is a floor —
+going below it means either leaving a member outside every ring or inventing a vertex no member
+occupies.
+
+**No leak-register row follows, and the argument is short.** The inputs are the same
+`membership ∩ M_auth`, the derivation is the same per-request one, every vertex is a visible member's
+position either way, and the result is a *subset* of the convex hull — it says less about where the
+members a principal cannot see are sitting, not more. Several rings say less again: they are the
+same members drawn without the ground between them. Nothing here lets a viewer end up knowing
+something about data they were not served, which is the register's inclusion test
+(design Appendix C's head note). Measured on the 2.4M-document corpus in
+[`2026-08-26-concave-hulls.md`](../evidence/memos/2026-08-26-concave-hulls.md): shapes 14% tighter in
+area on average, 1.4× the convex path's time over a whole 197-artifact layer, and the hull columns
+four times the bytes they were.
 
 **The declaration is therefore a cost control, not a security control**, and carries the same status
 as the pruning policy (spec §6.1): it may be changed without review, because every value it can take
@@ -404,7 +450,7 @@ say *public*, which is why the reach for `[]` was inevitable.
 wants no criterion says `none` in the field that means it; a declaration with the field missing is
 refused at parse. Under the old three-mode enumeration one schema word — *substitutive* — switched
 the criterion off as a side effect; making absence its own statement is what closes that path
-([decision 0079](../decisions/0079-the-gate-is-one-flag-not-three-modes.md)).
+(decision 0079).
 
 **Two fields carry a security consequence, not one** *(review finding)*. Whether a supplied item is
 corpus-independent — declaring a fitted centroid corpus-independent would serve it to every
@@ -420,7 +466,7 @@ separating these two fields from the derived vocabulary above, where every value
 ## 5. Existence: one flag, one criterion
 
 A layer declares two independent controls for its artifacts, and both are conjuncts of §3's one
-test ([decision 0079](../decisions/0079-the-gate-is-one-flag-not-three-modes.md)):
+test (decision 0079):
 
 - **The own-terms flag** — *does an artifact carry its own access terms?* If it does, a viewer must
   satisfy them before the artifact exists for them. The flag generalises **C23**'s authored gate —
@@ -441,7 +487,7 @@ test ([decision 0079](../decisions/0079-the-gate-is-one-flag-not-three-modes.md)
 
 ⊘ **The proportional form also breaks rollup's monotonicity** (§6): a ratio does not shrink from
 parent to child, so a passing child can sit beneath a failing parent in a properly nested tree
-([decision 0082](../decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md)). A layer
+(decision 0082). A layer
 declaring it must expect gaps in its lineage.
 
 The proportional form reads the declared, unmasked membership size as a **predicate input** — it
@@ -482,7 +528,7 @@ resolve-once-at-authorise rule an earlier revision stated here: that rule held e
 a pre-edit gate for the session's remaining life). The request-time check is a set-membership lookup
 identical in work for a gate-failed name and a never-registered one; a request naming an unreachable
 layer is indistinguishable in outcome and in work from naming one that never existed. This is the
-view gate's mechanism ([`views-and-multi-table.md`](views-and-multi-table.md) §3) applied to a
+view gate's mechanism ([`views.md`](views.md) §3) applied to a
 second object, cited rather than re-derived — **⊘ and the mechanism cited is itself provisional and
 unbuilt**: the view registry design is not normative and has no code behind it, so this imports a
 shape, not machinery. It narrows and never widens.
@@ -514,7 +560,7 @@ insufficient visibility becomes rollup rather than suppression. **That descent i
 is owed at promotion), and artifacts are tested independently instead.
 
 **A tree and a level set are different structures, and neither carries the other**
-([decision 0082](../decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md)). A nested
+(decision 0082). A nested
 layer's hierarchy is its **edges** and it declares no levels: a condensed tree is unbalanced, so one
 region splits at depth two and another at depth nine, and a level number would say nothing about
 position in the lineage. Levels are for resolutions that are semantic and balanced — an
@@ -530,6 +576,19 @@ shrink downward, so a parent at 5% of 10 000 declared members can fail a 10% rul
 `require_member_visibility = { fraction = … }` must expect gaps in its lineage. No disclosure follows either way, since each artifact passed its own
 test; what follows is a rendering consequence the caller chooses.
 
+**A withheld artifact is not in the viewer's tree** (owner ruling 2026-09-01, decision 0117). The structure
+a frontier is selected over, and a budget cuts, is the artifacts this principal passes, with an edge
+wherever one passing artifact is the nearest passing ancestor of another; depth is counted in
+passing artifacts, and one with no passing ancestor is a root of that tree. So the served set at
+every depth is identical to the world in which the withheld artifact never existed, which is what
+C29's *indistinguishable from one that never existed* means for the cut, and substitution stays
+honest because containment is transitive. **Until 2026-09-01 the implementation walked the whole level** —
+a withheld artifact occupied a rung and the climb passed through it, so a budget's settling depth
+was a function of artifacts the viewer may not see, one bit per budget sweep about a region's
+structure. Corrected that day rather than registered; [`dag-hierarchies.md`](dag-hierarchies.md) §6
+carries the example, the fix and its measured cost. The rule holds
+for the `dag` kind identically, where the nearest passing ancestor is a set.
+
 **What remains is frontier *selection*, which is a display concern.** Where a parent and a child both
 pass, something must choose or the map draws both and counts the same points twice at two sizes.
 That is a computation over the edges — for each passing artifact, does a descendant also pass — and
@@ -538,7 +597,7 @@ serving the frontier serves strictly less than serving every passer, and serving
 nothing beyond what each artifact's own presence already does.
 
 **And it is where the response gets its bound, which levels had been supplying quietly**
-([decision 0083](../decisions/0083-the-frontier-is-a-request-time-budget.md)). A viewport intersects
+(decision 0083). A viewport intersects
 a root and every passing descendant of it, so the depth of the cut is a **request parameter** in the
 shape of the mark budget a viewport already carries, and the layer declares only the default.
 Artifacts cannot be sampled (`annotation-representation.md` §6.1), so a budget is met by **serving
@@ -811,7 +870,7 @@ control over *corpus* structure, and a hand-assembled selection's structure is t
 So the layer sets the own-terms flag — the analyst's term, or a team's — and declares **no
 criterion**, in the field that means it (§4.2). Under the old enumeration that outcome arrived as a
 side effect of the word *substitutive*; under the flag it is its own deliberate statement
-([decision 0079](../decisions/0079-the-gate-is-one-flag-not-three-modes.md)).
+(decision 0079).
 
 Its count is still masked, which gives the behaviour that matters: a set of ten shared with a
 colleague who cannot see three of its members shows **seven**. Not an edge case — the system working,
@@ -889,6 +948,16 @@ The general lesson the layer exists to record: **the axis is where the geometry 
 whether the object is called a cluster, a polygon or a circle.** A supplied hull over an HDBSCAN
 cluster is this same case wearing a shape that looks like the engine's own output.
 
+The same circle may instead be declared as the layer's **membership** — `membership = "spatial"`
+with `shape.kind = "circle"` — and then it says *every point within r of the centre*, which is not
+k-means: which field the row puts the shape in decides the gate, and a membership shape is served
+under the artifact's own verdict alone, so declaring one is declaring it corpus-independent
+([`polygon-membership.md`](polygon-membership.md) §4.1, ruling (h)). `[[layer.content.supplied]]`
+takes `type = "polygon" | "circle" | "ellipse"`, read at publication as a membership shape is and
+served as the layer's **authored** drawn geometry through the same `shape_x`/`shape_y` columns
+(`polygon-membership.md` §7.1); the content slot itself is served blank, and a layer declares at
+most one drawn geometry — a supplied circle beside a computed `hull` is refused.
+
 ### 8.7 Terms as artifacts — a case the model was not designed for
 
 **Not scoped and not proposed** (owner observation, 2026-08-15). Recorded because it exercises the
@@ -941,9 +1010,9 @@ affordable and is not on any request path.
 |---|---|
 | `derived-artifact-gating.md` | **Retired at promotion.** Its taxonomy collapses into §4's one test plus §5's flag and criterion; what existed nowhere else — the point-scale edge argument, the edge gate's structural form, the induced-subgraph sampling problem — is carried at §5 and §11. Its advice that cluster identifiers are ephemeral per rebuild dies with it: identity survives an edit ([decision 0081](../decisions/0081-a-replacement-mints-identities-an-edit-keeps-them.md)) |
 | §7.5 | The frontier is a per-artifact test, not a tree walk (spec §6). Ruled ([decision 0080](../decisions/0080-the-frontier-is-a-per-artifact-test.md)); ⊘ **the amendment is owed at promotion** |
-| §7.6, §7.7 | A label is an artifact. The ladder reduces to caller guidance (§2.3): the service resolves an artifact's ranked *contents* by clearance and chooses between separate artifacts never. Ruled ([decision 0078](../decisions/0078-the-service-takes-no-opinion-on-which-variation.md)); ⊘ **the §7.7 amendment is owed at promotion** |
+| §7.6, §7.7 | A label is an artifact. The ladder reduces to caller guidance (§2.3): the service resolves an artifact's ranked *contents* by clearance and chooses between separate artifacts never. Ruled (decision 0078); ⊘ **the §7.7 amendment is owed at promotion** |
 | §7.8 | Add: rollup terminates only if the caller supplies a covering level; a contrastive labeller's generating set includes the contrast material |
-| [Decision 0006](../decisions/0006-per-session-handles-retired.md) | Its node-handle carve-out is withdrawn |
+| Decision 0006 | Its node-handle carve-out is withdrawn |
 | `records-and-search.md`, `filter-index.md` | The artifact population is its own population, named by the request ([`annotation-representation.md`](annotation-representation.md) §7–§8); search over it has **no containment gate as specified** — the route is withdrawn until the review's ruling 5 lands, the one ruling still open |
 | Appendix C | C1 gains layers as a differencing surface; the own-terms flag needs a row of C23's shape; artifact identifiers fall under C17; a corpus-independence declaration on supplied content needs a row of C12's shape (spec §4.2). Drill-down's proposed row dissolved by measurement ([`annotation-representation.md`](annotation-representation.md) §8), with a staleness residue carried in [`annotation-write-cycle.md`](annotation-write-cycle.md) §11 |
 
@@ -968,7 +1037,7 @@ affordable and is not on any request path.
 - ⊘ **Membership packaging** — one file per artifact does not survive the bundle's digest model at
   10⁷ manifest entries; a packed form behind a bounded number of entries is owed
   ([`annotation-representation.md`](annotation-representation.md) §2.4). Supplied content's home is
-  ruled — the record blob ([decision 0077](../decisions/0077-supplied-content-lives-in-the-record-blob.md)).
+  ruled — the record blob (decision 0077).
 - **The induced-subgraph sampling problem**, parked by name (carried from the retired
   `derived-artifact-gating.md`): an edge is drawable only if both endpoints are in the **served**
   set, not merely the visible one, so a future graph domain must either restrict edges to
@@ -1015,55 +1084,3 @@ derived vocabulary follows from what an artifact *has*, and that the axis separa
 polygon from a point-and-radius blob is where its geometry came from. §7.1 and §8.6 are that question
 followed through — the first finding that C4's structural closure does not survive the artifact
 population, which is the sharpest finding in the document and did not come from drafting it.
-
-## Appendix R
-
-**r6 — 2026-08-19. Two config spellings, corrected.** §6 named the proportional criterion
-`min_fraction` and §8.3 declared computed content as `derived = [count]`; neither parses. The
-criterion is `require_member_visibility = { fraction = … }` and computed content is
-`content = { computed = [...] }`, with the masked count intrinsic and never declared
-([decision 0088](../decisions/0088-visibility-is-two-axes-and-the-membership-test-is-one.md),
-[`configuration.md`](configuration.md) §1). §7's blockquote keeps `min_visible_members`, being a
-quoted review finding from before the rename, and the *withdrawn* section's record. No rule moves.
-
-**r5 — 2026-08-19. Vocabulary only.** What §2.3 called a *variation* is an entry in the artifact's
-ranked **`contents`**, and its position in that list is its **rank** — the names
-[`configuration.md`](configuration.md) §1 and [`annotation-write-cycle.md`](annotation-write-cycle.md)
-§6.1 already carry. No rule of §2.3, §3 or §4 moved: one artifact, one identity, each entry gated on
-its own generating set, the first the viewer satisfies served entire or nothing. The old word said
-nothing about what the thing was and left the caller's ranking unnamed.
-
-**r4 — 2026-08-16. Promoted to normative.** The two rulings taken after r3 are folded in: a layer's
-lineage is its **edges** and its levels are declared resolutions, independent structures neither of
-which carries the other ([decision 0082](../decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md),
-§6), and what bounds a treed layer's response is a **request-time artifact budget** rather than a
-declared depth ([decision 0083](../decisions/0083-the-frontier-is-a-request-time-budget.md), §6). The
-amendments this document owed the normative architecture are **performed** — §7.5's descent and
-§7.7's ladder, with §8.4's second threshold withdrawn alongside them and the register gaining C27,
-C28 and annotations to C1 and C17 (architecture r43). What promotion did **not** do is close the five
-⊘ items in the status line: they are allocated to the stages that need them, which is the whole
-argument for promoting now — an implementer building the spine is not blocked by search's gate.
-
-**r3 — 2026-08-15.** The owner rulings (decisions 0074–0081) applied. Existence became one test
-(§3), the gate modes one flag beside an independent criterion (§5), the ladder ranked variations
-(§2.3), the frontier a per-artifact test settled rather than proposed (§6), and §8.2's rollup was
-rewritten as the finer artifact absent and the coarser one served whole — nothing anywhere
-suppresses or coarsens a number. §8.6's degrade-to-derived is deleted. What remains open is in the
-status header.
-
-**r2 — 2026-08-15.** Stage 0 adversarial review, three lenses
-([record](../evidence/memos/2026-08-15-artifact-design-review.md)). The core — three object kinds,
-three questions, one containment test plus one threshold — survived all three. What did not survive
-is the claim to have *derived* the dependent rules: the threshold's owner (§5), label existence (§3,
-§2.3, §8.1) and the filter axis (§11) are each stated as the open contradictions they are and
-pointed at their owner rulings rather than resolved. §6.2's build-time bounding box — a panning
-channel the representation had already closed — is deleted; candidacy is the masked row-range test.
-The emergency-withdrawal path is marked as depending on where supplied content lives (ruling 4), and
-multi-version membership is recorded as undefined. Cross-references corrected toward the reviewed
-[`annotation-write-cycle.md`](annotation-write-cycle.md), which wins where they disagreed.
-
-**r1 — 2026-08-15.** Drafted; §7/§7.1 withdrawn after three reviews found the reuse claim fail-open
-(see §7's notice).
-
-[#13]: https://github.com/jennis0/tessera-index/issues/13
-[#41]: https://github.com/jennis0/tessera-index/issues/41

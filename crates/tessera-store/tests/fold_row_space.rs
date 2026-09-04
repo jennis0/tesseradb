@@ -14,8 +14,8 @@ use tessera_spatial::fixed32;
 use tessera_spatial::tiler::{sort_batch, TilerItem};
 use tessera_store::read::{ColumnsRef, MortonSlice};
 use tessera_store::write::write_segment;
-use tessera_store::{fold_row_space, FoldRowSpaceSpec, FoldSegmentInput, Permutation};
-use tessera_types::{EntityId, IdentityKey};
+use tessera_store::{fold_row_space, FoldRowSpaceSpec, FoldSegmentInput, Permutation, RowToEntity};
+use tessera_types::{EntityId, IdentityKey, RowId};
 
 fn key() -> IdentityKey {
     IdentityKey::from_hex("0123456789abcdef0123456789abcdef").expect("test key")
@@ -73,6 +73,7 @@ fn fold(
             identity_key: &key(),
             shard_id: 0,
             scalar_schema: &[],
+            scoped_from: usize::MAX,
             tombstones,
             permutation_bound: bound,
         },
@@ -253,10 +254,11 @@ fn permutation_maps_survivors_and_marks_dropped_and_unknown_entities_absent() {
 
     // The `0xFF` sentinel, directly: read entity 500's raw slot bytes (never named by any input
     // or tombstone) and confirm the writer's fill, not merely that some reader interprets it as
-    // absent. Format per `write.rs`: 16-byte header (`"TSPM"`, u16 version, u16 reserved, u64
-    // bound), then one little-endian `u32` slot per entity id.
+    // absent. Format per `tessera_store::permutation`: a 24-byte header, a `u32` per page of
+    // directory, zero padding to a 4 KiB boundary, then the present pages of 2¹⁶ slots each. This
+    // fold's bound is 1000, so there is one page and it is present.
     let bytes = fs::read(&perm_path).expect("read permutation.bin");
-    let at = 16 + 500 * 4;
+    let at = 4096 + 500 * 4;
     let slot = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
     assert_eq!(
         slot, 0xFFFF_FFFF,
@@ -317,5 +319,82 @@ fn the_empty_tombstone_set_is_a_faithful_reemission() {
             permutation.row_of(EntityId::new(e)).is_some(),
             "entity {e} must have a row when nothing was tombstoned"
         );
+    }
+}
+
+/// **The fold's two outputs invert one another.** Pass 1 writes `permutation.bin` and
+/// `row-entity.u32` from the same loop, and nothing downstream checks that they agree:
+/// `RowSpace::with_row_entity` stores the table with no validation, not even a length check. So
+/// the agreement is asserted here, over a fold's own production of both, rather than over a
+/// hand-supplied row order (which is what `tests/row_entity.rs` covers).
+///
+/// The harm is in the widening direction. `RowSpace::entity_of` is how the filtered viewport's
+/// per-tile crossing route decides which of a viewport's rows belong to a filter's verdict set;
+/// that set is a subset of `M_auth`, so a table misaligned with the permutation admits rows whose
+/// true entity is not in it. The route is chosen by a cost ratio, so the same request answers
+/// correctly on one shape and wrongly on another.
+///
+/// Mutations this kills: pushing the entity above the tombstone `continue`, so the table gains one
+/// entry per *input* row rather than per emitted row — every row after the first tombstone is
+/// attributed to the wrong entity and the table claims more rows than the segment holds; and any
+/// off-by-one, reordering or duplicate in either structure.
+#[test]
+fn the_fold_writes_a_row_entity_table_that_inverts_its_permutation() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let a = write_input(dir.path(), "seg-a", &(100..110).collect::<Vec<_>>(), 7);
+    let b = write_input(dir.path(), "seg-b", &(200..208).collect::<Vec<_>>(), 31);
+
+    let dead = tombstones(&[101, 103, 205]);
+    let (out, _output_dir, perm_path) = fold(dir.path(), &[a, b], &dead, 1000);
+    let table_path = dir.path().join(tessera_store::ROW_ENTITY_FILE);
+
+    let permutation = Permutation::load(&perm_path).expect("permutation.bin loads");
+    let table = RowToEntity::load(&table_path).expect("row-entity.u32 loads");
+
+    // The fixture must actually drop rows, or the two structures agree for the trivial reason
+    // that nothing was skipped between them and this test proves nothing.
+    assert_eq!(out.row_count, 15, "18 input rows less three tombstoned");
+    assert_eq!(
+        table.row_count(),
+        out.row_count,
+        "the table must describe exactly the rows the segment holds"
+    );
+
+    for row in 0..out.row_count {
+        let row = RowId::new(row);
+        let entity = table
+            .entity_of(row)
+            .unwrap_or_else(|| panic!("row {} has no entity in the table", row.raw()));
+        assert_eq!(
+            permutation.row_of(entity),
+            Some(row),
+            "the table sends row {} to entity {}, which the permutation does not send back",
+            row.raw(),
+            entity.raw()
+        );
+        assert!(
+            !dead.contains(entity.raw() as u32),
+            "row {} is attributed to tombstoned entity {}",
+            row.raw(),
+            entity.raw()
+        );
+    }
+
+    // And the other direction, so a table that merely covers a subset of the rows cannot pass:
+    // every surviving entity is named by exactly the row the permutation gives it.
+    for e in (100..110u64).chain(200..208) {
+        let entity = EntityId::new(e);
+        match permutation.row_of(entity) {
+            Some(row) => assert_eq!(
+                table.entity_of(row),
+                Some(entity),
+                "entity {e} holds row {} in the permutation but not in the table",
+                row.raw()
+            ),
+            None => assert!(
+                dead.contains(e as u32),
+                "entity {e} lost its row without being tombstoned"
+            ),
+        }
     }
 }

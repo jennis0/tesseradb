@@ -9,7 +9,7 @@
 mod common;
 
 use common::*;
-use tessera_engine::{ArtifactOut, Engine, ViewportRequest};
+use tessera_engine::{ArtifactOut, Engine, LayerSelection, ViewportRequest};
 use tessera_lifecycle::{wal::ChangeOp, IncomingArtifact};
 use tessera_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
@@ -23,6 +23,7 @@ const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 
 fn declaration(name: &str, criterion: Option<ExistenceCriterion>) -> LayerDeclaration {
     LayerDeclaration {
+        scope: Default::default(),
         name: name.into(),
         title: Some(format!("{name} (title)")),
         views: vec!["s0".into()],
@@ -299,7 +300,7 @@ fn a_drill_down_agrees_with_the_viewport_that_served_the_identifier() {
     let served = artifacts_of(&engine, &full_coverage_credential());
     let id = served[0].tessera_id;
     let drilled = engine
-        .artifact(&broad_session, id, None, "s0")
+        .artifact(&broad_session, id, None, "s0", None)
         .unwrap()
         .expect("the identifier this session was just served");
     assert_eq!(drilled, served[0], "one predicate, one answer");
@@ -308,7 +309,7 @@ fn a_drill_down_agrees_with_the_viewport_that_served_the_identifier() {
     // not a way round the criterion.
     let narrow_session = engine.authorise(&subset_credential()).unwrap();
     assert!(engine
-        .artifact(&narrow_session, id, None, "s0")
+        .artifact(&narrow_session, id, None, "s0", None)
         .unwrap()
         .is_none());
 
@@ -326,7 +327,7 @@ fn a_drill_down_agrees_with_the_viewport_that_served_the_identifier() {
             .tessera_ids[0],
     );
     assert!(engine
-        .artifact(&broad_session, point_id, None, "s0")
+        .artifact(&broad_session, point_id, None, "s0", None)
         .unwrap()
         .is_none());
 }
@@ -362,7 +363,7 @@ fn suppressing_an_artifact_removes_it_from_the_viewport_and_from_drill_down_at_t
     assert_eq!(after.len(), 1, "suppression takes effect at the ack");
     assert_eq!(after[0].key.as_deref(), Some("c1"));
     assert!(engine
-        .artifact(&session, served[0].tessera_id, None, "s0")
+        .artifact(&session, served[0].tessera_id, None, "s0", None)
         .unwrap()
         .is_none());
 
@@ -391,7 +392,7 @@ fn the_layer_selector_narrows_and_never_widens() {
     }
 
     let session = engine.authorise(&full_coverage_credential()).unwrap();
-    let answer = |layers: Option<&[&str]>| {
+    let answer = |layers: LayerSelection| {
         engine
             .viewport(
                 &session,
@@ -401,18 +402,22 @@ fn the_layer_selector_narrows_and_never_widens() {
             .artifacts
     };
 
-    assert_eq!(answer(None).len(), 2, "absent means every reachable layer");
+    assert_eq!(
+        answer(LayerSelection::All).len(),
+        2,
+        "`all` means every reachable layer"
+    );
     assert!(
-        answer(Some(&[])).is_empty(),
+        answer(LayerSelection::Named(&[])).is_empty(),
         "an empty list costs nothing and answers nothing"
     );
-    let one = answer(Some(&["clusters/a"]));
+    let one = answer(LayerSelection::Named(&["clusters/a"]));
     assert_eq!(one.len(), 1);
     assert_eq!(one[0].layer, "clusters/a");
     // A name that does not exist is absent, exactly as a name this principal could not reach
     // would be — asking is not a probe.
-    assert!(answer(Some(&["clusters/never"])).is_empty());
-    assert_eq!(answer(Some(&["clusters/a", "clusters/never"])).len(), 1);
+    assert!(answer(LayerSelection::Named(&["clusters/never"])).is_empty());
+    assert_eq!(answer(LayerSelection::Named(&["clusters/a", "clusters/never"])).len(), 1);
 }
 
 /// A publication is visible to the next request without a restart, a flush or a new session — and

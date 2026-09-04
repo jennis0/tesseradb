@@ -100,7 +100,7 @@ fn served(
     let session = engine.authorise(&credential(grant)).unwrap();
     let names = [layer];
     let mut request = ViewportRequest::new("s0", zoom, bbox, N as usize);
-    request.layers = Some(&names);
+    request.layers = tessera_engine::LayerSelection::Named(&names);
     engine
         .viewport(&session, request)
         .expect("a viewport over the fixture")
@@ -270,8 +270,8 @@ fn ingest_point_into(
     external_id: &str,
     value: u32,
     term: u32,
-    x: f32,
-    y: f32,
+    x: f64,
+    y: f64,
     columns: usize,
     at: usize,
 ) -> u64 {
@@ -285,11 +285,13 @@ fn ingest_point_into(
             vec![UnallocatedRow {
                 external_id: Some(external_id.as_bytes().to_vec()),
                 view: "s0".to_string(),
+                join: None,
                 descriptors: descriptors.clone(),
                 x,
                 y,
                 scalars: scalars_with_partition(value, columns, at),
                 terms: engine.resolve_terms(&descriptors),
+                scoped: Vec::new(),
             }],
             external_id.to_string(),
             hash,
@@ -299,12 +301,12 @@ fn ingest_point_into(
 }
 
 /// The generator's own schema: seven declared columns, `partition` at [`PARTITION_SCALAR`].
-fn ingest_point(engine: &Engine, external_id: &str, value: u32, term: u32, x: f32, y: f32) -> u64 {
+fn ingest_point(engine: &Engine, external_id: &str, value: u32, term: u32, x: f64, y: f64) -> u64 {
     ingest_point_into(engine, external_id, value, term, x, y, 7, PARTITION_SCALAR)
 }
 
 /// This file's own declaration: one column, so `partition` is at 0.
-fn ingest_own(engine: &Engine, external_id: &str, value: u32, term: u32, x: f32, y: f32) -> u64 {
+fn ingest_own(engine: &Engine, external_id: &str, value: u32, term: u32, x: f64, y: f64) -> u64 {
     ingest_point_into(engine, external_id, value, term, x, y, 1, 0)
 }
 
@@ -560,7 +562,7 @@ fn served_entity(engine: &Engine, grant: &str, layer: &str, key: &str) -> tesser
     let session = engine.authorise(&credential(grant)).unwrap();
     let names = [layer];
     let mut request = ViewportRequest::new("s0", 0, WHOLE_MAP, N as usize);
-    request.layers = Some(&names);
+    request.layers = tessera_engine::LayerSelection::Named(&names);
     engine
         .viewport(&session, request)
         .expect("a viewport")
@@ -586,7 +588,7 @@ fn a_predicate_artifact_answers_by_identifier_as_it_does_by_viewport() {
     let session = fx.engine.authorise(&credential(grant)).unwrap();
     let row = fx
         .engine
-        .artifact(&session, id, Some(idset), "s0")
+        .artifact(&session, id, Some(idset), "s0", None)
         .expect("the identifier route answers")
         .expect("the artifact the viewport just served is reachable by its identifier");
     assert_eq!(row.key.as_deref(), Some(key.as_str()));
@@ -599,7 +601,7 @@ fn a_predicate_artifact_answers_by_identifier_as_it_does_by_viewport() {
     let blind = fx.engine.authorise(b"{\"terms\": []}").unwrap();
     assert_eq!(
         fx.engine
-            .artifact(&blind, id, Some(idset), "s0")
+            .artifact(&blind, id, Some(idset), "s0", None)
             .expect("the identifier route answers")
             .map(|row| row.masked_count),
         Some(0)
@@ -618,7 +620,7 @@ fn a_predicate_artifact_answers_by_identifier_as_it_does_by_viewport() {
     assert!(
         gated
             .engine
-            .artifact(&blind, id, Some(idset), "s0")
+            .artifact(&blind, id, Some(idset), "s0", None)
             .expect("the identifier route answers")
             .is_none(),
         "a band below its own bar is reachable by identifier"

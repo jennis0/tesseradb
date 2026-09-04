@@ -10,10 +10,10 @@
 the ruling, superseding 0075's separation of the two membership tests; the register's C27 and C28
 are renamed onto the new keys at architecture r46. Those documents govern where they and this
 differ. The staged plan is
-[`2026-08-18-configuration-surface-plan.md`](2026-08-18-configuration-surface-plan.md).
+2026-08-18-configuration-surface-plan.md.
 **Reads with:** [`annotations.md`](../../design/annotations.md),
 [`records-and-search.md`](../../design/records-and-search.md) §2, and the working memo
-[2026-08-15 artifact configurations](2026-08-15-artifact-configurations.md), which this supersedes.
+2026-08-15 artifact configurations, which this supersedes.
 
 ## 1. What this is for
 
@@ -198,7 +198,7 @@ what a member with none gets. Omit `default` for points and a point with no labe
 principal — the narrow direction, so it may be omitted; a *widening* default never may.
 
 **The container's gate conjoins and can only narrow**, at both levels. That is already normative
-for views ([`views-and-multi-table.md`](../../design/views-and-multi-table.md) §3: a view's
+for views ([`views.md`](../../design/views.md) §3: a view's
 gate is a label, evaluated by the item-visibility predicate verbatim, *conjunctive with item
 labels, never substitutive*). ⊘ **View gating is specified and not implemented** — a bundle has
 one coordinate system reachable by every principal that authorises — so the `[[view]]` block is
@@ -330,7 +330,7 @@ us.
 the shared entity space — disjoint time ranges, several embedding spaces, several datasets — and
 *slice* reads as the temporal case that was merely the first instance. This is the one rename in
 this memo that reaches beyond the config: `slices-and-multi-table.md` (now
-[`views-and-multi-table.md`](../../design/views-and-multi-table.md)) is a normative document whose
+[`views.md`](../../design/views.md)) is a normative document whose
 title, sections and every citation carried the word, as did `SliceDescriptor`, `slice_id`, the
 per-slice layout paths and `--slice`. Pre-release that costs nothing but the edit
 ([decision 0048](../../decisions/0048-no-deployments-exist-so-delete-rather-than-support.md)); it
@@ -623,7 +623,7 @@ without disturbing the rest: the label layer's `visibility` defaulting to its pa
 ## 12. Cost and the plan
 
 The staged plan is
-[`2026-08-18-configuration-surface-plan.md`](2026-08-18-configuration-surface-plan.md).
+2026-08-18-configuration-surface-plan.md.
 
 
 

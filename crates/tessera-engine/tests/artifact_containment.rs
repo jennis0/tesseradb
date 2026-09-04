@@ -147,7 +147,7 @@ fn build_fixture_n(artifacts: u32) -> Fixture {
             ArtifactRecord {
                 entity: EntityId::new(u64::from(u32::MAX - ordinal)),
                 key: None,
-                members,
+                members: members.into(),
                 contents: sets
                     .into_iter()
                     .map(|set| ContentSet {
@@ -156,7 +156,7 @@ fn build_fixture_n(artifacts: u32) -> Fixture {
                     })
                     .collect(),
                 attached_to: None,
-                parent: None,
+                parents: Vec::new(),
             },
             None,
         );

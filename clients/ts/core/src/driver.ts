@@ -1,5 +1,6 @@
-import {calibrate, type DepthChoice} from './budget.js';
-import {plan, type Plan, type PlannerInputs, type Viewport} from './prefetch.js';
+import {calibrate, tileRectOfBbox, type CountCell, type CountField, type DepthChoice} from './budget.js';
+import {tileXY} from './coords.js';
+import {plan, worldBbox, type Plan, type PlannerInputs, type Viewport} from './prefetch.js';
 import {rectContains, rectContainsTile, rectIntersection, type TileRect} from './rects.js';
 import type {Replica, ReplicaFrame} from './replica.js';
 import {TesseraError} from './client.js';
@@ -62,7 +63,7 @@ export type DriverEvents = {
   onFrame(verdict: {tier: 'fold'; plan: Plan} | {tier: 'derive'; plan: Plan; frame: ReplicaFrame}): void;
   onStatus?(status: 'loading' | 'shown' | 'empty' | 'refused' | 'retrying', detail?: unknown): void;
   /** The Phase-0 instrumentation stream: request/arrived/covered/ring/ringskip/revalidate. */
-  onTrace?(kind: string, fields: Record<string, number>): void;
+  onTrace?(kind: string, fields: Record<string, number | string>): void;
 };
 
 export type DriverOptions = {
@@ -78,6 +79,10 @@ export type DriverOptions = {
   deriveMinGapMs?: number;
   inFlightMaxMs?: number;
   maxRetries?: number;
+  /** First backoff after a 503 `not-ready`, doubled per attempt; a shorter wait than a 429's. */
+  notReadyBackoffMs?: number;
+  /** Ceiling on any retry backoff, so a late attempt does not wait minutes. */
+  retryBackoffMaxMs?: number;
   /** Anticipation pacing — D5: shipped at design budgets, judged by measurement. */
   maxPrefetchPerPause?: number;
   maxPrefetchBytesPerPause?: number;
@@ -97,6 +102,8 @@ const DEFAULTS = {
   deriveMinGapMs: 120,
   inFlightMaxMs: 5_000,
   maxRetries: 2,
+  notReadyBackoffMs: 250,
+  retryBackoffMaxMs: 8_000,
   maxPrefetchPerPause: 3,
   maxPrefetchBytesPerPause: 8_000_000,
   prefetchLayers: 1,
@@ -109,6 +116,29 @@ export class Driver {
   // Scheduler-facing state (client-architecture §3): what is asked of the server is set here.
   private mTarget: number;
   private lastVisibleInView: number | undefined;
+  /**
+   * The per-cell masked counts the last response left, and the rectangle they were read over.
+   *
+   * **The depth choice is arithmetic over these** wherever they cover the view (`budget.ts`), the
+   * average `mTarget` answering only where they do not. They are snapshotted from the response's
+   * own bands — the *tiles* frame's counts arrive as `Band.visible` and the frame already holds
+   * every band over the render rect — rather than read from the store per plan: walking a depth's
+   * bands on every plan is per-frame work that scales with what is held rather than with what is
+   * drawn, which is the shape of fault `bands.ts` has measured twice.
+   *
+   * **Adopted after the response's own reconcile, exactly as the calibration is.** A field taken
+   * mid-response would let the derive that draws the arrival choose a depth nothing is held at, so
+   * the marks it just paid for would be redrawn as stand-ins and immediately re-requested. The
+   * counts a response brings decide the *next* plan, and the depth hold governs when that lands.
+   */
+  /**
+   * One count field per depth, the latest adopted at each. **Per depth, not the last one only**:
+   * a zoom-in adopts a small field at the finer depth, and if that replaced the coarser one, the
+   * next zoom-out had no field covering the view and fell back to the average model — the owner's
+   * trace of 2026-08-28 shows exactly that hand-off, `bound` at depth 13 then `average` at 12,
+   * where the depth-11 field from a second earlier still bounded every one of those views.
+   */
+  private counts = new Map<number, CountField>();
   /** The presented-frame handle — all the driver knows of what is on screen. */
   private presented: {want: TileRect; depth: number; version: number; standInStale: boolean} | null =
     null;
@@ -161,6 +191,19 @@ export class Driver {
   /** Deferred by a foreground in flight — re-evaluated when it clears, not discarded. */
   private anticipationEligible = false;
 
+  /**
+   * The `depth:rect` a settle has already asked for because the derived frame was not held there
+   * — so the ask happens once per uncovered frame and a shed or refused request does not become
+   * a settle-rate retry loop. Cleared by the next camera move.
+   */
+  private askedUncovered: string | null = null;
+
+  /**
+   * Whether the cold view's counts-only seed has been made (or has failed) — see
+   * {@link seedCounts}. One per session, never per uncovered pan.
+   */
+  private seeded = false;
+
   constructor(
     private readonly replica: Replica,
     private readonly meta: DriverMeta,
@@ -197,15 +240,21 @@ export class Driver {
     return this.presented;
   }
 
-  private trace(kind: string, fields: Record<string, number>): void {
+  private trace(kind: string, fields: Record<string, number | string>): void {
     this.events.onTrace?.(kind, fields);
   }
 
   private planFor(view: ViewState, velocity?: [number, number]): Plan {
+    const viewport = this.viewportOf(view);
+    // The planner derives this box again from the same viewport. Four multiplications and a clamp,
+    // recomputed here rather than threaded through, because asking the replica what it holds is the
+    // one question the planner is kept free of — see `prefetch.ts`'s doc on the layer split.
     const inputs: PlannerInputs = {
-      viewport: this.viewportOf(view),
+      viewport,
       budget: this.o.budget,
       mTarget: this.mTarget,
+      counts: this.countsFor(worldBbox(viewport, 1)),
+      k: this.meta.kMaxMarks,
       maxTiles: this.meta.maxTilesPerRequest,
       visibleInView: this.lastVisibleInView,
       velocity,
@@ -219,6 +268,43 @@ export class Driver {
 
   private viewportOf(view: ViewState): Viewport {
     return {target: [view.target[0], view.target[1]], zoom: view.zoom, width: this.width, height: this.height};
+  }
+
+  /**
+   * The count field, where it can speak for this view: the view's own tiles, at the field's depth,
+   * inside the region the field is complete for. A pan past that edge falls back to the average
+   * model until the next response re-anchors the field — the same self-repair the calibration has.
+   */
+  private countsFor(bbox: [number, number, number, number]): CountField | undefined {
+    // The finest field that covers the view: exact where the view is at its depth, the tightest
+    // bound otherwise.
+    let best: CountField | undefined;
+    for (const field of this.counts.values()) {
+      if (!rectContains(field.covers, tileRectOfBbox(bbox, field.depth))) continue;
+      if (!best || field.depth > best.depth) best = field;
+    }
+    return best;
+  }
+
+  /**
+   * Adopt the counts a response left, over the widest rectangle they are complete for.
+   *
+   * The cells are read after the absorb, so every non-empty tile of the region just fetched carries
+   * a band among them and a tile of it absent from them is empty ground. The wider rectangle the
+   * frame spans can be claimed too, but only where the replica's coverage says every tile of it is
+   * held — which a pan back over ground fetched earlier makes true, and which is how an
+   * anticipatory ring at this depth reaches the field at all. A rectangle claimed without that
+   * check would read its unfetched tiles as empty and choose a depth too deep, which is the fault
+   * the count route exists to remove.
+   *
+   * **The ring's own responses are not adopted.** A bite is one piece of its region by design, so
+   * its rectangle is not complete when it lands, and its shallower bands would replace an exact
+   * field with a bound. What a ring buys reaches the field on the next foreground response, through
+   * the coverage test above.
+   */
+  private adopt(depth: number, cells: CountCell[], fetched: TileRect, spans: TileRect): void {
+    const whole = this.replica.novelIn(spans, depth, this.meta.kMaxMarks) === 0;
+    this.counts.set(depth, {depth, cells, covers: whole ? spans : fetched});
   }
 
   /** Every view-state change enters here. */
@@ -247,6 +333,8 @@ export class Driver {
     this.bitesSincePause = 0;
     this.bytesSincePause = 0;
     this.anticipationEligible = false;
+    // A moved camera is a new frame: whatever the last settle asked for, it was for other ground.
+    this.askedUncovered = null;
     if (this.idleHandle) this.clock.cancel(this.idleHandle);
     if (this.prefetch) {
       this.idleHandle = this.clock.after(this.o.idleMs, () => {
@@ -281,6 +369,27 @@ export class Driver {
     );
   }
 
+  /**
+   * Draw this view from what is held, asking for nothing.
+   *
+   * The view switch's immediate publish (`view-switching.md` §3): a view returned to already holds
+   * the bands its last visit fetched, and a switch that waited for the settle's request before
+   * publishing them would blank the map for a request it does not need. It derives on the settle's
+   * terms — unconditionally, at full fidelity — because a switch is a settled moment by
+   * construction: the camera did not move, the view did.
+   *
+   * Nothing here touches the request discipline. A view stepped through and left before the
+   * caller's own settle fires has been drawn and has asked for nothing (§4).
+   */
+  redraw(view: ViewState, width: number, height: number): void {
+    this.lastView = view;
+    this.width = width;
+    this.height = height;
+    // `ask: false` — a view redrawn from what it holds must issue no request (`view-switching.md`
+    // §8): this is the switch's immediate publish, not the settle of a view being looked at.
+    this.reconcile('settle', view, false);
+  }
+
   /** An absorb landed mid-fetch: pieces paint as they arrive. The consumer coalesces to frames. */
   absorbed(): void {
     if (this.lastView) this.reconcile('absorb', this.lastView);
@@ -294,7 +403,7 @@ export class Driver {
    * {@link DriverOptions.deriveMinGapMs} while the view is moving, and unconditionally at the
    * settle — which is also the only trigger allowed to clear `standInStale`.
    */
-  private reconcile(trigger: 'schedule' | 'absorb' | 'response' | 'settle', view: ViewState): void {
+  private reconcile(trigger: 'schedule' | 'absorb' | 'response' | 'settle', view: ViewState, ask = true): void {
     const planned = this.planFor(view);
     const handle = this.presented;
     const covered =
@@ -313,6 +422,10 @@ export class Driver {
       // Reuse under an unheld plan is agreement — the suspension has done its job.
       this.holdSuspended = false;
       this.trace('reuse', {depth: handle.depth});
+      // Reuse says the *frame* is the one this plan wants; it says nothing about whether the
+      // replica holds anything at that depth. A derive under an absorb reaches here on the settle
+      // that follows it, which is precisely the case the ask exists for.
+      if (trigger === 'settle' && ask) this.askUncovered(view, planned);
       return;
     }
 
@@ -343,6 +456,39 @@ export class Driver {
     this.holdSuspended = false;
     if (trigger === 'settle') this.bankReady = true;
     this.events.onFrame({tier: 'derive', plan: planned, frame});
+    if (trigger === 'settle' && ask) this.askUncovered(view, planned);
+  }
+
+  /**
+   * Ask for the depth the settle just derived at, when the replica holds nothing there.
+   *
+   * **The depth a request is made at and the depth the frame is derived at are chosen by two
+   * different models, and they disagree on the first view of a session.** The average model
+   * answers the first request, because no counts describe the view yet (`budget.ts`); the
+   * response's own per-tile counts then answer every plan after it, and where the average
+   * overshot — measured on rung 3: depth 8 asked, 1,014,597 points served against a 500,000
+   * budget — the count-driven choice is two levels shallower. The settle then derives at that
+   * shallower depth, where nothing has been fetched, and the frame it publishes is entirely
+   * stand-ins with **no counts at all**: the strip reads *0 shown, 0 matched, 0 visible* and the
+   * marks on screen are whatever the slab still held.
+   *
+   * Nothing repaired that, because a request is issued only from {@link schedule} — a camera
+   * move. At rest the map stayed on the stand-ins indefinitely, and a filter or a highlight,
+   * which requeries without moving the camera, landed in exactly the same state.
+   *
+   * So the settle asks. It is the one trigger that means *the view is finished*, it is guarded to
+   * once per uncovered frame, and it converges by construction: the response covers the rect at
+   * this depth, so the next settle's {@link covers} is true and asks for nothing.
+   */
+  private askUncovered(view: ViewState, planned: Plan): void {
+    if (this.inFlight || this.queued || this.revalidating) return;
+    const depth = planned.choice.depth;
+    if (this.replica.novelIn(planned.visible.rect, depth, this.meta.kMaxMarks) === 0) return;
+    const key = `${depth}:${planned.visible.rect.x0},${planned.visible.rect.y0},${planned.visible.rect.x1},${planned.visible.rect.y1}`;
+    if (this.askedUncovered === key) return;
+    this.askedUncovered = key;
+    this.trace('uncovered', {depth, n: planned.choice.tiles});
+    void this.request(view);
   }
 
   private storeCanAnswer(view: ViewState): boolean {
@@ -440,6 +586,9 @@ export class Driver {
     this.velocity = undefined;
     this.lastTarget = null;
     this.anticipationEligible = false;
+    this.askedUncovered = null;
+    this.seeded = false;
+    this.counts.clear();
   }
 
   private async anticipate(): Promise<void> {
@@ -488,9 +637,63 @@ export class Driver {
     }
   }
 
+  /**
+   * Buy the counts before buying the marks, on the one view no counts describe.
+   *
+   * The first request of a session is planned by the average model, and where that model
+   * overshoots it overshoots by orders of magnitude: measured on rung 3 (MedCPT, 35.9 × 10^6
+   * items, budget 500,000), the cold view asked at depth 8 and was answered with **1,014,597
+   * points in 33.5 MB** — 2.1 s on the wire and a further 2.1 s of decode and absorb on the main
+   * thread, for a frame that was then re-derived at depth 6 and drawn from 2.4 MB. The client had
+   * paid fourteen times over for marks it did not draw, and the first marks reached the screen at
+   * 4.3 s.
+   *
+   * A counts-only request — `k = 0`, the tiles frame alone, ~170 ms and a few tens of kilobytes —
+   * answers exactly the question the average model was guessing at, and every plan after it is
+   * count-driven (`budget.ts`). So the cold view asks for counts first, adopts them, and re-plans;
+   * the marks request that follows is the one the second plan would have made anyway.
+   *
+   * **Once per session, and only where no counts exist at all.** A pan onto ground the replica has
+   * not covered also falls back to the average model, and seeding those would put a round trip in
+   * front of every such pan — the case the calibration loop and the held field already handle. The
+   * guard is `counts.size === 0`, which is true at session start (and after {@link cancel}) and
+   * false forever after the first response.
+   */
+  private async seedCounts(view: ViewState, planned: Plan, signal: AbortSignal): Promise<boolean> {
+    const depth = planned.choice.depth;
+    const started = this.clock.now();
+    let tiles;
+    try {
+      tiles = await this.replica.counts(planned.visible.rect, depth, signal);
+    } catch (error) {
+      // A refused seed is not a refused view: the marks request the average model planned is still
+      // worth making, and it is the request this client made before the seed existed. Reported and
+      // stepped over (an abort is not — the caller's generation check drops the whole request).
+      if (signal.aborted) throw error;
+      this.trace('seedfail', {depth, ms: this.clock.now() - started});
+      this.seeded = true;
+      return false;
+    }
+    const cells: CountCell[] = [];
+    let visible = 0;
+    for (const t of tiles) {
+      const {x, y} = tileXY(t.tile, depth);
+      cells.push({x, y, count: Number(t.visible)});
+      visible += Number(t.visible);
+    }
+    // Complete for the rectangle it was asked over by construction: a response omits only the
+    // cells whose masked count is zero, so `cells` is read over the whole of `covers` — the
+    // obligation `CountField` puts on whoever builds one.
+    this.counts.set(depth, {depth, cells, covers: planned.visible.rect});
+    this.lastVisibleInView = visible;
+    this.seeded = true;
+    this.trace('seed', {depth, ms: this.clock.now() - started, n: cells.length, visible});
+    return true;
+  }
+
   private async request(view: ViewState, attempt = 0): Promise<void> {
-    const planned = this.planFor(view);
-    const choice: DepthChoice = planned.choice;
+    let planned = this.planFor(view);
+    let choice: DepthChoice = planned.choice;
 
     // A real fetch displaces a running revalidation unconditionally — the refresh is the one
     // request the user must never wait behind.
@@ -506,12 +709,29 @@ export class Driver {
     this.inFlightAt = {rect: planned.render, depth: choice.depth, since: this.clock.now()};
     const generation = ++this.generation;
     const movedAt = this.movedAt || this.clock.now();
-    const startedAt = this.clock.now();
-    this.lastRequestAt = startedAt;
-    this.trace('request', {depth: choice.depth, n: choice.tiles, waited: startedAt - movedAt});
     this.events.onStatus?.('loading');
 
     try {
+      // The cold view buys its counts before its marks (see {@link seedCounts}), inside the
+      // foreground slot it already holds: the seed is the request, until it lands.
+      if (!this.seeded && this.counts.size === 0 && choice.source === 'average') {
+        const seeded = await this.seedCounts(view, planned, controller.signal);
+        if (generation !== this.generation) return;
+        if (seeded) {
+          planned = this.planFor(view);
+          choice = planned.choice;
+          this.inFlightAt = {rect: planned.render, depth: choice.depth, since: this.clock.now()};
+        }
+      }
+      const startedAt = this.clock.now();
+      this.lastRequestAt = startedAt;
+      this.trace('request', {
+        depth: choice.depth,
+        n: choice.tiles,
+        waited: startedAt - movedAt,
+        predicted: Math.round(choice.predictedMarks),
+        from: choice.source
+      });
       // `standIns: false` — the fetch absorbs and reports; what gets DERIVED is the
       // reconciler's decision, paid once under its own rate rule rather than per fetch.
       const frame = await this.replica.fetchRegion(
@@ -525,31 +745,49 @@ export class Driver {
       );
       if (generation !== this.generation) return;
       const arrivedAt = this.clock.now();
+
+      // The response's own figures, over the rect the prediction was for — the VISIBLE box, not the
+      // wider render rect the frame spans. Review F6: summing over 1.69x the predicted area
+      // inflated `actual` and silenced the calibration loop in the one direction that mattered.
+      //
+      // The cells are read over the whole render rect, because that is what the next plan may ask
+      // about; `countsFor` decides per plan whether they cover the view it is planning for.
+      const cells: CountCell[] = [];
+      let visible = 0;
+      let actual = 0;
+      for (const b of frame.exact) {
+        cells.push({x: b.x, y: b.y, count: Number(b.visible)});
+        if (!rectContainsTile(planned.visible.rect, b.x, b.y)) continue;
+        visible += Number(b.visible);
+        actual += b.served;
+      }
+
+      // Prediction against what was served, in the trace rather than only in the demo's probe. The
+      // overshoot that motivated the count-driven choice was diagnosed from response *sizes* and a
+      // separate probe; a recording that carries both figures per request answers it directly.
       this.trace('arrived', {
         ms: arrivedAt - startedAt,
         n: frame.plan.bytes,
         server: Math.round((frame.response?.timings.serverUs ?? 0) / 1000),
         depth: choice.depth,
         novel: frame.plan.novel,
-        wanted: frame.plan.wanted
+        wanted: frame.plan.wanted,
+        predicted: Math.round(choice.predictedMarks),
+        actual,
+        from: choice.source
       });
 
       this.heldBbox = {bbox: [0, 0, 0, 0], depth: choice.depth};
       this.reconcile('response', view);
 
-      // Calibration over the rect the prediction was for — the VISIBLE box, not the wider render
-      // rect the frame spans. Review F6: summing over 1.69x the predicted area inflated `actual`
-      // and silenced the loop in the one direction that mattered.
-      let visible = 0;
-      let actual = 0;
-      for (const b of frame.exact) {
-        if (!rectContainsTile(planned.visible.rect, b.x, b.y)) continue;
-        visible += Number(b.visible);
-        actual += b.served;
-      }
+      this.adopt(choice.depth, cells, planned.visible.rect, planned.render);
       this.lastVisibleInView = visible;
+      // Corrected against the AVERAGE model's own figure, never against the count-driven one it may
+      // have superseded: the loop is a model of the average, and a ratio between two predictions is
+      // not an error in either. The average stays the fallback for a view no counts describe, so it
+      // has to keep learning while the counts are deciding (`budget.ts`).
       this.mTarget = calibrate(
-        {predictedMarks: choice.predictedMarks, actualMarks: actual, visibleInView: visible},
+        {predictedMarks: choice.averageMarks, actualMarks: actual, visibleInView: visible},
         this.mTarget,
         this.meta.thetaTargetMarks
       );
@@ -566,7 +804,7 @@ export class Driver {
       // failure or supersession must not touch the *new* request's bookkeeping (review finding 7).
       if (planned.foreground.rect !== planned.visible.rect) {
         try {
-          await this.replica.fetchRegion(
+          const margin = await this.replica.fetchRegion(
             planned.foreground.rect,
             choice.depth,
             this.meta.kMaxMarks,
@@ -577,6 +815,14 @@ export class Driver {
           );
           if (generation !== this.generation) return;
           this.reconcile('response', view);
+          // The margin widens the field: it is ground the client now holds at the same depth, and
+          // the next gesture is exactly what it was bought for.
+          this.adopt(
+            choice.depth,
+            margin.exact.map((b) => ({x: b.x, y: b.y, count: Number(b.visible)})),
+            planned.foreground.rect,
+            planned.render
+          );
         } catch {
           // Already drawn; the margin buys the next gesture, not this one.
         }
@@ -589,10 +835,18 @@ export class Driver {
       this.inFlightAt = null;
       this.inFlight = null;
 
-      const shed = error instanceof TesseraError && error.status === 429;
-      if (shed && attempt < this.o.maxRetries) {
+      // Two retryable refusals, and they are not the same wait. A 429 `backpressure` is the
+      // server shedding load, retried on the exponential the shed path always used; a 503
+      // `not-ready` is an unverified bundle or an unready worker (contracts §3.1), which the
+      // built driver did not retry at all — a client that gave up on it turned a starting server
+      // into a refusal. Both surface as `retrying`; both re-enter the same generation discipline.
+      const status = error instanceof TesseraError ? error.status : 0;
+      const retryable = status === 429 || status === 503;
+      if (retryable && attempt < this.o.maxRetries) {
         this.events.onStatus?.('retrying');
-        this.retryHandle = this.clock.after(1000 * 2 ** attempt, () => {
+        const base = status === 503 ? this.o.notReadyBackoffMs : 1000;
+        const backoff = Math.min(base * 2 ** attempt, this.o.retryBackoffMaxMs);
+        this.retryHandle = this.clock.after(backoff, () => {
           this.retryHandle = null;
           // Superseded by anything newer: the retry re-enters the same discipline.
           if (generation === this.generation) void this.request(view, attempt + 1);

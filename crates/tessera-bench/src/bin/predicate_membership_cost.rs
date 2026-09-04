@@ -323,10 +323,10 @@ fn records(sets: &[Bitmap]) -> Vec<ArtifactRecord> {
         .map(|(i, members)| ArtifactRecord {
             entity: EntityId::new(i as u64),
             key: None,
-            members: members.clone(),
+            members: members.clone().into(),
             contents: Vec::new(),
             attached_to: None,
-            parent: None,
+            parents: Vec::new(),
         })
         .collect()
 }

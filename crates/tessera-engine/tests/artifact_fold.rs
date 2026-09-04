@@ -29,6 +29,7 @@ const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 
 fn declaration(name: &str) -> LayerDeclaration {
     LayerDeclaration {
+        scope: Default::default(),
         name: name.into(),
         title: Some(format!("{name} (title)")),
         views: vec!["s0".into()],
@@ -151,7 +152,16 @@ impl Fixture {
 }
 
 fn artifacts_of(engine: &Engine) -> Vec<ArtifactOut> {
-    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    artifacts_for(engine, &full_coverage_credential())
+}
+
+/// What one credential is served over the whole map.
+///
+/// **The discriminating form of [`artifacts_of`]**, which authorises with full coverage — and a
+/// full-coverage mask contains *every* generating set, an empty one included. A claim about which
+/// set a fold wrote can therefore only be made from a principal that fails one of them.
+fn artifacts_for(engine: &Engine, credential: &[u8]) -> Vec<ArtifactOut> {
+    let session = engine.authorise(credential).unwrap();
     engine
         .viewport(
             &session,
@@ -627,11 +637,13 @@ fn ingest(engine: &Engine, external_id: &[u8]) -> EntityId {
     let row = tessera_lifecycle::command::UnallocatedRow {
         external_id: Some(external_id.to_vec()),
         view: "s0".to_string(),
+        join: None,
         descriptors: descriptors.clone(),
         x: 5.0,
         y: 5.0,
         scalars: Vec::new(),
         terms: engine.resolve_terms(&descriptors),
+        scoped: Vec::new(),
     };
     engine
         .accept_ingest(
@@ -655,17 +667,20 @@ fn flush(engine: &Engine) {
     }
 }
 
-/// **The boundary condition the write cycle sets, and the cost it names.** An artifact's row form
-/// covers members holding **base** rows; a member whose row is still in a flush extent contributes
-/// nothing until the fold folds it in.
+/// **A member counts from its flush**, which is the first moment it has a row at all.
 ///
-/// That is what keeps the form untouched by a flush — an append moves no bit it holds — and it is
-/// fail-closed in the only direction available: the masked count **understates** for members
-/// ingested since the last fold, exactly as a buffered point is invisible until its flush. The
-/// alternative, rebuilding every level whenever a flush appends, is tens of seconds per level at
-/// the scale this design is for, paid by whichever request arrives next.
+/// The two boundaries are different and only one of them moved. A **buffered** member has no row
+/// anywhere and is in nobody's count, exactly as it is in no viewport; a **flushed** one has an
+/// extent row, and the level's held form gains that segment's rows at the publication that adds it
+/// (`ArtifactProjections::extend_flushed`) rather than at the next fold. Until 2026-09-03 the form
+/// covered base rows alone and this second case understated for as long as the gate between folds
+/// — hours — which was fail-closed and is now simply not the case.
+///
+/// The fold changes no count here, and that is the assertion the third case makes: it renumbers the
+/// row the member holds and the form is rebuilt over the new prefix, so the same member is counted
+/// by a different row.
 #[test]
-fn a_member_ingested_since_the_last_fold_counts_from_the_fold_and_not_before() {
+fn a_member_ingested_since_the_last_fold_counts_from_its_flush() {
     let fx = fixture();
     let engine = fx.open();
     engine.register_layer(declaration("clusters/a")).unwrap();
@@ -693,16 +708,17 @@ fn a_member_ingested_since_the_last_fold_counts_from_the_fold_and_not_before() {
     flush(&engine);
     assert_eq!(
         count(&engine),
-        300,
-        "flushed: it has a row, but an extent row — the form covers base rows, so the count \
-         understates rather than the form being rebuilt"
+        301,
+        "flushed: it holds an extent row, and the flush extended every held form by the segment \
+         it published rather than leaving the count short until a fold"
     );
 
     fold(&engine);
     assert_eq!(
         count(&engine),
         301,
-        "folded: its row is a base row now, and the pass rebuilt the form over it"
+        "folded: the same member, on a base row now — the fold renumbers what it counts and not \
+         how many"
     );
 }
 
@@ -729,16 +745,18 @@ fn a_flush_disturbs_no_artifacts_count() {
     );
 }
 
-/// **The arm a reader leaves out, and why leaving it out cannot bite here.** A merge permutes row
-/// space *inside the span it merges*, so a row id in that span names a different entity afterwards
-/// — and a membership form holding those ids would go on counting them, naming whichever documents
-/// landed there. That is the fail-open the design warns about, and it is fail-**open** rather than
-/// closed because the count can only be wrong upward: a stranger's row inside the span counts as a
-/// member, and one extra member can lift an artifact over its existence criterion.
+/// **The one publication that renumbers rows a form holds.** A merge permutes row space *inside
+/// the span it merges*, so a row id in that span names a different entity afterwards — and a form
+/// holding those ids would go on counting them, naming whichever documents landed there. That is
+/// fail-**open** rather than closed: a stranger's row inside the span counts as a member, and one
+/// extra member can lift an artifact over its existence criterion.
 ///
-/// The base-row rule removes the state it needs. The form references no extent row, and a merge
-/// renumbers nothing else, so there is no arm to build and nothing to rebase — which is what this
-/// pins: an artifact's count survives a merge that genuinely permuted the rows beneath it.
+/// A form covers extent rows (2026-09-03), so the state is reachable and what removes it is the
+/// check rather than the absence: `ArtifactRows::covers` compares the segments a form's rows came
+/// from against the row space at every cache hit, `seg_id`s are never reused, and a form whose
+/// segments were permuted rather than appended to is discarded and projected again. What this pins
+/// is the outcome either way — an artifact's count survives a merge that genuinely permuted the
+/// rows beneath it.
 #[test]
 fn a_merge_that_renumbers_extent_rows_disturbs_no_artifacts_count() {
     let fx = fixture();
@@ -862,12 +880,23 @@ fn a_strict_layer_withdraws_the_content_at_the_fold_and_the_artifact_with_it() {
 /// removes the deleted source from the set and the description serves again — to viewers who
 /// satisfy the survivors, which is a channel the caller opened for an object whose membership is
 /// statistical (C7).
+///
+/// **Mutations this kills:** a fold that *erases* the generating set rather than subtracting the
+/// retired members from it — `membership.rs`'s `generated_from.andnot_inplace(retired)` written as
+/// `clear()`. An empty set is contained by everyone, so the corpus-derived text would then serve to
+/// every principal who reaches the layer and sees one member of the artifact, and every assertion
+/// made from full coverage would still hold.
 #[test]
 fn a_permissive_layer_shrinks_the_generating_set_at_the_fold_and_serves_again() {
     let fx = fixture();
     let engine = fx.open();
     engine.register_layer(content_layer(false)).unwrap();
     publish_described(&fx, &engine);
+
+    // Resolved before the fold, which renumbers row space and moves the prefix the external-id
+    // extent is read from: these are the entities the control below is published over.
+    let control_members = fx.members((0..300).filter(|s| *s != 7));
+    let control_set = fx.members((0..90).filter(|s| terms_of(*s).contains(&SUBSET_TERM)));
 
     engine
         .accept_change(fx.member(7), ChangeOp::Delete)
@@ -888,6 +917,129 @@ fn a_permissive_layer_shrinks_the_generating_set_at_the_fold_and_serves_again() 
         "with its description, now generated from the surviving sources"
     );
     assert_eq!(served[0].masked_count, 299, "and one fewer member");
+
+    // **What the full-coverage assertions above cannot say.** They hold for a shrunk generating
+    // set and equally for one the fold erased, because containment against a full-coverage mask is
+    // satisfied by every set. So the surviving set is asserted from a principal that fails it: the
+    // fixture gives the subset term to every third source id, and the survivors are `0..30` less
+    // the deleted one, twenty of which that principal cannot see.
+    //
+    // `c1` is the control that makes the withholding mean something — the same layer, the same
+    // request, a generating set drawn *inside* the subset term. A narrow principal served nothing
+    // at all would satisfy an emptiness assertion without the fold having done anything right.
+    engine
+        .publish_artifacts(
+            "clusters/a".into(),
+            0,
+            vec![IncomingArtifact::with_content(
+                Some("c1".into()),
+                // Less the deleted source: a membership naming a deleted document is refused.
+                control_members,
+                vec![IncomingContent::new(
+                    vec!["what the subset term covers".into()],
+                    control_set,
+                )],
+            )],
+        )
+        .expect("a second described artifact publishes");
+
+    let narrow: Vec<Option<String>> = artifacts_for(&engine, &subset_credential())
+        .into_iter()
+        .map(|a| a.key)
+        .collect();
+    assert_eq!(
+        narrow,
+        vec![Some("c1".to_string())],
+        "the shrunk generating set is the surviving sources and not the empty set: a principal \
+         that fails the survivors reads neither the artifact nor its description, and is served \
+         the control published beside it"
+    );
+}
+
+/// **The limit of the shrink: a generating set with no survivors is not served**
+/// ([decision 0107](../../../docs/decisions/0107-a-generating-set-with-no-survivors-is-not-served.md)).
+///
+/// The case above deletes one of thirty sources and the content goes on serving from the
+/// twenty-nine. Delete the *only* source and the shrink has nothing left to serve on — and the
+/// state it would otherwise leave behind is the fail-open one, because containment is a subset test
+/// and the empty set is a subset of every mask. So the fold withdraws the content rather than
+/// retaining it emptied, and the artifact goes with it: its layer declares supplied content and it
+/// now has none, which is decision 0076's rule reached through the permissive arm.
+///
+/// **Mutations this kills:** retaining a content whose generating set the permissive arm emptied
+/// (serves the corpus-derived text to every principal who can see any member — the fail-open the
+/// ruling closes); applying the shrink to contents that named none of the retired entities (would
+/// take inherited content, which legitimately carries an empty set); withdrawing the whole artifact
+/// rather than the emptied content (would take `c1` with it).
+#[test]
+fn a_permissive_layer_withdraws_content_whose_last_source_the_fold_deletes() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(content_layer(false)).unwrap();
+
+    // Two artifacts, one layer, one level, published together and differing in exactly one thing:
+    // whether the deletion below empties the generating set. `c1` is the non-vacuity guard — an
+    // artifact absent because the fold broke the layer, or because the viewport returned nothing at
+    // all, would satisfy a careless assertion that `c0` is gone.
+    engine
+        .publish_artifacts(
+            "clusters/a".into(),
+            0,
+            vec![
+                IncomingArtifact::with_content(
+                    Some("c0".into()),
+                    fx.members(0..300),
+                    vec![IncomingContent::new(
+                        vec!["written from one document".into()],
+                        fx.members(std::iter::once(7)),
+                    )],
+                ),
+                IncomingArtifact::with_content(
+                    Some("c1".into()),
+                    fx.members(0..300),
+                    vec![IncomingContent::new(
+                        vec!["written from another".into()],
+                        fx.members(std::iter::once(8)),
+                    )],
+                ),
+            ],
+        )
+        .expect("two described artifacts publish");
+    wait_for_publication(&fx, &engine, 1);
+
+    assert_eq!(
+        artifacts_of(&engine).len(),
+        2,
+        "both serve before the deletion"
+    );
+
+    engine
+        .accept_change(fx.member(7), ChangeOp::Delete)
+        .expect("the delete is accepted");
+
+    fold(&engine);
+
+    // Full coverage is the discriminating principal *here*, unusually: the fault this pins is one
+    // an empty generating set satisfies for **everyone**, so a viewer who can see everything is
+    // exactly who would be served the withdrawn text.
+    let served = artifacts_of(&engine);
+    let keys: Vec<Option<String>> = served.iter().map(|a| a.key.clone()).collect();
+    assert_eq!(
+        keys,
+        vec![Some("c1".to_string())],
+        "the content whose only source was deleted is withdrawn and its artifact with it, while \
+         the one published beside it — same layer, same fold, same request — is served"
+    );
+    assert_eq!(
+        served[0].content,
+        vec!["written from another"],
+        "and `c1`'s own generating set is untouched: the shrink reaches only sets naming a \
+         retired entity"
+    );
+    assert_eq!(
+        served[0].masked_count, 299,
+        "the deletion left the membership as it leaves any other"
+    );
 }
 
 /// **A declared member that is deleted refuses the batch; a suppressed one is accepted.** The two

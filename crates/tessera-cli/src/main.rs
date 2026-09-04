@@ -39,10 +39,6 @@ enum Command {
         /// directories is a server serving whatever was there before.
         #[arg(long)]
         out: Option<PathBuf>,
-        /// Which view to materialise. Omit where the declaration has exactly one — the ordinary
-        /// case — and a declaration with several refuses rather than choosing.
-        #[arg(long = "view")]
-        view_id: Option<String>,
         /// Keep only source rows with `entity_id < LIMIT` (a prefix of entity space).
         #[arg(long)]
         limit: Option<u64>,
@@ -97,6 +93,40 @@ enum Command {
         /// fail-closed pre-flight, all follow from it.
         #[arg(long, value_parser = parse_byte_size)]
         memory_budget: Option<u64>,
+
+        /// Which order the declared string columns' text arenas are filled in: `auto` (default),
+        /// `entity` or `arrival`.
+        ///
+        /// **The bundle is the same either way** — the arena is `.build-tmp/` scratch — so this
+        /// buys time, not correctness. `arrival` fills it in one pass as the source yields values;
+        /// `entity` decodes the source's string columns a second time and writes each value at the
+        /// place a prefix sum gave it, which is what makes the record-blob stage's walk sequential
+        /// on a corpus whose arena does not fit the page cache. `auto` takes `entity` when the
+        /// columns' uncompressed Parquet payload exceeds half the memory budget, and prints every
+        /// number it decided on.
+        #[arg(long, value_name = "ORDER", default_value = "auto")]
+        arena_order: tessera_build::ArenaOrder,
+
+        /// Print each pipeline stage's wall time, row count and peak RSS as it completes.
+        ///
+        /// **What it is for**: "which of the twelve stages bends with scale" is the question every
+        /// sizing decision here turns on, and without this a build reports one total and one
+        /// stage's own figure — so an optimisation is aimed at whichever stage was last watched
+        /// through `top`. The observer sees durations and counts and nothing derived from the
+        /// corpus, and the timed path is the shipping one: `build` is `build_observed` with a
+        /// no-op, so there is no second code path to drift.
+        #[arg(long)]
+        stage_timings: bool,
+
+        /// Write the same per-stage records as JSON to this path at the end of the build.
+        ///
+        /// The stderr lines `--stage-timings` prints are for a person watching a build; a
+        /// measurement campaign wants the same numbers in a file it can put beside a rung's other
+        /// figures on one schema. Both may be given, and this one enables the observation on its
+        /// own. One object per stage, in report order: `stage`, `wall_s`, `rows`,
+        /// `peak_rss_kib`, `started_at`, `ended_at`.
+        #[arg(long, value_name = "PATH")]
+        stage_timings_json: Option<PathBuf>,
 
         /// Carry `identity.key` and `identity.idset` forward from an existing bundle's
         /// MANIFEST.json. **This is the normal rebuild path** (contracts §2.2).
@@ -862,6 +892,50 @@ fn collect_bindings(
 }
 
 /// `--file NAME=PATH`. Split at the **first** `=` so a path may contain one.
+/// Prints one line per pipeline stage as it completes, for `--stage-timings`.
+///
+/// **Peak RSS is the process's high-water at the moment the stage ended**, not the stage's own —
+/// it only ever rises, so a stage that adds nothing repeats the last figure. What it locates is
+/// the stage the peak arrived in, which is the question `--memory-budget` is answered against.
+///
+/// **One observer, two sinks**, rather than a second observer for `--stage-timings-json`: the
+/// pipeline takes one, and a wrapper that fanned out to two would have to re-sample nothing but
+/// still be a second place a stage could be dropped from.
+struct StageTimings {
+    /// Print a line per stage — `--stage-timings`. Off when only the JSON path was asked for.
+    print: bool,
+    /// Collect the records — `--stage-timings-json`. `None` when only the lines were asked for.
+    json: Option<tessera_build::observer::JsonStageTimings>,
+}
+
+impl tessera_build::observer::BuildObserver for StageTimings {
+    fn stage_end(
+        &self,
+        stage: tessera_build::observer::BuildStage,
+        elapsed: std::time::Duration,
+        rows: u64,
+        peak_rss_kib: u64,
+    ) {
+        if self.print {
+            eprintln!(
+                "stage {:>16}  {:>8.2}s  rows={rows:<12} peak={:>6} MiB",
+                stage.name(),
+                elapsed.as_secs_f64(),
+                peak_rss_kib / 1024,
+            );
+        }
+        if let Some(json) = &self.json {
+            tessera_build::observer::BuildObserver::stage_end(
+                json,
+                stage,
+                elapsed,
+                rows,
+                peak_rss_kib,
+            );
+        }
+    }
+}
+
 fn parse_file_binding(raw: &str) -> Result<(String, PathBuf), String> {
     let (key, path) = raw.split_once('=').ok_or_else(|| {
         format!(
@@ -962,7 +1036,7 @@ fn print_disclosure(disclosure: &tessera_build::disclosure::Disclosure) {
         println!("\nattributes (in declaration order, which is the stored column order)");
         for attribute in &disclosure.attributes {
             println!(
-                "  {:<26} {}{}, {}, from column '{}'",
+                "  {:<26} {}{}, {}, from column '{}'{}",
                 attribute.name,
                 attribute.ty,
                 match &attribute.vocabulary {
@@ -970,7 +1044,13 @@ fn print_disclosure(disclosure: &tessera_build::disclosure::Disclosure) {
                     None => String::new(),
                 },
                 attribute.placement,
-                attribute.field
+                attribute.field,
+                // A family is one column per view of the group, read from those views' own
+                // points and stored under `attrs/<column>/<group>/<key>/` (`views.md` §5).
+                match &attribute.scope {
+                    Some(group) => format!(", one column per view of '{group}'"),
+                    None => String::new(),
+                }
             );
         }
     }
@@ -1017,10 +1097,11 @@ fn print_disclosure(disclosure: &tessera_build::disclosure::Disclosure) {
 
 /// `tessera corpus items` (correctness-suite §12.1): served `fx_key` values in, their expected
 /// items out. The corpus is constructed with `n = 0` because the lookups take no part in it —
-/// see the verb's own doc.
+/// see the verb's own doc. The `partition` column is answered here for the same reason: it is a
+/// function of `(seed, layer, e)`, not of the corpus's size (`tessera-corpus`'s `partition.rs`).
 fn corpus_items(seed: u64, ids: &Path, extent: Bounds) -> ExitCode {
     use arrow::array::{
-        ArrayRef, Float32Builder, StringBuilder, TimestampMicrosecondBuilder, UInt32Builder,
+        ArrayRef, Float64Builder, StringBuilder, TimestampMicrosecondBuilder, UInt32Builder,
         UInt64Builder,
     };
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
@@ -1054,13 +1135,14 @@ fn corpus_items(seed: u64, ids: &Path, extent: Bounds) -> ExitCode {
 
     let mut fx_key = UInt64Builder::new();
     let mut e_col = UInt64Builder::new();
-    let mut x = Float32Builder::new();
-    let mut y = Float32Builder::new();
+    let mut x = Float64Builder::new();
+    let mut y = Float64Builder::new();
     let mut weight = UInt32Builder::new();
     let mut seen_at = TimestampMicrosecondBuilder::new();
     let mut bay = StringBuilder::new();
     let mut tag = StringBuilder::new();
     let mut blurb = StringBuilder::new();
+    let mut partition = UInt32Builder::new();
     for (line_no, line) in text.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() {
@@ -1087,13 +1169,16 @@ fn corpus_items(seed: u64, ids: &Path, extent: Bounds) -> ExitCode {
         bay.append_option(item.bay);
         tag.append_option(item.tag.as_deref());
         blurb.append_option(item.blurb.as_deref());
+        partition.append_value(
+            corpus.partition_artifact_of(tessera_corpus::materialise::PARTITION_LAYER, e) as u32,
+        );
     }
 
     let schema = Arc::new(Schema::new(vec![
         Field::new("fx_key", DataType::UInt64, false),
         Field::new("e", DataType::UInt64, false),
-        Field::new("x", DataType::Float32, false),
-        Field::new("y", DataType::Float32, false),
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
         Field::new("weight", DataType::UInt32, true),
         Field::new(
             "seen_at",
@@ -1103,6 +1188,7 @@ fn corpus_items(seed: u64, ids: &Path, extent: Bounds) -> ExitCode {
         Field::new("bay", DataType::Utf8, true),
         Field::new("tag", DataType::Utf8, true),
         Field::new("blurb", DataType::Utf8, true),
+        Field::new("partition", DataType::UInt32, false),
     ]));
     let batch = RecordBatch::try_new(
         schema,
@@ -1116,6 +1202,7 @@ fn corpus_items(seed: u64, ids: &Path, extent: Bounds) -> ExitCode {
             Arc::new(bay.finish()),
             Arc::new(tag.finish()),
             Arc::new(blurb.finish()),
+            Arc::new(partition.finish()),
         ],
     )
     .expect("columns built to one length from one loop");
@@ -1339,7 +1426,6 @@ fn main() -> ExitCode {
         Command::Build {
             deployment,
             out,
-            view_id,
             limit,
             config,
             file,
@@ -1347,6 +1433,9 @@ fn main() -> ExitCode {
             no_oracle_pairs,
             batch_items,
             memory_budget,
+            arena_order,
+            stage_timings,
+            stage_timings_json,
             carry_id_key_from,
             identity_file,
             mint_id_key,
@@ -1404,14 +1493,22 @@ fn main() -> ExitCode {
                 );
             }
 
-            // **A build materialises one view.** With one declared, naming it is noise; with
-            // several, choosing for the operator would publish a coordinate system nobody asked
-            // for, so `sole_view` refuses and lists them.
-            let view_id = match view_id
-                .map(Ok)
-                .unwrap_or_else(|| config.sole_view().map(str::to_string))
-            {
-                Ok(view_id) => view_id,
+            // **A build materialises every declared view and every view of every group**
+            // (`views.md` §7). `--view` is withdrawn with the refusal it went with: there is
+            // nothing to choose between when the answer is all of them.
+            let registry = match config.build_views() {
+                Ok(registry) => registry,
+                Err(e) => {
+                    eprintln!("build refused: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            // The anchor decides which view's Morton code orders ids within a signature group
+            // (decision 0112). Resolved before any file is read: it is a permanent property of
+            // the corpus (I9), so a declaration that has not said which view it is refuses here
+            // rather than after a multi-minute build.
+            let anchor = match config.anchor_view(&registry) {
+                Ok(anchor) => anchor,
                 Err(e) => {
                     eprintln!("build refused: {e}");
                     return ExitCode::FAILURE;
@@ -1419,43 +1516,192 @@ fn main() -> ExitCode {
             };
             // The files this build reads, resolved from the declaration and any overrides — and
             // every absence a refusal here rather than an empty read (configuration.md §8).
-            let acquired = match config.acquire(&view_id) {
+            let acquired = match config.acquire() {
                 Ok(acquired) => acquired,
                 Err(e) => {
                     eprintln!("build refused: {e}");
                     return ExitCode::FAILURE;
                 }
             };
-            // **The frame, resolved before any work — and surveyed in the same pass.** `auto`
-            // fits the box; every other spelling is already the answer and the pass is what
-            // establishes how much of the corpus that frame clamps.
-            let frame = match tessera_build::config::frame_view(
-                &view_id,
-                &acquired.extent,
-                &acquired.points,
-                &acquired.point_fields,
-                limit,
-            ) {
-                Ok(frame) => frame,
-                Err(e) => {
-                    eprintln!("build refused: {e}");
+            // **The frame, resolved before any work — and surveyed in the same pass, per view.**
+            // `auto` fits the box; every other spelling is already the answer and the pass is
+            // what establishes how much of the corpus that frame clamps. Printed for every view,
+            // because the extent is the view's (decision 0040) and four plausible-looking numbers
+            // are only checkable beside the data's own box.
+            let mut acquired_views = Vec::with_capacity(registry.len());
+            for view in &registry {
+                match tessera_build::config::acquire_view(view) {
+                    Ok(acquired) => acquired_views.push(acquired),
+                    Err(e) => {
+                        eprintln!("build refused: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            // **One frame per view, except on a group, where one frame covers every view of it**
+            // (`views.md` §3.1): a group's views differ by a key and by per-view metadata and by
+            // nothing else, so `auto` is fitted over the union of their sources and a stated
+            // extent is surveyed against every one of them. The views of a group are contiguous
+            // in the registry, so the fold is a scan.
+            let mut frames: Vec<usize> = Vec::with_capacity(registry.len());
+            let mut extents: Vec<tessera_spatial::Bounds> = Vec::with_capacity(registry.len());
+            let mut frame_of: std::collections::BTreeMap<&str, usize> =
+                std::collections::BTreeMap::new();
+            for (index, view) in registry.iter().enumerate() {
+                let owner = match &view.group {
+                    Some(membership) => membership.group.as_str(),
+                    None => view.id.as_str(),
+                };
+                match frame_of.get(owner) {
+                    Some(&first) => {
+                        frames.push(first);
+                        extents.push(extents[first]);
+                        continue;
+                    }
+                    None => frame_of.insert(owner, index),
+                };
+                let members: Vec<usize> = registry
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, v)| match (&v.group, &view.group) {
+                        (Some(a), Some(b)) => a.group == b.group,
+                        _ => v.id == view.id,
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
+                let sources: Vec<tessera_build::config::FrameSource> = members
+                    .iter()
+                    .map(|&i| tessera_build::config::FrameSource {
+                        points: &acquired_views[i].points,
+                        fields: &acquired_views[i].point_fields,
+                        select: acquired_views[i].select.as_ref(),
+                    })
+                    .collect();
+                let subject = match &view.group {
+                    Some(membership) => format!("view group '{}'", membership.group),
+                    None => format!("view '{}'", view.id),
+                };
+                let frame = match tessera_build::config::frame_of(
+                    &subject,
+                    view.projection,
+                    &view.extent,
+                    &sources,
+                    limit,
+                ) {
+                    Ok(frame) => frame,
+                    Err(e) => {
+                        eprintln!("build refused: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                };
+                eprintln!("{}", frame.report());
+                if let Some(detail) = frame.refusal() {
+                    eprintln!("build refused: {detail}");
                     return ExitCode::FAILURE;
                 }
-            };
-            // **The frame, and what it does to the data — printed before any work, always.** The
-            // extent alone is four plausible-looking numbers; beside the data's own box it is
-            // checkable, and the clamp count is the number that says whether this bundle's
-            // geometry means anything. Past half the corpus on the boundary it is a refusal, and
-            // it fires here rather than after a multi-minute build.
-            eprintln!("{}", frame.report());
-            if let Some(detail) = frame.refusal() {
-                eprintln!("build refused: {detail}");
-                return ExitCode::FAILURE;
+                frames.push(index);
+                extents.push(frame.extent);
             }
-            let extent = frame.extent;
+            let view_args: Vec<tessera_build::ViewArgs> = registry
+                .iter()
+                .zip(acquired_views)
+                .zip(&extents)
+                .map(|((view, acquired_view), extent)| tessera_build::ViewArgs {
+                    // **This view's own gate** (`views.md` §6), as the declaration compiled it:
+                    // the plain view's `visibility`, or — for a view of a group — its roster
+                    // record's own. The group's half travels on the group descriptor beside it.
+                    visibility: view.visibility.clone(),
+                    view_id: view.id.clone(),
+                    projection: view.projection,
+                    extent: *extent,
+                    points: acquired_view.points,
+                    point_fields: acquired_view.point_fields,
+                    select: acquired_view.select,
+                    access: acquired_view.access,
+                })
+                .collect();
+            // **One column per view of the group** (`views.md` §5), resolved against the registry
+            // the build just enumerated: the views a family covers are the ones its group owns,
+            // and each of them already says where its rows are.
+            let scoped_attributes: Vec<tessera_build::ScopedColumnFamily> = config
+                .scoped_attributes
+                .iter()
+                .map(|scoped| tessera_build::ScopedColumnFamily {
+                    attribute: scoped.attribute.clone(),
+                    group: scoped.group.clone(),
+                    views: registry
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, view)| {
+                            view.group
+                                .as_ref()
+                                .is_some_and(|group| group.group == scoped.group)
+                        })
+                        .map(|(index, _)| index)
+                        .collect(),
+                    source: scoped.source.clone(),
+                })
+                .collect();
+            // **A layer naming a group is drawn on every view of it** (`views.md` §2, §3.5),
+            // and the expansion happens here, against the registry the build just enumerated: a
+            // build materialises the views that exist, and a layer's extents are per row space.
+            // The rule itself is [`Config::expand_layer_views`], which `tessera check` sizes its
+            // shape layers through so that the two entry points cannot disagree about which views
+            // a layer is drawn on.
+            let mut config = config;
+            for layer in &mut config.layers {
+                layer.views =
+                    tessera_build::config::Config::expand_layer_views(&registry, &layer.views);
+            }
+            // **A scoped layer is a different artifact set per view of one group** (§3.5): its
+            // rows say which view each artifact belongs to, under the layer's own `fields.view`,
+            // and the group's keys are what a stray value is refused against.
+            let scoped_layers: std::collections::BTreeMap<String, tessera_build::ScopedLayer> =
+                config
+                    .scopes
+                    .layers
+                    .iter()
+                    .map(|(layer, group)| {
+                        let mut keys: Vec<String> = registry
+                            .iter()
+                            .filter_map(|view| view.group.as_ref())
+                            .filter(|membership| {
+                                &membership.group == group
+                                    || membership.members_of.as_ref() == Some(group)
+                            })
+                            .map(|membership| membership.key.clone())
+                            .collect();
+                        keys.sort();
+                        keys.dedup();
+                        let column = config
+                            .layer_sources
+                            .iter()
+                            .find(|source| &source.name == layer)
+                            .and_then(|source| match &source.artifacts {
+                                Some(tessera_build::config::ArtifactSource::File {
+                                    fields,
+                                    ..
+                                }) => Some(fields.of("view").to_string()),
+                                _ => None,
+                            })
+                            .unwrap_or_else(|| "view".to_string());
+                        (
+                            layer.clone(),
+                            tessera_build::ScopedLayer {
+                                group: group.clone(),
+                                column,
+                                keys,
+                            },
+                        )
+                    })
+                    .collect();
             // Read out before the declaration is broken up into build arguments: it is a
             // property of the declaration, and every value in it exists by now.
             let disclosure = tessera_build::disclosure::Disclosure::of(&config);
+            // The group registry beside it, and before the declaration is broken up for the same
+            // reason: it reads the declaration's groups and the frames the views resolved to
+            // (`views.md` §3.2).
+            let groups = config.group_registry(&registry, &view_args);
             let schema = config.schema;
             // §2.3: the cost is reported, never hidden — a hot column is baked into every row and
             // is unalterable without rewriting the corpus, so the operator sees the per-row and
@@ -1508,13 +1754,13 @@ fn main() -> ExitCode {
             };
 
             let args = tessera_build::BuildArgs {
-                points: acquired.points,
-                point_fields: acquired.point_fields,
+                arena_order,
+                views: view_args,
+                anchor,
+                groups,
+                scoped_attributes,
                 attribute_sources: acquired.attribute_sources,
-                access: acquired.access,
                 out: out.clone(),
-                extent,
-                view_id,
                 limit,
                 identity_key: identity.key,
                 identity_key_hex: identity.hex,
@@ -1528,23 +1774,43 @@ fn main() -> ExitCode {
                 schema,
                 layers: config.layers,
                 layer_inputs: acquired.layers,
+                scoped_layers,
             };
-            match tessera_build::build(&args) {
+            let observer = StageTimings {
+                print: stage_timings,
+                json: stage_timings_json
+                    .is_some()
+                    .then(tessera_build::observer::JsonStageTimings::new),
+            };
+            let built = if stage_timings || stage_timings_json.is_some() {
+                tessera_build::build_observed(&args, &observer)
+            } else {
+                tessera_build::build(&args)
+            };
+            // Written whether the build succeeded or failed: a build that died in `layers` is
+            // exactly the one whose per-stage record is worth having, and the records collected
+            // before the failure are as true as any other.
+            if let (Some(path), Some(json)) = (&stage_timings_json, &observer.json) {
+                if let Err(e) = json.write(path) {
+                    eprintln!("stage timings: writing {}: {e}", path.display());
+                }
+            }
+            match built {
                 Ok(report) => {
-                    // **Written beside the build rather than inside it**, because it is derived
-                    // from the declaration and from nothing the build computes — which is also why
-                    // `tessera check` can emit the identical document without opening a data file.
-                    // `reports/containment.json` is the other way round: a result, needing every
-                    // artifact published.
                     // **The other half of the frame report**, and the half the clamp count
                     // cannot see: data far too small for its frame clamps nothing, and every
                     // stored position is correct while nearly all the resolution is gone.
                     // Printed as raw numbers always — a frame this does not warn about is one
                     // the caller can still judge — and emphatically past the collapse threshold.
                     // Never a refusal: a coarse map is stored correctly, and may be meant.
-                    eprintln!("{}", report.occupancy.report(&report.view_id));
-                    if let Some(detail) = report.occupancy.warning(&report.view_id) {
-                        eprintln!("{detail}");
+                    //
+                    // **Per view, because the frame is** (decision 0040): two views of one
+                    // bundle may give the corpus quite different resolution.
+                    for view in &report.views {
+                        eprintln!("{}", view.occupancy.report(&view.view_id));
+                        if let Some(detail) = view.occupancy.warning(&view.view_id) {
+                            eprintln!("{detail}");
+                        }
                     }
                     if let Err(e) = tessera_build::write_disclosure_report(&out, &disclosure) {
                         eprintln!("build FAILED: writing reports/disclosure.json: {e}");
@@ -1562,6 +1828,11 @@ fn main() -> ExitCode {
                         report.minted_artifacts,
                         report.unclustered_member_rows,
                     );
+                    // The per-view shapes, which is what a multi-view build has to say and a
+                    // single total cannot: a view holds a subset of entity space (`views.md` §8).
+                    for view in &report.views {
+                        println!("  view {}: {} row(s)", view.view_id, view.rows);
+                    }
                     ExitCode::SUCCESS
                 }
                 Err(e) => {
@@ -1623,12 +1894,13 @@ fn main() -> ExitCode {
                         print_shallow(&report.shallow);
                         println!(
                             "deep: {} term(s), {} delta tier(s), {} pairs row(s), {} dict \
-                             record(s), {} external-id binding(s)",
+                             record(s), {} external-id binding(s), {} scoped render lane(s)",
                             report.terms,
                             report.delta_tiers,
                             report.pairs_rows,
                             report.dict_records,
-                            report.external_id_bindings
+                            report.external_id_bindings,
+                            report.scoped_render_lanes
                         );
                         ExitCode::SUCCESS
                     }
@@ -1699,6 +1971,60 @@ fn main() -> ExitCode {
             for finding in &report.findings {
                 eprintln!("  FAILED       {}: {}", finding.object, finding.detail);
             }
+            // **The frame a projected view will quantise against** (`projections.md` §4.2) —
+            // computed from the declaration alone, so the square and the resolution the snap costs
+            // are readable without a build. Reported, never a finding.
+            if !report.frames.is_empty() {
+                eprintln!("projected views, from the declaration alone:");
+                for frame in &report.frames {
+                    frame.print();
+                }
+            }
+            // **The declaration's view groups, and what is scoped to them** (`views.md` §3, §5)
+            // — the shape of a declaration nothing yet builds, so that `tessera check` is where
+            // an author reads back what they wrote. Reported, never a finding.
+            if !config.view_groups.is_empty() {
+                eprintln!("view groups, from the declaration alone:");
+                for group in &config.view_groups {
+                    let keys = group.declared_keys();
+                    let roster = match (&group.members, keys.len()) {
+                        (Some(owner), _) => format!("the views of '{owner}'"),
+                        (None, 0) => group.form().to_string(),
+                        (None, n) => format!("{}, {n} view(s): {}", group.form(), keys.join(", ")),
+                    };
+                    eprintln!("  {:<20} {roster}", group.name);
+                    if !group.metadata.is_empty() {
+                        eprintln!(
+                            "  {:<20} metadata: {}",
+                            "",
+                            group
+                                .metadata
+                                .iter()
+                                .map(|m| format!("{} ({})", m.name, m.ty.arrow_type_name()))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                    }
+                }
+                for (attribute, group) in &config.scopes.attributes {
+                    eprintln!("  {:<20} attribute '{attribute}'", format!("scope {group}"));
+                }
+                for (layer, group) in &config.scopes.layers {
+                    eprintln!("  {:<20} layer '{layer}'", format!("scope {group}"));
+                }
+            }
+            // **The shape layers, sized from the geometry alone** (`polygon-membership.md` §6.5)
+            // — the decomposition an operator sizing a boundary set reads before a build commits
+            // memory to it. Reported, never a finding: nothing here refuses.
+            if !report.shapes.is_empty() {
+                eprintln!("shape layers, from the geometry alone:");
+                for shape in &report.shapes {
+                    match shape {
+                        Ok(shape) => shape.print(),
+                        Err(why) => eprintln!("  not sized: {why}"),
+                    }
+                }
+            }
             if !report.is_clean() {
                 eprintln!(
                     "check FAILED: {} finding(s) across {} source(s). Nothing was read but \
@@ -1726,12 +2052,21 @@ fn main() -> ExitCode {
                 print_disclosure(&tessera_build::disclosure::Disclosure::of(&config));
             }
             eprintln!(
-                "check OK: {} source(s), {} view(s), {} vocabulary(ies), {} attribute(s), {} \
-                 layer(s)",
+                "check OK: {} source(s), {} view(s), {} view group(s) over {} declared view(s), \
+                 {} vocabulary(ies), {} attribute(s), {} layer(s)",
                 report.sources.len(),
                 config.views.len(),
+                config.view_groups.len(),
+                config
+                    .view_groups
+                    .iter()
+                    .map(|g| g.declared_keys().len())
+                    .sum::<usize>(),
                 config.schema.vocabularies.len(),
-                config.schema.attributes.len(),
+                // Every declared column, the group-scoped families included: they are held apart
+                // from the schema because a family has no slot in the manifest's flat list
+                // (`views.md` §5), not because they are fewer columns.
+                config.schema.attributes.len() + config.scoped_attributes.len(),
                 config.layers.len()
             );
             ExitCode::SUCCESS

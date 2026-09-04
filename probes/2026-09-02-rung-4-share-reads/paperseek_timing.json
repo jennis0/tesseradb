@@ -1,0 +1,10 @@
+{
+  "chunk": "chunk_0.parquet",
+  "file_size_bytes": 4699752481,
+  "whole_read_s": 115.2530837059021,
+  "whole_MBps": 40.777672318014744,
+  "projected_bytes": 964895325,
+  "projected_rows": 2000000,
+  "projected_read_s": 9.753742933273315,
+  "projected_MBps": 98.92564645192931
+}

@@ -1,0 +1,56 @@
+t,line
+0.395,"view 'knn': quantising against x [-61.571681365966796, 18.65543685913086], y [-22.400528774261474, 57.82658945083618]"
+0.395,"        the data spans x [-60.78514099121094, 17.868896484375], y [-15.247759819030762, 50.67382049560547] — 64252 x 53852 of the 65536 x 65536 cells"
+0.395,"        10000000 point(s) placed, none on the frame's edge"
+0.395,"schema: 4 column(s), 8.00 B/row against the 12 B fixed row (+67%)"
+0.395,        7.44 GiB per 10^9 items — unalterable without rewriting the corpus
+0.395,        every column materialises in EVERY view — including ones whose items carry no value for it (§3.9). Per-view columns need contracts §2.6's per-view enumeration
+0.593,stage       source_ids      0.20s  rows=10000000     peak=   180 MiB
+7.873,stage       dictionary      7.28s  rows=18           peak=   844 MiB
+13.104,stage    geometry_read      5.23s  rows=10000000     peak=  1939 MiB
+13.104,stage       pairs_pack      0.00s  rows=46017422     peak=  1939 MiB
+14.627,stage   signature_sort      1.52s  rows=10000000     peak=  1939 MiB
+18.340,stage       assignment      3.71s  rows=10000000     peak=  1939 MiB
+18.482,stage       assignment      0.14s  rows=10000000     peak=  1939 MiB
+19.702,stage   postings_write      1.22s  rows=46017422     peak=  1939 MiB
+19.702,stage     external_ids      0.00s  rows=0            peak=  1939 MiB
+25.210,"attribute 'published': 9,992,314 of 10,000,000 entities have a value"
+25.210,"attribute 'title': 9,990,914 of 10,000,000 entities have a value"
+25.210,"attribute 'mesh_major': 8,449,628 of 10,000,000 entities have a value"
+25.210,"attribute 'pmid': 10,000,000 of 10,000,000 entities have a value"
+25.210,        0 source row(s) named entities this build did not load
+25.210,stage   attribute_tail      5.51s  rows=10000000     peak=  1939 MiB
+104.457,stage         lay_plan      0.00s  rows=0            peak=  1939 MiB
+121.491,stage        lay_merge     17.03s  rows=0            peak=  1939 MiB
+121.499,stage      lay_resolve      0.01s  rows=0            peak=  1939 MiB
+130.396,stage       lay_verify      8.89s  rows=0            peak=  1939 MiB
+136.122,stage      lay_publish      5.73s  rows=0            peak=  2437 MiB
+137.225,stage      lay_extents      1.10s  rows=0            peak=  2438 MiB
+137.261,stage      lay_content      0.04s  rows=0            peak=  2438 MiB
+137.344,stage           layers    112.13s  rows=2            peak=  2437 MiB
+176.572,stage       text_index     16.14s  rows=904589       peak=  3645 MiB
+176.572,stage  filter_postings     23.09s  rows=10000000     peak=  3645 MiB
+188.342,stage      record_blob     11.77s  rows=10000000     peak=  3645 MiB
+188.545,stage   column_release      0.20s  rows=10000000     peak=  3645 MiB
+188.916,stage       tiler_sort      0.37s  rows=10000000     peak=  3645 MiB
+189.644,stage    segment_write      0.73s  rows=10000000     peak=  3645 MiB
+189.650,stage       ap_resolve      0.01s  rows=0            peak=  3645 MiB
+196.774,stage       ap_observe      7.12s  rows=0            peak=  3645 MiB
+196.833,stage ap_tileidx_project      0.06s  rows=0            peak=  3645 MiB
+196.837,stage  ap_tileidx_file      0.00s  rows=0            peak=  3645 MiB
+232.768,stage ap_column_project     35.93s  rows=0            peak=  4622 MiB
+233.924,stage   ap_column_file      1.16s  rows=0            peak=  4622 MiB
+233.924,stage        ap_shapes      0.00s  rows=0            peak=  4622 MiB
+233.925,stage    ct_start_cluste      0.00s  rows=0            peak=  4622 MiB
+233.927,stage      ct_wanted      0.00s  rows=0            peak=  4622 MiB
+233.933,stage        ct_sigs      0.00s  rows=0            peak=  4622 MiB
+233.938,stage    ct_start_mesh/d      0.00s  rows=0            peak=  4622 MiB
+233.942,stage      ct_wanted      0.00s  rows=0            peak=  4622 MiB
+233.942,stage        ct_sigs      0.00s  rows=0            peak=  4622 MiB
+233.951,stage       ap_contain      0.03s  rows=0            peak=  4622 MiB
+233.953,"artifact layouts, chosen from the bundle's own row space (44306 ms):"
+233.953,"  clusters/kmeans level 0 [knn]: 135 artifact(s) with rows, 0.541 everywhere, 5.0 blocks/artifact, disjoint — served rows"
+233.953,"  mesh/descriptors level 0 [knn]: 30119 artifact(s) with rows, 0.988 everywhere, 71.1 blocks/artifact, overlapping — served list"
+233.953,"  wrote 1 tile index(es), 1 row-major column(s), 2 containment partition(s), 0 shape row form(s), 0 decomposition file(s)"
+234.518,stage        manifests     44.87s  rows=3163528625   peak=  4622 MiB
+234.699,view 'knn': 10000000 point(s) landed in 8981578 distinct cell(s) — 89.8% of them have a position of their own

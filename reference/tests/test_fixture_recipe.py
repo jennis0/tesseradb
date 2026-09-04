@@ -53,6 +53,7 @@ def _stamped(bundle_root: Path, recipe: dict) -> None:
         ("N_ITEMS", 1234),
         ("_LAYOUT", [("only", 10)]),
         ("POINTS_NAME", "other.parquet"),
+        ("PAIRS_NAME", "other-pairs.parquet"),
         ("SHELF_ABSENT_STRIDE", 1),
         ("NOTE_ABSENT_STRIDE", 1),
         ("NOTE_OVERSIZE_ID", 2),
@@ -220,7 +221,15 @@ def test_the_250k_fixture_recipe_covers_every_build_argument(work_dir: Path):
 
     assert "--out" not in recipe and str(harness.CLI_BIN) not in recipe
     assert "--deployment" not in recipe, "the deployment file's path differs per worktree"
-    for expected in ("p.parquet", "q.parquet", "250000", "--mint-id-key", "--mint-external-ids"):
+    # The corpus files ride the argv as `--file` bindings (`points=…`, `pairs=…`) since sources
+    # were named once in the declaration; the binding token is what a changed path must move.
+    for expected in (
+        "points=p.parquet",
+        "pairs=q.parquet",
+        "250000",
+        "--mint-id-key",
+        "--mint-external-ids",
+    ):
         assert expected in recipe, f"{expected} is not in the recipe, so a change to it is silent"
 
     # **The extent is in the declaration now, not the invocation**, so the recipe has to stamp the

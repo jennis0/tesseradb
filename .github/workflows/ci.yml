@@ -9,17 +9,52 @@
 #
 # What runs is exactly the gate CLAUDE.md defines, plus the conformance suite. Nothing here builds
 # from the Phase 0 corpus: every fixture the suite uses is synthesised from a seed, which is what
-# makes a hosted runner possible at all. `reference/tests` is NOT run here — two of its five
-# modules build from that corpus, and repointing them would cost the viewport differential its
-# realistic term distribution. I1 keeps CI coverage through the overlay-journal differential and
-# its two defective engines; what CI does not see is the differential against real term skew.
+# makes a hosted runner possible at all.
+#
+# `reference/tests` used to be excluded **wholesale** on that ground, and the ground held for one
+# of its six modules and three cases of a second. Measured 2026-08-30 at `2bde89a6`: 62 of its 71
+# tests ran green with no corpus at all, in 21 s — a count that moves whenever a test is added, so
+# it is a measurement of the gap, not a figure to assert against. What the exclusion cost included
+# the oracle's only known-answer test of the identity permutation — whose independence from
+# `identity.rs` is the whole reason the shared vectors mean anything — while the Rust half of that
+# same pair ran here, so only one side of a cross-implementation check was gated. The corpus-free
+# part now runs in the `conformance` job, which already builds the venv it needs.
+#
+# The step runs the **directory** and names the exclusions, rather than listing the modules that
+# are wanted, for the reason `test_oracle_layering.py` derives its module set from `oracle/`: a
+# list of what to run is a list that a new file is silently absent from, and the file absent from
+# it is the one nobody thought about. So `test_differential.py` is ignored as a whole file and
+# `test_identity.py`'s three `fixture_bundle` cases are deselected as three node ids, and anything
+# else added under `reference/tests` runs here the day it lands.
+#
+# Both directions of drift then arrive as a red job: a renamed case stops matching its `--deselect`
+# and errors on the missing corpus, and a new corpus-dependent case is simply run and errors —
+# where `-k "not fixture_bundle"` would have swallowed either silently. Nothing here is turned into
+# a `skip`: a corpus test reported as a pass is worse than one that is visibly not run.
+#
+# What CI still does not see is the viewport differential against real term skew. Repointing it at a
+# synthetic corpus would cost it exactly the realistic term distribution it exists for, so it stays
+# out. I1 keeps CI coverage through the overlay-journal differential and its two defective engines.
 # Recorded so the omission reads as a decision rather than an oversight.
 #
-# Measured wall-clock on a developer machine, 2026-08-01, so that a runner that turns out much
-# slower is recognisable as a difference rather than as normal: `cargo test --workspace` 94 s;
-# `pytest conformance/tests` 24 s from deleted fixtures, including the 150,000-item catalogue
-# build. Runner time is the constraint that decides whether a gate stays enabled, so it is a
-# figure to keep an eye on rather than a one-off curiosity.
+# What the Rust job does not execute, on the same principle. `cargo test --workspace` skips every
+# `#[ignore]`d test — 22 of the 2,283 distinct tests the workspace harnesses list — and each of
+# those 22 either builds a real corpus, runs for minutes to hours, or measures rather than asserts.
+# Nothing here runs them and no other tier does either: §6's nightly, which would, is specified and
+# unbuilt. So a property held only by an ignored test is a property nothing gates on.
+#
+# Runner cost is the constraint that decides whether a gate stays enabled. Measured wall-clock on a
+# developer machine, 2026-08-01, so that a runner which turns out much slower is recognisable as a
+# difference rather than as normal: `cargo test --workspace` 94 s; `pytest conformance/tests` 24 s
+# from deleted fixtures, including the 150,000-item catalogue build.
+#
+# Both are **measurements with a date, not a current budget**, and the distinction is load-bearing
+# because four other sites cite the 94 s — `conformance.md` §6, `correctness-suite.md` §16 twice,
+# and `tests/scale.rs`'s module doc — and two of those cite it as the budget an ignored test is
+# excluded against. The workspace has grown since (2,283 distinct tests at 2026-08-30) and neither
+# figure has been re-measured, so neither may be quoted as headroom. What the exclusion of the
+# ignored set actually rests on is what those tests do — real corpora, minutes to hours — which is
+# durable and independent of any figure. Re-measure before either number is used to decide anything.
 
 name: gate
 
@@ -49,7 +84,15 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace
+      # `--no-fail-fast` is load-bearing. Without it cargo stops at the first test
+      # binary that fails and never runs the rest, so the summary reports the failures it reached
+      # alongside a passing total that is quietly smaller than the run before it — which reads as
+      # success at a glance. That has already been mistaken for a green gate here.
+      - run: cargo test --workspace --no-fail-fast
+      # Runs here rather than in `checks` so it reuses the build above: `--quick` asks the compiled
+      # harnesses what they would run, and would otherwise compile the workspace a second time. It
+      # counts what the gate executes against what exists, and refuses a bare `#[ignore]`.
+      - run: bash scripts/check-test-reachability.sh --quick
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   checks:
@@ -66,6 +109,9 @@ jobs:
       # which is not a gate.
       - run: bash scripts/check-layers.sh
       - run: python3 scripts/check-doc-links.py
+      # Prose register: files already rewritten to docs/agents/writing.md's Register section fail
+      # on any forbidden construction; the rest are counted until their rewrite lands.
+      - run: bash scripts/check-register.sh
       # Keeps `inventory.md`'s per-document revision and ⊘-marker counts true. It regenerates the
       # file and exits 1 when that changed anything, which is the behaviour wanted here: the
       # regenerated copy is discarded with the runner, and the failure is the signal. Added because
@@ -106,6 +152,65 @@ jobs:
           print(' '.join(d['project']['dependencies'] + d['project']['optional-dependencies']['dev']))
           ")
       - run: reference/.venv/bin/ruff check --config reference/pyproject.toml reference conformance
+      # `conformance.md` §0 states the suite's case count, and a hand-maintained number in a design
+      # document drifts silently — that one has been wrong three times. This is the treatment
+      # `scripts/check-corpus-integrity.py` gives `docs/design/inventory.md`, applied to the one
+      # fact in §0 a script can compute. It lives here and not in that script because collecting
+      # the suite needs the venv and the release binary, and that check is deliberately neither.
+      - name: the case count stated in conformance.md is the count pytest collects
+        run: |
+          collected=$(reference/.venv/bin/pytest conformance/tests conformance/suite \
+            --collect-only -q | grep -oE '^[0-9]+ tests collected' | grep -oE '^[0-9]+')
+          stated=$(grep -oE '^ *conformance-cases = [0-9]+' docs/design/conformance.md \
+            | grep -oE '[0-9]+$')
+          if [ -z "$collected" ] || [ -z "$stated" ]; then
+            echo "could not read a count: collected='$collected' stated='$stated'" >&2
+            echo "collection failed, or docs/design/conformance.md §0 lost its marker line" >&2
+            exit 1
+          fi
+          if [ "$collected" != "$stated" ]; then
+            echo "docs/design/conformance.md §0 states $stated cases; pytest collects" \
+                 "$collected. The document is stale — update the marker line in §0." >&2
+            exit 1
+          fi
+          echo "conformance.md §0 and pytest agree: $collected cases"
       # Fixtures are built once and cached in /tmp by a stamped recipe; on a fresh runner every one
       # of them is built from scratch, which is most of this job's wall-clock.
       - run: reference/.venv/bin/pytest conformance/tests conformance/suite -v
+      # The oracle's own tests — everything in `reference/tests` that does not build from the Phase
+      # 0 corpus. Run from `reference/` because that is where `pyproject.toml`'s `testpaths` and the
+      # node ids below are rooted; a `--deselect` given a repo-relative path matches nothing and is
+      # not an error, which is precisely the silent exclusion this step exists to stop being.
+      - name: the oracle's own tests, minus what needs the Phase 0 corpus
+        working-directory: reference
+        run: |
+          .venv/bin/pytest -v tests \
+            --ignore tests/test_differential.py \
+            --deselect tests/test_identity.py::test_fixture_bundle_rows_are_stored_in_morton_then_tessera_id_order \
+            --deselect tests/test_identity.py::test_fixture_bundle_identity_column_agrees_with_the_key \
+            --deselect tests/test_identity.py::test_fixture_bundle_sidecar_round_trips_through_the_locator
+
+  clients:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Node >= 20, which both scripts below need: `check-clients.sh` refuses without npm on PATH,
+      # and `clients/py/check.sh`'s wheel is built by a hatchling hook that shells out to npm.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: clients/ts/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # `check-clients.sh` requires an installed tree rather than installing one itself, so that a
+      # developer's stale `node_modules` fails loudly instead of being silently repaired.
+      - run: npm --prefix clients/ts ci
+      # The two halves of CLAUDE.md's gate that ran nowhere until now. The TypeScript client is in
+      # the gate because one rename — `ead7e90` — shipped three defects into `clients/` that a
+      # Rust-and-Python gate could not see, each found later by a separate investigation. The
+      # Python half exercises the wheel's build hook for real, that hook being the only thing
+      # between `pip install tesseradb[widget]` and a widget with no JavaScript in it.
+      - run: bash scripts/check-clients.sh
+      - run: bash clients/py/check.sh

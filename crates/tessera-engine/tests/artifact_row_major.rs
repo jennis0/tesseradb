@@ -58,6 +58,7 @@ fn declaration(
     layout: Option<ServingLayout>,
 ) -> LayerDeclaration {
     LayerDeclaration {
+        scope: Default::default(),
         name: name.into(),
         title: Some(format!("{name} (title)")),
         views: vec!["s0".into()],
@@ -181,10 +182,10 @@ struct Served {
     layer: String,
     key: Option<String>,
     masked_count: u64,
-    /// The key of the parent, where one was named. `None` is *no parent named*, which covers a root
-    /// and a parent withheld from this viewer alike — the ambiguity is deliberate on the wire and is
-    /// kept here.
-    parent_key: Option<Option<String>>,
+    /// The keys of the parents named — every one in the same response. Empty is *no parent
+    /// named*, which covers a root and a parent withheld from this viewer alike — the ambiguity is
+    /// deliberate on the wire and is kept here.
+    parent_keys: Vec<Option<String>>,
     centroid: Option<[f64; 2]>,
     bbox: Option<[u32; 4]>,
     content: Vec<String>,
@@ -201,7 +202,11 @@ fn served(artifacts: &[ArtifactOut]) -> Vec<Served> {
             layer: a.layer.clone(),
             key: a.key.clone(),
             masked_count: a.masked_count,
-            parent_key: a.parent_id.map(|id| by_id.get(&id).cloned().flatten()),
+            parent_keys: a
+                .parent_ids
+                .iter()
+                .map(|id| by_id.get(id).cloned().flatten())
+                .collect(),
             centroid: a.derived.centroid,
             bbox: a.derived.bbox,
             content: a.content.clone(),
@@ -369,7 +374,7 @@ fn treed(fx: &Fixture) -> Vec<IncomingArtifact> {
                 Some(format!("t{parent}.{child}")),
                 fx.members(clo..(clo + 500).min(N_ITEMS)),
             );
-            node.parent_key = Some(format!("t{parent}"));
+            node.parent_keys = vec![format!("t{parent}")];
             out.push(node);
         }
     }
@@ -558,7 +563,7 @@ fn a_drill_down_agrees_with_the_viewport_under_either_layout() {
                 // ⊘ A cold drill-down on a row-major level pays the level's whole histogram; this
                 // is where that is exercised as well as asserted.
                 let alone = engine
-                    .artifact(&session, artifact.tessera_id, Some(idset), "s0")
+                    .artifact(&session, artifact.tessera_id, Some(idset), "s0", None)
                     .expect("the identifier resolves")
                     .expect("and the artifact is served to the viewer the viewport served it to");
                 assert_eq!(

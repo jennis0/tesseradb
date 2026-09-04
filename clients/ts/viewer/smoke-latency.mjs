@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // What look-ahead is actually for: the time from the user stopping to the points being on screen.
 //
-//   node clients/ts/viewer/smoke-latency.mjs [--clients N]
+//   node clients/ts/viewer/smoke-latency.mjs [--clients N] [--url http://localhost:5173]
+//     [--headed] [--executable /path/to/chrome]
 //
 // Requires a running `tessera serve` and `vite dev`.
 //
@@ -18,20 +19,19 @@
 //
 //  3. **Contention.** Anticipation is speculative server work, so its cost is paid per client while
 //     its benefit accrues to one. `--clients N` runs N pages against one server.
-import {chromium} from 'playwright';
+import {flags, launchBrowser, withParams} from './smoke-browser.mjs';
 
-const arg = (name, fallback) => {
-  const i = process.argv.indexOf(`--${name}`);
-  return i >= 0 ? Number(process.argv[i + 1]) : fallback;
-};
-const CLIENTS = arg('clients', 1);
+const args = flags();
+const CLIENTS = Number(args.clients ?? 1);
+const BASE_URL = args.url ?? 'http://localhost:5173';
 const PAN_PX = 420;
 // Pixels per second. A slow drag is a careful read; 3000 px/s is a flick across the screen.
 const SPEEDS = [300, 1000, 2500];
 
-const browser = await chromium.launch({
-  args: ['--use-gl=swiftshader', '--enable-unsafe-swiftshader', '--disable-gpu-sandbox']
-});
+// Under headless swiftshader the frame is the measurement's noise floor: pan-to-paint is timed
+// from the paint, and a software-rasterised frame at a few million marks is itself seconds. What
+// this reports is a client latency, so it wants the real browser (`smoke-browser.mjs`).
+const browser = await launchBrowser(args);
 
 /** Drive one page: settle it, then sweep pan speeds, reporting latency per pan. */
 async function runClient(index, prefetch) {
@@ -43,7 +43,7 @@ async function runClient(index, prefetch) {
     }
   });
 
-  const url = prefetch ? 'http://localhost:5173' : 'http://localhost:5173/?prefetch=0';
+  const url = prefetch ? BASE_URL : withParams(BASE_URL, {prefetch: 0});
   await page.goto(url, {waitUntil: 'load'});
   await page.waitForTimeout(6000);
   const options = await page.locator('#principal option').count();

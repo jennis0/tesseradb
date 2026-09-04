@@ -1,5 +1,5 @@
 import {MAX_DEPTH, WORLD_SIZE} from './coords.js';
-import {MIN_DEPTH, chooseDepth, tileRectOfBbox, type DepthChoice} from './budget.js';
+import {MIN_DEPTH, chooseDepth, tileRectOfBbox, type CountField, type DepthChoice} from './budget.js';
 import {rectArea, type TileRect} from './rects.js';
 
 /**
@@ -53,8 +53,15 @@ export type PlannerInputs = {
   viewport: Viewport;
   /** Target marks on screen. */
   budget: number;
-  /** Calibrated marks-per-tile. */
+  /** Calibrated marks-per-tile — the fallback model, used where no counts cover the view. */
   mTarget: number;
+  /**
+   * Per-cell masked counts the caller knows cover the view, from responses already absorbed. The
+   * depth choice is arithmetic over these where they answer; see `budget.ts`.
+   */
+  counts?: CountField;
+  /** The cap in force, `min(k, k_max_marks)` — the `k` of `Σ min(k, count)`. */
+  k?: number;
   maxTiles: number;
   /** The previous response's visible count, the saturation term for depth choice. */
   visibleInView?: number;
@@ -199,10 +206,11 @@ export function worldBbox(
  * resolution of what the user is actually looking at.
  */
 export function plan(inputs: PlannerInputs): Plan {
-  const {viewport, budget, mTarget, maxTiles, visibleInView, velocity, holdDepth} = inputs;
+  const {viewport, budget, mTarget, maxTiles, counts, k, visibleInView, velocity, holdDepth} = inputs;
 
   const visible = worldBbox(viewport, 1);
-  let choice = chooseDepth({budget, mTarget, worldBbox: visible, maxTiles, visibleInView});
+  const ask = {budget, mTarget, worldBbox: visible, maxTiles, counts, k, visibleInView};
+  let choice = chooseDepth(ask);
   // **A one-step disagreement defers to the depth already drawn.** `visibleInView` varies with the
   // ground under the view, so panning across a density boundary flip-flops the budget's choice
   // between neighbours — measured as `8 9 8 8 9 8` across consecutive derivations, each flip
@@ -212,7 +220,7 @@ export function plan(inputs: PlannerInputs): Plan {
   // than one. The caller clears `holdDepth` on gesture pauses, so the hold never outlives the
   // interaction that needed it.
   if (holdDepth !== undefined && Math.abs(choice.depth - holdDepth) === 1) {
-    choice = chooseDepth({budget, mTarget, worldBbox: visible, maxTiles, visibleInView, force: holdDepth});
+    choice = chooseDepth({...ask, force: holdDepth});
   }
 
   const foreground: PlannedFetch = {

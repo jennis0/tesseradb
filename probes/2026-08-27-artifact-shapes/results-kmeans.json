@@ -1,0 +1,4269 @@
+[
+ {
+  "key": "km-000000",
+  "members": 28848,
+  "alpha": 71935065.93604344,
+  "convex": {
+   "rings": 1,
+   "vertices": 29,
+   "bytes": 232,
+   "area_ratio": 0.9999999999998882,
+   "fill": 0.9723607921906926,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 73,
+   "bytes": 584,
+   "area_ratio": 0.9387277443749567,
+   "fill": 0.998704024169504,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": false,
+   "bridges_left": 0,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 74,
+   "bytes": 592,
+   "area_ratio": 0.9723607921905838,
+   "fill": 1.0000000000000002,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": -3.568256801145253e-13
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 44,
+   "bytes": 352,
+   "area_ratio": 0.9463903596450081,
+   "fill": 0.9983536128907172,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 6,
+   "bytes": 48,
+   "area_ratio": 0.8750136564001939,
+   "fill": 0.9997252939212112,
+   "members_outside": 2264,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    28848
+   ]
+  }
+ },
+ {
+  "key": "km-000001",
+  "members": 46286,
+  "alpha": 97287874.66512576,
+  "convex": {
+   "rings": 1,
+   "vertices": 26,
+   "bytes": 208,
+   "area_ratio": 1.000000000000022,
+   "fill": 0.9848676842964226,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 50,
+   "bytes": 400,
+   "area_ratio": 0.9613197312320539,
+   "fill": 0.9965804384306602,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": false,
+   "bridges_left": 0,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 94,
+   "bytes": 752,
+   "area_ratio": 0.9848676842964438,
+   "fill": 1.0,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": 5.284661597215745e-14
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 36,
+   "bytes": 288,
+   "area_ratio": 0.9695235164419573,
+   "fill": 0.9960731774706308,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 5,
+   "bytes": 40,
+   "area_ratio": 0.9204182095617544,
+   "fill": 0.992840399340529,
+   "members_outside": 2237,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    46286
+   ]
+  }
+ },
+ {
+  "key": "km-000002",
+  "members": 51579,
+  "alpha": 120768882.4079276,
+  "convex": {
+   "rings": 1,
+   "vertices": 24,
+   "bytes": 192,
+   "area_ratio": 1.0000000000000189,
+   "fill": 0.9490936623507835,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 54,
+   "bytes": 432,
+   "area_ratio": 0.9467077164777579,
+   "fill": 0.9920654858652741,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": false,
+   "bridges_left": 0,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 60,
+   "bytes": 480,
+   "area_ratio": 0.9490936623508014,
+   "fill": 1.0,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": 8.060219158778636e-14
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 34,
+   "bytes": 272,
+   "area_ratio": 0.9537088297884718,
+   "fill": 0.9924997842578073,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 6,
+   "bytes": 48,
+   "area_ratio": 0.9776133472940678,
+   "fill": 0.9538653044699936,
+   "members_outside": 538,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    51579
+   ]
+  }
+ },
+ {
+  "key": "km-000003",
+  "members": 48573,
+  "alpha": 59737109.50191027,
+  "convex": {
+   "rings": 1,
+   "vertices": 29,
+   "bytes": 232,
+   "area_ratio": 0.9999999999997915,
+   "fill": 0.9624977320372421,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 69,
+   "bytes": 552,
+   "area_ratio": 0.9510961204450619,
+   "fill": 0.9965794445514851,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": false,
+   "bridges_left": 0,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 101,
+   "bytes": 808,
+   "area_ratio": 0.9624977320370414,
+   "fill": 1.0,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": 3.8191672047105385e-14
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 50,
+   "bytes": 400,
+   "area_ratio": 0.9512565269058773,
+   "fill": 0.996577549141988,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 5,
+   "bytes": 40,
+   "area_ratio": 0.9355041165472685,
+   "fill": 0.9769323308068539,
+   "members_outside": 928,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    48573
+   ]
+  }
+ },
+ {
+  "key": "km-000004",
+  "members": 66877,
+  "alpha": 37324665.790387206,
+  "convex": {
+   "rings": 1,
+   "vertices": 37,
+   "bytes": 296,
+   "area_ratio": 1.0000000000000446,
+   "fill": 0.9691952294482448,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 101,
+   "bytes": 808,
+   "area_ratio": 0.9526836941665259,
+   "fill": 0.9974899503876078,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": true,
+   "bridges_left": 13,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 172,
+   "bytes": 1376,
+   "area_ratio": 0.9691952294482878,
+   "fill": 1.0000000000000004,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": 4.625189120588402e-13
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 94,
+   "bytes": 752,
+   "area_ratio": 0.9270678007047761,
+   "fill": 0.9980456583366892,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 11,
+   "bytes": 88,
+   "area_ratio": 0.8686117242616114,
+   "fill": 0.9986911897438872,
+   "members_outside": 3352,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    66877
+   ]
+  }
+ },
+ {
+  "key": "km-000005",
+  "members": 26471,
+  "alpha": 166016464.8154022,
+  "convex": {
+   "rings": 1,
+   "vertices": 24,
+   "bytes": 192,
+   "area_ratio": 0.9999999999999979,
+   "fill": 0.9331334737119275,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 81,
+   "bytes": 648,
+   "area_ratio": 0.9556364583871312,
+   "fill": 0.9586596418984116,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": false,
+   "bridges_left": 0,
+   "refused_digs": 1
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 44,
+   "bytes": 352,
+   "area_ratio": 0.9331334737119257,
+   "fill": 0.9999999999999996,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": 7.882583474838611e-15
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 41,
+   "bytes": 328,
+   "area_ratio": 0.8320556160330248,
+   "fill": 0.9955361678605402,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 6,
+   "bytes": 48,
+   "area_ratio": 0.7431031272536777,
+   "fill": 0.9791902709903326,
+   "members_outside": 5086,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    26471
+   ]
+  }
+ },
+ {
+  "key": "km-000006",
+  "members": 44821,
+  "alpha": 46879396.157165736,
+  "convex": {
+   "rings": 1,
+   "vertices": 26,
+   "bytes": 208,
+   "area_ratio": 0.999999999999929,
+   "fill": 0.9244944906468487,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 90,
+   "bytes": 720,
+   "area_ratio": 0.9314991323063855,
+   "fill": 0.9905979594288493,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": true,
+   "bridges_left": 11,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 151,
+   "bytes": 1208,
+   "area_ratio": 0.924494490646783,
+   "fill": 1.0000000000000004,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": -8.055778266680136e-13
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 74,
+   "bytes": 592,
+   "area_ratio": 0.9094068851079097,
+   "fill": 0.997303733841129,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 7,
+   "bytes": 56,
+   "area_ratio": 0.8937468085031269,
+   "fill": 0.9974164754211919,
+   "members_outside": 1487,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    44821
+   ]
+  }
+ },
+ {
+  "key": "km-000007",
+  "members": 13658,
+  "alpha": 515749396.4805978,
+  "convex": {
+   "rings": 1,
+   "vertices": 16,
+   "bytes": 128,
+   "area_ratio": 1.000000000000002,
+   "fill": 0.9996812882635197,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 16,
+   "bytes": 128,
+   "area_ratio": 1.000000000000002,
+   "fill": 0.9996812882635197,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": false,
+   "bridges_left": 0,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 19,
+   "bytes": 152,
+   "area_ratio": 0.9996812882635217,
+   "fill": 1.0000000000000002,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": 5.551115123125783e-15
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 16,
+   "bytes": 128,
+   "area_ratio": 1.0000000000000022,
+   "fill": 0.9996812882635191,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 4,
+   "bytes": 32,
+   "area_ratio": 0.7003743469902957,
+   "fill": 1.0,
+   "members_outside": 1309,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 3,
+   "largest_share": 0.9998535656757944,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    13656,
+    1,
+    1
+   ]
+  }
+ },
+ {
+  "key": "km-000008",
+  "members": 16042,
+  "alpha": 39938798.43362653,
+  "convex": {
+   "rings": 1,
+   "vertices": 21,
+   "bytes": 168,
+   "area_ratio": 1.0000000000000515,
+   "fill": 0.05816167223477362,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 85,
+   "bytes": 680,
+   "area_ratio": 0.8709183952497924,
+   "fill": 0.0667803784788696,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": true,
+   "bridges_left": 15,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 27,
+   "vertices": 253,
+   "bytes": 2128,
+   "area_ratio": 0.058161672234776626,
+   "fill": 1.0,
+   "members_outside": 35,
+   "precision": 1.0,
+   "outer_rings": 23,
+   "holes": 4,
+   "hole_area_share": -9.618972285352356e-13
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 276,
+   "bytes": 2208,
+   "area_ratio": 0.09478594523019013,
+   "fill": 0.3420726693064326,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 72,
+   "bytes": 576,
+   "area_ratio": 0.1168701745869934,
+   "fill": 0.2518839220715348,
+   "members_outside": 2067,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 32,
+   "largest_share": 0.3550056102730333,
+   "over_1pct": 8,
+   "over_5pct": 3,
+   "over_10pct": 3,
+   "top": [
+    5695,
+    5124,
+    2216,
+    559,
+    554,
+    551
+   ]
+  }
+ },
+ {
+  "key": "km-000009",
+  "members": 45345,
+  "alpha": 130149746.70149276,
+  "convex": {
+   "rings": 1,
+   "vertices": 17,
+   "bytes": 136,
+   "area_ratio": 1.0000000000000595,
+   "fill": 0.779310743831336,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 81,
+   "bytes": 648,
+   "area_ratio": 0.8528189964436793,
+   "fill": 0.802809201230183,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": true,
+   "bridges_left": 5,
+   "refused_digs": 2
+  },
+  "alpha_complex": {
+   "rings": 2,
+   "vertices": 66,
+   "bytes": 532,
+   "area_ratio": 0.7793107438313829,
+   "fill": 0.9999999999999993,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 2,
+   "holes": 0,
+   "hole_area_share": 8.79296635503124e-14
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 79,
+   "bytes": 632,
+   "area_ratio": 0.6702458759828994,
+   "fill": 0.9959622651895659,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 12,
+   "bytes": 96,
+   "area_ratio": 0.6568803620743234,
+   "fill": 0.995061389526692,
+   "members_outside": 3843,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 5,
+   "largest_share": 0.9972654096372258,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    45221,
+    39,
+    34,
+    32,
+    19
+   ]
+  }
+ },
+ {
+  "key": "km-000010",
+  "members": 37785,
+  "alpha": 8073707.471683439,
+  "convex": {
+   "rings": 1,
+   "vertices": 17,
+   "bytes": 136,
+   "area_ratio": 1.0000000000000058,
+   "fill": 0.3242553570606238,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 81,
+   "bytes": 648,
+   "area_ratio": 0.9011604572702081,
+   "fill": 0.3595658156483618,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": true,
+   "bridges_left": 18,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 14,
+   "vertices": 473,
+   "bytes": 3836,
+   "area_ratio": 0.3242553570606257,
+   "fill": 1.0000000000000007,
+   "members_outside": 68,
+   "precision": 1.0,
+   "outer_rings": 10,
+   "holes": 4,
+   "hole_area_share": 0.02536535560917208
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 608,
+   "bytes": 4864,
+   "area_ratio": 0.3244626903527816,
+   "fill": 0.8979643421780776,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 165,
+   "bytes": 1320,
+   "area_ratio": 0.33175486634476725,
+   "fill": 0.8764468925662162,
+   "members_outside": 892,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 29,
+   "largest_share": 0.690882625380442,
+   "over_1pct": 3,
+   "over_5pct": 2,
+   "over_10pct": 2,
+   "top": [
+    26105,
+    8617,
+    1722,
+    339,
+    291,
+    202
+   ]
+  }
+ },
+ {
+  "key": "km-000011",
+  "members": 30662,
+  "alpha": 325443439.956716,
+  "convex": {
+   "rings": 1,
+   "vertices": 22,
+   "bytes": 176,
+   "area_ratio": 1.0000000000000322,
+   "fill": 0.976891802796843,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 48,
+   "bytes": 384,
+   "area_ratio": 0.9626880328067527,
+   "fill": 0.9939113371584689,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": false,
+   "bridges_left": 0,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 38,
+   "bytes": 304,
+   "area_ratio": 0.9768918027968742,
+   "fill": 0.9999999999999998,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": 9.992007221626409e-15
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 30,
+   "bytes": 240,
+   "area_ratio": 0.9497143354066176,
+   "fill": 0.9938281621801284,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 4,
+   "bytes": 32,
+   "area_ratio": 0.637809396957715,
+   "fill": 0.9937645170762903,
+   "members_outside": 7021,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 2,
+   "largest_share": 0.9999673863413998,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    30661,
+    1
+   ]
+  }
+ },
+ {
+  "key": "km-000012",
+  "members": 73360,
+  "alpha": 29947977.52803591,
+  "convex": {
+   "rings": 1,
+   "vertices": 34,
+   "bytes": 272,
+   "area_ratio": 1.000000000000096,
+   "fill": 0.8982927109075483,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 98,
+   "bytes": 784,
+   "area_ratio": 0.9141398485470703,
+   "fill": 0.9744533138936132,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": true,
+   "bridges_left": 15,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 2,
+   "vertices": 186,
+   "bytes": 1492,
+   "area_ratio": 0.8982927109076352,
+   "fill": 0.9999999999999993,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 1,
+   "hole_area_share": 0.009187770364383785
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 120,
+   "bytes": 960,
+   "area_ratio": 0.8486255196225808,
+   "fill": 0.998198545120294,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 14,
+   "bytes": 112,
+   "area_ratio": 0.8502743268971907,
+   "fill": 0.9906304065832721,
+   "members_outside": 1367,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 2,
+   "largest_share": 0.9996864776444929,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    73337,
+    23
+   ]
+  }
+ },
+ {
+  "key": "km-000013",
+  "members": 33353,
+  "alpha": 208215180.70635587,
+  "convex": {
+   "rings": 1,
+   "vertices": 18,
+   "bytes": 144,
+   "area_ratio": 0.9999999999999892,
+   "fill": 0.9914307100356005,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 18,
+   "bytes": 144,
+   "area_ratio": 0.9999999999999892,
+   "fill": 0.9914307100356005,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": false,
+   "bridges_left": 0,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 24,
+   "bytes": 192,
+   "area_ratio": 0.99143071003559,
+   "fill": 1.0,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": -6.150635556423367e-14
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 18,
+   "bytes": 144,
+   "area_ratio": 0.999999999999989,
+   "fill": 0.9914307100356009,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 4,
+   "bytes": 32,
+   "area_ratio": 0.6712433562613364,
+   "fill": 1.0,
+   "members_outside": 9434,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    33353
+   ]
+  }
+ },
+ {
+  "key": "km-000014",
+  "members": 34434,
+  "alpha": 64972216.002219446,
+  "convex": {
+   "rings": 1,
+   "vertices": 23,
+   "bytes": 184,
+   "area_ratio": 0.9999999999999714,
+   "fill": 0.9348548952176607,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 87,
+   "bytes": 696,
+   "area_ratio": 0.9599348003850138,
+   "fill": 0.9669339821085435,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": true,
+   "bridges_left": 10,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 65,
+   "bytes": 520,
+   "area_ratio": 0.9348548952176339,
+   "fill": 0.9999999999999999,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": -1.199040866595169e-14
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 75,
+   "bytes": 600,
+   "area_ratio": 0.8026228373896046,
+   "fill": 0.9982845679636502,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 12,
+   "bytes": 96,
+   "area_ratio": 0.8408337976302825,
+   "fill": 0.9722457099515902,
+   "members_outside": 1979,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    34434
+   ]
+  }
+ },
+ {
+  "key": "km-000015",
+  "members": 55605,
+  "alpha": 22161916.504043102,
+  "convex": {
+   "rings": 1,
+   "vertices": 41,
+   "bytes": 328,
+   "area_ratio": 0.9999999999999727,
+   "fill": 0.9920251437799789,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 105,
+   "bytes": 840,
+   "area_ratio": 0.9961764656190697,
+   "fill": 0.9956630676405777,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": true,
+   "bridges_left": 18,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 238,
+   "bytes": 1904,
+   "area_ratio": 0.9920251437799512,
+   "fill": 0.9999999999999998,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": 3.7614356074300304e-13
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 121,
+   "bytes": 968,
+   "area_ratio": 0.9743729713381329,
+   "fill": 0.9981233615136226,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 12,
+   "bytes": 96,
+   "area_ratio": 0.956636327174524,
+   "fill": 0.999006450862264,
+   "members_outside": 946,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    55605
+   ]
+  }
+ },
+ {
+  "key": "km-000016",
+  "members": 25256,
+  "alpha": 85002453.94816302,
+  "convex": {
+   "rings": 1,
+   "vertices": 21,
+   "bytes": 168,
+   "area_ratio": 0.9999999999999848,
+   "fill": 0.6048773016273827,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 85,
+   "bytes": 680,
+   "area_ratio": 0.7770182520812022,
+   "fill": 0.7736039677186902,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": true,
+   "bridges_left": 10,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 79,
+   "bytes": 632,
+   "area_ratio": 0.6048773016273735,
+   "fill": 1.0000000000000002,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": -8.149037000748649e-14
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 171,
+   "bytes": 1368,
+   "area_ratio": 0.23847891661969858,
+   "fill": 0.9995517683670604,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 39,
+   "bytes": 312,
+   "area_ratio": 0.2864262979051274,
+   "fill": 0.9498704783223045,
+   "members_outside": 1538,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 9,
+   "largest_share": 0.9838454228698131,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    24848,
+    125,
+    83,
+    78,
+    68,
+    33
+   ]
+  }
+ },
+ {
+  "key": "km-000017",
+  "members": 34127,
+  "alpha": 192061194.34304175,
+  "convex": {
+   "rings": 1,
+   "vertices": 20,
+   "bytes": 160,
+   "area_ratio": 0.999999999999964,
+   "fill": 0.9735120488157349,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 50,
+   "bytes": 400,
+   "area_ratio": 0.9659939030425421,
+   "fill": 0.9994275598467742,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": false,
+   "bridges_left": 0,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 34,
+   "bytes": 272,
+   "area_ratio": 0.9735120488157,
+   "fill": 1.0000000000000002,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": -2.1715962361668062e-13
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 25,
+   "bytes": 200,
+   "area_ratio": 0.9741281254272623,
+   "fill": 0.999367561006113,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 4,
+   "bytes": 32,
+   "area_ratio": 0.6600016981036123,
+   "fill": 1.0,
+   "members_outside": 5384,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    34127
+   ]
+  }
+ },
+ {
+  "key": "km-000018",
+  "members": 23394,
+  "alpha": 216287046.35635275,
+  "convex": {
+   "rings": 1,
+   "vertices": 15,
+   "bytes": 120,
+   "area_ratio": 1.0000000000000022,
+   "fill": 0.9464333421909158,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 57,
+   "bytes": 456,
+   "area_ratio": 0.9470220922300832,
+   "fill": 0.9991357616630814,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": false,
+   "bridges_left": 0,
+   "refused_digs": 2
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 32,
+   "bytes": 256,
+   "area_ratio": 0.9464333421909181,
+   "fill": 1.0,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": -6.661338147750939e-14
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 30,
+   "bytes": 240,
+   "area_ratio": 0.7943250033911733,
+   "fill": 0.9988608827279468,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 8,
+   "bytes": 64,
+   "area_ratio": 0.7100572016387772,
+   "fill": 0.9554383632277439,
+   "members_outside": 4948,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 2,
+   "largest_share": 0.9987603659057878,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    23365,
+    29
+   ]
+  }
+ },
+ {
+  "key": "km-000019",
+  "members": 27827,
+  "alpha": 323948862.21617496,
+  "convex": {
+   "rings": 1,
+   "vertices": 19,
+   "bytes": 152,
+   "area_ratio": 0.9999999999999966,
+   "fill": 0.9680489461192787,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 83,
+   "bytes": 664,
+   "area_ratio": 0.9007082336424657,
+   "fill": 0.9860004874420374,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": true,
+   "bridges_left": 1,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 37,
+   "bytes": 296,
+   "area_ratio": 0.9680489461192754,
+   "fill": 1.0000000000000002,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": -2.220446049250313e-15
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 31,
+   "bytes": 248,
+   "area_ratio": 0.8933745872438384,
+   "fill": 0.998872565320379,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 4,
+   "bytes": 32,
+   "area_ratio": 0.8266543146483866,
+   "fill": 0.9663761717853306,
+   "members_outside": 1375,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    27827
+   ]
+  }
+ },
+ {
+  "key": "km-000020",
+  "members": 59880,
+  "alpha": 74267247.39709619,
+  "convex": {
+   "rings": 1,
+   "vertices": 28,
+   "bytes": 224,
+   "area_ratio": 1.0000000000000973,
+   "fill": 0.9527463243496349,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 90,
+   "bytes": 720,
+   "area_ratio": 0.927696163364719,
+   "fill": 0.9976355905484345,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": false,
+   "bridges_left": 0,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 87,
+   "bytes": 696,
+   "area_ratio": 0.9527463243497281,
+   "fill": 0.9999999999999997,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": -1.6586731987899839e-13
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 50,
+   "bytes": 400,
+   "area_ratio": 0.9443173841115106,
+   "fill": 0.9975077522463613,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 7,
+   "bytes": 56,
+   "area_ratio": 0.9016432321266066,
+   "fill": 0.9885464178407942,
+   "members_outside": 3087,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    59880
+   ]
+  }
+ },
+ {
+  "key": "km-000021",
+  "members": 21684,
+  "alpha": 158232458.43890205,
+  "convex": {
+   "rings": 1,
+   "vertices": 21,
+   "bytes": 168,
+   "area_ratio": 0.9999999999999858,
+   "fill": 0.930992682614501,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 49,
+   "bytes": 392,
+   "area_ratio": 0.8449509760861441,
+   "fill": 0.9975604476584362,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": false,
+   "bridges_left": 0,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 42,
+   "bytes": 336,
+   "area_ratio": 0.9309926826144878,
+   "fill": 1.0,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": -4.6851411639181606e-14
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 33,
+   "bytes": 264,
+   "area_ratio": 0.874464149900761,
+   "fill": 0.997642782574389,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 4,
+   "bytes": 32,
+   "area_ratio": 0.571205922312381,
+   "fill": 0.9987436020167472,
+   "members_outside": 2366,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    21684
+   ]
+  }
+ },
+ {
+  "key": "km-000022",
+  "members": 61919,
+  "alpha": 39906408.02518806,
+  "convex": {
+   "rings": 1,
+   "vertices": 39,
+   "bytes": 312,
+   "area_ratio": 0.9999999999998851,
+   "fill": 0.9910266711807544,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 103,
+   "bytes": 824,
+   "area_ratio": 0.9735879094304475,
+   "fill": 0.9968813662095735,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": true,
+   "bridges_left": 5,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 149,
+   "bytes": 1192,
+   "area_ratio": 0.9910266711806407,
+   "fill": 1.0000000000000002,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": 1.0538236949741986e-12
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 84,
+   "bytes": 672,
+   "area_ratio": 0.9704380253159555,
+   "fill": 0.9974264094753512,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 11,
+   "bytes": 88,
+   "area_ratio": 0.9551829731635815,
+   "fill": 0.998781376498648,
+   "members_outside": 1080,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    61919
+   ]
+  }
+ },
+ {
+  "key": "km-000023",
+  "members": 36794,
+  "alpha": 97718175.56649628,
+  "convex": {
+   "rings": 1,
+   "vertices": 27,
+   "bytes": 216,
+   "area_ratio": 0.9999999999999989,
+   "fill": 0.9570019699115646,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 91,
+   "bytes": 728,
+   "area_ratio": 0.902512499142587,
+   "fill": 0.9862899445760179,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": true,
+   "bridges_left": 4,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 55,
+   "bytes": 440,
+   "area_ratio": 0.9570019699115632,
+   "fill": 1.0000000000000002,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": -3.26405569239796e-14
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 46,
+   "bytes": 368,
+   "area_ratio": 0.855067550781795,
+   "fill": 0.9974091204855565,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 8,
+   "bytes": 64,
+   "area_ratio": 0.8567709309967406,
+   "fill": 0.9714561185315265,
+   "members_outside": 3273,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    36794
+   ]
+  }
+ },
+ {
+  "key": "km-000024",
+  "members": 49602,
+  "alpha": 60335874.78544063,
+  "convex": {
+   "rings": 1,
+   "vertices": 32,
+   "bytes": 256,
+   "area_ratio": 1.0000000000000913,
+   "fill": 0.9837612394605743,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 78,
+   "bytes": 624,
+   "area_ratio": 0.9500167002686969,
+   "fill": 0.9973673239846685,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": false,
+   "bridges_left": 0,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 137,
+   "bytes": 1096,
+   "area_ratio": 0.9837612394606646,
+   "fill": 0.9999999999999993,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": 8.064660050877137e-13
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 52,
+   "bytes": 416,
+   "area_ratio": 0.9608646425218413,
+   "fill": 0.9969060586665199,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 8,
+   "bytes": 64,
+   "area_ratio": 0.8897665185145742,
+   "fill": 0.9880641610748845,
+   "members_outside": 3463,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    49602
+   ]
+  }
+ },
+ {
+  "key": "km-000025",
+  "members": 33489,
+  "alpha": 77989347.26688421,
+  "convex": {
+   "rings": 1,
+   "vertices": 28,
+   "bytes": 224,
+   "area_ratio": 1.0000000000002687,
+   "fill": 0.9793039834327356,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 80,
+   "bytes": 640,
+   "area_ratio": 0.968392332549474,
+   "fill": 0.992259360635235,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": false,
+   "bridges_left": 0,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 79,
+   "bytes": 632,
+   "area_ratio": 0.9793039834329997,
+   "fill": 0.999999999999999,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": 3.042011087472929e-14
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 46,
+   "bytes": 368,
+   "area_ratio": 0.9744601401179138,
+   "fill": 0.9916079565657626,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 5,
+   "bytes": 40,
+   "area_ratio": 0.8607427044919399,
+   "fill": 0.9909138065502118,
+   "members_outside": 5107,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    33489
+   ]
+  }
+ },
+ {
+  "key": "km-000026",
+  "members": 21655,
+  "alpha": 269552638.74634206,
+  "convex": {
+   "rings": 1,
+   "vertices": 18,
+   "bytes": 144,
+   "area_ratio": 0.9999999999999781,
+   "fill": 0.9765768188461682,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 63,
+   "bytes": 504,
+   "area_ratio": 0.9389471402723334,
+   "fill": 0.978236588784909,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": false,
+   "bridges_left": 0,
+   "refused_digs": 1
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 31,
+   "bytes": 248,
+   "area_ratio": 0.9765768188461466,
+   "fill": 1.0,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": 5.440092820663267e-15
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 32,
+   "bytes": 256,
+   "area_ratio": 0.8741561383913359,
+   "fill": 0.9971634458945156,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 3,
+   "bytes": 24,
+   "area_ratio": 0.7551197031152007,
+   "fill": 0.9931401621906807,
+   "members_outside": 5583,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    21655
+   ]
+  }
+ },
+ {
+  "key": "km-000027",
+  "members": 43042,
+  "alpha": 63732316.13711073,
+  "convex": {
+   "rings": 1,
+   "vertices": 32,
+   "bytes": 256,
+   "area_ratio": 0.9999999999999712,
+   "fill": 0.9862888117682863,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 62,
+   "bytes": 496,
+   "area_ratio": 0.9875833689016265,
+   "fill": 0.9945861669785806,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": false,
+   "bridges_left": 0,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 95,
+   "bytes": 760,
+   "area_ratio": 0.9862888117682577,
+   "fill": 1.0000000000000002,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": 7.80486786311485e-14
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 47,
+   "bytes": 376,
+   "area_ratio": 0.9883339702625679,
+   "fill": 0.994542264270928,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 5,
+   "bytes": 40,
+   "area_ratio": 0.9105661178376809,
+   "fill": 0.9987962152783952,
+   "members_outside": 2798,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    43042
+   ]
+  }
+ },
+ {
+  "key": "km-000028",
+  "members": 36910,
+  "alpha": 86260534.3390844,
+  "convex": {
+   "rings": 1,
+   "vertices": 22,
+   "bytes": 176,
+   "area_ratio": 0.9999999999999598,
+   "fill": 0.9636386784683503,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 75,
+   "bytes": 600,
+   "area_ratio": 0.9734631029251918,
+   "fill": 0.988761736627522,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": false,
+   "bridges_left": 0,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 71,
+   "bytes": 568,
+   "area_ratio": 0.9636386784683119,
+   "fill": 1.0,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": -1.9984014443252818e-14
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 40,
+   "bytes": 320,
+   "area_ratio": 0.9740753515382773,
+   "fill": 0.989285558808686,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 4,
+   "bytes": 32,
+   "area_ratio": 0.8768329202666856,
+   "fill": 0.98297787994905,
+   "members_outside": 5871,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    36910
+   ]
+  }
+ },
+ {
+  "key": "km-000029",
+  "members": 46551,
+  "alpha": 46698275.225961015,
+  "convex": {
+   "rings": 1,
+   "vertices": 35,
+   "bytes": 280,
+   "area_ratio": 0.9999999999998362,
+   "fill": 0.823780290011636,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 99,
+   "bytes": 792,
+   "area_ratio": 0.8305066314955026,
+   "fill": 0.9805108579790033,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": true,
+   "bridges_left": 14,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 123,
+   "bytes": 984,
+   "area_ratio": 0.8237802900115015,
+   "fill": 0.9999999999999994,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": -4.3165471197426086e-13
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 106,
+   "bytes": 848,
+   "area_ratio": 0.7533264991903252,
+   "fill": 0.9985293208961632,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 20,
+   "bytes": 160,
+   "area_ratio": 0.7524690133059498,
+   "fill": 0.9780834601010371,
+   "members_outside": 1351,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 2,
+   "largest_share": 0.9998925909217847,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    46546,
+    5
+   ]
+  }
+ },
+ {
+  "key": "km-000030",
+  "members": 24867,
+  "alpha": 79147251.32791312,
+  "convex": {
+   "rings": 1,
+   "vertices": 27,
+   "bytes": 216,
+   "area_ratio": 0.9999999999997667,
+   "fill": 0.9532693888160501,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 91,
+   "bytes": 728,
+   "area_ratio": 0.7494838679003081,
+   "fill": 0.9974110787624473,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": true,
+   "bridges_left": 2,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 48,
+   "bytes": 384,
+   "area_ratio": 0.9532693888158281,
+   "fill": 0.9999999999999994,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": -4.1322500976548326e-13
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 51,
+   "bytes": 408,
+   "area_ratio": 0.7652601257818459,
+   "fill": 0.99674762927973,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 10,
+   "bytes": 80,
+   "area_ratio": 0.8022504387953829,
+   "fill": 0.9640504632397998,
+   "members_outside": 793,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    24867
+   ]
+  }
+ },
+ {
+  "key": "km-000031",
+  "members": 60055,
+  "alpha": 87452590.03825654,
+  "convex": {
+   "rings": 1,
+   "vertices": 27,
+   "bytes": 216,
+   "area_ratio": 0.9999999999999647,
+   "fill": 0.9073547224595665,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 91,
+   "bytes": 728,
+   "area_ratio": 0.8664631703808109,
+   "fill": 0.9875695826886617,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": true,
+   "bridges_left": 6,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 79,
+   "bytes": 632,
+   "area_ratio": 0.9073547224595344,
+   "fill": 1.0,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": -1.099120794378905e-13
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 67,
+   "bytes": 536,
+   "area_ratio": 0.6644114823291016,
+   "fill": 0.9920133774170545,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 9,
+   "bytes": 72,
+   "area_ratio": 0.6205337766621954,
+   "fill": 0.9609167290321297,
+   "members_outside": 11073,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    60055
+   ]
+  }
+ },
+ {
+  "key": "km-000032",
+  "members": 16268,
+  "alpha": 99258998.85257012,
+  "convex": {
+   "rings": 1,
+   "vertices": 21,
+   "bytes": 168,
+   "area_ratio": 0.9999999999999813,
+   "fill": 0.9530694666548486,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 85,
+   "bytes": 680,
+   "area_ratio": 0.7605340694321717,
+   "fill": 0.9804095580532728,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": true,
+   "bridges_left": 3,
+   "refused_digs": 1
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 35,
+   "bytes": 280,
+   "area_ratio": 0.9530694666548314,
+   "fill": 0.9999999999999998,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": -2.4868995751603507e-14
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 45,
+   "bytes": 360,
+   "area_ratio": 0.7425777544853173,
+   "fill": 0.9995925767080039,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 6,
+   "bytes": 48,
+   "area_ratio": 0.7474922939485278,
+   "fill": 0.9898575590643757,
+   "members_outside": 2054,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    16268
+   ]
+  }
+ },
+ {
+  "key": "km-000033",
+  "members": 31248,
+  "alpha": 227639575.5843073,
+  "convex": {
+   "rings": 1,
+   "vertices": 16,
+   "bytes": 128,
+   "area_ratio": 1.0000000000000024,
+   "fill": 0.9184692855473112,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 80,
+   "bytes": 640,
+   "area_ratio": 0.9264379668308058,
+   "fill": 0.9738505241557389,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": true,
+   "bridges_left": 3,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 41,
+   "bytes": 328,
+   "area_ratio": 0.9184692855473139,
+   "fill": 1.0,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": 2.298161660974074e-14
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 28,
+   "bytes": 224,
+   "area_ratio": 0.9310975584276688,
+   "fill": 0.9864372183494065,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 4,
+   "bytes": 32,
+   "area_ratio": 0.86041931631199,
+   "fill": 0.9856768436498103,
+   "members_outside": 1009,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    31248
+   ]
+  }
+ },
+ {
+  "key": "km-000034",
+  "members": 27674,
+  "alpha": 17860837.426561166,
+  "convex": {
+   "rings": 1,
+   "vertices": 25,
+   "bytes": 200,
+   "area_ratio": 1.0000000000000002,
+   "fill": 0.051048889335325726,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 89,
+   "bytes": 712,
+   "area_ratio": 0.8852037518101573,
+   "fill": 0.05762433294426632,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": true,
+   "bridges_left": 18,
+   "refused_digs": 1
+  },
+  "alpha_complex": {
+   "rings": 39,
+   "vertices": 354,
+   "bytes": 2984,
+   "area_ratio": 0.05104888933532573,
+   "fill": 1.0,
+   "members_outside": 21,
+   "precision": 1.0,
+   "outer_rings": 36,
+   "holes": 3,
+   "hole_area_share": 8.215650382226158e-15
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 315,
+   "bytes": 2520,
+   "area_ratio": 0.11162110482353922,
+   "fill": 0.4279128635622746,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 90,
+   "bytes": 720,
+   "area_ratio": 0.11964406967865898,
+   "fill": 0.39141018577082076,
+   "members_outside": 738,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 39,
+   "largest_share": 0.6130302811303028,
+   "over_1pct": 6,
+   "over_5pct": 3,
+   "over_10pct": 2,
+   "top": [
+    16965,
+    5364,
+    1432,
+    1084,
+    986,
+    700
+   ]
+  }
+ },
+ {
+  "key": "km-000035",
+  "members": 46526,
+  "alpha": 106842594.0951074,
+  "convex": {
+   "rings": 1,
+   "vertices": 26,
+   "bytes": 208,
+   "area_ratio": 1.000000000000066,
+   "fill": 0.9879230029232732,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 59,
+   "bytes": 472,
+   "area_ratio": 0.9682377973848927,
+   "fill": 0.9981466305041891,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": false,
+   "bridges_left": 0,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 72,
+   "bytes": 576,
+   "area_ratio": 0.9879230029233382,
+   "fill": 1.0000000000000004,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": -5.848654893725325e-13
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 38,
+   "bytes": 304,
+   "area_ratio": 0.9739810995564994,
+   "fill": 0.9978050332110444,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 5,
+   "bytes": 40,
+   "area_ratio": 0.9288872712397707,
+   "fill": 0.9968921223596957,
+   "members_outside": 4623,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    46526
+   ]
+  }
+ },
+ {
+  "key": "km-000036",
+  "members": 58080,
+  "alpha": 54240949.392962664,
+  "convex": {
+   "rings": 1,
+   "vertices": 28,
+   "bytes": 224,
+   "area_ratio": 1.0000000000000324,
+   "fill": 0.9871248447208125,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 65,
+   "bytes": 520,
+   "area_ratio": 0.9911684098230528,
+   "fill": 0.9952581169246947,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": false,
+   "bridges_left": 0,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 137,
+   "bytes": 1096,
+   "area_ratio": 0.9871248447208449,
+   "fill": 1.0,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": 1.368904989362818e-13
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 50,
+   "bytes": 400,
+   "area_ratio": 0.9920521992938955,
+   "fill": 0.9950331700523847,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 5,
+   "bytes": 40,
+   "area_ratio": 0.9652525333467846,
+   "fill": 0.9949727097470564,
+   "members_outside": 732,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    58080
+   ]
+  }
+ },
+ {
+  "key": "km-000037",
+  "members": 43751,
+  "alpha": 57623363.23822586,
+  "convex": {
+   "rings": 1,
+   "vertices": 28,
+   "bytes": 224,
+   "area_ratio": 0.9999999999997388,
+   "fill": 0.9333654431460706,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 92,
+   "bytes": 736,
+   "area_ratio": 0.9268355798915804,
+   "fill": 0.9959939201613963,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": true,
+   "bridges_left": 7,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 78,
+   "bytes": 624,
+   "area_ratio": 0.933365443145827,
+   "fill": 0.9999999999999999,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": -3.26405569239796e-13
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 68,
+   "bytes": 544,
+   "area_ratio": 0.8913418662065329,
+   "fill": 0.9972195058405806,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 10,
+   "bytes": 80,
+   "area_ratio": 0.9005889007106369,
+   "fill": 0.979330118642255,
+   "members_outside": 638,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    43751
+   ]
+  }
+ },
+ {
+  "key": "km-000038",
+  "members": 47015,
+  "alpha": 50021869.225999,
+  "convex": {
+   "rings": 1,
+   "vertices": 34,
+   "bytes": 272,
+   "area_ratio": 1.0000000000000604,
+   "fill": 0.9627055308670489,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 98,
+   "bytes": 784,
+   "area_ratio": 0.9401557220237606,
+   "fill": 0.9930252921594519,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": true,
+   "bridges_left": 11,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 114,
+   "bytes": 912,
+   "area_ratio": 0.9627055308671072,
+   "fill": 1.0000000000000004,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": 1.1013412404281553e-13
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 98,
+   "bytes": 784,
+   "area_ratio": 0.8417305334108014,
+   "fill": 0.9976232060586786,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 18,
+   "bytes": 144,
+   "area_ratio": 0.8413792404247639,
+   "fill": 0.9874231605087654,
+   "members_outside": 2015,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    47015
+   ]
+  }
+ },
+ {
+  "key": "km-000039",
+  "members": 36157,
+  "alpha": 79237221.01777977,
+  "convex": {
+   "rings": 1,
+   "vertices": 22,
+   "bytes": 176,
+   "area_ratio": 1.0000000000000062,
+   "fill": 0.9379932248558823,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 86,
+   "bytes": 688,
+   "area_ratio": 0.8991902055901602,
+   "fill": 0.9903332441154268,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": true,
+   "bridges_left": 6,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 62,
+   "bytes": 496,
+   "area_ratio": 0.9379932248558881,
+   "fill": 1.0000000000000002,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": 1.1435297153639112e-14
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 49,
+   "bytes": 392,
+   "area_ratio": 0.8750471673004971,
+   "fill": 0.9943579983776356,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 7,
+   "bytes": 56,
+   "area_ratio": 0.7684920152004727,
+   "fill": 0.9852164915911525,
+   "members_outside": 4354,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    36157
+   ]
+  }
+ },
+ {
+  "key": "km-000040",
+  "members": 30222,
+  "alpha": 107370761.47640933,
+  "convex": {
+   "rings": 1,
+   "vertices": 22,
+   "bytes": 176,
+   "area_ratio": 0.9999999999998388,
+   "fill": 0.981963186621733,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 36,
+   "bytes": 288,
+   "area_ratio": 0.9827853726685121,
+   "fill": 0.9965225955210171,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": false,
+   "bridges_left": 0,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 51,
+   "bytes": 408,
+   "area_ratio": 0.9819631866215744,
+   "fill": 1.0000000000000002,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": -2.5290880500961066e-13
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 29,
+   "bytes": 232,
+   "area_ratio": 0.9831943720583134,
+   "fill": 0.9964971255170006,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 5,
+   "bytes": 40,
+   "area_ratio": 0.9023085300028422,
+   "fill": 0.9953730058538524,
+   "members_outside": 1664,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    30222
+   ]
+  }
+ },
+ {
+  "key": "km-000041",
+  "members": 14289,
+  "alpha": 25939602.445745714,
+  "convex": {
+   "rings": 1,
+   "vertices": 20,
+   "bytes": 160,
+   "area_ratio": 1.000000000000036,
+   "fill": 0.009611998352459863,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 84,
+   "bytes": 672,
+   "area_ratio": 0.8530136580406469,
+   "fill": 0.011268196556353648,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": true,
+   "bridges_left": 17,
+   "refused_digs": 1
+  },
+  "alpha_complex": {
+   "rings": 51,
+   "vertices": 434,
+   "bytes": 3672,
+   "area_ratio": 0.00961199835246021,
+   "fill": 1.0,
+   "members_outside": 13,
+   "precision": 1.0,
+   "outer_rings": 49,
+   "holes": 2,
+   "hole_area_share": 2.2498669594028797e-12
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 430,
+   "bytes": 3440,
+   "area_ratio": 0.13133534725346638,
+   "fill": 0.058962117179701276,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 120,
+   "bytes": 960,
+   "area_ratio": 0.13671525215743086,
+   "fill": 0.046232692615958804,
+   "members_outside": 4068,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 61,
+   "largest_share": 0.2599902022534817,
+   "over_1pct": 12,
+   "over_5pct": 7,
+   "over_10pct": 2,
+   "top": [
+    3715,
+    2106,
+    1325,
+    1226,
+    938,
+    935
+   ]
+  }
+ },
+ {
+  "key": "km-000042",
+  "members": 33967,
+  "alpha": 216374967.5643955,
+  "convex": {
+   "rings": 1,
+   "vertices": 21,
+   "bytes": 168,
+   "area_ratio": 0.9999999999999433,
+   "fill": 0.9953280766002187,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 21,
+   "bytes": 168,
+   "area_ratio": 0.9999999999999433,
+   "fill": 0.9953280766002187,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": false,
+   "bridges_left": 0,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 33,
+   "bytes": 264,
+   "area_ratio": 0.9953280766001625,
+   "fill": 0.9999999999999994,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": 8.193445921733655e-14
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 21,
+   "bytes": 168,
+   "area_ratio": 0.9999999999999433,
+   "fill": 0.9953280766002187,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 4,
+   "bytes": 32,
+   "area_ratio": 0.7495956025886664,
+   "fill": 0.9968158010383752,
+   "members_outside": 10554,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    33967
+   ]
+  }
+ },
+ {
+  "key": "km-000043",
+  "members": 50941,
+  "alpha": 30864099.445254933,
+  "convex": {
+   "rings": 1,
+   "vertices": 30,
+   "bytes": 240,
+   "area_ratio": 1.000000000000058,
+   "fill": 0.9837259364862433,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 94,
+   "bytes": 752,
+   "area_ratio": 0.9783459851992842,
+   "fill": 0.9973660944232854,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": true,
+   "bridges_left": 6,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 193,
+   "bytes": 1544,
+   "area_ratio": 0.9837259364863004,
+   "fill": 0.9999999999999993,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": -4.813927034774679e-13
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 78,
+   "bytes": 624,
+   "area_ratio": 0.979131292112243,
+   "fill": 0.9973074483326831,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 7,
+   "bytes": 56,
+   "area_ratio": 0.9695934345238543,
+   "fill": 0.9982711619529672,
+   "members_outside": 313,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    50941
+   ]
+  }
+ },
+ {
+  "key": "km-000044",
+  "members": 41785,
+  "alpha": 45531053.64088014,
+  "convex": {
+   "rings": 1,
+   "vertices": 27,
+   "bytes": 216,
+   "area_ratio": 1.0000000000000349,
+   "fill": 0.9652406304155966,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 91,
+   "bytes": 728,
+   "area_ratio": 0.9319476017332826,
+   "fill": 0.9960981183627088,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": true,
+   "bridges_left": 6,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 127,
+   "bytes": 1016,
+   "area_ratio": 0.9652406304156299,
+   "fill": 1.0000000000000004,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": -6.88338275267597e-14
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 75,
+   "bytes": 600,
+   "area_ratio": 0.9050720049412138,
+   "fill": 0.9959433902274377,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 9,
+   "bytes": 72,
+   "area_ratio": 0.8876637358054764,
+   "fill": 0.9908800725082105,
+   "members_outside": 1563,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    41785
+   ]
+  }
+ },
+ {
+  "key": "km-000045",
+  "members": 28591,
+  "alpha": 96357731.49943206,
+  "convex": {
+   "rings": 1,
+   "vertices": 19,
+   "bytes": 152,
+   "area_ratio": 1.0000000000000129,
+   "fill": 0.9033520977535587,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 83,
+   "bytes": 664,
+   "area_ratio": 0.888019135070928,
+   "fill": 0.974560650218671,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": true,
+   "bridges_left": 6,
+   "refused_digs": 1
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 45,
+   "bytes": 360,
+   "area_ratio": 0.9033520977535704,
+   "fill": 0.9999999999999999,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": -4.218847493575595e-15
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 44,
+   "bytes": 352,
+   "area_ratio": 0.7933701249335247,
+   "fill": 0.9993051915198432,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 6,
+   "bytes": 48,
+   "area_ratio": 0.7525799941381338,
+   "fill": 0.9856615102416902,
+   "members_outside": 2653,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    28591
+   ]
+  }
+ },
+ {
+  "key": "km-000046",
+  "members": 40758,
+  "alpha": 39213832.42636268,
+  "convex": {
+   "rings": 1,
+   "vertices": 28,
+   "bytes": 224,
+   "area_ratio": 0.999999999999977,
+   "fill": 0.7552456155021344,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 92,
+   "bytes": 736,
+   "area_ratio": 0.7408392583675313,
+   "fill": 0.9835792822393403,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": true,
+   "bridges_left": 12,
+   "refused_digs": 1
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 112,
+   "bytes": 896,
+   "area_ratio": 0.7552456155021171,
+   "fill": 0.9999999999999993,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": 1.787459069646502e-14
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 82,
+   "bytes": 656,
+   "area_ratio": 0.7194321764917162,
+   "fill": 0.9979439773477912,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 13,
+   "bytes": 104,
+   "area_ratio": 0.7336434146285372,
+   "fill": 0.9560494273873233,
+   "members_outside": 2516,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 4,
+   "largest_share": 0.9710240934295108,
+   "over_1pct": 2,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    39577,
+    876,
+    265,
+    40
+   ]
+  }
+ },
+ {
+  "key": "km-000047",
+  "members": 61031,
+  "alpha": 34326857.18967939,
+  "convex": {
+   "rings": 1,
+   "vertices": 37,
+   "bytes": 296,
+   "area_ratio": 1.0000000000001488,
+   "fill": 0.9614984702548758,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 101,
+   "bytes": 808,
+   "area_ratio": 0.9553813983470177,
+   "fill": 0.9967559086469664,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": true,
+   "bridges_left": 13,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 190,
+   "bytes": 1520,
+   "area_ratio": 0.9614984702550187,
+   "fill": 1.0000000000000002,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": -7.385203559806541e-13
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 97,
+   "bytes": 776,
+   "area_ratio": 0.9235394269010531,
+   "fill": 0.9982162704743235,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 12,
+   "bytes": 96,
+   "area_ratio": 0.9228216901644917,
+   "fill": 0.9960638156375146,
+   "members_outside": 858,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    61031
+   ]
+  }
+ },
+ {
+  "key": "km-000048",
+  "members": 34076,
+  "alpha": 120741378.14003214,
+  "convex": {
+   "rings": 1,
+   "vertices": 20,
+   "bytes": 160,
+   "area_ratio": 1.0000000000000056,
+   "fill": 0.9167929230846313,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 84,
+   "bytes": 672,
+   "area_ratio": 0.9424201110409819,
+   "fill": 0.9668096886902362,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": true,
+   "bridges_left": 7,
+   "refused_digs": 2
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 50,
+   "bytes": 400,
+   "area_ratio": 0.9167929230846361,
+   "fill": 1.0,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": -5.1736392947532295e-14
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 75,
+   "bytes": 600,
+   "area_ratio": 0.5481967723039258,
+   "fill": 0.9935838042659999,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 18,
+   "bytes": 144,
+   "area_ratio": 0.4515902038880884,
+   "fill": 0.9867556951510734,
+   "members_outside": 14106,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 3,
+   "largest_share": 0.9969773447587745,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    33973,
+    62,
+    41
+   ]
+  }
+ },
+ {
+  "key": "km-000049",
+  "members": 42116,
+  "alpha": 100561711.05817641,
+  "convex": {
+   "rings": 1,
+   "vertices": 20,
+   "bytes": 160,
+   "area_ratio": 1.0000000000001128,
+   "fill": 0.594224818781513,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 84,
+   "bytes": 672,
+   "area_ratio": 0.7195964145262673,
+   "fill": 0.8204063424062102,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": true,
+   "bridges_left": 9,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 3,
+   "vertices": 68,
+   "bytes": 552,
+   "area_ratio": 0.5942248187815804,
+   "fill": 0.9999999999999992,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 3,
+   "holes": 0,
+   "hole_area_share": -2.637889906509372e-13
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 71,
+   "bytes": 568,
+   "area_ratio": 0.5681592522501824,
+   "fill": 0.8977645001122456,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 13,
+   "bytes": 104,
+   "area_ratio": 0.5886018820125197,
+   "fill": 0.8249810639474029,
+   "members_outside": 3952,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 3,
+   "largest_share": 0.997625605470605,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    42016,
+    70,
+    30
+   ]
+  }
+ },
+ {
+  "key": "km-000050",
+  "members": 17895,
+  "alpha": 209487147.16864783,
+  "convex": {
+   "rings": 1,
+   "vertices": 15,
+   "bytes": 120,
+   "area_ratio": 0.9999999999999977,
+   "fill": 0.7790697987374233,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 79,
+   "bytes": 632,
+   "area_ratio": 0.837070134166652,
+   "fill": 0.8981336296132223,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": true,
+   "bridges_left": 4,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 32,
+   "bytes": 256,
+   "area_ratio": 0.7790697987374211,
+   "fill": 1.0000000000000004,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": -4.085620730620576e-14
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 37,
+   "bytes": 296,
+   "area_ratio": 0.6080808178519623,
+   "fill": 0.9852840229709859,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 8,
+   "bytes": 64,
+   "area_ratio": 0.5923104422120086,
+   "fill": 0.9532042625453286,
+   "members_outside": 2008,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 2,
+   "largest_share": 0.9929030455434479,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    17768,
+    127
+   ]
+  }
+ },
+ {
+  "key": "km-000051",
+  "members": 47182,
+  "alpha": 85812150.9325952,
+  "convex": {
+   "rings": 1,
+   "vertices": 26,
+   "bytes": 208,
+   "area_ratio": 0.999999999999981,
+   "fill": 0.9830255242404577,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 79,
+   "bytes": 632,
+   "area_ratio": 0.9707058996483783,
+   "fill": 0.9957771063770833,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": false,
+   "bridges_left": 0,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 88,
+   "bytes": 704,
+   "area_ratio": 0.9830255242404391,
+   "fill": 1.0000000000000002,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": -3.2440716779547074e-13
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 43,
+   "bytes": 344,
+   "area_ratio": 0.9705764329963721,
+   "fill": 0.9955034017470819,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 5,
+   "bytes": 40,
+   "area_ratio": 0.8810059748842637,
+   "fill": 0.9850002798604254,
+   "members_outside": 4698,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    47182
+   ]
+  }
+ },
+ {
+  "key": "km-000052",
+  "members": 40288,
+  "alpha": 85876046.33133964,
+  "convex": {
+   "rings": 1,
+   "vertices": 26,
+   "bytes": 208,
+   "area_ratio": 1.000000000000055,
+   "fill": 0.9354668106088777,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 68,
+   "bytes": 544,
+   "area_ratio": 0.8997749021176308,
+   "fill": 0.9937305785983311,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": false,
+   "bridges_left": 0,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 74,
+   "bytes": 592,
+   "area_ratio": 0.9354668106089293,
+   "fill": 1.0,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": 1.3034018309099338e-13
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 36,
+   "bytes": 288,
+   "area_ratio": 0.9172053757044972,
+   "fill": 0.9938468990594664,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 7,
+   "bytes": 56,
+   "area_ratio": 0.8772169377122578,
+   "fill": 0.9825266828343355,
+   "members_outside": 5047,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    40288
+   ]
+  }
+ },
+ {
+  "key": "km-000053",
+  "members": 43283,
+  "alpha": 57149254.15477854,
+  "convex": {
+   "rings": 1,
+   "vertices": 28,
+   "bytes": 224,
+   "area_ratio": 0.999999999999966,
+   "fill": 0.9741535120902427,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 92,
+   "bytes": 736,
+   "area_ratio": 0.958165755451435,
+   "fill": 0.9934619066511629,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": true,
+   "bridges_left": 8,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 91,
+   "bytes": 728,
+   "area_ratio": 0.9741535120902096,
+   "fill": 1.0000000000000007,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": -2.6001423236721166e-13
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 57,
+   "bytes": 456,
+   "area_ratio": 0.9483402858119961,
+   "fill": 0.9975826803006452,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 7,
+   "bytes": 56,
+   "area_ratio": 0.8721183903896698,
+   "fill": 0.9943500944511104,
+   "members_outside": 3651,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    43283
+   ]
+  }
+ },
+ {
+  "key": "km-000054",
+  "members": 19455,
+  "alpha": 707600312.6513052,
+  "convex": {
+   "rings": 1,
+   "vertices": 14,
+   "bytes": 112,
+   "area_ratio": 1.0,
+   "fill": 0.9967869324226878,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 14,
+   "bytes": 112,
+   "area_ratio": 1.0,
+   "fill": 0.9967869324226878,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": false,
+   "bridges_left": 0,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 18,
+   "bytes": 144,
+   "area_ratio": 0.996786932422688,
+   "fill": 1.0,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": -4.6629367034256575e-15
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 14,
+   "bytes": 112,
+   "area_ratio": 0.9999999999999998,
+   "fill": 0.9967869324226883,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 3,
+   "bytes": 24,
+   "area_ratio": 0.42331996730424926,
+   "fill": 0.9977341257333764,
+   "members_outside": 14975,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    19455
+   ]
+  }
+ },
+ {
+  "key": "km-000055",
+  "members": 47032,
+  "alpha": 70204594.7536253,
+  "convex": {
+   "rings": 1,
+   "vertices": 23,
+   "bytes": 184,
+   "area_ratio": 1.0000000000000446,
+   "fill": 0.9920689681577296,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 56,
+   "bytes": 448,
+   "area_ratio": 0.9958946741207231,
+   "fill": 0.9953761080227749,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": false,
+   "bridges_left": 0,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 132,
+   "bytes": 1056,
+   "area_ratio": 0.992068968157774,
+   "fill": 1.0,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": 5.773159728050814e-13
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 40,
+   "bytes": 320,
+   "area_ratio": 0.9970277077898493,
+   "fill": 0.9950264776060563,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 4,
+   "bytes": 32,
+   "area_ratio": 0.9694811426670221,
+   "fill": 0.9985071567373813,
+   "members_outside": 1360,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    47032
+   ]
+  }
+ },
+ {
+  "key": "km-000056",
+  "members": 55860,
+  "alpha": 59478645.60026526,
+  "convex": {
+   "rings": 1,
+   "vertices": 34,
+   "bytes": 272,
+   "area_ratio": 1.0000000000001958,
+   "fill": 0.9905812265415698,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 64,
+   "bytes": 512,
+   "area_ratio": 0.9939997272991279,
+   "fill": 0.996367041399298,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": false,
+   "bridges_left": 0,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 118,
+   "bytes": 944,
+   "area_ratio": 0.9905812265417641,
+   "fill": 1.0000000000000002,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": 1.5021317523178368e-13
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 53,
+   "bytes": 424,
+   "area_ratio": 0.9946637562972511,
+   "fill": 0.9958955679950731,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 7,
+   "bytes": 56,
+   "area_ratio": 0.933757751546043,
+   "fill": 0.99658493292822,
+   "members_outside": 1198,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    55860
+   ]
+  }
+ },
+ {
+  "key": "km-000057",
+  "members": 42689,
+  "alpha": 128632867.66692004,
+  "convex": {
+   "rings": 1,
+   "vertices": 24,
+   "bytes": 192,
+   "area_ratio": 1.0000000000000346,
+   "fill": 0.9754699973522447,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 42,
+   "bytes": 336,
+   "area_ratio": 0.9416525344546244,
+   "fill": 0.992983404456381,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": false,
+   "bridges_left": 0,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 49,
+   "bytes": 392,
+   "area_ratio": 0.9754699973522784,
+   "fill": 0.9999999999999999,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": -1.199040866595169e-14
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 29,
+   "bytes": 232,
+   "area_ratio": 0.9522337186748155,
+   "fill": 0.9911351021552723,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 5,
+   "bytes": 40,
+   "area_ratio": 0.8469765636455484,
+   "fill": 0.9999230972787714,
+   "members_outside": 4872,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    42689
+   ]
+  }
+ },
+ {
+  "key": "km-000058",
+  "members": 26619,
+  "alpha": 98646273.0340825,
+  "convex": {
+   "rings": 1,
+   "vertices": 21,
+   "bytes": 168,
+   "area_ratio": 0.9999999999999589,
+   "fill": 0.9809990260760748,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 85,
+   "bytes": 680,
+   "area_ratio": 0.8742066758819452,
+   "fill": 0.9954913433548712,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": true,
+   "bridges_left": 1,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 48,
+   "bytes": 384,
+   "area_ratio": 0.9809990260760348,
+   "fill": 0.9999999999999999,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": 2.653433028854124e-14
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 33,
+   "bytes": 264,
+   "area_ratio": 0.8886735922062295,
+   "fill": 0.9954801674016618,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 7,
+   "bytes": 56,
+   "area_ratio": 0.6985953209918156,
+   "fill": 0.9999999999999999,
+   "members_outside": 3990,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    26619
+   ]
+  }
+ },
+ {
+  "key": "km-000059",
+  "members": 20648,
+  "alpha": 266941576.3297534,
+  "convex": {
+   "rings": 1,
+   "vertices": 17,
+   "bytes": 136,
+   "area_ratio": 0.9999999999999973,
+   "fill": 0.9905359083750535,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 29,
+   "bytes": 232,
+   "area_ratio": 0.9954782916403948,
+   "fill": 0.9950225068561299,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": false,
+   "bridges_left": 0,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 35,
+   "bytes": 280,
+   "area_ratio": 0.990535908375051,
+   "fill": 0.9999999999999998,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": 1.887379141862766e-15
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 22,
+   "bytes": 176,
+   "area_ratio": 0.9955192009732005,
+   "fill": 0.994994277766538,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 4,
+   "bytes": 32,
+   "area_ratio": 0.7493077241478266,
+   "fill": 0.9999999999999999,
+   "members_outside": 1645,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    20648
+   ]
+  }
+ },
+ {
+  "key": "km-000060",
+  "members": 18426,
+  "alpha": 171284056.94088104,
+  "convex": {
+   "rings": 1,
+   "vertices": 20,
+   "bytes": 160,
+   "area_ratio": 1.0000000000000107,
+   "fill": 0.9109765821473361,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 84,
+   "bytes": 672,
+   "area_ratio": 0.8897638517421554,
+   "fill": 0.9965660234554989,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": true,
+   "bridges_left": 3,
+   "refused_digs": 1
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 41,
+   "bytes": 328,
+   "area_ratio": 0.9109765821473461,
+   "fill": 0.9999999999999996,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": -9.903189379656396e-14
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 42,
+   "bytes": 336,
+   "area_ratio": 0.7613178831057617,
+   "fill": 0.9979050202418379,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 8,
+   "bytes": 64,
+   "area_ratio": 0.7353836810460398,
+   "fill": 0.9572873454701953,
+   "members_outside": 5607,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    18426
+   ]
+  }
+ },
+ {
+  "key": "km-000061",
+  "members": 16741,
+  "alpha": 318097316.9004102,
+  "convex": {
+   "rings": 1,
+   "vertices": 20,
+   "bytes": 160,
+   "area_ratio": 0.9999999999999996,
+   "fill": 0.9726805298429151,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 83,
+   "bytes": 664,
+   "area_ratio": 0.8975104362499792,
+   "fill": 0.9934456582407217,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": false,
+   "bridges_left": 0,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 32,
+   "bytes": 256,
+   "area_ratio": 0.9726805298429143,
+   "fill": 1.0000000000000004,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": -2.6645352591003757e-15
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 27,
+   "bytes": 216,
+   "area_ratio": 0.92293413743164,
+   "fill": 0.9928524601218218,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 4,
+   "bytes": 32,
+   "area_ratio": 0.8023034669499439,
+   "fill": 0.9999999824505974,
+   "members_outside": 5095,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    16741
+   ]
+  }
+ },
+ {
+  "key": "km-000062",
+  "members": 37158,
+  "alpha": 40038895.66530097,
+  "convex": {
+   "rings": 1,
+   "vertices": 35,
+   "bytes": 280,
+   "area_ratio": 0.999999999999907,
+   "fill": 0.9592422008862204,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 99,
+   "bytes": 792,
+   "area_ratio": 0.9365191112077007,
+   "fill": 0.9981231559642754,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": true,
+   "bridges_left": 9,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 104,
+   "bytes": 832,
+   "area_ratio": 0.959242200886131,
+   "fill": 1.0000000000000004,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": 4.635181127810029e-13
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 82,
+   "bytes": 656,
+   "area_ratio": 0.9029234354647313,
+   "fill": 0.9990676812657266,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 13,
+   "bytes": 104,
+   "area_ratio": 0.8732816470591844,
+   "fill": 0.9915434090303832,
+   "members_outside": 988,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    37158
+   ]
+  }
+ },
+ {
+  "key": "km-000063",
+  "members": 43962,
+  "alpha": 129229281.78272317,
+  "convex": {
+   "rings": 1,
+   "vertices": 25,
+   "bytes": 200,
+   "area_ratio": 0.9999999999999293,
+   "fill": 0.9944355531930952,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "dig": {
+   "rings": 1,
+   "vertices": 25,
+   "bytes": 200,
+   "area_ratio": 0.9999999999999293,
+   "fill": 0.9944355531930952,
+   "members_outside": 0,
+   "precision": 1.0,
+   "at_budget": false,
+   "bridges_left": 0,
+   "refused_digs": 0
+  },
+  "alpha_complex": {
+   "rings": 1,
+   "vertices": 55,
+   "bytes": 440,
+   "area_ratio": 0.9944355531930247,
+   "fill": 0.9999999999999997,
+   "members_outside": 0,
+   "precision": 1.0,
+   "outer_rings": 1,
+   "holes": 0,
+   "hole_area_share": 1.4099832412739488e-13
+  },
+  "chi": {
+   "rings": 1,
+   "vertices": 25,
+   "bytes": 200,
+   "area_ratio": 0.9999999999999294,
+   "fill": 0.9944355531930945,
+   "members_outside": 0,
+   "precision": 1.0
+  },
+  "chi_dp": {
+   "rings": 1,
+   "vertices": 5,
+   "bytes": 40,
+   "area_ratio": 0.8868846013486291,
+   "fill": 0.9999804932981807,
+   "members_outside": 3425,
+   "precision": 1.0
+  },
+  "modality": {
+   "components": 1,
+   "largest_share": 1.0,
+   "over_1pct": 1,
+   "over_5pct": 1,
+   "over_10pct": 1,
+   "top": [
+    43962
+   ]
+  }
+ }
+]

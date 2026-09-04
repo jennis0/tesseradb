@@ -1,14 +1,53 @@
 # Tessera clients — an instrument, not a product
 
-Two TypeScript packages and a headless-browser smoke test, built to answer one question:
-**does a running Tessera actually work?**
+Five TypeScript packages, three example pages, a headless-browser smoke test and an acceptance
+harness, built to answer one question: **does a running Tessera actually work?**
 
-- `core/` — `@tessera/client`. The four viewer/session verbs, the framed-Arrow decoder, the
-  coordinate arithmetic. Stateless: no cache, no view key, no replica state.
-- `viewer/` — a Vite + deck.gl app. All UI, all state.
+- `core/` — `@tesseradb/client`. The **headless store** is its main export: `createStore({viewerUrl,
+  token | authorise})` hands a visualisation the projections to draw and the verbs to steer, over
+  the driver, the replica, the presented frame, the artifact channel, the encoding accumulators,
+  filter composition, the session artifact table and the region counter (design client-components
+  §4, §5.11). The four viewer/session verbs, the framed-Arrow decoder and the coordinate arithmetic
+  sit beneath it. No DOM: the frame scheduler and the clock are injected, so the whole store is
+  testable in node.
+- `deck/` — `@tesseradb/deck`. `TesseraLayer`, a deck.gl `CompositeLayer` over the store's `marks`,
+  `tiles` and `artifacts` — the GPU slab, rank-to-colour, the density wash, the artifact markers,
+  the selection highlight — for a host that owns a `Deck` already. It never fetches; deck.gl and
+  luma.gl are peers.
+- `components/` — `@tesseradb/components`. Lit custom elements: `<tessera-explorer>`, `<tessera-map>`,
+  `<tessera-status>`, `<tessera-count>`, `<tessera-item-card>`, `<tessera-filter>`,
+  `<tessera-filter-panel>`, `<tessera-selection>`, `<tessera-store>` — a subpath entry each, the
+  eight display states rendered through `part="state"`, tokens `--tessera-*`, parts, slots and
+  events per design §5. `npm run build -w @tesseradb/components` writes the single-file bundle with
+  the decode worker inlined and its SRI hash beside it (`dist/`).
+- `react/` — `@tesseradb/react`. `useTesseraStore(options)` and `useProjection(store, name)` over
+  `useSyncExternalStore`; the store is built in an effect paired with its `dispose`, so
+  StrictMode's double mount leaks no driver. `@tesseradb/react/components` wraps every element
+  through `@lit/react` with typed props and events, behind optional peers on
+  `@tesseradb/components` and `@lit/react`, so a hooks-only install pulls neither Lit nor deck.gl.
+- `examples/` — the three pages design §9 step 4 asks for, each a workspace the gate typechecks:
+  `plain-html` (no build step; the bundle with its integrity hash, and the app server that holds
+  the session credential), `react-explorer` (React 19 through the wrappers, one slot replaced by
+  a host component) and `canvas-store` (the store under a hand-rolled camera on a 2D canvas, with
+  none of our rendering — the check that C2 works).
+- `viewer/` — the demo, `@tesseradb/viewer`: `<tessera-explorer layout="overlay">` plus the
+  instruments — dataset and principal pickers (where the session credential stays), the layer and
+  colour controls, the depth and request readouts, the trace bar.
+- `harness/` — the acceptance harness (design §9): the components' claims, checked through
+  shadow-piercing locators against the demo page and against the plain-HTML example page
+  (`--url`), and the §5.10 measurements printed.
 - `spike/` — the deck.gl tile-convention spike, kept as a regression guard.
 
-Design: [`docs/archive/plans/2026-08-01-mvp-client-and-deckgl-viewer-design.md`](../../docs/archive/plans/2026-08-01-mvp-client-and-deckgl-viewer-design.md).
+**Vite 8 and the decorators.** The elements use standard (TC39 stage-3) decorators with `accessor`,
+as design §5.9 decides; Vite 8's oxc transform lowers only the legacy form, so
+`components/vite-plugin-decorators.ts` runs esbuild over the component sources first. Both the dev
+server and the bundle use it; a host bundling the unbundled distribution needs the same or a
+transform of its own.
+
+The npm scope is `@tesseradb/*`, matching the Python package (design §8); it was `@tessera/*` until
+the store landed.
+
+Design: docs/archive/plans/2026-08-01-mvp-client-and-deckgl-viewer-design.md.
 It is the first slice of
 [`client-interaction.md`](../../docs/design/client-interaction.md),
 which owns the client architecture proper.
@@ -21,15 +60,67 @@ Two things here exist **only** to let a browser talk to a local bundle, and neit
 to copy:
 
 - **`serve.dev_cors_origins`** in `tessera.toml` lets an enumerated browser origin call the viewer
-  and session planes. It is off unless typed, has no wildcard and no environment variable, and the
-  server logs a warning at `warn` when it is on.
+  **and session** planes. It is off unless typed, has no wildcard and no environment variable, and
+  the server logs a warning at `warn` when it is on. Opening the session plane to a browser is the
+  part that makes it development-only.
 - **`VITE_TESSERA_SESSION_CREDENTIAL`** puts the deployment's *session credential* into the browser
   bundle, because `POST /session/authorise` is gated by it and the viewer re-authorises whenever
   you switch principal.
 
-The documented integration topology is **T2 with verified assertions** — credential construction
-at the integrator's app server, where the authority is (client-interaction §7). Nothing here
-revises that.
+**A production browser origin list does exist, and it is a different key.**
+`serve.cors_origins` ([decision 0102](../../docs/decisions/0102-the-viewer-plane-gains-an-enumerated-cors-origin-list.md))
+is enumerated in the same way — no wildcard, none by default — and covers the **viewer plane
+only**, so a page it names may present a *token* and can no more reach `/session/authorise` than
+any other origin. It is silent at startup rather than warned about, because a deployment that
+types it has said something deliberate. That is the key a drop-in `<tessera-explorer>` on a
+customer's page runs on; `dev_cors_origins` is not, and the two are not interchangeable.
+
+The token still comes from somewhere the credential is held. The documented integration topology
+is **T2 with verified assertions** — credential construction at the integrator's app server, where
+the authority is (client-interaction §7) — and `cors_origins` does not revise that: it decides
+which page may *present* the token that server minted, not who may mint one.
+
+## Embedding the elements
+
+The elements are custom elements, so every framework takes them; what differs is how each sets an
+object-valued property and whether it needs telling the tag is not its own.
+
+**Plain HTML** — `examples/plain-html`: the self-contained bundle with its integrity hash and
+`<tessera-explorer viewer-url token>`; the token from the page's own server, which holds the
+session credential (`examples/plain-html/README.md` says what that server is under the
+passthrough plugin, and what the production topology is until D10 is ruled).
+
+**React** — `examples/react-explorer`: the wrappers in `@tesseradb/react/components` set object
+props as properties and type the events (`onPick`, `onSelectChange`, …); the hooks in
+`@tesseradb/react` read the store. React 19 sets properties on custom elements natively, so the
+raw tags work there too; the wrappers are for React 18 and for the typing.
+
+**Vue** — not checked in the gate; two things are needed. The compiler must be told the tags are
+custom elements, or it warns that `tessera-map` failed to resolve as a component:
+
+```ts
+// vite.config.ts
+vue({template: {compilerOptions: {isCustomElement: (tag) => tag.startsWith('tessera-')}}})
+```
+
+and object values go through **property** bindings, since an attribute can only carry a string:
+`<tessera-status .store="store" />`, `<tessera-count .count="served" />`, `<tessera-explorer
+.authorise="getToken" />`. Events are ordinary: `@tessera-pick="onPick"`. Import
+`@tesseradb/components` from a client-only path — Lit and deck.gl touch `window` at import, so a
+server-rendered app imports it dynamically in `onMounted` or a `<ClientOnly>` boundary.
+
+**Svelte** — not checked in the gate. Svelte sets a property when the element has one of that
+name and an attribute otherwise, so object values need no marking in most cases; where the
+element is upgraded after Svelte set the attribute (the module still loading), bind explicitly:
+`<tessera-count bind:this={el} />` then `el.count = served`, or use Svelte's `prop:` directive
+(`<tessera-status prop:store={store} />`). Events: `on:tessera-pick={onPick}`. The same
+client-only import rule applies under SvelteKit — import the package in `onMount`, not at module
+scope.
+
+**Every framework**: define before render. The package's root entry defines every element on
+import; a panel rendered before the import resolves is an unknown element until it upgrades,
+which is harmless but reads as a blank. The context root is attached once on import, so a panel
+above the explorer in the DOM still finds its store.
 
 ## Prerequisites
 
@@ -41,13 +132,15 @@ revises that.
 
 Write a `tessera.toml` in this directory (untracked). **Every path in it resolves against the file
 itself**, and `tessera serve` finds it by walking up from wherever you run it — so the paths below
-are relative to `clients/ts/`:
+are relative to `clients/ts/`. What the run produces goes under `tessera-demo/` at the checkout
+root, which is gitignored: nothing a run writes belongs in the source tree, for the reason
+`run_demo.sh` gives at its head.
 
 ```toml
 [bundle]
 path = "../../data/bench-fixtures/2m4"
-cache = ".dev/cache"
-wal = ".dev/wal.log"
+cache = "../../tessera-demo/manual/cache"
+wal = "../../tessera-demo/manual/wal.log"
 
 [plugin]
 module = "builtin:passthrough"
@@ -66,30 +159,34 @@ operator_credential_env = "TESSERA_OPERATOR_CRED"
 dev_cors_origins = ["http://localhost:5173"]
 ```
 
-and `clients/ts/viewer/.env.local` (untracked):
-
-```
-VITE_TESSERA_VIEWER_URL=http://127.0.0.1:37585
-VITE_TESSERA_SESSION_URL=http://127.0.0.1:49303
-VITE_TESSERA_SESSION_CREDENTIAL=dev-session-credential
-```
-
-Then:
+Then, with the viewer's own configuration in the environment — Vite exposes `VITE_`-prefixed
+process variables to `import.meta.env` just as it does the ones in a file, and an exported variable
+leaves nothing behind under `clients/` for the next run to read:
 
 ```bash
 cargo build --release
-mkdir -p clients/ts/.dev
+mkdir -p tessera-demo/manual
 export TESSERA_SESSION_CRED=dev-session-credential
 export TESSERA_OPERATOR_CRED=dev-operator-credential
 ./target/release/tessera serve --deployment clients/ts/tessera.toml &
 
+export VITE_TESSERA_VIEWER_URL=http://127.0.0.1:37585
+export VITE_TESSERA_SESSION_URL=http://127.0.0.1:49303
+export VITE_TESSERA_SESSION_CREDENTIAL=dev-session-credential
+
 cd clients/ts && npm install
-node scripts/measure-principals.mjs --terms 0..200   # writes viewer/presets.json
-npm run dev -w @tessera/viewer                       # http://localhost:5173
+node scripts/measure-principals.mjs --terms 0..200 --out ../../tessera-demo/presets/manual.json
+npm run dev -w @tesseradb/viewer                       # http://localhost:5173
 ```
 
+One server needs no dataset document: with no `?datasets=` in the URL the viewer serves the single
+entry those three variables name. `run_demo.sh` is the route that measures several and offers a
+picker.
+
 The Vite port is `strictPort`: the origin is enumerated in `dev_cors_origins`, so a silent
-fallback to 5174 would produce a CORS failure that reads as a broken server.
+fallback to another port would produce a CORS failure that reads as a broken server. `VITE_PORT`
+moves it deliberately, and `run_demo.sh` writes whichever port it is given into the deployments it
+generates.
 
 ## Regenerating the two generated artifacts
 
@@ -114,14 +211,43 @@ checks every declared column decodes at its declared type, so a six-column captu
 passing while quietly dropping two thirds of the types it covers. The other two are captured with
 `layers: []` so they keep pinning the no-artifacts-frame case whatever the server holds.
 
-**`viewport-artifacts.bin` is the exception, and may be captured against any corpus that carries a
-layer.** It is taken at `k = 0` — the annotation channel's own request shape — so the body holds no
-points frame at all, and the wide fixture's breadth, which is entirely a property of the *points*
-columns, has nothing to contribute to it. What it must carry is several artifacts with genuinely
-different geometry: a layer declaring `centroid`, `box` and `hull` over clusters that occupy
-different parts of the map. Clusters cut from runs of consecutive ids do **not** qualify on a
+**`viewport-artifacts.bin` and `viewport-membership.bin` are the exception, and may be captured
+against any corpus that carries a layer** — `--artifacts-only` recaptures the pair alone, leaving
+the wide goldens as they are. The first is the annotation channel's own shape, `k = 0` and no
+points frame; the worked decodes in `reference/examples` and `wire-example` pin its bytes, so it
+is captured as `--terms 0` every time. **Both are r44 captures and are due a recapture** — they
+carry `hull_x`/`hull_y`, the names the shape columns had before `polygon-membership.md` §7.1 made
+them `shape_x`/`shape_y` three lists deep (contracts §3.2 r45), and the decoder refuses those names
+outright rather than reading a hull body as shapeless. Until they are recaptured the tests strip
+the old columns (`core/test/old-shape-columns.ts`) to keep the row-set and membership claims
+against real bytes, and `viewport-artifacts-pre-r40.bin` beside them is a real body from before
+the rings change, kept deliberately and never recaptured: both are what the refusal is tested
+against. The second names the layer with points, so the body carries
+the artifacts frame **and** a points frame with the per-point membership column (D12); the wide
+fixture's breadth, a property of the declared columns, has nothing to contribute to either. What
+it must carry is several artifacts with genuinely different geometry — a layer declaring
+`centroid`, `box` and `hull` over clusters that occupy different parts of the map — and at least
+one point the column names a member, so it is captured as a principal broad enough to be served
+several (the demo's *medium* preset). Clusters cut from runs of consecutive ids do **not** qualify on a
 synthetic corpus whose positions are a modular sequence — every such run samples the whole extent,
 so every centroid lands in the middle and a decoder reading row 0 for every row would pass.
+
+**`viewport-highlight.bin`, `viewport-point-rows-highlight.bin`, `viewport-no-highlight.bin` and
+the three `browse-*.json` pages are recorded, not lifted** — one `tessera serve` over
+`data/ladder/arxiv/` on 2026-09-02, the day the highlight columns and the browse verb landed. The
+three viewport bodies are one request in three shapes: with `filters` and `highlight` together (so
+`highlighted < matched < visible`, all non-zero, which is the only arrangement in which reading the
+wrong column is caught), the same under `point_rows = "highlight"`, and the same with no highlight
+at all. Recapture them with a server serving contracts §3.2 r74–r75 and the same request; there is
+no script, because the request is three curls and the point is the shape rather than the corpus.
+
+**Every golden also predates the tiles frame's `highlighted` column** (`highlight-and-hierarchy.md`
+§2, fifth after `served` and always present), so `liftTilesHighlighted` in the same module gives
+each one that column with each tile's `matched` in it — which is exactly what the server serves for
+a request carrying no `highlight`, and these captures carried none. `liftGolden` is both lifts
+together. Both are rewrites of stale recordings, **in test code only**: the decoder keeps no shim
+(decision 0048) and refuses a body without the column. They go when the goldens are recaptured
+against a server serving the highlight columns.
 
 ## Annotation layers, and the number beside a cluster
 
@@ -130,7 +256,7 @@ until something publishes one:
 
 ```bash
 TESSERA_SESSION_CRED=… TESSERA_OPERATOR_CRED=… node scripts/publish-clusters.mjs \
-  --presets .dev/presets/2m4.json --clusters 24 --layer clusters/kmeans-v1
+  --presets ../../tessera-demo/presets/2m4.json --clusters 24 --layer clusters/kmeans-v1
 # and again, for the same clusters under an existence criterion:
 … --layer clusters/kmeans-v1-min1000 --min-visible 1000
 ```
@@ -159,24 +285,25 @@ Three things about that panel are worth knowing before reading a number off it:
   principal cannot reach, suppressed, never published — one answer, indistinguishable. Under
   `--min-visible 1000` the same clustering serves 0, 0, 8, 20 and 24 clusters to the five principals
   above.
-- **The rings are placed by the publisher, not by the service.** There is no artifact geometry on
-  the wire — a bounding box over full membership would disclose a cluster's extent by panning — so
-  `publish-clusters.mjs` writes centroids to `viewer/public/clusters.json` and the viewer joins them
-  by stable key. Only artifacts the server actually served are drawn; the sidecar supplies position
-  and nothing else. Real geometry arrives as derived content at Stage 3, gated by containment.
+- **Every shape and colour on the map is the wire's.** A cluster's outline is the `hull` or `box`
+  the service derived for *this* principal from the members they can see; its name sits at the
+  derived `centroid`; a point wears a cluster's colour only because the response's membership
+  column named it a member (decision 0099, exact only). Nothing is placed from a publisher-side
+  file, and no shape is contoured from the held marks — the sidecar the demo once used is gone.
 
-The annotation channel makes its **own** request (`k = 0`, one named layer) rather than reading the
-artifacts off the point path's responses: the replica elides tiles it already holds, and an elided
-tile carries no artifacts, so clusters would thin out as the cache warmed.
+The annotation channel makes its **own** request (`k = 0`, the layers that are on) rather than
+reading the artifacts off the point path's responses: the replica elides tiles it already holds,
+and an elided tile carries no artifacts, so clusters would thin out as the cache warmed. The
+point path names the same layers, which is what puts the membership column on each band.
 
 ### Labels attached to those clusters, and who is served which description
 
 ```bash
 TESSERA_SESSION_CRED=… TESSERA_OPERATOR_CRED=… node scripts/publish-clusters.mjs \
-  --presets .dev/presets/stage3.json --clusters 24 --layer centroids/kmeans-2026-08 \
+  --presets ../../tessera-demo/presets/stage3.json --clusters 24 --layer centroids/kmeans-2026-08 \
   --labels topics/ctfidf-2026-08 --label-term 46
 TESSERA_SESSION_CRED=… TESSERA_OPERATOR_CRED=… node scripts/check-labels.mjs \
-  --presets .dev/presets/stage3.json
+  --presets ../../tessera-demo/presets/stage3.json
 ```
 
 The first publishes a second layer of labels **attached** to those clusters, each carrying two
@@ -194,7 +321,7 @@ traverses no edge and would otherwise go on describing what was just hidden.
 
 ```bash
 TESSERA_SESSION_CRED=… TESSERA_OPERATOR_CRED=… node scripts/write-cycle-demo.mjs \
-  --presets .dev/presets/stage3.json            # add --dry-run to see the plan first
+  --presets ../../tessera-demo/presets/stage3.json            # add --dry-run to see the plan first
 ```
 
 The two above are read-only about the corpus. This one changes it: it publishes a small cluster and
@@ -219,14 +346,78 @@ notice the publisher is owed, and it is written before anything retires.
 Run it with the viewer open over the cluster: the label disappears at step 2, and step 3 changes
 nothing a viewer can see, which is what a fold is supposed to look like from outside.
 
+## Filter, highlight, and a layer that draws nothing
+
+**A filter narrows the map; a highlight keeps every point and lights the matched ones.** They are
+two fields of one `POST /v1/viewport` — `filters` and `highlight`, in the same grammar — and the
+client holds them as one draft: a control carries a `verb`, and moving a clause between the two
+positions is that field changing and nothing else, so a predicate is never re-entered. The chips on
+`<tessera-filter-panel>` carry the word and move the clause when it is clicked; the words in the
+interface are **filter**, **highlight** and **matched** throughout.
+
+Under a highlight the marks that satisfy it draw lit and the rest **dulled in three channels at
+once** — an eighth of their alpha, four fifths of the way to a neutral grey, and a slightly
+smaller radius — with every lit mark drawn **over** every dulled one in a second pass and a little
+larger. The map does not move and nothing is removed, which is the whole difference. One channel
+was not enough: at 0.22 alpha alone, a dense region overdraws the same pixels several times and
+several coats of 0.22 composite back to very nearly the undulled wash, which is what *the
+highlight shows no visible difference* looked like on rung 3 (2026-09-02, measured: 872 of
+1,179,341 drawn marks lit and no perceptible change). The constants are `DULL_ALPHA`,
+`DULL_GREY`, `DULL_RADIUS_SCALE` and `LIT_RADIUS_SCALE` in `deck/src/marks-layer.ts`.
+
+**The drawn sample is chosen with no regard to the highlight, and the lit share of the marks on
+screen is therefore the tile's own share** — measured on rung 3: a descriptor whose members are
+0.065% of the visible set in view lights 0.069% of the drawn marks. That is why the wash matters,
+and why a highlight over a small descriptor is a scattering of lit points rather than a shape.
+Whether the server should promote highlighted points into the draw is open.
+
+The density wash switches to the per-tile `highlighted` count, which is what shows the members the
+mark budget did not draw. `<tessera-status>` gains a fourth cell, *the highlight matched N*, and it is drawn only
+where a highlight was asked: the wire's `highlighted` equals `matched` where none was, so a cell
+drawn always would repeat a number.
+
+**A `member_of` clause names one artifact of one layer** and asks for its membership. It is what
+*Filter to this*, *Highlight this* and *Outside this* on `<tessera-artifact-card>` send, and what a
+node of `<tessera-hierarchy>` sends; it replaces the `region`-by-published-artifact spelling for
+that use, the drawn-region spelling staying for a region drawn by hand.
+
+**A layer declaring no computed content is a filter layer, and a filter layer is still a layer.**
+It is in `/v1/meta`'s roster and in `<tessera-layer-picker>`, in its own group with no draw toggle;
+it is never named in a viewport request's `layers`, so nothing draws it, nothing labels it and it
+is absent from *In view*. It is reached through `<tessera-hierarchy>` and applied as a clause. A
+MeSH descriptor's members are spread over the whole layout, which is what the rule is for: its hull
+would be the map's outline.
+
+**`<tessera-hierarchy>` does not depend on the viewport.** It walks `POST /v1/artifacts/browse` —
+the roots whatever the zoom, children on expansion, *More…* to page, a search box, and, on a `dag`
+layer, a node under each of its served parents saying *also under* the others. A click is a
+highlight; *filter* is beside it, and *fit* beside that where the layer draws something. Under a
+filter it sends the map's own `filters` and shows each row's matched count beside its masked one.
+**A panel that is not being shown asks nothing**: the roots are the widest request it makes, and a
+panel in a closed drawer or an unopened tab was making it on the page's first meta, beside the
+first viewport, against a server still materialising the session. It browses when it is shown —
+which in the demo's overlay layout is at once, so nothing changes there.
+
+`viewer/.highlight-boards.html` is the harness the element screenshots are taken through: the built
+components against a hand-made store, at `/.highlight-boards.html` on the dev server. It needs no
+service, which is the point — the states it draws are ones a live corpus reaches rarely.
+
 ## Testing
 
 ```bash
-npm test                       # spike + core: tile arithmetic, framing, decode, coords
+npm test                       # spike, core, deck, components: every unit suite
 cd core && TESSERA_LIVE=1 TESSERA_SESSION_CRED=… npx vitest run test/client.live.test.ts
 cd viewer && node smoke.mjs             # drives the page in headless chromium
 cd viewer && node smoke-artifacts.mjs   # the same clustering under every principal
+cd viewer && node ../harness/harness.mjs  # the §9 claims, through the parts; the measurements
+cd harness && node harness.mjs --url http://localhost:5180   # the same claims against examples/plain-html
 ```
+
+The smoke scripts and the harness read the page **through the components' parts** —
+`tessera-status [part="count"]`, `[part="state"]`, `[part="refresh"]` — with Playwright's
+shadow-piercing locators, never an id the shadow DOM hides; the mark count and the view's figures
+come from the map's probe (`window.__tesseraProbe`, the first map's, published by the demo; on a
+page that publishes none the harness reads the explorer's map's own).
 
 `smoke.mjs` reports what the page actually did — requests and their statuses, the counts each
 principal reported, whether marks accumulate on zoom, lit canvas pixels, console errors — and
@@ -243,9 +434,13 @@ as though the control under test had changed it. `smoke.mjs` turns look-ahead of
 section for the same reason: the anticipation ring issues requests whenever the view is still, which
 is exactly when a colour switch is measured.
 
-**Clicking is not exercised headless.** deck.gl's `onClick` does not fire under headless chromium,
-so neither drill-down — a mark's record or a cluster's count — can be driven from these scripts.
-The routes behind them are covered in `core/test/client.live.test.ts` instead.
+**Clicking on the canvas is not exercised headless.** deck.gl's `onClick` does not fire under
+headless chromium, so neither canvas drill-down — a mark's record or a cluster's count — can be
+driven from these scripts. The routes behind them are covered in `core/test/client.live.test.ts`,
+the pick resolution in `deck/test`, and the harness fills the item card through the selection
+panel's list, which is DOM. Hover picks *do* run under headless input and are slow there — every
+`mouse.move` waits on a software-GL pick pass over the marks — so a mouse-up-to-panel time the
+harness prints is the input's, and the store's own select-to-counted clock is printed beside it.
 
 Headless chromium needs `npx playwright install chromium-headless-shell` once.
 
@@ -277,6 +472,37 @@ marks vary 2.33× — against ~25× for the tile-addressed version.
 inert at every depth on every fixture), so the quantity worth setting is the budget. Raise
 `serve.theta_target_marks` if you want `k` to bite.
 
+**A host-computed property needs a repaint; the layer's own subscription is not enough.** The
+layer subscribes to the store and redraws itself when the projections move, so `marks`, `tiles`
+and `artifacts` look after themselves. Anything `<tessera-map>` computes and hands the layer as a
+property — the opened artifact, the region, and now `highlighting` and `washChannel` — is frozen
+at whatever the last paint passed until something calls `paint()` again. That is how a highlight
+could reach the wire, come back with its bits, be written into the slab, and still draw at
+`highlighting: false`: nothing repainted, because the camera had not moved. `onStoreChange` now
+repaints on a change in either.
+
+**The cold view buys its counts before its marks.** Two depth models decide what to ask for, and
+they disagree on the first view of a session: the average model answers where no counts describe
+the view, the response's own per-tile counts answer every plan after it. Where the average
+overshoots it overshoots by orders of magnitude — measured on rung 3, depth 8 asked and 1,014,597
+points served in 33.5 MB against a 500,000 budget, drawn two levels shallower from 2.4 MB the
+moment the counts landed. So the first request of a session is a counts-only one (`k = 0`, the
+tiles frame alone: 101 KB and 4 ms of server time on a warm session, and it is where the
+session's own materialisation is paid), and the marks request that follows is planned from it.
+**Once per session, and only where no counts exist at all** — a pan onto uncovered ground still
+falls back to the average model rather than putting a round trip in front of every such pan.
+Measured on rung 3 over the demo's broadest principal, first marks 4.3 s → 3.7 s and the load
+quiet at 6.2 s → 4.3 s, on a headless software renderer where the frame is itself the noise
+floor; on the wire the first marks request went from 33.5 MB to 2.4 MB.
+
+**A settle asks where the two models still disagree.** The count-driven choice can be shallower
+than the depth just fetched, and the settle then derives at a depth the replica holds nothing at. Before
+2026-09-02 the map simply stayed there: all stand-ins, `visible`, `matched` and `served` reading
+zero on the strip, and no request, because a request was only ever issued from a camera move — so
+a filter or a highlight, which requeries without moving the camera, landed in the same state.
+`Driver.askUncovered` asks once per uncovered frame at the settle; `redraw` (a view switch's
+immediate publish) still asks for nothing.
+
 **Calibration only ever goes deeper.** A shallower request returns a strict *subset* of what is
 already drawn, so marks would pop *out* while the user did nothing — the lever design §7.2 and §7.3
 strike as unsound. It also stops once the principal's whole visible set is served, or a sparse
@@ -290,6 +516,45 @@ request cover every tile the view touches.
 **`x-tessera-stage-ns` is usually absent.** It needs both the `bench-timing` cargo feature and
 `[serve] stage_timing = true`. Absence is a configuration fact, not an error, and the stats panel
 says so.
+
+## What the panels do not say
+
+The elements answer and never explain (owner, 2026-08-25): a panel's state is one line — *Nothing
+here*, *Refused · 422 contract*, *Corpus updated · Refresh* — and the reasoning behind each number
+lives here instead.
+
+- **Shown, matched, visible.** *Shown* is a sample of *matched*; filters narrow *matched* and never
+  move *visible*, which is the grant. The strip's shown cell carries its total on `data-total`, so
+  the rule *both figures or neither* holds with the total drawn as the visible cell beside it.
+- **Starting session…** The first request of a session materialises what this principal may see,
+  which can take seconds at 10⁹; the strip says so once and then says *Loading*.
+- **Corpus updated.** The numbers were drawn against a corpus that has since moved; the cells are
+  blank until *Refresh* redraws them. A number against a stale view is never rendered.
+- **Refused · 422.** A `422 contract` refusal is the host page's bug — a request the server would
+  never have accepted — not the server's.
+- **Nothing here.** An empty answer for this principal — an answer, not a failure — and
+  indistinguishable from a region no principal has anything in.
+- **A layer's size is never published.** What you reach of a layer is answered artifact by
+  artifact, by the viewport; the picker offers a layer with its closure and no count.
+- **A cluster's number** is members visible to this principal over the whole artifact — never
+  its size, and never over the viewport. It holds steady during a pan. One refusal covers every
+  withheld case (a suppressed artifact, one below its criterion, one this principal cannot
+  reach, one that never existed) and nothing tells them apart.
+- **Colour by cluster is exact only.** A point wears a cluster's colour because the wire named it
+  a member; neutral means *not known here yet*, never a guess. The strip's hover reads *colours
+  exact* or *refreshing N tiles*.
+- **A legend lists the values on screen**, not the whole vocabulary, and a numeric ramp spans the
+  marks served, not the corpus. A refused column draws every mark unmapped; every served mark is
+  still on the map.
+- **A typed category value is submitted, never validated**: values a principal cannot list may
+  still be filtered by, and an unresolvable one is an empty answer — the control never says *no
+  such value*.
+- **A selection's numbers are inexact** where a counted cell is wider than a screen pixel: they
+  are exact for the cells asked, not for the shape drawn, and render with `≈`. *Filter to this*,
+  *Export* and *Save as artifact* wait on server verbs (D11) and are greyed with the reason on
+  hover.
+- **A miss is not a fault.** Nothing under the cursor is the ordinary case; a mark whose layer
+  carried no identity is a fault in the map and the card says *Layer fault*.
 
 ## Why the points sit on a grid
 

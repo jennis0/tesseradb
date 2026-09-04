@@ -3,7 +3,7 @@
 //!
 //! # Why there is a battery mode rather than only a random sweep
 //!
-//! `docs/evidence/memos/2026-07-30-tail-attribution.md` showed that a uniform-random p99 mostly
+//! docs/evidence/memos/2026-07-30-tail-attribution.md showed that a uniform-random p99 mostly
 //! measures the *input distribution*: Sigma-visible spans 1 to 1.4x10^8 across random bboxes, and
 //! repeating one fixed viewport collapsed p99-p50 from 47.4 ms to 5.1 ms. Its recommendation was
 //! a fixed representative-viewport battery chosen across the corpus's actual density spectrum,
@@ -113,7 +113,14 @@ pub fn run(
         let stats = TermStats::compute(&postings)?;
         let dictionary = Dictionary::open(&fixture.root, &fixture.prefix)?;
         let bundle = open_bundle(&fixture.root)?;
-        let q = bundle.manifest.quantisation;
+        // The frame is the view's (decision 0040); a built bundle declares one, and this harness
+        // measures against it.
+        let q = bundle
+            .manifest
+            .views
+            .first()
+            .expect("a built bundle declares a view")
+            .quantisation;
         let extent_span = q.x_max - q.x_min;
         let view_id = bundle
             .partitions

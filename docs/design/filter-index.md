@@ -1,8 +1,10 @@
 # The filter index — design
 
 **Date:** 2026-08-08
-**Status:** **Provisional — r7, reviewed under two lenses and dispositioned in one pass** (Appendix
-R). The category case is
+**Status:** **Provisional — r8; §7 gains the one per-view case** (2026-08-31): a group-scoped
+attribute is a family of entity-space columns, one per view of a group, which `views.md` §5 designs
+and this section now records rather than denying. Reviewed under two lenses and dispositioned in one
+pass at r7 (Appendix R). The category case is
 built to this design; see the ⊘ notes for exactly what. The organising rule
 changed at r4: the flat value column is the artefact of record and every accelerator is derived from it
 (Appendix R). To become normative: confirmation of §2's constants at a value
@@ -27,16 +29,16 @@ refuse by name. Marked at each claim.
 [`per-point-attributes.md`](per-point-attributes.md) §2–§3;
 [`records-and-search.md`](records-and-search.md) §2–§3, §5, §6.2 (cited as **records §n**); design
 memo 2026-07-29 (secondary attribute indexing); decisions
-[0013](../decisions/0013-mark-specified-vs-implemented.md),
-[0039](../decisions/0039-multi-valued-categoricals-are-slow-path-only.md),
-[0042](../decisions/0042-a-dictionary-extent-never-repeats-a-descriptor.md),
+0013,
+0039,
+0042,
 [0048](../decisions/0048-no-deployments-exist-so-delete-rather-than-support.md),
-[0050](../decisions/0050-a-fold-invalidates-the-term-index-and-every-fragment.md),
-[0052](../decisions/0052-the-folds-page-cache-mitigation-is-a-hint-not-a-throttle.md),
+0050,
+0052,
 [0056](../decisions/0056-a-folds-schedule-is-a-gated-window-not-a-pure-timer.md),
 [0063](../decisions/0063-category-postings-serve-public-listings-and-never-per-viewer-ones.md),
-[0064](../decisions/0064-an-absent-number-is-a-presence-bitmap-beside-the-column.md),
-[0068](../decisions/0068-a-row-space-operand-bounded-by-the-requests-domain-is-admitted.md);
+0064,
+0068;
 [`probes/2026-08-08-filter-layout/`](../../probes/2026-08-08-filter-layout/).
 **Citation convention:** unprefixed §n is the architecture design; this document's own sections are
 cited as **index §n**. The companion read-side design is
@@ -904,7 +906,7 @@ non-disruption half is the pass's own cost, sized at the end of this section.
 own thread, after the external-id pass and before the digests — and everything below is what it
 does, with one exception marked at its own paragraph: the `MADV_SEQUENTIAL` asked for there is
 **not** taken, because `ValueColumn::open` has no route to it. What the pass inherits from
-[decision 0052](../decisions/0052-the-folds-page-cache-mitigation-is-a-hint-not-a-throttle.md) is
+decision 0052 is
 the ownership rule — it maps its own inputs and never advises the request path's — rather than the
 hint itself.
 
@@ -1115,15 +1117,16 @@ and contracts §2.1's tree gain the coalesce's fourth axis and `coalesced/<id>/a
 
 ## 7. Views
 
-**The filter index is view-invariant.** Nothing about it is per-view, and a view attaching, being
-populated or being dropped touches none of it.
+**The filter index is entity-space, and one exception is per view.** A view attaching, being
+populated or being dropped touches none of it; the exception is a **group-scoped attribute**
+(`views.md` §5), whose column is one per view of a group rather than one for the corpus.
 
 The governing statement is architecture §9: the term index, node memberships and generating sets are
 shared across views in entity space (**I4**), while each view stores its own permutation and derives its
 own tile ranges. per-point-attributes §3.9 draws the same line for attributes — `render` is row-space and
 therefore per-view; `filter` and `inspect` are entity-space, declared once, and apply everywhere.
-`views-and-multi-table.md` reaches the same conclusion in more detail, but it is provisional and
-explicitly not approved, so it corroborates this section rather than grounding it.
+`views.md` — **normative since 2026-08-30** — is where the exception is designed, and it is the
+document that governs it.
 
 - **One entity ID globally**, never one per `(view, entity)`. An entity appearing in several views has one
   set of attribute postings and one membership in every value it carries.
@@ -1132,9 +1135,20 @@ explicitly not approved, so it corroborates this section rather than grounding i
   Neither deletes an entity, and neither reads or writes anything under `attrs/`.
 - **The per-view cost is the projection, not the index** — surface §4's subject.
 
-With tier paths view-independent (index §5.3), there is no per-view case anywhere in this document — and
-the two removal rules gain none either, because deletions and suppressions are entity-space mechanisms
-that do not know views exist.
+- **A group-scoped attribute is a family of columns, one per view, and every one of them is still
+  entity space** (`views.md` §5, decision 0109). The column lives at
+  `attrs/<column>/<group>/<key>/` with its own presence bitmap, its values are indexed by entity,
+  and a predicate over it answers a bitmap in entity space that the mask meets before any
+  permutation — which is why the exception costs I2's argument nothing. What the scope decides is
+  **which column file** a leaf reads: the request's own view under a view of the group, or the one
+  a leaf pins. The fold's attribute pass runs per column and needs no new case, and ⊘ the
+  accelerators do not exist per view — no per-view postings are written, so a **category** or
+  **text** family is stored and is on no filter surface, and the scan is the only route the served
+  families take.
+
+With tier paths view-independent (index §5.3), the scoped family is the only per-view case in this
+document — and the two removal rules gain none, because deletions and suppressions are entity-space
+mechanisms that do not know views exist.
 
 ---
 
@@ -1263,197 +1277,3 @@ denies for the same reasons, plus `deny tessera-filter tessera-filter-write`, wh
 the dependency one-way and the read crate's codegen a function of its own source.
 
 ---
-
-## Appendix R — review trail
-
-**2026-08-12 — re-read against the built declaration surface.** The placement key this document
-spelt is gone: a column earns its value column from `index = true`, or from being a `derived`
-category, and §1 now says which declarations reach the artefact and which do not — a blob-resident
-column owning nothing here, and a rendered category filterable over the request's own rows through
-a second evaluation space rather than a second artefact (decision 0068). §2.6's list refusal lifts
-for every placement but `render` rather than for one placement, an unindexed list needing no
-addressing at all. No mechanism of this design moved.
-
-**2026-08-10 (r7) — adversarial review, two lenses, dispositioned in one pass.** Both lenses held
-the shape and attacked load-bearing claims; every finding was accepted except one whose *remedy*
-was declined for a cheaper one. What changed: **selection is per column** over that column's own
-`attr_extents` subsequence — which dissolves the missing selection unit (the reviewed draft
-selected "a window of flushes", an identity the format does not record; the suggested group-key
-format change is declined because the column, which the format does record, is the better unit and
-also survives the second rung), confines cap starvation to the offending column with a
-narrow-to-`width ≥ 2` fallback, and gives the size tier a well-defined base. **The merge carries
-its own overlap refusal** — after coalescing, an input overlap is internal to one layer and
-invisible to `compose` forever, so the union-equals-sum-of-cardinalities guard lives in
-`coalesce_attr_extents`, as the dictionary axis's guard lives in its merge; composition gains the
-**replace** operation `compose` cannot express, refusing unless the coalesced presence *equals*
-the consumed union. **Publication order is fixed to the flush's** — compose, manifest, swap, with
-the completed unit carrying opened columns. **"The writers spool" was false** and the two
-spool-then-assemble writers (value column, keyed postings) are now explicit deliverables — banding
-bounds nothing without them. **The flip must open filter columns from the new prefix**, joining
-the rotation as postings and the sidecar did. And three properties are now recorded at their
-sites: **positivity** — every "degrades safely under I12" argument holds only while every operand
-is positive, so lifting `none_of`'s fence must revisit §5.2/§6.2 under the inverted sign (§5, the
-review's most valuable finding); **lists break one-bit-one-slot addressing** and are excluded from
-the merge and blanking specifications until §2.6's addressing exists; and §2.3's "unmeasured"
-marker was stale — arm 9 measured the residual and 0062 is built on it. §6.2 also now names its
-dependency on 0063's leak-register row, which is registered on the postings track, not here.
-
-**2026-08-10 — the fold's attribute pass is built**, to §6.2 as written. Two things the design did
-not anticipate, both recorded at their sites. The pass had to become its own **crate**: written
-inside `tessera-filter` it cost the scan 65% with the hot file byte-identical, which is the same
-code-shape hazard that split `extent.rs` out of `values.rs`, one level up — codegen units are
-partitioned per crate, so a file boundary cannot hold it (§6.2, §9). And **the presence bitmap
-needed normalising at the writer** for the byte-identity claim to be true at all: the fold's
-presence arrives as a union of its layers' and the build's from repeated insertion, and croaring
-serialises the two encodings differently, so the same entity set produced two different files
-(§6.2). Two things §6.2 asks for are **not** built and are marked: `MADV_SEQUENTIAL` on the pass's
-own mappings, and the attribute-byte terms in the fold's log line and `/control/status`.
-
-**2026-08-10 — the fold's rulings are closed** (owner). The attribute axis is **reported, never
-triggered on**: compaction §9's OR over four gauges gains no fifth, and this document's earlier
-promise of attribute-bytes terms on them is withdrawn rather than deferred — a correlated axis
-cannot earn a place among gauges whose independence is the reason they are an OR. With the
-carry-forward withdrawn under 0048 and the postings-memory question dissolved by banding, §6.3 has
-no open question; what stands between this design and normative is §2's constants at a second value
-width and on a string column, surface §4's project-vs-per-tile rule, and one adversarial round.
-
-**2026-08-10 (r6) — two owner corrections, both of which change what gets built.** First, the
-extent coalesce was declined at r5 on the query axis — the wrong axis, since arm 13's own numbers
-put the binding cost in files and open time — and is now designed as the **fourth axis of the
-existing entity-space coalesce** (§5.2): same policy, same `coalesced/<id>/` precedent, same
-content-preserving and retire-nothing rules, with the fold re-derived to hold retention, the
-postings rebuild and a final collapse of tens of layers rather than a day's ~960. Second, the
-postings-memory figure was wrong twice — ~2 GB is the *serialised* size where the in-flight
-transient is the raw ids at ~4 GB, and it is not the fold's problem alone: the **build's shipped
-emit is unbanded today** (§4's finding). The emit is now specified banded by code space on the
-authorisation build's own construction (§6.2), shared by both producers, which dissolves r5's
-pre-flight ruling: the term becomes a planner-chosen band budget with no corpus-proportional
-residual. §6.3 is down to one ruling — no attribute gauge.
-
-**2026-08-09 (r5) — the fold and start-up designed, on a new measurement.** §5.1 and §6.2 are new
-and §6.3 lists what the owner must rule; probe arm 13 measured layer accumulation — ~9 µs per layer
-net on the worst operand shape, +15 ms at a day of 90 s flushes, so the fold's pressure is the
-open-path file count rather than the scan. Three earlier statements are corrected at their sites:
-the option of carrying an untouched extent through a fold is withdrawn (it defeats the
-single-build-equivalence objective for IO the fold can afford); "the fold gauges gain
-attribute-bytes terms" is narrowed to reporting, since the extent axis moves one-for-one with the
-gauged segment axis; and "deletion and the fold touch no attribute artefact" is replaced by the
-truth §6's marker already carried — the fold destroys the artefact, and §6.2 specifies the pass that
-closes it. An interim carry-forward was drafted into §6.2 and §6.3 and **withdrawn by the owner the
-same day**: with nothing deployed there is no folded bundle to rescue, so a state whose only
-justification is the pass's absence is the shape decision 0048 forbids.
-
-**2026-08-09 — the flush's half of the write side landed, and one measurement is worth carrying.**
-§5's extent is built and §1's and §5's markers move with it; §2.5 gains the extent's presence file,
-which is mandatory where a base column's is optional, and §6 records that a fold destroys the
-artefact today rather than merely failing to rebuild it. The measurement: adding the three extent
-functions to the *same file* as the scan cost the universal-contiguous arm 0.27 → 0.46 ns per
-candidate entity at 10⁹ — code that never runs during a scan, in a file whose module doc already
-records three such regressions — and moving them to their own module restored 0.26 ns exactly.
-Anything that adds to `values.rs` must re-run `probes/2026-08-08-filter-layout/`'s `realscan`.
-
-**2026-08-08 (r4) — the organising rule changed, on an owner ruling and the first measurements.**
-r1–r3 specified an **inverted posting per distinct value for every family**, a shape imported from the
-authorisation term index without an argument that it transferred. `M_auth` needs it — a union over ~10⁴
-term postings, materialised once per session and reused by every request in it. A filter operand is
-per-request over a narrow predicate and can take `M_auth` as a candidate set, and nothing established the
-two were alike.
-
-The owner ruled that **postings are specifically a categorical instance**: a category's value already has
-an integer identity and repeats heavily, and no other family has either property. Other types belong in a
-flat table or in an index suited to that type.
-
-Two probes then settled what reasoning had been guessing at
-([`2026-08-08-filter-layout`](../../probes/2026-08-08-filter-layout/)). The masked scan is **~0.24 ns per
-candidate entity** contiguous and **~10 ns** scattered, stable across 10⁶–10⁹ — which refuted a 5–10 GB/s
-bandwidth model that had predicted 40–80 ms for a 25% principal at 10⁹ against a measured 730 ms, itself
-since improved 13–272× by run-based iteration and typed traversal (arm 4). The
-addressing choice was measured rather than argued: bare array where presence is universal, Roaring
-presence bitmap where partial, explicit `(entity_id, value)` pairs never optimal on either axis, and run
-tables a trap that is smallest on disk and collapses at 2.9–10.2 s on a broad candidate. And the derived
-category posting closes the broad-coverage corner at **107×**, with **no measurable timing channel**
-between a hidden value and a nonexistent one — which is what allows §2.2 to withdraw filter-surface §2.1's
-supersession of per-point-attributes §3.8 and restore the original "indistinguishable in work" requirement.
-
-What that deleted from the design: the value dictionaries and their promotion path, the extension-id
-resolver, per-flush delta tiers, `max_distinct_values`, the near-unique-string quadratic hazard, the level
-tree, range-encoded bit slicing, the order-preserving float key, and the separate conformance relation.
-What it added: one presence bitmap, and one open corner (§3's broad numeric ranges) that needs an owner
-ruling rather than a measurement.
-
-Three corrections carried in from review of the analysis that produced this revision, recorded because
-each was wrong in a way that would have reached the design. Decision **0050 does not justify the fold
-blanking a deleted entity's filter slot** — its argument is a fail-open in `M_auth` and does not transfer;
-the retention asymmetry does, and §6 now says so. The **candidate-driven container probe** was proposed as
-"value-independent by construction" and is not — it equalises the probe count only — and measurement then
-showed it unnecessary, since the plain intersection is already flat. And the **21.7 ms / 2,885 ms union
-spread must not be cited against a filter operand**: it measures a union over ~10⁴ authorisation postings,
-not a single-value intersection, and §4.1 now says so at the site where it was previously quoted as a risk.
-
-**2026-08-08 (r3) — a simplification found while implementing r2.** §2.4 had a category's postings
-addressed by a `posting_ordinal` minted beside its code, to fit the positional CSR record format. Writing
-it showed the cost: a second durable quantity seeded from every home the code is seeded from — manifest,
-segment extensions, WAL — where `vocabulary.rs` records that missing one of those homes is the module's
-characteristic failure, and a duplicated ordinal is two values sharing a posting slot, which is the C11
-disclosure §2.4 invokes decision 0042 to prevent. The mechanism added to avoid a hazard reintroduced it.
-
-§2.5 removes it by choosing the record format to fit the domain instead: **scattered identifiers use the
-keyed record format**, which contracts §2.4 already defines and every delta tier already uses, so a
-category is addressed by its code and nothing is derived alongside it. Positional CSR stays where
-identifiers genuinely are dense. This is more faithful to the two-route ruling than r2 was, not a
-departure from it — a category's identity comes from the vocabulary table, now with nothing beside it —
-and it lands where per-point-attributes §6 already ruled: *the code is the identifier*.
-
-A limited review of that change found it sound and found the edit **incompletely applied**: §2.4 still
-carried r2's prescriptive paragraph mandating the ordinal, §5.2 still said a category had one, and §6
-stated the positional sweep rule blanket across both formats — which for a keyed column would have meant
-sweeping a 4×10⁹-code domain, the size §2.5 exists to refuse. All three are corrected, and §6 now states
-the keyed fold's shape and its drop-on-empty rule rather than leaving them to be discovered. Two negative
-results from the same review, recorded so they are not re-derived: nothing outside this document
-referenced `posting_ordinal`, so there was no consumer to unwind; and reusing `coalesce_delta_tiers` for a
-keyed base would fit the signature while voiding the whole-file-read justification its own doc gives.
-
-**2026-08-08 (r2) — reviewed under three lenses, and the artefact's address space failed.**
-
-All three lenses independently found the same defect, which is the strongest signal this process
-produces. r1 addressed the postings file as `base + local` over per-column extents in one positional file;
-under ingest a value minted after the build takes an ordinal belonging to the next column, `base ∪ tiers`
-unions one value's members into another's, and §6's never-renumber rule forbids the repair — a C11
-disclosure reachable by ordinary operation. §2.2 replaces it with **one postings file per column**, so an
-`AttrTermId` is `(column, local)` and no arithmetic relates the two routes. Per-column extents are gone;
-the families that appeared to justify them do not need them.
-
-Three more that changed a mechanism. The r1 claim that the two indexes have distinct newtypes *and* share
-a reader was self-contradictory, since the shared reader is typed in one of them — §2.1 makes the format
-core raw-`u32` with typed wrappers per crate. The extension-ordinal guarantee was inherited from the
-authorisation side without its enforcement: that side rests on a *checked* plugin bound, and attributes have
-none, so §5.1 declares `max_distinct_values` and refuses at promotion. And §8's "digest-gate at open" did
-not do what it claimed — bundle open reads and hashes every named file regardless — so §8 takes contracts
-deviation 9's first-touch deferral instead, and records that relocating the reader's validation is an owed
-amendment rather than this document's to make.
-
-Four that changed a number or a rule. **§3.4's level-tree sizing was the lucky case**: the upper levels are
-~1.25 GB modelled when the attribute correlates with the label set and ~20–30 GB when it does not, so the
-structure choice reads a contiguity statistic and not cardinality alone — the same spread §4.1 already
-quoted for membership sets and failed to apply here. **Every fold rebuilds the accelerator**, not only a
-fold that changes a structure, since deltas carry level 0 only (§6.2). **The un-folded delta range path**
-was a sentence and is now a mechanism, with the tier carrying keys so a range scans records rather than
-probing ordinals, and the FST usable for rank only because §3.3 now fixes the key big-endian. And **§4's
-build pass** is its own stage pair rather than a rider on the authorisation write, with the bit-sliced pair
-volume, the 4 GB scatter floor and the streaming encoder stated, because the r1 claim that it was "bounded
-by the same arithmetic" was unfalsifiable without them.
-
-Two findings were rejected on verification and are recorded so they are not re-raised. A row-space cache key
-**may** carry the prefix alongside `segments_version`; §10.2 forbids keying on the prefix *instead of* the
-version, which is a different thing. And the shared-format-crate extraction is **not** forced by §3.5.
-
-**2026-08-08 (r1) — drafted**, after a three-lens review of the plan it was written from. The findings that
-shaped it: level-tree nodes are rank-keyed in the reference implementation, so interning them breaks
-decision 0042 (§3.1); the argument that `∧ M_auth` makes stale postings harmless is false, because
-suppressions never fold and the entity-space verbs use the composed verdict (§6.1); floats have no total
-order under raw IEEE bits, so range answers over a signed float column would be wrong rather than slow
-(§3.3); and a category's posting ordinal comes from the vocabulary table rather than a second interner
-(§2.4). Owner corrections at the same time: **strings are not categories** — no value set, no visibility, no
-autocomplete, and the dictionary's interning is a posting key rather than a vocabulary (§2.3).
-
-[#44]: https://github.com/jennis0/tessera-index/issues/44

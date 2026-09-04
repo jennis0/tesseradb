@@ -64,6 +64,7 @@ const WAIT: Duration = Duration::from_secs(60);
 /// kind would make every minting case a refusal at admission rather than an interleaving.
 fn declaration(name: &str, value_set: ValueSet) -> LayerDeclaration {
     LayerDeclaration {
+        scope: Default::default(),
         name: name.into(),
         title: Some(format!("{name} (title)")),
         views: vec!["s0".into()],
@@ -230,23 +231,25 @@ fn body_hash(seed: &str) -> [u8; 32] {
     hash
 }
 
-fn row(engine: &Engine, external_id: &str, x: f32, y: f32) -> UnallocatedRow {
+fn row(engine: &Engine, external_id: &str, x: f64, y: f64) -> UnallocatedRow {
     let descriptors = vec![b"0".to_vec()];
     UnallocatedRow {
         external_id: Some(external_id.as_bytes().to_vec()),
         view: "s0".to_string(),
+        join: None,
         x,
         y,
         scalars: Vec::new(),
         terms: engine.resolve_terms(&descriptors),
         descriptors,
+        scoped: Vec::new(),
     }
 }
 
 /// One batch of one point carrying the artifact that point belongs to — what `/control/ingest`'s
 /// membership column decodes to, taken at the engine boundary. Returns how many artifacts the
 /// batch created.
-fn ingest_naming(engine: &Engine, batch: &str, layer: &str, key: &str, x: f32, y: f32) -> u64 {
+fn ingest_naming(engine: &Engine, batch: &str, layer: &str, key: &str, x: f64, y: f64) -> u64 {
     engine
         .accept_ingest_joining(
             vec![row(engine, batch, x, y)],
@@ -1250,13 +1253,22 @@ fn built_fixture() -> Fixture {
     );
 
     tessera_build::build(&tessera_build::BuildArgs {
-        point_fields: Default::default(),
+        arena_order: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points,
+            point_fields: Default::default(),
+            select: None,
+            access: tessera_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: Vec::new(),
-        points,
-        access: tessera_build::config::AccessInput::relation(pairs),
         out: root.clone(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -1264,6 +1276,7 @@ fn built_fixture() -> Fixture {
         shard_id: 0,
         layers: config.layers,
         layer_inputs: config.layer_sources,
+        scoped_layers: Default::default(),
         mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,

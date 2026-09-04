@@ -1,0 +1,1880 @@
+# Tessera's viewer and session planes, as an OpenAPI 3.1 description.
+#
+# Hand-authored, and kept true by `crates/tessera-server/tests/openapi.rs`, which starts the
+# server, exercises every route below (a success and at least one refusal each) and validates
+# every JSON request and response body against the schemas in `components`. A field added to a
+# response and not to this file fails that test, because every closed DTO is declared
+# `additionalProperties: false`. The contract itself is `docs/design/contracts.md` §3 (the API)
+# and §5 (the framing); where the two disagree, contracts wins and this file is wrong.
+#
+# What this file cannot say: the framed-Arrow body of `POST /v1/viewport`. It is not JSON, so it
+# is declared as `application/octet-stream` and described in prose; the frame layout is contracts
+# §5, and `docs/openapi/README.md` carries a worked decode in Python and in JavaScript.
+openapi: 3.1.0
+info:
+  title: Tessera viewer and session planes
+  version: "1"
+  summary: A permission-masked point service — the two planes a client speaks to.
+  description: |
+    Two listeners. The **session plane** mints and revokes viewer sessions and is authenticated by
+    the operator-configured *session credential*, a shared secret; it is never browser-facing. The
+    **viewer plane** answers about the corpus as one principal may see it and is authenticated by
+    the *session token* the session plane minted. `/healthz` and `/readyz` sit on both, unauthenticated,
+    bare status codes with no body.
+
+    `api_version` is published by `GET /v1/meta` and by nothing else. There is no version header,
+    on either side, so a client must not send one as a negotiation and must not expect a refusal
+    if its assumed version is wrong (contracts §3.1).
+
+    **Every error is one envelope** (`Error` below) with a closed code list, and the codes group
+    into three refusal classes that tell a client whether to retry (contracts §3.1, design §10.6):
+
+    - **Failure** — `500 fail-closed`, `503 not-ready`. Fail-closed and never a partial result.
+    - **Backpressure** — `429 backpressure`. Retry the request *unchanged*, after `Retry-After`,
+      which every 429 carries together with an agreeing body `retry_after_s`. The number is
+      per-subject — `1` for the viewer and session planes' compute-admission gate, derived
+      elsewhere — so read the header rather than assuming it.
+    - **Shape** — `422 contract`. Must not be retried unchanged; the request has to change.
+
+    `401`, `403`, `404` and `409` are none of the three: they concern the credential or the
+    identity of the thing addressed. The `401`/`403` split is best-effort — a `401 bad-credential`
+    on a token that previously worked is a revoked session, and a client treats it as it treats
+    `403 expired-token`: the session has ended, re-authorise.
+
+    A refusal is a function of the request and the deployment's configuration, never of the
+    viewer's data. In particular `404 unknown` is one status, one code and one detail string for
+    *no such identifier* and *exists but is not visible to this principal*.
+servers:
+  - url: http://{viewer-host}
+    description: The viewer plane listener (`serve.viewer_bind`). Routes under `/v1/`.
+    variables:
+      viewer-host:
+        default: 127.0.0.1:8080
+  - url: http://{session-host}
+    description: The session plane listener (`serve.session_bind`). Routes under `/session/`.
+    variables:
+      session-host:
+        default: 127.0.0.1:8081
+
+tags:
+  - name: session
+    description: Minting and revoking viewer sessions. Authenticated by the session credential.
+  - name: viewer
+    description: The corpus as one principal sees it. Authenticated by a session token.
+  - name: probes
+    description: Liveness and readiness, on both listeners, unauthenticated, no body.
+
+paths:
+  /session/authorise:
+    post:
+      tags: [session]
+      operationId: authorise
+      summary: Mint a viewer session from a credential the auth plugin understands.
+      description: |
+        `auth_data` is base64 of bytes the deployment's auth plugin evaluates (`terms_of_auth`,
+        contracts §4.3) — **opaque to this description**: what the bytes mean is the plugin's, and
+        the built-in passthrough plugin reads them as JSON `{"terms": [...]}`. The decoded bytes are
+        also the fast-path hash input, which is why the encoding is base64 and never "verbatim
+        JSON".
+
+        A valid credential yielding zero terms still mints a token, with zero visibility — the
+        service cannot distinguish *wrong credential* from *cleared for nothing* and refusing
+        would disclose which (contracts §3.3).
+
+        Behind the compute-admission gate: a cold authorise builds and writes a mask fragment.
+      security:
+        - sessionCredential: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthoriseRequest"
+      responses:
+        "200":
+          description: A session. `expires_at` is `min(backstop, plugin not_after)`, seconds since the Unix epoch.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthoriseResponse"
+        "401":
+          $ref: "#/components/responses/BadCredential"
+        "422":
+          $ref: "#/components/responses/Contract"
+        "429":
+          $ref: "#/components/responses/Backpressure"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+        "503":
+          $ref: "#/components/responses/NotReady"
+
+  /session/revoke:
+    post:
+      tags: [session]
+      operationId: revoke
+      summary: End a session by its non-capability `token_id`.
+      description: |
+        Revocation is by `token_id` so the capability itself never transits a second time. A
+        `token_id` that names no live session is still a `204` — there is nothing to say about it
+        that would not enumerate sessions.
+      security:
+        - sessionCredential: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RevokeRequest"
+      responses:
+        "204":
+          description: Revoked, or never live. No body.
+        "401":
+          $ref: "#/components/responses/BadCredential"
+        "422":
+          $ref: "#/components/responses/Contract"
+
+  /healthz:
+    get:
+      tags: [probes]
+      operationId: healthz
+      summary: Liveness. Unauthenticated, no body.
+      security: []
+      responses:
+        "200":
+          description: The process is up.
+
+  /readyz:
+    get:
+      tags: [probes]
+      operationId: readyz
+      summary: Readiness — bundle verified, workers ready, plugin loaded. Unauthenticated, no body.
+      security: []
+      responses:
+        "200":
+          description: Ready to serve.
+        "503":
+          description: Not ready. Deliberately no body and no `Retry-After` — a number that varied with the executor's posture would hand an unauthenticated caller exactly what the bare-boolean shape withholds.
+
+  /v1/meta:
+    get:
+      tags: [viewer]
+      operationId: meta
+      summary: The deployment's shape as this principal may know it.
+      description: |
+        Everything here is a deployment constant identical for every principal **except
+        `layers`**, which is filtered per principal — a layer this caller may not know about is
+        absent by the same route a name nobody registered is. Never cache this document across
+        principals.
+
+        Not behind the compute-admission gate.
+      security:
+        - sessionToken: []
+      responses:
+        "200":
+          description: The document. `declared_scalars` is the column schema in full; `filter_operands` is the subset a request may filter on, with each column's operator names; `selection` is design §7.2's clause parameters, which a client needs to read a mark count as a density at all.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Meta"
+        "401":
+          $ref: "#/components/responses/BadCredential"
+        "403":
+          $ref: "#/components/responses/ExpiredToken"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+        "503":
+          $ref: "#/components/responses/NotReady"
+
+  /v1/categories/{column}:
+    get:
+      tags: [viewer]
+      operationId: categories
+      summary: What a category column's codes stand for, gated by the vocabulary's `visibility`.
+      description: |
+        Two forms, one gate. `?codes=` resolves codes the caller already holds; the bare form
+        enumerates ascending by value **key**, resuming after `?after=` and bounded by `?limit=`,
+        whose ceiling and default are `selection.max_category_values`. `limit` above the ceiling is
+        clamped; `limit=0` is `422`. A `visibility = "derived"` column is filtered per principal
+        **before** the two forms diverge and the page is cut after the filter, so a page's length
+        never counts what the principal cannot see.
+
+        **An unresolvable code is omitted, never refused**, and an empty `values` is a real answer
+        served with `200` — "no such code", "a code no key explains" and "a value you cannot see"
+        are one outcome. No counts on this route: a legend with counts is a separate surface.
+        A count beside a value the caller *asked for by prefix* is served by
+        `/v1/categories/{column}/suggest`.
+
+        Not behind the compute-admission gate. For a `public` column that is a walk of an in-memory
+        map; a `derived` column composes the candidate and probes one memory-mapped posting per
+        value it walks, over the whole vocabulary.
+      security:
+        - sessionToken: []
+      parameters:
+        - name: column
+          in: path
+          required: true
+          description: |
+            Any column from `/v1/meta`'s `declared_scalars` that carries a `category` block —
+            including one with neither `render` nor `index`, which is blob-resident and is not a
+            filter operand, a value list being a property of the vocabulary rather than of the
+            placement — or
+            a **group-scoped** category family from `filter_operands` — which is one column per
+            view, so it is addressed with a view. Either pin one here, `<column>@<key>`, or name
+            the request's own view in `view` below; a scoped column named with neither is a `422`
+            naming the group, and a pin naming no view of it is the unknown-view `404`. A pin on an
+            entity-scoped column is a `422`: it is one value set for the corpus.
+          schema:
+            type: string
+            pattern: "^[A-Za-z0-9_-]+(@[A-Za-z0-9_.:-]+)?$"
+        - name: view
+          in: query
+          required: false
+          description: |
+            The request's own view, for a **group-scoped** category (`views.md` §5). Resolved
+            through the session's visible-view set exactly as a viewer verb's `view` is, and
+            resolved **before** the column is, whatever that column's scope — so a `view` naming
+            nothing, or naming a view this principal may not reach, is the `404` an unknown view
+            gets even where the column is entity-scoped and no view would have decided anything
+            about it. What the scope changes is only whether the view *chooses a column*: an
+            entity-scoped column has one value set for the corpus.
+          schema:
+            type: string
+        - name: codes
+          in: query
+          required: false
+          description: Comma-separated `u32` codes to resolve. Present means bulk lookup; absent means enumerate. `next` is always `null` for this form.
+          schema:
+            type: string
+        - name: after
+          in: query
+          required: false
+          description: Resume enumeration after this value key — the cursor, which is `next` from the previous page.
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          description: Page bound. Clamped to `selection.max_category_values`; `0` is refused.
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        "200":
+          description: The values this principal may be told about, in key order for the bare form and request order for `?codes=`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CategoriesResponse"
+        "401":
+          $ref: "#/components/responses/BadCredential"
+        "403":
+          $ref: "#/components/responses/ExpiredToken"
+        "404":
+          description: No such column, a column that is not a category, or a column whose vocabulary is missing — one answer for all three, so this route cannot become a finer schema oracle than `/v1/meta`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          $ref: "#/components/responses/Contract"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+
+  /v1/categories/{column}/suggest:
+    get:
+      tags: [viewer]
+      operationId: suggestCategoryValues
+      summary: Typeahead over a category vocabulary — the values whose key, title or a word start of either has `q` as a prefix, gated by the vocabulary's `visibility`.
+      description: |
+        Specified by `value-suggestion.md` (normative r4) and decisions 0118–0124.
+
+        The matching rule is declared and fixed: Unicode NFKC, then default case folding, then
+        whitespace collapsed and trimmed, applied to `q` and to every indexed string alike. Each
+        value contributes its whole folded key, its whole folded title where one exists, and the
+        folded title (or key, where there is no title) from each word boundary after the first. A
+        match is a **prefix** of one of those entries — no infix, no fuzziness, no stemming.
+
+        Ordering is the matched text's own: ascending by folded entry string, ties by entry kind
+        (key, then title, then word start), then by key. It is fixed at index build and identical
+        for every principal — never frequency, never recency, and never the count. A value appears
+        at most once, at its first matching entry.
+
+        **One gate with the enumeration**: a `public` vocabulary is suggested as authored; a
+        `derived` one offers a value iff at least one item carrying it is visible against the
+        composed candidate. Address resolution is the enumeration's too, including the `@key` pin
+        and the group gate's `404` collapse.
+
+        **There is no cursor.** A typeahead does not page: the user types another character.
+        `more` says the walk stopped early — the page filled, or the deployment's
+        `selection.max_suggestion_walk` values were examined. That spent-budget form is the probe
+        route's; where the server answers from a per-session set of visible values — built for a
+        principal whose composed cardinality is at or under `selection.max_suggest_set_entities` —
+        `more` means the page filled and nothing else.
+
+        Not behind the compute-admission gate, and at most one suggest in flight per session: a
+        second while one is running is the shared `429 backpressure`, shed whole and refused before
+        any work is done, with `Retry-After` as every other shed request carries it.
+      security:
+        - sessionToken: []
+      parameters:
+        - name: column
+          in: path
+          required: true
+          description: As on `/v1/categories/{column}` — any column carrying a `category` block, or a group-scoped family pinned `<column>@<key>`.
+          schema:
+            type: string
+            pattern: "^[A-Za-z0-9_-]+(@[A-Za-z0-9_.:-]+)?$"
+        - name: q
+          in: query
+          required: true
+          description: The text typed. Echoed in the response **as received**, not folded, so a client can match a response to the request it has in flight. Empty matches every value and returns the first `limit` visible ones in index order — the picker's list before anything is typed. Over 256 bytes is `422`.
+          schema:
+            type: string
+            maxLength: 256
+        - name: limit
+          in: query
+          required: false
+          description: Page bound. Clamped to `selection.max_suggestions`, which is also the default; `0` is refused, a zero-length suggestion page being a request for no answer.
+          schema:
+            type: integer
+            minimum: 1
+        - name: counts
+          in: query
+          required: false
+          description: Serve `count` beside each value — the number of items carrying it that this principal may see, exact, computed per request. Absent from the response entirely when this is not `true`. It never orders the page.
+          schema:
+            type: boolean
+        - name: view
+          in: query
+          required: false
+          description: The request's own view, for a **group-scoped** category. Resolved exactly as on `/v1/categories/{column}`, and before the column is, whatever that column's scope.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: At most `limit` values this principal may be told about, in matched-entry order.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuggestResponse"
+        "401":
+          $ref: "#/components/responses/BadCredential"
+        "403":
+          $ref: "#/components/responses/ExpiredToken"
+        "404":
+          description: No such column, a column that is not a category, or a column whose vocabulary is missing — one answer for all three, as on the enumeration; and the answer a group-scoped family gives whole when its group gate fails.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          $ref: "#/components/responses/Contract"
+        "429":
+          $ref: "#/components/responses/Backpressure"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+
+  /v1/viewport:
+    post:
+      tags: [viewer]
+      operationId: viewport
+      summary: Masked counts per tile, a served sample of points, and the served annotation artifacts, over a region at a depth.
+      description: |
+        The response is **not JSON**. It is a sequence of tagged, length-prefixed frames —
+        `u8 kind`, `u32 little-endian payload length`, payload — each payload a complete Arrow IPC
+        stream (JSON for the trailer), decodable alone (contracts §5). Kinds: `1` tiles (exactly
+        one, first), `2` sub-cells (exactly one iff `underlay_offset` was supplied and non-zero),
+        `5` artifacts (at most one, after tiles and before any points; **absent, never empty, when
+        nothing is served**, deliberately), `3` points (zero or more, whole tiles per frame,
+        boundaries not contract), `4` trailer (exactly one, last — its presence is the completeness
+        signal). A body without a trailer is incomplete whatever the transport said; an unknown
+        kind is a decoder error, never skipped. `docs/openapi/README.md` walks a decode in Python
+        and JavaScript, and contracts §3.2 gives every batch's schema.
+
+        **Exactly one of `bbox` and `tiles`.** `k` defaults to the deployment's `k_max_marks` and
+        is capped by `max_k` (both in `/v1/meta`'s `selection`); it is design §7.2's cap clause,
+        so a tile may return fewer than `k` while more are visible — that is the density signal,
+        not truncation. **`k = 0` is the counts-only request**: tiles and artifacts as at any `k`,
+        and no points frame at all. **A client must not decrease `k` as it zooms in**; the server
+        cannot enforce this.
+
+        The *artifacts* frame's `matched` column answers the request's `filters` per
+        artifact, and is null where the request carried none — see `filters`. Its `layer` column
+        is **dictionary-encoded** (u16 keys over utf8 values); its `rung` column is the number a
+        client draws by — the declared level on a levelled layer, the response-local parent-chain
+        depth on a treed one (the depth in the forest this response's own `parent_id` links form,
+        after the budget cut), `0` on a flat one; and its two shape columns `shape_x`/`shape_y` —
+        `list<list<list<uint32>>>`, parts then rings then vertices, one drawn geometry per artifact
+        of the kind its layer's `shape` names — **trail the fixed columns and are absent from the
+        schema entirely when no served layer draws a shape or the request did not ask for one** —
+        an absent column is distinguishable from a null one, so a per-row null keeps its one
+        meaning: *this layer declares no such property*, never *withheld* (decision 0076).
+        `artifact_rows: "identity"` answers with the **same rows** in a fixed five-column schema —
+        see its property.
+
+        A request carrying a `highlight` gains three columns and loses none: `highlighted` fifth on
+        the tiles frame (`uint64`, **always present**, equal to `matched` where the request carried
+        no highlight), `highlighted` on the points frame (`bool`, after the render scalars and
+        before the membership columns, **present only with a highlight**), and `highlighted`
+        fifteenth on the artifacts frame (`bool?`, after `matched`). The served set is identical
+        with and without one — see `highlight`.
+
+        `layers` decides whether an artifacts frame can appear — see its schema; the semantics
+        there are the owner's ruling of 2026-08-25 and the server change is landing on the s3
+        track, so until that merges an *omitted* `layers` is read as `"all"` and the string form is
+        not accepted. `artifact_budget` is honoured structurally (ancestors in place of their
+        descendants), never by sampling, and is inert on a flat layer.
+
+        Behind the compute-admission gate.
+      security:
+        - sessionToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ViewportRequest"
+      responses:
+        "200":
+          description: The framed body. Headers carry the coordinates a client caches and revalidates by.
+          headers:
+            etag:
+              description: The **content key**, quoted — identity, the served watermark, the overlay version, a per-process nonce (`delta-serving.md` §2). What a held band may be *declared* under. Echoed as `If-Match`; a mismatch yields the full response, never `412`.
+              required: true
+              schema:
+                type: string
+            x-tessera-identity-key:
+              description: The **identity key** — idset, auth-data hash, mask-fragment identity, view. What a held band may be *rendered* under at all; the client's cache partition key.
+              required: true
+              schema:
+                type: string
+            x-tessera-pin:
+              description: The generation stamp of the geometry this response was computed from, as JSON `{"prefix", "segments_version"}`. A stamp, not a selector — echo it back as `pin`, and the only effect is `x-tessera-stale`.
+              required: true
+              schema:
+                type: string
+            x-tessera-stale:
+              description: "`1` if geometry has moved since the `pin` this request presented, else `0`. The **broadcast** form: it moves at every flush, merge and compaction whether or not anything this principal can see changed. Advisory in both directions."
+              required: true
+              schema:
+                type: string
+                enum: ["0", "1"]
+            x-tessera-region:
+              description: "Present exactly when the request's `filters` carried a `region` leaf: `exact` when every region's answer is exact for the shape against each point's stored position, or `cover; depth=<d>` when a shape's perimeter exceeded `max_region_cells` and the answer is exact for a cover of it — a superset — taken at depth `d` (`selection-operand.md` §6). A function of the shape and the grid alone, never of the rows, so it says nothing about the corpus; with several region leaves, the coarsest. A leaf by artifact is always exact."
+              required: false
+              schema:
+                type: string
+                pattern: "^(exact|cover; depth=[0-9]+)$"
+            x-tessera-server-us:
+              description: Server compute after admission to first-flush-ready, microseconds. The whole-stream wall total is the trailer's `stream_us`.
+              required: true
+              schema:
+                type: string
+                pattern: "^[0-9]+$"
+            x-tessera-admission-us:
+              description: Time spent in the compute-admission gate, microseconds.
+              required: true
+              schema:
+                type: string
+                pattern: "^[0-9]+$"
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+                description: Framed Arrow IPC streams and one JSON trailer, per contracts §5.
+        "401":
+          $ref: "#/components/responses/BadCredential"
+        "403":
+          $ref: "#/components/responses/ExpiredToken"
+        "404":
+          description: Unknown `view`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          description: "`zoom` above 16; neither or both of `bbox`/`tiles`; a non-finite or inverted bbox; a tile prefix with bits above `zoom`; an `underlay_offset` beyond the deployment's ceiling, the grid or the sub-cell budget (refused, never clamped); an unknown filter column or an operator outside its family (an unknown *value* is an empty operand, never a refusal); `none_of` naming a text column or naming two columns."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/Backpressure"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+        "503":
+          $ref: "#/components/responses/NotReady"
+
+  /v1/items/{tessera_id}:
+    post:
+      tags: [viewer]
+      operationId: item
+      summary: One item's whole record, if this principal may see it.
+      description: |
+        The record assembled from its three homes and keyed by declared column name; a category
+        appears as its vocabulary **key**, never its code; every width lands on a JSON number. **An
+        absent field is absent from the object, never `null`.** `external_id` is the caller's own,
+        base64, present only where one exists — the only place a caller external id appears on
+        this plane.
+
+        **The whole permitted picture of one point** (owner ruling 2026-09-01): beside the record,
+        `views` names every view the item is in **that this principal may reach**, with the
+        position each view places it at, and `scoped` carries the group-scoped attribute values
+        keyed by the group's key. Both are gate-filtered against the session's visible-view set, so
+        a point held only in views this principal cannot reach serves exactly what it served
+        before — an empty `views` and no scoped entries — and nothing on this route names a
+        gate-failed view.
+
+        `404 unknown` is returned identically for *no such id* and *exists but not visible* — same
+        status, same code, same detail, and the same work. Behind the compute-admission gate.
+      security:
+        - sessionToken: []
+      parameters:
+        - $ref: "#/components/parameters/TesseraId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ItemRequest"
+      responses:
+        "200":
+          description: The record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ItemResponse"
+        "401":
+          $ref: "#/components/responses/BadCredential"
+        "403":
+          $ref: "#/components/responses/ExpiredToken"
+        "404":
+          $ref: "#/components/responses/Unknown"
+        "409":
+          description: "`idset` was supplied and differs from the deployment's — *stale idset; re-resolve by external_id*. Decided before inversion and identically for every identifier."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/Backpressure"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+
+  /v1/artifacts/browse:
+    post:
+      tags: [viewer]
+      operationId: browseArtifacts
+      summary: One page of a layer's hierarchy, by lineage — its roots, an artifact's children and parents, or a name search.
+      description: |
+        **Independent of the viewport** (`highlight-and-hierarchy.md` §4). A layer whose artifacts
+        are spread across the map draws nothing at any zoom the viewport's budget cut reaches; this
+        verb serves the same artifacts by relation instead of by position, each row carrying the
+        masked count the artifacts frame carries.
+
+        **One verb, three forms.** `parent` and `q` absent is the **roots** form — the layer's
+        artifacts with no served parent. `parent` names the **children** form: the artifacts naming
+        it, with the requested artifact's own served parents in `parents`, which is `[]` on the
+        other two forms. `q` names the **search** form, matching a key or a first supplied text
+        content case-insensitively. Both together is a `422`.
+
+        **The gate runs before the page.** Every artifact served passed its own existence
+        criterion, evaluated over the form's whole candidate set before `limit` and `cursor` — so a
+        page's fill and its `next` count only artifacts this principal may see, and a withheld
+        artifact leaves no gap. **The order is total**: count descending, then `tessera_id`
+        ascending, so a cursor over tied counts neither duplicates nor drops a row. **A relation is
+        named only where both ends are served**: a child whose parent is withheld is a root here,
+        and a parent below this principal's floor is absent from `parents`.
+
+        **The refusals name deployment schema and never an artifact.** An unknown layer, an
+        attached layer, a `level` on a kind with one level, a level a layer does not hold, `limit =
+        0` and both `parent` and `q` are each a `422`. A `parent` that names nothing, one of another
+        layer, one suppressed and one below this principal's criterion answer an **empty page** —
+        refusing would make the verb an existence oracle over what the criterion withholds.
+
+        Behind the compute-admission gate.
+      security:
+        - sessionToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BrowseRequest"
+      responses:
+        "200":
+          description: One page of the layer's hierarchy as this principal sees it.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BrowseResponse"
+        "401":
+          $ref: "#/components/responses/BadCredential"
+        "403":
+          $ref: "#/components/responses/ExpiredToken"
+        "404":
+          description: "`404 unknown`: no such `view`, or one this principal's gate fails — the same answer, on the viewer plane's rule."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          description: "`422 contract`: an unknown or attached layer, a `level` the kind or the layer does not have, `limit = 0`, both `parent` and `q`, or a malformed `filters`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/Backpressure"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+
+  /v1/artifacts/{tessera_id}:
+    post:
+      tags: [viewer]
+      operationId: artifact
+      summary: Drill down on one annotation artifact — its masked count and derived geometry for this principal.
+      description: |
+        A separate route from `/v1/items`, so that the *shape* of an answer never says which of the
+        two an identifier names. `masked_count` is **this principal's** count of the artifact's
+        members and never its size. Geometry is recomputed per principal from `membership ∩ M_auth`
+        and travels in the same 32-bit-per-axis grid units as the viewport's `code`; a client must
+        not cache one principal's geometry against an identifier. An absent geometry field means
+        *this layer declares no such property*, never *withheld*: an artifact whose content cannot
+        be served is a `404` entire.
+
+        `404` is the only failure shape and one construction site: nothing by that id, a point by
+        that id, a layer this principal cannot reach, a suppressed artifact, and one below its
+        layer's existence criterion are one answer. Behind the compute-admission gate.
+      security:
+        - sessionToken: []
+      parameters:
+        - $ref: "#/components/parameters/TesseraId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ArtifactRequest"
+      responses:
+        "200":
+          description: The artifact as this principal sees it.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArtifactResponse"
+        "401":
+          $ref: "#/components/responses/BadCredential"
+        "403":
+          $ref: "#/components/responses/ExpiredToken"
+        "404":
+          description: "`404 unknown`: nothing this principal may see by that identifier — and an unknown `view` takes the same answer, since a view is addressed like any other named thing."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: Stale `idset`, on `/v1/items`' rule.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/Backpressure"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+
+components:
+  securitySchemes:
+    sessionCredential:
+      type: http
+      scheme: bearer
+      description: The operator-configured session credential (`serve.session_credential`), a shared secret. Compared in constant time. Never handed to a browser.
+    sessionToken:
+      type: http
+      scheme: bearer
+      description: The `token` `POST /session/authorise` minted. A missing, malformed or unrecognised token — including a revoked one — is `401 bad-credential`; a recognised token past `expires_at` is `403 expired-token`. Both end the session.
+
+  parameters:
+    TesseraId:
+      name: tessera_id
+      in: path
+      required: true
+      description: The item's or artifact's opaque identifier, a `u64` in decimal. A keyed blinding permutation of the internal identity — stable across sessions, meaningless without the key, and **not** a cryptographic guarantee (contracts §5, decision 0014).
+      schema:
+        type: string
+        pattern: "^[0-9]+$"
+
+  responses:
+    BadCredential:
+      description: "`401 bad-credential`: missing, malformed or unrecognised bearer credential. On a token that previously worked this is the session ending — revoked — and a client treats it exactly as `403`."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    ExpiredToken:
+      description: "`403 expired-token`: the token is recognised and its `expires_at` has passed. Re-authorise."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unknown:
+      description: "`404 unknown`: nothing this principal may see by that identifier — indistinguishable from *nothing exists* by construction."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Contract:
+      description: "`422 contract`: the request itself is wrong. Do not retry unchanged."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Backpressure:
+      description: "`429 backpressure`: shed whole, never a narrowed answer. Retry unchanged after `Retry-After`, which agrees with the body's `retry_after_s`."
+      headers:
+        Retry-After:
+          required: true
+          description: Seconds. `1` for the compute-admission gate and the single-flight builders; other subjects derive their own figure. Read it rather than assuming it.
+          schema:
+            type: string
+            pattern: "^[0-9]+$"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/BackpressureError"
+    FailClosed:
+      description: "`500 fail-closed`: a mask, composition or containment failure. Partial results do not exist."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotReady:
+      description: "`503 not-ready`: unverified bundle, unready worker, unloaded plugin. No `Retry-After`, deliberately."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  schemas:
+    Error:
+      type: object
+      description: The one error envelope, every plane (contracts §3.1). The code list is closed.
+      additionalProperties: false
+      required: [error, detail]
+      properties:
+        error:
+          type: string
+          enum:
+            - bad-credential
+            - expired-token
+            - unknown
+            - conflict
+            - contract
+            - backpressure
+            - fail-closed
+            - not-ready
+        detail:
+          type: string
+          description: Human-readable. Identical for every branch of a `404`, so it discloses nothing an enumeration could use.
+        retry_after_s:
+          type: integer
+          minimum: 0
+          description: Present on every `429` and on nothing else; agrees with the `Retry-After` header.
+
+    BackpressureError:
+      description: An `Error` whose code is `backpressure` and whose `retry_after_s` is present.
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - type: object
+          required: [retry_after_s]
+          properties:
+            error:
+              const: backpressure
+
+    AuthoriseRequest:
+      type: object
+      additionalProperties: false
+      required: [auth_data]
+      properties:
+        auth_data:
+          type: string
+          contentEncoding: base64
+          description: >-
+            Bytes the auth plugin evaluates. **Plugin-defined; this description can say only that
+            they are bytes.** The passthrough plugin reads JSON `{"terms": ["<label>", ...]}`.
+
+    AuthoriseResponse:
+      type: object
+      additionalProperties: false
+      required: [token, token_id, expires_at]
+      properties:
+        token:
+          type: string
+          description: >-
+            The capability. Presented as `Authorization: Bearer <token>` on the viewer plane;
+            never logged, never transited to the session plane again.
+        token_id:
+          type: integer
+          minimum: 0
+          description: The non-capability handle `POST /session/revoke` takes.
+        expires_at:
+          type: integer
+          minimum: 0
+          description: Seconds since the Unix epoch — `min(backstop, plugin not_after)`.
+
+    RevokeRequest:
+      type: object
+      additionalProperties: false
+      required: [token_id]
+      properties:
+        token_id:
+          type: integer
+          minimum: 0
+
+    Meta:
+      type: object
+      additionalProperties: false
+      required: [api_version, bundle_format, idset, views, groups, declared_scalars, scoped_scalars, filter_operands, selection, layers]
+      properties:
+        api_version:
+          type: integer
+          const: 1
+        bundle_format:
+          type: integer
+        idset:
+          type: integer
+          minimum: 0
+          description: The identity set the `tessera_id`s were minted under. The identity **key** appears in no response on any plane.
+        views:
+          type: array
+          description: "The views this principal may reach, in serving order. **Per-principal**: a view whose own `visibility` label — or whose group's — the principal does not satisfy is absent, and naming it on a viewer verb is the same `404` a name nobody declared gets (`views.md` §6). A filtered roster is a shorter list and nothing else: a view carries no position of its own, so nothing here counts the views withheld from this principal (decision 0113)."
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, display_name, quantisation, projection, world_aspect, tile_scheme, tile, group, key, metadata]
+            properties:
+              id:
+                type: string
+              display_name:
+                type: string
+              quantisation:
+                type: object
+                additionalProperties: false
+                required: [x_min, x_max, y_min, y_max]
+                description: The extent a point's `code` is scaled against in this view — 32 bits per axis over this range. Per view and not per bundle (decision 0040), because two views of one bundle may quantise differently and a client drawing the second would otherwise decode every position against the first's ground.
+                properties:
+                  x_min: { type: number }
+                  x_max: { type: number }
+                  y_min: { type: number }
+                  y_max: { type: number }
+              projection:
+                description: What placed this view's positions — the name declared, from the closed set `projections.md` §5 enumerates, and `none` for a view that projects nothing. A deployment constant, identical for every principal.
+                type: string
+                enum: [web_mercator, equirectangular, gall_isographic, none]
+              world_aspect:
+                description: The ratio the world should be drawn at, width ÷ height — 1 for `web_mercator`, `2cos φ₁` for an equirectangular alias, `null` for `none`, which has no world to draw.
+                type: [number, "null"]
+              tile_scheme:
+                description: The tile scheme this view's frame addresses, and what decides whether a basemap may be drawn — a scheme's name rather than a boolean, because an equirectangular frame is aligned to a square tiling no server publishes (`projections.md` §9). `null` means draw the points and draw no basemap.
+                type: [string, "null"]
+                enum: [xyz, null]
+              tile:
+                description: The tile this view's frame is under `tile_scheme`. Present exactly when `tile_scheme` is.
+                type: [object, "null"]
+                additionalProperties: false
+                required: [z, x, y]
+                properties:
+                  z: { type: integer, minimum: 0 }
+                  x: { type: integer, minimum: 0 }
+                  y: { type: integer, minimum: 0 }
+              group:
+                description: "The view group this view belongs to, or `null` for a plain view (`views.md` §3.2). The three roster fields are one record and are null together."
+                type: [string, "null"]
+              key:
+                description: "This view's key within its group — the caller's own, required at creation, a view's only address, and the `<group>:<key>` that makes up `id` (decision 0113)."
+                type: [string, "null"]
+              metadata:
+                description: "The typed per-view values this view carries, one entry per name its group declared. Empty on a `members` group's views, whose metadata belongs to the group that owns the keys (`views.md` §3.3). Not an attribute — one value per view rather than one per (entity, view), and it filters nothing."
+                type: [object, "null"]
+                additionalProperties:
+                  type: object
+                  additionalProperties: false
+                  required: [type, value]
+                  properties:
+                    type:
+                      type: string
+                      enum: [bool, int, float, text, timestamp_us]
+                    value:
+                      description: "The value under `type`; `timestamp_us` is microseconds since the Unix epoch, the one unit that type may hold."
+                      type: [boolean, number, string]
+        groups:
+          type: array
+          description: "The view groups this principal may reach, in manifest order, each listing its reachable view ids in creation order — what lets a client offer previous-and-next without interpreting a key. A group is not a view: it cannot be named on a viewer verb (`views.md` §3.1). **Per-principal**: a group whose gate the principal fails is absent, and takes its whole roster with it (`views.md` §6). Empty where the declaration carries plain views alone."
+          items:
+            type: object
+            additionalProperties: false
+            required: [name, title, members_of, views]
+            properties:
+              name:
+                type: string
+              title:
+                description: "The group's human-readable title, or `null` where it declared none. Presentation metadata on an object whose visibility this roster has already decided, so it is a deployment constant rather than a per-principal field."
+                type: [string, "null"]
+              members_of:
+                description: "The group whose keys these are, where this group is a second layout over another's views (`views.md` §3.3); `null` where it owns them."
+                type: [string, "null"]
+              views:
+                description: "This group's view ids, in creation order — the joined `group:key` form a request names."
+                type: array
+                items: { type: string }
+        declared_scalars:
+          type: array
+          description: The entity-scoped column schema in full, in declaration order. `render = true` columns arrive in the points frame after `tessera_id` and `code`, in this order, each named by its column — followed, under a view of a group, by that group's `render = true` scoped families (`scoped_scalars`). Readers take the columns by name.
+          items:
+            $ref: "#/components/schemas/DeclaredScalar"
+        scoped_scalars:
+          type: array
+          description: "The **group-scoped** column families (`views.md` §5) — the same schema `declared_scalars` publishes, plus the scope that says which views each column arrives under. **Per-principal**: a family whose group this principal cannot reach is omitted, exactly as its `filter_operands` entry is."
+          items:
+            $ref: "#/components/schemas/ScopedScalar"
+        filter_operands:
+          type: array
+          description: "The columns a request may filter on and each one's operator names. `family` is what tells a client which control to draw — a category has a value set `/v1/categories/{column}` fills; a keyword has none. `scope` is present only on a **group-scoped** attribute, whose values differ per view of the group it names. **Per-principal in its scoped entries**: a family whose group this principal cannot reach is omitted, and a leaf naming it — bare or pinned — is the ordinary unknown-column `422` (`views.md` §5, §6)."
+          items:
+            type: object
+            additionalProperties: false
+            required: [column, family, operands]
+            properties:
+              column:
+                type: string
+              family:
+                type: string
+                enum: [category, keyword, numeric, text]
+              operands:
+                type: array
+                items:
+                  type: string
+                  enum: [eq, in, prefix, contains, range, match, phrase]
+              scope:
+                type: object
+                additionalProperties: false
+                required: [group]
+                description: |
+                  The view group whose views this column's values are per. Under a view of that
+                  group — or of a group sharing its views — the request's own view decides which
+                  column the leaf reads and nothing is added to the wire. Under any other view the
+                  leaf must **pin** one: `<column>@<key>`, the same key form `views` publishes. An unpinned leaf there is a `422` naming the
+                  group; a pin naming no view of it is the `404` an unknown view gets.
+                properties:
+                  group:
+                    type: string
+        selection:
+          $ref: "#/components/schemas/Selection"
+        layers:
+          type: array
+          description: The annotation layers this principal may know exist, and what each declared. Per-principal, as `views`, `groups` and `filter_operands`' scoped entries are; each layer's own `views` list is filtered by the view gate too. Never the artifact cardinality.
+          items:
+            $ref: "#/components/schemas/Layer"
+
+    DeclaredScalar:
+      type: object
+      additionalProperties: false
+      required: [name, arrow_type, category, analyser, render, index]
+      properties:
+        name:
+          type: string
+          pattern: "^[A-Za-z0-9_-]+$"
+          description: The column's identifier, unique bundle-wide, path-safe. Not view-qualified.
+        arrow_type:
+          type: string
+          description: The storage type's name (`u8`, `u16`, `u32`, `u64`, `i8`…`i64`, `f32`, `f64`, `bool`, `timestamp_us`, `keyword`, `text`). Engine-derived; the set is the build schema's core types and this description does not enumerate it further.
+        category:
+          description: Present for a category column; `null` for a plain one — the signal a client keys a legend off, since the points frame ships a category as a bare integer.
+          oneOf:
+            - type: "null"
+            - type: object
+              additionalProperties: false
+              required: [vocabulary, kind, visibility]
+              properties:
+                vocabulary:
+                  type: string
+                kind:
+                  type: string
+                  enum: [declared, discovered]
+                visibility:
+                  type: string
+                  enum: [public, derived]
+                  description: "`public`: the value set is served as authored to any session. `derived`: filtered per principal — a value appears iff at least one item carrying it is visible."
+        analyser:
+          description: For a `text` column, the `<name>/<version>` analyser identity that segmented the index — what lets a client tell *nothing says this* from *your query segmented differently*. `null` for every other type.
+          type: [string, "null"]
+        render:
+          type: boolean
+          description: The column arrives in the points frame.
+        index:
+          type: boolean
+          description: The column has an entity-space search structure. Neither flag set means blob-resident — returned at drill-down, never an operand.
+
+    ScopedScalar:
+      type: object
+      additionalProperties: false
+      required: [name, arrow_type, scope, category, analyser, render, index, views]
+      description: One group-scoped attribute's column family — one entity-space column per view of the group it names, and the same declaration an entity-scoped column carries.
+      properties:
+        name:
+          type: string
+          pattern: "^[A-Za-z0-9_-]+$"
+          description: The column's identifier, as a filter leaf spells it before any pin. Unique bundle-wide across the entity-scoped columns and the families alike.
+        arrow_type:
+          type: string
+          description: The storage type's name, spelt exactly as `DeclaredScalar.arrow_type` is.
+        scope:
+          type: object
+          additionalProperties: false
+          required: [group]
+          description: The view group whose views this family has a column per.
+          properties:
+            group:
+              type: string
+        category:
+          description: Present for a category family; `null` otherwise — `DeclaredScalar.category`'s three facts, for the same reason.
+          oneOf:
+            - type: "null"
+            - type: object
+              additionalProperties: false
+              required: [vocabulary, kind, visibility]
+              properties:
+                vocabulary:
+                  type: string
+                kind:
+                  type: string
+                  enum: [declared, discovered]
+                visibility:
+                  type: string
+                  enum: [public, derived]
+        analyser:
+          description: For a `text` family, the `<name>/<version>` analyser identity that segmented its per-view indexes. `null` for every other family.
+          type: [string, "null"]
+        render:
+          type: boolean
+          description: The column arrives in the points frame **under a view of this group**, or of a group sharing its views via `members`, and under no other view. Under those views it follows the entity-scoped render columns; a row with no value carries the type's zero, as every render column does.
+        index:
+          type: boolean
+          description: The family's columns carry an entity-space value column a filter may be answered from — which is the whole of whether it is an operand, a scoped column having no row route.
+        views:
+          type: array
+          description: "Every view id whose rows carry this column and that this principal may reach: the owning group's own `group:key` ids, **and** the same keys under every group sharing those views via `members` — a client under a sharing group's view receives the column under that group's id, which the family's own list does not name. Gate-filtered per id, so a view this principal cannot reach is absent here as it is absent from `views`. Not the group's roster: a view created while the service runs has no column until a rebuild."
+          items: { type: string }
+
+    Selection:
+      type: object
+      additionalProperties: false
+      description: Design §7.2's clause parameters and the request-shape ceilings. All deployment constants, identical for every principal; a client cannot read a mark count as a density without them.
+      required: [k_min, k_max_marks, max_k, theta_target_marks, max_underlay_offset, max_tiles_per_request, max_category_values, max_shape_vertices, max_region_vertices, max_region_cells, max_suggestions, max_suggestion_walk, max_suggest_set_entities, max_browse_rows]
+      properties:
+        k_min:
+          type: integer
+          minimum: 0
+        k_max_marks:
+          type: integer
+          minimum: 0
+          description: The overplot ceiling and `k`'s default.
+        max_k:
+          type: integer
+          minimum: 0
+          description: The machine ceiling. Effective cap is `min(k, max_k, k_max_marks)`.
+        theta_target_marks:
+          type: integer
+          minimum: 0
+        max_underlay_offset:
+          type: integer
+          minimum: 0
+        max_tiles_per_request:
+          type: integer
+          minimum: 0
+          description: The tile-count ceiling a `422` is otherwise indistinguishable from the client's own arithmetic being wrong.
+        max_category_values:
+          type: integer
+          minimum: 0
+          description: "`/v1/categories`' page ceiling and default."
+        max_shape_vertices:
+          type: integer
+          minimum: 0
+          description: The most vertices a published shape may carry after canonicalisation (`polygon-membership.md` §9). Over it, `PUT /control/layers/{name}/artifacts` is a `422` naming the count and the cap; the held decomposition is reported and never capped.
+        max_region_vertices:
+          type: integer
+          minimum: 0
+          description: The most vertices a `region` filter leaf's `polygon` may carry (`selection-operand.md` §2). Over it the request is a `422` naming the count and the cap.
+        max_browse_rows:
+          type: integer
+          minimum: 1
+          description: The most rows `POST /v1/artifacts/browse` returns in one page, and the default page size when a caller names none (`highlight-and-hierarchy.md` §4). `limit` clamps to it; `limit = 0` is a `422`. A response bound and not a disclosure control — what a principal may be told is the artifact's own existence criterion, settled before paging starts.
+        max_region_cells:
+          type: integer
+          minimum: 0
+          description: The most boundary cells a `region` leaf's decomposition may hold at one depth (`selection-operand.md` §6). **Not a refusal** — over it the descent stops at the deepest depth that fits and the answer is exact for a cover, said on `x-tessera-region`.
+        max_suggestions:
+          type: integer
+          minimum: 1
+          description: "`/v1/categories/{column}/suggest`'s page ceiling and `limit`'s default; recommended 20. It is what lets a client tell a short list that means *that is all* from one the deployment truncated, which `more` alone does not."
+        max_suggestion_walk:
+          type: integer
+          minimum: 1
+          description: "The most values one suggestion request may examine before it stops and answers `more: true`; recommended 10⁵. It bounds latency and not disclosure — the enumeration walks the whole vocabulary unbudgeted — and a client that receives `more` on an unfilled page reads it as this budget rather than as its own arithmetic being wrong."
+        max_suggest_set_entities:
+          type: integer
+          minimum: 1
+          description: "The composed cardinality at or under which a suggestion is answered from a per-session set of the values this principal can see, rather than by probing one posting per value walked (`value-suggestion.md` §6.3, decision 0124); recommended 10⁷. Both routes serve the same page under the same gate and which answered is not on the wire; what differs is `more`, exact from the set route and possibly a spent walk budget from the probe route. A deployment constant, and the one here a caller can locate themselves against — they learn which side of it their own cardinality falls on, which a zoom-0 viewport already returns as `visible`."
+
+    Layer:
+      type: object
+      additionalProperties: false
+      required: [name, title, views, membership, hierarchy, levels, computed_content, shape, supplied_content, depends_on, version]
+      properties:
+        name:
+          type: string
+        title:
+          type: [string, "null"]
+        views:
+          type: array
+          items: { type: string }
+        membership:
+          description: Where the layer's artifacts get their members — a stored set per artifact, or a shape decomposed at request time. Engine-derived; other spellings are the declaration's and are not enumerated here.
+          type: string
+        hierarchy:
+          type: object
+          additionalProperties: false
+          required: [kind, prune_children]
+          properties:
+            kind:
+              type: string
+              enum: [flat, nested, stacked, tiered]
+            prune_children:
+              type: boolean
+              description: The layer's **default** cut policy; `artifact_budget` may ask for more.
+        levels:
+          type: array
+          description: Empty for a treed layer, whose lineage is in its edges.
+          items:
+            type: object
+            additionalProperties: false
+            required: [level, title, zoom]
+            properties:
+              level:
+                type: integer
+                minimum: 0
+              title:
+                type: [string, "null"]
+              zoom:
+                description: "`[min, max]` tile depth — **the default bound on this layer's response**: a `/v1/viewport` naming no `levels` is answered at the levels whose range covers the depth it asked at, and naming `levels` overrides that. Absent means served at every depth; a range containing no depth is refused at registration. It was advisory and bounded no work while nothing on the wire could name a level (contracts §3.2 r41, decision 0103)."
+                oneOf:
+                  - type: "null"
+                  - type: array
+                    minItems: 2
+                    maxItems: 2
+                    items: { type: integer, minimum: 0 }
+        computed_content:
+          type: array
+          description: Properties recomputed per viewer from `membership ∩ M_auth` — `centroid`, `hull`, `box`.
+          items: { type: string }
+        shape:
+          description: |
+            **Which kind the layer's one drawn geometry is** (`polygon-membership.md` §7.1), or
+            null where it draws none: `derived` — the hull over the members this principal can
+            see, recomputed per principal; `predicate` — the membership shape of a `spatial`
+            layer, identical for every principal served the artifact; `authored` — a supplied
+            `polygon`, `circle` or `ellipse` content, gated by that content's own requirement and
+            likewise identical. A client reads from it whether the outline moves with the
+            principal, which decides whether it may hold one against a `tessera_id` across
+            principals: a derived shape never, the other two may be. The geometry itself travels
+            in the artifacts frame's `shape_x`/`shape_y` and in `ArtifactResponse.shape`, the same
+            nesting for every kind.
+          oneOf:
+            - type: "null"
+            - type: string
+              enum: [derived, predicate, authored]
+        supplied_content:
+          type: array
+          description: The **types** of publisher-supplied content, positional to the artifacts frame's `content` column. Safe to publish because an artifact failing containment is absent whole.
+          items: { type: string }
+        depends_on:
+          type: array
+          description: Layers whose artifacts this layer's may target — a clustering's labels name the clustering.
+          items: { type: string }
+        version:
+          type: integer
+          minimum: 0
+          description: Moves on a gate edit; a client echoes it to notice one.
+
+    CategoriesResponse:
+      type: object
+      additionalProperties: false
+      required: [column, values, next]
+      properties:
+        column:
+          type: string
+        values:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [code, key, title]
+            properties:
+              code:
+                type: integer
+                minimum: 1
+                description: Never `0`, the reserved *absent* sentinel.
+              key:
+                type: string
+              title:
+                type: [string, "null"]
+                description: The authored presentation; `null` where no author wrote one, which is every value a discovered vocabulary mints. The key is the display fallback.
+        next:
+          type: [string, "null"]
+          description: The last key returned, to pass as `?after=`; `null` when the set is complete, and always `null` for `?codes=`.
+
+    SuggestResponse:
+      type: object
+      additionalProperties: false
+      required: [column, q, values, more]
+      description: "`value-suggestion.md` §5.1."
+      properties:
+        column:
+          type: string
+          description: The caller's own spelling, echoed back.
+        q:
+          type: string
+          description: The query **as received**, not folded.
+        values:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [code, key, title, match]
+            properties:
+              code:
+                type: integer
+                minimum: 1
+                description: Never `0`, the reserved *absent* sentinel.
+              key:
+                type: string
+              title:
+                type: [string, "null"]
+                description: The authored presentation; `null` where no author wrote one.
+              match:
+                type: object
+                additionalProperties: false
+                required: [field, start, len]
+                description: Where the match sits, in **characters of the served string**, so a client highlights without re-implementing the fold.
+                properties:
+                  field:
+                    type: string
+                    enum: [key, title]
+                    description: Which field matched. A word-start match reports the field the word came from, and is `key` for a word start on a value with no title.
+                  start:
+                    type: integer
+                    minimum: 0
+                  len:
+                    type: integer
+                    minimum: 0
+              count:
+                type: integer
+                minimum: 0
+                description: Present **iff** `counts=true` — the items carrying this value that this principal may see, exact and computed per request. Never `0` or `null` as a stand-in for absence, and never a sort key.
+        more:
+          type: boolean
+          description: "`true` iff the walk stopped before its range was exhausted — the page filled, or `selection.max_suggestion_walk` values were examined. The budget form is the probe route's: answered from a per-session set of visible values (`value-suggestion.md` §6.3) it means the page filled and nothing else. There is no cursor; the client's response either way is to type more."
+
+    Pin:
+      type: object
+      additionalProperties: false
+      required: [prefix, segments_version]
+      description: A generation stamp — the `x-tessera-pin` header's JSON, echoed back. Advisory, never authorisation.
+      properties:
+        prefix:
+          type: string
+        segments_version:
+          type: integer
+          minimum: 0
+
+    ViewportRequest:
+      type: object
+      additionalProperties: false
+      required: [view, zoom]
+      description: Exactly one of `bbox` and `tiles` (contracts §3.2).
+      properties:
+        view:
+          type: string
+          description: A view id from `/v1/meta`.
+        zoom:
+          type: integer
+          minimum: 0
+          maximum: 16
+          description: The tile depth — the grid is 2¹⁶ × 2¹⁶.
+        bbox:
+          type: array
+          minItems: 4
+          maxItems: 4
+          items: { type: number }
+          description: "`[x0, y0, x1, y1]` in the view's quantisation extent's coordinates, `x0 ≤ x1`, `y0 ≤ y1`, all finite. The tiles answered for are the depth-`zoom` tiles it intersects."
+        tiles:
+          type: array
+          items:
+            type: integer
+            minimum: 0
+          description: Depth-`zoom` Morton prefixes, in place of `bbox`. Answered in the request's own order after duplicate removal (first occurrence kept); a prefix with bits above `zoom` is refused. Omitting a tile the client already holds costs the server nothing for it.
+        k:
+          type: integer
+          minimum: 0
+          description: The cap clause. Defaults to `k_max_marks`; capped by `max_k`. `0` is the counts-only request. Never decrease it on zoom.
+        filters:
+          description: |
+            The filter. It narrows which marks are drawn and **answers one boolean beside each
+            served artifact**: the *artifacts* frame's `matched` is `true` where a member this
+            principal may see, inside the requested tiles, matches (contracts §3.2, decision 0104).
+            The column is **null** on every response whose request carried no filter — there was no
+            question, and `false` would answer one.
+
+            **A filter moves nothing else about an artifact.** The same artifacts are served with
+            the same `masked_count`, filtered or not: a filter may move the frontier up and never
+            down (**I12**).
+          allOf:
+            - $ref: "#/components/schemas/FilterExpr"
+        highlight:
+          description: |
+            A second boolean expression in **exactly `filters`' grammar**, and a second field of
+            the one request rather than a second endpoint: a viewer narrowed by one clause and lit
+            by another sends both here and reads both answers off the same frames
+            (`highlight-and-hierarchy.md` §2).
+
+            **It never changes which rows the response holds.** The cap clause, the density
+            sampling and `served` all run over the `filters` candidate exactly as they do without
+            it, so the served set is identical with and without a highlight — the map does not
+            move, the marks do not resample, and a point the viewer was looking at stays where it
+            is with its brightness changed. A client that wants the map to narrow uses `filters`;
+            one that wants it lit uses this.
+
+            It is evaluated over the candidate `filters` produced, so every answer is the
+            conjunction `all_of[filters, highlight]`: the tiles frame's `highlighted` count (of
+            this tile's `matched`, how many also satisfy it), the points frame's `highlighted` bit
+            per served point, and the artifacts frame's `highlighted` bit — decision 0104's bit
+            under the second expression. `highlighted ≤ matched ≤ visible` per tile.
+
+            There is no list form, for the reason `filters` is one expression: two highlights are
+            one expression under `all_of` or `any_of`.
+          allOf:
+            - $ref: "#/components/schemas/FilterExpr"
+        pin:
+          $ref: "#/components/schemas/Pin"
+        underlay_offset:
+          type: integer
+          minimum: 0
+          description: Serve exact masked counts at depth `zoom + underlay_offset` as the sub-cells frame. Absent or `0` serves none and adds no bytes. Refused, never clamped, above `max_underlay_offset`, past depth 16, or over the sub-cell budget.
+        layers:
+          description: |
+            Which annotation layers to answer for — and so whether an artifacts frame can appear.
+            **Omitted or `[]`: no layers**, no artifact pass, no cost. **`"all"`: every layer this
+            principal reaches.** **An array: the named set intersected with the reachable set,
+            never unioned** — a name this principal does not reach is absent whether or not it was
+            asked for, so naming a layer is not a way to learn whether it exists. (Owner ruling
+            2026-08-25; the server change lands on the s3 track. Until it merges, omitted is read
+            as `"all"` and the string form is not accepted — send `[]` for none and an explicit
+            array otherwise, which both servers read identically.)
+          oneOf:
+            - type: array
+              items: { type: string }
+            - type: string
+              const: all
+        artifact_budget:
+          type: integer
+          minimum: 0
+          description: How many artifacts the client wants back at most. Honoured structurally — ancestors in place of their descendants — never by sampling (decision 0083); accepted and inert on a flat layer. Unbounded when absent.
+        levels:
+          description: |
+            Which of each named layer's declared resolutions to answer for (contracts §3.2 r41,
+            decision 0103).
+
+            **Absent follows the layer's own declaration** — the levels whose declared zoom range
+            covers this request's `zoom`, the two being the same 0–16 depth coordinate. The string
+            `"all"` answers for every level; an array answers for exactly those, intersected with
+            what the layer holds. A level a layer does not hold is absent from the answer rather
+            than a refusal, the same way an unreachable layer name is; any other value is `422`.
+
+            **A layer that declares no levels at all is inert to this in every form** — a treed
+            or flat layer sits entirely at level 0, so naming levels for the tiered layer beside it
+            does not blank its clusterings. **A layer that declares levels but no zoom range on any
+            of them serves every level in the absent case**, there being no map to follow.
+
+            **An empty array is *none***, as `layers: []` is.
+
+            **The default is the reverse of `layers`' and deliberately so**: naming a layer has
+            already opted into the artifact pass, so what is left is which of its rungs to pay for,
+            and there the expensive answer is *every level* — the one a caller asks for by name.
+
+            **It applies to every layer named**, against each layer's own declaration: a level
+            number is a rung of one layer and means nothing across two.
+          oneOf:
+            - type: array
+              items: { type: integer, minimum: 0 }
+            - type: string
+              const: all
+        computed:
+          description: |
+            Which of each layer's **declared** derived properties the response should carry
+            (contracts §3.2 r42, `artifact-shapes.md` §8 C).
+
+            **Absent is the layer's own declaration**, which is what every response carried before
+            this field existed. An array is that array **intersected** with each layer's
+            declaration, and the empty array is *none* — counts and no geometry, the artifacts
+            frame still served.
+
+            **It narrows and can never widen.** A property a layer did not declare is not served
+            for naming it. A name outside the vocabulary is `422`, unlike an unreachable layer
+            name, which is absent: the three words are deployment schema and each layer's own set
+            is published in `/v1/meta`, so refusing discloses nothing.
+
+            **A cost control, not a disclosure one.** A derived shape is computed per artifact
+            per request from `membership ∩ M_auth`, and a client draws one while a settled view
+            carries hundreds; measured at 2,032 ms and 263 KB against 164 ms and 26 KB on a
+            2.42M-member corpus. Fetch the one shape that draws from `POST /v1/artifacts/{tessera_id}`,
+            which serves the same geometry and is unaffected by this field.
+
+            `shape` names the layer's **one drawn geometry** of whichever kind `/v1/meta`'s
+            `shape` publishes for it — the derived hull, the membership shape, or the authored
+            one (`polygon-membership.md` §7.1); `hull` is the declaration's word and not an ask
+            word. A predicate or an authored shape is served at this request's `zoom` under the
+            vertex rule (§7.2): vertices that would move the drawn edge by less than a pixel at
+            that depth are not sent, and at most 2,048 are.
+          type: array
+          items:
+            type: string
+            enum: [centroid, box, shape]
+        artifact_rows:
+          description: |
+            Which columns each served artifact row answers with. **Absent or `"full"`: every
+            column** — the default, and the answer a caller who has read nothing receives.
+            **`"identity"`: the same rows in a fixed five-column schema** — `layer`
+            (dictionary-encoded), `tessera_id`, `rung`, `matched`, `highlighted`, the payload
+            columns absent from the schema rather than null. **The row set, the `matched` and
+            `highlighted` bits and the `rung` values
+            are identical under either value; only the columns change** — which keeps `parent_id`
+            and the points frames' membership columns resolvable, and is why the projection
+            discloses nothing: a column subset of what the same caller's identical request would
+            have been served. For a filter change over rows the caller already holds. Any other
+            value is `422`.
+          type: string
+          enum: [full, identity]
+        point_rows:
+          description: |
+            Which columns each served point answers with, mirroring `artifact_rows`
+            (`highlight-and-hierarchy.md` §2). **Absent or `"full"`: every column.**
+            **`"highlight"`: the same points as `(tessera_id, highlighted)`**, the other columns
+            absent from the schema rather than null. **The row set and the per-tile `served` split
+            are identical under either value; only the columns change** — which is why the
+            projection discloses nothing: the served set does not depend on the highlight at all.
+
+            Nine bytes a point against the render columns' width. It is for the client that changed
+            only its highlight and already holds every point it needs; the bits join its held
+            points by `tessera_id`. **Bound to a generation**: a stamp move (`x-tessera-stale`)
+            means the held set may no longer be what the same request serves, and the client
+            re-asks with `"full"`. Without a `highlight` on the request there is nothing to project
+            to and this answers as `"full"` does. Any other value is `422`.
+          type: string
+          enum: [full, highlight]
+
+    BrowseRequest:
+      type: object
+      additionalProperties: false
+      required: [view, layer]
+      properties:
+        view:
+          type: string
+          description: Which view's row space the counts are taken in. Required — a masked count is an intersection in row space, and row space is per view.
+        layer:
+          type: string
+          description: The layer to browse. A name outside the list `/v1/meta` publishes to this principal is a `422`; so is a layer that attaches to another, which has no lineage of its own.
+        level:
+          type: integer
+          minimum: 0
+          description: Which level the form addresses on a **levelled** layer (`stacked`, `tiered`). A `422` on `flat`, `nested` and `dag`, which have one level, and on a level the layer does not hold — a kind's levels are deployment schema, and a parameter accepted and ignored is a wrong answer that looks right.
+        parent:
+          description: The children form — the artifacts naming this one among their parents, with its own served parents in `parents`. A `tessera_id`, as a number or its decimal string. One that names nothing, one of another layer, one suppressed and one below this principal's criterion all answer an empty page.
+          oneOf:
+            - type: integer
+              minimum: 0
+            - type: string
+              pattern: "^[0-9]+$"
+        q:
+          type: string
+          description: The search form — the layer's artifacts whose key, or whose first supplied text content, contains this case-insensitively. Mutually exclusive with `parent`.
+        filters:
+          description: The viewport's own filter object. Each row then carries `matched_count = |membership ∩ M_auth ∩ filter|` and the page is ordered by it. **Existence and `masked_count` never move with it**, and a row whose `matched_count` is zero is still served.
+          allOf:
+            - $ref: "#/components/schemas/FilterExpr"
+        limit:
+          type: integer
+          minimum: 1
+          description: Page size, clamped to `selection.max_browse_rows` and defaulting to it. `0` is a `422`.
+        cursor:
+          type: string
+          description: A previous page's `next`, passed back unchanged. Opaque; it carries a count and an identifier this principal was already served.
+
+    BrowseResponse:
+      type: object
+      required: [artifacts, parents]
+      properties:
+        artifacts:
+          type: array
+          items: { $ref: "#/components/schemas/BrowseRow" }
+        parents:
+          type: array
+          description: The requested artifact's own served parents — **the children form only**, `[]` on the others so a client reads one shape.
+          items: { $ref: "#/components/schemas/BrowseRow" }
+        next:
+          type: string
+          description: The cursor for the next page. Absent where this page is the last.
+
+    BrowseRow:
+      type: object
+      required: [tessera_id, masked_count, rung, parent_ids]
+      properties:
+        tessera_id:
+          type: string
+          description: A decimal string, for the reason every other viewer-plane JSON identifier is one — a `u64` does not ride through a JavaScript number intact.
+        key:
+          type: string
+          description: The publisher's own key, where they supplied one.
+        name:
+          type: string
+          description: The artifact's first supplied text content, where this principal may read it. An artifact whose content cannot be served is absent from the page entirely rather than served with this field empty.
+        masked_count:
+          type: integer
+          description: How many of this artifact's members this principal can see — never how many it has, and never moved by `filters`.
+        matched_count:
+          type: integer
+          description: "`|membership ∩ M_auth ∩ filter|`. Present exactly when the request carried `filters`: absent is *there was no question*."
+        rung:
+          type: integer
+          description: The declared level on a levelled layer; the depth in the gated forest on a treed one; `0` on a flat one.
+        parent_ids:
+          type: array
+          description: This artifact's parents **that this principal is also served**, ascending. Empty for a root and for one whose parents were all withheld alike — the two are one shape, and a client reads it as *no parent here*.
+          items: { type: string }
+
+    FilterExpr:
+      description: |
+        A boolean expression over declared columns (contracts §3.2, decisions 0062 and 0066). A node
+        is a **leaf** — exactly one column name mapped to exactly one operator — or a
+        **combinator**: `all_of`, `any_of` or `none_of` over sub-expressions. `all_of: []` matches
+        the whole candidate; `any_of: []` matches nothing; `none_of: []` is `422`, as is a `none_of`
+        whose branches name different columns or a `text` column. Nesting is bounded by the
+        deployment and an over-deep expression is refused, never flattened.
+
+        Values: a category takes its vocabulary **key** (string) or **code** (integer), freely
+        mixed; a keyword takes byte-exact strings; a numeric takes numbers (and `range` a bounds
+        object of `gte`/`gt`/`lte`/`lt`, at least one, at most one per side); a `text` column takes
+        `match` with a string or `{"query", "minimum_should_match"}`, and `phrase` with a string.
+
+        **An unknown column or an operator outside the column's family is `422`; an unknown
+        *value* is an empty operand** — the one filter rule stated for clients: render *no
+        matches* identically for a value you may not see and one that does not exist.
+
+        **`region` is a leaf of its own, not a column** (`selection-operand.md` §2,
+        `polygon-membership.md` §8; the name is reserved at the build): a set of rows over the
+        whole view, composable with every other leaf, negatable with `none_of` — every rowed item
+        carries a position, so the complement is well defined — and cached per generation across
+        principals. The answer's exactness rides on `x-tessera-region`.
+
+        **`member_of` is a second leaf of its own** (`highlight-and-hierarchy.md` §3; the name is
+        reserved at the build): `{"layer", "artifact"}`, resolving to that artifact's membership
+        inside `M_auth` as a set of rows over the whole view, composable and negatable exactly as
+        `region` is. A layer this principal's `/v1/meta` does not list is a `422`; an artifact that
+        names nothing, belongs to another layer, is suppressed or is below this principal's
+        criterion is an **empty operand**, one answer for every reason.
+      type: object
+      minProperties: 1
+      maxProperties: 1
+      properties:
+        all_of:
+          type: array
+          items: { $ref: "#/components/schemas/FilterExpr" }
+        any_of:
+          type: array
+          items: { $ref: "#/components/schemas/FilterExpr" }
+        none_of:
+          type: array
+          items: { $ref: "#/components/schemas/FilterExpr" }
+        region:
+          $ref: "#/components/schemas/RegionLeaf"
+        member_of:
+          $ref: "#/components/schemas/MemberOfLeaf"
+      additionalProperties:
+        $ref: "#/components/schemas/FilterLeafOperator"
+
+    MemberOfLeaf:
+      type: object
+      description: |
+        One artifact of one layer, as a set of rows over the whole view: that artifact's
+        membership intersected with what this principal may see
+        (`highlight-and-hierarchy.md` §3).
+
+        **The two halves take opposite refusals.** `layer` is deployment schema — a name outside
+        the layer list `/v1/meta` publishes to this principal is a `422`, and the registry answers
+        alike for a gate-failed name and a never-registered one. `artifact` is a value and is never
+        refused: an identifier that names nothing, one of another layer, one suppressed, one whose
+        layer this principal does not reach, and one below their own existence criterion are all
+        the empty operand, one answer for every reason. The artifact's gate — its layer's
+        `visibility`, its own label, and `require_member_visibility` against `M_auth` — is the same
+        conjunction the artifacts frame applies, and it runs before any membership is read.
+      additionalProperties: false
+      required: [layer, artifact]
+      properties:
+        layer:
+          type: string
+        artifact:
+          oneOf:
+            - type: integer
+              minimum: 0
+            - type: string
+              pattern: "^[0-9]+$"
+
+    RegionLeaf:
+      type: object
+      description: |
+        Exactly one of `polygon`, `bbox`, `circle`, `ellipse` — a shape in the view's own space
+        (the view's quantisation extent, as `/v1/meta` publishes it), with `space` (`view`, the
+        default, or `wgs84` on a view that declares a projection — degrees, densified before projection so the edge is
+        straight in the plane it was declared in; `wgs84` on a view that projects nothing is a
+        `422`) — or `artifact`, a
+        published shape named by its `tessera_id`, answered from its held membership under the
+        artifact's own verdict: an artifact this principal would not be served, an id that names
+        nothing, one on another view, one whose layer draws an authored shape, is an **empty
+        operand**, one answer for every reason.
+
+        A `polygon` is at least three vertices, implicitly closed, even-odd with a point on an
+        edge inside, over `max_region_vertices` a `422`; a `bbox` is `[x0, y0, x1, y1]` closed on
+        every side; a `circle` is `[cx, cy, r]`; an `ellipse` is `[cx, cy, a, b, angle_degrees]`.
+        Coordinates are quantised to the view's 32-bit grid before anything is tested, so a
+        client highlighting its own marks should quantise the same way.
+      additionalProperties: false
+      minProperties: 1
+      maxProperties: 2
+      properties:
+        polygon:
+          type: array
+          minItems: 3
+          items:
+            type: array
+            minItems: 2
+            maxItems: 2
+            items: { type: number }
+        bbox:
+          type: array
+          minItems: 4
+          maxItems: 4
+          items: { type: number }
+        circle:
+          type: array
+          minItems: 3
+          maxItems: 3
+          items: { type: number }
+        ellipse:
+          type: array
+          minItems: 5
+          maxItems: 5
+          items: { type: number }
+        artifact:
+          oneOf:
+            - type: integer
+              minimum: 0
+            - type: string
+              pattern: "^[0-9]+$"
+        space:
+          type: string
+          enum: [view, wgs84]
+
+    FilterLeafOperator:
+      type: object
+      description: One operator from the column's family in `/v1/meta`'s `filter_operands`, with its value. Value shapes are per family (see `FilterExpr`) and are not narrowed further here, since the family is schema the description cannot know per column.
+      minProperties: 1
+      maxProperties: 1
+      properties:
+        eq: {}
+        in:
+          type: array
+        prefix:
+          type: string
+        contains:
+          type: string
+        range:
+          type: object
+          additionalProperties: false
+          minProperties: 1
+          properties:
+            gte: { type: number }
+            gt: { type: number }
+            lte: { type: number }
+            lt: { type: number }
+        match:
+          oneOf:
+            - type: string
+            - type: object
+              additionalProperties: false
+              required: [query, minimum_should_match]
+              properties:
+                query: { type: string }
+                minimum_should_match: { type: integer, minimum: 1 }
+        phrase:
+          type: string
+      additionalProperties: false
+
+    ItemRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        pin:
+          $ref: "#/components/schemas/Pin"
+        idset:
+          type: integer
+          minimum: 0
+          description: The idset the caller minted its `tessera_id` under. Supplying it makes a `tessera_id` from a past idset a `409` rather than another item's record.
+
+    ItemResponse:
+      type: object
+      additionalProperties: false
+      required: [fields, labels, views, scoped]
+      properties:
+        fields:
+          type: object
+          description: The record by declared column name. Values are JSON numbers (every width), strings (a keyword, a text, or a category's **key**) or booleans. An absent field is absent, never `null`.
+          additionalProperties:
+            type: [number, string, boolean]
+        external_id:
+          type: string
+          contentEncoding: base64
+          description: The caller's own external id, present only where one exists.
+        labels:
+          type: array
+          items:
+            type: string
+          description: |
+            **The satisfied labels only** — the item's own access labels intersected with this
+            session's satisfied term set, as the authorisation plugin presents them, sorted. Never
+            the item's full label set: a viewer must not learn a compartment they do not hold, so
+            every string here is one the credential itself presented. Always present; empty where
+            this principal satisfies none of the item's labels, which is a fact and not an absence.
+        views:
+          type: array
+          description: |
+            **The views this item is in that this principal may reach**, sorted by id, each with
+            the position that view places it at. **Gate-filtered**: a view the session's gate
+            refuses is absent exactly as a view nobody declared is, so this is never the place a
+            gate-failed view is named. Always present; `[]` says *none of this item's views is one
+            you may reach* and says nothing else — an item in no view at all is a `404` before this
+            field is built, so it is a different response rather than the other reading of an empty
+            array.
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, x, y]
+            properties:
+              id:
+                type: string
+                description: The view's id — a plain view's name or `<group>:<key>`.
+              x:
+                type: integer
+                minimum: 0
+                maximum: 4294967295
+                description: |
+                  The horizontal axis in **this view's own grid units** — 32-bit fixed point
+                  against the frame `/v1/meta` publishes for *this* view (decision 0040), which is
+                  the same quantity the viewport's Morton codes decode to. Deinterleaved
+                  server-side: a JSON number cannot carry a 64-bit code exactly.
+              y:
+                type: integer
+                minimum: 0
+                maximum: 4294967295
+                description: The vertical axis, on `x`'s terms.
+        scoped:
+          type: object
+          description: |
+            **The group-scoped attribute values, by family name and then by the group's key**
+            (`views.md` §5) — `{"mood": {"2026-Q1": "calm"}}`. The key is a view's only address
+            (decision 0113), so two views sharing a key through a `members` group share one entry.
+            Which group a family's keys belong to is on `/v1/meta`'s `scoped_scalars` and is not
+            repeated here. Gate-filtered per key on the same set `views` is; a family with no
+            reachable key, one this item carries no value under, and a `text` family — which has
+            no per-entity value slot — are all absent rather than empty. Always present; `{}` is
+            the ordinary answer for a corpus whose attributes are all entity-scoped.
+          additionalProperties:
+            type: object
+            additionalProperties:
+              type: [number, string, boolean]
+
+    ArtifactRequest:
+      type: object
+      additionalProperties: false
+      required: [view]
+      properties:
+        view:
+          type: string
+          description: Which view's row space the count is taken in. Required, unlike `/v1/items` — a masked count is an intersection in row space, and row space is per view.
+        idset:
+          type: integer
+          minimum: 0
+        zoom:
+          type: integer
+          minimum: 0
+          maximum: 16
+          description: The depth the caller draws at, for the vertex rule a predicate or an authored shape is served under (`polygon-membership.md` §7.2). Absent serves the whole presimplified shape under the 2,048-vertex guard. A derived hull is unaffected.
+
+    ArtifactResponse:
+      type: object
+      additionalProperties: false
+      required: [layer, masked_count, rung]
+      properties:
+        layer:
+          type: string
+        key:
+          type: string
+          description: The publisher's own key, absent where none was supplied.
+        masked_count:
+          type: integer
+          minimum: 0
+          description: How many of this artifact's members **the asking principal** can see. Never the artifact's size.
+        centroid:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items: { type: number }
+          description: In the viewport's 32-bit-per-axis grid units, over the members this principal can see. Absent where the layer declares none.
+        box:
+          type: array
+          minItems: 4
+          maxItems: 4
+          items: { type: integer, minimum: 0 }
+          description: "`[min_x, min_y, max_x, max_y]`, grid units."
+        shape:
+          type: array
+          description: "**The artifact's one drawn geometry** — parts, then rings, then vertices — of the kind `/v1/meta`'s `shape` names for its layer (`polygon-membership.md` §7.1): the derived hull, every α-group its own part; the predicate shape; or the authored one. A part's first ring is its outer and the rest are holes. Absent where the layer draws none."
+          items:
+            type: array
+            description: One part — its outer ring, then its holes.
+            items:
+              type: array
+              description: One closed ring in grid units; a derived hull's counter-clockwise from its lowest vertex.
+              items:
+                type: array
+                minItems: 2
+                maxItems: 2
+                items: { type: integer, minimum: 0 }
+        content:
+          type: array
+          items: { type: string }
+          description: The publisher's supplied content, positional to the layer's declared `supplied_content` types. Absent where the layer declares none; never partial.
+        rung:
+          type: integer
+          minimum: 0
+          description: "The rung this artifact sits at — the declared level on a levelled layer, `0` on a treed or flat one (which, this response being one artifact with no parent links, is also its response-local chain depth; the viewport frame's `rung` column carries the same number). The one field here that is a fact about the artifact rather than about the asking principal: two principals served it agree on it."

@@ -44,8 +44,8 @@ fn run_of(root: &Path, seg_id: &str, bindings: &[(u64, &str)]) -> PathBuf {
         .map(|(entity, external_id)| FlushRow {
             entity_id: EntityId::new(*entity),
             external_id: Some(external_id.as_bytes().to_vec()),
-            x: ((*entity % 97) as f32) / 97.0,
-            y: ((*entity % 89) as f32) / 89.0,
+            x: ((*entity % 97) as f64) / 97.0,
+            y: ((*entity % 89) as f64) / 89.0,
             scalars: vec![],
         })
         .collect();
@@ -54,6 +54,7 @@ fn run_of(root: &Path, seg_id: &str, bindings: &[(u64, &str)]) -> PathBuf {
         PARTITION,
         VIEW,
         FlushInput {
+            incarnation: 0,
             seg_id,
             rows,
             quantisation: quantisation(),

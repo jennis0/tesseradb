@@ -1,0 +1,52 @@
+# The arXiv rung's environment — `~/venvs/projection`, Python 3.12. Not `~/venvs/ingest`, which is
+# the geographic rungs' DuckDB and PyArrow and needs none of this.
+#
+# Python is a **consumer** here and never a component. This writes files; nothing in it sits on a
+# request path, produces a served artifact, or belongs to any trusted computing base.
+#
+# Unpinned, on `reference/pyproject.toml`'s argument: every use is of a long-stable API surface, and
+# a lockfile would be a maintenance obligation bought for nothing. The ones that matter are named
+# with a reason rather than a version — and the one that is pinned says why.
+#
+# ```bash
+# uv venv --python 3.12 ~/venvs/projection
+# VIRTUAL_ENV=~/venvs/projection uv pip install \
+#     --extra-index-url https://pypi.nvidia.com -r test_corpora/arxiv/requirements.txt
+# ```
+#
+# The RAPIDS wheels come from NVIDIA's index and are large — about 3 GB resolved. The environment
+# is named for the projection experiment this rung's two views came out of.
+
+pyarrow
+numpy
+scikit-learn
+scipy
+
+# **The GPU half, and it is the whole geometry pipeline** (owner ruling, 2026-09-01). `cuvs` builds
+# the full-dimension cosine kNN graph the `knn` view is laid out from; `cuml` runs the UMAP on the
+# end of both routes, and the k-means and HDBSCAN over the anchor layout. `cupy` is what the arrays
+# cross on. On one 200,000-point graph cuML's UMAP lays out in 6.4 s where `umap-learn` took 82.7 s.
+cuml-cu12
+cuvs-cu12
+cupy-cuda12x
+
+# ⊘ **The `hdbscan` package is not installed here and the rung does not need it.** It is what this
+# pipeline used to run, for one reason: it exposes `condensed_tree_`, which *is* the hierarchy.
+# cuML's HDBSCAN exposes the same four columns as a record array, which `prepare.py`'s `Tree` reads
+# directly — so the tree's shape and the non-covering property are unchanged. Install it only to
+# run the two implementations against each other; cuML's own `condensed_tree_` *property* wraps it
+# and raises without it.
+
+# ---------------------------------------------------------------- the optional Toponymy stage
+
+# **Toponymy names the clusters**, through its own layered HDBSCAN (fast_hdbscan) and a chat model
+# behind an OpenAI-compatible endpoint. Pinned: the 0.5.3 wheel on PyPI ships without its
+# `toponymy.tools` package and cannot be imported. Lift the pin when a later release imports.
+toponymy==0.5.2
+openai
+
+# The text encoder Toponymy's keyphrase step needs, and it has to be the corpus's own embedding
+# model (BGE-large-en-v1.5) for the step to mean anything. CPU torch is enough — a few tens of
+# thousands of short phrases — and the GPU is where the language model lives.
+sentence-transformers
+torch

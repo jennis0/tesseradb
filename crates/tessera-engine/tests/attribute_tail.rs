@@ -145,7 +145,9 @@ fn write_points_with_attributes(path: &Path, n: u64) {
 fn parse_schema(tmp: &Path) -> Schema {
     let path = tmp.join("schema.toml");
     std::fs::write(&path, SCHEMA_TOML).unwrap();
-    Config::parse(&path, &std::collections::HashMap::new()).map(|c| c.schema).expect("the fixture schema parses")
+    Config::parse(&path, &std::collections::HashMap::new())
+        .map(|c| c.schema)
+        .expect("the fixture schema parses")
 }
 
 /// Build a fixture bundle carrying the attribute tail.
@@ -156,13 +158,22 @@ fn build_fixture_with_attributes(out: &Path, tmp: &Path, n: u64) {
     write_pairs_n(&pairs, n);
     let schema = parse_schema(tmp);
     let args = BuildArgs {
-        point_fields: Default::default(),
+        arena_order: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: points.clone(),
+            point_fields: Default::default(),
+            select: None,
+            access: tessera_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
-        points,
-        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.to_path_buf(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -170,6 +181,7 @@ fn build_fixture_with_attributes(out: &Path, tmp: &Path, n: u64) {
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
         mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
@@ -326,7 +338,10 @@ fn a_build_emits_the_declared_tail_and_records_its_vocabulary() {
         .iter()
         .find(|v| v.name == "band")
         .expect("the declared vocabulary reaches the manifest");
-    assert_eq!(vocabulary.visibility, tessera_store::manifest::Visibility::Public);
+    assert_eq!(
+        vocabulary.visibility,
+        tessera_store::manifest::Visibility::Public
+    );
     let codes: BTreeMap<&str, u32> = vocabulary
         .values
         .iter()
@@ -375,16 +390,22 @@ fn both_build_implementations_write_the_same_tail() {
     write_pairs_n(&pairs, 2_000);
     let schema = parse_schema(tmp.path());
     let args_for = |out: &Path| BuildArgs {
-        point_fields: Default::default(),
-        points: points.clone(),
-        attribute_sources: tessera_build::config::AttributeSource::over(
-            points.clone(),
-            &schema,
-        ),
-        access: tessera_build::config::AccessInput::relation(pairs.clone()),
+        arena_order: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: points.clone(),
+            point_fields: Default::default(),
+            select: None,
+            access: tessera_build::config::AccessInput::relation(pairs.clone()),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
         out: out.to_path_buf(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -392,6 +413,7 @@ fn both_build_implementations_write_the_same_tail() {
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
         mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
@@ -437,6 +459,7 @@ fn an_ingested_row_carries_the_declared_tail_through_a_flush() {
             vec![UnallocatedRow {
                 external_id: Some(b"ingested-1".to_vec()),
                 view: "s0".to_string(),
+                join: None,
                 descriptors: vec![b"0".to_vec()],
                 x: 5.0,
                 y: 5.0,
@@ -448,6 +471,7 @@ fn an_ingested_row_carries_the_declared_tail_through_a_flush() {
                     WalScalar::F32(12.5),
                 ],
                 terms: engine.resolve_terms(&[b"0".to_vec()]),
+                scoped: Vec::new(),
             }],
             "batch-1".to_string(),
             [0u8; 32],
@@ -499,17 +523,19 @@ fn a_merge_carries_every_inputs_tail_forward_against_the_right_identities() {
                 vec![UnallocatedRow {
                     external_id: Some(format!("merged-{batch}").into_bytes()),
                     view: "s0".to_string(),
+                    join: None,
                     descriptors: vec![b"0".to_vec()],
                     // Spread across the extent so the merge genuinely interleaves in Morton order
                     // rather than appending one segment after another.
-                    x: (batch * 149 % 1000) as f32,
-                    y: (batch * 271 % 1000) as f32,
+                    x: (batch * 149 % 1000) as f64,
+                    y: (batch * 271 % 1000) as f64,
                     scalars: vec![
                         WalScalar::U8((batch % 3) as u8 + 1),
                         WalScalar::I64(1_900_000_000_000_000 + batch as i64),
                         WalScalar::F32(batch as f32 * 3.25),
                     ],
                     terms: engine.resolve_terms(&[b"0".to_vec()]),
+                    scoped: Vec::new(),
                 }],
                 format!("batch-{batch}"),
                 [batch as u8; 32],
@@ -583,6 +609,7 @@ fn a_fold_rewrites_the_whole_corpus_without_losing_the_tail() {
             vec![UnallocatedRow {
                 external_id: Some(b"folded-1".to_vec()),
                 view: "s0".to_string(),
+                join: None,
                 descriptors: vec![b"0".to_vec()],
                 x: 500.0,
                 y: 500.0,
@@ -592,6 +619,7 @@ fn a_fold_rewrites_the_whole_corpus_without_losing_the_tail() {
                     WalScalar::F32(99.75),
                 ],
                 terms: engine.resolve_terms(&[b"0".to_vec()]),
+                scoped: Vec::new(),
             }],
             "pre-fold".to_string(),
             [7u8; 32],
@@ -681,6 +709,7 @@ fn a_served_point_carries_its_own_tail_across_segments_and_tiles() {
             vec![UnallocatedRow {
                 external_id: Some(b"ingested-read-path".to_vec()),
                 view: "s0".to_string(),
+                join: None,
                 descriptors: vec![b"0".to_vec()],
                 x: 5.0,
                 y: 5.0,
@@ -690,6 +719,7 @@ fn a_served_point_carries_its_own_tail_across_segments_and_tiles() {
                     WalScalar::F32(99.5),
                 ],
                 terms: engine.resolve_terms(&[b"0".to_vec()]),
+                scoped: Vec::new(),
             }],
             "batch-read-path".to_string(),
             [0u8; 32],
@@ -859,13 +889,22 @@ fn build_non_prefix_fixture(out: &Path, tmp: &Path, n: u64) {
         .map(|c| c.schema)
         .expect("the non-prefix fixture schema parses");
     let args = BuildArgs {
-        point_fields: Default::default(),
+        arena_order: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: points.clone(),
+            point_fields: Default::default(),
+            select: None,
+            access: tessera_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
-        points,
-        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.to_path_buf(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -873,6 +912,7 @@ fn build_non_prefix_fixture(out: &Path, tmp: &Path, n: u64) {
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
         mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
@@ -889,6 +929,7 @@ fn non_prefix_row(engine: &Engine, audit: i64, band_code: u8, score: f32) -> Una
     UnallocatedRow {
         external_id: Some(b"non-prefix-flushed".to_vec()),
         view: "s0".to_string(),
+        join: None,
         descriptors: vec![b"0".to_vec()],
         x: 5.0,
         y: 5.0,
@@ -898,6 +939,7 @@ fn non_prefix_row(engine: &Engine, audit: i64, band_code: u8, score: f32) -> Una
             WalScalar::F32(score),
         ],
         terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
     }
 }
 
@@ -985,7 +1027,11 @@ fn a_non_prefix_render_declaration_serves_every_column_under_its_own_name() {
         out.scalar_names.len(),
         "one buffer per name: the two lists zip positionally on the wire"
     );
-    assert_eq!(out.points.len(), 513, "every row of both segments is served");
+    assert_eq!(
+        out.points.len(),
+        513,
+        "every row of both segments is served"
+    );
     let flushed_id = engine.tessera_id_of(flushed_entity).unwrap();
     assert!(
         out.points.iter().any(|(id, _)| id == flushed_id),
@@ -994,8 +1040,12 @@ fn a_non_prefix_render_declaration_serves_every_column_under_its_own_name() {
 
     // Read by name, exactly as a client does; truth joined by identity from the segments.
     let truth = non_prefix_tail_by_identity(&root);
-    let position =
-        |name: &str| out.scalar_names.iter().position(|n| n.as_str() == name).unwrap();
+    let position = |name: &str| {
+        out.scalar_names
+            .iter()
+            .position(|n| n.as_str() == name)
+            .unwrap()
+    };
     let band = match &out.points.scalars[position("band")] {
         ColumnBuf::U8(v) => v,
         other => panic!("the column named 'band' must be u8, found {other:?}"),
@@ -1006,8 +1056,14 @@ fn a_non_prefix_render_declaration_serves_every_column_under_its_own_name() {
     };
     for (row, (id, _)) in out.points.iter().enumerate() {
         let (expected_band, expected_score) = truth[&id.raw()];
-        assert_eq!(band[row], expected_band, "row {row}'s band, under its own name");
-        assert_eq!(score[row], expected_score, "row {row}'s score, under its own name");
+        assert_eq!(
+            band[row], expected_band,
+            "row {row}'s band, under its own name"
+        );
+        assert_eq!(
+            score[row], expected_score,
+            "row {row}'s score, under its own name"
+        );
     }
 
     // A counts-only request seeds its empty columns from the same render schema the gather
@@ -1061,14 +1117,7 @@ fn a_drill_down_assembles_the_non_prefix_declaration_by_name() {
             ["audit", "band", "score"],
             "{label}: every declared column has a value in some home, in declared order"
         );
-        let value = |name: &str| {
-            &served
-                .fields
-                .iter()
-                .find(|f| f.name == name)
-                .unwrap()
-                .value
-        };
+        let value = |name: &str| &served.fields.iter().find(|f| f.name == name).unwrap().value;
         assert_eq!(
             value("audit"),
             &tessera_engine::ScalarOut::I64(audit),
@@ -1176,7 +1225,6 @@ fn tier_code_of(entity: u64) -> u8 {
     (entity % 3) as u8 + 1
 }
 
-
 /// The blob row the fixture's generation functions predict for `source`: `note` is declared at
 /// position 1 and `revision` at position 2, and the field tag **is** the declared position
 /// (records §3) — the same identity the build's blob stage and the flush's extent writer share.
@@ -1253,13 +1301,22 @@ fn build_record_fixture(out: &Path, tmp: &Path, n: u64) {
         .map(|c| c.schema)
         .expect("the record fixture schema parses");
     let args = BuildArgs {
-        point_fields: Default::default(),
+        arena_order: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: points.clone(),
+            point_fields: Default::default(),
+            select: None,
+            access: tessera_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
-        points,
-        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.to_path_buf(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -1267,6 +1324,7 @@ fn build_record_fixture(out: &Path, tmp: &Path, n: u64) {
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
         mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
@@ -1315,6 +1373,7 @@ fn record_row(engine: &Engine, external: &str, note: &str, revision: i64) -> Una
     UnallocatedRow {
         external_id: Some(external.as_bytes().to_vec()),
         view: "s0".to_string(),
+        join: None,
         descriptors: vec![b"0".to_vec()],
         x: 5.0,
         y: 5.0,
@@ -1325,6 +1384,7 @@ fn record_row(engine: &Engine, external: &str, note: &str, revision: i64) -> Una
             WalScalar::U8(3),
         ],
         terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
     }
 }
 
@@ -1376,7 +1436,12 @@ fn a_flushed_record_extent_round_trips_through_the_stack() {
         .fields
         .iter()
         .find(|f| f.name == "note")
-        .unwrap_or_else(|| panic!("the flushed item carries no `note` field: {:?}", served.fields));
+        .unwrap_or_else(|| {
+            panic!(
+                "the flushed item carries no `note` field: {:?}",
+                served.fields
+            )
+        });
     assert_eq!(
         note.value,
         tessera_engine::ScalarOut::Utf8("the-flushed-note".to_string()),
@@ -1615,6 +1680,12 @@ fn a_coalesce_collapses_record_extents_and_every_row_still_answers() {
         8,
         "one record extent per flush before the coalesce"
     );
+    // The base plus one layer per extent, in the stack the *running* process reads from.
+    assert_eq!(
+        engine.generation().filter_columns.record_layers(),
+        9,
+        "the live stack composes each flush's extent as it publishes"
+    );
 
     engine.request_flush();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
@@ -1624,6 +1695,35 @@ fn a_coalesce_collapses_record_extents_and_every_row_still_answers() {
             "the coalesce never published"
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    // **The live stack shrank with the manifest, before any restart.** The blob's layers ride on
+    // `Arc`s from one generation to the next, so a publication that edited only the manifest left
+    // this reader probing the eight extents the coalesce had just consumed — until the process
+    // restarted, and with no wrong answer to find it by, the layers being disjoint in entity space
+    // (I9). The count is the assertion because the count is the cost: a miss walks every layer,
+    // and the whole point of the pass is that there are fewer of them.
+    assert_eq!(
+        engine.generation().filter_columns.record_layers(),
+        2,
+        "the base plus the one coalesced extent, re-derived from the rebased manifest"
+    );
+    // And it answers — a re-derived stack that opened the wrong files would be caught here rather
+    // than at the restart below.
+    for (entity, note, _) in &ingested {
+        let entity = u32::try_from(entity.raw()).unwrap();
+        let fields = engine
+            .generation()
+            .filter_columns
+            .records()
+            .fields_of(entity)
+            .expect("the live stack reads")
+            .expect("every ingested entity has a blob row");
+        assert!(
+            fields.iter().any(|f| f.value
+                == tessera_filter::RecordValue::Utf8(note.clone())),
+            "entity {entity} lost its note to the coalesce's live publication"
+        );
     }
     drop(engine);
 

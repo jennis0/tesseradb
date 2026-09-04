@@ -62,7 +62,8 @@
 //! the framing above is what stops a truncation being read as a smaller extent.
 
 use std::fs::File;
-use std::path::Path;
+use std::io::{BufWriter, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 
 use memmap2::Mmap;
 
@@ -109,6 +110,127 @@ pub fn pack(ordinal_lo: u32, blobs: &[Vec<u8>]) -> Vec<u8> {
         out.extend_from_slice(blob);
     }
     out
+}
+
+/// Serialise one extent **a blob at a time**, straight to the file — [`pack`]'s bytes, without
+/// ever holding them.
+///
+/// # Why a second writer
+///
+/// [`pack`] takes every blob of a level at once and returns their concatenation, so at the moment
+/// it returns, a level's memberships stand in memory twice over. That is affordable for a
+/// publication that appends the tail one commit produced, and it is not affordable for a **build**,
+/// which publishes a whole corpus's levels in one pass and holds the encoded blobs of all of them
+/// while it does. The two callers are also not free to share one route: the online publication
+/// reads the artifact store under a lock it must not hold across an fsync, so it materialises and
+/// releases; a build owns its store outright and can encode as it writes.
+///
+/// **The count is a contract, not a hint.** It is the level's ordinal range, known before the first
+/// blob, which is what lets the offset table be reserved and filled in afterwards. [`Self::push`]
+/// refuses the blob past the end and [`Self::finish`] refuses a writer that was pushed fewer than
+/// it reserved: an extent addresses `[ordinal_lo, ordinal_lo + count)` densely, so a short one is a
+/// membership that decodes as absent for every viewer — which the existence criterion then renders
+/// as a cluster that legitimately failed its bar.
+pub struct PackWriter {
+    path: PathBuf,
+    file: BufWriter<File>,
+    ordinal_lo: u32,
+    count: u32,
+    /// Where each blob starts within the payload, and one more for the payload's end — the file's
+    /// own table, held here at 8 bytes an artifact until the payload has gone past and it can be
+    /// written back over the space reserved for it.
+    offsets: Vec<u64>,
+}
+
+impl PackWriter {
+    /// Reserve the header and the offset table for `count` blobs, and position at the payload.
+    pub fn create(path: &Path, ordinal_lo: u32, count: u32) -> Result<PackWriter> {
+        let file = File::create(path).map_err(|source| StoreError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let mut file = BufWriter::new(file);
+        let prologue = HEADER_LEN + (count as usize + 1) * 8;
+        file.write_all(&vec![0u8; prologue])
+            .map_err(|source| StoreError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        let mut offsets = Vec::with_capacity(count as usize + 1);
+        offsets.push(0);
+        Ok(PackWriter {
+            path: path.to_path_buf(),
+            file,
+            ordinal_lo,
+            count,
+            offsets,
+        })
+    }
+
+    /// Append one blob, in ordinal order.
+    pub fn push(&mut self, blob: &[u8]) -> Result<()> {
+        if self.offsets.len() > self.count as usize {
+            return Err(malformed(
+                &self.path,
+                format!(
+                    "a {}-blob extent was pushed a {}th blob",
+                    self.count,
+                    self.offsets.len()
+                ),
+            ));
+        }
+        self.file.write_all(blob).map_err(|source| StoreError::Io {
+            path: self.path.clone(),
+            source,
+        })?;
+        let at = self.offsets.last().copied().unwrap_or_default() + blob.len() as u64;
+        self.offsets.push(at);
+        Ok(())
+    }
+
+    /// Write the header and the offset table over the space reserved for them, and fsync.
+    ///
+    /// The file is durable when this returns — the caller still owns the *directory* sync and the
+    /// ordering against the manifest that names it, exactly as with [`crate::write_and_fsync`].
+    pub fn finish(self) -> Result<()> {
+        let PackWriter {
+            path,
+            file,
+            ordinal_lo,
+            count,
+            offsets,
+        } = self;
+        if offsets.len() != count as usize + 1 {
+            return Err(malformed(
+                &path,
+                format!(
+                    "{} blob(s) were written into an extent reserved for {count} — the ordinal \
+                     range it addresses would decode as absent above the last one",
+                    offsets.len() - 1,
+                ),
+            ));
+        }
+        let mut head = Vec::with_capacity(HEADER_LEN + offsets.len() * 8);
+        head.extend_from_slice(MAGIC);
+        head.extend_from_slice(&VERSION.to_le_bytes());
+        head.extend_from_slice(&0u16.to_le_bytes());
+        head.extend_from_slice(&count.to_le_bytes());
+        head.extend_from_slice(&ordinal_lo.to_le_bytes());
+        for at in &offsets {
+            head.extend_from_slice(&at.to_le_bytes());
+        }
+        let mut file = file.into_inner().map_err(|e| StoreError::Io {
+            path: path.clone(),
+            source: e.into_error(),
+        })?;
+        let io = |source| StoreError::Io {
+            path: path.clone(),
+            source,
+        };
+        file.seek(SeekFrom::Start(0)).map_err(io)?;
+        file.write_all(&head).map_err(io)?;
+        file.sync_all().map_err(io)
+    }
 }
 
 /// One extent, opened and validated. The mapping is held for the reader's life; blobs are slices
@@ -983,25 +1105,94 @@ pub fn pack_label_column(ordinals: u32, labels: &[u32]) -> Vec<u8> {
 }
 
 /// Serialise one `(view, layer, level)`'s list column: `at[row]..at[row + 1]` into `values`.
+///
+/// **[`ListColumnWriter`] with the values already in hand**, and the composer does not go this way:
+/// it frames the column and fills it, rather than materialising a `u32` per entry first (see the
+/// writer's own doc for what that cost). One implementation, so the two cannot produce different
+/// bytes for the same column.
 pub fn pack_list_column(ordinals: u32, at: &[u32], values: &[u32]) -> Vec<u8> {
-    let width = row_column_width(u64::from(ordinals));
-    let rows = at.len().saturating_sub(1) as u32;
-    let mut out =
-        Vec::with_capacity(LIST_HEADER_LEN + at.len() * 4 + values.len() * usize::from(width));
-    out.extend_from_slice(LIST_MAGIC);
-    out.extend_from_slice(&ROW_COLUMN_VERSION.to_le_bytes());
-    out.push(width);
-    out.push(0);
-    out.extend_from_slice(&rows.to_le_bytes());
-    out.extend_from_slice(&ordinals.to_le_bytes());
-    out.extend_from_slice(&(values.len() as u32).to_le_bytes());
-    for offset in at {
-        out.extend_from_slice(&offset.to_le_bytes());
+    debug_assert_eq!(
+        *at.last().unwrap_or(&0) as usize,
+        values.len(),
+        "the offset array's end is how many values there are"
+    );
+    let mut writer = ListColumnWriter::frame(ordinals, at);
+    for (index, value) in values.iter().enumerate() {
+        writer.put(index as u32, *value);
     }
-    for value in values {
-        put_narrow(&mut out, width, *value);
+    writer.finish()
+}
+
+/// The same bytes as [`pack_list_column`], **without the `Vec<u32>` of values in front of them**.
+///
+/// # Why it exists
+///
+/// The composer's two passes count each row's list and then fill it, and the fill used to land in a
+/// `Vec<u32>` that [`pack_list_column`] then narrowed into the output. At the 10⁷ MedCPT sample the
+/// MeSH level's lists hold 471,778,374 entries, so that vector is **1.9 GB** standing beside the
+/// 0.9 GB of column it is about to become — measured as the whole of the artifact pass's
+/// +2.6 GB transient (`probes/2026-09-02-mapped-memberships/README.md`). Framing the output first
+/// and writing each value straight into it at its stored width leaves the column and nothing else.
+///
+/// The bytes are [`pack_list_column`]'s exactly, and structurally so: that function is this writer
+/// with the values already in hand, so there is one implementation and this is where a value is
+/// written rather than what is written.
+pub struct ListColumnWriter {
+    out: Vec<u8>,
+    width: u8,
+    values_at: usize,
+    entries: usize,
+}
+
+impl ListColumnWriter {
+    /// The header and the offset array, with the values region reserved and zeroed.
+    ///
+    /// `at` is the finished prefix sum: `at[row]..at[row + 1]` is where row `row`'s entries go, and
+    /// `at.last()` is how many there are in all.
+    pub fn frame(ordinals: u32, at: &[u32]) -> Self {
+        let width = row_column_width(u64::from(ordinals));
+        let rows = at.len().saturating_sub(1) as u32;
+        let entries = *at.last().unwrap_or(&0) as usize;
+        let values_at = LIST_HEADER_LEN + at.len() * 4;
+        let mut out = Vec::with_capacity(values_at + entries * usize::from(width));
+        out.extend_from_slice(LIST_MAGIC);
+        out.extend_from_slice(&ROW_COLUMN_VERSION.to_le_bytes());
+        out.push(width);
+        out.push(0);
+        out.extend_from_slice(&rows.to_le_bytes());
+        out.extend_from_slice(&ordinals.to_le_bytes());
+        out.extend_from_slice(&(entries as u32).to_le_bytes());
+        for offset in at {
+            out.extend_from_slice(&offset.to_le_bytes());
+        }
+        out.resize(values_at + entries * usize::from(width), 0);
+        ListColumnWriter {
+            out,
+            width,
+            values_at,
+            entries,
+        }
     }
-    out
+
+    /// Put `value` at `index` in the values array — the position the caller's own cursor over `at`
+    /// hands it. An index past the array is ignored, on the composer's own rule for a row above the
+    /// view's base row space: the alternative is a panic on a shape this module does not control.
+    pub fn put(&mut self, index: u32, value: u32) {
+        let index = index as usize;
+        if index >= self.entries {
+            return;
+        }
+        let at = self.values_at + index * usize::from(self.width);
+        match self.width {
+            1 => self.out[at] = value as u8,
+            2 => self.out[at..at + 2].copy_from_slice(&(value as u16).to_le_bytes()),
+            _ => self.out[at..at + 4].copy_from_slice(&value.to_le_bytes()),
+        }
+    }
+
+    pub fn finish(self) -> Vec<u8> {
+        self.out
+    }
 }
 
 /// One `(view, layer, level)`'s label column, framed and checked once at open.
@@ -1332,9 +1523,285 @@ impl ListColumnPack {
         (lo..hi).map(move |i| self.value(i))
     }
 
+    /// **Every entry of rows `[from, to)`, walked linearly** — the values region read straight
+    /// through, with the width resolved once rather than per value and the row not carried at
+    /// all.
+    ///
+    /// For a **counting** pass, which is what a transposition of this column starts with
+    /// (`tessera-engine`'s `RowColumn::transpose`): how many rows carry each ordinal is a
+    /// question about the values alone, so the offset table is read twice for the range and never
+    /// per row. At rung 3's `mesh/descriptors` that is 1.66×10⁹ entries, and resolving the width
+    /// per value is the difference between one pass and several seconds of them.
+    pub fn for_each_value(&self, from: usize, to: usize, mut visit: impl FnMut(u32)) {
+        let rows = self.rows as usize;
+        let (from, to) = (from.min(rows), to.min(rows));
+        if from >= to {
+            return;
+        }
+        let (lo, hi) = (self.at(from) as usize, self.at(to) as usize);
+        let raw = self.bytes.as_slice();
+        let width = usize::from(self.width);
+        let values = &raw[self.values_at + lo * width..self.values_at + hi * width];
+        match self.width {
+            1 => values.iter().for_each(|byte| visit(u32::from(*byte))),
+            2 => values
+                .chunks_exact(2)
+                .for_each(|v| visit(u32::from(u16::from_le_bytes([v[0], v[1]])))),
+            _ => values
+                .chunks_exact(4)
+                .for_each(|v| visit(u32::from_le_bytes([v[0], v[1], v[2], v[3]]))),
+        }
+    }
+
+    /// [`Self::for_each_value`] with the **row** beside each ordinal — the placing pass of the
+    /// same transposition, which needs both and so walks the offset table row by row.
+    pub fn for_each_row_value(&self, from: usize, to: usize, mut visit: impl FnMut(u32, u32)) {
+        let rows = self.rows as usize;
+        let (from, to) = (from.min(rows), to.min(rows));
+        if from >= to {
+            return;
+        }
+        let raw = self.bytes.as_slice();
+        let width = usize::from(self.width);
+        let mut at = self.at(from) as usize;
+        for row in from..to {
+            let end = self.at(row + 1) as usize;
+            let values = &raw[self.values_at + at * width..self.values_at + end * width];
+            match self.width {
+                1 => values
+                    .iter()
+                    .for_each(|byte| visit(row as u32, u32::from(*byte))),
+                2 => values
+                    .chunks_exact(2)
+                    .for_each(|v| visit(row as u32, u32::from(u16::from_le_bytes([v[0], v[1]])))),
+                _ => values.chunks_exact(4).for_each(|v| {
+                    visit(row as u32, u32::from_le_bytes([v[0], v[1], v[2], v[3]]))
+                }),
+            }
+            at = end;
+        }
+    }
+
     /// This column's bytes, exactly as they would be written.
     pub fn as_bytes(&self) -> &[u8] {
         self.bytes.as_slice()
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The shape row form: one segment's resolved membership of one spatial level
+// (`polygon-membership.md` §6.3), persisted so an open claims it rather than resolving again.
+// ---------------------------------------------------------------------------------------------
+
+const SHAPE_ROWS_MAGIC: &[u8; 4] = b"TSSR";
+const SHAPE_ROWS_VERSION: u16 = 1;
+/// Magic, version, reserved, ordinals, row count, level version, segment-id length.
+const SHAPE_ROWS_HEADER_LEN: usize = 4 + 2 + 2 + 4 + 4 + 8 + 2;
+/// The per-ordinal length that marks a hole — no artifact at that ordinal, as distinct from an
+/// artifact whose membership of this segment is empty, which is a zero-length entry.
+const SHAPE_ROWS_HOLE: u32 = u32::MAX;
+
+fn shape_rows_malformed(what: &str, detail: impl std::fmt::Display) -> StoreError {
+    StoreError::MalformedBundle {
+        detail: format!("shape rows {what}: {detail}"),
+    }
+}
+
+/// Serialise one `(view, layer, level)`'s membership of **one segment**, one entry per ordinal.
+///
+/// ```text
+/// TSSR | u16 version | u16 reserved (0) | u32 ordinals | u32 row_count | u64 level_version
+///      | u16 seg_id_len | seg_id bytes
+///      | per ordinal: u32 len — u32::MAX a hole, 0 an empty membership — then `len` bytes,
+///        a portable Roaring bitmap of segment-local rows
+/// ```
+///
+/// **The key is in the file as well as in the manifest entry that names it**, because the two are
+/// what a reader refuses on: a piece is a function of the segment's rows and the level's shapes at
+/// one level version, and one written against any other segment or version names rows that mean
+/// something else. `row_count` is the segment's, and a bitmap naming a row at or past it is refused
+/// at read rather than trusted.
+///
+/// `entries` is per ordinal: `None` a hole, `Some(bytes)` the bitmap's portable serialisation —
+/// produced by `derived::shape_rows_bytes`, which owns the bitmap side.
+pub fn pack_shape_rows(
+    level_version: u64,
+    seg_id: &str,
+    row_count: u32,
+    entries: &[Option<Vec<u8>>],
+) -> Vec<u8> {
+    let payload: usize = entries
+        .iter()
+        .map(|e| 4 + e.as_ref().map_or(0, Vec::len))
+        .sum();
+    let mut out = Vec::with_capacity(SHAPE_ROWS_HEADER_LEN + seg_id.len() + payload);
+    out.extend_from_slice(SHAPE_ROWS_MAGIC);
+    out.extend_from_slice(&SHAPE_ROWS_VERSION.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    out.extend_from_slice(&row_count.to_le_bytes());
+    out.extend_from_slice(&level_version.to_le_bytes());
+    out.extend_from_slice(&(seg_id.len() as u16).to_le_bytes());
+    out.extend_from_slice(seg_id.as_bytes());
+    for entry in entries {
+        match entry {
+            None => out.extend_from_slice(&SHAPE_ROWS_HOLE.to_le_bytes()),
+            Some(bytes) => {
+                out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                out.extend_from_slice(bytes);
+            }
+        }
+    }
+    out
+}
+
+/// One shape row form, framed and checked once at open: the header's key and each entry's extent
+/// are verified before any bitmap is decoded.
+pub struct ShapeRowsPack {
+    bytes: ContainmentBytes,
+    ordinals: u32,
+    row_count: u32,
+    level_version: u64,
+    seg_id: String,
+    /// Byte offset of each ordinal's length word, so an entry is addressed without a second walk.
+    at: Vec<usize>,
+}
+
+impl std::fmt::Debug for ShapeRowsPack {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShapeRowsPack")
+            .field("ordinals", &self.ordinals)
+            .field("row_count", &self.row_count)
+            .field("level_version", &self.level_version)
+            .field("seg_id", &self.seg_id)
+            .finish()
+    }
+}
+
+impl ShapeRowsPack {
+    /// Open a written row form, mapped in place.
+    pub fn open(path: &Path) -> Result<Self> {
+        let map = map_read_only(path)?;
+        Self::frame(ContainmentBytes::Mapped(map), &path.display().to_string())
+    }
+
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self> {
+        Self::frame(ContainmentBytes::Owned(bytes), "(in memory)")
+    }
+
+    /// Every check refuses rather than truncating, on `TileIndexPack::frame`'s argument: a form
+    /// read short leaves every ordinal past the truncation with no rows, which is a masked count
+    /// that silently understates for every viewer.
+    fn frame(bytes: ContainmentBytes, what: &str) -> Result<Self> {
+        let raw = bytes.as_slice();
+        if raw.len() < SHAPE_ROWS_HEADER_LEN {
+            return Err(shape_rows_malformed(
+                what,
+                format!(
+                    "{} bytes is shorter than the {SHAPE_ROWS_HEADER_LEN}-byte header",
+                    raw.len()
+                ),
+            ));
+        }
+        if &raw[0..4] != SHAPE_ROWS_MAGIC {
+            return Err(shape_rows_malformed(what, "magic is not TSSR"));
+        }
+        let version = u16::from_le_bytes([raw[4], raw[5]]);
+        if version != SHAPE_ROWS_VERSION {
+            return Err(shape_rows_malformed(
+                what,
+                format!("version {version}, expected {SHAPE_ROWS_VERSION}"),
+            ));
+        }
+        let reserved = u16::from_le_bytes([raw[6], raw[7]]);
+        if reserved != 0 {
+            return Err(shape_rows_malformed(
+                what,
+                format!("reserved is {reserved}, expected 0"),
+            ));
+        }
+        let read = |at: usize| u32::from_le_bytes([raw[at], raw[at + 1], raw[at + 2], raw[at + 3]]);
+        let ordinals = read(8);
+        let row_count = read(12);
+        let level_version = u64::from_le_bytes(raw[16..24].try_into().expect("eight bytes"));
+        let seg_id_len = usize::from(u16::from_le_bytes([raw[24], raw[25]]));
+        let mut cursor = SHAPE_ROWS_HEADER_LEN;
+        if raw.len() < cursor + seg_id_len {
+            return Err(shape_rows_malformed(what, "truncated inside the segment id"));
+        }
+        let seg_id = std::str::from_utf8(&raw[cursor..cursor + seg_id_len])
+            .map_err(|_| shape_rows_malformed(what, "the segment id is not UTF-8"))?
+            .to_string();
+        cursor += seg_id_len;
+        let mut at = Vec::with_capacity(ordinals as usize);
+        for ordinal in 0..ordinals {
+            if raw.len() < cursor + 4 {
+                return Err(shape_rows_malformed(
+                    what,
+                    format!("truncated at ordinal {ordinal} of {ordinals}"),
+                ));
+            }
+            at.push(cursor);
+            let len = read(cursor);
+            cursor += 4;
+            if len != SHAPE_ROWS_HOLE {
+                let len = len as usize;
+                if raw.len() < cursor + len {
+                    return Err(shape_rows_malformed(
+                        what,
+                        format!("truncated inside ordinal {ordinal}'s bitmap"),
+                    ));
+                }
+                cursor += len;
+            }
+        }
+        if cursor != raw.len() {
+            return Err(shape_rows_malformed(
+                what,
+                format!(
+                    "{} bytes, but the entries end at {cursor} — trailing bytes the packer did \
+                     not write",
+                    raw.len()
+                ),
+            ));
+        }
+        Ok(ShapeRowsPack {
+            bytes,
+            ordinals,
+            row_count,
+            level_version,
+            seg_id,
+            at,
+        })
+    }
+
+    pub fn ordinals(&self) -> u32 {
+        self.ordinals
+    }
+
+    /// The segment's row count the form was resolved over — every row a bitmap names is below it.
+    pub fn row_count(&self) -> u32 {
+        self.row_count
+    }
+
+    pub fn level_version(&self) -> u64 {
+        self.level_version
+    }
+
+    pub fn seg_id(&self) -> &str {
+        &self.seg_id
+    }
+
+    /// One ordinal's entry: `None` at a hole, `Some(&[])` for an empty membership, otherwise the
+    /// bitmap's portable bytes.
+    pub fn entry(&self, ordinal: u32) -> Option<&[u8]> {
+        let raw = self.bytes.as_slice();
+        let at = *self.at.get(ordinal as usize)?;
+        let len = u32::from_le_bytes([raw[at], raw[at + 1], raw[at + 2], raw[at + 3]]);
+        if len == SHAPE_ROWS_HOLE {
+            return None;
+        }
+        Some(&raw[at + 4..at + 4 + len as usize])
     }
 }
 
@@ -1385,6 +1852,45 @@ mod tests {
 
         let all: Vec<(u32, usize)> = pack.iter().map(|(o, b)| (o, b.len())).collect();
         assert_eq!(all, vec![(1000, 3), (1001, 0), (1002, 300)]);
+    }
+
+    /// **The streaming writer's bytes are [`pack`]'s bytes**, which is the whole of its contract:
+    /// a build writes its extents through it and a fold writes them through `pack`, and a reader
+    /// cannot tell which produced the file it opened.
+    #[test]
+    fn the_streaming_writer_produces_the_same_bytes_as_pack() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blobs = vec![vec![1u8, 2, 3], Vec::new(), vec![9u8; 300], vec![4u8; 7]];
+        let path = tmp.path().join("streamed.tsmb");
+        let mut writer = PackWriter::create(&path, 1000, blobs.len() as u32).unwrap();
+        for blob in &blobs {
+            writer.push(blob).unwrap();
+        }
+        writer.finish().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), pack(1000, &blobs));
+
+        let opened = MembershipPack::open(&path).unwrap();
+        assert_eq!(opened.ordinal_lo(), 1000);
+        assert_eq!(opened.blob(1002).map(<[u8]>::len), Some(300));
+    }
+
+    /// **A count that is not kept refuses.** The count is the level's ordinal range, so an extent
+    /// short of it addresses artifacts whose membership decodes as absent — which the existence
+    /// criterion then renders as a cluster that failed its bar, with nothing to notice.
+    #[test]
+    fn a_streamed_extent_that_does_not_fill_its_range_refuses() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("short.tsmb");
+        let mut writer = PackWriter::create(&path, 0, 3).unwrap();
+        writer.push(&[1u8, 2]).unwrap();
+        writer.push(&[3u8]).unwrap();
+        assert!(writer.finish().is_err());
+
+        let path = tmp.path().join("long.tsmb");
+        let mut writer = PackWriter::create(&path, 0, 2).unwrap();
+        writer.push(&[1u8]).unwrap();
+        writer.push(&[2u8]).unwrap();
+        assert!(writer.push(&[3u8]).is_err());
     }
 
     #[test]
@@ -1756,5 +2262,90 @@ mod tests {
         let mut short_list = list.clone();
         short_list.truncate(list.len() - 1);
         assert!(ListColumnPack::from_bytes(short_list).is_err());
+    }
+
+    /// **Each of the four width rules refuses on its own**, with the length the header describes
+    /// left consistent so the generic length check cannot stand in for any of them.
+    ///
+    /// The corruptions in `a_torn_or_foreign_row_column_refuses` above cannot do this: both of its
+    /// width faults change byte 6 of a column packed at width 2, which changes the length the
+    /// header describes, so the length check refuses either of them whether the width rules are
+    /// there or not — and the list column had no width fault aimed at it at all. Every framing
+    /// refusal on these paths is the same `MalformedBundle`, so the assertions below read the
+    /// `detail`; an error-kind check would be no stronger than `is_err()`.
+    ///
+    /// Mutations this kills: deleting either width rule from either column reader. Removing the
+    /// width-set rule lets `label()`'s and the entry reader's `_ =>` arms read four bytes at a
+    /// three-byte stride; removing the ordinals-vs-width rule admits a column whose hole value is
+    /// also a legal ordinal, so rows carrying that ordinal read as holes and the artifacts holding
+    /// them silently stop being candidates.
+    #[test]
+    fn each_row_column_width_rule_refuses_without_help_from_the_length_check() {
+        fn detail(err: crate::StoreError) -> String {
+            match err {
+                crate::StoreError::MalformedBundle { detail } => detail,
+                other => panic!("expected a malformed-bundle refusal, got {other}"),
+            }
+        }
+
+        // Twelve labels at width 1 occupy 12 bytes, which is also four rows at width 3 — so the
+        // header describes exactly the bytes present and only the width-set rule can refuse.
+        let wide = pack_label_column(10, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1]);
+        assert_eq!(wide.len(), LABEL_HEADER_LEN + 12, "packed at width 1");
+        let mut odd_width = wide.clone();
+        odd_width[6] = 3;
+        odd_width[8..12].copy_from_slice(&4u32.to_le_bytes());
+        assert_eq!(
+            odd_width.len(),
+            LABEL_HEADER_LEN + 4 * 3,
+            "the header must describe exactly the bytes present, or the length check refuses \
+             this instead and the width rule is untested"
+        );
+        let d = detail(LabelColumnPack::from_bytes(odd_width).unwrap_err());
+        assert!(
+            d.contains("expected 1, 2 or 4"),
+            "a label width outside the set must be what refuses: {d}"
+        );
+
+        // The same column, its width left alone, claiming a level whose ordinal count reaches the
+        // hole value. The bytes are untouched, so the length check has nothing to say.
+        let good = pack_label_column(10, &[0, 1, 2, 9]);
+        let mut narrow = good.clone();
+        narrow[12..16].copy_from_slice(&255u32.to_le_bytes());
+        assert_eq!(narrow.len(), good.len(), "only the header field moved");
+        let d = detail(LabelColumnPack::from_bytes(narrow).unwrap_err());
+        assert!(
+            d.contains("cannot be addressed at width 1"),
+            "255 ordinals at width 1 leaves no value for the hole: {d}"
+        );
+
+        // The list column carries the identical pair. Four entries at width 1 over four rows is
+        // 44 bytes; two rows at width 3 is 44 bytes as well, and the offsets still span the value
+        // column at the shortened row count, so nothing downstream of the width rule refuses.
+        let list = pack_list_column(3, &[0, 2, 4, 4, 4], &[0, 1, 2, 0]);
+        assert_eq!(list.len(), LIST_HEADER_LEN + 5 * 4 + 4, "packed at width 1");
+        let mut odd_width = list.clone();
+        odd_width[6] = 3;
+        odd_width[8..12].copy_from_slice(&2u32.to_le_bytes());
+        assert_eq!(
+            odd_width.len(),
+            LIST_HEADER_LEN + 3 * 4 + 4 * 3,
+            "the header must describe exactly the bytes present, or the length check refuses \
+             this instead and the width rule is untested"
+        );
+        let d = detail(ListColumnPack::from_bytes(odd_width).unwrap_err());
+        assert!(
+            d.contains("expected 1, 2 or 4"),
+            "an entry width outside the set must be what refuses: {d}"
+        );
+
+        let mut narrow = list.clone();
+        narrow[12..16].copy_from_slice(&255u32.to_le_bytes());
+        assert_eq!(narrow.len(), list.len(), "only the header field moved");
+        let d = detail(ListColumnPack::from_bytes(narrow).unwrap_err());
+        assert!(
+            d.contains("cannot be addressed at width 1"),
+            "255 ordinals at width 1 leaves no value for the hole: {d}"
+        );
     }
 }

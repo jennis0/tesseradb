@@ -1,0 +1,19 @@
+{
+  "extends": "../tsconfig.base.json",
+  "include": [
+    "src",
+    "test",
+    "vite-plugin-decorators.ts"
+  ],
+  "compilerOptions": {
+    "noEmit": true,
+    "types": [
+      "vite/client"
+    ],
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ]
+  }
+}

@@ -1423,6 +1423,10 @@ pub(crate) struct LiveState {
     /// large and — until the packaging question is settled — lives only in the log. Folding them
     /// into one structure would put the second's durability problem onto the first.
     artifacts: Mutex<ArtifactStore>,
+    /// The view roster, on the registry's contract: **written only by the executor** — a create is
+    /// a WAL append followed by an apply, on the one thread that also holds the allocator — and
+    /// read by the request path, which resolves a view id against the manifest the roster made.
+    roster: Mutex<tessera_lifecycle::ViewRoster>,
 }
 
 impl LiveState {
@@ -1597,6 +1601,16 @@ impl LiveState {
         lock_recover(&self.registry).resolve_for(is_satisfied, resolve_label)
     }
 
+    /// Every registered layer, as the registry holds it. **The declarations, never a decision** —
+    /// `registered_layer`'s rule over the whole set, and the caller applies the gate.
+    ///
+    /// Its one caller is `Engine::warm_artifact_projections`, which has no principal to resolve
+    /// against: it builds a level's row form, which is the same structure for every principal, and
+    /// the gate is applied to what is *served* from it on the request that asks.
+    pub(crate) fn registered_layers(&self) -> Vec<tessera_types::layer::RegisteredLayer> {
+        lock_recover(&self.registry).snapshot().0
+    }
+
     /// One registered layer, by name. The caller has already established the name is reachable —
     /// this returns the declaration, never the decision.
     pub(crate) fn registered_layer(
@@ -1646,6 +1660,23 @@ impl LiveState {
         layout: tessera_types::layer::ServingLayout,
     ) -> bool {
         lock_recover(&self.registry).set_layout(layer, level, layout)
+    }
+
+    /// Run `f` with the roster held — the create and drop preparations, and nothing else.
+    fn with_roster<R>(&self, f: impl FnOnce(&mut tessera_lifecycle::ViewRoster) -> R) -> R {
+        let mut roster = lock_recover(&self.roster);
+        f(&mut roster)
+    }
+
+    /// What a publication carries forward: the creations and the dead incarnations, complete
+    /// current state — [`Self::registry_for_publication`]'s contract, for the roster.
+    fn roster_for_publication(
+        &self,
+    ) -> (
+        Vec<tessera_types::view::CreatedView>,
+        Vec<tessera_types::view::DeadIncarnation>,
+    ) {
+        lock_recover(&self.roster).snapshot()
     }
 
     fn registry_for_publication(
@@ -1720,17 +1751,40 @@ impl LiveState {
     /// must never refuse a user's write). A *suppressed* holder still collides: suppression is
     /// temporary hiding, and re-ingesting past one is the byte-identical-copy hole this check
     /// exists to close.
+    /// The apply-adjacent backstop for the check-to-apply race, **rewritten as the join rule**
+    /// (`views.md` §4): a known external id is a collision only where the entity it names already
+    /// has a row in the view this batch names. Anywhere else it is a join, and the row is stamped
+    /// with the entity it joins — here rather than in the handler's answer, because this map and
+    /// this generation are the ones the apply will clone from.
+    ///
+    /// **A deleted holder is neither** (decision 0047): the binding is dead bookkeeping and the
+    /// row allocates fresh, which is what makes a re-ingest under the same external id land.
     fn established_collisions(
         &self,
-        rows: &[UnallocatedRow],
+        rows: &mut [UnallocatedRow],
         is_deleted: impl Fn(EntityId) -> bool,
+        holds: impl Fn(EntityId, &str) -> bool,
     ) -> usize {
         let established = lock_recover(&self.established);
-        rows.iter()
-            .filter_map(|r| r.external_id.as_ref())
-            .filter_map(|id| established.get(id.as_slice()))
-            .filter(|entity| !is_deleted(**entity))
-            .count()
+        let mut collisions = 0;
+        for row in rows.iter_mut() {
+            let Some(id) = row.external_id.as_ref() else {
+                continue;
+            };
+            let Some(entity) = established.get(id.as_slice()).copied() else {
+                continue;
+            };
+            if is_deleted(entity) {
+                row.join = None;
+                continue;
+            }
+            if holds(entity, &row.view) {
+                collisions += 1;
+                continue;
+            }
+            row.join = Some(entity);
+        }
+        collisions
     }
 
     /// Drop every retired entity's external-id binding from the live map — **the other half of
@@ -1883,9 +1937,21 @@ pub enum AcceptError {
     /// the edge of the grid.
     OutsideExtent {
         index: usize,
-        x: f32,
-        y: f32,
+        x: f64,
+        y: f64,
         quantisation: tessera_store::manifest::Quantisation,
+    },
+    /// A row names a view this bundle does not declare, so there is no frame to quantise it
+    /// against and no row space for it to land in.
+    ///
+    /// Checked here, beside [`Self::OutsideExtent`] and for the same more-than-one-caller reason:
+    /// since the extent became the view's (decision 0040), resolving a row's frame *is* resolving
+    /// its view, and a row whose view cannot be resolved has nothing to be checked against. The
+    /// HTTP handler refuses an unknown `x-tessera-view` with its own 404 and is only one of the
+    /// buffer's writers.
+    UnknownView {
+        index: usize,
+        view: String,
     },
     /// A row carries a number of scalars other than one per declared column.
     ///
@@ -1946,6 +2012,12 @@ impl std::fmt::Display for AcceptError {
                  under a corrected extent, which is a migration",
                 q.x_min, q.x_max, q.y_min, q.y_max
             ),
+            AcceptError::UnknownView { index, view } => write!(
+                f,
+                "ingest row {index} names view '{view}', which this bundle does not declare. A \
+                 view carries its own frame and its own row space (decision 0040), so a row \
+                 naming none of them has no cell to occupy and no order to be placed in"
+            ),
             AcceptError::SteppedDown => write!(
                 f,
                 "a partition is serving a stepped-down side-manifest, so ingest is refused: a \
@@ -1975,6 +2047,10 @@ pub(crate) struct WritePathState {
     accepted_batches: AcceptedBatches,
     pub(crate) registry: LayerRegistry,
     pub(crate) artifacts: ArtifactStore,
+    /// The view roster — which views of which groups exist, and which keys are burnt
+    /// (`views.md` §3.2). Rebuilt exactly as the layer registry beside it is: seeded from the
+    /// manifests, then the log replayed on top.
+    pub(crate) roster: tessera_lifecycle::ViewRoster,
 }
 
 /// The manifest state a reconstruction starts from, before WAL replay unions what was written
@@ -1994,6 +2070,17 @@ pub(crate) struct ManifestSeed<'a> {
     pub low_water: u64,
     pub layers: &'a [tessera_types::layer::RegisteredLayer],
     pub tombstones: &'a [String],
+    /// Every view created since the build, across every partition's manifest (`views.md` §3.2),
+    /// and every incarnation that has died. The build's own roster is not here: it is in
+    /// `MANIFEST.json` and is seeded separately.
+    pub created_views: &'a [tessera_types::view::CreatedView],
+    pub dead_view_incarnations: &'a [tessera_types::view::DeadIncarnation],
+    /// The views a build declared, as `(group, key)` — the keys a create must not reissue.
+    pub declared_views: Vec<(String, String)>,
+    /// `Manifest::view_ids_for_key` — every view id a dropped key resolves to, the owner's and
+    /// every sharing group's (`views.md` §3.3). Replay's `ViewDrop` arm prunes the buffer with it,
+    /// and it is passed rather than derived because `tessera-lifecycle` holds no manifest.
+    pub view_ids_of_key: &'a dyn Fn(&str, &str) -> Vec<String>,
     /// Every published membership extent, across every partition's manifest, with the prefix
     /// directory their paths are relative to.
     pub membership_extents: &'a [tessera_store::manifest::MembershipExtent],
@@ -2031,13 +2118,10 @@ fn artifact_coordinates(
     held: &[tessera_store::manifest::ContainmentExtent],
     held_indexes: &[tessera_store::manifest::TileIndexExtent],
     held_columns: &[tessera_store::manifest::RowColumnExtent],
+    held_shape_rows: &[tessera_store::manifest::ShapeRowsExtent],
+    held_shape_held: &[tessera_store::manifest::ShapeHeldExtent],
     pending_retirement: &[(String, u32)],
-) -> (
-    Vec<tessera_store::manifest::LevelVersion>,
-    Vec<tessera_store::manifest::ContainmentExtent>,
-    Vec<tessera_store::manifest::TileIndexExtent>,
-    Vec<tessera_store::manifest::RowColumnExtent>,
-) {
+) -> ArtifactCoordinates {
     let pending = |layer: &str, level: u32| {
         pending_retirement
             .iter()
@@ -2084,7 +2168,44 @@ fn artifact_coordinates(
         })
         .cloned()
         .collect();
-    (versions, still_true, indexes_still_true, columns_still_true)
+    // The shape row forms take the same filter. The segment half of their key is not part of it:
+    // a segment is immutable and its id never reused, so an entry naming one that no generation
+    // serves any more is a file nothing will claim, and is dropped when the prefix is.
+    let shape_rows_still_true = held_shape_rows
+        .iter()
+        .filter(|entry| {
+            !pending(&entry.layer, entry.level)
+                && store.level_version(&entry.layer, entry.level) == entry.level_version
+        })
+        .cloned()
+        .collect();
+    let shape_held_still_true = held_shape_held
+        .iter()
+        .filter(|entry| {
+            !pending(&entry.layer, entry.level)
+                && store.level_version(&entry.layer, entry.level) == entry.level_version
+        })
+        .cloned()
+        .collect();
+    ArtifactCoordinates {
+        level_versions: versions,
+        containment: still_true,
+        tile_indexes: indexes_still_true,
+        row_columns: columns_still_true,
+        shape_rows: shape_rows_still_true,
+        shape_held: shape_held_still_true,
+    }
+}
+
+/// What [`artifact_coordinates`] stamps into a side-manifest: the level versions and every
+/// derived-structure list filtered to the entries still true at them.
+struct ArtifactCoordinates {
+    level_versions: Vec<tessera_store::manifest::LevelVersion>,
+    containment: Vec<tessera_store::manifest::ContainmentExtent>,
+    tile_indexes: Vec<tessera_store::manifest::TileIndexExtent>,
+    row_columns: Vec<tessera_store::manifest::RowColumnExtent>,
+    shape_rows: Vec<tessera_store::manifest::ShapeRowsExtent>,
+    shape_held: Vec<tessera_store::manifest::ShapeHeldExtent>,
 }
 
 impl WritePath {
@@ -2113,7 +2234,7 @@ impl WritePath {
         dict: &Dict,
         initial_deny: &[(EntityId, ChangeOp)],
         vocabularies: &mut Vocabularies,
-        has_row: impl Fn(EntityId) -> bool,
+        has_row: impl Fn(EntityId, &str) -> bool,
     ) -> Result<(Overlay, IngestBuffer, WritePathState), EngineError> {
         let (wal, records) = Wal::open(wal_path).map_err(EngineError::Wal)?;
 
@@ -2183,6 +2304,18 @@ impl WritePath {
         // retired the highest-numbered layer. Reseeding costs at most one block per restart, out
         // of 65 536, and a durable cursor would buy back an id space nothing is short of.
         registry.reseed_entity_cursor();
+
+        // **The roster, on the registry's ordering rule and for the same reason**: the manifests
+        // are the starting point and every WAL record postdates them, so seeding afterwards would
+        // resurrect a view that was dropped since the last publication. The build's declared views
+        // are seeded first because their keys are taken — a roster that forgot them would let a
+        // create reissue a key a declared view already holds.
+        let mut roster = tessera_lifecycle::ViewRoster::new();
+        roster.seed_declared(seed.declared_views.iter().cloned());
+        roster.seed(seed.created_views, seed.dead_view_incarnations);
+        for record in &records {
+            roster.apply(record);
+        }
 
         // **The manifests' membership extents are the starting point, and replay unions what came
         // after** — the registry's ordering rule above, for the same reason: every WAL record
@@ -2270,6 +2403,8 @@ impl WritePath {
             );
         }
 
+        // Taken off the manifest seed before it is shadowed by the overlay seed below.
+        let view_ids_of_key = seed.view_ids_of_key;
         // **The manifests' deny state is the starting point, and replay runs over it.** Ordering,
         // not aesthetics — see `replay`'s own doc: every WAL record postdates any state an
         // honourable manifest carries, and the one op that needs the later record to win is
@@ -2280,7 +2415,8 @@ impl WritePath {
             seed.apply(*entity, *op);
         }
 
-        let (overlay, mut buffer, established, resolver) = replay(&records, dict, seed);
+        let (overlay, mut buffer, established, resolver) =
+            replay(&records, dict, seed, view_ids_of_key);
         // **Re-hashed at the boundary, once, at startup.** `replay` builds this with `FxHashMap`;
         // the live index deliberately does not — see `WritePath::established`'s doc. Converting
         // here costs one pass over the replayed set at open and keeps the hasher choice in one
@@ -2303,10 +2439,16 @@ impl WritePath {
         // It is also what `compose::verdict` now relies on. That function used to gate rule 4 on
         // `entity < watermark` to stop a stale buffer answering for an entity the fragment already
         // covers; the gate is gone, and this invariant is what replaces it.
-        let already_flushed: Vec<EntityId> = buffer
-            .iter()
-            .map(|(entity, _)| *entity)
-            .filter(|entity| has_row(*entity))
+        // **Per (entity, view), because an entity may hold a row in several views** (`views.md`
+        // §4). The question is not "does this entity have geometry" — a joined entity has some,
+        // in the view it was first ingested into — but "does this *row* have geometry", and a
+        // predicate over the entity alone would drop a second view's pending row from the buffer
+        // while no segment held it. Every row is in one view, so the two questions coincide
+        // exactly while a corpus has one view, which is why the narrower one costs nothing.
+        let already_flushed: Vec<(EntityId, String)> = buffer
+            .rows()
+            .map(|(entity, item)| (*entity, item.view.clone()))
+            .filter(|(entity, view)| has_row(*entity, view))
             .collect();
         if !already_flushed.is_empty() {
             tracing::debug!(
@@ -2314,8 +2456,8 @@ impl WritePath {
                 "WAL rows that already have geometry were not re-buffered"
             );
         }
-        for entity in already_flushed {
-            buffer.remove(entity);
+        for (entity, view) in already_flushed {
+            buffer.remove_in_view(entity, &view);
         }
 
         // **Where each surviving row sits in the log**, so a rotation knows what it may reclaim
@@ -2330,7 +2472,7 @@ impl WritePath {
         for (record, position) in records.iter().zip(wal.replayed_positions()) {
             if let WalRecord::IngestBatch { rows, .. } = record {
                 for row in rows {
-                    buffer.set_wal_pos(row.entity_id, *position);
+                    buffer.set_wal_pos(row.entity_id, &row.view, *position);
                 }
             }
         }
@@ -2366,6 +2508,7 @@ impl WritePath {
                 accepted_batches,
                 registry,
                 artifacts,
+                roster,
             },
         ))
     }
@@ -2385,6 +2528,7 @@ impl WritePath {
                 accepted_batches: Mutex::new(state.accepted_batches),
                 registry: Mutex::new(state.registry),
                 artifacts: Mutex::new(state.artifacts),
+                roster: Mutex::new(state.roster),
             }),
             wal: Some(state.wal),
             handle: None,
@@ -2432,6 +2576,7 @@ impl WritePath {
         let (coalesce_tx, coalesce_rx) = std::sync::mpsc::channel();
         let (merge_tx, merge_rx) = std::sync::mpsc::channel();
         let (fold_tx, fold_rx) = std::sync::mpsc::channel();
+        let (suggest_tx, suggest_rx) = std::sync::mpsc::channel();
 
         // A clone, not a move: `ExecutorHealth` keeps the other end, which is what gives the
         // counters a reader outside the executor thread (`ExecutorStats::wal_fsyncs`).
@@ -2486,6 +2631,22 @@ impl WritePath {
             .values()
             .flat_map(|p| p.manifest.row_column_extents.iter().cloned())
             .collect();
+        // The shape row forms the build or the last fold wrote, seeded identically and for the
+        // identical reason.
+        let seeded_shape_rows_extents: Vec<tessera_store::manifest::ShapeRowsExtent> = generation
+            .load()
+            .bundle
+            .partitions
+            .values()
+            .flat_map(|p| p.manifest.shape_rows_extents.iter().cloned())
+            .collect();
+        let seeded_shape_held_extents: Vec<tessera_store::manifest::ShapeHeldExtent> = generation
+            .load()
+            .bundle
+            .partitions
+            .values()
+            .flat_map(|p| p.manifest.shape_held_extents.iter().cloned())
+            .collect();
         // The content half, seeded identically and for the identical reason.
         let seeded_content_extents: Vec<tessera_store::manifest::RecordExtent> = generation
             .load()
@@ -2505,8 +2666,11 @@ impl WritePath {
                     live,
                     generation,
                     row_projection_cache,
+                    region_cache: flush.region_cache,
                     artifact_projections: flush.artifact_projections,
+                    shapes: flush.shapes,
                     lineages: flush.lineages,
+                    level_contents: flush.level_contents,
                     queues: LifecycleQueues {
                         work: work_rx,
                         deny: deny_rx,
@@ -2544,6 +2708,11 @@ impl WritePath {
                     fold_attempt: 0,
                     fold_done: fold_rx,
                     fold_submit: fold_tx,
+                    suggest_dir: flush.suggest_dir,
+                    suggest_in_flight: Arc::new(AtomicBool::new(false)),
+                    suggest_build: 0,
+                    suggest_done: suggest_rx,
+                    suggest_submit: suggest_tx,
                     configured_merge_bytes: flush.configured_merge_bytes,
                     fold_paused: flush.fold_paused,
                     fold_publication_paused: flush.fold_publication_paused,
@@ -2555,6 +2724,8 @@ impl WritePath {
                     containment_extents: seeded_containment_extents,
                     tile_index_extents: seeded_tile_index_extents,
                     row_column_extents: seeded_row_column_extents,
+                    shape_rows_extents: seeded_shape_rows_extents,
+                    shape_held_extents: seeded_shape_held_extents,
                     artifact_record_extents: seeded_content_extents,
                     pending_reclaim: Vec::new(),
                     last_tick: std::time::Instant::now(),
@@ -2679,6 +2850,24 @@ impl WritePath {
             .publish_geometry(publication)
     }
 
+    /// Submit a suggestion-index drop to the executor and block until it has published.
+    ///
+    /// `false` where there is no executor to publish through — the hook's callers all start one,
+    /// and a test that did not would otherwise assert against an unchanged generation.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) fn forget_suggestion_index(&self, vocabulary: String) -> bool {
+        self.handle
+            .as_ref()
+            .is_some_and(|handle| handle.forget_suggestion_index(vocabulary))
+    }
+
+    #[cfg(feature = "fault-injection")]
+    pub(crate) fn rebuild_suggestion_index(&self, vocabulary: String) -> bool {
+        self.handle
+            .as_ref()
+            .is_some_and(|handle| handle.rebuild_suggestion_index(vocabulary))
+    }
+
     pub(crate) fn resolve_terms(&self, dict: &Dict, descriptors: &[Descriptor]) -> Vec<TermId> {
         self.live.resolve_terms(dict, descriptors)
     }
@@ -2764,6 +2953,47 @@ impl WritePath {
         }
     }
 
+    /// Create a view of a view group while the service runs (`views.md` §3.2).
+    pub(crate) fn create_view(
+        &self,
+        group: String,
+        key: String,
+        visibility: Option<String>,
+        metadata: std::collections::BTreeMap<String, tessera_types::view::ViewMetadataValue>,
+    ) -> Result<(), AcceptError> {
+        let receipt = self.handle()?.submit(Command::CreateView {
+            group,
+            key,
+            visibility,
+            metadata,
+        })?;
+        match receipt.outcome {
+            Ok(Ack::ViewCreated) => Ok(()),
+            Ok(other) => unreachable!("a CreateView command answers ViewCreated, not {other:?}"),
+            Err(e) => Err(AcceptError::Exec(e)),
+        }
+    }
+
+    /// Drop a view — freeing its key and killing its incarnation (decision 0115) — and answer how
+    /// many entities `delete_dangling` submitted for deletion (`views.md` §3.4).
+    pub(crate) fn drop_view(
+        &self,
+        group: String,
+        key: String,
+        delete_dangling: bool,
+    ) -> Result<u64, AcceptError> {
+        let receipt = self.handle()?.submit(Command::DropView {
+            group,
+            key,
+            delete_dangling,
+        })?;
+        match receipt.outcome {
+            Ok(Ack::ViewDropped { deleted }) => Ok(deleted),
+            Ok(other) => unreachable!("a DropView command answers ViewDropped, not {other:?}"),
+            Err(e) => Err(AcceptError::Exec(e)),
+        }
+    }
+
     /// Which layers a principal may know exist, resolved once per session.
     pub(crate) fn resolve_layers(
         &self,
@@ -2778,6 +3008,11 @@ impl WritePath {
         name: &str,
     ) -> Option<tessera_types::layer::RegisteredLayer> {
         self.live.registered_layer(name)
+    }
+
+    /// See `WriteState::registered_layers`.
+    pub(crate) fn registered_layers(&self) -> Vec<tessera_types::layer::RegisteredLayer> {
+        self.live.registered_layers()
     }
 
     /// Publish a batch of artifacts, returning their entities in the caller's submitted order.
@@ -2949,6 +3184,35 @@ pub(crate) enum ExecutorWork {
         publication: GeometryPublication,
         respond: SyncSender<std::result::Result<(), GeometryRefused>>,
     },
+    /// Drop one vocabulary's suggestion index and publish — `Engine::forget_suggestion_index_for_test`.
+    ///
+    /// **A test hook that is nonetheless a publication**, so it comes through this queue like every
+    /// other. It swapped the generation directly at first, which is the second publisher
+    /// `check-layers.sh` forbids (lifecycle §1.3, #59): the executor thread reads the live
+    /// generation, builds a successor and stores it, so a store from anywhere else can be
+    /// overwritten by a swap already in flight — and a test that lost its swap would pass or fail
+    /// on timing rather than on the behaviour under test.
+    #[cfg(feature = "fault-injection")]
+    ForgetSuggestionIndex {
+        vocabulary: String,
+        respond: SyncSender<()>,
+    },
+    /// Rebuild one vocabulary's suggestion index from the live minter and publish it —
+    /// `Engine::rebuild_suggestion_index_for_test`.
+    ///
+    /// **A test hook for a cadence a test cannot otherwise reach.** A rebuild is dispatched when a
+    /// vocabulary's side map has run `SUGGEST_REBUILD_SIDE_VALUES` (4,096) values ahead of its
+    /// base, which is hundreds of ingest batches — far past what a fixture builds — and it is the
+    /// one publication that deliberately moves neither `segments_version` nor `overlay_version`
+    /// (`Executor::publish_completed_suggests`). So it is exactly the state a per-session set's key
+    /// cannot see, and the only way to put a test in it is to ask for the rebuild directly. It
+    /// comes through this queue for [`ExecutorWork::ForgetSuggestionIndex`]'s reason: it is a
+    /// publication, and the executor thread is the sole publisher.
+    #[cfg(feature = "fault-injection")]
+    RebuildSuggestionIndex {
+        vocabulary: String,
+        respond: SyncSender<()>,
+    },
 }
 
 /// Why a geometry publication produced no answer.
@@ -3093,6 +3357,47 @@ impl LifecycleHandle {
         rx.recv()
             .map_err(|_| PublishGeometryError::NoExecutor)?
             .map_err(PublishGeometryError::Refused)
+    }
+
+    /// Submit a suggestion-index drop and block until the executor has published it.
+    ///
+    /// A blocking `send` on the work lane, exactly as [`Self::publish_geometry`] is and for the
+    /// same reason: it is a publication, not a client request, and shedding it would leave the
+    /// caller's next assertion racing a swap that never happened.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) fn forget_suggestion_index(&self, vocabulary: String) -> bool {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        if self
+            .work
+            .send(ExecutorWork::ForgetSuggestionIndex {
+                vocabulary,
+                respond: tx,
+            })
+            .is_err()
+        {
+            return false;
+        }
+        let _ = self.bell.try_send(());
+        rx.recv().is_ok()
+    }
+
+    /// Submit a suggestion-index rebuild and block until the executor has published it — the same
+    /// shape as [`Self::forget_suggestion_index`] and for the same reason.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) fn rebuild_suggestion_index(&self, vocabulary: String) -> bool {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        if self
+            .work
+            .send(ExecutorWork::RebuildSuggestionIndex {
+                vocabulary,
+                respond: tx,
+            })
+            .is_err()
+        {
+            return false;
+        }
+        let _ = self.bell.try_send(());
+        rx.recv().is_ok()
     }
 
     /// Ring the executor's doorbell without submitting anything.
@@ -3416,15 +3721,34 @@ pub(crate) struct MaintenanceDeps {
     /// per-session value, so leaving it to the first request after the flip is a stall of tens of
     /// seconds for whoever arrives first.
     pub(crate) artifact_projections: Arc<crate::artifacts::ArtifactProjections>,
+    /// The region decompositions (`crate::region`), pruned of superseded generations at every
+    /// geometry swap exactly as the row-projection cache is — a row-space artefact keyed on a
+    /// generation is unusable after it (I11), and only retention is left to do.
+    pub(crate) region_cache: Arc<
+        crate::single_flight::SingleFlightCache<
+            crate::region::RegionKey,
+            crate::region::RegionDecomposition,
+        >,
+    >,
+    /// The spatial levels' held shapes and per-segment pieces (`crate::shapes`) — filled by the
+    /// flush before its publication, rebuilt at a publication into a shape layer, re-resolved at
+    /// the fold and the merge.
+    pub(crate) shapes: Arc<crate::shapes::ShapeStore>,
     /// The lineages, shared for the half of the same warm that is theirs — see
     /// [`Executor::warm_artifact_caches`].
     pub(crate) lineages: Arc<crate::cut::Lineages>,
+    /// The supplied-content tables, shared for the one thing this thread does with them: dropping
+    /// a layer's when the layer is dropped, beside the two caches above.
+    pub(crate) level_contents: Arc<crate::artifact_content::LevelContents>,
     /// Whether the coalesce and the merge run at all — see `Engine::merge_enabled`.
     pub(crate) coalesce_enabled: Arc<AtomicBool>,
     pub(crate) merge_enabled: Arc<AtomicBool>,
     /// The bundle **root**, from which the live prefix directory is derived per use — see
     /// [`Executor::prefix_dir`] and `Engine::bundle_root`.
     pub(crate) bundle_root: PathBuf,
+    /// Where a rebuilt suggestion index is written — the engine's own cache directory, never the
+    /// bundle (`crate::suggest`'s header).
+    pub(crate) suggest_dir: PathBuf,
     pub(crate) identity_key: IdentityKey,
     /// D-D's one shared compute pool — a flush's segment write runs on it, off this thread,
     /// because this thread is the one that must reach a queued deny promptly (§1.1).
@@ -3459,11 +3783,17 @@ pub(crate) struct MaintenanceDeps {
     /// state in which a merge or coalesce can dispatch, publish, and leave the fold planned against
     /// artefacts the live manifest no longer lists.
     ///
-    /// That state is reachable in production and is not a contrivance: the fold thread clears
-    /// `fold_in_flight` after its send, and an executor already inside `tick_if_due` reads the
-    /// cleared flag and dispatches. The window is microseconds wide there and every outcome is
-    /// fail-closed; what this makes is that same window deterministic, so compaction §12's
-    /// obligation 9 is a test rather than an argument.
+    /// That state was reachable in production, and **not rarely**: the fold thread clears
+    /// `fold_in_flight` after its send, and an executor already inside `tick_if_due` read the
+    /// cleared flag and dispatched. Measured at **3 of 93 whole-binary runs and 12 of 480 runs of
+    /// the single test (~3%)** under 3–4 concurrent lanes, each occurrence costing a discarded
+    /// corpus rewrite and an orphan prefix nothing sweeps. The instruction window is microseconds
+    /// wide; the *observed* rate is not that, because the executor's loop and the job's completion
+    /// are both driven by the tick cadence and align far more often than independence predicts.
+    /// The dispatchers now suspend on publication rather than on completion
+    /// ([`Executor::fold_outstanding`]), so the state is no longer reachable through the executor
+    /// at all. This hook is what holds a fold in it, which is how the suspension itself is tested:
+    /// a merge offered ten ticks under a held fold takes none of them.
     pub(crate) fold_publication_paused: Arc<AtomicBool>,
     /// Whether a **completed** merge is left undrained in its channel —
     /// `Engine::set_merge_publication_paused_for_test`. Always `false` in a shipped build.
@@ -3497,6 +3827,123 @@ pub(crate) fn scalar_schema_of(
         .render_scalars()
         .map(|d| (d.name.clone(), d.arrow_type))
         .collect()
+}
+
+/// Every view's **group-scoped** attribute families, keyed by view id (`views.md` §5).
+///
+/// **The families whose owning group's key set holds this view's key** — the owner's own views,
+/// and the same keys under every group declaring `members` of it (§3.3, decision 0116). A family
+/// belongs to the group that owns the keys (a `members` group's list is always empty), and a batch
+/// into any view addressing one of those keys carries its values under their plain names, because
+/// the address of a scoped value is `(attribute → its group, key)` and never the view.
+///
+/// The sharing door was refused until 2026-09-01 on the argument that two views of one key would
+/// put two extents over one entity. That is withdrawn: the cell is written once — `admit`'s cell
+/// arm dedupes an identical second value and refuses a differing one — and the extent it is written
+/// into is addressed by [`scoped_owner_view_of`], which is the owner's view id whichever door the
+/// row came through.
+///
+/// **This is the one derivation, and three callers take it**: the ingest boundary parses a batch's
+/// schema against it, the commit window mints a scoped category's keys against it, and the flush
+/// writes a row's values into the columns it names. A second copy would let a row's positional
+/// tail be built against one list and read against another.
+pub(crate) fn scoped_families_by_view(
+    manifest: &tessera_store::manifest::Manifest,
+) -> FxHashMap<String, Vec<tessera_store::manifest::ScopedScalar>> {
+    let mut out: FxHashMap<String, Vec<tessera_store::manifest::ScopedScalar>> =
+        FxHashMap::default();
+    for group in &manifest.groups {
+        for view in &group.views {
+            let id = format!(
+                "{}{}{}",
+                group.name,
+                tessera_store::GROUP_SEPARATOR,
+                view.key
+            );
+            let families = scoped_families_of_view(manifest, &id);
+            if families.is_empty() {
+                continue;
+            }
+            out.insert(id, families.to_vec());
+        }
+    }
+    out
+}
+
+/// One view's **group-scoped** families — [`scoped_families_by_view`]'s rule, asked of one view.
+///
+/// **The rule itself lives here and the map is built from it**, so a caller that wants one view's
+/// answer does not walk every group to get it and cannot derive a second, differing list. The
+/// families are the **owning** group's, in that group's manifest order, which is the order a
+/// buffered row's `scoped` list is positional against; empty for a plain view, for a view whose key
+/// the owning group does not carry, and for a group that owns no family.
+pub(crate) fn scoped_families_of_view<'a>(
+    manifest: &'a tessera_store::manifest::Manifest,
+    view: &str,
+) -> &'a [tessera_store::manifest::ScopedScalar] {
+    const NONE: &[tessera_store::manifest::ScopedScalar] = &[];
+    let owner = scoped_owner_view_of(manifest, view);
+    let Some((owner_group, key)) = owner.split_once(tessera_store::GROUP_SEPARATOR) else {
+        return NONE;
+    };
+    let Some(group) = manifest.groups.iter().find(|g| g.name == owner_group) else {
+        return NONE;
+    };
+    // A sharing group's roster carries the owner's keys by construction, so the key is matched
+    // rather than assumed: a key the owning group does not carry addresses no cell.
+    if !group.views.iter().any(|v| v.key == key) {
+        return NONE;
+    }
+    &group.scoped_scalars
+}
+
+/// The view id a scoped value written through `view` is **addressed by** — the owning group's view
+/// of the same key (`views.md` §5, decision 0116).
+///
+/// Equal to `view` itself for every view of the owning group, and for every view in no scope at
+/// all; a sharing group's view resolves to the owner's. This is the one place a door becomes an
+/// address, so a row that arrived through the sharing spelling writes the byte-identical extent,
+/// under the byte-identical column name, that the owner's door would have written.
+pub(crate) fn scoped_owner_view_of(
+    manifest: &tessera_store::manifest::Manifest,
+    view: &str,
+) -> String {
+    let Some((group, key)) = view.split_once(tessera_store::GROUP_SEPARATOR) else {
+        return view.to_string();
+    };
+    let owner = manifest
+        .groups
+        .iter()
+        .find(|g| g.name == group)
+        .and_then(|g| g.members_of.as_deref())
+        .unwrap_or(group);
+    format!("{owner}{}{key}", tessera_store::GROUP_SEPARATOR)
+}
+
+/// One view's writer schema: the bundle-wide render tail, then the **group-scoped** render lanes
+/// that view's rows carry (`views.md` §5).
+///
+/// **Every producer of a segment takes this, and taking the bundle-wide list alone was the
+/// defect.** A build writes a scoped family's lane into the row tail of every view of its group;
+/// a merge or a fold that rewrote such a segment from `scalar_schema_of` alone wrote the
+/// entity-scoped tail and nothing per family, so values served correctly before the rewrite came
+/// back as the type's zero afterwards — indistinguishable from absence, with no error anywhere.
+/// The lanes are appended after the declared ones, which is the order the build writes them in.
+///
+/// **No gate here, deliberately.** A writer has no principal; which lanes a row space holds is a
+/// property of the bundle, and narrowing it by a session's sight would drop a lane the build
+/// wrote. `viewport::scoped_render_scalars` is the read half, and it narrows the same list.
+pub(crate) fn view_scalar_schema_of(
+    manifest: &tessera_store::manifest::Manifest,
+    view: &str,
+) -> Vec<(String, ScalarType)> {
+    let mut schema = scalar_schema_of(manifest);
+    schema.extend(
+        crate::viewport::scoped_render_families(manifest, view)
+            .into_iter()
+            .map(|f| (f.name.clone(), f.arrow_type)),
+    );
+    schema
 }
 
 /// The filterable columns, with the position each occupies in a buffered row's scalar list.
@@ -3572,6 +4019,29 @@ pub(crate) fn text_schema_of(
         });
     }
     Ok(out)
+}
+
+/// The analyser a group-scoped `text` family's terms were produced by
+/// ([`text_schema_of`]'s resolution, over a family's declaration).
+fn analyser_of(
+    family: &tessera_store::manifest::ScopedScalar,
+) -> Result<tessera_analyse::Analyser, crate::flush::FlushFailed> {
+    let identity = family.analyser.as_deref().ok_or_else(|| {
+        crate::flush::FlushFailed(format!(
+            "the scoped column family '{}' is text but the manifest records no analyser identity",
+            family.name
+        ))
+    })?;
+    tessera_analyse::analyser(identity.split('/').next().unwrap_or_default())
+        .filter(|a| a.identity() == identity)
+        .ok_or_else(|| {
+            crate::flush::FlushFailed(format!(
+                "the scoped column family '{}' was indexed by analyser '{identity}', which this \
+                 binary does not carry — a flush cannot extend an index whose terms it cannot \
+                 reproduce",
+                family.name
+            ))
+        })
 }
 
 /// The blob-resident columns, with each one's position in a buffered row's scalar list — which is
@@ -3739,12 +4209,6 @@ mod segment_schema_tests {
             declared_bounds: serde_json::json!({}),
             vocabularies: vec![],
             small_term_threshold: 32,
-            quantisation: tessera_store::manifest::Quantisation {
-                x_min: 0.0,
-                x_max: 1.0,
-                y_min: 0.0,
-                y_max: 1.0,
-            },
             entity_id_high_water: 0,
             identity: tessera_store::manifest::IdentityDescriptor {
                 construction: "siphash-2-4".to_string(),
@@ -3753,6 +4217,7 @@ mod segment_schema_tests {
                 shard_id: 0,
                 idset: 1,
             },
+            groups: Vec::new(),
             views: vec![],
             partitions: vec![],
             provenance: serde_json::json!({}),
@@ -3805,17 +4270,23 @@ mod vocabulary_extensions_tests {
             entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
             layers: Vec::new(),
             layer_tombstones: Vec::new(),
+            views: Vec::new(),
+            scoped_columns: Vec::new(),
+            dead_view_incarnations: Vec::new(),
             membership_extents: Vec::new(),
             level_versions: Vec::new(),
             containment_extents: Vec::new(),
             tile_index_extents: Vec::new(),
             row_column_extents: Vec::new(),
+            shape_rows_extents: Vec::new(),
+            shape_held_extents: Vec::new(),
             artifact_record_extents: Vec::new(),
             segments: Vec::new(),
             deltas: Vec::new(),
             dict_extents: Vec::new(),
             attr_extents: Vec::new(),
             record_extents: Vec::new(),
+            entity_terms_extents: Vec::new(),
             text_extents: Vec::new(),
             external_id_runs: Vec::new(),
             locator_extents: Vec::new(),
@@ -4190,6 +4661,123 @@ fn live_segments_of(generation: &Generation) -> usize {
         .unwrap_or(0)
 }
 
+/// Is this extent's `(view, incarnation)` pair one the live manifest still declares?
+///
+/// **An entity-scoped extent belongs to no view and is always carried** — its `view` is `None`,
+/// and so is its incarnation. A group-scoped one is carried only where the pair is live: a dropped
+/// key's columns sit in the list until a fold reclaims them, and a key created again writes its
+/// own column under the same family name (decision 0115).
+///
+/// **Fail-closed by construction**: a half-stamped entry — a view with no incarnation, or the
+/// reverse — matches nothing and is omitted, which loses a derived artefact and never serves one.
+fn carries_live_view(
+    live: &FxHashMap<&str, tessera_types::view::ViewIncarnation>,
+    view: Option<&str>,
+    incarnation: Option<tessera_types::view::ViewIncarnation>,
+) -> bool {
+    match (view, incarnation) {
+        (None, None) => true,
+        (Some(view), Some(incarnation)) => live.get(view) == Some(&incarnation),
+        _ => false,
+    }
+}
+
+/// The refusal a roster error is answered with — the three the wire tells apart
+/// (`views.md` §3.2, and this module's `ExecError` doc for why the caller's remedy decides).
+fn roster_error(e: tessera_lifecycle::RosterError) -> ExecError {
+    use tessera_lifecycle::RosterError;
+    let detail = e.to_string();
+    match e {
+        // **A conflict is a *live* key and nothing else now** (decision 0115): a dropped key is
+        // created again at a fresh incarnation, so the tombstone arm this match once had has no
+        // refusal left to carry.
+        RosterError::Exists { .. } => ExecError::ViewConflict { detail },
+        RosterError::Unknown { .. } => ExecError::ViewUnknown { detail },
+        RosterError::Refused(_) => ExecError::ViewRefused { detail },
+    }
+}
+
+/// The entities of `views` that hold a row in **no other view** — the commit-window buffer
+/// included (`views.md` §3.4's `delete_dangling`).
+///
+/// **`views` is every id the dropped key resolves to** (`Manifest::view_ids_for_key`), not the one
+/// the request happened to name: a key is a view of the group that owns it *and* one of every
+/// group sharing its views (`views.md` §3.3), so a probe over a single spelling reads the wrong
+/// row space when the drop was addressed to the other, and counts an entity dangling that holds a
+/// row under the key's own second name.
+///
+/// **The buffer counts as a view's rows.** A row accepted but not yet flushed is in no
+/// permutation, so a probe that read the permutations alone would call an entity dangling that a
+/// caller was told had landed elsewhere — and then delete it.
+///
+/// **Row space is walked, entity space only where it cannot be.** A view's rows invert to their
+/// entities directly wherever the row space can be inverted, which is every view a flush created
+/// and every built view that published a `row-entity.u32`; where it cannot, the fallback asks
+/// each entity below the high-water whether this view holds it, which is `O(entity space)` and is
+/// reported rather than hidden, because a silent one would look like an idle service.
+fn dangling_entities(generation: &Generation, views: &[String]) -> Vec<EntityId> {
+    let mut candidates: Vec<EntityId> = Vec::new();
+    for view in views {
+        for partition in generation.bundle.partitions.values() {
+            let Some(view_data) = partition.views.get(view) else {
+                continue;
+            };
+            let rows = view_data.row_space.total_rows();
+            if view_data.row_space.can_invert() {
+                for row in 0..rows {
+                    if let Some(entity) = view_data
+                        .row_space
+                        .entity_of(tessera_types::RowId::new(row as u32))
+                    {
+                        candidates.push(entity);
+                    }
+                }
+            } else {
+                let bound = view_data.row_space.base().bound();
+                tracing::warn!(
+                    view = %view,
+                    entities = bound,
+                    "this view publishes no row→entity table, so delete_dangling walks entity \
+                     space to enumerate its rows"
+                );
+                for raw in 0..bound {
+                    let entity = EntityId::new(raw);
+                    if view_data.row_space.row_of(entity).is_some() {
+                        candidates.push(entity);
+                    }
+                }
+            }
+        }
+    }
+    // **Every buffered row, joins included** (`rows()`, not `iter()`): the question here is which
+    // entities have a row *in one of these views*, which is geometry, and a join is a row.
+    for (entity, item) in generation.buffer.rows() {
+        if views.iter().any(|view| view == &item.view) {
+            candidates.push(*entity);
+        }
+    }
+    candidates.sort_unstable_by_key(|e| e.raw());
+    candidates.dedup();
+    candidates.retain(|entity| {
+        // Already deleted is already gone: a second deletion of the same entity is a no-op the
+        // overlay would absorb, and counting it would report work the drop did not do.
+        if generation.overlay.is_deleted(*entity) {
+            return false;
+        }
+        let in_another_view = generation.bundle.partitions.values().any(|partition| {
+            partition
+                .views
+                .iter()
+                .any(|(id, data)| !views.contains(id) && data.row_space.row_of(*entity).is_some())
+        });
+        let buffered_elsewhere = generation.buffer.rows().any(|(buffered, item)| {
+            buffered == entity && !views.iter().any(|view| view == &item.view)
+        });
+        !in_another_view && !buffered_elsewhere
+    });
+    candidates
+}
+
 fn views_of(generation: &Generation) -> Vec<String> {
     let mut views: Vec<String> = generation
         .bundle
@@ -4200,6 +4788,28 @@ fn views_of(generation: &Generation) -> Vec<String> {
     views.sort_unstable();
     views.dedup();
     views
+}
+
+/// Whether this layer's memberships are a **stored** set — the one kind a record's delta describes.
+///
+/// A `spatial` layer's membership is the rows inside its shapes and an `attribute` layer's is the
+/// rows carrying a value; both are evaluated against the geometry, so neither has anything to take
+/// from a publication's or a growth's record.
+fn stored_membership(declaration: &tessera_types::layer::LayerDeclaration) -> bool {
+    matches!(
+        declaration.membership,
+        tessera_types::layer::MembershipSource::Enumerated
+    ) && declaration.shape.is_none()
+}
+
+/// The `(layer, level)` a record changes the artifacts of, and `None` for every other record —
+/// what a caller needs to read that level's version before the record moves it.
+fn artifact_level_of(record: &WalRecord) -> Option<(&str, u32)> {
+    match record {
+        WalRecord::ArtifactPublish { layer, level, .. }
+        | WalRecord::ArtifactGrow { layer, level, .. } => Some((layer.as_str(), *level)),
+        _ => None,
+    }
 }
 
 /// **The growth records one closed window owes**, with the index of the entry to blame if an append
@@ -4355,11 +4965,26 @@ struct Executor {
     /// projections of generations now older than the retention depth. Runs at the swap — see
     /// `RowProjectionCache::prune_generations_below`.
     row_projection_cache: Arc<RowProjectionCache>,
+    /// See [`MaintenanceDeps::region_cache`].
+    region_cache: Arc<
+        crate::single_flight::SingleFlightCache<
+            crate::region::RegionKey,
+            crate::region::RegionDecomposition,
+        >,
+    >,
     /// The artifact row forms — rebuilt here at the fold, and read by every viewport. See
     /// [`MaintenanceDeps::artifact_projections`].
     artifact_projections: Arc<crate::artifacts::ArtifactProjections>,
+    /// See [`MaintenanceDeps::shapes`].
+    shapes: Arc<crate::shapes::ShapeStore>,
     /// The lineages, rebuilt beside them and for the same reason.
     lineages: Arc<crate::cut::Lineages>,
+    /// The supplied-content tables, held for the layer drop below. Not warmed at the fold: a
+    /// table is read from the blob the fold has just rewritten, and reading every level's is a
+    /// pass over the whole of it — where a row form is rebuilt there because row space renumbered
+    /// under it, this one is merely stale and the first request that wants a level pays for that
+    /// level alone.
+    level_contents: Arc<crate::artifact_content::LevelContents>,
     queues: LifecycleQueues,
     health: Arc<ExecutorHealth>,
     /// The last window's sequence number. [`BatchState::Held`] is what it is for; all it has to be
@@ -4461,6 +5086,16 @@ struct Executor {
     fold_attempt: u64,
     fold_done: Receiver<crate::compact::CompletedFold>,
     fold_submit: Sender<crate::compact::CompletedFold>,
+    /// **The suggestion index's rebuild**, on the same in-flight / channel shape as the three
+    /// passes above, and deliberately the *smallest* of them: it reads a vocabulary out of the
+    /// generation and writes files the manifest does not name, so it has no plan, no gate and
+    /// nothing to refuse. One at a time across every vocabulary, because the cost it exists to
+    /// bound is the sort's memory and not its latency (`crate::suggest`).
+    suggest_dir: PathBuf,
+    suggest_in_flight: Arc<AtomicBool>,
+    suggest_build: u64,
+    suggest_done: Receiver<crate::suggest::CompletedSuggest>,
+    suggest_submit: Sender<crate::suggest::CompletedSuggest>,
     /// See [`MaintenanceDeps::configured_merge_bytes`].
     configured_merge_bytes: Option<u64>,
     /// See [`MaintenanceDeps::fold_paused`].
@@ -4561,6 +5196,13 @@ struct Executor {
     /// only difference is the layout tag each entry carries, which says which form the file is in
     /// and is checked against the file's own magic at open.
     row_column_extents: Vec<tessera_store::manifest::RowColumnExtent>,
+    /// Every persisted shape row form the current prefix holds — one per `(view, layer, level,
+    /// segment)` the build or the last fold wrote one for. Held, filtered and replaced exactly as
+    /// [`Executor::row_column_extents`] is, and by the same code ([`artifact_coordinates`]).
+    shape_rows_extents: Vec<tessera_store::manifest::ShapeRowsExtent>,
+    /// Every persisted decomposition file the current prefix holds, held and filtered as
+    /// [`Executor::shape_rows_extents`] is.
+    shape_held_extents: Vec<tessera_store::manifest::ShapeHeldExtent>,
     /// Every artifact **content** extent this node has published, complete current state, held for
     /// the reason above and written the same way. The two lists travel together: a membership
     /// without its content leaves an artifact whose description cannot be read, which withholds it.
@@ -4587,6 +5229,14 @@ struct Executor {
 }
 
 impl Executor {
+    /// Drop the region decompositions of generations older than the retention depth — the same
+    /// pass, at the same swap, as `RowProjectionCache::prune_generations_below`.
+    fn prune_region_cache(&self, segments_version: u64) {
+        let floor = segments_version.saturating_sub(KEEP_SUPERSEDED_GENERATIONS);
+        self.region_cache
+            .retain_keys(|key| key.segments_version >= floor);
+    }
+
     /// Drain deny to empty, then execute **at most one** work item, then repeat — blocking only
     /// once both queues have been *observed* empty.
     ///
@@ -4637,7 +5287,8 @@ impl Executor {
             let published = self.publish_completed_flushes()
                 | self.publish_completed_coalesces()
                 | self.publish_completed_merges()
-                | self.publish_completed_folds();
+                | self.publish_completed_folds()
+                | self.publish_completed_suggests();
             self.tick_if_due();
             while self.run_deny_pass() {}
             // **At drain close**: one write covers a burst of consecutive windows rather than one
@@ -4689,6 +5340,9 @@ impl Executor {
         // tick that found a flush running would leave a whole prefix on disc for another period
         // for no reason.
         self.reclaim_superseded_prefixes();
+        // On the same argument, and ahead of the flush's in-flight gate for the same reason: it is
+        // owed to residency rather than to any request, and it waits on nothing this thread does.
+        self.dispatch_suggest_rebuild();
 
         let generation = self.generation.load_full();
 
@@ -4791,21 +5445,102 @@ impl Executor {
         drop(generation);
     }
 
-    /// Select and dispatch an entity-space coalesce, if one qualifies and none is running.
+    /// Whether a fold is **outstanding**: running, or completed and not yet published.
     ///
-    /// **At most one in flight, checked before the plan is built**, for the same reason a flush
+    /// # Publication is the boundary the mutual exclusion has to use, and running was not
+    ///
+    /// A fold plans against a snapshot of which artefacts the live manifest lists; a merge and a
+    /// coalesce change exactly that. So the three exclude one another — and the state each must
+    /// exclude is not "the other is executing" but "the other's effect is not visible yet". A
+    /// background job passes through three phases: running, completed and sitting undrained in its
+    /// channel, and published. The `*_in_flight` flag covers only the first, and the executor's own
+    /// loop straddles the second: `publish_completed_merges` runs at the top of an iteration and
+    /// drains nothing because the merge is still working, and `tick_if_due` later in the *same*
+    /// iteration reads a by-then-cleared `merge_in_flight` and dispatches a fold against a
+    /// generation that is about to change. The next iteration publishes the merge, and the fold is
+    /// left naming artefacts the live manifest no longer lists — discarded whole at its rebase
+    /// check.
+    ///
+    /// **Every outcome of that was fail-closed, and it was still worth closing**: the cost is a
+    /// discarded corpus rewrite — minutes to hours at scale — plus an orphan prefix tree nothing
+    /// sweeps, compaction §7's startup sweep covering only what is present when an executor
+    /// starts. It was also not rare. Measured on the merge-lands-during-fold direction: **3 of 93
+    /// runs of the whole `--test fold` binary and 12 of 480 runs of the single test, ~3%**, under
+    /// 3–4 concurrent lanes, with the mechanism confirmed each time (one dispatch, one orphan
+    /// prefix holding only `partitions/`, the discard line, then a second dispatch). "Microseconds
+    /// wide" describes the instruction window and is not the rate, because the loop and the job's
+    /// completion are both driven by the tick cadence rather than being independent.
+    ///
+    /// The `*_completed_pending` flags this reads are the ones the completion handshake already
+    /// maintains — set before the send, cleared by the drain
+    /// ([`ExecutorHealth::flush_completed_pending`] states the ordering) — so the boundary needed
+    /// no new state, only the right flag.
+    ///
+    /// # Suspended, not refused
+    ///
+    /// A pass that does not start here has had nothing rejected and has lost no intent, which is
+    /// why every site says *suspended*. `dispatch_merge` calls `plan_merge` fresh on every tick, so
+    /// a merge that does not start is simply re-decided at the next one against whatever the corpus
+    /// is then; the plan does not survive the tick, and it is not meant to. That is the same
+    /// principle this boundary rests on — a merge plan names specific segments, so one made before
+    /// a fold and held until after would be a plan against a generation the fold is about to
+    /// replace. Re-planning is what keeps a plan and the generation it executes on together.
+    ///
+    /// # Why this cannot wedge
+    ///
+    /// A suspension here lasts at most one pass. The pending flags are set only by a completing job
+    /// and cleared only by `publish_completed_*`, which [`Executor::run`] calls at the top of every
+    /// iteration, unconditionally and *before* `tick_if_due` — no dispatcher's suspension can
+    /// suppress the drain that clears the flag it suspended on, because no dispatcher runs before
+    /// it. Nothing on this path sets a pending flag, so a dispatcher cannot starve itself, and the
+    /// mutual case resolves for the same reason: whichever flags are set, the next iteration's drain
+    /// clears them all before any dispatch is attempted. The executor also cannot sleep through it —
+    /// [`Executor::wait_for_work`] treats every pending flag as a reason for the fast completion
+    /// poll rather than the full tick. The one state in which a pending flag never clears is a
+    /// test's publication pause, which is `false` in a shipped build and wakes the executor when it
+    /// is lifted.
+    ///
+    /// A suspended *requested* fold is not consumed either: the request flag stays armed and the
+    /// next tick tries again, which is the treatment `dispatch_fold` already gives a fold suspended
+    /// for a running merge.
+    fn fold_outstanding(&self) -> bool {
+        self.fold_in_flight.load(Ordering::SeqCst)
+            || self.health.fold_completed_pending.load(Ordering::SeqCst)
+    }
+
+    /// Whether a merge is running, or completed and not yet published — the boundary
+    /// [`Executor::fold_outstanding`] states, applied to the row-space merge.
+    fn merge_outstanding(&self) -> bool {
+        self.merge_in_flight.load(Ordering::SeqCst)
+            || self.health.merge_completed_pending.load(Ordering::SeqCst)
+    }
+
+    /// Whether a coalesce is running, or completed and not yet published — the boundary
+    /// [`Executor::fold_outstanding`] states, applied to the entity-space coalesce.
+    fn coalesce_outstanding(&self) -> bool {
+        self.coalesce_in_flight.load(Ordering::SeqCst)
+            || self
+                .health
+                .coalesce_completed_pending
+                .load(Ordering::SeqCst)
+    }
+
+    /// Select and dispatch an entity-space coalesce, if one qualifies and none is outstanding.
+    ///
+    /// **At most one outstanding, checked before the plan is built**, for the same reason a flush
     /// is: two passes would select overlapping windows and the loser's manifest edit would no
     /// longer rebase, having done all of its IO first.
     fn dispatch_coalesce(&mut self, generation: &Arc<Generation>) {
-        // **Suspended for a fold's duration** (compaction §1): a coalesce publishing under one
-        // would be orphaned by the flip and would discard the fold at its rebase check, so running
-        // it is waste rather than hazard. The safety argument rests on that rebase check, not on
+        // **Suspended until a fold is published, not merely until it stops running** (compaction
+        // §1, and [`Executor::fold_outstanding`] for why the later boundary is the load-bearing
+        // one): a coalesce publishing under a fold would be orphaned by the flip and would discard
+        // the fold at its rebase check, so running it is waste rather than hazard. The safety argument rests on that rebase check, not on
         // this line; what this buys is that the fold is not routinely discarded by the maintenance
         // running beside it.
         if self.coalesce_policy.width < 2
             || !self.coalesce_enabled.load(Ordering::SeqCst)
-            || self.coalesce_in_flight.load(Ordering::SeqCst)
-            || self.fold_in_flight.load(Ordering::SeqCst)
+            || self.coalesce_outstanding()
+            || self.fold_outstanding()
             || !self.may_publish()
         {
             return;
@@ -4828,6 +5563,15 @@ impl Executor {
             &partition_data.manifest,
             &generation.bundle.manifest.files,
             self.coalesce_policy,
+            // The roster as this generation has it (decision 0115): a scoped column of an
+            // incarnation that is no longer live is the fold's to reclaim, not this pass's to
+            // merge.
+            &|view, incarnation| {
+                generation
+                    .bundle
+                    .manifest
+                    .is_live_incarnation(view, incarnation)
+            },
         ) else {
             return;
         };
@@ -4882,10 +5626,11 @@ impl Executor {
     /// nothing (`plan_merge` checks the last itself, it being bundle state rather than executor
     /// health).
     fn dispatch_merge(&mut self, generation: &Arc<Generation>) {
-        // Suspended for a fold's duration, for the reason `dispatch_coalesce` states.
+        // Suspended until a fold is *published*, for the reason `dispatch_coalesce` states and on
+        // the boundary `fold_outstanding` states.
         if !self.merge_enabled.load(Ordering::SeqCst)
-            || self.merge_in_flight.load(Ordering::SeqCst)
-            || self.fold_in_flight.load(Ordering::SeqCst)
+            || self.merge_outstanding()
+            || self.fold_outstanding()
             || self.wal.is_poisoned()
             || !self.may_publish()
         {
@@ -4895,7 +5640,10 @@ impl Executor {
             return;
         };
         let manifest = &generation.bundle.manifest;
-        let scalar_schema = scalar_schema_of(manifest);
+        // **This view's schema, not the bundle's** — the merged segment must carry the scoped
+        // render lanes its inputs carry, or the rewrite serves them as absence (`views.md` §5).
+        let scalar_schema = view_scalar_schema_of(manifest, &plan.view);
+        let scoped_from = scalar_schema_of(manifest).len();
         let Some(partition_data) = generation.bundle.partitions.get(&plan.partition) else {
             return;
         };
@@ -4911,6 +5659,7 @@ impl Executor {
             identity_key: self.identity_key,
             shard_id: manifest.identity.shard_id,
             scalar_schema,
+            scoped_from,
             watermark: generation.watermark,
             entity_id_high_water: partition_data.manifest.entity_id_high_water,
         };
@@ -4936,6 +5685,187 @@ impl Executor {
             }
             in_flight.store(false, Ordering::SeqCst);
         });
+    }
+
+    /// **Dispatch a suggestion-index rebuild** where one vocabulary's side map has run far enough
+    /// ahead of its base (`crate::suggest::SuggestIndexes::most_owed_rebuild`).
+    ///
+    /// Off this thread and onto the pool, on the flush's own argument: the sort is measured in
+    /// seconds to tens of seconds at 10⁷ values, and this thread is the one that must reach a
+    /// queued deny promptly (§1.1). Nothing waits on it — a value in the side map is suggested
+    /// exactly as one in the base is, so a rebuild that never finishes costs residency and no
+    /// answer.
+    fn dispatch_suggest_rebuild(&mut self) {
+        if self.suggest_in_flight.load(Ordering::SeqCst) {
+            return;
+        }
+        let generation = self.generation.load_full();
+        let Some((vocabulary, covered_through)) = generation.suggest.most_owed_rebuild() else {
+            return;
+        };
+        let vocabulary = vocabulary.to_string();
+        let Some(minter) = generation.vocabularies.get(&vocabulary) else {
+            return;
+        };
+        // Snapshotted here rather than read on the pool: the minter lives on the generation and the
+        // next window publishes a new one, so the build must own its input.
+        let values = crate::suggest::values_of(minter);
+        self.suggest_build += 1;
+        let build = self.suggest_build;
+        let dir = self.suggest_dir.join(&vocabulary);
+
+        self.suggest_in_flight.store(true, Ordering::SeqCst);
+        let in_flight = Arc::clone(&self.suggest_in_flight);
+        let submit = self.suggest_submit.clone();
+        let pool = Arc::clone(&self.pool);
+        self.pool.spawn(move || {
+            match crate::suggest::SuggestIndex::build(&dir, build, &values, &pool) {
+                Ok(index) => {
+                    let _ = submit.send(crate::suggest::CompletedSuggest {
+                        vocabulary,
+                        index: Arc::new(index),
+                        covered_through,
+                    });
+                }
+                Err(source) => {
+                    // The live index is still complete — the side map holds everything the base
+                    // does not — so this costs residency and is retried at the next tick.
+                    tracing::warn!(
+                        %vocabulary,
+                        %source,
+                        "a suggestion index rebuild failed; the side map keeps the live index \
+                         complete and the rebuild is retried at the next tick"
+                    );
+                }
+            }
+            in_flight.store(false, Ordering::SeqCst);
+        });
+    }
+
+    /// Drop one vocabulary's suggestion index and publish — the executor half of
+    /// `Engine::forget_suggestion_index_for_test`.
+    ///
+    /// **On this thread, which is the whole point of the hook going through the queue.** The
+    /// executor is the sole publisher (lifecycle §1.3, #59), so a swap performed anywhere else can
+    /// be lost to one already in flight here. It carries everything else forward and moves neither
+    /// version counter, exactly as [`Self::publish_completed_suggests`] does and for the same
+    /// reason: what changed is which structure a value's entries are read out of.
+    #[cfg(feature = "fault-injection")]
+    fn forget_suggestion_index(&mut self, vocabulary: &str) {
+        let live = self.generation.load_full();
+        let next = Generation {
+            suggest: Arc::new(live.suggest.without(vocabulary)),
+            prefix: live.prefix.clone(),
+            vocabularies: Arc::clone(&live.vocabularies),
+            filter_columns: Arc::clone(&live.filter_columns),
+            segments_version: live.segments_version,
+            watermark: live.watermark,
+            bundle: Arc::clone(&live.bundle),
+            dict: Arc::clone(&live.dict),
+            postings: Arc::clone(&live.postings),
+            fragments: Arc::clone(&live.fragments),
+            external_index: Arc::clone(&live.external_index),
+            delta_postings: live.delta_postings.clone(),
+            overlay_version: live.overlay_version,
+            overlay: Arc::clone(&live.overlay),
+            buffer: Arc::clone(&live.buffer),
+            denied: Arc::clone(&live.denied),
+        };
+        // Nothing acknowledged anything — the hook's own channel is what the caller waits on — so
+        // the token is dropped here as the rebuild's is.
+        let _published = self.publish(next, std::time::Instant::now());
+    }
+
+    /// Build one vocabulary's suggestion index from the live minter and publish it, inline —
+    /// `ExecutorWork::RebuildSuggestionIndex`.
+    ///
+    /// **The dispatch's own two steps, without the threshold and without the pool**: the same
+    /// `SuggestIndex::build` over the same `values_of` snapshot, submitted to the same channel and
+    /// published by the same [`Self::publish_completed_suggests`], so what a test observes is the
+    /// production path's result rather than a second one. Inline because the caller is blocked on
+    /// it and a test that returned before the swap would race the assertion it exists to make.
+    ///
+    /// A build that fails publishes nothing and is not an error here: the caller's next request
+    /// sees the index it already had, which is the same outcome the dispatch has.
+    #[cfg(feature = "fault-injection")]
+    fn rebuild_suggestion_index_now(&mut self, vocabulary: &str) {
+        let generation = self.generation.load_full();
+        let Some(covered_through) = generation
+            .suggest
+            .get(vocabulary)
+            .map(|live| live.next_seq())
+        else {
+            return;
+        };
+        let Some(minter) = generation.vocabularies.get(vocabulary) else {
+            return;
+        };
+        let values = crate::suggest::values_of(minter);
+        self.suggest_build += 1;
+        let dir = self.suggest_dir.join(vocabulary);
+        let Ok(index) = crate::suggest::SuggestIndex::build(&dir, self.suggest_build, &values, &self.pool)
+        else {
+            return;
+        };
+        let _ = self.suggest_submit.send(crate::suggest::CompletedSuggest {
+            vocabulary: vocabulary.to_string(),
+            index: Arc::new(index),
+            covered_through,
+        });
+        self.publish_completed_suggests();
+    }
+
+    /// Publish every finished rebuild, and report whether any did.
+    ///
+    /// **Its own swap, carrying everything else forward.** No geometry moved, no row is stale and
+    /// no cache key rotates: what changed is which of two structures a value's entries are read out
+    /// of, and both answer identically. `segments_version` and `overlay_version` therefore stand —
+    /// a rebuild that bumped either would invalidate every row projection in the process for a
+    /// change no request can observe.
+    fn publish_completed_suggests(&mut self) -> bool {
+        let mut any = false;
+        while let Ok(completed) = self.suggest_done.try_recv() {
+            let generation = self.generation.load_full();
+            let superseded = generation
+                .suggest
+                .get(&completed.vocabulary)
+                .map(|live| live.base().dir().to_path_buf());
+            let suggest = Arc::new(generation.suggest.with_rebuilt(
+                &completed.vocabulary,
+                completed.index,
+                completed.covered_through,
+            ));
+            let next = Generation {
+                suggest,
+                prefix: generation.prefix.clone(),
+                vocabularies: Arc::clone(&generation.vocabularies),
+                filter_columns: Arc::clone(&generation.filter_columns),
+                segments_version: generation.segments_version,
+                watermark: generation.watermark,
+                bundle: Arc::clone(&generation.bundle),
+                dict: Arc::clone(&generation.dict),
+                postings: Arc::clone(&generation.postings),
+                fragments: Arc::clone(&generation.fragments),
+                external_index: Arc::clone(&generation.external_index),
+                delta_postings: generation.delta_postings.clone(),
+                overlay_version: generation.overlay_version,
+                overlay: Arc::clone(&generation.overlay),
+                buffer: Arc::clone(&generation.buffer),
+                denied: Arc::clone(&generation.denied),
+            };
+            // Nothing acknowledged anything: a rebuild answers no caller, so the token is
+            // dropped here as the coalesce's is.
+            let _published = self.publish(next, std::time::Instant::now());
+            // **After the swap, and unlinking a mapped file is the point.** A request still holding
+            // the superseded generation keeps its pages — the mapping outlives the directory entry
+            // — and a rebuild that deleted before the swap would race a walk against a file whose
+            // name it had just removed.
+            if let Some(dir) = superseded {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+            any = true;
+        }
+        any
     }
 
     /// Apply every completed merge waiting from the pool, and report whether any did.
@@ -5021,6 +5951,8 @@ impl Executor {
             &self.containment_extents,
             &self.tile_index_extents,
             &self.row_column_extents,
+            &self.shape_rows_extents,
+            &self.shape_held_extents,
             &[],
         ) {
             self.health.merge_failures.fetch_add(1, Ordering::Relaxed);
@@ -5038,6 +5970,21 @@ impl Executor {
             .iter()
             .map(|i| i.seg_id.clone())
             .collect();
+        // **The merged segment's shape memberships, before the swap**: its rows are the consumed
+        // segments' rows renumbered, so their pieces do not carry over and the new segment is
+        // resolved whole (`polygon-membership.md` §6.3).
+        for held in self.shapes.levels_of_view(&completed.plan.view) {
+            let (_, cost) = held.resolve(&completed.segment);
+            tracing::info!(
+                layer = %held.layer,
+                level = held.level,
+                view = %completed.plan.view,
+                seg_id = %completed.segment.seg_id,
+                rows_tested = cost.rows_tested,
+                elapsed_ms = cost.elapsed_ms,
+                "a merge resolved its segment against a spatial level's shapes"
+            );
+        }
         let next_bundle = match live.bundle.with_merged(
             &completed.plan.partition,
             &completed.plan.view,
@@ -5073,6 +6020,8 @@ impl Executor {
             // (`filter-index.md` §6.2), and it publishes through its own seam rather than through
             // this path.
             filter_columns: Arc::clone(&live.filter_columns),
+            // A merge changes no value and no title, so the index it holds is still the right one.
+            suggest: Arc::clone(&live.suggest),
             segments_version,
             // A merge moves neither, and both are the live values — see `MergeSpec::watermark`.
             watermark: live.watermark,
@@ -5100,6 +6049,7 @@ impl Executor {
 
         self.row_projection_cache
             .prune_generations_below(segments_version.saturating_sub(KEEP_SUPERSEDED_GENERATIONS));
+        self.prune_region_cache(segments_version);
         self.health.merges.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -5176,11 +6126,13 @@ impl Executor {
     /// request-serving workers for its duration is exactly the maintenance schedule leaking into
     /// the product that decision 0043 forbids.
     ///
-    /// **The request flag is consumed by a refusal but not by a wait.** A gate — poisoned,
-    /// diverged, stepped down — is a state an operator must act on, and re-planning into it every
-    /// tick is the log flood compaction §9 refuses; the request is answered with one warning and
-    /// dropped. A merge or coalesce already in flight is neither a refusal nor a state to act on,
-    /// so the flag stays armed and the next tick tries again once that pass lands.
+    /// **The request flag is consumed by a refusal but not by a suspension**, and the two words
+    /// are kept apart deliberately. A gate — poisoned, diverged, stepped down — is a state an
+    /// operator must act on, and re-planning into it every tick is the log flood compaction §9
+    /// refuses; the request is *refused*, answered with one warning and dropped. A merge or
+    /// coalesce that is *outstanding* — running, or completed and not yet published — is neither,
+    /// so the fold is *suspended*: the flag stays armed and the next tick tries again once that
+    /// pass lands ([`Executor::fold_outstanding`] states why nothing is lost by re-deciding).
     fn dispatch_fold(&mut self, generation: &Arc<Generation>) {
         // A fold this node could not publish is hours of IO spent to produce an orphan. The
         // planner's own gates cover the recoverable postures; this one covers the two that latch.
@@ -5203,6 +6155,13 @@ impl Executor {
             }
             return;
         }
+        // **A completed fold not yet drained excludes a second one, quietly.** Unlike the refusal
+        // above this consumes nothing: publication is one pass away, so a request left armed is
+        // answered by the next tick rather than dropped — the treatment a fold suspended for a
+        // running merge already gets.
+        if self.fold_outstanding() {
+            return;
+        }
         // A request dispatches on its own terms — whatever hour it is and whatever the gauges read
         // — so the schedule is not consulted for one. **That is about attribution rather than
         // about whether the fold happens**: evaluating both would dispatch exactly the same fold,
@@ -5217,12 +6176,11 @@ impl Executor {
         if !requested && scheduled.is_none() {
             return;
         }
-        // **At most one fold, and none while a merge or a coalesce is running.** Their outputs
-        // would be orphaned by the flip and their inputs are the fold's, so starting now would
-        // mean re-reading the corpus to discard it at the rebase check.
-        if self.merge_in_flight.load(Ordering::SeqCst)
-            || self.coalesce_in_flight.load(Ordering::SeqCst)
-        {
+        // **At most one fold, and none while a merge or a coalesce is outstanding** — running, or
+        // completed and not yet published ([`Executor::fold_outstanding`]). Their outputs would be
+        // orphaned by the flip and their inputs are the fold's, so starting now would mean
+        // re-reading the corpus to discard it at the rebase check.
+        if self.merge_outstanding() || self.coalesce_outstanding() {
             return;
         }
 
@@ -5255,7 +6213,26 @@ impl Executor {
         };
 
         let manifest = &generation.bundle.manifest;
-        let scalar_schema = scalar_schema_of(manifest);
+        // **One schema per view the fold will rewrite** — the bundle-wide render tail plus that
+        // view's group-scoped render lanes. A single bundle-wide list dropped a family's lane from
+        // every rewritten segment of a group's view (`views.md` §5).
+        let scalar_schema: std::collections::BTreeMap<String, Vec<(String, ScalarType)>> = plan
+            .views
+            .iter()
+            .map(|view| {
+                (
+                    view.view.clone(),
+                    view_scalar_schema_of(manifest, &view.view),
+                )
+            })
+            .collect();
+        let scoped_from: std::collections::BTreeMap<String, usize> = {
+            let entity_scoped = scalar_schema_of(manifest).len();
+            plan.views
+                .iter()
+                .map(|view| (view.view.clone(), entity_scoped))
+                .collect()
+        };
         let Some(partition_data) = generation.bundle.partitions.get(&plan.partition) else {
             return;
         };
@@ -5277,6 +6254,7 @@ impl Executor {
             identity_key: self.identity_key,
             shard_id: manifest.identity.shard_id,
             scalar_schema,
+            scoped_from,
             // The same never-reused shape a flush's and a merge's `seg_id` have (contracts §2.1).
             // A fold writes into a fresh prefix, so nothing can collide today; the id is still
             // unique because a `seg_id` naming two different segments across a bundle's life is
@@ -5285,6 +6263,18 @@ impl Executor {
             base_postings: Arc::clone(&generation.postings),
             tiers: generation.delta_postings.clone(),
             declared_scalars: manifest.declared_scalars.clone(),
+            // The scoped families, flattened: the attribute pass folds one column per view of
+            // each, and a fold that omitted them wrote a prefix their directories are absent
+            // from (`views.md` §5).
+            scoped_scalars: manifest.scoped_scalars(),
+            // The roster those families' view ids are placed by (decision 0115): a scoped column's
+            // directory carries the incarnation above the build's, so the fold has to write it
+            // where the opener will look.
+            view_incarnations: manifest
+                .views
+                .iter()
+                .map(|v| (v.id.clone(), v.incarnation))
+                .collect(),
             vocabularies: manifest.vocabularies.clone(),
         };
 
@@ -5464,8 +6454,18 @@ impl Executor {
         //
         // ABA-safe because ids are never reused (contracts §2.1), so an artefact still listed is
         // the same artefact the fold consumed. A merge or a coalesce that published under the fold
-        // fails this — which the suspension in `dispatch_merge`/`dispatch_coalesce` makes a
-        // crash-and-race path rather than the steady one.
+        // fails this.
+        //
+        // **Unreachable by construction while the suspension holds, and kept anyway.** No merge or
+        // coalesce can publish under a fold at all: `dispatch_merge` and `dispatch_coalesce` are
+        // the only routes to either, both run from the tick, and both consult
+        // `Executor::fold_outstanding`, which covers the fold from dispatch through publication.
+        // What would make this reachable again is a dispatcher that stopped consulting those
+        // predicates, or a second route to a merge — a control-plane trigger, a second writer. The
+        // check costs one set comparison against a manifest already in hand, on a path that has
+        // just spent hours of IO, and its failure mode is fail-closed where forcing would drop
+        // every row the merge wrote; so it stays as defence in depth rather than as a path with a
+        // known rate.
         let consumed_segments: FxHashSet<(&str, &str)> = plan
             .views
             .iter()
@@ -5510,6 +6510,12 @@ impl Executor {
                     .iter()
                     .any(|extent| extent.dict == consumed.dict)
             })
+            || !plan.entity_terms_extents.iter().all(|consumed| {
+                live_manifest
+                    .entity_terms_extents
+                    .iter()
+                    .any(|extent| extent.terms == consumed.terms)
+            })
         {
             discard("an artefact it consumed is no longer listed in the live manifest");
             return;
@@ -5520,10 +6526,53 @@ impl Executor {
         // Listed order is preserved in every one of these: for segments it is entity order, which
         // `RowSpace::with_extent` requires; for runs it is recency, which decision 0047's
         // newest-first resolution reads.
+        //
+        // **A dead incarnation's segments are carried by nothing** (`views.md` §3.4, decision
+        // 0115): the drop retains the view out of the bundle, so the plan has no base for it and
+        // never consumed its segments — and carrying them would name an incarnation the new
+        // manifest does not declare. This filter is the whole of "reclamation by omission": the
+        // descriptors are left behind with the superseded prefix's files, which the reclaim then
+        // deletes. Without it every fold after a drop of a view that held rows is *discarded* by
+        // the base check below, so compaction stops for the life of the bundle and nothing ever
+        // retires.
+        //
+        // **`(view, incarnation)`, not the view alone.** A dropped key may be created again
+        // (decision 0115), and the recreated view is declared under the same id — so "is this
+        // view still declared" stopped being the question the moment the burn was withdrawn. A
+        // segment stamped with the dead incarnation would otherwise be carried into the fold's
+        // output and the new view would serve the predecessor's points.
+        //
+        // **The `MANIFEST.json` roster decides, not the partition's view map.** Both answer the
+        // same question — the map is retained against the same roster at `Bundle::with_views` —
+        // but only one of them is that question: the map is a cache of open row spaces, and a
+        // later change to how it is built would move this predicate without anyone reading this
+        // line. The roster read here is the same snapshot the new manifest is written from, so
+        // what is carried and what is declared cannot disagree.
+        let live_incarnations: FxHashMap<&str, tessera_types::view::ViewIncarnation> = live
+            .bundle
+            .manifest
+            .views
+            .iter()
+            .map(|v| (v.id.as_str(), v.incarnation))
+            .collect();
+        // **Owned, because the log that reports them outlives this borrow**: the generation is
+        // moved into `pending_reclaim` at step 8, a few lines before the publication is logged.
+        let mut omitted_views: Vec<String> = Vec::new();
+        let mut omitted_segments = 0usize;
         let carried_segments: Vec<&tessera_store::manifest::SegmentDescriptor> = live_manifest
             .segments
             .iter()
             .filter(|d| !consumed_segments.contains(&(d.view.as_str(), d.seg_id.as_str())))
+            .filter(|d| {
+                let live = live_incarnations.get(d.view.as_str()) == Some(&d.incarnation);
+                if !live {
+                    omitted_segments += 1;
+                    if !omitted_views.iter().any(|v| v == &d.view) {
+                        omitted_views.push(d.view.clone());
+                    }
+                }
+                live
+            })
             .collect();
         let carried_tiers: Vec<String> = live_manifest
             .deltas
@@ -5559,6 +6608,16 @@ impl Executor {
             .attr_extents
             .iter()
             .filter(|extent| !consumed_attrs.contains(extent.values.as_str()))
+            // **And nothing of a dead incarnation** (decision 0115), on the segment filter's
+            // argument: a group-scoped column's extents outlive the drop that orphaned them, and
+            // a key created again writes its own column under the same family name.
+            .filter(|extent| {
+                carries_live_view(
+                    &live_incarnations,
+                    extent.view.as_deref(),
+                    extent.incarnation,
+                )
+            })
             .cloned()
             .collect();
         // The record-blob extents take the attribute extents' shape exactly: the fold consumed
@@ -5586,10 +6645,33 @@ impl Executor {
             .iter()
             .map(|extent| extent.dict.as_str())
             .collect();
+        // The transpose's extents, the same shape a third time: pass 4c folded every one its
+        // snapshot named into the new base, and what is carried is the flight's. Identified by the
+        // terms path, `seg_id`-derived and never reused. Dropping a flight entry would leave the
+        // entities that flush minted with *unknown* labels — a drill-down without them and, on the
+        // write path, a join rule with nothing to compare against.
+        let consumed_entity_terms: FxHashSet<&str> = plan
+            .entity_terms_extents
+            .iter()
+            .map(|extent| extent.terms.as_str())
+            .collect();
+        let carried_entity_terms: Vec<tessera_store::manifest::EntityTermsExtent> = live_manifest
+            .entity_terms_extents
+            .iter()
+            .filter(|extent| !consumed_entity_terms.contains(extent.terms.as_str()))
+            .cloned()
+            .collect();
         let carried_texts: Vec<tessera_store::manifest::TextExtent> = live_manifest
             .text_extents
             .iter()
             .filter(|extent| !consumed_texts.contains(extent.dict.as_str()))
+            .filter(|extent| {
+                carries_live_view(
+                    &live_incarnations,
+                    extent.view.as_deref(),
+                    extent.incarnation,
+                )
+            })
             .cloned()
             .collect();
 
@@ -5603,7 +6685,18 @@ impl Executor {
         // cleared the live row space's own floor; this refuses to be the place it is assumed.
         for descriptor in &carried_segments {
             let Some(view) = plan.views.iter().find(|s| s.view == descriptor.view) else {
-                discard("a carried-forward segment names a view the fold has no base for");
+                // **A view that arrived during the flight**, and the only way to reach this now:
+                // a view created and flushed since the plan was taken has a segment and no base
+                // in it. That is transient and self-healing — the next fold plans over a bundle
+                // that holds the view, and nothing is lost meanwhile but this fold's work — which
+                // is why it is said here rather than left under the sentence below. The other
+                // reader of this line was a **dropped** view, whose segments the carry-forward
+                // now omits (`views.md` §3.4), and that one did not self-heal: it discarded every
+                // fold of the bundle for ever.
+                discard(
+                    "a carried-forward segment names a view created since the plan was taken, so \
+                     the fold has no base for it; the next fold plans over a bundle that has it",
+                );
                 return;
             };
             if descriptor.entity_lo < view.permutation_bound {
@@ -5746,7 +6839,17 @@ impl Executor {
         // replace-on-mismatch and this fold moves the prefix, so it would go anyway; the *held*
         // tile index and column would not, because a level that flipped is never asked for its old
         // form again and nothing would ever claim the entry.
-        let layouts = self.choose_layouts(&spaces, &pending_retirement);
+        let fold_segments = fold_segments(&to_prefix_dir, &plan.partition, &completed.segments);
+        // **Which incarnation each planned view is** (decision 0115), so every derived structure
+        // this pass writes is stamped with the one whose row space it was written over. Taken
+        // from the plan rather than from the live manifest: the plan is what the row spaces above
+        // came from, and a view created since it was taken has no space here to describe.
+        let fold_incarnations: FxHashMap<String, tessera_types::view::ViewIncarnation> = plan
+            .views
+            .iter()
+            .map(|view| (view.view.clone(), view.incarnation))
+            .collect();
+        let layouts = self.choose_layouts(&spaces, &pending_retirement, &fold_segments);
         for (layer, level, chosen) in &layouts {
             if self.live.record_layout(layer, *level, *chosen) {
                 self.artifact_projections.forget_level(layer, *level);
@@ -5759,6 +6862,7 @@ impl Executor {
             &to_prefix_dir,
             &plan.partition,
             manifest_n,
+            &fold_incarnations,
             &spaces,
             &layouts,
             &pending_retirement,
@@ -5770,9 +6874,31 @@ impl Executor {
             &to_prefix_dir,
             &plan.partition,
             manifest_n,
+            &fold_incarnations,
             &spaces,
             &layouts,
             &pending_retirement,
+            &fold_segments,
+        );
+        // **And the row forms of the spatial levels the columns do not cover**, so the next open
+        // claims what this fold just resolved instead of resolving it again
+        // (`polygon-membership.md` §6.3; owner ruling 2026-08-29).
+        let shape_rows = self.write_shape_rows(
+            &to_prefix_dir,
+            &plan.partition,
+            manifest_n,
+            &fold_incarnations,
+            &row_columns,
+            &pending_retirement,
+            &fold_segments,
+        );
+        let shape_held = self.write_shape_held(
+            &to_prefix_dir,
+            &plan.partition,
+            manifest_n,
+            &fold_incarnations,
+            &pending_retirement,
+            &fold_segments,
         );
 
         // ---- step 3b: the report, before anything retires ---------------------------------------
@@ -5826,6 +6952,10 @@ impl Executor {
         // The online publication path takes the same posture for the same reason.
         let (registered_layers, registered_tombstones, registry_low_water) =
             self.live.registry_for_publication();
+        // The roster, from the live roster rather than from the fold's own inputs, on exactly the
+        // argument above it: the manifest a fold planned against may be several publications
+        // behind, and a view created since must not be dropped by the publication that lands.
+        let (created_views, dead_view_incarnations) = self.live.roster_for_publication();
 
         let mut segments_manifest = SegmentsManifest {
             // The flight's text extents, and the pass merged every other one into the new base
@@ -5850,6 +6980,14 @@ impl Executor {
             entity_id_low_water: live_manifest.entity_id_low_water.min(registry_low_water),
             layers: registered_layers,
             layer_tombstones: registered_tombstones,
+            views: created_views,
+            // **Emptied, because the fold has just written the list into `MANIFEST.json`.** The
+            // new bundle manifest carries every `(family, view)` the live one had folded into
+            // `scoped_scalars[..].views`, and the fold wrote a column for each — so restating them
+            // here would be a second copy of a fact the prefix's own manifest now states
+            // (`views.md` §5).
+            scoped_columns: Vec::new(),
+            dead_view_incarnations,
             // **The pass's own output, not the live list.** The paths are prefix-relative and the
             // fold publishes a *new* prefix, so what step 3a wrote is the only list that names
             // files this prefix contains. The content extents beside it are carried by link, their
@@ -5863,6 +7001,8 @@ impl Executor {
             containment_extents: Vec::new(),
             tile_index_extents: Vec::new(),
             row_column_extents: Vec::new(),
+            shape_rows_extents: Vec::new(),
+            shape_held_extents: Vec::new(),
             artifact_record_extents: self.artifact_record_extents.clone(),
             segments,
             deltas: carried_tiers.clone(),
@@ -5879,6 +7019,7 @@ impl Executor {
             // halves are written here, in one manifest write.
             attr_extents: carried_attrs.clone(),
             record_extents: carried_records.clone(),
+            entity_terms_extents: carried_entity_terms.clone(),
             external_id_runs,
             locator_extents: carried_locators.clone(),
             tombstones: Vec::new(),
@@ -5945,8 +7086,10 @@ impl Executor {
         let mut carried_rels: BTreeSet<String> = BTreeSet::new();
         for descriptor in &carried_segments {
             let segment_prefix = format!(
-                "partitions/{}/views/{}/segments/{}",
-                plan.partition, descriptor.view, descriptor.seg_id
+                "partitions/{}/{}/segments/{}",
+                plan.partition,
+                tessera_store::view_rel(&descriptor.view),
+                descriptor.seg_id
             );
             for name in ["morton.u32", "columns.arrow"] {
                 carried_rels.insert(format!("{segment_prefix}/{name}"));
@@ -6001,6 +7144,14 @@ impl Executor {
             carried_rels.insert(extent.dict.clone());
             carried_rels.insert(extent.postings.clone());
             carried_rels.insert(extent.presence.clone());
+        }
+        // All three files of every carried transpose extent, under the same rule: the offsets
+        // address the terms and the has-row bitmap ranks them, so any one missing is a refusal at
+        // open rather than a shorter label set (`tessera_store::entity_terms`).
+        for extent in &carried_entity_terms {
+            carried_rels.insert(extent.hasrow.clone());
+            carried_rels.insert(extent.offsets.clone());
+            carried_rels.insert(extent.terms.clone());
         }
         carried_rels.extend(live_manifest.dict_extents.iter().map(|e| e.path.clone()));
         for rel in &carried_rels {
@@ -6085,6 +7236,8 @@ impl Executor {
             &containment,
             &tile_indexes,
             &row_columns,
+            &shape_rows,
+            &shape_held,
             &pending_retirement,
         ) {
             discard(&format!(
@@ -6147,6 +7300,8 @@ impl Executor {
         self.containment_extents = segments_manifest.containment_extents.clone();
         self.tile_index_extents = segments_manifest.tile_index_extents.clone();
         self.row_column_extents = segments_manifest.row_column_extents.clone();
+        self.shape_rows_extents = segments_manifest.shape_rows_extents.clone();
+        self.shape_held_extents = segments_manifest.shape_held_extents.clone();
         *lock_recover(&self.health.last_fold_report) = degraded;
 
         // ---- steps 5 and 6: open the new prefix, then one swap ---------------------------------
@@ -6310,6 +7465,17 @@ impl Executor {
             staircase_rss,
             attr_bytes_read = completed.attr_bytes_read,
             attr_bytes_written = completed.attr_bytes_written,
+            // **What the fold reclaimed by leaving it behind** (`views.md` §3.4). A dropped view's
+            // row space goes with the superseded prefix and nothing else records that it did: the
+            // mechanism is a deliberate omission, so an operator who cannot see it here cannot see
+            // it at all. Zero on every fold of a bundle nothing was dropped from, which is nearly
+            // all of them.
+            dropped_views = %if omitted_views.is_empty() {
+                "none".to_string()
+            } else {
+                omitted_views.join(",")
+            },
+            dropped_view_segments = omitted_segments,
             "a compaction fold published: the bundle is one base segment per partition-view, one \
              base postings tier, one external-id run and one locator, plus whatever landed during \
              its flight"
@@ -6500,7 +7666,10 @@ impl Executor {
             .iter()
             .zip(&completed.plan.attrs)
             .map(|(attr, window)| crate::filter::CoalescedWindow {
-                column: attr.extent.column.clone(),
+                column: crate::filter::extent_column_name(
+                    &attr.extent.column,
+                    attr.extent.view.as_deref(),
+                ),
                 consumed: window.extents.iter().map(|e| e.values.clone()).collect(),
                 values_rel: attr.extent.values.clone(),
                 values: Arc::clone(&attr.values),
@@ -6518,7 +7687,10 @@ impl Executor {
             .map(|(extent, window)| crate::filter::CoalescedTextWindow {
                 consumed: window.extents.iter().map(|e| e.dict.clone()).collect(),
                 paths: crate::filter::TextExtentPaths {
-                    column: extent.column.clone(),
+                    column: crate::filter::extent_column_name(
+                        &extent.column,
+                        extent.view.as_deref(),
+                    ),
                     dict_rel: extent.dict.clone(),
                     dict: prefix_dir.join(&extent.dict),
                     postings: prefix_dir.join(&extent.postings),
@@ -6526,7 +7698,108 @@ impl Executor {
                 },
             })
             .collect();
-        let filter_columns = match live.filter_columns.with_coalesced(&windows, &text_windows) {
+        // **The transpose's stack is re-derived from the rebased manifest**, not patched — the
+        // form `delta_postings` below takes, and for its reason: re-deriving is the one shape that
+        // cannot drift from what a restart would open. It is affordable here where it would not be
+        // per flush: the base's `hasrow` is a run-container bitmap and its other two files are
+        // mapped rather than read, and a coalesce fires once per `width` ticks. `None` where the
+        // axis did not run, in which case the live stack rides through untouched.
+        let entity_terms = if completed.terms.is_none() {
+            None
+        } else {
+            let partition_dir = prefix_dir
+                .join("partitions")
+                .join(&completed.plan.partition);
+            let extents: Vec<tessera_store::EntityTermsExtentPaths> = manifest
+                .entity_terms_extents
+                .iter()
+                .map(|e| tessera_store::EntityTermsExtentPaths {
+                    hasrow: prefix_dir.join(&e.hasrow),
+                    offsets: prefix_dir.join(&e.offsets),
+                    terms: prefix_dir.join(&e.terms),
+                })
+                .collect();
+            match tessera_store::EntityTermsStack::open(
+                Some(&partition_dir.join(tessera_store::ENTITY_TERMS_DIR)),
+                &extents,
+            ) {
+                Ok(stack) => Some(Arc::new(stack)),
+                Err(e) => {
+                    self.health
+                        .coalesce_failures
+                        .fetch_add(1, Ordering::Relaxed);
+                    tracing::error!(
+                        error = %e,
+                        "ALARM: a completed coalesce's entity→term extent would not compose into \
+                         a stack; discarding it rather than publishing a manifest naming a layer \
+                         this process cannot serve. Its files are orphans and every consumed \
+                         entry still stands"
+                    );
+                    return;
+                }
+            }
+        };
+        // **The record axis's stack is re-derived from the rebased manifest too**, on exactly the
+        // transpose's rule above: a coalesce that folds a window of record extents into one must
+        // leave the live reader probing the extent it wrote and not the ones it consumed, or the
+        // process serves from layers its own manifest no longer names until a restart. Affordable
+        // for the same reason: the layers are memory-mapped, and a coalesce fires once per
+        // `width` ticks. `None` where the axis did not run, and the live stack rides through.
+        let records =
+            if completed.record.is_none() {
+                None
+            } else {
+                let partition_dir = prefix_dir
+                    .join("partitions")
+                    .join(&completed.plan.partition);
+                // The schema decides whether there is a base, exactly as it does at open: a build
+                // writes `attrs/record` only where a column has no other home. Derived rather than
+                // probed for, so a missing base refuses instead of reading as "those entities have no
+                // record".
+                let blob_resident =
+                    live.bundle.manifest.declared_scalars.iter().any(|d| {
+                        crate::filter::blob_resident(d, &live.bundle.manifest.vocabularies)
+                    });
+                let record_dir = partition_dir.join("attrs").join("record");
+                // **Both lists, one stack**, as the open composes them: an artifact's content extents
+                // hold the same format and the same reader, and the two never share an entity.
+                let extents: Vec<tessera_filter::RecordExtentPaths> = manifest
+                    .record_extents
+                    .iter()
+                    .chain(manifest.artifact_record_extents.iter())
+                    .map(|e| tessera_filter::RecordExtentPaths {
+                        blocks: prefix_dir.join(&e.blocks),
+                        hasrow: prefix_dir.join(&e.hasrow),
+                        directory: prefix_dir.join(&e.directory),
+                    })
+                    .collect();
+                match tessera_filter::RecordStack::open(
+                    blob_resident.then_some(record_dir.as_path()),
+                    &extents,
+                    live.filter_columns.access(),
+                ) {
+                    Ok(stack) => Some(Arc::new(stack)),
+                    Err(e) => {
+                        self.health
+                            .coalesce_failures
+                            .fetch_add(1, Ordering::Relaxed);
+                        tracing::error!(
+                            error = %e,
+                            "ALARM: a completed coalesce's record extent would not compose into a \
+                             stack; discarding it rather than publishing a manifest naming a \
+                             layer this process cannot serve. Its files are orphans and every \
+                             consumed entry still stands"
+                        );
+                        return;
+                    }
+                }
+            };
+        let filter_columns = match live.filter_columns.with_coalesced(
+            &windows,
+            &text_windows,
+            entity_terms,
+            records,
+        ) {
             Ok(columns) => Arc::new(columns),
             Err(e) => {
                 self.health
@@ -6564,6 +7837,8 @@ impl Executor {
             &self.containment_extents,
             &self.tile_index_extents,
             &self.row_column_extents,
+            &self.shape_rows_extents,
+            &self.shape_held_extents,
             &[],
         ) {
             self.health
@@ -6656,6 +7931,8 @@ impl Executor {
             // values — the same set of `(entity, value)` pairs in fewer files, so a request holding
             // the old and one holding the new agree on every answer.
             filter_columns,
+            // A coalesce is content-preserving in value space too.
+            suggest: Arc::clone(&live.suggest),
             // **Unchanged, and this is the whole of D2.** Row space did not move, so no
             // projection is stale and no cache key may rotate.
             segments_version: live.segments_version,
@@ -6750,6 +8027,10 @@ impl Executor {
             }
         };
         let render_indices: Vec<usize> = manifest.render_indices().collect();
+        // **The group-scoped families, by view** (`views.md` §5), taken once for the dispatch: the
+        // schema below is per view, because a family's lanes and columns are its group's views'
+        // and no others'.
+        let scoped_by_view = scoped_families_by_view(manifest);
         // **One plan per dispatch.** Every context a dispatch builds takes `next_n` from the same
         // unchanging `partition_data`, so they would all write `SEGMENTS-<next_n>.json` at one
         // path and only one could commit. Dispatching one makes that structurally unreachable and
@@ -6781,6 +8062,34 @@ impl Executor {
         let mut contexts = Vec::with_capacity(1);
         {
             let Some(view_data) = partition_data.views.get(&view) else {
+                return;
+            };
+            // **This view's frame** (decision 0040): the flush quantises against the extent the
+            // view's own positions were placed in, and a bundle-wide one would put a second
+            // view's rows on the first's grid. The manifest is the authority for both — a plan
+            // naming a view the manifest does not declare is dropped here rather than flushed
+            // against a guessed frame, which is the same refusal `accept_ingest` makes upstream.
+            // **And this view's incarnation** (decision 0115), resolved from the same manifest
+            // and on the same rule: a plan naming a view the manifest does not declare is
+            // dropped, never flushed under a guess. The stamp goes on the segment, on every
+            // scoped column this flush writes, and on every extent — which is what stops a key
+            // created again from adopting them.
+            let Some(incarnation) = manifest.incarnation_of(&view) else {
+                tracing::error!(
+                    view = %view,
+                    "a flush plan names a view this bundle's manifest does not declare, so its \
+                     incarnation cannot be resolved; the plan is dropped and the buffer is \
+                     retained"
+                );
+                return;
+            };
+            let Some(quantisation) = manifest.quantisation_of(&view) else {
+                tracing::error!(
+                    view = %view,
+                    "a flush plan names a view this bundle's manifest does not declare, so \
+                     there is no frame to quantise its rows against; the plan is dropped \
+                     and the buffer is retained"
+                );
                 return;
             };
             let Ok(row_base) = u32::try_from(view_data.row_space.total_rows()) else {
@@ -6817,12 +8126,104 @@ impl Executor {
             // sequence it was planned against is exactly that: contracts §2.1's never-reused
             // property rests on this plus the attempt counter, as before.
             let planned_at_n = partition_data.segments_n;
+            // **This view's scoped families, and where each one's value sits in a buffered row's
+            // `scoped` list** (`views.md` §5). Positional against the group's own manifest order,
+            // which is the order `/control/ingest` parsed the batch against — one derivation,
+            // `scoped_families_by_view`, so the two cannot come to disagree about which value
+            // belongs to which family.
+            let families = scoped_by_view.get(&view).cloned().unwrap_or_default();
+            // **Where those families' columns live** — the owner's view of the same key, which is
+            // `view` itself under the owning group's own views (decision 0116).
+            let scoped_view = scoped_owner_view_of(manifest, &view);
+            let Some(scoped_incarnation) = manifest.incarnation_of(&scoped_view) else {
+                // Fail closed (decision 0115): an owner view the manifest cannot place is a
+                // bundle whose halves disagree, and flushing under a guessed incarnation is how
+                // a dropped view's predecessor adopts rows.
+                tracing::error!(
+                    view = %scoped_view,
+                    "ALARM: no incarnation for the owner view; no flush is planned this tick"
+                );
+                return;
+            };
+            let scoped_schema: Vec<crate::flush::ScopedColumnSpec> = match families
+                .iter()
+                .enumerate()
+                .map(|(index, family)| {
+                    let text = family.arrow_type == ScalarType::Text;
+                    let analyser = if text {
+                        Some(std::sync::Arc::new(analyser_of(family)?))
+                    } else {
+                        None
+                    };
+                    Ok(crate::flush::ScopedColumnSpec {
+                        index,
+                        name: family.name.clone(),
+                        ty: family.arrow_type,
+                        category: family.vocabulary.is_some(),
+                        filterable: crate::filter::scoped_is_filterable(family),
+                        has_value_column: crate::filter::scoped_has_value_column(family),
+                        render: family.render,
+                        has_base: family.views.contains(&scoped_view),
+                        analyser,
+                    })
+                })
+                .collect::<Result<Vec<_>, crate::flush::FlushFailed>>()
+            {
+                Ok(schema) => schema,
+                Err(e) => {
+                    // The same refusal `text_schema_of` makes, for its reason: a flush that
+                    // indexed prose with a pipeline the base was not built by leaves one column
+                    // whose two layers disagree about what a word is.
+                    self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
+                    tracing::error!(
+                        error = %e,
+                        "ALARM: a group-scoped text family's analyser is not one this binary \
+                         carries; no flush is dispatched, and the buffer is retained"
+                    );
+                    return;
+                }
+            };
+            // **The lanes this view's rows carry.** Two cases, and the split is which side of the
+            // family's `views` list this flush is on.
+            //
+            // Under a view of the family's **own** group, every rendered family of the group gets
+            // a lane whether or not the manifest already lists the view: this flush is what gives
+            // the view its column, and a lane withheld until the manifest agreed would drop the
+            // very batch that acquired it. Publication adds the pair, so every later flush, merge
+            // and fold of this view derives the same list from `view_scalar_schema_of`.
+            //
+            // A sharing group's view is on the same side of that split since decision 0116 — it
+            // writes the family through the key it shares — so it takes the same branch and the
+            // same argument. Under any other view the read side's list is exactly right: a view in
+            // no scope at all owes a lane of absences rather than no lane, because a segment
+            // missing one is a segment its own view's rewriters would have to guess about.
+            let scoped_render: Vec<tessera_store::manifest::ScopedScalar> = if families.is_empty() {
+                crate::viewport::scoped_render_families(manifest, &view)
+                    .into_iter()
+                    .cloned()
+                    .collect()
+            } else {
+                families.iter().filter(|f| f.render).cloned().collect()
+            };
+
+            // Where each lane's value sits in a buffered row's `scoped` list, `None` where this
+            // view writes none of them — since decision 0116 that is a view whose key is in no
+            // scope at all, a sharing group's writing the family through the key it shares, and
+            // any family the batch could not have named.
+            let scoped_render_indices: Vec<Option<usize>> = scoped_render
+                .iter()
+                .map(|lane| families.iter().position(|f| f.name == lane.name))
+                .collect();
             contexts.push((
                 plan,
                 crate::flush::FlushContext {
                     prefix_dir: self.prefix_dir(generation),
                     partition: partition.clone(),
                     view: view.clone(),
+                    scoped_view,
+                    scoped_incarnation,
+                    incarnation,
+
                     // **`seg_id`s are never reused** (contracts §2.1), which is what makes the
                     // merge rebase ABA-safe — and the attempt counter is not decoration. `next_n`
                     // alone repeats whenever a flush is planned twice before it publishes, and the
@@ -6835,9 +8236,28 @@ impl Executor {
                     row_base,
                     identity_key: self.identity_key,
                     shard_id: manifest.identity.shard_id,
-                    quantisation: manifest.quantisation,
-                    scalar_schema: scalar_schema.clone(),
+                    quantisation,
+                    // **This view's schema, entity-scoped tail then scoped render lanes** — the
+                    // same list a merge and a fold of this view take (`view_scalar_schema_of`),
+                    // so a segment written by any of the three carries the same columns.
+                    //
+                    // **The two derivations agree only because a `members` group can never own a
+                    // family** (`Manifest::validate_groups` refuses one, `views.md` §3.3): under a
+                    // view whose key is in a scope — the owner's own, or a sharing group's of the
+                    // same key — `scoped_render` is the owning group's rendered families in
+                    // manifest order, which is exactly what `scoped_render_families` yields there
+                    // once publication has put the owner view id on each family's list; under any
+                    // other view the branch above *is* that function. Change either site — or that
+                    // refusal — and the third has to move with it, or a flush writes a tail its own
+                    // view's rewriters cannot read.
+                    scalar_schema: {
+                        let mut schema = scalar_schema.clone();
+                        schema.extend(scoped_render.iter().map(|f| (f.name.clone(), f.arrow_type)));
+                        schema
+                    },
                     render_indices: render_indices.clone(),
+                    scoped_schema,
+                    scoped_render: scoped_render_indices,
                     filter_schema: filter_schema.clone(),
                     record_schema: record_schema.clone(),
                     text_schema: text_schema.clone(),
@@ -6845,6 +8265,7 @@ impl Executor {
                     novel_descriptors,
                     max_distinct_terms: self.max_distinct_terms,
                     prefix: generation.prefix.clone(),
+                    shapes: self.shapes.levels_of_view(&view),
                 },
             ));
         }
@@ -7372,8 +8793,8 @@ impl Executor {
     /// The specified third trigger is `opened_at.elapsed() >= commit_window_max_age_ms`, whose
     /// stated purpose is to stop a lone ingest on an idle server waiting the full window age
     /// "for company that is not coming". **It is declined, and `ingest.commit_window_max_age_ms`
-    /// is deleted** (`docs/decisions/0034-the-window-does-not-linger.md` carries the no-linger
-    /// argument; `docs/decisions/0045-inert-config-keys-are-deleted.md` the key's removal).
+    /// is deleted** (docs/decisions/0034-the-window-does-not-linger.md carries the no-linger
+    /// argument; docs/decisions/0045-inert-config-keys-are-deleted.md the key's removal).
     ///
     /// An age bound is the safety cap on a **linger** — "having drained the queue empty, wait for
     /// more" — and this executor has no linger. A window is a local of this function and every exit
@@ -7480,6 +8901,41 @@ impl Executor {
                     }
                     let _ = respond.send(self.publish_geometry(publication));
                     self.health.note_work_refused();
+                    did_work = true;
+                    continue;
+                }
+                #[cfg(feature = "fault-injection")]
+                ExecutorWork::ForgetSuggestionIndex {
+                    vocabulary,
+                    respond,
+                } => {
+                    // The open window closes first, on the arm above's reasoning exactly: this
+                    // swaps the whole generation, and doing it under a window that has not applied
+                    // its ingest would have the window's own swap carry the pre-drop indexes
+                    // forward — losing the drop, and leaving the test asserting against a state it
+                    // asked to leave.
+                    if !window.is_empty() {
+                        window = self.close_and_reopen(window);
+                    }
+                    self.forget_suggestion_index(&vocabulary);
+                    let _ = respond.send(());
+                    did_work = true;
+                    continue;
+                }
+                #[cfg(feature = "fault-injection")]
+                ExecutorWork::RebuildSuggestionIndex {
+                    vocabulary,
+                    respond,
+                } => {
+                    // The open window closes first, on the arm above's reasoning: the rebuild reads
+                    // the live minter, and a window holding an ingest that mints has not published
+                    // its value yet — so a rebuild taken under it would omit exactly the value the
+                    // caller asked for the rebuild to pick up.
+                    if !window.is_empty() {
+                        window = self.close_and_reopen(window);
+                    }
+                    self.rebuild_suggestion_index_now(&vocabulary);
+                    let _ = respond.send(());
                     did_work = true;
                     continue;
                 }
@@ -7644,22 +9100,27 @@ impl Executor {
         containment: &[tessera_store::manifest::ContainmentExtent],
         tile_indexes: &[tessera_store::manifest::TileIndexExtent],
         row_columns: &[tessera_store::manifest::RowColumnExtent],
+        shape_rows: &[tessera_store::manifest::ShapeRowsExtent],
+        shape_held: &[tessera_store::manifest::ShapeHeldExtent],
         pending_retirement: &[(String, u32)],
     ) -> Result<(), ManifestCommitRefused> {
-        let (level_versions, containment_extents, tile_index_extents, row_column_extents) =
-            self.live.with_artifacts(|store| {
-                artifact_coordinates(
-                    store,
-                    containment,
-                    tile_indexes,
-                    row_columns,
-                    pending_retirement,
-                )
-            });
-        next.level_versions = level_versions;
-        next.containment_extents = containment_extents;
-        next.tile_index_extents = tile_index_extents;
-        next.row_column_extents = row_column_extents;
+        let coordinates = self.live.with_artifacts(|store| {
+            artifact_coordinates(
+                store,
+                containment,
+                tile_indexes,
+                row_columns,
+                shape_rows,
+                shape_held,
+                pending_retirement,
+            )
+        });
+        next.level_versions = coordinates.level_versions;
+        next.containment_extents = coordinates.containment;
+        next.tile_index_extents = coordinates.tile_indexes;
+        next.row_column_extents = coordinates.row_columns;
+        next.shape_rows_extents = coordinates.shape_rows;
+        next.shape_held_extents = coordinates.shape_held;
         crate::geometry::check_manifest_publishable(live_manifest, next)
             .map_err(ManifestCommitRefused::Regresses)?;
         tessera_store::write_segments_manifest(prefix_dir, partition, n, next)
@@ -7845,9 +9306,38 @@ impl Executor {
         // apply below will clone from, on the same thread, so the deleted-holder exemption cannot
         // race its own delete.
         let generation = self.generation.load();
-        let collisions = self
-            .live
-            .established_collisions(&rows, |e| generation.overlay.is_deleted(e));
+        let mut rows = rows;
+        let collisions = self.live.established_collisions(
+            &mut rows,
+            |e| generation.overlay.is_deleted(e),
+            |entity, view| {
+                // The same predicate the handler answered with, read from the generation this
+                // apply will clone from: the view's permutation, and the buffer beside it for the
+                // rows an earlier window accepted and no flush has taken yet.
+                generation.bundle.partitions.values().any(|partition| {
+                    partition
+                        .views
+                        .get(view)
+                        .is_some_and(|data| data.row_space.row_of(entity).is_some())
+                }) || generation.buffer.contains_in_view(entity, view)
+            },
+        );
+        // **The join rule's arms, on the one thread that settles join-ness** (`views.md` §4, §5;
+        // decision 0116). They used to run in `/control/ingest`'s handler, a whole queue drain
+        // before `established_collisions` above decided which rows are joins — so a row whose
+        // holder was established in between was admitted as a join having passed no arm at all.
+        // One authoritative site, and the refusal text is the handler's own so the bodies are
+        // byte-identical to what the earlier site answered. `settle_joins` also completes an
+        // accepted join — dropping its descriptors and terms, backfilling its omitted `render`
+        // values — because that is the same per-row pass over the same sources.
+        if collisions == 0 {
+            if let Err(detail) = settle_joins(&generation, &mut rows) {
+                drop(generation);
+                self.ack_failed(&respond, ExecError::JoinRefused { detail });
+                self.health.note_work_refused();
+                return None;
+            }
+        }
         drop(generation);
         if collisions > 0 {
             self.ack_failed(
@@ -7876,7 +9366,279 @@ impl Executor {
             waiters: vec![respond],
         })
     }
+}
 
+/// Settle every joining row of one batch, whose join-ness `established_collisions` has just decided
+/// (`views.md` §4, §5; decision 0116) — the **join rule**'s three arms, and then the completion an
+/// accepted join owes.
+///
+/// `Err` is the refusal the caller is answered with — a `409`, whole batch without effect, taken
+/// before the WAL append so a refused batch leaves no record. The text is what
+/// `/control/ingest`'s handler answered with until 2026-09-01, byte for byte: the site moved and
+/// the body did not, so a caller cannot tell one from the other and the byte-identity tests hold.
+///
+/// **Why all three are here and none in the handler.** A joining row carries geometry, and — for a
+/// scoped family — the cell its key addresses. Everything else it might name is already decided:
+/// the entity's label, and its entity-scoped attributes. What each arm checks is that the caller is
+/// not trying to change one of those through a second view's row. The handler could ask the same
+/// questions, and did, but it asked them of an answer a queue drain old: a row promoted to a join
+/// between the handler's pass and this one passed no arm at all, which is the race this collapse
+/// closes.
+///
+/// **A row index and a column name reach the caller; nothing else does.** No entity id, no external
+/// id and no value on either side (**I10**, and `error.rs`'s standing rule about caller data in
+/// bodies).
+///
+/// **One pass, because the arms and the completion read the same sources.** A joining row's
+/// buffered row is fetched once, its record-blob row is decompressed at most once
+/// ([`crate::session::BlobRow`]) however many blob-resident columns ask for it, and the descriptor
+/// drop and the render backfill happen in the same visit. Splitting them cost a second lookup per
+/// row and a decompression per blob column per site (review finding F4).
+fn settle_joins(generation: &Generation, rows: &mut [UnallocatedRow]) -> Result<(), String> {
+    if rows.iter().all(|row| row.join.is_none()) {
+        return Ok(());
+    }
+    let manifest = &generation.bundle.manifest;
+    let declared = &manifest.declared_scalars;
+    // One derivation per batch, not per row: every row of a batch names one view, and this is the
+    // list its `scoped` tail was parsed positionally against at the boundary.
+    let view = rows.first().map(|row| row.view.as_str()).unwrap_or("");
+    let scoped_families = scoped_families_of_view(manifest, view);
+    let owner_view = scoped_owner_view_of(manifest, view);
+    // The cell's key, for the refusal — the half of the owner view id a caller spelled, and never
+    // the owning group, which a sharing group's caller has no business learning from a refusal.
+    let key = owner_view
+        .split_once(tessera_store::GROUP_SEPARATOR)
+        .map(|(_, key)| key)
+        .unwrap_or(owner_view.as_str())
+        .to_string();
+
+    for (index, row) in rows.iter_mut().enumerate() {
+        let Some(entity) = row.join else {
+            continue;
+        };
+        let buffered = generation.buffer.get(entity);
+        // Read at most once for this row, and only if a blob-resident column asks.
+        let mut blob = crate::session::BlobRow::default();
+        // **The label arm reads the buffer first and the transpose after it, and both are exact.**
+        // The buffer holds the entity's own row until its flush; past that, `entities/terms/`
+        // holds the same set in promoted ordinals (contracts §2.4).
+        //
+        // A novel descriptor resolves to a process-local extension id, which no stored ordinal can
+        // equal, so a batch naming a label the deployment has never interned is a mismatch — which
+        // is right: the flushed entity cannot be carrying it.
+        let held_terms: Option<Vec<u32>> = match &buffered {
+            Some(buffered) => Some(buffered.terms.iter().map(|t| t.raw()).collect()),
+            None => crate::session::flushed_terms_of(generation, entity)
+                .map(|terms| terms.iter().map(|t| t.raw()).collect()),
+        };
+        if let Some(mut held_terms) = held_terms {
+            let mut supplied_terms: Vec<u32> = row.terms.iter().map(|t| t.raw()).collect();
+            supplied_terms.sort_unstable();
+            supplied_terms.dedup();
+            held_terms.sort_unstable();
+            held_terms.dedup();
+            if supplied_terms != held_terms {
+                return Err(format!(
+                    "row {index} joins an entity this deployment already holds, under a different \
+                     access label. A re-label is a delete plus a re-ingest (decision 0047), never \
+                     a field carried in on a second view's row: the alternative is a widening with \
+                     no overlay entry, or a narrowing that bypasses the deny lanes (views §4)"
+                ));
+            }
+        }
+        // **The attribute arm reads the buffer first and the stored value after it, and both are
+        // exact** (2026-08-31, closing `views.md` §4's last ⊘). An entity-scoped attribute is one
+        // value per entity, so a joining row must carry the stored value or leave it absent. A
+        // differing one is refused naming the column — silently keeping either value would make
+        // the answer depend on which view a filter was asked under, which is exactly what a
+        // *scoped* attribute is for and this is not one.
+        //
+        // The two sources are compared by the *same* equality, on values normalised to the shape a
+        // batch carries (`stored_as_wal`), so the buffered and the flushed arm produce
+        // byte-identical refusals and cannot come to disagree about what "the same value" means.
+        for (position, d) in declared.iter().enumerate() {
+            let Some(supplied) = row.scalars.get(position) else {
+                continue;
+            };
+            let held = match &buffered {
+                Some(buffered) => buffered.scalars.get(position).cloned(),
+                // `None` here is *no value held* and *could not find out* alike; see
+                // `session::flushed_scalar_of` for why one answer serves both.
+                None => crate::session::flushed_scalar_of(generation, entity, position, &mut blob),
+            };
+            let Some(held) = held else {
+                continue;
+            };
+            if crate::session::scalar_is_absent(&held, d) {
+                continue;
+            }
+            // **An omitted value is not a disagreement**, and is not written through as an absence
+            // either: the backfill below fills a `render` column's omitted slot from the entity's
+            // stored value, once join-ness is settled.
+            if crate::session::scalar_is_absent(supplied, d) || held == *supplied {
+                continue;
+            }
+            return Err(format!(
+                "row {index} joins an entity this deployment already holds, with a different \
+                 value for column '{}'. An entity-scoped attribute is one value per entity, so a \
+                 joining row byte-matches the stored value or omits it (views §4, §5)",
+                d.name
+            ));
+        }
+        // **The scoped cell arm: one value per `(entity, attribute, key)`, whichever door wrote it**
+        // (`views.md` §5, decision 0116). A scoped value is not the entity's, so the two arms above
+        // do not reach it; it is the *cell's*, and the cell a joining row addresses may already hold
+        // a value — put there through the owning group's view, or through any group sharing those
+        // views, in this window or a previous one.
+        //
+        // Three answers, and the middle one is what makes the two doors safe:
+        //
+        // - the cell is empty, or this row names no value for it → the row writes it;
+        // - the cell holds the **same** value → the row's copy is dropped. One claimant per cell, so
+        //   the extents stay disjoint in entity space and the composition has nothing to refuse;
+        //   this is what replaces the old two-extents jam argument for the one-door rule;
+        // - the cell holds a **different** value → `409` naming the column and the key.
+        //
+        // **The same-window case needs no separate check.** Two batches writing one cell means two
+        // rows for one entity, so the second names an external id the open window already holds and
+        // `admit_ingest` closes the window before reaching here — after which the first batch's row
+        // is in the buffer and the buffered source below is the one that answers.
+        //
+        // **A `text` family past a flush is refused rather than compared, and that is the whole
+        // rule for it** (2026-09-01, review finding F1). Nothing here can compare prose across a
+        // flush boundary: a text column stores a dictionary, postings and a presence bitmap, and no
+        // per-entity value for `flushed_scoped_of` to read back. The blob-resident analogy the
+        // entity-scoped arm makes does not carry — *there* a lost comparison costs only the report,
+        // because a joining row writes no record field, but here the row's value **is** written, as
+        // a second text layer stamped with the same view. Text layers have no coverage check (their
+        // disjointness rests on I9, which no longer holds for a scoped column, two views of one key
+        // now reaching one cell) and `match` unions across them, so an admitted disagreement is two
+        // sets of words answering under one column with no symptom anywhere. So occupancy is asked
+        // instead of equality, and an occupied cell refuses a supplied string — equal or not, the
+        // equality being exactly what cannot be established. Omitting the column still passes, and
+        // the buffered source above still compares text exactly.
+        for (position, family) in scoped_families.iter().enumerate() {
+            let Some(supplied) = row.scoped.get(position) else {
+                continue;
+            };
+            let d = crate::session::declared_of_scoped(family);
+            if crate::session::scalar_is_absent(supplied, &d) {
+                continue;
+            }
+            // Every buffered row of the entity whose view addresses this same key — the cell's own
+            // rows, not the entity's own row, which is a different question and `buffer.get`'s.
+            let held = generation
+                .buffer
+                .rows_of(entity)
+                .filter(|item| scoped_owner_view_of(manifest, &item.view) == owner_view)
+                .find_map(|item| {
+                    let value = item.scoped.get(position)?;
+                    (!crate::session::scalar_is_absent(value, &d)).then(|| value.clone())
+                })
+                .or_else(|| {
+                    crate::session::flushed_scoped_of(generation, entity, family, &owner_view)
+                });
+            if held.is_none()
+                && family.arrow_type == ScalarType::Text
+                && crate::session::flushed_scoped_text_present(
+                    generation,
+                    entity,
+                    family,
+                    &owner_view,
+                )
+            {
+                return Err(format!(
+                    "row {index} names a value for group-scoped column '{}', and this deployment \
+                     already holds prose for key '{}'. A `text` family's stored value cannot be \
+                     compared once it has flushed — the column stores a dictionary and postings \
+                     and no value per entity — so a cell that holds prose takes no second one, \
+                     equal or not: changing it is a delete plus a re-ingest (decision 0047), and \
+                     omitting the column leaves the cell as it stands (views §5)",
+                    family.name, key
+                ));
+            }
+            let Some(held) = held else {
+                continue;
+            };
+            if crate::session::scalar_is_absent(&held, &d) {
+                continue;
+            }
+            if held == row.scoped[position] {
+                // The dedupe. Absence in this row's tail, and the cell keeps the one claimant it
+                // already had.
+                row.scoped[position] = tessera_lifecycle::WalScalar::Null;
+                continue;
+            }
+            return Err(format!(
+                "row {index} names a different value for group-scoped column '{}' than this \
+                 deployment already holds for key '{}'. A scoped value is addressed by \
+                 (attribute, key) and is one value per cell, so a row naming that cell — through \
+                 the owning group's view or through any group sharing it — byte-matches the stored \
+                 value or omits it (views §5)",
+                family.name, key
+            ));
+        }
+
+        // ---- past this point the row is admitted, and what follows completes it ----
+
+        // **A joining row carries no descriptors and no terms, and this is where they go**
+        // (`views.md` §4). The entity's label is the one it already has: its terms are already in
+        // the postings, put there by the flush that gave it its first row, and re-writing them from
+        // this row is how a second view would come to re-label an entity with no overlay entry.
+        //
+        // Here rather than in the handler for `established_collisions`'s reason: the handler's
+        // answer is a queue drain old. A row it called new and this pass calls a join would arrive
+        // with its descriptors intact and re-label the entity; a row it called a join and this pass
+        // calls new — its holder deleted in between — would arrive with them already dropped and
+        // allocate a fresh entity carrying no label at all, which is invisible to every principal.
+        row.descriptors = Vec::new();
+        row.terms = Vec::new();
+
+        // **An accepted join's omitted `render` values are backfilled here** (`views.md` §4, owner
+        // ruling 2026-08-31), and here rather than in the handler because this is where join-ness
+        // is *settled*: `established_collisions` is what finally decides which rows join and which
+        // allocate fresh, and a row that stops being a join must not carry a value it took from an
+        // entity it turned out not to be joining.
+        //
+        // A joining row is geometry-only in entity space — no descriptors, no postings, no
+        // attribute column, no record field — but its scalars still travel in its own row tail, so
+        // an omitted `render` value would put an **absence** in the joined view's hot column while
+        // every other view of the same entity rendered a value. An entity-scoped attribute is one
+        // value per entity (`views.md` §5); one that renders under one view and not another is not.
+        //
+        // Before the WAL append, so the log carries the value the flush will write and replay
+        // reproduces it rather than re-deriving it against whatever the bundle holds by then.
+        for (position, d) in declared.iter().enumerate() {
+            if !d.render {
+                continue;
+            }
+            let Some(supplied) = row.scalars.get(position) else {
+                continue;
+            };
+            if !crate::session::scalar_is_absent(supplied, d) {
+                continue;
+            }
+            // The entity's own row where it is still buffered, the stored homes after it. A column
+            // the entity genuinely holds nothing for is `None` here and its absence stays an
+            // absence in every view.
+            let held = match &buffered {
+                Some(item) => item.scalars.get(position).cloned(),
+                None => crate::session::flushed_scalar_of(generation, entity, position, &mut blob),
+            };
+            let Some(held) = held else {
+                continue;
+            };
+            if crate::session::scalar_is_absent(&held, d) {
+                continue;
+            }
+            row.scalars[position] = held;
+        }
+    }
+    Ok(())
+}
+
+impl Executor {
     /// Resolve one batch's membership keys, and check the edges its adjacency declared.
     ///
     /// Returns the memberships — each carrying the ordinal it resolved to, or `None` where an open
@@ -7947,7 +9709,9 @@ impl Executor {
             // published would be the batch's row order rather than anything the caller wrote. It is
             // made here, over the batch's own column, because that is where the two rows are — and
             // it is the whole check for a minted child, whose parent nothing else has an opinion
-            // about yet.
+            // about yet. It holds at every kind: only a `nested` or `tiered` list column declares
+            // edges, and a `dag` layer's several parents arrive on its artifact rows' `parent`
+            // list by the publish route, never here (`ListMeaning`, decision 0125).
             let mut claimed: std::collections::BTreeMap<(&str, u32, &str), &str> =
                 Default::default();
             for edge in &artifacts.edges {
@@ -8131,29 +9895,6 @@ impl Executor {
             return Ok((Vec::new(), minted_per_entry));
         };
 
-        // **A child named under two parents refuses**, across the window as it does within a batch:
-        // two entries naming different parents for one artifact are two hierarchies, and there is no
-        // correct output. Checked before anything is prepared, so a refusal spends nothing.
-        let mut parents: BTreeMap<(String, u32, String), String> = BTreeMap::new();
-        for edge in &edges {
-            let at = (edge.layer.clone(), edge.level, edge.child.clone());
-            match parents.get(&at) {
-                Some(first) if *first != edge.parent => {
-                    return Err(format!(
-                        "{} in level {} of {} is named as a child of both {first} and {}. A list \
-                         column declares the edges, so two rows naming different parents for one \
-                         artifact are two hierarchies — and which of them was published would be \
-                         the order the batches arrived in rather than anything the caller wrote",
-                        edge.child, edge.level, edge.layer, edge.parent
-                    ))
-                }
-                Some(_) => {}
-                None => {
-                    parents.insert(at, edge.parent.clone());
-                }
-            }
-        }
-
         type Prepared = Result<
             (
                 Vec<WalRecord>,
@@ -8163,6 +9904,34 @@ impl Executor {
             String,
         >;
         let prepared: Prepared = self.live.with_publication_state(|registry, store, alloc| {
+            // **A child named under two parents refuses**, across the window as it does within a
+            // batch: two entries naming different parents for one artifact are two hierarchies,
+            // and there is no correct output. Checked before anything is prepared, so a refusal
+            // spends nothing. Every kind whose list declares edges is a tree here — a `dag`
+            // layer's list is memberships and its parents travel on the artifact row (decision
+            // 0125) — so a child's parents are at most one key, held as a list because that is
+            // the record's shape. The cycle those edges could close is refused where the
+            // artifacts are created, in `prepare_publish`, which walks the batch's own edges — a
+            // growth never adds lineage, so the window's minted edges are every edge a cycle
+            // could run through.
+            let mut parents: BTreeMap<(String, u32, String), Vec<String>> = BTreeMap::new();
+            for edge in &edges {
+                let at = (edge.layer.clone(), edge.level, edge.child.clone());
+                let named = parents.entry(at).or_default();
+                if named.contains(&edge.parent) {
+                    continue;
+                }
+                if !named.is_empty() {
+                    return Err(format!(
+                        "{} in level {} of {} is named as a child of both {} and {}. A list \
+                         column declares the edges, so two rows naming different parents for one \
+                         artifact are two hierarchies — and which of them was published would be \
+                         the order the batches arrived in rather than anything the caller wrote",
+                        edge.child, edge.level, edge.layer, named[0], edge.parent
+                    ));
+                }
+                named.push(edge.parent.clone());
+            }
             // Re-resolved here and not trusted from admission: a publication executes between an
             // admission and this close (it takes the work lane, and the window is open across it),
             // so a key that named nothing then may name an artifact now — and §5's second ruling is
@@ -8200,9 +9969,10 @@ impl Executor {
                         // refusals, in the words `prepare_publish` would have made them in.
                         contents: Vec::new(),
                         attached_to: None,
-                        parent_key: parents
+                        parent_keys: parents
                             .get(&((*layer).to_string(), *level, (*key).to_string()))
-                            .cloned(),
+                            .cloned()
+                            .unwrap_or_default(),
                         // A layer declaring a `shape` publishes boxes an author wrote, so a point
                         // naming a key on such a layer has nothing to mint one from — the layer is
                         // a predicate and `resolve_or_mint` refuses the key at admission.
@@ -8342,6 +10112,13 @@ impl Executor {
         let generation = self.generation.load_full();
         let mut vocabularies: Vocabularies = (*generation.vocabularies).clone();
         let declared_scalars = generation.bundle.manifest.declared_scalars.clone();
+        // **The group-scoped families, by the view a row names** (`views.md` §5). A row's scoped
+        // tail is positional against the families of the group that owns its view, so the mint
+        // pass below needs the same list the boundary parsed against — derived once for the
+        // window rather than per row, and from the live manifest, which is what the boundary read
+        // too.
+        let scoped_by_view: FxHashMap<String, Vec<tessera_store::manifest::ScopedScalar>> =
+            scoped_families_by_view(&generation.bundle.manifest);
         let mut closed = closed;
         let mut fresh_bindings: Vec<(String, String, u32)> = Vec::new();
         let mut mint_failed: Option<MintError> = None;
@@ -8377,6 +10154,42 @@ impl Executor {
                         }
                         Ok(Minted::Existing(code)) => {
                             row.scalars[index] = code_at_declared_width(declared.arrow_type, code);
+                        }
+                        Err(e) => {
+                            mint_failed = Some(e);
+                            break 'minting;
+                        }
+                    }
+                }
+                // **The same mint, over the row's scoped tail** (`views.md` §5). A scoped category
+                // is a category: its key travels from the boundary exactly as an entity-scoped
+                // one's does, and this is the one place a novel key becomes a code. A row whose
+                // view is in no scope has an empty list here and the loop does nothing.
+                let Some(families) = scoped_by_view.get(row.view.as_str()) else {
+                    continue;
+                };
+                for (index, family) in families.iter().enumerate() {
+                    let Some(vocabulary) = family.vocabulary.as_deref() else {
+                        continue;
+                    };
+                    let Some(WalScalar::Utf8(key)) = row.scoped.get(index) else {
+                        continue;
+                    };
+                    let key = key.clone();
+                    let minter = vocabularies.get_mut(vocabulary).unwrap_or_else(|| {
+                        panic!(
+                            "scoped column family '{}' names vocabulary '{vocabulary}', which \\
+                             the live bindings do not carry",
+                            family.name
+                        )
+                    });
+                    match minter.mint(&key) {
+                        Ok(Minted::Fresh(code)) => {
+                            fresh_bindings.push((vocabulary.to_string(), key, code));
+                            row.scoped[index] = code_at_declared_width(family.arrow_type, code);
+                        }
+                        Ok(Minted::Existing(code)) => {
+                            row.scoped[index] = code_at_declared_width(family.arrow_type, code);
                         }
                         Err(e) => {
                             mint_failed = Some(e);
@@ -8517,13 +10330,35 @@ impl Executor {
         // One buffer clone, one generation, **one swap** for every entry in the window — carrying
         // the mutated `vocabularies`, so the next generation publishes this window's mints and not
         // merely its rows.
-        let published = self.apply_window(&mut closed, &positions, vocabularies);
+        let published = self.apply_window(&mut closed, &positions, vocabularies, &fresh_bindings);
 
         // **After the rows are in force, never before.** A membership is projected through rows, so
         // a store that held the join while the generation still lacked the row would describe an
         // artifact by a point nothing could yet see. The reverse order costs nothing: both are
         // durable by this line, and the log is what a restart reads.
         if !minted.is_empty() || !growth.is_empty() {
+            // **The level versions these records are about to move, read in the order they move
+            // them** — what each record's held row form must be at for that record's delta to be
+            // the one it is missing (`Executor::bring_artifacts_forward`). Two records of one
+            // window may name the same level, so the version is carried forward across the
+            // sequence rather than read once: every publication and every growth bumps exactly one
+            // level exactly once.
+            let mut befores: Vec<u64> = Vec::with_capacity(minted.len() + growth.len());
+            self.live.with_artifacts(|store| {
+                let mut seen: std::collections::BTreeMap<(&str, u32), u64> =
+                    std::collections::BTreeMap::new();
+                for (record, _) in minted.iter().chain(growth.iter()) {
+                    let Some((layer, level)) = artifact_level_of(record) else {
+                        befores.push(0);
+                        continue;
+                    };
+                    let at = seen
+                        .entry((layer, level))
+                        .or_insert_with(|| store.level_version(layer, level));
+                    befores.push(*at);
+                    *at += 1;
+                }
+            });
             let undecodable = self.live.with_publication_state(|registry, store, _| {
                 let mut undecodable = 0;
                 // The registry half first, per record: a mint may have extended its level's
@@ -8545,6 +10380,31 @@ impl Executor {
                     count = undecodable,
                     "ALARM: a membership growth did not survive its own round trip"
                 );
+            }
+            // **And every held row form takes the same deltas the records just took**, in the same
+            // order, rather than being invalidated by the version moves they made — the ingest
+            // twin of `commit_growth`'s own bring-forward.
+            for ((record, _), before) in minted.iter().chain(growth.iter()).zip(befores) {
+                match record {
+                    WalRecord::ArtifactPublish {
+                        layer,
+                        level,
+                        artifacts,
+                        ..
+                    } => {
+                        let ordinals: Vec<u32> = artifacts.iter().map(|a| a.ordinal).collect();
+                        self.bring_artifacts_forward(
+                            layer,
+                            *level,
+                            &crate::artifacts::LevelDelta::Published(&ordinals),
+                            before,
+                        );
+                    }
+                    WalRecord::ArtifactGrow { layer, level, .. } => {
+                        self.bring_grown_forward(layer, *level, record, before)
+                    }
+                    _ => {}
+                }
             }
             // A growth against an artifact **above** its level's high-water is carried by the next
             // tail pack like any other unpublished record; one below it waits for the fold, held in
@@ -8782,6 +10642,17 @@ impl Executor {
                 |_| Ack::LayerDropped,
                 respond,
             ),
+            Command::CreateView {
+                group,
+                key,
+                visibility,
+                metadata,
+            } => self.commit_view_create(group, key, visibility, metadata, respond),
+            Command::DropView {
+                group,
+                key,
+                delete_dangling,
+            } => self.commit_view_drop(group, key, delete_dangling, respond),
             Command::PublishArtifacts {
                 layer,
                 level,
@@ -8793,6 +10664,90 @@ impl Executor {
                 joins,
             } => self.commit_growth(layer, level, joins, respond),
         }
+    }
+
+    /// **Apply an accepted write to every held row form of the level it changed**, in every view
+    /// the generation carries — the delta, rather than the version move that would make the next
+    /// request project the level whole
+    /// (`docs/evidence/memos/2026-09-03-post-flush-artifact-frames.md`).
+    ///
+    /// `before` is the level's version as it stood when the delta was prepared; a form at any other
+    /// version is dropped rather than amended, which
+    /// [`crate::artifacts::ArtifactProjections::bring_forward`] argues in full.
+    ///
+    /// A view two partitions carry is skipped, exactly as `Engine::warm_artifact_projections`
+    /// skips it: it is `EngineError::MultiPartitionView` on the request path, so there is no row
+    /// space here that a request would agree with.
+    fn bring_artifacts_forward(
+        &self,
+        layer: &str,
+        level: u32,
+        delta: &crate::artifacts::LevelDelta<'_>,
+        before: u64,
+    ) {
+        // **Only a level whose membership is *stored* has a delta to take.** A shape's members and
+        // an attribute predicate's are evaluated against the geometry, so a record's delta says
+        // nothing about them — see `ArtifactProjections::bring_forward`, which will not touch such
+        // a form. An unregistered layer is not one either; there is nothing to read.
+        let stored = self
+            .live
+            .registered_layer(layer)
+            .is_some_and(|held| stored_membership(&held.declaration));
+        if !stored {
+            return;
+        }
+        let generation = self.generation.load_full();
+        let mut views: std::collections::BTreeMap<&str, Option<&tessera_store::read::ViewData>> =
+            std::collections::BTreeMap::new();
+        for partition in generation.bundle.partitions.values() {
+            for (name, data) in &partition.views {
+                views
+                    .entry(name.as_str())
+                    .and_modify(|held| *held = None)
+                    .or_insert(Some(data));
+            }
+        }
+        self.live.with_artifacts(|store| {
+            for (view, data) in views {
+                let Some(data) = data else { continue };
+                self.artifact_projections.bring_forward(
+                    &generation.prefix,
+                    view,
+                    layer,
+                    level,
+                    store,
+                    &data.row_space,
+                    delta,
+                    before,
+                    stored,
+                );
+            }
+        });
+    }
+
+    /// [`Self::bring_artifacts_forward`] over an `ArtifactGrow` record — the joining sets decoded
+    /// from the log's own bytes, so what reaches the row forms is what reached the records.
+    ///
+    /// **A set that does not decode is skipped and nothing else is**, which is the same disposition
+    /// `ArtifactStore::apply_growth` makes of it: that delta did not enter the records either, and
+    /// the alarm it raised has already been said.
+    fn bring_grown_forward(&self, layer: &str, level: u32, record: &WalRecord, before: u64) {
+        let WalRecord::ArtifactGrow { growth, .. } = record else {
+            return;
+        };
+        let joins: Vec<(u32, croaring::Bitmap)> = growth
+            .iter()
+            .filter_map(|grown| {
+                tessera_lifecycle::membership::deserialise_members(&grown.joining)
+                    .map(|joining| (grown.ordinal, joining))
+            })
+            .collect();
+        self.bring_artifacts_forward(
+            layer,
+            level,
+            &crate::artifacts::LevelDelta::Grown(&joins),
+            before,
+        );
     }
 
     /// Validate, allocate, append, sync, apply — `commit_registry`'s sequence, for the same reason
@@ -8811,6 +10766,11 @@ impl Executor {
         incoming: Vec<IncomingArtifact>,
         respond: Responder,
     ) {
+        // Read before the record is applied, because it is what says a held row form is the form
+        // this publication follows — see [`Self::bring_artifacts_forward`].
+        let before = self
+            .live
+            .with_artifacts(|store| store.level_version(&layer, level));
         let prepared = self.live.with_publication_state(|registry, store, alloc| {
             registry.prepare_publish(
                 &layer,
@@ -8866,7 +10826,47 @@ impl Executor {
                 "ALARM: an artifact membership did not survive its own round trip"
             );
         }
+        let ordinals: Vec<u32> = artifacts.iter().map(|a| a.ordinal).collect();
+        self.bring_artifacts_forward(
+            &layer,
+            level,
+            &crate::artifacts::LevelDelta::Published(&ordinals),
+            before,
+        );
         let published = Published::registry_applied(&record);
+        // **A shape layer's held structures are rebuilt at publication, and every segment the
+        // generation serves is resolved against them before the ack** (`polygon-membership.md`
+        // §6.3: built at publication and at open, never on a request). The level version moved and
+        // the bring-forward above declined the level — a shape's membership is not in the record
+        // it would have applied — so the cached row form is stale by its own key and the next
+        // request joins the pieces installed here. That decline is load-bearing: a form brought
+        // forward would *hit* on the next request and these pieces would never be read.
+        let generation = self.generation.load_full();
+        let warmed = self.live.with_artifacts(|store| {
+            let (layers, _, _) = self.live.registry_for_publication();
+            // Nothing persisted is claimable here: the level version has just moved past every
+            // file the prefix holds for this layer.
+            self.shapes.warm(
+                &generation.bundle,
+                &layers,
+                store,
+                Some(&layer),
+                &crate::shapes::PersistedPieces::none(),
+            )
+        });
+        if warmed.levels > 0 {
+            tracing::info!(
+                layer = %layer,
+                levels = warmed.levels,
+                artifacts = warmed.artifacts,
+                rows_tested = warmed.rows_tested,
+                build_ms = warmed.build_ms,
+                resolve_ms = warmed.resolve_ms,
+                held_bytes = warmed.held_bytes,
+                "a publication into a shape layer rebuilt its held shapes and resolved every \
+                 segment against them"
+            );
+        }
         // Durable in the log, not yet in a manifest. The registry half of this record reaches
         // `SEGMENTS-<n>.json` at the next flush on the deny lane's mechanism; the membership half
         // has nowhere to reach, which is what the rotation pin holds the log for.
@@ -8910,6 +10910,11 @@ impl Executor {
         joins: Vec<tessera_lifecycle::IncomingGrowth>,
         respond: Responder,
     ) {
+        // `commit_artifacts`' reason: the version a held row form must be at for this delta to be
+        // the one it is missing.
+        let before = self
+            .live
+            .with_artifacts(|store| store.level_version(&layer, level));
         let prepared = self.live.with_publication_state(|registry, store, _| {
             registry.prepare_grow(&layer, level, &joins, store)
         });
@@ -8955,6 +10960,7 @@ impl Executor {
                 "ALARM: a membership growth did not survive its own round trip"
             );
         }
+        self.bring_grown_forward(&layer, level, &record, before);
         let published = Published::registry_applied(&record);
         // A growth against an artifact **above** its level's high-water is carried by the next
         // tail pack like any other unpublished record; one below it waits for the fold, held in the
@@ -9024,6 +11030,7 @@ impl Executor {
         if let WalRecord::LayerDrop { name } = &record {
             self.artifact_projections.forget(name);
             self.lineages.forget(name);
+            self.level_contents.forget(name);
         }
         let published = Published::registry_applied(&record);
         // The registry is durable in the log but not yet in a manifest, and a rotation reclaims the
@@ -9031,6 +11038,241 @@ impl Executor {
         // mechanism a deny uses to reach `SEGMENTS-<n>.json`.
         self.deny_dirty = true;
         respond.ack(ack, &published);
+    }
+
+    /// `PUT /control/views/{group}/{key}` — create a view of a group while the service runs
+    /// (`views.md` §3.2, decision 0108).
+    ///
+    /// **The shape is `commit_registry`'s**, because the obligation is: prepare against state only
+    /// this thread may write, append, fsync, apply, publish, ack. What differs is that a view has
+    /// a *row space* — an empty one — so the apply reaches the bundle rather than stopping at a
+    /// live-state map, and the ack therefore rides a generation swap rather than a registry token.
+    ///
+    /// **The ordinal is spent whatever happens next.** A create whose append fails is refused with
+    /// its ordinal unreturned, exactly as a failed registration keeps its ids: an ordinal reissued
+    /// after a torn append that replay might still apply is two views under one alias, which is
+    /// worse than a gap in a sequence nothing counts.
+    fn commit_view_create(
+        &mut self,
+        group: String,
+        key: String,
+        visibility: Option<String>,
+        metadata: std::collections::BTreeMap<String, tessera_types::view::ViewMetadataValue>,
+        respond: Responder,
+    ) {
+        let started = std::time::Instant::now();
+        let generation = self.generation.load_full();
+        let Some(descriptor) = generation
+            .bundle
+            .manifest
+            .groups
+            .iter()
+            .find(|g| g.name == group)
+        else {
+            // The same 404 an unknown view id is, and for the same reason: a group nobody declared
+            // and a key no view holds must be one answer, or the difference between them is an
+            // existence oracle over the roster.
+            respond.fail(ExecError::ViewUnknown {
+                detail: format!(
+                    "unknown view group '{group}'. A group is declared at a build and its views \
+                     grow at a running service (views §3.1); there is no create that mints a group"
+                ),
+            });
+            self.health.note_work_refused();
+            return;
+        };
+        let facts = tessera_lifecycle::GroupFacts {
+            name: &descriptor.name,
+            members_of: descriptor.members_of.as_deref(),
+            metadata: &descriptor.metadata,
+        };
+        let prepared = self
+            .live
+            .with_roster(|roster| roster.prepare_create(facts, &key, visibility, metadata));
+        let record = match prepared {
+            Ok(record) => record,
+            Err(e) => {
+                respond.fail(roster_error(e));
+                self.health.note_work_refused();
+                return;
+            }
+        };
+        if let Err(e) = self.wal.append(&record).and_then(|()| self.wal.fsync()) {
+            tracing::error!(
+                error = %e,
+                view = %format!("{group}:{key}"),
+                "ALARM: a view creation could not be made durable; the view does not exist"
+            );
+            respond.fail(ExecError::Wal(e));
+            return;
+        }
+        self.live.with_roster(|roster| roster.apply(&record));
+        let published = self.publish_roster(&generation, started, &[]);
+        // Durable in the log and not yet in a manifest, and a rotation reclaims the log — so the
+        // roster reaches `SEGMENTS-<n>.json` on the mechanism a deny already uses (`views.md`
+        // §3.2: the durable home is the segments manifest).
+        self.deny_dirty = true;
+        respond.ack(Ack::ViewCreated, &published);
+    }
+
+    /// `DELETE /control/views/{group}/{key}` — drop a view, freeing its key and killing its
+    /// incarnation (`views.md` §3.4, decision 0115).
+    ///
+    /// **Dropping a view deletes no entity.** An entity whose only view was dropped still exists,
+    /// with its label, its attributes and its artifact memberships, in no view — and a later batch
+    /// into a new view picks it up by `external_id` under the join rule. `delete_dangling` is the
+    /// caller who *did* mean "and the items that were only here", and it is **sugar and nothing
+    /// else**: the entities are submitted as ordinary deletions, which enter the overlay and
+    /// retire at the fold that executes them (Rule F, write-path §5.4). It is not a second
+    /// retirement route, and the two removal rules are untouched by anything here.
+    ///
+    /// **The probe and the submission are one step on this thread**, which is what the
+    /// serialisation is for: a batch acked between them could re-add an entity the probe had
+    /// already found dangling, and the deletion would then destroy a row the caller was told had
+    /// landed.
+    fn commit_view_drop(
+        &mut self,
+        group: String,
+        key: String,
+        delete_dangling: bool,
+        respond: Responder,
+    ) {
+        let started = std::time::Instant::now();
+        let generation = self.generation.load_full();
+        // The owner's key, whatever group the request named: a key belongs to the group that owns
+        // the views, and dropping the key takes the view out of every group sharing them
+        // (`views.md` §3.3).
+        let owner = generation.bundle.manifest.owner_of_group(&group);
+        // **Every id the key resolves to**, which is what a drop takes away — the owner's view and
+        // every sharing group's. Built from the *owner* rather than from the group the request
+        // named, and used by all three things below that act on "the views of this key": the log
+        // line, the `delete_dangling` probe and the buffer prune. A prune over the requested
+        // spelling alone leaves the other's buffered rows to be flushed into whatever takes the
+        // key next ([decision 0115](../../../docs/decisions/0115-a-dropped-view-key-is-reusable.md)).
+        let ids = generation.bundle.manifest.view_ids_for_key(&owner, &key);
+        let id = format!("{owner}{}{key}", tessera_store::GROUP_SEPARATOR);
+        let prepared = self
+            .live
+            .with_roster(|roster| roster.prepare_drop(&owner, &key));
+        let record = match prepared {
+            Ok(record) => record,
+            Err(e) => {
+                respond.fail(roster_error(e));
+                self.health.note_work_refused();
+                return;
+            }
+        };
+        // **Computed before the drop applies**, because the probe reads the row space the drop is
+        // about to take away — and on this thread, with no yield between it and the submission.
+        let dangling = if delete_dangling {
+            dangling_entities(&generation, &ids)
+        } else {
+            Vec::new()
+        };
+        if let Err(e) = self.wal.append(&record).and_then(|()| self.wal.fsync()) {
+            tracing::error!(
+                error = %e,
+                view = %id,
+                "ALARM: a view drop could not be made durable; the view still exists"
+            );
+            respond.fail(ExecError::Wal(e));
+            return;
+        }
+        self.live.with_roster(|roster| roster.apply(&record));
+        let published = self.publish_roster(&generation, started, &ids);
+        self.deny_dirty = true;
+        // **Ordinary deletions, through the ordinary lane.** They are appended, fsynced and
+        // applied by the same path a `/control/changes` delete takes, so they retire at the fold
+        // under Rule F and nowhere else. A failure here is reported the way that lane reports one
+        // — in force, and possibly not durable — and does not un-drop the view, which is already
+        // acknowledged as far as the log is concerned.
+        let deleted = dangling.len() as u64;
+        if !dangling.is_empty() {
+            let mut entries: Vec<DenyEntry> = dangling
+                .into_iter()
+                .map(|entity| DenyEntry {
+                    record: WalRecord::ChangeByEntity {
+                        entity_id: entity,
+                        op: tessera_lifecycle::ChangeOp::Delete,
+                    },
+                    entity,
+                    op: tessera_lifecycle::ChangeOp::Delete,
+                    respond: None,
+                })
+                .collect();
+            self.cascade_dependents(&mut entries);
+            self.commit_denies(entries);
+        }
+        respond.ack(Ack::ViewDropped { deleted }, &published);
+    }
+
+    /// Publish the generation a create or a drop makes: the bundle as the live roster describes
+    /// it, the deny mask re-derived over the views it now has, and every buffered row of a view
+    /// that has gone.
+    ///
+    /// **The buffered rows of a dropped view are discarded, and that is not a deletion.** They
+    /// name a coordinate system that no longer exists, so nothing will ever give them geometry —
+    /// and a row left in the buffer for a view no flush will plan pins `oldest_wal_pos`, and with
+    /// it every WAL member after it, for the life of the process. Their entities are untouched:
+    /// an entity left in no view is exactly what `views.md` §3.4 says a drop produces.
+    fn publish_roster(
+        &self,
+        generation: &Arc<Generation>,
+        started: std::time::Instant,
+        dropped: &[String],
+    ) -> Published {
+        let (created, tombstones) = self.live.roster_for_publication();
+        let manifest = generation
+            .bundle
+            .manifest
+            .with_roster(&created, &tombstones);
+        let bundle = generation.bundle.with_views(manifest);
+        let buffer = if dropped.is_empty() {
+            Arc::clone(&generation.buffer)
+        } else {
+            let mut buffer = (*generation.buffer).clone();
+            // Rows, not entities, and by (entity, view): an entity whose row in the dropped view
+            // was a join keeps the row it holds elsewhere, and `rows()` is what sees the join at
+            // all.
+            let orphaned: Vec<(EntityId, String)> = generation
+                .buffer
+                .rows()
+                .filter(|(_, item)| dropped.contains(&item.view))
+                .map(|(entity, item)| (*entity, item.view.clone()))
+                .collect();
+            for (entity, view) in orphaned {
+                buffer.remove_in_view(entity, &view);
+            }
+            self.health
+                .buffered_items
+                .store(buffer.len(), Ordering::SeqCst);
+            Arc::new(buffer)
+        };
+        // **Re-derived, never carried**: the mask holds one entry per view of the bundle and its
+        // own contract is that a missing one means the mask and the bundle disagree — which is
+        // exactly the state carrying it forward across a create would produce.
+        let denied = Arc::new(crate::compose::derive_denied(&generation.overlay, &bundle));
+        let next = Generation {
+            prefix: generation.prefix.clone(),
+            // **Unmoved**: no row moved, so every row-projection cache keyed on it stays valid.
+            // The coalesce publication is the precedent — a new bundle at the same version.
+            segments_version: generation.segments_version,
+            watermark: generation.watermark,
+            bundle,
+            dict: Arc::clone(&generation.dict),
+            postings: Arc::clone(&generation.postings),
+            fragments: Arc::clone(&generation.fragments),
+            external_index: Arc::clone(&generation.external_index),
+            delta_postings: generation.delta_postings.clone(),
+            overlay_version: generation.overlay_version,
+            overlay: Arc::clone(&generation.overlay),
+            buffer,
+            vocabularies: Arc::clone(&generation.vocabularies),
+            filter_columns: Arc::clone(&generation.filter_columns),
+            suggest: Arc::clone(&generation.suggest),
+            denied,
+        };
+        self.publish(next, started)
     }
 
     /// Clone the buffer **once**, insert every entry in the window, publish **once**.
@@ -9077,10 +11319,20 @@ impl Executor {
         closed: &mut [ClosedEntry<Responder>],
         positions: &[u64],
         vocabularies: Vocabularies,
+        mints: &[(String, String, u32)],
     ) -> Published {
         let started = std::time::Instant::now();
         let mut mark = StageMark::now();
         let generation = self.generation.load_full();
+        // The suggestion index's side map, grown by exactly the keys this window minted. Nothing
+        // is rebuilt: the base index and every other vocabulary's are carried behind their `Arc`s,
+        // and the fold's handles are borrows of data baked into the binary rather than a
+        // deserialisation.
+        let suggest = generation.suggest.with_mints(
+            &tessera_analyse::SuggestionFold::new(),
+            &vocabularies,
+            mints,
+        );
         let mut buffer = (*generation.buffer).clone();
         mark = self.health.lap(WriteStage::ApplyBufferClone, mark);
 
@@ -9108,7 +11360,7 @@ impl Executor {
                 }
                 buffer.insert_row_with_terms(row, row_terms);
                 let m = self.health.lap(WriteStage::RowBufferInsert, m);
-                buffer.set_wal_pos(row.entity_id, *wal_pos);
+                buffer.set_wal_pos(row.entity_id, &row.view, *wal_pos);
                 self.health.lap(WriteStage::RowWalPos, m);
             }
         }
@@ -9116,9 +11368,10 @@ impl Executor {
         drop(established_inverse);
         mark = self.health.lap(WriteStage::ApplyRows, mark);
 
-        // Published here, at the one place buffer occupancy changes, so `/control/ingest`'s
-        // occupancy bound reads a figure the executor maintains rather than one a handler derives
-        // from a generation it would have to load.
+        // Published here, and at every other place buffer occupancy changes — the flush's
+        // publication and the deny lane's — so `/control/ingest`'s occupancy bound reads a figure
+        // the executor maintains rather than one a handler derives from a generation it would
+        // have to load.
         self.health
             .buffered_items
             .store(buffer.len(), Ordering::SeqCst);
@@ -9138,6 +11391,12 @@ impl Executor {
             external_index: Arc::clone(&generation.external_index),
             delta_postings: generation.delta_postings.clone(),
             overlay: Arc::clone(&generation.overlay),
+            // **The one publication that changes the suggestion index**, and it changes it by the
+            // same mints that changed the bindings above: a novel key gets its code here, and a
+            // viewer typing its prefix on the next keystroke must be offered it rather than
+            // waiting for the next rebuild (`value-suggestion.md` §6.1). Every other publication
+            // carries the index forward.
+            suggest,
             // Neither the deny sets nor the row space moved, so the mask is unchanged. An ingest
             // adds a *buffered* row, which has no row id to be denied at.
             denied: Arc::clone(&generation.denied),
@@ -9269,6 +11528,11 @@ impl Executor {
 
         let next = Generation {
             filter_columns: Arc::clone(&generation.filter_columns),
+            // A deny changes who may be told a value name and never which value names exist, so
+            // the index is carried and the *predicate* answers differently — which is
+            // membership-derivation self-retiring, and is the whole reason it is derived per
+            // request rather than maintained (per-point-attributes §3.3).
+            suggest: Arc::clone(&generation.suggest),
             overlay_version: generation.overlay_version + 1,
             overlay: Arc::new(overlay),
             prefix: generation.prefix.clone(),
@@ -9338,6 +11602,13 @@ impl Executor {
             manifest.entity_id_low_water = manifest.entity_id_low_water.min(low_water);
             manifest.layers = layers;
             manifest.layer_tombstones = layer_tombstones;
+            // **The roster's durable home, restated from the live roster and never from the
+            // clone** (`views.md` §3.2): the manifest this was cloned from may be several
+            // publications behind, and a create that landed since would be dropped by carrying it
+            // forward — which a rotation then makes permanent.
+            let (created_views, dead_view_incarnations) = self.live.roster_for_publication();
+            manifest.views = created_views;
+            manifest.dead_view_incarnations = dead_view_incarnations;
             // **Membership extents are written before the manifest that names them**, which is the
             // whole of their durability contract: a manifest naming a missing extent refuses at
             // open, so the file has to be durable first. A failure here abandons the publication
@@ -9412,6 +11683,8 @@ impl Executor {
                 &self.containment_extents,
                 &self.tile_index_extents,
                 &self.row_column_extents,
+                &self.shape_rows_extents,
+                &self.shape_held_extents,
                 &[],
             ) {
                 tracing::error!(
@@ -9747,8 +12020,10 @@ impl Executor {
                 .map(
                     |(layer, level, level_version, bytes)| tessera_store::derived::Filed {
                         // A partition is a function of the level's records and the prefix's
-                        // postings, so it is not per view and the entry carries none.
+                        // postings, so it is not per view and the entry carries none — and no
+                        // incarnation either, there being no view to carry one for.
                         view: String::new(),
+                        incarnation: tessera_store::manifest::DECLARED_INCARNATION,
                         layer,
                         level,
                         level_version,
@@ -9812,12 +12087,8 @@ impl Executor {
     ) -> Vec<(String, tessera_store::RowSpace)> {
         let mut spaces: Vec<(String, tessera_store::RowSpace)> = Vec::new();
         for (view, row_count) in views {
-            let path = prefix_dir
-                .join("partitions")
-                .join(partition)
-                .join("views")
-                .join(view)
-                .join("permutation.bin");
+            let partition_dir = prefix_dir.join("partitions").join(partition);
+            let path = tessera_store::view_path(&partition_dir, view).join("permutation.bin");
             match tessera_store::Permutation::load(&path) {
                 Ok(permutation) => spaces.push((
                     view.clone(),
@@ -9866,8 +12137,9 @@ impl Executor {
         &self,
         spaces: &[(String, tessera_store::RowSpace)],
         pending_retirement: &[(String, u32)],
+        fold_segments: &[(String, tessera_store::read::SegmentData)],
     ) -> Vec<(String, u32, tessera_types::layer::ServingLayout)> {
-        let Some((_, space)) = spaces.first() else {
+        let Some((first_view, space)) = spaces.first() else {
             return Vec::new();
         };
         let levels: Vec<(String, u32)> = self.live.with_artifacts(|store| {
@@ -9882,6 +12154,10 @@ impl Executor {
                 .collect()
         });
         let mut out = Vec::with_capacity(levels.len());
+        // Level counts gathered per layer for the roll-up below, the per-level lines being one
+        // level's own shape and the sum being what a response pays.
+        let mut per_layer: std::collections::BTreeMap<String, Vec<(u32, u64)>> =
+            std::collections::BTreeMap::new();
         for (layer, level) in levels {
             let Some(registered) = self.live.registered_layer(&layer) else {
                 continue;
@@ -9890,12 +12166,59 @@ impl Executor {
             // `project_base` per artifact either way; what differs is what is held while it runs,
             // and at ten million artifacts a row form here is the gigabytes §7.3 prices — held
             // beside the outgoing generation's own forms, because the fold runs before the flip.
+            //
+            // **A spatial level is observed over its resolved rows** (`polygon-membership.md`
+            // §6.3): every segment the fold wrote is resolved against the level's shapes here,
+            // inside the artifact pass and before anything is written, and the pieces are held
+            // under the new segment ids so the generation about to be published finds them. That
+            // is the fold's re-resolution — everything, because the fold renumbered every row.
+            let spatial = registered.declaration.membership
+                == tessera_types::layer::MembershipSource::Spatial
+                && registered.declaration.shape.is_some();
             let shape = self.live.with_artifacts(|store| {
-                tessera_store::derived::observe_shape(space.base_rows(), &|visit| {
-                    for (ordinal, record) in store.level(&layer, level) {
-                        visit(ordinal, &space.project_base(&record.members));
+                if spatial {
+                    let mut observed = None;
+                    for (view, segment) in fold_segments {
+                        let held = self.shapes.level(
+                            view,
+                            &layer,
+                            level,
+                            store,
+                            &crate::shapes::PersistedPieces::none(),
+                        );
+                        let (piece, cost) = held.resolve(segment);
+                        tracing::info!(
+                            layer = %layer,
+                            level,
+                            view = %view,
+                            seg_id = %segment.seg_id,
+                            rows_tested = cost.rows_tested,
+                            rows_interior = cost.rows_interior,
+                            artifacts_empty = cost.artifacts_empty,
+                            elapsed_ms = cost.elapsed_ms,
+                            "the fold re-resolved a segment against a spatial level's shapes"
+                        );
+                        if view == first_view {
+                            observed = Some(tessera_store::derived::observe_shape(
+                                space.base_rows(),
+                                &|visit| {
+                                    for (ordinal, rows) in piece.iter().enumerate() {
+                                        if let Some(rows) = rows {
+                                            visit(ordinal as u32, rows);
+                                        }
+                                    }
+                                },
+                            ));
+                        }
                     }
-                })
+                    observed.unwrap_or_else(tessera_store::derived::LevelShape::empty)
+                } else {
+                    tessera_store::derived::observe_shape(space.base_rows(), &|visit| {
+                        for (ordinal, record) in store.level(&layer, level) {
+                            visit(ordinal, &space.project_base(&record.members));
+                        }
+                    })
+                }
             });
             let chosen = crate::layout::choose(&registered.declaration, shape);
             tracing::info!(
@@ -9912,7 +12235,42 @@ impl Executor {
                 now = ?chosen,
                 "the fold re-evaluated a level's serving layout"
             );
+            per_layer
+                .entry(layer.clone())
+                .or_default()
+                .push((level, shape.artifacts));
             out.push((layer, level, chosen));
+        }
+        // **What a whole-layer response costs, reported and never refused** (owner ruling
+        // 2026-08-28). The per-level lines above each carry their own count; this is the sum, and
+        // the sum is the figure that predicts response volume, because a response carries one row
+        // per served artifact and the levels a request does not exclude are all of them.
+        //
+        // **Reported rather than bounded, and the distinction is the ruling's.** A large response
+        // is slow, not wrong: it discloses nothing the mask did not already allow and a rerun costs
+        // nothing, so it is the operator's call and not the service's. The bound that does exist is
+        // the request's — `levels`, whose absent case follows this layer's own declared zoom ranges
+        // — and an operator who sees a number here they do not like has a declaration to change.
+        //
+        // **No byte estimate.** Bytes per artifact depend on what the layer declares: a count-only
+        // level is tens of bytes and one declaring a hull is unbounded, the rings being a function
+        // of the membership. A constant here would be a guess wearing a measurement's clothes; the
+        // artifact count is what is actually known.
+        for (layer, mut levels) in per_layer {
+            levels.sort_unstable();
+            let total: u64 = levels.iter().map(|(_, n)| *n).sum();
+            // **The levels this fold evaluated, which is not always the layer's whole set**: a
+            // level being retired is filtered out above, and so is one whose layer is no longer
+            // registered. The build's report (`tessera_build::artifact_pass::report`) is the one
+            // that sees every level, and is where an operator reads a layer's response cost;
+            // this is the fold's own view of what it just re-evaluated.
+            tracing::info!(
+                layer = %layer,
+                evaluated_artifacts = total,
+                per_level = ?levels,
+                "the fold re-evaluated these levels of a layer; the sum is what a response naming \
+                 them carries, one row per served artifact"
+            );
         }
         out
     }
@@ -9933,9 +12291,11 @@ impl Executor {
         prefix_dir: &std::path::Path,
         partition: &str,
         n: u64,
+        incarnations: &FxHashMap<String, tessera_types::view::ViewIncarnation>,
         spaces: &[(String, tessera_store::RowSpace)],
         layouts: &[(String, u32, tessera_types::layer::ServingLayout)],
         pending_retirement: &[(String, u32)],
+        fold_segments: &[(String, tessera_store::read::SegmentData)],
     ) -> Vec<tessera_store::manifest::RowColumnExtent> {
         let wanted: Vec<(String, u32, tessera_types::layer::ServingLayout)> = layouts
             .iter()
@@ -9944,12 +12304,13 @@ impl Executor {
                     && !pending_retirement
                         .iter()
                         .any(|(l, v)| l == layer && v == level)
-                    // **A predicate level's column is not this fold's to write**, and the reason is
-                    // what it is a column *of*: an attribute layer's labels come from the value
-                    // column the predicate names, and this pass composes from the level's stored
-                    // memberships — which such a level has none of. Composing anyway would write a
-                    // file of nothing but holes, name it in the manifest, and leave the reader
-                    // adopting a column no request will ever claim.
+                    // **An attribute level's column is not this fold's to write**, and the reason
+                    // is what it is a column *of*: its labels come from the value column the
+                    // predicate names, and this pass composes from the level's stored memberships
+                    // — which such a level has none of. Composing anyway would write a file of
+                    // nothing but holes, name it in the manifest, and leave the reader adopting a
+                    // column no request will ever claim. A spatial level's column *is* written,
+                    // from the rows the pass just resolved.
                     && self
                         .live
                         .registered_layer(layer)
@@ -9957,6 +12318,7 @@ impl Executor {
                             matches!(
                                 registered.declaration.membership,
                                 tessera_types::layer::MembershipSource::Enumerated
+                                    | tessera_types::layer::MembershipSource::Spatial
                             )
                         })
             })
@@ -9980,11 +12342,32 @@ impl Executor {
             for (layer, level, layout) in &wanted {
                 let version = store.level_version(layer, *level);
                 let ordinals = store.level(layer, *level).count() as u32;
+                let spatial = self.live.registered_layer(layer).is_some_and(|registered| {
+                    registered.declaration.membership
+                        == tessera_types::layer::MembershipSource::Spatial
+                });
                 for (view, space) in spaces {
-                    let column =
+                    let column = if spatial {
+                        // The fold's segment is the whole base at row base 0, so the piece
+                        // resolved in `choose_layouts` is the level's membership in this view.
+                        let piece = self.shapes.get(view, layer, *level).and_then(|held| {
+                            fold_segments
+                                .iter()
+                                .find(|(v, _)| v == view)
+                                .and_then(|(_, segment)| held.piece(&segment.seg_id))
+                        });
+                        piece.and_then(|piece| {
+                            crate::row_column::RowColumn::compose(
+                                &crate::artifacts::MembershipRows::of_rows(piece.as_ref().clone()),
+                                space.base_rows(),
+                                *layout,
+                            )
+                        })
+                    } else {
                         crate::row_column::RowColumn::project(ordinals, space, *layout, || {
                             store.level(layer, *level)
-                        });
+                        })
+                    };
                     match column {
                         Some(column) => out.push((
                             view.clone(),
@@ -10019,18 +12402,176 @@ impl Executor {
             n,
             written
                 .into_iter()
-                .map(|(view, layer, level, level_version, layout, bytes)| {
-                    tessera_store::derived::Filed {
+                .filter_map(|(view, layer, level, level_version, layout, bytes)| {
+                    // **No incarnation, no file** (decision 0115): a structure addressed by row
+                    // and stamped with a guess would label another key's rows.
+                    let incarnation = *incarnations.get(&view)?;
+                    Some(tessera_store::derived::Filed {
                         view,
+                        incarnation,
                         layer,
                         level,
                         level_version,
                         layout,
                         bytes,
-                    }
+                    })
                 })
                 .collect(),
         )
+    }
+
+    /// Write this prefix's shape row forms: for every spatial level `columns` does not cover, the
+    /// piece the fold resolved for each of its segments in `choose_layouts`, keyed by that segment
+    /// and the level's version.
+    ///
+    /// **Every failure is a dropped entry, not a discarded fold** — the form is derived, and an
+    /// open that finds no entry resolves the segment again, loudly.
+    #[allow(clippy::too_many_arguments)]
+    fn write_shape_rows(
+        &self,
+        prefix_dir: &std::path::Path,
+        partition: &str,
+        n: u64,
+        incarnations: &FxHashMap<String, tessera_types::view::ViewIncarnation>,
+        columns: &[tessera_store::manifest::RowColumnExtent],
+        pending_retirement: &[(String, u32)],
+        fold_segments: &[(String, tessera_store::read::SegmentData)],
+    ) -> Vec<tessera_store::manifest::ShapeRowsExtent> {
+        let levels: Vec<(String, u32)> = self.live.with_artifacts(|store| {
+            store
+                .levels_and_extents()
+                .map(|(layer, level, _)| (layer.to_string(), level))
+                .filter(|(layer, level)| {
+                    !pending_retirement
+                        .iter()
+                        .any(|(l, v)| l == layer && v == level)
+                })
+                .filter(|(layer, _)| {
+                    self.live.registered_layer(layer).is_some_and(|registered| {
+                        registered.declaration.membership
+                            == tessera_types::layer::MembershipSource::Spatial
+                            && registered.declaration.shape.is_some()
+                    })
+                })
+                .collect()
+        });
+        let mut filed: Vec<tessera_store::derived::FiledShapeRows> = Vec::new();
+        for (layer, level) in &levels {
+            let version = self
+                .live
+                .with_artifacts(|store| store.level_version(layer, *level));
+            for (view, segment) in fold_segments {
+                let covered = columns
+                    .iter()
+                    .any(|c| &c.layer == layer && c.level == *level && &c.view == view);
+                if covered {
+                    continue;
+                }
+                let Some(piece) = self
+                    .shapes
+                    .get(view, layer, *level)
+                    .and_then(|held| held.piece(&segment.seg_id))
+                else {
+                    tracing::warn!(
+                        layer = %layer,
+                        level,
+                        view = %view,
+                        seg_id = %segment.seg_id,
+                        "the fold holds no resolved piece for this segment, so no row form is \
+                         written; the next open resolves it"
+                    );
+                    continue;
+                };
+                // **No incarnation, no file** — `write_row_columns`' rule.
+                let Some(incarnation) = incarnations.get(view).copied() else {
+                    continue;
+                };
+                filed.push(tessera_store::derived::FiledShapeRows {
+                    view: view.clone(),
+                    incarnation,
+                    layer: layer.clone(),
+                    level: *level,
+                    level_version: version,
+                    seg_id: segment.seg_id.clone(),
+                    row_count: segment.row_count,
+                    bytes: tessera_store::derived::shape_rows_bytes(
+                        version,
+                        &segment.seg_id,
+                        segment.row_count,
+                        &piece,
+                    ),
+                });
+            }
+        }
+        tessera_store::derived::file_shape_rows(prefix_dir, partition, n, filed)
+    }
+
+    /// Write this prefix's persisted decompositions: every spatial level's held shapes for each
+    /// fold view, as the level holds them at its current version.
+    fn write_shape_held(
+        &self,
+        prefix_dir: &std::path::Path,
+        partition: &str,
+        n: u64,
+        incarnations: &FxHashMap<String, tessera_types::view::ViewIncarnation>,
+        pending_retirement: &[(String, u32)],
+        fold_segments: &[(String, tessera_store::read::SegmentData)],
+    ) -> Vec<tessera_store::manifest::ShapeHeldExtent> {
+        let filed: Vec<tessera_store::derived::Filed> = self.live.with_artifacts(|store| {
+            let mut out = Vec::new();
+            let levels: Vec<(String, u32)> = store
+                .levels_and_extents()
+                .map(|(layer, level, _)| (layer.to_string(), level))
+                .filter(|(layer, level)| {
+                    !pending_retirement
+                        .iter()
+                        .any(|(l, v)| l == layer && v == level)
+                })
+                .filter(|(layer, _)| {
+                    self.live.registered_layer(layer).is_some_and(|registered| {
+                        registered.declaration.membership
+                            == tessera_types::layer::MembershipSource::Spatial
+                            && registered.declaration.shape.is_some()
+                    })
+                })
+                .collect();
+            for (layer, level) in &levels {
+                let version = store.level_version(layer, *level);
+                for (view, _) in fold_segments {
+                    let Some(held) = self.shapes.get(view, layer, *level) else {
+                        continue;
+                    };
+                    if held.level_version != version {
+                        continue;
+                    }
+                    let shapes: Vec<(Option<&[u8]>, Option<&tessera_store::derived::HeldShape>)> =
+                        (0..held.shapes.len() as u32)
+                            .map(|ordinal| {
+                                (
+                                    store
+                                        .shape_of(layer, *level, ordinal)
+                                        .and_then(|shapes| shapes.for_view(view)),
+                                    held.shapes[ordinal as usize].as_ref(),
+                                )
+                            })
+                            .collect();
+                    let Some(incarnation) = incarnations.get(view).copied() else {
+                        continue;
+                    };
+                    out.push(tessera_store::derived::Filed {
+                        view: view.clone(),
+                        incarnation,
+                        layer: layer.clone(),
+                        level: *level,
+                        level_version: version,
+                        layout: tessera_types::layer::ServingLayout::ArtifactMajor,
+                        bytes: tessera_store::derived::shape_held_bytes(version, &shapes),
+                    });
+                }
+            }
+            out
+        });
+        tessera_store::derived::file_shape_held(prefix_dir, partition, n, filed)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -10039,6 +12580,7 @@ impl Executor {
         prefix_dir: &std::path::Path,
         partition: &str,
         n: u64,
+        incarnations: &FxHashMap<String, tessera_types::view::ViewIncarnation>,
         spaces: &[(String, tessera_store::RowSpace)],
         layouts: &[(String, u32, tessera_types::layer::ServingLayout)],
         pending_retirement: &[(String, u32)],
@@ -10068,6 +12610,16 @@ impl Executor {
                         !layouts
                             .iter()
                             .any(|(l, v, layout)| l == layer && v == level && layout.is_row_major())
+                    })
+                    // **A spatial level's index is not projected from its records**, which carry
+                    // no membership — an index of empties would be adopted at open and settle
+                    // nothing. Its index is built at open over the held pieces, one pass per
+                    // level over row extents, which is cheap where the resolution is not.
+                    .filter(|(layer, _)| {
+                        !self.live.registered_layer(layer).is_some_and(|registered| {
+                            registered.declaration.membership
+                                == tessera_types::layer::MembershipSource::Spatial
+                        })
                     })
                     .collect();
                 let mut out = Vec::with_capacity(levels.len() * spaces.len());
@@ -10104,15 +12656,18 @@ impl Executor {
             n,
             projected
                 .into_iter()
-                .map(|(view, layer, level, level_version, bytes)| {
-                    tessera_store::derived::Filed {
+                .filter_map(|(view, layer, level, level_version, bytes)| {
+                    // **No incarnation, no file** — `write_row_columns`' rule.
+                    let incarnation = *incarnations.get(&view)?;
+                    Some(tessera_store::derived::Filed {
                         view,
+                        incarnation,
                         layer,
                         level,
                         level_version,
                         layout: tessera_types::layer::ServingLayout::ArtifactMajor,
                         bytes,
-                    }
+                    })
                 })
                 .collect(),
         )
@@ -10167,17 +12722,54 @@ impl Executor {
                     // assembled. What such a level pays instead is one derivation on the first
                     // request after the fold, which is what every level paid before this warm
                     // existed.
-                    let predicate_backed =
-                        self.live.registered_layer(layer).is_some_and(|registered| {
-                            !matches!(
-                                registered.declaration.membership,
-                                tessera_types::layer::MembershipSource::Enumerated
-                            )
-                        });
-                    if predicate_backed {
+                    //
+                    // **A spatial level is warmed**, because its membership is held rather than
+                    // evaluated: the fold's artifact pass resolved the new segments against the
+                    // level's shapes, so the join is the O(containers) step and the form built
+                    // here is the one the next request reads.
+                    let registered = self.live.registered_layer(layer);
+                    let membership = registered
+                        .as_ref()
+                        .map(|r| r.declaration.membership.clone());
+                    let spatial = matches!(
+                        membership,
+                        Some(tessera_types::layer::MembershipSource::Spatial)
+                    ) && registered
+                        .as_ref()
+                        .is_some_and(|r| r.declaration.shape.is_some());
+                    if matches!(
+                        membership,
+                        Some(tessera_types::layer::MembershipSource::Attribute(_))
+                    ) || (!spatial
+                        && !matches!(
+                            membership,
+                            Some(tessera_types::layer::MembershipSource::Enumerated)
+                        ))
+                    {
                         continue;
                     }
+                    let segments = if spatial {
+                        crate::viewport::segments_with_row_bases(view, view_data).ok()
+                    } else {
+                        None
+                    };
                     self.live.with_artifacts(|store| {
+                        let predicate = segments.as_ref().map(|segments| {
+                            crate::artifacts::PredicateSource::Spatial(
+                                crate::artifacts::SpatialSource {
+                                    level: self.shapes.level(
+                                        view,
+                                        layer,
+                                        *level,
+                                        store,
+                                        &crate::shapes::PersistedPieces::none(),
+                                    ),
+                                    segments,
+                                    total_rows: u32::try_from(view_data.row_space.total_rows())
+                                        .unwrap_or(u32::MAX),
+                                },
+                            )
+                        });
                         self.artifact_projections.get_or_build(
                             &generation.prefix,
                             view,
@@ -10187,7 +12779,7 @@ impl Executor {
                             &view_data.row_space,
                             Some(&generation.partition_source()),
                             layout,
-                            None,
+                            predicate.as_ref(),
                             generation.segments_version,
                         )
                     });
@@ -10204,8 +12796,9 @@ impl Executor {
                         crate::cut::Lineage::new(store.level(layer, *level).map(
                             |(ordinal, record)| {
                                 let within = record
-                                    .parent
-                                    .filter(|parent| parent.level == *level)
+                                    .parents
+                                    .iter()
+                                    .find(|parent| parent.level == *level)
                                     .map(|parent| parent.ordinal);
                                 (ordinal, within)
                             },
@@ -10358,7 +12951,10 @@ impl Executor {
             .iter()
             .map(|e| {
                 (
-                    e.column.clone(),
+                    // The resolved name for a group-scoped family's column, the column's own for
+                    // an entity-scoped one — one function, so a flush's layer composes under the
+                    // key a leaf resolves to (`filter::extent_column_name`).
+                    crate::filter::extent_column_name(&e.column, e.view.as_deref()),
                     e.values_rel.clone(),
                     Arc::clone(&e.values),
                     // A keyword extent's dictionary travels with its ordinals or the composition
@@ -10380,20 +12976,62 @@ impl Executor {
                 directory: record_dir.join(&e.directory),
             })
             .collect();
+        let entity_terms_paths = vec![tessera_store::EntityTermsExtentPaths {
+            hasrow: record_dir.join(&completed.entity_terms_extent.hasrow),
+            offsets: record_dir.join(&completed.entity_terms_extent.offsets),
+            terms: record_dir.join(&completed.entity_terms_extent.terms),
+        }];
         let text_paths: Vec<crate::filter::TextExtentPaths> = completed
             .text_extents
             .iter()
             .map(|e| crate::filter::TextExtentPaths {
-                column: e.column.clone(),
+                column: crate::filter::extent_column_name(&e.column, e.view.as_deref()),
                 dict_rel: e.dict.clone(),
                 dict: record_dir.join(&e.dict),
                 postings: record_dir.join(&e.postings),
                 presence: record_dir.join(&e.presence),
             })
             .collect();
-        let filter_columns = match live.filter_columns.with_extents(
+        // **The new columns first, then the extents that land on them** (`views.md` §5). A flush
+        // of a view a family had no column for wrote its base in the same unit as its extent, and
+        // the extent composes *onto* a column — so the column has to exist before the composition
+        // below can find it. Empty in every steady-state flush, where the base has been on disc
+        // since the build.
+        let live_columns = if completed.scoped_columns.is_empty() {
+            Arc::clone(&live.filter_columns)
+        } else {
+            let partition_dir = record_dir.join("partitions").join(&completed.partition);
+            // Stamped with the flush's own incarnation, which is what places the base it just
+            // wrote (decision 0115).
+            let opening: Vec<(String, String, tessera_types::view::ViewIncarnation)> = completed
+                .scoped_columns
+                .iter()
+                .map(|(column, view)| (column.clone(), view.clone(), completed.incarnation))
+                .collect();
+            match live.filter_columns.with_scoped_columns(
+                &partition_dir,
+                &opening,
+                &live.bundle.manifest.scoped_scalars(),
+                &live.bundle.manifest.vocabularies,
+                true,
+            ) {
+                Ok(columns) => Arc::new(columns),
+                Err(e) => {
+                    self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
+                    tracing::error!(
+                        error = %e,
+                        "ALARM: a completed flush wrote a group-scoped column this process cannot \
+                         open; discarding it rather than publishing a manifest naming a column no \
+                         request could read. Its files are orphans and the buffer is retained"
+                    );
+                    return;
+                }
+            }
+        };
+        let filter_columns = match live_columns.with_extents(
             &extents,
             &record_paths,
+            &entity_terms_paths,
             &text_paths,
         ) {
             Ok(columns) => Arc::new(columns),
@@ -10411,7 +13049,27 @@ impl Executor {
 
         let mut manifest = partition_data.manifest.clone();
         let manifest_n = self.allocate_manifest_n();
-        manifest.watermark = completed.watermark;
+        // **The watermark advances at every flush publication, and never regresses** — a
+        // publication coordinate, which is the only reading left of it.
+        //
+        // `entity_hi + 1` of *this view's* flush was the whole definition while a bundle had one
+        // view, and under several it is neither monotone nor sufficient. Not monotone: views flush
+        // one per tick, so a view holding older entities publishes after one holding newer ones
+        // and offers a lower number — which `check_manifest_publishable` refuses, leaving those
+        // rows buffered for ever with nothing but a `warn!` to say so. Not sufficient: fragment
+        // freshness is `fragment.watermark >= generation.watermark` (`Engine::fragment_for`), so a
+        // publication that did not move it would let a session keep a fragment built before this
+        // flush's postings tier — its entities in no fragment and no buffer, invisible until the
+        // session re-authorised.
+        //
+        // The entity-threshold reading is already gone: `compose::verdict` dropped its
+        // `entity < watermark` gate when the buffer became exactly the rows without geometry, and
+        // its own note records that removing it took a silent multi-view hazard with it. What is
+        // left reads this as *has anything been published since* — `check_publishable`,
+        // `check_manifest_publishable`, and the fragment test above — and all three want a
+        // coordinate that strictly advances. Single-view behaviour is unchanged: ids are issued
+        // monotonically, so `entity_hi + 1` was already above the live value there.
+        manifest.watermark = completed.watermark.max(manifest.watermark + 1);
         manifest.entity_id_high_water = manifest
             .entity_id_high_water
             .max(completed.entity_id_high_water);
@@ -10424,6 +13082,28 @@ impl Executor {
         manifest.entity_id_low_water = manifest.entity_id_low_water.min(low_water);
         manifest.layers = layers;
         manifest.layer_tombstones = layer_tombstones;
+        // The roster beside them, on the same rule and for the same reason (`views.md` §3.2).
+        let (created_views, dead_view_incarnations) = self.live.roster_for_publication();
+        manifest.views = created_views;
+        manifest.dead_view_incarnations = dead_view_incarnations;
+        // **And the group-scoped columns this flush gave a view its first of** (`views.md` §5).
+        // Carried forward and appended to, never restated: the list is what a *restart* recovers
+        // `scoped_scalars[..].views` from, and a render-only family writes no extent for the
+        // derivation to find. `manifest` is the live side-manifest cloned, so the earlier pairs
+        // are already here.
+        for (column, view) in &completed.scoped_columns {
+            let entry = tessera_store::manifest::ScopedColumn {
+                column: column.clone(),
+                view: view.clone(),
+                // **The incarnation this flush wrote under** (decision 0115). The list is carried
+                // forward for ever, so an entry outlives the drop that orphaned its column; the
+                // stamp is what keeps a key created again from publishing it as its own.
+                incarnation: completed.incarnation,
+            };
+            if !manifest.scoped_columns.contains(&entry) {
+                manifest.scoped_columns.push(entry);
+            }
+        }
         manifest.segments.push(completed.descriptor);
         manifest.deltas.push(completed.tier_path);
         manifest.external_id_runs.push(completed.external_id_run);
@@ -10443,6 +13123,10 @@ impl Executor {
                     .iter()
                     .map(|e| tessera_store::manifest::AttrExtent {
                         column: e.column.clone(),
+                        // `None` for an entity-scoped column, which belongs to no view — the
+                        // incarnation follows the view exactly (decision 0115).
+                        incarnation: e.view.as_ref().map(|_| completed.incarnation),
+                        view: e.view.clone(),
                         values: e.values_rel.clone(),
                         presence: e.presence_rel.clone(),
                         // One record, so the layer's files swap as one: an extent's ordinals are
@@ -10458,6 +13142,14 @@ impl Executor {
         // what `record_extents` names, so bytes this list omits answer no drill-down and bytes it
         // names but that are absent refuse the open (records §7's fail-closed rule).
         manifest.record_extents.extend(completed.record_extent);
+        // The entity→term transpose's extent, under the same two-obligation rule and for the
+        // sharper of the two reasons: a list this manifest omits leaves the flushed entities'
+        // labels unknown, which serves a drill-down without them (harmless) *and* leaves the join
+        // rule's label arm with nothing to compare against (a re-label accepted through a second
+        // view's row). The live generation composes it below.
+        manifest
+            .entity_terms_extents
+            .push(completed.entity_terms_extent.clone());
         // The text layers, under the same two-obligation rule: the files are already digested in
         // `files`, and this entry is what makes them reachable to a reopen. The live generation
         // composes them below — a published layer no live reader holds answers no `match` until the
@@ -10490,6 +13182,8 @@ impl Executor {
             &self.containment_extents,
             &self.tile_index_extents,
             &self.row_column_extents,
+            &self.shape_rows_extents,
+            &self.shape_held_extents,
             &[],
         ) {
             self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
@@ -10501,6 +13195,14 @@ impl Executor {
             return;
         }
 
+        let seg_id = completed.segment.seg_id.clone();
+        // Stamped with the flush's own incarnation for `Manifest::with_scoped_columns`, which
+        // publishes a pair only where it is the live one (decision 0115).
+        let scoped_columns: Vec<(String, String, tessera_types::view::ViewIncarnation)> = completed
+            .scoped_columns
+            .iter()
+            .map(|(column, view)| (column.clone(), view.clone(), completed.incarnation))
+            .collect();
         let next_bundle = match live.bundle.with_segment(
             &completed.partition,
             &completed.view,
@@ -10520,6 +13222,46 @@ impl Executor {
                 return;
             }
         };
+        // **And the family's own list gains the view this flush wrote a base for**
+        // (`views.md` §5). `scoped_scalars[..].views` names the views that *have* a column, so a
+        // view that has just acquired one has to enter it — a client reading the list would
+        // otherwise conclude the column it is being served does not exist, and the next restart's
+        // opener would not open it at all.
+        let next_bundle = if scoped_columns.is_empty() {
+            next_bundle
+        } else {
+            let manifest = next_bundle.manifest.with_scoped_columns(&scoped_columns);
+            next_bundle.with_views(manifest)
+        };
+
+        // **The segment's shape memberships, installed before the swap** (`polygon-membership.md`
+        // §6.3). The pool resolved them against the levels as held when the flush was planned; a
+        // publication into a shape layer since then rebuilt that level, and a piece resolved over
+        // the old shapes would be installed into nothing a request reads. So each piece is
+        // installed into the level now held, and re-resolved against it where the two differ —
+        // one segment, on this thread, in the window a shape publication and a flush overlap.
+        for piece in completed.shape_pieces {
+            let current = self
+                .shapes
+                .get(&completed.view, &piece.level.layer, piece.level.level);
+            match current {
+                Some(current) if Arc::ptr_eq(&current, &piece.level) => {
+                    current.install(&seg_id, piece.rows);
+                }
+                Some(current) => {
+                    let segment = next_bundle
+                        .partitions
+                        .get(&completed.partition)
+                        .and_then(|p| p.views.get(&completed.view))
+                        .and_then(|v| v.segments.iter().find(|s| s.seg_id == seg_id));
+                    if let Some(segment) = segment {
+                        current.resolve(segment);
+                    }
+                }
+                // The level was dropped meanwhile (its layer was dropped): nothing to hold.
+                None => {}
+            }
+        }
 
         // **Exactly what was consumed, from the then-current buffer.** O(buffered) on this thread,
         // which is the term the deny-ack memo measured as dominant at 1 M buffered (165 ms p50);
@@ -10527,8 +13269,19 @@ impl Executor {
         // design adds rather than one it avoids.
         let mut buffer = (*live.buffer).clone();
         for entity in &completed.consumed {
-            buffer.remove(*entity);
+            // **By (entity, view), never by entity.** A flush consumes one view's rows; an entity
+            // that also holds a row awaiting flush in another view keeps it, and removing the
+            // entity outright would lose a row that is in no segment and no buffer (`views.md`
+            // §4).
+            buffer.remove_in_view(*entity, &completed.view);
         }
+        // **The gauge follows the buffer here too.** A flush is the other place occupancy changes,
+        // and until it was stated here the figure only ever came down at the next apply — so a
+        // node that flushed and then took no ingest reported a backlog it had already written, and
+        // `/control/ingest`'s occupancy bound was measured against it.
+        self.health
+            .buffered_items
+            .store(buffer.len(), Ordering::SeqCst);
 
         let watermark = next_bundle
             .partitions
@@ -10544,12 +13297,50 @@ impl Executor {
         // buffered, had no row, and so appeared in no mask at all.
         let denied = Arc::new(crate::compose::derive_denied(&live.overlay, &next_bundle));
 
+        // **And every stored level's held row form gains this segment's rows, before the swap.**
+        // A form covers the whole row space, so a segment nothing added to it would leave every
+        // artifact one segment short — a member ingested into an artifact counting for nobody
+        // until the next fold, which under the nightly gate is hours
+        // (`docs/evidence/memos/2026-09-03-post-flush-artifact-frames.md`). This is the enumerated
+        // twin of the shape pieces installed above: one `project_extents_from` per artifact over
+        // the entities inside this extent's own range, on this thread, against the whole-level
+        // projection the alternative puts on the next request.
+        if let Some(space) = next_bundle
+            .partitions
+            .get(&completed.partition)
+            .and_then(|p| p.views.get(&completed.view))
+            .map(|v| &v.row_space)
+        {
+            // The same rule the delta path takes, asked per layer because this reaches every level
+            // the view holds a form for: a rule-derived level is fresh by its own version move and
+            // has nothing here to gain.
+            let stored = |layer: &str| {
+                self.live
+                    .registered_layer(layer)
+                    .is_some_and(|held| stored_membership(&held.declaration))
+            };
+            self.live.with_artifacts(|store| {
+                self.artifact_projections.extend_flushed(
+                    &live.prefix,
+                    &completed.view,
+                    store,
+                    space,
+                    &stored,
+                )
+            });
+        }
+
         let next = Arc::new(Generation {
             prefix: live.prefix.clone(),
             vocabularies: Arc::clone(&live.vocabularies),
             // The live columns with this flush's extents composed on — the whole of what makes an
             // entity ingested since the build answer a filter on its own value.
             filter_columns,
+            // **A flush changes which entities carry a value, not which values exist**, so this is
+            // carried rather than rebuilt — the sort a rebuild pays is measured in tens of seconds
+            // at 10⁷ values (§6.1). The values a flush's *rows* minted are already in the side map:
+            // they were put there at the commit window that minted them, not here.
+            suggest: Arc::clone(&live.suggest),
             segments_version,
             watermark,
             bundle: next_bundle,
@@ -10581,6 +13372,7 @@ impl Executor {
         // generation itself is held by nothing but the requests already in flight against it.
         self.row_projection_cache
             .prune_generations_below(segments_version.saturating_sub(KEEP_SUPERSEDED_GENERATIONS));
+        self.prune_region_cache(segments_version);
         self.health.flushes.fetch_add(1, Ordering::Relaxed);
         self.health.record_tier_fragmentation(completed.tier_tally);
 
@@ -10813,6 +13605,12 @@ impl Executor {
                 || Arc::clone(&previous.external_index),
                 |r| Arc::clone(&r.external_index),
             ),
+            // **Carried across a rotation too**, and this is not the oversight it looks like: a
+            // fold retires entities, never values — a code is pinned forever (§3.4) and no
+            // publication removes one from a vocabulary — so the value set the index is over is the
+            // set the new prefix carries. What a fold *can* change is a title, and it does so
+            // through a new bundle, which is a new `Engine::open` and therefore a fresh build.
+            suggest: Arc::clone(&previous.suggest),
             delta_postings,
             overlay_version,
             overlay,
@@ -10859,6 +13657,7 @@ impl Executor {
         // would delete the input to the very patch it exists to enable.
         self.row_projection_cache
             .prune_generations_below(segments_version.saturating_sub(KEEP_SUPERSEDED_GENERATIONS));
+        self.prune_region_cache(segments_version);
         Ok(())
     }
 
@@ -10880,6 +13679,17 @@ impl Executor {
     /// [`Self::publish`] over a generation the caller already holds by `Arc` — a geometry
     /// publication needs the same value afterwards, to hand the background refresh.
     fn publish_arc(&self, next: Arc<Generation>, started: std::time::Instant) -> Published {
+        // **The pieces of segments no view serves any more are dropped at the swap** — a merged or
+        // folded segment's rows were renumbered into its successor, which was resolved before this
+        // publication, so nothing reads the consumed ones again (`crate::shapes`).
+        let live: std::collections::HashSet<String> = next
+            .bundle
+            .partitions
+            .values()
+            .flat_map(|p| p.views.values())
+            .flat_map(|v| v.segments.iter().map(|s| s.seg_id.clone()))
+            .collect();
+        self.shapes.retain_segments(&|seg_id| live.contains(seg_id));
         // **The deny mask's derivation rule, enforced at the one place a generation becomes live.**
         // `crate::compose::derive_denied` states the rule; every build site — the incremental
         // addition on a deny window, the rebuild at each geometry publication, the carry-forward
@@ -11191,9 +14001,11 @@ mod dispatch_rules_tests {
         let item = BufferedItem {
             terms: Vec::new(),
             view: "s".to_string(),
+            join: false,
             x: 0.5,
             y: 0.5,
             scalars: Vec::new(),
+            scoped: Vec::new(),
             external_id: None,
             wal_pos: None,
         };
@@ -11238,4 +14050,43 @@ mod dispatch_rules_tests {
         assert!(!dictionary_moved_under(None, 9));
         assert!(!dictionary_moved_under(None, 0));
     }
+}
+
+/// The segments a fold wrote, opened from the prefix it wrote them into — what its artifact pass
+/// resolves every spatial level against (`polygon-membership.md` §6.3). A segment that will not
+/// open is skipped and said so; the level then resolves it at the flip's warm, on the executor,
+/// which is the same answer later.
+fn fold_segments(
+    prefix_dir: &std::path::Path,
+    partition: &str,
+    segments: &[tessera_store::manifest::SegmentDescriptor],
+) -> Vec<(String, tessera_store::read::SegmentData)> {
+    let mut out = Vec::with_capacity(segments.len());
+    for descriptor in segments {
+        let partition_dir = prefix_dir.join("partitions").join(partition);
+        let dir = tessera_store::view_path(&partition_dir, &descriptor.view)
+            .join("segments")
+            .join(&descriptor.seg_id);
+        let morton = tessera_store::read::MortonSlice::load(&dir.join("morton.u32"));
+        let columns = tessera_store::read::ColumnsRef::load(&dir.join("columns.arrow"));
+        match (morton, columns) {
+            (Ok(morton), Ok(columns)) => out.push((
+                descriptor.view.clone(),
+                tessera_store::read::SegmentData {
+                    seg_id: descriptor.seg_id.clone(),
+                    row_count: descriptor.row_count,
+                    morton,
+                    columns,
+                },
+            )),
+            (Err(error), _) | (_, Err(error)) => tracing::warn!(
+                view = %descriptor.view,
+                seg_id = %descriptor.seg_id,
+                %error,
+                "the fold could not reopen a segment it just wrote; its spatial memberships are \
+                 resolved at the flip instead"
+            ),
+        }
+    }
+    out
 }

@@ -59,7 +59,9 @@ fn write_points(path: &Path) {
                 ids.iter().map(|e| (e % 100) as f64).collect::<Vec<_>>(),
             )),
             Arc::new(Float64Array::from(
-                ids.iter().map(|e| ((e * 7) % 100) as f64).collect::<Vec<_>>(),
+                ids.iter()
+                    .map(|e| ((e * 7) % 100) as f64)
+                    .collect::<Vec<_>>(),
             )),
             Arc::new(StringArray::from(
                 ids.iter().map(|&e| Some(prose_of(e))).collect::<Vec<_>>(),
@@ -108,6 +110,10 @@ fn text_schema(index: bool) -> Schema {
 }
 
 fn build_with(schema: Schema) -> tempfile::TempDir {
+    build_ordered(schema, tessera_build::ArenaOrder::Auto)
+}
+
+fn build_ordered(schema: Schema, arena_order: tessera_build::ArenaOrder) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     let points = dir.path().join("points.parquet");
     let pairs = dir.path().join("pairs.parquet");
@@ -115,18 +121,27 @@ fn build_with(schema: Schema) -> tempfile::TempDir {
     write_empty_pairs(&pairs);
     let out = dir.path().join("bundle");
     build(&BuildArgs {
-        point_fields: Default::default(),
+        arena_order,
+        views: vec![tessera_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: Bounds {
+                x_min: 0.0,
+                x_max: 1000.0,
+                y_min: 0.0,
+                y_max: 1000.0,
+            },
+            points: points.clone(),
+            point_fields: Default::default(),
+            select: None,
+            access: tessera_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
-        points,
-        access: tessera_build::config::AccessInput::relation(pairs),
         out,
-        extent: Bounds {
-            x_min: 0.0,
-            x_max: 1000.0,
-            y_min: 0.0,
-            y_max: 1000.0,
-        },
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -134,6 +149,7 @@ fn build_with(schema: Schema) -> tempfile::TempDir {
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
         mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
@@ -187,6 +203,77 @@ fn source_to_entity(out: &Path) -> HashMap<u64, u32> {
         }
     }
     map
+}
+
+/// **The arena's order reaches no byte of the bundle.**
+///
+/// The arena is `.build-tmp/` scratch and its order is internal, which is the whole argument for
+/// letting a switch choose between the two fills: a wrong choice costs time, never correctness. It
+/// is asserted rather than argued because the two fills write the text index's postings from
+/// different arena windows in a different order, and the sort and merge that make that
+/// unobservable are the kind of thing a later change can quietly lose.
+///
+/// `MANIFEST.json` differs in `created_at` alone, and `CURRENT` carries that manifest's digest.
+#[test]
+fn the_two_arena_orders_build_the_same_bundle() {
+    use tessera_build::ArenaOrder;
+
+    let mut files = Vec::new();
+    for order in [ArenaOrder::Arrival, ArenaOrder::Entity] {
+        let dir = build_ordered(text_schema(true), order);
+        let out = dir.path().join("bundle");
+        let mut seen: HashMap<PathBuf, Vec<u8>> = HashMap::new();
+        let mut stack = vec![out.clone()];
+        while let Some(at) = stack.pop() {
+            for entry in std::fs::read_dir(&at).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    let rel = path.strip_prefix(&out).unwrap().to_path_buf();
+                    seen.insert(rel, std::fs::read(&path).unwrap());
+                }
+            }
+        }
+        files.push((dir, seen));
+    }
+    let (arrival, entity) = (&files[0].1, &files[1].1);
+    let mut names: Vec<&PathBuf> = arrival.keys().collect();
+    names.sort();
+    assert_eq!(
+        names,
+        {
+            let mut theirs: Vec<&PathBuf> = entity.keys().collect();
+            theirs.sort();
+            theirs
+        },
+        "the two orders wrote different files"
+    );
+    let mut compared = 0usize;
+    for name in names {
+        let display = name.to_string_lossy().to_string();
+        if display.ends_with("MANIFEST.json") || display == "CURRENT" {
+            continue;
+        }
+        assert_eq!(
+            arrival[name],
+            entity[name],
+            "{display} differs between the two arena orders"
+        );
+        compared += 1;
+    }
+    assert!(compared > 5, "only {compared} files were compared");
+    // The manifests agree about everything but when they were written.
+    let manifest = arrival
+        .keys()
+        .find(|k| k.to_string_lossy().ends_with("MANIFEST.json"))
+        .expect("the bundle carries a manifest");
+    let strip = |bytes: &[u8]| {
+        let mut json: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        json.as_object_mut().unwrap().remove("created_at");
+        json
+    };
+    assert_eq!(strip(&arrival[manifest]), strip(&entity[manifest]));
 }
 
 /// **The index and the blob, both, from one build.**
@@ -371,7 +458,11 @@ fn match_and_minimum_should_match_answer_from_the_index() {
         expected(&|t| t.iter().any(|x| x == "quick") && t.iter().any(|x| x == "fox")),
         "match is a conjunction"
     );
-    assert_eq!(got(m("fox quick", None)), got(m("quick fox", None)), "order is not a term");
+    assert_eq!(
+        got(m("fox quick", None)),
+        got(m("quick fox", None)),
+        "order is not a term"
+    );
 
     // A token no document carries makes the conjunction empty — and does not make it *everything*,
     // which is what a short circuit that skipped an unresolved token would produce.
@@ -386,7 +477,11 @@ fn match_and_minimum_should_match_answer_from_the_index() {
     assert_eq!(
         got(m("quick brown zzzznope", Some(2))),
         expected(&|t| {
-            [ "quick", "brown" ].iter().filter(|w| t.iter().any(|x| &x == w)).count() >= 2
+            ["quick", "brown"]
+                .iter()
+                .filter(|w| t.iter().any(|x| &x == w))
+                .count()
+                >= 2
         }),
         "an absent token keeps its place in the denominator"
     );
@@ -394,8 +489,14 @@ fn match_and_minimum_should_match_answer_from_the_index() {
     // The query is analysed by the column's analyser, so a fullwidth or uppercase query finds the
     // same documents a plain one does — the property that a wire-side tokeniser would put at risk.
     assert_eq!(got(m("QUICK", None)), got(m("quick", None)));
-    assert_eq!(got(m("日本語", None)), expected(&|t| t.iter().any(|x| x == "日本語")));
-    assert!(!got(m("日本語", None)).is_empty(), "the CJK term is findable");
+    assert_eq!(
+        got(m("日本語", None)),
+        expected(&|t| t.iter().any(|x| x == "日本語"))
+    );
+    assert!(
+        !got(m("日本語", None)).is_empty(),
+        "the CJK term is findable"
+    );
 }
 
 /// **The candidate bounds the answer.** Postings are corpus-wide; nothing derived from them may
@@ -416,16 +517,25 @@ fn match_never_answers_outside_the_candidate() {
     };
     let all: croaring::Bitmap = (0..N).map(|e| source_of[&e]).collect();
     let wide = columns.resolve("abstract", &everything, &all).unwrap();
-    assert!(wide.cardinality() > 2, "the fixture must have something to narrow");
+    assert!(
+        wide.cardinality() > 2,
+        "the fixture must have something to narrow"
+    );
 
     // Two entities only, one of which carries the term.
     let narrow_mask: croaring::Bitmap = [source_of[&0], source_of[&3]].into_iter().collect();
-    let narrow = columns.resolve("abstract", &everything, &narrow_mask).unwrap();
+    let narrow = columns
+        .resolve("abstract", &everything, &narrow_mask)
+        .unwrap();
     assert!(
         narrow.andnot(&narrow_mask).is_empty(),
         "the answer named an entity the candidate did not"
     );
-    assert_eq!(narrow.cardinality(), 1, "source 0 carries `quick`, source 3 does not");
+    assert_eq!(
+        narrow.cardinality(),
+        1,
+        "source 0 carries `quick`, source 3 does not"
+    );
 }
 
 fn open_columns(out: &Path) -> tessera_engine::filter::FilterColumns {
@@ -435,7 +545,10 @@ fn open_columns(out: &Path) -> tessera_engine::filter::FilterColumns {
         &out.join(current_prefix(out)),
         &phash,
         &bundle.manifest.declared_scalars,
+        &bundle.manifest.scoped_scalars(),
+        &|view: &str| bundle.manifest.incarnation_of(view),
         &bundle.manifest.vocabularies,
+        &[],
         &[],
         &[],
         &[],
@@ -595,14 +708,20 @@ fn a_phrase_matches_only_where_the_words_are_adjacent_and_in_order() {
         v.sort_unstable();
         v
     };
-    let phrase = |q: &str| FilterOperand::Phrase { query: q.to_string() };
+    let phrase = |q: &str| FilterOperand::Phrase {
+        query: q.to_string(),
+    };
     // The oracle: the corpus's own prose, analysed and searched for the word sequence. Upstream of
     // anything the build stored, which is the relation every assertion in this file checks against.
     let saying = |words: &[&str]| -> Vec<u64> {
         let a = tessera_analyse::Analyser::new();
         let want: Vec<String> = words.iter().map(|w| w.to_string()).collect();
         (0..N)
-            .filter(|e| a.tokens(&prose_of(*e)).windows(want.len()).any(|w| w == want))
+            .filter(|e| {
+                a.tokens(&prose_of(*e))
+                    .windows(want.len())
+                    .any(|w| w == want)
+            })
             .collect()
     };
     let matches = |q: &str| FilterOperand::Match {
@@ -630,9 +749,15 @@ fn a_phrase_matches_only_where_the_words_are_adjacent_and_in_order() {
     assert!(!sources(phrase("fox brown")).contains(&0));
 
     // At the very start and the very end of a document, which is where a window walk goes wrong.
-    assert!(sources(phrase("the quick")).contains(&0), "the first two words");
+    assert!(
+        sources(phrase("the quick")).contains(&0),
+        "the first two words"
+    );
     assert!(sources(phrase("silver fox")).contains(&1));
-    assert!(sources(phrase("brown bear")).contains(&3), "the whole document");
+    assert!(
+        sources(phrase("brown bear")).contains(&3),
+        "the whole document"
+    );
     // And exhaustively, against the corpus's own prose rather than against three spot checks: the
     // route's answer *is* the set of documents saying the words in that order.
     for probe in [
@@ -676,7 +801,10 @@ fn a_phrase_matches_only_where_the_words_are_adjacent_and_in_order() {
 
     // The query is analysed by the column's own analyser here exactly as for `match`, so case and
     // width fold, and a CJK phrase works without spaces to split on.
-    assert_eq!(sources(phrase("QUICK BROWN")), sources(phrase("quick brown")));
+    assert_eq!(
+        sources(phrase("QUICK BROWN")),
+        sources(phrase("quick brown"))
+    );
     assert!(
         !sources(phrase("日本語のテキスト")).is_empty(),
         "a CJK phrase is a sequence of segmented words, not one token"
@@ -717,9 +845,16 @@ fn a_phrase_never_answers_or_reads_outside_the_candidate() {
         got.andnot(&narrow).is_empty(),
         "the answer named an entity the candidate did not"
     );
-    assert_eq!(got.cardinality(), 1, "source 0 carries the phrase, source 3 does not");
+    assert_eq!(
+        got.cardinality(),
+        1,
+        "source 0 carries the phrase, source 3 does not"
+    );
 
     // A candidate holding no carrier answers empty rather than reading anything.
     let none: croaring::Bitmap = [source_of[&3]].into_iter().collect();
-    assert!(columns.resolve("abstract", &operand, &none).unwrap().is_empty());
+    assert!(columns
+        .resolve("abstract", &operand, &none)
+        .unwrap()
+        .is_empty());
 }

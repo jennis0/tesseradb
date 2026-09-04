@@ -3,15 +3,17 @@
   <head>
     <meta charset="utf-8" />
     <title>Tessera viewer</title>
+    <!-- No icon to fetch: a headed browser asks for one and the dev server's 404 reads as an error. -->
+    <link rel="icon" href="data:," />
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
-    <div id="map"></div>
-    <!-- Controls left, readouts right. The two are separate elements because they are rebuilt under
-         different rules: the readouts refresh on every store change, while the controls must not be
-         rebuilt while focus is inside them or a filter box loses its caret mid-word. -->
-    <aside id="controls"></aside>
-    <aside id="stats"></aside>
+    <!-- The explorer is the map with its status strip, toolbar (the layer picker and the legend),
+         filters, artifact list, selection and detail card (design client-components §7); the
+         instruments beside it are the demo's own — dataset and principal, where the session
+         credential stays, and the readouts that measure rather than show. -->
+    <tessera-explorer id="explorer" layout="overlay"></tessera-explorer>
+    <aside id="instruments"></aside>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

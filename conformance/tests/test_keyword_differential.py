@@ -115,7 +115,7 @@ COMPOSED_EXPR = {
 
 
 def _tiles_by_id(tiles) -> dict[int, tuple[int, int, int]]:
-    return {t: (v, m, s) for t, v, m, s in tiles}
+    return {t: (v, m, s) for t, v, m, s, _h in tiles}
 
 
 def _served_entities(raw: bytes, entity_of_fx: dict[int, int]) -> set[int]:
@@ -425,7 +425,7 @@ def test_a_needle_no_dictionary_holds_still_answers_and_answers_empty(
         )
         tiles, points = decode_viewport(resp.content)
         assert points == [], label
-        assert all(matched == 0 for _t, _v, matched, _s in tiles), label
+        assert all(matched == 0 for _t, _v, matched, _s, _h in tiles), label
         assert {t: v for t, (v, _m, _s) in _tiles_by_id(tiles).items()} == {
             t: v for t, (v, _m, _s) in unfiltered("crossover_below").items()
         }, f"{label}: an empty-operand request moved `visible`"
