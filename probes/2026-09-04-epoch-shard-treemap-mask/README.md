@@ -243,3 +243,9 @@ or above 95%) fires in no variant beyond the occasional fully-visible tiny tile.
   large request across the pool; it does not divide the work, and the ratio is what was asked.
 - **A 2³⁰-row universe**, not 10⁹, and one machine. The ratios are the finding; the absolute
   microseconds are this box's, single-threaded, with a warm page cache.
+
+- **Built at 7314a8f9 (2026-08-23), about 800 commits behind the main it was merged into.** The
+  operations measured are croaring calls through `Selection::of` and the transcribed run walker;
+  `select.rs` and `for_each_run_in` are byte-identical between that base and main, and the
+  `range_cardinality` and `rows_in_range` delegations have the same signatures, so the figures
+  describe current code. Checked at merge, not re-run.
