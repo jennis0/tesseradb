@@ -312,10 +312,12 @@ pub struct ExecutorHealth {
     pub(crate) fold_ended_unix: AtomicU64,
     /// The last fold's wall clock in seconds, and the highest resident set its own staircase saw
     /// (`compact::PassCost`) — the two gauges `/control/status` publishes for the most expensive
-    /// operation in the system. Both are 0 before the first fold.
+    /// operation in the system. Both are 0 before the first fold. Both cover the whole fold, from
+    /// the fold thread's entry to the superseded prefix's reclaim: the publication's phases are
+    /// rows of the same staircase (`compact::Staircase`).
     ///
     /// **The RSS figure is a staircase maximum, not a peak**, and the difference is not pedantry:
-    /// it is sampled at five pass boundaries, so a spike inside a pass is invisible to it. It is
+    /// it is sampled at pass boundaries, so a spike inside a pass is invisible to it. It is
     /// what a deployment has, and probe P1 is what says how far under the true peak it sits.
     pub(crate) last_fold_secs: AtomicU64,
     pub(crate) last_fold_rss: AtomicU64,
@@ -6387,7 +6389,7 @@ impl Executor {
             .name("tessera-fold".to_string())
             .spawn(move || {
                 match crate::compact::execute(plan, ctx) {
-                    Ok(completed) => {
+                    Ok(mut completed) => {
                         // A test holding the fold here models the flight a real corpus gives for
                         // free — see `Engine::set_fold_paused_for_test`. Always false otherwise.
                         health.fold_holding.store(true, Ordering::SeqCst);
@@ -6395,6 +6397,8 @@ impl Executor {
                             std::thread::sleep(std::time::Duration::from_millis(5));
                         }
                         health.fold_holding.store(false, Ordering::SeqCst);
+                        // After the hold, so the staircase's hand-off row is the hand-off.
+                        completed.finished = std::time::Instant::now();
                         // Set before the send, exactly as a flush's is — see
                         // `ExecutorHealth::flush_completed_pending` for the handshake's ordering.
                         health.fold_completed_pending.store(true, Ordering::SeqCst);
@@ -6479,6 +6483,11 @@ impl Executor {
         use std::collections::{BTreeMap, BTreeSet};
 
         let started = std::time::Instant::now();
+        // The fold thread's staircase, continued here for the publication's phases so the gauges
+        // on `/control/status` cover the whole fold (`compact::Staircase`). A discard below drops
+        // it with the fold.
+        let mut stairs =
+            crate::compact::Staircase::resume(completed.cost.clone(), completed.finished);
         let live = self.generation.load_full();
         let plan = &completed.plan;
         // **A node whose durable state disagrees with what it is serving publishes nothing**
@@ -6871,6 +6880,7 @@ impl Executor {
         // nothing else: a suppressed member keeps its bit (Rule S), and no generating set is
         // touched at all.
         let to_prefix_dir = self.bundle_root.join(&completed.prefix);
+        stairs.record("6 hand-off");
         let repacked = match self.rewrite_membership_extents(
             &to_prefix_dir,
             &plan.partition,
@@ -6885,6 +6895,8 @@ impl Executor {
                 return;
             }
         };
+
+        stairs.record("7 memberships");
 
         // **The containment partitions, in the same pass and against the prefix just written.**
         // They are derived, so an empty list is a cost and not a fault — see
@@ -6991,6 +7003,7 @@ impl Executor {
             &pending,
             &fold_segments,
         );
+        stairs.record("8 derived");
 
         // ---- step 3b: the report, before anything retires ---------------------------------------
         //
@@ -7008,6 +7021,7 @@ impl Executor {
         let degraded = self
             .live
             .with_artifacts(|store| store.degradations(&executed));
+        stairs.record("9 report");
 
         // ---- step 2: assemble `SEGMENTS-<n>` from the live partition manifest ------------------
         //
@@ -7355,6 +7369,7 @@ impl Executor {
             ));
             return;
         }
+        stairs.record("10 manifest");
 
         self.pause_point(PauseSiteArg::BeforeCurrentFlip);
         if let Err(e) =
@@ -7547,6 +7562,7 @@ impl Executor {
                 store,
             );
         });
+        stairs.record("11 flip");
 
         // **The row forms, rebuilt here rather than by whoever arrives first.** Row space renumbers
         // globally at a fold, so every projection built over the old one is invalid at the flip —
@@ -7563,6 +7579,7 @@ impl Executor {
         // the retire is about to bump, and the whole warm would be discarded on the first request —
         // paying the stall it exists to prevent, having already paid for the warm.
         self.warm_artifact_caches();
+        stairs.record("12 warm");
 
         // ---- step 7: rotate the WAL ------------------------------------------------------------
         //
@@ -7583,6 +7600,8 @@ impl Executor {
             superseded_sidecars: std::mem::take(&mut self.superseded_sidecars),
         });
         self.reclaim_superseded_prefixes();
+        stairs.record("13 reclaim");
+        let cost = stairs.into_cost();
 
         self.health.folds.fetch_add(1, Ordering::Relaxed);
         // **The fold's own account of what it spent, at the one severity an operator reads.** The
@@ -7590,8 +7609,7 @@ impl Executor {
         // its counters said a fold happened, and nothing said what it took. The staircase is the
         // diagnostic half — a resident set that climbs on one pass names that pass — and the two
         // gauges below are the alarming half, on `/control/status`.
-        let passes = completed
-            .cost
+        let passes = cost
             .iter()
             .map(|c| {
                 // Total and anonymous, because §3's budget is a claim about the split: a fold
@@ -7608,8 +7626,14 @@ impl Executor {
             })
             .collect::<Vec<_>>()
             .join(" ");
-        let fold_secs: u64 = completed.cost.iter().map(|c| c.elapsed.as_secs()).sum();
-        let staircase_rss = completed.cost.iter().map(|c| c.rss).max().unwrap_or(0);
+        // Summed before it is truncated to seconds: a fold of many sub-second rows is not a
+        // zero-second fold.
+        let fold_secs = cost
+            .iter()
+            .map(|c| c.elapsed)
+            .sum::<std::time::Duration>()
+            .as_secs();
+        let staircase_rss = cost.iter().map(|c| c.rss).max().unwrap_or(0);
         self.health
             .last_fold_secs
             .store(fold_secs, Ordering::Relaxed);
@@ -7622,7 +7646,7 @@ impl Executor {
         self.health
             .last_fold_attr_written
             .store(completed.attr_bytes_written, Ordering::Relaxed);
-        *lock_recover(&self.health.last_fold_passes) = completed.cost.clone();
+        *lock_recover(&self.health.last_fold_passes) = cost;
         tracing::info!(
             prefix = %completed.prefix,
             segments_version,
