@@ -442,6 +442,26 @@ deployment. **`publishers/source` needs no publication** — its membership is t
 and it reproduces exactly at five of the six principals, the sixth being the wire-encoding
 difference above.
 
+### What is on disk
+
+`$TESSERA_LADDER/treeoflife` is **78 GB**, `treeoflife-1m` beside it 221 MB, and the measurement
+work under `$TESSERA_LADDER/.measure/treeoflife` **40 GB** — almost all of it the ingest cell's base
+bundle and its folded copy, which is deletable once the cell's JSON is committed.
+
+| | |
+|---|---|
+| `bundle/` | **38 GB** |
+| `staging/` | **30 GB** — `metadata.parquet` 8.3 GB and its 666 shards 8.3 GB, the GBIF join's parts and ids 7.4 GB, `gbif-coordinates.parquet` 2.4 GB, the placement checkpoint 1.8 GB, **`fit.f16` 3.6 GB** |
+| `points.parquet` | 6.5 GB |
+| `points-geo.parquet` | 1.9 GB |
+| `layout-bioclip.npy` | 1.8 GB — the whole corpus's positions, so a rebuild needs no GPU and no share pass |
+| the two member files | 696 MB |
+
+**The 346 GB of vectors are not here and never were.** A run that wants a *new* layout re-reads the
+share, which is ~3.5 hours; a run that wants a new corpus over the same layout reads
+`layout-bioclip.npy` and costs 10.6 minutes. `staging/placement/` is the resumable checkpoint —
+`place.f32` and its ledger — and can go once the layout is written.
+
 ## The environment
 
 `~/venvs/projection` — cuVS, cuML and CuPy on the GPU with scikit-learn on the CPU — shared with
