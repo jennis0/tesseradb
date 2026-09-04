@@ -888,6 +888,45 @@ def compare_census(folded: dict, all_in: dict) -> dict:
 # ---------------------------------------------------------------------------------------------
 
 
+def executor_laps(before: dict, after: dict, rows: int) -> dict:
+    """The `WriteStage` laps across one ingest phase, µs per accepted row.
+
+    Differenced rather than read absolute, because the laps are process totals and the base's own
+    open may have closed windows before the phase began. **All zero without `bench-timing`** — the
+    `bench_timing` flag is carried through so a reader can tell an uninstrumented binary from an
+    idle executor. `unattributed` is the coarse `apply_nanos_total` minus the three `apply` laps
+    plus whatever `submit\u2192receipt` sees beyond the executor's own stages; it is reported, not
+    hidden, because the close's stages are meant to partition its wall clock.
+    """
+    stages = after.get("stage_nanos") or {}
+    prior = before.get("stage_nanos") or {}
+    windows = after.get("wal_fsyncs", 0) - before.get("wal_fsyncs", 0)
+    laps = {
+        name: round((nanos - prior.get(name, 0)) / 1000.0 / rows, 3) if rows else None
+        for name, nanos in stages.items()
+    }
+    executor = sum(
+        laps.get(name) or 0.0
+        for name in ("allocate", "wal_append", "wal_fsync", "buffer_clone", "apply_rows",
+                     "swap", "admit", "record_batch")
+    )
+    return {
+        "bench_timing": after.get("bench_timing", False),
+        "rows": rows,
+        "windows": windows,
+        "rows_per_window": round(rows / windows, 1) if windows else None,
+        "us_per_row": laps,
+        "executor_sum_us_per_row": round(executor, 3),
+        "queueing_us_per_row": round((laps.get("submit\u2192receipt") or 0.0) - executor, 3),
+        "apply_nanos_total_us_per_row": round(
+            (after.get("apply_nanos_total", 0) - before.get("apply_nanos_total", 0))
+            / 1000.0 / rows, 3
+        ) if rows else None,
+        "apply_nanos_max_ms": round(after.get("apply_nanos_max", 0) / 1e6, 1),
+        "work_service_nanos_ewma_ms": round(after.get("work_service_nanos_ewma", 0) / 1e6, 1),
+    }
+
+
 class Cycle:
     def __init__(self, args):
         self.args = args
@@ -1058,7 +1097,9 @@ class Cycle:
             scratch,
             (args.port0, args.port0 + 1, args.port0 + 2),
             self.binary,
+            ingest=json.loads(args.ingest_config) if args.ingest_config else None,
         )
+        self.result["ingest_config"] = served.ingest
         served.clear_scratch()
         t0 = time.perf_counter()
         try:
@@ -1087,8 +1128,21 @@ class Cycle:
             head = 3 * args.write_cycle_n if args.write_cycle else 0
             hold = HoldOut(self.rung, self.held, head_rows=head)
             self.log(f"ingesting {len(self.held):,} rows at C={args.concurrency}")
+            before = control.status()["write_executor"]
             self.result["ingest"] = self.run_ingest(control, hold.batches(), "cycle")
+            self.result["executor_laps"] = executor_laps(
+                before,
+                control.status()["write_executor"],
+                self.result["ingest"]["accepted"],
+            )
             self.log(f"  {self.result['ingest']['items_per_s']} items/s")
+            if args.stop_after_ingest:
+                # **The attribution cell, not the cycle.** Everything after this measures
+                # publication, flush and the fold; a run that only wants the executor's laps
+                # pays ~an hour for figures it is not reading. The equivalence census is
+                # therefore *absent* from such a run's result, not passed — see `stop_after`.
+                self.result["stop_after"] = "ingest"
+                return self.result
 
             # **Every artifact, after every point it depends on.** Before the flush, deliberately:
             # an ingested row is resolvable by its external id from the moment it is acked
@@ -1460,6 +1514,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--write-cycle", action="store_true")
     ap.add_argument("--write-cycle-n", type=int, default=1000)
     ap.add_argument("--reuse-base", action="store_true")
+    ap.add_argument(
+        "--ingest-config",
+        default=None,
+        help="a JSON object of `[ingest]` keys written into the served deployment's copy, for a "
+        'cell that sweeps a write-path knob: `{"flush_max_age_secs": 5}`. Absent means the '
+        "server's own defaults",
+    )
+    ap.add_argument(
+        "--stop-after-ingest",
+        action="store_true",
+        help="return after the ingest phase and its executor laps, skipping publication, flush, "
+        "the fold and the equivalence census. An attribution run, not a cycle: the result carries "
+        '`stop_after: "ingest"` and no census at all',
+    )
     ap.add_argument(
         "--publish-max-bytes",
         type=int,

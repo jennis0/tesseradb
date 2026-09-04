@@ -61,6 +61,7 @@ class Deployment:
         binary: Path,
         cap_bytes: int | None = None,
         env: dict[str, str] | None = None,
+        ingest: dict | None = None,
     ):
         self.source_dir = Path(source_dir)
         self.bundle = Path(bundle)
@@ -68,6 +69,9 @@ class Deployment:
         self.ports = ports
         self.binary = Path(binary)
         self.cap_bytes = cap_bytes
+        #: `[ingest]` keys written into the copy. Empty means the server's own defaults, which is
+        #: what every cell that is not sweeping a write-path knob wants.
+        self.ingest = dict(ingest or {})
         self.env = dict(os.environ)
         self.env.update(read_env_file(self.source_dir / ".env"))
         if env:
@@ -137,6 +141,10 @@ max_k   = {serve.get('max_k', 5000)}
 session_credential_env  = "{serve['session_credential_env']}"
 operator_credential_env = "{serve['operator_credential_env']}"
 """
+        if self.ingest:
+            body += "\n[ingest]\n" + "".join(
+                f"{key} = {value!r}\n".replace("'", '"') for key, value in self.ingest.items()
+            )
         self.toml.write_text(body)
 
     def start(self, log: Path | None = None, timeout: float = 900.0) -> None:
