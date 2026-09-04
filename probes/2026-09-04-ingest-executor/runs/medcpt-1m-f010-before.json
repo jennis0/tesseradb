@@ -1,0 +1,356 @@
+{
+  "fraction": 0.1,
+  "concurrency": 8,
+  "seed": 0,
+  "batch_rows": 10000,
+  "base_rows": 900000,
+  "holdout_rows": 100000,
+  "build": {
+    "wall_s": 7.76,
+    "returncode": 0,
+    "stdout": "built /tmp/claude-1000/-home-joe-code-tessera/33360fbb-27d0-434f-9d43-7de275c80a32/scratchpad/work1m/base-0.1/bundle (v00000): 900000 items, 18 terms, 4141437 pairs, 173774826 bytes on disk, 0 artifact(s) minted, 0 unclustered member row(s)\n  view knn: 900000 row(s)\n",
+    "stderr_tail": "view 'knn': quantising against x [-12.541484279632568, 17.44895498275757], y [-13.982394618988037, 16.0080446434021]\n        the data spans x [-12.146526336669922, 17.053997039794922], y [-13.688370704650879, 15.714020729064941] \u2014 63810 x 64252 of the 65536 x 65536 cells\n        900000 point(s) placed, none on the frame's edge\nschema: 4 column(s), 8.00 B/row against the 12 B fixed row (+67%)\n        7.44 GiB per 10^9 items \u2014 unalterable without rewriting the corpus\n        every column materialises in EVERY view \u2014 including ones whose items carry no value for it (\u00a73.9). Per-view columns need contracts \u00a72.6's per-view enumeration\nstage       source_ids      0.03s  rows=900000       peak=    30 MiB\nstage       dictionary      0.75s  rows=18           peak=   116 MiB\nstage    geometry_read      0.52s  rows=900000       peak=   213 MiB\nstage       pairs_pack      0.00s  rows=4141437      peak=   213 MiB\nstage   signature_sort      0.14s  rows=900000       peak=   213 MiB\nstage       assignment      0.24s  rows=900000       peak=   213 MiB\nstage       assignment      0.04s  rows=900000       peak=   213 MiB\nstage   postings_write      0.14s  rows=4141437      peak=   213 MiB\nstage     external_ids      0.04s  rows=900000       peak=   213 MiB\nattribute 'published': 899,312 of 900,000 entities have a value\nattribute 'title': 899,188 of 900,000 entities have a value\nattribute 'mesh_major': 760,256 of 900,000 entities have a value\nattribute 'pmid': 900,000 of 900,000 entities have a value\n        0 source row(s) named entities this build did not load\nstage   attribute_tail      1.29s  rows=900000       peak=   373 MiB\nstage           layers      0.00s  rows=2            peak=   373 MiB\nstage       text_index      2.04s  rows=256767       peak=   373 MiB\nstage  filter_postings      1.33s  rows=900000       peak=   373 MiB\nstage      record_blob      0.97s  rows=900000       peak=   373 MiB\nstage   column_release      0.01s  rows=900000       peak=   373 MiB\nstage       tiler_sort      0.02s  rows=900000       peak=   373 MiB\nstage    segment_write      0.08s  rows=900000       peak=   373 MiB\nstage        manifests      0.04s  rows=173774826    peak=   373 MiB\nview 'knn': 900000 point(s) landed in 898432 distinct cell(s) \u2014 99.8% of them have a position of their own\n",
+    "stages": [
+      {
+        "stage": "source_ids",
+        "wall_s": 0.031311919,
+        "rows": 900000,
+        "peak_rss_kib": 31308,
+        "started_at": 1788509626.508986,
+        "ended_at": 1788509626.540298
+      },
+      {
+        "stage": "dictionary",
+        "wall_s": 0.749881867,
+        "rows": 18,
+        "peak_rss_kib": 119608,
+        "started_at": 1788509626.5403826,
+        "ended_at": 1788509627.2902646
+      },
+      {
+        "stage": "geometry_read",
+        "wall_s": 0.522249723,
+        "rows": 900000,
+        "peak_rss_kib": 219100,
+        "started_at": 1788509627.2904027,
+        "ended_at": 1788509627.8126523
+      },
+      {
+        "stage": "pairs_pack",
+        "wall_s": 1.363e-06,
+        "rows": 4141437,
+        "peak_rss_kib": 219100,
+        "started_at": 1788509627.8127172,
+        "ended_at": 1788509627.8127186
+      },
+      {
+        "stage": "signature_sort",
+        "wall_s": 0.13653963,
+        "rows": 900000,
+        "peak_rss_kib": 219100,
+        "started_at": 1788509627.8128004,
+        "ended_at": 1788509627.94934
+      },
+      {
+        "stage": "assignment",
+        "wall_s": 0.244450425,
+        "rows": 900000,
+        "peak_rss_kib": 219100,
+        "started_at": 1788509627.9494264,
+        "ended_at": 1788509628.1938767
+      },
+      {
+        "stage": "assignment",
+        "wall_s": 0.038567999,
+        "rows": 900000,
+        "peak_rss_kib": 219100,
+        "started_at": 1788509628.1939738,
+        "ended_at": 1788509628.2325418
+      },
+      {
+        "stage": "postings_write",
+        "wall_s": 0.137547219,
+        "rows": 4141437,
+        "peak_rss_kib": 219100,
+        "started_at": 1788509628.23262,
+        "ended_at": 1788509628.3701673
+      },
+      {
+        "stage": "external_ids",
+        "wall_s": 0.042479048,
+        "rows": 900000,
+        "peak_rss_kib": 219100,
+        "started_at": 1788509628.3702457,
+        "ended_at": 1788509628.4127247
+      },
+      {
+        "stage": "attribute_tail",
+        "wall_s": 1.290532578,
+        "rows": 900000,
+        "peak_rss_kib": 382368,
+        "started_at": 1788509628.412767,
+        "ended_at": 1788509629.7032995
+      },
+      {
+        "stage": "layers",
+        "wall_s": 0.004275384,
+        "rows": 2,
+        "peak_rss_kib": 382368,
+        "started_at": 1788509629.7033887,
+        "ended_at": 1788509629.707664
+      },
+      {
+        "stage": "text_index",
+        "wall_s": 2.039023156,
+        "rows": 256767,
+        "peak_rss_kib": 382368,
+        "started_at": 1788509631.0332558,
+        "ended_at": 1788509633.072279
+      },
+      {
+        "stage": "filter_postings",
+        "wall_s": 1.325591951,
+        "rows": 900000,
+        "peak_rss_kib": 382368,
+        "started_at": 1788509631.746729,
+        "ended_at": 1788509633.072321
+      },
+      {
+        "stage": "record_blob",
+        "wall_s": 0.9669793,
+        "rows": 900000,
+        "peak_rss_kib": 382368,
+        "started_at": 1788509633.0724154,
+        "ended_at": 1788509634.0393946
+      },
+      {
+        "stage": "column_release",
+        "wall_s": 0.005185923,
+        "rows": 900000,
+        "peak_rss_kib": 382368,
+        "started_at": 1788509634.039471,
+        "ended_at": 1788509634.0446568
+      },
+      {
+        "stage": "tiler_sort",
+        "wall_s": 0.023488241,
+        "rows": 900000,
+        "peak_rss_kib": 382368,
+        "started_at": 1788509634.0447578,
+        "ended_at": 1788509634.0682461
+      },
+      {
+        "stage": "segment_write",
+        "wall_s": 0.078592662,
+        "rows": 900000,
+        "peak_rss_kib": 382368,
+        "started_at": 1788509634.068331,
+        "ended_at": 1788509634.1469238
+      },
+      {
+        "stage": "manifests",
+        "wall_s": 0.035206024,
+        "rows": 173774826,
+        "peak_rss_kib": 382368,
+        "started_at": 1788509634.1470294,
+        "ended_at": 1788509634.1822355
+      }
+    ],
+    "bundle_bytes": 173788365
+  },
+  "open_s": 0.51,
+  "base_visible": 900000,
+  "ingest": {
+    "batches": 10,
+    "rows_offered": 100000,
+    "accepted": 100000,
+    "minted": 0,
+    "wall_s": 0.59,
+    "items_per_s": 168749.5,
+    "ack_ms": {
+      "p25": 73.7776,
+      "p50": 115.5356,
+      "p75": 149.2725,
+      "p95": 236.3454,
+      "p99": 236.3454,
+      "max": 236.3454,
+      "mean": 128.948,
+      "n": 10
+    },
+    "statuses": {
+      "200": 10
+    }
+  },
+  "executor_laps": {
+    "bench_timing": true,
+    "rows": 100000,
+    "windows": 10,
+    "rows_per_window": 10000.0,
+    "us_per_row": {
+      ".buf_insert": 0.735,
+      ".est_fwd": 0.354,
+      ".est_inv": 0.184,
+      ".wal_pos": 0.034,
+      "admit": 0.183,
+      "allocate": 0.688,
+      "apply_rows": 1.344,
+      "buffer_clone": 0.753,
+      "record_batch": 0.001,
+      "submit\u2192receipt": 9.374,
+      "swap": 0.001,
+      "wal_append": 0.408,
+      "wal_fsync": 0.477
+    },
+    "executor_sum_us_per_row": 3.855,
+    "queueing_us_per_row": 5.519,
+    "apply_nanos_total_us_per_row": 2.098,
+    "apply_nanos_max_ms": 34.1,
+    "work_service_nanos_ewma_ms": 39.5
+  },
+  "stop_after": "ingest",
+  "status_at_end": {
+    "compaction": {
+      "fold_failures": 0,
+      "fold_requested": false,
+      "folds": 0,
+      "last_attr_bytes_read": 0,
+      "last_attr_bytes_written": 0,
+      "last_rss_bytes": 0,
+      "last_secs": 0,
+      "live_rows": 900000,
+      "passes": []
+    },
+    "compute": {
+      "admission": 48,
+      "in_flight": 0,
+      "queue": 96,
+      "shed_total": 0,
+      "streaming": 0,
+      "waiting": 0
+    },
+    "entity_id_high_water": 1000000,
+    "fragment_cache": {
+      "bound_bytes": 1073741824,
+      "building_refusals": 0,
+      "bytes": 512,
+      "entries": 1,
+      "evictions": 0,
+      "hits": 0,
+      "misses": 1,
+      "oversized_admissions": 0,
+      "rebuilds": 1,
+      "thrashing": false,
+      "young_evictions": 0
+    },
+    "fragmentation": {
+      "allocation": {
+        "containers": 193,
+        "postings": 459925,
+        "rows": 100000,
+        "runs": 17756,
+        "scope": "commit-window-allocation",
+        "windows": 10
+      },
+      "containers": 0,
+      "postings": 0,
+      "postings_per_container": null,
+      "rows": 0,
+      "run_ratio": null,
+      "runs": 0,
+      "scope": "delta-tiers",
+      "tiers": 0
+    },
+    "ingest": {
+      "admission": 64,
+      "in_flight": 0,
+      "max_batch_bytes": 16777216,
+      "max_batch_rows": 10000,
+      "shed_total": 0
+    },
+    "overlay": {
+      "depth": 0,
+      "retirable": 0,
+      "soft_limit_alarms": 0
+    },
+    "partitions": [
+      {
+        "partition": "default",
+        "readiness": true,
+        "segments_version": 0,
+        "watermark": 900000
+      }
+    ],
+    "row_projection_cache": {
+      "bound_bytes": 2147483648,
+      "building_refusals": 0,
+      "bytes": 114808,
+      "entries": 1,
+      "evictions": 0,
+      "hits": 0,
+      "misses": 1,
+      "oversized_admissions": 0,
+      "thrashing": false,
+      "waiters_now": 0,
+      "waits_satisfied": 0,
+      "young_evictions": 0
+    },
+    "segments": [
+      {
+        "count": 1,
+        "partition": "default",
+        "view": "knn"
+      }
+    ],
+    "sessions": {
+      "retained": 1,
+      "sweep_at": 16,
+      "sweeps": 0,
+      "swept_total": 0
+    },
+    "write_executor": {
+      "apply_nanos_max": 34125010,
+      "apply_nanos_total": 209763841,
+      "bench_timing": true,
+      "coalesces": 0,
+      "deny_submitted": 0,
+      "flush": {
+        "buffered_items": 100000,
+        "flush_failures": 0,
+        "flush_requested": false,
+        "flush_skips": 0,
+        "flushable_items": 0,
+        "flushes": 0,
+        "overlay_publications": 0,
+        "refreshes": 0,
+        "ticks": 0
+      },
+      "merges": 0,
+      "posture": "running",
+      "ready": true,
+      "stage_nanos": {
+        ".buf_insert": 73532105,
+        ".est_fwd": 35391123,
+        ".est_inv": 18426003,
+        ".wal_pos": 3392932,
+        "admit": 18299031,
+        "allocate": 68796836,
+        "apply_rows": 134355449,
+        "buffer_clone": 75342740,
+        "record_batch": 77332,
+        "submit\u2192receipt": 937378638,
+        "swap": 66405,
+        "wal_append": 40847946,
+        "wal_fsync": 47701582
+      },
+      "wal_appends": 10,
+      "wal_fsyncs": 10,
+      "wal_recoveries": 0,
+      "work_completed": 10,
+      "work_depth": 0,
+      "work_in_flight_nanos": 0,
+      "work_service_nanos_ewma": 39454163,
+      "work_submitted": 10
+    }
+  },
+  "ran_s": 10.8
+}

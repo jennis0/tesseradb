@@ -213,12 +213,18 @@ operator_credential_env = "{serve['operator_credential_env']}"
         ).stdout.split()
         # Our own `pgrep` invocation and the systemd-run wrapper both match the pattern; the
         # served process is the one whose `/proc/<pid>/comm` is the binary's name.
+        #
+        # **Compared truncated**, because `comm` is `TASK_COMM_LEN` — 15 characters plus a NUL —
+        # and a longer binary name never matches its own. A measurement that copies the binary
+        # aside under a descriptive name (`tessera-bt-rowtrigger`) then fails here with "could not
+        # identify the served process" while the server is up and answering.
+        want = self.binary.name[:15]
         for pid in out:
             try:
                 comm = Path(f"/proc/{pid}/comm").read_text().strip()
             except OSError:
                 continue
-            if comm == self.binary.name:
+            if comm == want:
                 return int(pid)
         raise RuntimeError("could not identify the served process under the transient scope")
 

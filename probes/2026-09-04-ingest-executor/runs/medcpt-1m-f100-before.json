@@ -1,0 +1,350 @@
+{
+  "fraction": 1.0,
+  "concurrency": 8,
+  "seed": 0,
+  "batch_rows": 10000,
+  "base_rows": 0,
+  "holdout_rows": 1000000,
+  "stated_extent": {
+    "view": "knn",
+    "quantisation": {
+      "x_min": -12.541571340560914,
+      "x_max": 17.449042043685914,
+      "y_min": -13.982567033767701,
+      "y_max": 16.008046350479127
+    },
+    "from_version": null
+  },
+  "build": {
+    "wall_s": 0.09,
+    "returncode": 0,
+    "stdout": "built /tmp/claude-1000/-home-joe-code-tessera/33360fbb-27d0-434f-9d43-7de275c80a32/scratchpad/work1m/base-1/bundle (v00000): 0 items, 1 terms, 0 pairs, 10971 bytes on disk, 0 artifact(s) minted, 0 unclustered member row(s)\n  view knn: 0 row(s)\n",
+    "stderr_tail": "view 'knn': quantising against x [-12.541571340560914, 17.449042043685914], y [-13.982567033767701, 16.008046350479127]\n        the source selects no rows, so nothing was placed\nschema: 4 column(s), 8.00 B/row against the 12 B fixed row (+67%)\n        7.44 GiB per 10^9 items \u2014 unalterable without rewriting the corpus\n        every column materialises in EVERY view \u2014 including ones whose items carry no value for it (\u00a73.9). Per-view columns need contracts \u00a72.6's per-view enumeration\nstage       source_ids      0.00s  rows=0            peak=    13 MiB\nstage       dictionary      0.00s  rows=1            peak=    13 MiB\nstage    geometry_read      0.00s  rows=0            peak=    13 MiB\nstage       pairs_pack      0.00s  rows=0            peak=    13 MiB\nstage       assignment      0.01s  rows=0            peak=    13 MiB\nstage   postings_write      0.01s  rows=0            peak=    15 MiB\nstage     external_ids      0.00s  rows=0            peak=    15 MiB\nattribute 'published': 0 of 0 entities have a value\nattribute 'title': 0 of 0 entities have a value\nattribute 'mesh_major': 0 of 0 entities have a value\nattribute 'pmid': 0 of 0 entities have a value\n        0 source row(s) named entities this build did not load\nstage   attribute_tail      0.00s  rows=0            peak=    15 MiB\nstage           layers      0.00s  rows=2            peak=    15 MiB\nstage       text_index      0.01s  rows=0            peak=    15 MiB\nstage  filter_postings      0.01s  rows=0            peak=    15 MiB\nstage      record_blob      0.01s  rows=0            peak=    15 MiB\nstage   column_release      0.00s  rows=0            peak=    15 MiB\nstage       tiler_sort      0.00s  rows=0            peak=    15 MiB\nstage    segment_write      0.01s  rows=0            peak=    16 MiB\nstage        manifests      0.01s  rows=10971        peak=    26 MiB\nview 'knn': 0 point(s) landed in 0 distinct cell(s) \u2014 100.0% of them have a position of their own\n",
+    "stages": [
+      {
+        "stage": "source_ids",
+        "wall_s": 0.000121534,
+        "rows": 0,
+        "peak_rss_kib": 13780,
+        "started_at": 1788509711.7138197,
+        "ended_at": 1788509711.7139413
+      },
+      {
+        "stage": "dictionary",
+        "wall_s": 0.00357627,
+        "rows": 1,
+        "peak_rss_kib": 13908,
+        "started_at": 1788509711.7140253,
+        "ended_at": 1788509711.7176015
+      },
+      {
+        "stage": "geometry_read",
+        "wall_s": 0.000620601,
+        "rows": 0,
+        "peak_rss_kib": 13908,
+        "started_at": 1788509711.7176645,
+        "ended_at": 1788509711.718285
+      },
+      {
+        "stage": "pairs_pack",
+        "wall_s": 1.039e-06,
+        "rows": 0,
+        "peak_rss_kib": 13908,
+        "started_at": 1788509711.718352,
+        "ended_at": 1788509711.718353
+      },
+      {
+        "stage": "assignment",
+        "wall_s": 0.008373947,
+        "rows": 0,
+        "peak_rss_kib": 14296,
+        "started_at": 1788509711.7184236,
+        "ended_at": 1788509711.7267976
+      },
+      {
+        "stage": "postings_write",
+        "wall_s": 0.006553893,
+        "rows": 0,
+        "peak_rss_kib": 15368,
+        "started_at": 1788509711.7268722,
+        "ended_at": 1788509711.733426
+      },
+      {
+        "stage": "external_ids",
+        "wall_s": 0.003583832,
+        "rows": 0,
+        "peak_rss_kib": 15376,
+        "started_at": 1788509711.733497,
+        "ended_at": 1788509711.7370808
+      },
+      {
+        "stage": "attribute_tail",
+        "wall_s": 0.001380342,
+        "rows": 0,
+        "peak_rss_kib": 15396,
+        "started_at": 1788509711.7371397,
+        "ended_at": 1788509711.7385201
+      },
+      {
+        "stage": "layers",
+        "wall_s": 0.002742783,
+        "rows": 2,
+        "peak_rss_kib": 15844,
+        "started_at": 1788509711.7385998,
+        "ended_at": 1788509711.7413425
+      },
+      {
+        "stage": "text_index",
+        "wall_s": 0.010031435,
+        "rows": 0,
+        "peak_rss_kib": 16060,
+        "started_at": 1788509711.7513275,
+        "ended_at": 1788509711.761359
+      },
+      {
+        "stage": "filter_postings",
+        "wall_s": 0.009984184,
+        "rows": 0,
+        "peak_rss_kib": 16060,
+        "started_at": 1788509711.7514381,
+        "ended_at": 1788509711.7614224
+      },
+      {
+        "stage": "record_blob",
+        "wall_s": 0.01009798,
+        "rows": 0,
+        "peak_rss_kib": 16372,
+        "started_at": 1788509711.7614925,
+        "ended_at": 1788509711.7715905
+      },
+      {
+        "stage": "column_release",
+        "wall_s": 2.3552e-05,
+        "rows": 0,
+        "peak_rss_kib": 16372,
+        "started_at": 1788509711.7716584,
+        "ended_at": 1788509711.771682
+      },
+      {
+        "stage": "tiler_sort",
+        "wall_s": 0.001285254,
+        "rows": 0,
+        "peak_rss_kib": 16376,
+        "started_at": 1788509711.7717493,
+        "ended_at": 1788509711.7730346
+      },
+      {
+        "stage": "segment_write",
+        "wall_s": 0.009132247,
+        "rows": 0,
+        "peak_rss_kib": 16384,
+        "started_at": 1788509711.7731042,
+        "ended_at": 1788509711.7822363
+      },
+      {
+        "stage": "manifests",
+        "wall_s": 0.010940476,
+        "rows": 10971,
+        "peak_rss_kib": 26984,
+        "started_at": 1788509711.7823105,
+        "ended_at": 1788509711.793251
+      }
+    ],
+    "bundle_bytes": 24031
+  },
+  "open_s": 0.51,
+  "base_visible": 0,
+  "ingest": {
+    "batches": 100,
+    "rows_offered": 1000000,
+    "accepted": 1000000,
+    "minted": 0,
+    "wall_s": 17.81,
+    "items_per_s": 56146.8,
+    "ack_ms": {
+      "p25": 780.297,
+      "p50": 1385.528,
+      "p75": 1662.2013,
+      "p95": 2278.797,
+      "p99": 3234.7168,
+      "max": 3253.6315,
+      "mean": 1281.1498,
+      "n": 100
+    },
+    "statuses": {
+      "200": 100
+    }
+  },
+  "executor_laps": {
+    "bench_timing": true,
+    "rows": 1000000,
+    "windows": 100,
+    "rows_per_window": 10000.0,
+    "us_per_row": {
+      ".buf_insert": 1.236,
+      ".est_fwd": 0.683,
+      ".est_inv": 0.315,
+      ".wal_pos": 0.036,
+      "admit": 0.649,
+      "allocate": 1.512,
+      "apply_rows": 2.308,
+      "buffer_clone": 9.91,
+      "record_batch": 0.001,
+      "submit\u2192receipt": 120.489,
+      "swap": 0.001,
+      "wal_append": 0.679,
+      "wal_fsync": 1.032
+    },
+    "executor_sum_us_per_row": 16.092,
+    "queueing_us_per_row": 104.397,
+    "apply_nanos_total_us_per_row": 12.219,
+    "apply_nanos_max_ms": 489.8,
+    "work_service_nanos_ewma_ms": 294.4
+  },
+  "stop_after": "ingest",
+  "status_at_end": {
+    "compaction": {
+      "fold_failures": 0,
+      "fold_requested": false,
+      "folds": 0,
+      "last_attr_bytes_read": 0,
+      "last_attr_bytes_written": 0,
+      "last_rss_bytes": 0,
+      "last_secs": 0,
+      "live_rows": 0,
+      "passes": []
+    },
+    "compute": {
+      "admission": 48,
+      "in_flight": 0,
+      "queue": 96,
+      "shed_total": 0,
+      "streaming": 0,
+      "waiting": 0
+    },
+    "entity_id_high_water": 1000000,
+    "fragment_cache": {
+      "bound_bytes": 1073741824,
+      "building_refusals": 0,
+      "bytes": 512,
+      "entries": 1,
+      "evictions": 0,
+      "hits": 0,
+      "misses": 1,
+      "oversized_admissions": 0,
+      "rebuilds": 1,
+      "thrashing": false,
+      "young_evictions": 0
+    },
+    "fragmentation": {
+      "allocation": {
+        "containers": 1770,
+        "postings": 4601362,
+        "rows": 1000000,
+        "runs": 190997,
+        "scope": "commit-window-allocation",
+        "windows": 100
+      },
+      "containers": 0,
+      "postings": 0,
+      "postings_per_container": null,
+      "rows": 0,
+      "run_ratio": null,
+      "runs": 0,
+      "scope": "delta-tiers",
+      "tiers": 0
+    },
+    "ingest": {
+      "admission": 64,
+      "in_flight": 0,
+      "max_batch_bytes": 16777216,
+      "max_batch_rows": 10000,
+      "shed_total": 0
+    },
+    "overlay": {
+      "depth": 0,
+      "retirable": 0,
+      "soft_limit_alarms": 0
+    },
+    "partitions": [
+      {
+        "partition": "default",
+        "readiness": true,
+        "segments_version": 0,
+        "watermark": 0
+      }
+    ],
+    "row_projection_cache": {
+      "bound_bytes": 2147483648,
+      "building_refusals": 0,
+      "bytes": 512,
+      "entries": 1,
+      "evictions": 0,
+      "hits": 0,
+      "misses": 1,
+      "oversized_admissions": 0,
+      "thrashing": false,
+      "waiters_now": 0,
+      "waits_satisfied": 0,
+      "young_evictions": 0
+    },
+    "segments": [
+      {
+        "count": 1,
+        "partition": "default",
+        "view": "knn"
+      }
+    ],
+    "sessions": {
+      "retained": 1,
+      "sweep_at": 16,
+      "sweeps": 0,
+      "swept_total": 0
+    },
+    "write_executor": {
+      "apply_nanos_max": 489838614,
+      "apply_nanos_total": 12219223393,
+      "bench_timing": true,
+      "coalesces": 0,
+      "deny_submitted": 0,
+      "flush": {
+        "buffered_items": 1000000,
+        "flush_failures": 0,
+        "flush_requested": false,
+        "flush_skips": 0,
+        "flushable_items": 0,
+        "flushes": 0,
+        "overlay_publications": 0,
+        "refreshes": 0,
+        "ticks": 0
+      },
+      "merges": 0,
+      "posture": "running",
+      "ready": true,
+      "stage_nanos": {
+        ".buf_insert": 1236331770,
+        ".est_fwd": 682998075,
+        ".est_inv": 315280014,
+        ".wal_pos": 36115685,
+        "admit": 648632970,
+        "allocate": 1511883220,
+        "apply_rows": 2308182266,
+        "buffer_clone": 9910248090,
+        "record_batch": 774161,
+        "submit\u2192receipt": 120488848955,
+        "swap": 801684,
+        "wal_append": 679260531,
+        "wal_fsync": 1032046180
+      },
+      "wal_appends": 100,
+      "wal_fsyncs": 100,
+      "wal_recoveries": 0,
+      "work_completed": 100,
+      "work_depth": 0,
+      "work_in_flight_nanos": 0,
+      "work_service_nanos_ewma": 294412028,
+      "work_submitted": 100
+    }
+  },
+  "ran_s": 19.8
+}

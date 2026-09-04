@@ -147,6 +147,10 @@ fn config() -> EngineConfig {
         // Long, so every flush in this run is one the campaign asked for: a tick firing on its own
         // would put an unplanned extent in the middle of a measured stage.
         flush_max_age_secs: 3600,
+        // **The row trigger off.** This cell drives publication itself — it pins `B`
+        // by flushing and waiting, so a trigger that published on its own would
+        // measure a different buffer depth than the one the sweep set.
+        flush_max_items: usize::MAX,
         max_merged_segment_bytes: None,
         compaction: tessera_engine::CompactionSchedule::off(),
     }

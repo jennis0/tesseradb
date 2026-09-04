@@ -1091,9 +1091,24 @@ class Cycle:
             return self.result
 
         scratch = self.work / f"serve-{args.fraction:g}"
+        # **A run that flushes writes into the bundle it serves.** Every publication adds a side
+        # manifest, so a base is a *different* base after one cell has ingested into it — the next
+        # `--reuse-base` run 409s on the hold-out its predecessor published. Serving a copy is what
+        # makes the flag mean what it says; without it only the first cell over a given base is the
+        # cell that was intended.
+        bundle = base_dir / "bundle"
+        if args.copy_base:
+            bundle = scratch / "bundle"
+            if bundle.exists():
+                shutil.rmtree(bundle)
+            scratch.mkdir(parents=True, exist_ok=True)
+            t0 = time.perf_counter()
+            shutil.copytree(base_dir / "bundle", bundle)
+            self.result["base_copy_s"] = round(time.perf_counter() - t0, 2)
+            self.log(f"copied the base bundle in {self.result['base_copy_s']} s")
         served = Deployment(
             base_dir,
-            base_dir / "bundle",
+            bundle,
             scratch,
             (args.port0, args.port0 + 1, args.port0 + 2),
             self.binary,
@@ -1514,6 +1529,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--write-cycle", action="store_true")
     ap.add_argument("--write-cycle-n", type=int, default=1000)
     ap.add_argument("--reuse-base", action="store_true")
+    ap.add_argument(
+        "--copy-base",
+        action="store_true",
+        help="serve a copy of the base bundle under the scratch instead of the base itself, so a "
+        "cell that publishes does not change the base the next `--reuse-base` cell starts from",
+    )
     ap.add_argument(
         "--ingest-config",
         default=None,
