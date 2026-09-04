@@ -72,6 +72,7 @@ import argparse
 import base64
 import concurrent.futures
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -148,20 +149,30 @@ def filter_parquet(
     Streaming rather than `read_table().filter()` because rung 3's points file is 4 GB of parquet:
     read whole it is tens of gigabytes of Arrow, and the machine this runs on has 47.
 
+    **Written under the source's own compression**, not `ParquetWriter`'s default. Rung 4's points
+    file is 52 GB of ZSTD carrying abstracts; rewritten as Snappy the 90% base copy passes 130 GB
+    and fills the disk before the build starts. The codec is read off the first row group, so a
+    rung that changes its own is followed rather than assumed.
+
     `drop` names columns to leave behind — see [`write_base_inputs`], which drops the membership
     columns a rung's points file may carry.
     """
     reader = pq.ParquetFile(source)
+    codec = reader.metadata.row_group(0).column(0).compression.lower()
+    if codec == "uncompressed":
+        codec = "none"
     writer = None
     kept = 0
     try:
         wanted = [name for name in reader.schema_arrow.names if name not in set(drop)]
-        for batch in reader.iter_batches(batch_size=1 << 20, columns=wanted):
+        # 2^20 rows of a narrow points file is a few tens of MB and of a wide one — ten columns
+        # including an abstract — several GB, which is the whole of a run's headroom on this box.
+        for batch in reader.iter_batches(batch_size=1 << 17, columns=wanted):
             table = pa.Table.from_batches([batch])
             mask = pa.array(in_sorted(table.column(column).to_numpy(), keep))
             table = table.filter(mask)
             if writer is None:
-                writer = pq.ParquetWriter(out, table.schema)
+                writer = pq.ParquetWriter(out, table.schema, compression=codec)
             if table.num_rows:
                 writer.write_table(table)
                 kept += table.num_rows
@@ -170,7 +181,7 @@ def filter_parquet(
             writer.close()
     if writer is None:  # an empty source still needs a file with the right schema
         schema = pa.schema([f for f in reader.schema_arrow if f.name not in set(drop)])
-        pq.write_table(schema.empty_table(), out)
+        pq.write_table(schema.empty_table(), out, compression=codec)
     return kept
 
 
@@ -300,12 +311,22 @@ def write_base_inputs(rung: Path, out: Path, base_ids: np.ndarray) -> dict:
             if name in set(layers)
         ],
     }
-    for name in ("branch.parquet", ".env"):
-        source = rung / name
-        if source.exists():
-            shutil.copy2(source, out / name)
     declaration, removed = base_declaration((rung / "corpus.toml").read_text())
     (out / "corpus.toml").write_text(declaration)
+    # **Every rung-relative file the base declaration still names**, plus the credential file the
+    # served copy reads its values from. A fixed list worked while every rung was shaped like
+    # MedCPT's; rung 4 declares its vocabularies from `vocab-*.parquet` and its terms from a text
+    # file, and a base built without them is refused at the first missing path. The layer sources
+    # are not among these — `base_declaration` has already removed the acquisitions that name
+    # them — and `points.parquet` is written above rather than copied.
+    named = {
+        Path(token).name
+        for token in re.findall(r'"([^"]+\.(?:parquet|txt|json|npy|csv))"', declaration)
+    }
+    for name in sorted(named | {"branch.parquet", ".env"}):
+        source = rung / name
+        if source.exists() and name != "points.parquet":
+            shutil.copy2(source, out / name)
     kept["declaration_only"] = removed
     (out / "tessera.toml").write_text((rung / "tessera.toml").read_text())
     return kept
