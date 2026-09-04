@@ -1,4 +1,4 @@
-# PaperSeek + OpenAlex — the ladder's largest rung, and the first build the box cannot finish
+# PaperSeek + OpenAlex — the ladder's largest rung, and the build that twice could not finish
 
 **102,117,343 OpenAlex works**, each with a 1024-dimensional Stella V5 embedding a third party
 computed from its title and abstract and released on Hugging Face, joined to OpenAlex itself for a
@@ -14,10 +14,11 @@ fidelity is not judged.
 **The rung was built to put a bundle past the box's memory**, and nothing about the declaration was
 trimmed to make it fit — the abstracts are 118.9 GB of characters uncompressed and they are indexed
 as text, because a corpus trimmed to fit deletes the finding. **The answer arrived one stage
-earlier than expected: it is the build, not the server, that meets the wall.** The corpus prepares
-in 43.8 minutes; `tessera build` reaches the abstract text index and stops making progress there.
-Everything below the *Measured* heading is what that cost and what it was possible to prove
-instead.
+earlier than expected: it is the build, not the server, that met the wall.** The corpus prepares in
+43.8 minutes; `tessera build` reached the abstract text index and stopped making progress there,
+and then did the same one stage later at the record blob. Both were random walks over an arena two
+and a half times the size of the box, both are fixed, and **on 2026-09-04 the whole corpus built in
+2 h 56 m to a 70.78 GB bundle**. Everything below the *Measured* heading is what that cost.
 
 ```bash
 export TESSERA_LADDER=/home/joe/code/tessera/data/ladder
@@ -317,13 +318,44 @@ The process was stopped after 3 h 25 m and its partial bundle deleted.
 | what the second fixed | the attribute join's **scatter** — resolved in source-id order, written at signature-then-Morton entity indices — and, behind the switch `--arena-order`, an arena filled in entity order by a second decode of the source's prose |
 | the bundle | **byte-identical** under every arm, at 10⁶ and 10⁷ |
 
-⊘ **The 10⁸ build is now refused before it starts, by the disk pre-flight**: **274.5 GB needed at
-peak against 257.7 GB free — 16.3 GiB short**. Of the modelled need, the abstract column is
-115,536 MiB and the text index's sorted runs — charged at the column they are tokenised from, a
-term `residency.rs` states is loose — another 115,147 MiB. **What holds the volume is not this
-corpus**: 209 GB of the 1,007 GB filesystem is one other session's `target/debug`. The rung's
-`tessera build`, `verify --deep`, bundle breakdown and serve battery at 10⁸ are all still owed, and
-what they need is free disk rather than another change to the build.
+⊘ The 10⁸ build was then refused by the **disk** pre-flight — 274.5 GB needed against 257.7 GB
+free, 16.3 GiB short, on a volume 209 GB of which was another session's `target/debug`. With that
+reclaimed it ran, and it finished.
+
+### 2026-09-04 — the whole corpus builds
+
+**102,117,343 rows, the same declaration, 2 h 56 m 18 s, a 70.78 GB bundle, `verify --deep` clean.**
+`docs/ingest-campaign.md` §4b carries the full stage table, the bundle breakdown and the battery;
+this is the rung's own summary.
+
+| | |
+|---|---|
+| `tessera build --arena-order auto` | **10,578.4 s**, peak `VmHWM` **29,239 MiB**, anonymous high-water **5,047 MiB** |
+| the stages that bend | `attribute_tail` **6,369.1 s** · `text_index` **2,233.9 s** (57,637,877 terms) · `record_blob` **905.4 s** · `filter_postings` **762.9 s** |
+| `verify --deep` | clean in **74.24 s** at 3.22 GB — 1 partition, 1 view, 1 segment, 102,117,343 rows, 12 terms |
+| bundle | **70.78 GB**: `attrs` 66.22 GB (`record` **44.77 GB**, `abstract` **17.61 GB**, `title` 2.50 GB, `openalex_id` 916 MB, `publication_year` 416 MB) · `views` 3.06 GB · `entities` 817 MB · `members` 487 MB · `row-column` 204 MB |
+| served under `MemoryMax=24G` on 8131–8133 | **`oom_kill` 0**, `memory.peak` exactly at the cap, 110,266 reclaim-at-max events, open **98.9 s** |
+| the ladder | **0 / 14,028,655 / 102,117,343** across no terms, `cc-by` (+`mit`, 62 pairs) and all eleven keys — hot p50 at zoom 0 of 1.13 / 81.2 / 115.8 ms |
+| `match abstract:"network"` | **134.9 ms** server-side median, hot |
+
+**88% of the bundle is prose** — the record blob and the abstract index are 62.4 GB of 70.8 GB.
+The 10⁷ prefix projected ~76 GB at two thirds prose; the whole corpus is 70.78 GB at seven eighths,
+because the prefix's abstracts are shorter than the corpus's.
+
+**`record_blob` is what the entity-ordered arena bought**: 905.4 s at **zero major faults a second**,
+against over four hours making no progress and 52 MB written at 56 KB/s. **What it cost is the
+join**: `auto` chose `entity` — 123,869 MiB of string payload against a 16,254 MiB share — so the
+source's prose is decoded twice and the arena written by entity, and `attribute_tail` went from
+704.7 s to 6,369.1 s. ⊘ Nine times the join at 10⁸ against 2.04× at 10⁷, and the extra is the
+scatter rather than the decode: the join's chunk buffer does not grow with the corpus, so the arena
+is written as ~54 interleaved ascending runs here against six at 10⁷.
+
+⊘ **The arm most likely to beat this one was not run**: an arrival-order arena *with* the ascending
+scatter, which is what made `record_blob` finish at 10⁷ under a cap. It costs one more three-hour
+build and it is the open question this rung now poses.
+
+⊘ **The box carried rung 5's share passes and GPU work throughout.** No other `tessera build` and no
+serve battery ran; the disk was this build's alone.
 
 ### The bracket — 10,000,000 rows, and the declaration proved end to end
 

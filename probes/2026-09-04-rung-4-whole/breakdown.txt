@@ -1,0 +1,18 @@
+== total
+70783207109	/home/joe/code/tessera/data/rung4-run/bundle
+== by family
+66217546197	/home/joe/code/tessera/data/rung4-run/bundle/v00000/partitions/default/attrs
+3056864328	/home/joe/code/tessera/data/rung4-run/bundle/v00000/partitions/default/views
+816968965	/home/joe/code/tessera/data/rung4-run/bundle/v00000/partitions/default/entities
+486593646	/home/joe/code/tessera/data/rung4-run/bundle/v00000/partitions/default/members
+204238798	/home/joe/code/tessera/data/rung4-run/bundle/v00000/partitions/default/row-column
+880494	/home/joe/code/tessera/data/rung4-run/bundle/v00000/partitions/default/terms
+39168	/home/joe/code/tessera/data/rung4-run/bundle/v00000/partitions/default/containment
+8464	/home/joe/code/tessera/data/rung4-run/bundle/v00000/partitions/default/tile-index
+8147	/home/joe/code/tessera/data/rung4-run/bundle/v00000/partitions/default/SEGMENTS-0.json
+== attrs
+44774484898	/home/joe/code/tessera/data/rung4-run/bundle/v00000/partitions/default/attrs/record
+17607712059	/home/joe/code/tessera/data/rung4-run/bundle/v00000/partitions/default/attrs/abstract
+2503459423	/home/joe/code/tessera/data/rung4-run/bundle/v00000/partitions/default/attrs/title
+916004780	/home/joe/code/tessera/data/rung4-run/bundle/v00000/partitions/default/attrs/openalex_id
+415880941	/home/joe/code/tessera/data/rung4-run/bundle/v00000/partitions/default/attrs/publication_year
