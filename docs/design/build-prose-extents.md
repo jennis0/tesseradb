@@ -1,7 +1,9 @@
 # The build's prose is never permuted
 
 **Date:** 2026-09-04
-**Status:** Provisional. Built for the base build. The flush and the fold are unchanged.
+**Status:** Provisional. Built for the base build; the flush and the fold are unchanged. Byte
+identity against the arena build is held at 10⁶ (`medcpt-1m`, 36 files, none differing) and by the
+unit tests. ⊘ The 10⁷ and 10⁸ runs are owed: they were queued behind another campaign's build.
 **Reads against:** [`records-and-search.md`](records-and-search.md) §3 and §4.4 (the record blob's
 format and addressing, the text family), [`compaction.md`](compaction.md) (the fold's record pass),
 [decision 0091](../decisions/0091-build-is-ingest-into-an-empty-database.md).
