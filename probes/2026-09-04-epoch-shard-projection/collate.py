@@ -84,7 +84,9 @@ def main():
     shards = [r for r in rows if r["part"] == "shards"]
     tokens = [r for r in rows if r["part"] == "tokens"]
 
-    out = {"host": host, "recorded_10e9_25pc_ms": RECORDED_10E9_25PC_MS,
+    commit = (sys.argv[1] if len(sys.argv) > 1 else
+              os.popen("git rev-parse --short HEAD 2>/dev/null").read().strip())
+    out = {"commit": commit, "host": host, "recorded_10e9_25pc_ms": RECORDED_10E9_25PC_MS,
            "linearity": linearity, "shards": shards, "tokens": tokens, "fits": []}
 
     # ---- (a) linearity -------------------------------------------------------------------
@@ -180,13 +182,18 @@ def main():
         s0 = shards[0]
         print(f"## (b) one mask over {fmt_rows(s0['rows'])} rows: one permutation against "
               f"{s0['shards']} × {s0['per_shard_rows']:,}\n")
-        print("| coverage | one: ms (cpu) | sharded: ms (cpu) | split ms | sharded / one | "
-              "with split | one: portable bytes | sharded: portable bytes | bytes ratio | "
-              "containers |")
-        print("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
-        for s in sorted(shards, key=lambda x: -x["coverage"]):
+        print("`project` allocates its scratch on every call (the session path); `project_with` "
+              "reuses one scratch (the artifact pass). The split is the emulation's cost of "
+              "restricting the global mask to a shard and is shown so it can be subtracted.\n")
+        print("| entry point | coverage | one: ms (cpu) | sharded: ms (cpu) | split ms | "
+              "sharded / one | with split | one: portable bytes | sharded: portable bytes | "
+              "bytes ratio | containers |")
+        print("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+        for s in sorted(shards, key=lambda x: (x.get("scratch", False), -x["coverage"])):
             one, sh = s["one"], s["sharded"]
-            print(f"| {s['coverage']:.0%} | {one['median_ms']:.2f} ({one['median_cpu_ms']:.2f}) | "
+            entry = "project_with" if s.get("scratch") else "project"
+            print(f"| {entry} | {s['coverage']:.0%} | {one['median_ms']:.2f} "
+                  f"({one['median_cpu_ms']:.2f}) | "
                   f"{sh['median_ms']:.2f} ({sh['median_cpu_ms']:.2f}) | "
                   f"{sh['split']['median_ms']:.2f} | {s['ratio_project_only']:.3f} | "
                   f"{s['ratio_with_split']:.3f} | {one['result']['portable_bytes']:,} | "
@@ -199,14 +206,15 @@ def main():
         t0 = tokens[0]
         print(f"## (b) {t0['tokens']:,} tokens' leaf projections held at once, "
               f"{fmt_rows(t0['rows'])}-row universe at {t0['coverage']:.0%}\n")
-        print("| shape | bitmaps held | project µs/token (cpu) | split µs/token | RSS Δ MB | "
-              "RSS Δ KB/token | RSS Δ after trim MB | malloc in-use Δ KB/token | "
+        print("| entry point | shape | bitmaps held | project µs/token (cpu) | split µs/token | "
+              "RSS Δ MB | RSS Δ KB/token | RSS Δ after trim MB | malloc in-use Δ KB/token | "
               "portable KB/token | container KB/token | containers/token |")
-        print("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
-        for t in sorted(tokens, key=lambda x: x["shards"]):
+        print("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+        for t in sorted(tokens, key=lambda x: (x.get("scratch", False), x["shards"])):
             n = t["tokens"]
             res = t["result"]
-            print(f"| {t['shape']} (N={t['shards']}) | {t['bitmaps_held']:,} | "
+            entry = "project_with" if t.get("scratch") else "project"
+            print(f"| {entry} | {t['shape']} (N={t['shards']}) | {t['bitmaps_held']:,} | "
                   f"{t['project_us_per_token']:.1f} ({t['project_cpu_us_per_token']:.1f}) | "
                   f"{t['split_us_per_token']:.1f} | "
                   f"{t['rss_delta_bytes'] / 1e6:.1f} | {t['rss_delta_bytes_per_token'] / 1e3:.2f} | "
@@ -214,9 +222,14 @@ def main():
                   f"{t['malloc_in_use_delta_bytes_per_token'] / 1e3:.2f} | "
                   f"{res['portable_bytes'] / n / 1e3:.2f} | {res['container_bytes'] / n / 1e3:.2f} | "
                   f"{res['containers'] / n:.1f} |")
-        one = next((t for t in tokens if t["shards"] == 1), None)
-        sh = next((t for t in tokens if t["shards"] > 1), None)
-        if one and sh:
+        out["token_ratios_sharded_over_one"] = {}
+        for scratch in (False, True):
+            one = next((t for t in tokens if t["shards"] == 1
+                        and t.get("scratch", False) == scratch), None)
+            sh = next((t for t in tokens if t["shards"] > 1
+                       and t.get("scratch", False) == scratch), None)
+            if not (one and sh):
+                continue
             ratios = {
                 "project_time": sh["project_us_per_token"] / one["project_us_per_token"],
                 "project_time_with_split": (sh["project_us_per_token"] + sh["split_us_per_token"])
@@ -227,13 +240,15 @@ def main():
                 "malloc_in_use": sh["malloc_in_use_delta_bytes"] / one["malloc_in_use_delta_bytes"],
                 "portable_bytes": sh["result"]["portable_bytes"] / one["result"]["portable_bytes"],
             }
-            out["token_ratios_sharded_over_one"] = ratios
+            entry = "project_with" if scratch else "project"
+            out["token_ratios_sharded_over_one"][entry] = ratios
             print()
-            print(f"Sharded over one, per token: build time **{ratios['project_time']:.2f}×** "
-                  f"({ratios['project_time_with_split']:.2f}× with the split); resident set "
-                  f"**{ratios['rss']:.2f}×** ({ratios['rss_after_trim']:.2f}× after `malloc_trim`); "
-                  f"allocator in-use bytes {ratios['malloc_in_use']:.2f}×; portable bytes "
-                  f"{ratios['portable_bytes']:.3f}×.\n")
+            print(f"`{entry}`, sharded over one, per token: build time "
+                  f"**{ratios['project_time']:.2f}×** ({ratios['project_time_with_split']:.2f}× "
+                  f"with the split); resident set **{ratios['rss']:.2f}×** "
+                  f"({ratios['rss_after_trim']:.2f}× after `malloc_trim`); allocator in-use bytes "
+                  f"{ratios['malloc_in_use']:.2f}×; portable bytes {ratios['portable_bytes']:.3f}×.")
+        print()
 
     with open(os.path.join(HERE, "result.json"), "w") as f:
         json.dump(out, f, indent=1)

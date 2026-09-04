@@ -1,0 +1,1 @@
+tokens shape=one scratch=true tokens=10000 bitmaps=10000  project 140.3 µs/token (cpu 155.6; split 0.0 µs/token)  RSS +211.2 MB (21.1 KB/token; trimmed +210.4 MB)  malloc in use +210.3 MB  portable 201.4 MB  containers 200.0 MB in 160000

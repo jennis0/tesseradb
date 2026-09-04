@@ -12,7 +12,9 @@
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
-BIN=${BIN:-/home/joe/code/tessera/target/release/epoch_shard_projection}
+# The checkout's own target directory. A target shared between checkouts at different revisions
+# overwrites one checkout's crate metadata with the other's.
+BIN=${BIN:-$HERE/../../target/release/epoch_shard_projection}
 OUT=${OUT:-$HERE/runs}
 DIR=${DIR:-${TMPDIR:-/tmp}/epoch-shard-projection-$$}
 mkdir -p "$OUT" "$DIR"
@@ -53,13 +55,25 @@ linearity() {
   done
 }
 
+# Both projection entry points: `project`, which the session path uses and which allocates its
+# scratch on every call, and `project_with` over one reused scratch, which the artifact pass uses.
 shards() {
   run shards --part shards
+  run shards-scratch --part shards --scratch
 }
 
 tokens() {
   run tokens-one --part tokens --token-shape one
   run tokens-sharded --part tokens --token-shape sharded
+  run tokens-one-scratch --part tokens --token-shape one --scratch
+  run tokens-sharded-scratch --part tokens --token-shape sharded --scratch
+}
+
+# 10^7 rows is 2.38 buckets of 2^22, so its two full buckets hold 26 % more than the mean the
+# reservation is sized from and reallocate; 3 × 2^22 rows has no partial bucket. The pair
+# separates that from the size itself.
+buckets() {
+  run linear-3x2p22 --part linearity --rows 12582912 --coverage 0.25
 }
 
 case ${1:-all} in
@@ -68,10 +82,17 @@ case ${1:-all} in
       --shard-rows 8000000 --tokens 200
     ;;
   linearity) linearity ;;
+  buckets) buckets ;;
+  rerun)
+    buckets
+    shards
+    tokens
+    ;;
   shards) shards ;;
   tokens) tokens ;;
   all)
     linearity
+    buckets
     shards
     tokens
     ;;

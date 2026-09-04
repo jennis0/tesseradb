@@ -1,0 +1,2 @@
+# linearity: 12582912 rows, fixture written and validated in 0.3 s
+linearity rows=12582912 mask=scattered coverage=0.25 card=3145596 median=22.22 ms (cpu 22.64) min=17.87 ms majflt=[0, 0, 0, 0, 0] switches vol=[0, 0, 0, 0, 0] nonvol=[0, 0, 0, 0, 0] compact_stall=[0, 0, 0, 0, 0] thp=[0, 0, 0, 0, 0]/[0, 0, 0, 0, 0] swap=[0, 0, 0, 0, 0]  1.766 ns/row  7.06 ns/projected row  result 1.57 MB portable, 192 containers
