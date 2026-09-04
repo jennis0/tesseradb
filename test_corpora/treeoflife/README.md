@@ -376,6 +376,72 @@ boundability in row space are different properties.
 and 9.6%) both draw on both views.
 
 
+### The ingest cycle at f = 50% — 116.5M rows in, and one finding that is the driver's
+
+`ingest_cycle.py --fraction 0.50 --concurrency 8 --state-extent`, 4 h 2 m end to end. The base is
+the complement's **points and declarations alone**; every artifact is meant to arrive on the wire
+afterwards.
+
+| | |
+|---|---|
+| the split | 116,527,993 base rows, 116,527,993 held back |
+| base build (points and declarations only) | 25 min to a 19 GB bundle; opens in 12.6 s |
+| **the hold-out, ingested** | **116,527,993 accepted in 10,536 s — 11,060 items/s** at *C* = 8 |
+| ack latency | p50 **5.99 s**, p99 **15.13 s**, max 48.6 s |
+| statuses | 11,653 × 200, and 2,487 × 429 retried — backpressure, not error |
+| flush | ⊘ the executor's counter did not move within the driver's 900 s timeout |
+| **fold** | **1,313 s** (the server's own `compaction.last_secs`) at **28.9 GB**, 1 fold, 0 failures |
+| after the fold | `verify --deep` clean: **321,511,824 rows** over two views, `entity_id_high_water` 233,055,986, **233,055,986 external-id bindings** |
+
+**Nothing is lost, and the served-side arithmetic closes exactly.** The folded deployment holds
+**233,055,986 `bioclip` rows** — every base row and every hold-out row — and **88,455,838 `geo`
+rows**, which are the base's own: the driver's wire batch carries one row space, so the hold-out
+enters the **anchor view alone**. A rung with several row spaces measures the write path on one of
+them, and a `geo`-side census differs by construction rather than by defect.
+
+⊘ **2,142,399 rows are visible on the all-in bundle and not on the folded one, and the cause is the
+driver's wire encoding.** `ingest_cycle.encode_batch` writes the passthrough plugin's `access` as a
+**comma-separated descriptor list**, and **70 of the 474 publisher names contain a comma**. On the
+wire each splits into fragments, and every fragment that is not already a term is minted: the folded
+deployment carries **617 terms against the declaration's 475**. Measured on it directly:
+
+| principal | `bioclip` visible |
+|---|---|
+| the 474 declared publisher terms | **230,913,587** |
+| those plus the 148 wire fragments | **233,055,986** |
+
+2,217,001 hold-out rows carry a comma name; **74,602 stay visible** because a fragment of their name
+is itself a declared key — 73,442 of them `Natural History Museum, Vienna`, whose first fragment is
+the real publisher `Natural History Museum` — and the other **2,142,399 are invisible to every
+declared principal**. **Where a fragment is a real key the rows land in that compartment instead**,
+which is why the 25% principal sees **73,212 rows more** on the folded deployment than on the all-in
+one. It is the driver's encoding and not the build: the all-in bundle keys the same rows correctly,
+and this is the first rung whose compartment keys contain the separator that encoding uses. It is
+also why this rung writes no `branch-terms.txt`.
+
+**The equivalence census, retaken.** The run's own was shed mid-body — `ChunkedEncodingError`, on
+the zoom-0 whole-extent request with `layers: "all"` over 1,001,193 artifacts against a stream
+deadline, which is the post-flush artifact-frames finding at this scale and not a count difference.
+Retaken once after the fold with both sides served in turn, it went through:
+
+| principal | folded | all-in | difference |
+|---|---|---|---|
+| 1% | 2,309,136 | 2,309,136 | **exact** |
+| 5% | 11,545,679 | 11,545,679 | **exact** |
+| 10% | 23,091,359 | 23,091,359 | **exact** |
+| 25% | 57,801,609 | 57,728,397 | +73,212 |
+| 50% | 96,061,149 | 98,203,548 | −2,142,399 |
+| 100% | 230,913,587 | 233,055,986 | −2,142,399 |
+
+22 differences over three surfaces: 3 at zoom 0, 6 at box level, 13 on layers. **Every layer
+difference is a layer that was never published.** `clusters/kmeans` is declined at 233,118,470
+member rows — the driver inverts a layer's whole membership in memory to address it per artifact —
+and `taxonomy/tree` is not in the driver's layer roster at all, its member file being list-keyed,
+which the publication path does not take. Both are therefore declared and empty on the folded
+deployment. **`publishers/source` needs no publication** — its membership is the indexed column —
+and it reproduces exactly at five of the six principals, the sixth being the wire-encoding
+difference above.
+
 ## The environment
 
 `~/venvs/projection` — cuVS, cuML and CuPy on the GPU with scikit-learn on the CPU — shared with

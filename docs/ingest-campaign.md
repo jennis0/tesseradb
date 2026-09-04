@@ -25,7 +25,7 @@ is the owner's to settle.
 | **2** | **Overture places + divisions** | **7.4×10⁷** | **Built and verified**, and rebuilt 2026-08-30 on a declared projection with its boundary polygons in longitude and latitude — see §3 |
 | **3** | **MedCPT / PubMed** | **35,920,666** | **Built, verified and served** 2026-09-02 — see §4.6. The ladder's largest embedding rung and its first `dag` layer: MeSH's 30,217 descriptors with members over 41,321 edges, membership closed upward to **1.66×10⁹ entries** (3.27× rung 2's spill), an 11.15 GB bundle in 12 m 10 s at 16.03 GB peak, `verify --deep` clean. ⊘ Three non-reproducing host faults over two runs, §4.6 |
 | **4** | **PaperSeek + OpenAlex** | **102,117,343** | **Staged and prepared whole; built, verified and served at a 10⁷ prefix; ⊘ stalled at 10⁸** 2026-09-03 — see §4a. The corpus exists: 254 GB staged in one 164.7-minute pass, laid out and joined to OpenAlex in 43.8 minutes at 18.4 GB, 52.2 GB of `points.parquet`, 394,325,928 topic member rows, and the ladder's first compartment that is a property of the row. **`tessera build` reaches the abstract text index and stalls there** — not refused, not killed, 93% system time against a 128 GiB mapped arena on a 47 GB box. The rung's finding is that negative |
-| **5** | **TreeOfLife-200M** | **233,055,986** | **Built, verified and served** 2026-09-04 — see §4b. The ladder's largest rung and its first with **two geometries over one entity space**: `bioclip` over every row and `geo` over the 75.90% the GBIF join placed on the ground. A **seven-level tiered taxonomy over every row** — 1,001,193 artifacts, 1.63×10⁹ membership entries — drawn on both views. **39.97 GB bundle in 1 h 10 m at 35.3 GB peak**, `verify --deep` clean in 37.1 s, served under a 24 GiB cap with every masked count identical. The vectors are 346 GB and were **never staged**: the layout is fitted on 2.5M rows and every row placed in one 2 h 55 m pass off the share |
+| **5** | **TreeOfLife-200M** | **233,055,986** | **Built, verified and served** 2026-09-04 — see §4b. The ladder's largest rung and its first with **two geometries over one entity space**: `bioclip` over every row and `geo` over the 75.90% the GBIF join placed on the ground. A **seven-level tiered taxonomy over every row** — 1,001,193 artifacts, 1.63×10⁹ membership entries — drawn on both views. **39.97 GB bundle in 1 h 10 m at 35.3 GB peak**, `verify --deep` clean in 37.1 s, served under a 24 GiB cap with every masked count identical, and the *f* = 50% ingest cell run: 116,527,993 rows in at 11,060 items/s and a 1,313 s fold. The vectors are 346 GB and were **never staged**: the layout is fitted on 2.5M rows and every row placed in one 2 h 55 m pass off the share |
 | 6 | GBIF | 3.50×10⁹ | Not started. Staged; needs a second local volume |
 | 7 | Overture buildings | 2.53×10⁹ | Not started. Staged; needs a second local volume |
 
@@ -66,6 +66,7 @@ block; re-run the script.
 | rung | rows | build wall | peak RSS | bundle | slowest stage |
 |---|---|---|---|---|---|
 | medcpt | 35,920,666 | 15:13 | 11.85 GB | 11.15 GB | layers 6:52 |
+| treeoflife | 233,055,986 | 70:33 | 37.86 GB | 40.01 GB | filter_postings 35:25 |
 
 **Serve.** One row per (cap, principal). `measured` is a zoom-0 whole-extent viewport
 under that principal over the same under the 100% principal — the *target* is what the
@@ -86,6 +87,18 @@ median under each condition, end to end; the last is the median cell's server-si
 | medcpt | 6.44 GB | 25% | 24.74% | 3 | 5.40 ms | 3.20 s | 1.30 s | 33.86 ms | 13.21 ms | 2.10 ms |
 | medcpt | 6.44 GB | 50% | 48.86% | 2 | 6.30 ms | 4.64 s | 1.39 s | 50.29 ms | 9.77 ms | 5.32 ms |
 | medcpt | 6.44 GB | 100% | 100.00% | 17 | 1.10 ms | 7.71 s | 1.47 s | 77.01 ms | 14.32 ms | 5.65 ms |
+| treeoflife | uncapped | 1% | 1.00% | 6 | 5.40 ms | 1.65 s | 99.24 ms | 58.40 ms | 1.65 ms | 8.02 ms |
+| treeoflife | uncapped | 5% | 5.00% | 5 | 7.40 ms | 2.39 s | 240.20 ms | 79.33 ms | 1.71 ms | 14.42 ms |
+| treeoflife | uncapped | 10% | 10.00% | 6 | 12.20 ms | 4.65 s | 164.98 ms | 55.29 ms | 1.63 ms | 7.79 ms |
+| treeoflife | uncapped | 25% | 25.00% | 12 | 7.90 ms | 4.59 s | 330.63 ms | 52.72 ms | 1.61 ms | 7.77 ms |
+| treeoflife | uncapped | 50% | 42.14% | 473 | 9.00 ms | 6.10 s | 438.85 ms | 53.95 ms | 1.66 ms | 14.02 ms |
+| treeoflife | uncapped | 100% | 100.00% | 474 | 3.30 ms | 28.23 s | 1.14 s | 56.80 ms | 1.71 ms | 8.91 ms |
+| treeoflife | 25.77 GB | 1% | 1.00% | 6 | 5.70 ms | 2.16 s | 71.96 ms | 20.02 ms | 1.72 ms | 1.95 ms |
+| treeoflife | 25.77 GB | 5% | 5.00% | 5 | 7.30 ms | 3.64 s | 104.56 ms | 17.64 ms | 1.66 ms | 2.51 ms |
+| treeoflife | 25.77 GB | 10% | 10.00% | 6 | 9.70 ms | 5.11 s | 139.63 ms | 21.12 ms | 1.78 ms | 2.26 ms |
+| treeoflife | 25.77 GB | 25% | 25.00% | 12 | 8.20 ms | 4.77 s | 317.35 ms | 20.37 ms | 1.69 ms | 4.01 ms |
+| treeoflife | 25.77 GB | 50% | 42.14% | 473 | 10.80 ms | 6.71 s | 420.66 ms | 20.51 ms | 1.72 ms | 2.33 ms |
+| treeoflife | 25.77 GB | 100% | 100.00% | 474 | 3.40 ms | 26.40 s | 1.23 s | 19.55 ms | 1.65 ms | 3.21 ms |
 
 **Ingest.** *f* of the entities held back, the complement built, the hold-out ingested
 online. `visibility` is when a zoom-0 viewport reached the expected count after the
@@ -95,6 +108,7 @@ flush, not the flush's own wall; `fold` is the server's own `compaction.last_sec
 |---|---|---|---|---|---|---|---|---|
 | medcpt | 100% | 8 | 11,267.0 | 3.07 s | 16.62 s | 1.2 s | 1:43 | zoom-0 exact, layers 6 |
 | medcpt | 50% | 8 | 10,746.0 | 2.58 s | 19.20 s | 0.8 s | 1:56 | zoom-0 exact, layers 6 |
+| treeoflife | 50% | 8 | 11,059.8 | 5.99 s | 15.13 s | 15:02 | 21:53 | 22 difference(s) |
 
 <!-- /campaign-table -->
 
@@ -845,6 +859,46 @@ uncapped run, and zero request failures across the whole battery. Uncapped, `mem
 GB. **Zoom 0 is the expensive request**, and the tiered layer is why: 1,001,193 artifacts against
 the 464,655 that produced §6's first finding at rung 1.
 
+### The ingest cycle at *f* = 50%, and a finding that belongs to the driver
+
+`ingest_cycle.py --fraction 0.50 --concurrency 8 --state-extent`, 4 h 2 m. The hold-out —
+**116,527,993 rows — went in at 11,060 items/s** at *C* = 8 (ack p50 5.99 s, p99 15.13 s; 11,653
+× 200 and 2,487 × 429 retried), and the **fold took 1,313 s at 28.9 GB**. `verify --deep` on the
+folded bundle is clean: **321,511,824 rows over two views**, `entity_id_high_water` 233,055,986,
+**233,055,986 external-id bindings**. Nothing is lost.
+
+⊘ **The hold-out enters the anchor view alone.** `bioclip` holds all 233,055,986 rows after the
+fold; `geo` holds 88,455,838, which are the base's own. The driver's wire batch carries one row
+space, so a rung with several of them measures the write path on one, and a `geo`-side census
+differs by construction.
+
+⊘ **2,142,399 rows are visible on the all-in bundle and not on the folded one, and it is the
+driver's wire encoding rather than the write path.** `encode_batch` writes the passthrough plugin's
+`access` as a **comma-separated descriptor list**, and 70 of the 474 publisher names contain a
+comma. Each splits on the wire into fragments and every fragment not already a term is minted: the
+folded deployment carries **617 terms against the declaration's 475**. Measured on it — 230,913,587
+visible under the 474 declared terms, **233,055,986 under those plus the 148 fragments**. Worse than
+hiding: **where a fragment is itself a real key the rows land in that compartment**, which is why
+the 25% principal sees **73,212 rows more** on the folded deployment (`Natural History Museum,
+Vienna` → `Natural History Museum`). **This is the first rung whose compartment keys contain the
+separator the ingest encoding uses**, and it is worth fixing in the driver before a rung whose keys
+are free text is measured.
+
+**The 0091 census, retaken.** The run's own was shed mid-body on the zoom-0 whole-extent request
+with `layers: "all"` — 1,001,193 artifacts against a stream deadline, §6's artifact-response-volume
+finding at 2.2× rung 1's size, not a count difference. Retaken once after the fold with both sides
+served in turn: **zoom-0 exact at the 1%, 5% and 10% principals**, and 22 differences over three
+surfaces (3 zoom-0, 6 box, 13 layer). **Every layer difference is a layer that was never published**
+— `clusters/kmeans` declined at 233,118,470 member rows, and `taxonomy/tree` absent from the
+driver's roster because its member file is list-keyed and the publication path does not take one.
+**`publishers/source` needs no publication and reproduces exactly** at five of the six principals:
+its membership is the indexed column, which is the predicate layer's whole point.
+
+⊘ **The flush figures are the driver's timeouts, not the write path's cost.** The executor's
+counter did not move within 900 s and the visibility poll did not reach its target within 902 s —
+the target being the all-in total, which the wire encoding above had put out of the polling
+principal's reach. The fold completed regardless.
+
 ### Ruled 2026-09-03 — the contiguity experiment is withdrawn
 
 The plan's §7 and §9.5 asked for the same rows ingested in taxonomy order and shuffled. Allocation
@@ -1007,6 +1061,14 @@ three are read off the rung's own declaration, and `wire_columns` returns MedCPT
 so rung 3's cells are unaffected. ⊘ **The hold-out still enters the anchor view alone**: a second
 view's rows for the same entities do not travel, so a rung with several row spaces measures the
 write path on one of them.
+
+⊘ **A fourth is open and is not fixed here.** The driver writes the passthrough plugin's `access` as
+a comma-separated descriptor list, so a compartment key containing a comma is split on the wire and
+its fragments minted as terms — 2,142,399 of rung 5's ingested rows became invisible to every
+declared principal, and 73,212 landed in **another publisher's** compartment (§4b). Every rung below
+has keys with no commas — country codes, MeSH branch letters, licence names — so nothing before this
+one could see it. It wants an escaped encoding or a non-textual descriptor list, which is an owner
+call rather than a patch to make mid-campaign.
 
 ## 8. Open, and what is next
 
