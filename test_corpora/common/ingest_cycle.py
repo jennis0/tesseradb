@@ -977,10 +977,30 @@ class Cycle:
             self.log(f"reusing {bundle}")
             self.result["build"] = {"reused": True}
             return base_dir
-        if base_dir.exists():
-            shutil.rmtree(base_dir)
-        self.log(f"splitting: base {len(base_ids):,} rows, hold-out {len(held):,} rows")
-        write_base_inputs(self.rung, base_dir, base_ids)
+        # **The split survives a failed build.** Writing rung 4's base inputs is a quarter of an
+        # hour and 50 GB, and a build that dies after it — out of memory, out of disc — would
+        # otherwise pay for it again. `--reuse-base` reuses a *prepared* base as well as a built
+        # one, on the same test the split itself would apply: the points file exists and holds the
+        # rows this fraction and seed ask for.
+        prepared = base_dir / "points.parquet"
+        reuse_inputs = (
+            self.args.reuse_base
+            and prepared.exists()
+            and pq.ParquetFile(prepared).metadata.num_rows == len(base_ids)
+        )
+        if reuse_inputs:
+            self.log(f"reusing the prepared base inputs at {base_dir}")
+        else:
+            if base_dir.exists():
+                shutil.rmtree(base_dir)
+            self.log(f"splitting: base {len(base_ids):,} rows, hold-out {len(held):,} rows")
+            write_base_inputs(self.rung, base_dir, base_ids)
+            # **Give the split's arena back before the build starts.** Arrow's pool keeps every
+            # page it has touched, so after a wide 10^8-row split the driver sits on tens of
+            # gigabytes it will never read again — on this box, 41 GB of a 47 GB machine, in front
+            # of a build that needs a dozen. `release_unused` is the pool's own answer and costs
+            # nothing when there is nothing to give back.
+            pa.default_memory_pool().release_unused()
         if self.args.state_extent:
             self.result["stated_extent"] = state_extent(
                 base_dir / "corpus.toml", self.rung / "bundle"
