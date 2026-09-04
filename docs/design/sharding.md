@@ -37,14 +37,16 @@ There are two kinds.
   and locator, an overlay (`deleted`, `suppressed`) in its own entity space, an allocator, and a
   compaction generation counter
   ([decision 0072](../decisions/0072-entity-ids-are-slots-and-are-reused-after-a-fold.md)).
-- An **artifact shard** holds an entity space only: no row space, no permutation, no segments, no
-  Morton order. It holds an allocator, postings over the terms an artifact's own visibility gates
-  on, and an overlay for deleted and suppressed artifacts. There is exactly one artifact shard per
-  bundle, `ShardId(1)`, kind `artifacts`. It is never sealed by size, since artifact churn is
-  small. Whether it ever needs a second is open (§11).
+- An **artifact shard**, kind `artifacts`, holds an entity space only: no row space, no
+  permutation, no segments, no Morton order. It holds an allocator, postings over the terms an
+  artifact's own visibility gates on, and an overlay for deleted and suppressed artifacts. It
+  opens, seals, reopens and is dropped by the same rules as a point shard, because artifact churn
+  alone consumes a `u32`: about 14 months at a daily replacement of 10⁷ artifacts
+  ([annotation-representation.md](annotation-representation.md)).
 
-Shard 0 is the build's first point shard. Shard 1 is the artifact shard. Point shards after the
-first are numbered 2, 3 and so on, in opening order. The smallest bundle has two shards.
+Shard 0 is the build's first point shard and shard 1 its first artifact shard. A later shard of
+either kind takes the next number from `next_shard_id` when it opens. The smallest bundle has two
+shards.
 
 ```mermaid
 flowchart TB
@@ -64,7 +66,7 @@ flowchart TB
     P5["external-id runs and locator"]
     P6["overlay (deleted, suppressed),<br/>allocator, compaction generation"]
   end
-  subgraph A["Artifact shard: exactly one, ShardId(1)"]
+  subgraph A["Artifact shard: one open at a time"]
     direction TB
     A1["entity space only:<br/>no row space, no Morton order"]
     A2["allocator"]
@@ -73,7 +75,7 @@ flowchart TB
   end
 ```
 
-*What is per point shard, what is in the artifact shard, and what stays global to the bundle.*
+*What is per point shard, what is in an artifact shard, and what stays global to the bundle.*
 
 A point shard passes through four states.
 
@@ -84,8 +86,8 @@ A point shard passes through four states.
   once those slots are gone.
 - **Dropped** is removed; its number is retired.
 
-Exactly one point shard is open at a time. Several open shards, one per data source for example,
-is an option this design does not take (§11).
+Exactly one shard of each kind is open at a time. Several open shards of one kind, one per data
+source for example, is an option this design does not take (§11).
 
 ```mermaid
 flowchart TD
@@ -242,7 +244,7 @@ to one pass per container the shard's leaf touches.
 | | Today | Becomes |
 |---|---|---|
 | postings | bundle-wide | per shard: `shards/<id>/terms/postings.arrow` and that shard's delta tiers |
-| fragment | one `Bitmap` per session | one `FrozenFragment` per shard, including the artifact shard |
+| fragment | one `Bitmap` per session | one `FrozenFragment` per shard, including the artifact shards |
 | `FragmentCache` key | `(bundle identity, plugin hash, satisfied terms, watermark)` | `(bundle identity, plugin hash, shard, satisfied terms, that shard's watermark)` |
 | row projection | one per (token, view) | `row_space[shard, view].project(fragment[shard])`, cached per `(token, view, shard)` |
 
@@ -317,8 +319,9 @@ artifacts, so cost at fine zoom does not grow with the shard count. This route i
 
 The existence criterion sums over shards. The histogram's cache key carries every shard's
 `(segments_version, overlay_version)` pair, and the cache stays keyed once per token (decision
-0093's one exception). The artifact shard's own fragment leaf gates an artifact's own-terms
-visibility. The cut, the lineage and the derived content stay global and unchanged.
+0093's one exception). An artifact's own-terms visibility is gated by the fragment leaf of the
+artifact shard that holds it. The cut, the lineage and the derived content stay global and
+unchanged.
 
 Measured (`probes/2026-09-04-epoch-shard-tile-index/`): a spatial cluster has members in every
 epoch shard, so a per-shard tile index alone is 6 to 8.8× the bytes at N=8 and returns 2.3 to 7.8×
@@ -368,17 +371,18 @@ links.*
 
 | | Today | Becomes |
 |---|---|---|
-| allocator | one, bundle-wide | one per shard: `Allocators { by_shard: BTreeMap<ShardId, Allocator>, open: ShardId }` |
+| allocator | one, bundle-wide | one per shard: `Allocators { by_shard: BTreeMap<ShardId, Allocator>, open: BTreeMap<ShardKind, ShardId> }`, one open shard per kind |
 | point allocation | `allocate(n)` | `allocate(n)` on the open shard; when `remaining() < n` the open shard seals (recorded at the next publication) and the next shard opens, numbered `next_shard_id` |
-| artifact allocation | the two-region allocator: points up from 0, artifacts down from `u32::MAX` | `allocate` on shard 1; no `allocate_rowless`, no two regions |
+| artifact allocation | the two-region allocator: points up from 0, artifacts down from `u32::MAX` | `allocate` on the open artifact shard, which seals and is succeeded on the same rule as a point shard; no `allocate_rowless`, no two regions |
 | seed | one manifest field | each shard's own `entity_id_high_water` seeds its allocator; WAL replay recovers per shard, since a record carries its shard |
 
 A commit window's allocation run may straddle a seal boundary; each row records the shard it
 landed in.
 
-Seal by size, `shard.seal_rows`, defaults to the entity ceiling and is tunable; an operator may
-set a lower figure. The design expects a value around 2³⁰, to bound compaction and projection cost
-per shard; the default itself is open (§11). Seal is also an operator verb (§3.5).
+Seal by size, `shard.seal_rows` for point shards and `shard.seal_artifacts` for artifact shards,
+each defaults to the entity ceiling and is tunable; an operator may set a lower figure. For point
+shards the design expects a value around 2³⁰, to bound compaction and projection cost per shard;
+both defaults are open (§11). Seal is also an operator verb (§3.5).
 
 ### 3.2 Ingest, the commit window, the WAL, flush
 
@@ -416,7 +420,9 @@ directories hard-linked whole; the flip, retirement, WAL rotation and reclaim pr
 today ([compaction.md](compaction.md) §§4–8). Retirement is per shard, and the compaction
 generation counter is per shard (decision 0072). A compaction of shard k rotates only shard k's
 session fragment entries and projections. Merge and coalesce run per shard, suspended only while
-that shard's compaction is unpublished.
+that shard's compaction is unpublished. An artifact shard's compaction runs the passes that apply
+to an entity space without rows: postings, external ids, the dictionary and the overlay's
+retirement.
 
 Sealing schedules one closing compaction when any of the shard's gauges is non-zero. Its final form is one base segment per view, one postings tier, one
 external-id run, an overlay holding only suppressions (its deletions retired), and a digest per
@@ -438,8 +444,8 @@ open at a time. `{"state": "sealed"}` seals a shard immediately.
 
 `DELETE /control/shards/{id}` is refused while a shard is open or reopened. Otherwise, the next
 publication removes its directory, its number is retired, and every identifier it issued becomes
-invalid by whole-identifier equality, since no row carries it any longer. Both operations are
-irreversible for identifiers.
+invalid by whole-identifier equality, since no row carries it any longer. Dropping an artifact shard retires every artifact it holds as deleted, and their records leave
+the registry at the same publication. Both operations are irreversible for identifiers.
 
 ### 3.6 Layout changes and views
 
@@ -449,8 +455,8 @@ layouts. A re-layout is the one operation that rebuilds every shard in one publi
 
 ## 4. Build
 
-`tessera build` writes shard 0 for points and shard 1 for artifacts; past `shard.seal_rows` it
-writes shard 2, 3 and so on, in input order. Each shard's views get their own permutation and
+`tessera build` writes shard 0 for points and shard 1 for artifacts; past the seal size of either
+kind it opens the next shard of that kind, numbered in opening order, in input order. Each shard's views get their own permutation and
 Morton sort; the layout is computed once over the corpus, since coordinates are per item and only
 the sort is per shard.
 
@@ -484,6 +490,7 @@ New fixtures:
 | (e) | a shard with a corrupted file refuses at open, naming the shard |
 | (f) | decision 0091's equivalence across a seal boundary |
 | (g) | the byte-scanner: no entity id, no shard number and no per-shard count on the wire |
+| (h) | an artifact shard sealing at `shard.seal_artifacts` and a second opening: new artifact identifiers carry the new shard number; memberships, generating sets and lineage are unchanged |
 
 ## 7. Invariants and the register
 
@@ -523,7 +530,7 @@ applies within the open shard. Shard ids are never reused, the same rule contrac
 rules that an edit keeps its identity rather than minting a new one; a sealed shard is closed to
 allocation, and still accepts edits, deletes and suppressions.
 
-**E. Artifacts have their own shard, with its own allocator.** This replaces the two-region
+**E. Artifacts have their own shards, each with its own allocator, opening and sealing on the same rule as point shards** (the second clause added by the owner the same day). This replaces the two-region
 allocator. The identity input is unchanged: `(shard: 12, generation: 20, entity: 32)`, per decision
 0072.
 
@@ -558,7 +565,7 @@ samples, and identifiers identical while the shard field is 0 and the generation
 flowchart LR
   S1["S1<br/>the shard as a parameter"] --> S2["S2<br/>ShardedMask in the engine"]
   S2 --> S3["S3<br/>per-shard allocation,<br/>flush, overlay, compaction"]
-  S3 --> S4["S4<br/>the artifact shard"]
+  S3 --> S4["S4<br/>artifact shards"]
   S4 --> S5["S5<br/>artifact structures per shard"]
   S5 --> S6["S6<br/>control plane: seal,<br/>reopen, drop"]
   S6 --> S7["S7<br/>build past<br/>the seal size"]
@@ -572,7 +579,7 @@ order.*
 | S1 | `ShardId`; the store's `Bundle` gains `shards`; every per-view structure moves under a shard; `bundle_format` bump; the manifest lists shards; the engine passes shard 0 everywhere; the compile-fail tests | bundles equivalent, full suite |
 | S2 | `ShardedMask` replaces the engine's bitmaps in projection, composition, filter rows, deny mask, histogram; parts carry a shard; `count_ranges` in the sweep | N=1 no regression on the viewport suite; a bench at N=8 on the treemap probe's shape |
 | S3 | per-shard allocator; the identity's shard field taken from the row's shard; open and seal; per-shard flush, overlay, compaction and closing compaction | fixtures (a), (b), (f) |
-| S4 | the artifact shard: allocator, own-term postings, overlay; the two-region allocator removed | fixture (g) extended |
+| S4 | artifact shards: allocator, own-term postings, overlay, seal and succession; the two-region allocator removed | fixtures (g) extended, (h) |
 | S5 | artifact structures per shard: membership slices, per-shard row forms, one everywhere set per level, containment per shard, histogram sums, the request-aware route | the tile-index probe re-run at N=8 |
 | S6 | control plane: status, seal, reopen, drop, refuse-at-open | fixtures (c), (d), (e) |
 | S7 | build past the seal size | decision 0091's equivalence across a seal boundary |
@@ -583,9 +590,8 @@ order.*
   index partitioned by container range and cost one fan-out per request per machine, expected
   cheaper than an exchange per token up to about a dozen machines. Unmeasured; decided when 10¹⁰
   is real.
-- Several open shards.
-- The seal-size default and the reopen threshold.
-- Whether the artifact shard ever needs sealing.
+- Several open shards of one kind.
+- The seal-size defaults and the reopen threshold.
 - The cost of a re-layout beyond one publication.
 
 ## 12. Specification amendments this document implies
