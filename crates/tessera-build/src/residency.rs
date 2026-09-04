@@ -184,12 +184,22 @@ pub(crate) struct ColumnCost {
 
 /// Whether one entity's value lives in [`crate::column::EntityColumn`]'s arena — which is what
 /// makes the column's characters a term of their own rather than part of its width.
+///
+/// A `text` column is not one of them: its prose is spilled as record-blob extents while the join
+/// decodes it and is never placed at an entity index ([`crate::prose`]). [`EXTENT_SHARE`] is what
+/// it costs instead.
 fn is_variable_width(ty: ScalarType) -> bool {
-    matches!(
-        ty,
-        ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text
-    )
+    matches!(ty, ScalarType::Utf8 | ScalarType::Keyword)
 }
+
+/// What a `text` column's prose extents cost against the column's Parquet payload: **one half**.
+///
+/// The extents are the same 256 KiB zstd blocks the base blob is cut into, and the base blob at
+/// the 10⁸ PaperSeek rung measured 44.77 GB against 128 GiB of prose — 2.9×
+/// (`probes/2026-09-04-rung-4-whole/breakdown.txt`). Half is charged rather than a 2.9th because
+/// that ratio is one corpus's prose at one operating point, and this figure refuses a build
+/// rather than warning about one. ⊘ Modelled for the extents, measured for the blob.
+const EXTENT_SHARE: u64 = 2;
 
 /// The fixed width one entity's value occupies in [`crate::column::EntityColumn`]'s typed
 /// storage. A variable-width type answers [`ARENA_OFFSET`] here — its offset and its record
@@ -321,14 +331,29 @@ pub(crate) fn entity_order_residency(
         // orders of magnitude larger, and it errs in the direction that costs a rerun
         // (`crate::ArenaOrder`, `column.rs`).
         let layout = if is_variable_width(column.ty) { 4 * n } else { 0 };
-        let bytes = width
-            .saturating_mul(n)
-            .saturating_add(presence)
-            .saturating_add(column.payload_bytes)
-            .saturating_add(layout);
+        // **A `text` column has no arena and no offset array.** What it has instead is one
+        // record-blob extent per join chunk, holding the same prose compressed
+        // ([`EXTENT_SHARE`]); the presence bits are all that is left of the column itself.
+        let prose = column.ty == ScalarType::Text;
+        let bytes = if prose {
+            presence.saturating_add(column.payload_bytes / EXTENT_SHARE)
+        } else {
+            width
+                .saturating_mul(n)
+                .saturating_add(presence)
+                .saturating_add(column.payload_bytes)
+                .saturating_add(layout)
+        };
         let ty = column.ty.arrow_type_name();
         terms.push(Term {
-            what: if column.payload_bytes > 0 {
+            what: if prose {
+                format!(
+                    "declared column {index} ({ty}): {} MiB of prose extents in .build-tmp/, \
+                     modelled at half the source's {} MiB of characters",
+                    (column.payload_bytes / EXTENT_SHARE) >> 20,
+                    column.payload_bytes >> 20
+                )
+            } else if column.payload_bytes > 0 {
                 format!(
                     "declared column {index} ({ty}): {width} B/item of offset plus \
                      {} MiB of characters and 4 B/item of arena layout, in .build-tmp/",
@@ -359,8 +384,14 @@ pub(crate) fn entity_order_residency(
                 ),
                 // The column's own storage, without the arena layout's transient: the layout is
                 // given back at the end of the join and the runs spill three stages later, so the
-                // two never stand on the disk together.
-                bytes: bytes - layout,
+                // two never stand on the disk together. For a `text` column the runs are charged
+                // at the source's characters rather than at the extents that hold them, the runs
+                // being uncompressed.
+                bytes: if prose {
+                    column.payload_bytes
+                } else {
+                    bytes - layout
+                },
                 mapped: true,
             });
         }
@@ -470,12 +501,16 @@ pub(crate) struct ArenaDecision {
 /// The share of the memory budget the string payload may take before the arena is filled in
 /// entity order: **one half**.
 ///
+/// **The payload here is the `keyword` and `utf8` columns' and no longer the prose's.** A `text`
+/// column has no arena in either order ([`crate::prose`]), so what this decides is the fill of the
+/// columns the record blob and the keyword dictionary still read by entity.
+///
 /// **Not a share of the machine, and not a tighter one, for two reasons that pull the same way.**
 /// The arena is not alone in the page cache at the join: the entity-order columns, their presence
 /// bitmaps, `at`, the source ids and the ordinal map are all mapped and all live across the same
-/// stages, and the stages that then read the arena — the text index and the record blob — hold
-/// their own spill runs beside it. So an arena at the whole budget is already thrashing, and half
-/// is the point past which the *other* mapped files stop fitting alongside it.
+/// stages, and the record blob's merge holds a block per extent beside them. So an arena at the
+/// whole budget is already thrashing, and half is the point past which the *other* mapped files
+/// stop fitting alongside it.
 ///
 /// It is not tighter than a half because the two-pass fill is not free: it is a second decode of
 /// the source's prose, measured at 33% of the join at 10⁷ (`docs/ingest-campaign.md` §4a). Paying
@@ -635,11 +670,13 @@ mod tests {
     #[test]
     fn the_decision_reads_the_string_columns_payload_from_the_footer() {
         let (args, _temp) = fixture(20_000);
-        // One declared string column: the fixture's `blurb`.
+        // The fixture declares a `text` and a `keyword` column, and only the second has an
+        // arena to fill in either order: a text column's prose is spilled as extents
+        // ([`crate::prose`]) and never placed at an entity index.
         let generous = decide_arena_order(&args, 1 << 40);
         assert_eq!(
             generous.columns.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
-            vec!["blurb"]
+            vec!["code"]
         );
         assert!(generous.payload_bytes > 0, "the footer gave no payload");
         assert_eq!(generous.order, ArenaOrder::Arrival);
@@ -689,17 +726,17 @@ mod tests {
         );
     }
 
-    /// **A declared column is reported and not charged.** The whole of a text column — its
-    /// per-entity offsets, its presence bits and every character of the corpus's prose — is a file
-    /// under `.build-tmp/`, so it appears in the breakdown at its full size and adds nothing to the
+    /// **A declared column is reported and not charged.** The whole of a keyword column — its
+    /// per-entity offsets, its presence bits and every character it holds — is a file under
+    /// `.build-tmp/`, so it appears in the breakdown at its full size and adds nothing to the
     /// figure `--memory-budget` is compared against.
     #[test]
     fn a_declared_column_is_reported_as_mapped_and_charged_at_nothing() {
         let n = 10_000_000;
         let bare = entity_order_residency(n, &[], 0);
-        let with_text = entity_order_residency(n, &[column(ScalarType::Text, 400 * n)], 0);
-        assert_eq!(with_text.total(), bare.total());
-        let term = with_text
+        let with_keyword = entity_order_residency(n, &[column(ScalarType::Keyword, 400 * n)], 0);
+        assert_eq!(with_keyword.total(), bare.total());
+        let term = with_keyword
             .terms
             .iter()
             .find(|t| t.mapped)
@@ -708,9 +745,30 @@ mod tests {
         // fill's layout pass holds across the join.
         assert_eq!(term.bytes, ARENA_OFFSET * n + n.div_ceil(8) + 400 * n + 4 * n);
         assert!(
-            with_text.describe().contains("(mapped)"),
+            with_keyword.describe().contains("(mapped)"),
             "the breakdown must say which terms are files: {}",
-            with_text.describe()
+            with_keyword.describe()
+        );
+    }
+
+    /// **A text column costs its extents, not an arena.** Its prose is written once as
+    /// record-blob blocks under `.build-tmp/`, charged at half the source's characters
+    /// ([`EXTENT_SHARE`]); the column itself is presence bits and nothing else.
+    #[test]
+    fn a_text_column_costs_its_extents_and_not_an_arena() {
+        let n = 10_000_000;
+        let payload = 400 * n;
+        let with_text = entity_order_residency(n, &[column(ScalarType::Text, payload)], 0);
+        let term = with_text
+            .terms
+            .iter()
+            .find(|t| t.mapped)
+            .expect("the column is a term of its own");
+        assert_eq!(term.bytes, n.div_ceil(8) + payload / 2);
+        assert!(
+            term.what.contains("prose extents"),
+            "the breakdown must name them: {}",
+            term.what
         );
     }
 
@@ -729,15 +787,15 @@ mod tests {
             text_index: true,
             ..plain
         };
-        let column_bytes = ARENA_OFFSET * n + n.div_ceil(8) + 400 * n;
+        let extent_bytes = n.div_ceil(8) + 200 * n;
 
         let without = entity_order_residency(n, &[plain], 0);
-        assert_eq!(without.mapped(), column_bytes + 4 * n);
+        assert_eq!(without.mapped(), extent_bytes);
 
-        // The runs are charged the column's storage and **not** its layout transient, which the
-        // join has already given back by the time they spill.
+        // The runs are charged the source's characters, being uncompressed where the extents that
+        // hold the same prose are not.
         let with = entity_order_residency(n, &[indexed], 0);
-        assert_eq!(with.mapped(), 2 * column_bytes + 4 * n);
+        assert_eq!(with.mapped(), extent_bytes + 400 * n);
         assert_eq!(
             with.total(),
             without.total(),
@@ -846,6 +904,7 @@ mod tests {
                 Field::new("y", DataType::Float64, false),
                 Field::new("weight", DataType::UInt32, false),
                 Field::new("blurb", DataType::Utf8, false),
+                Field::new("code", DataType::Utf8, false),
             ])),
             vec![
                 Arc::new(UInt64Array::from(ids.clone())) as ArrayRef,
@@ -859,6 +918,9 @@ mod tests {
                     ids.iter().map(|e| (e % 64) as u32).collect::<Vec<_>>(),
                 )),
                 Arc::new(StringArray::from(blurbs)),
+                Arc::new(StringArray::from(
+                    ids.iter().map(|e| format!("k{e:08}")).collect::<Vec<_>>(),
+                )),
             ],
         );
 
@@ -933,6 +995,11 @@ name = "blurb"
 type = "text"
 index = true
 analyser = "unicode"
+
+[[attribute]]
+name = "code"
+type = "keyword"
+index = true
 
 [[layer]]
 name = "fixture/flat"

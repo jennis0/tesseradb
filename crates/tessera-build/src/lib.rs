@@ -362,10 +362,14 @@ pub struct BuildArgs {
 /// `Arrival` is one pass — values are appended as the source yields them. `Entity` is two — pass
 /// one keeps each entity's length, a prefix sum lays the records out in entity order, and pass two
 /// decodes the source's string columns again and writes each value at its place. What entity order
-/// buys is the stage after the join: `record_blob` walks entities 0..n and reads each string by
-/// offset, so an arrival-order arena costs it one random read per document, which is free while
-/// the arena fits in memory and ruinous when it does not (`probes/2026-09-03-text-arena-streaming/`
-/// §4 measured 56 KB/s at 10⁸). What it costs is a second decode of the source's prose.
+/// buys is the stage that reads the arena by entity and cannot be reordered: the record blob's
+/// merge and the keyword dictionary both walk entity space, and against an arrival-order arena
+/// that walk is one random read per value.
+///
+/// **It governs `keyword` and `utf8` columns alone.** A `text` column has no arena: its prose is
+/// spilled as record-blob extents while the join decodes it (`build-prose-extents.md`), so a
+/// corpus whose prose was the whole reason `Auto` took `Entity` now takes `Arrival` and pays no
+/// second decode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ArenaOrder {
     /// Decide from the string columns' uncompressed Parquet payload against the memory budget —
