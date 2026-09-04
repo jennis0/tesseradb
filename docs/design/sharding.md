@@ -6,7 +6,7 @@ says what exists today and what it becomes.
 
 Entity ids are a `u32`, bounded by the allocator's ceiling (`tessera-lifecycle alloc.rs`,
 `ENTITY_ID_CEILING`) and by the identity construction ([contracts.md](contracts.md) §2.6). The
-entity space fills before the corpus does: churn burns ids faster than the corpus grows, and an
+entity space fills before the corpus does: consumed ids exceed live items through churn, and an
 artifact allocates from the top of the same space, downward from `u32::MAX`. Exhaustion is these
 two allocation ranges meeting
 ([annotation-representation.md](annotation-representation.md)).
@@ -298,7 +298,7 @@ is unchanged: `tessera-filter` cannot see a `RowId`.
 
 | | Today | Becomes |
 |---|---|---|
-| membership | entity-space per artifact (`Members` over `.tsmb` extents) | sliced per shard, under `shards/<id>/artifacts/memberships/`; `Members` is `Vec<(ShardId, view)>` |
+| membership | entity-space per artifact (`Members` over `.tsmb` extents) | sliced per shard, under `shards/<id>/artifacts/memberships/`; an artifact's membership is `Vec<(ShardId, Members)>` |
 | generating sets, contents | entity-space records | global records, naming `(ShardId, EntityId)` members |
 | row forms | one per (view, layer, level) | one per (view, layer, level, shard); `RowColumn` per shard |
 | `TileIndex` | one `own`/`subtree` structure, one `everywhere` set, per (view, layer, level) | per shard for placed artifacts; one `everywhere` set per (view, layer, level), the union of what each shard's placement would make everywhere, tested once per request rather than once per shard |
@@ -418,8 +418,7 @@ generation counter is per shard (decision 0072). A compaction of shard k rotates
 session fragment entries and projections. Merge and coalesce run per shard, suspended only while
 that shard's compaction is unpublished.
 
-A shard's compaction also closes it: when a shard seals and any gauge is non-zero, one compaction
-is scheduled for it. Its final form is one base segment per view, one postings tier, one
+Sealing schedules one closing compaction when any of the shard's gauges is non-zero. Its final form is one base segment per view, one postings tier, one
 external-id run, an overlay holding only suppressions (its deletions retired), and a digest per
 file. A sealed shard with no later edits then stays unchanged on disc until it is reopened or
 dropped.
@@ -446,7 +445,7 @@ irreversible for identifiers.
 
 A new layout, a new view or a view's re-incarnation ([views.md](views.md)), is built as that view
 in every point shard and published in one generation swap. Two shards are never served in two
-layouts. The cost of a re-layout is the build-everything cost, for a re-layout and nothing else.
+layouts. A re-layout is the one operation that rebuilds every shard in one publication.
 
 ## 4. Build
 
@@ -498,7 +497,7 @@ New fixtures:
 | I13b | a generating set with members in a shard the process does not hold cannot occur in one process: every shard is held, or the bundle is refused (ruling F) |
 | Rule S / Rule F | the two removal rules apply per shard, as §3.3 states |
 
-No new Appendix C row: no per-shard quantity is disclosed. Ruling F's refusal is a liveness
+No new Appendix C row: no per-shard quantity is disclosed. Ruling F's refusal is an availability
 choice, recorded in conformance §4.6's coverage and here.
 
 ## 8. Decisions, as ruled
@@ -597,5 +596,5 @@ architecture §13.4 ("premature below 10⁸", narrowed to across machines only),
 contracts §2.1 (layout), §2.2 (manifest), §2.3 (the per-shard side-manifest), §2.6 (the identity
 input); write-path §2, §4, §5, §7; compaction §§1–3, §9; annotation-representation.md (the
 allocator regions, membership per shard); [annotation-write-cycle.md](annotation-write-cycle.md)
-(the exhaustion note); [conformance.md](conformance.md) §4.6; scaling-analysis §4 (shard by epoch,
-not row range); and decision 0072 (slot return per shard, sealed by default).
+(the exhaustion note); [conformance.md](conformance.md) §4.6; scaling-analysis §4 (the shard key
+becomes the epoch); and decision 0072 (slot return per shard, sealed by default).
