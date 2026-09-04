@@ -1,0 +1,3 @@
+OK /home/joe/code/tessera/data/rung4-run/bundle (v00000): 1 partition(s), 1 view(s), 1 segment(s), 102117343 rows, entity_id_high_water 102117343
+deep: 12 term(s), 0 delta tier(s), 102117343 pairs row(s), 12 dict record(s), 0 external-id binding(s), 0 scoped render lane(s)
+verify --deep wall 74.24 s, maxrss 3221924 KiB

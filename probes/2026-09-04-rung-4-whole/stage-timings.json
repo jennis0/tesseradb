@@ -1,0 +1,146 @@
+[
+  {
+    "stage": "source_ids",
+    "wall_s": 4.300571237,
+    "rows": 102117343,
+    "peak_rss_kib": 1622692,
+    "started_at": 1788469304.043946,
+    "ended_at": 1788469308.3445172
+  },
+  {
+    "stage": "dictionary",
+    "wall_s": 27.104479042,
+    "rows": 12,
+    "peak_rss_kib": 1878820,
+    "started_at": 1788469308.3446286,
+    "ended_at": 1788469335.4491076
+  },
+  {
+    "stage": "geometry_read",
+    "wall_s": 19.30733278,
+    "rows": 102117343,
+    "peak_rss_kib": 4426672,
+    "started_at": 1788469335.449219,
+    "ended_at": 1788469354.7565517
+  },
+  {
+    "stage": "pairs_pack",
+    "wall_s": 2.961e-6,
+    "rows": 102117343,
+    "peak_rss_kib": 4426672,
+    "started_at": 1788469354.7566144,
+    "ended_at": 1788469354.7566173
+  },
+  {
+    "stage": "signature_sort",
+    "wall_s": 3.7609879360000003,
+    "rows": 102117343,
+    "peak_rss_kib": 6033844,
+    "started_at": 1788469354.7567189,
+    "ended_at": 1788469358.5177069
+  },
+  {
+    "stage": "assignment",
+    "wall_s": 42.179707838,
+    "rows": 102117343,
+    "peak_rss_kib": 6437212,
+    "started_at": 1788469358.5178156,
+    "ended_at": 1788469400.6975234
+  },
+  {
+    "stage": "assignment",
+    "wall_s": 0.853694336,
+    "rows": 102117343,
+    "peak_rss_kib": 6436116,
+    "started_at": 1788469400.6976106,
+    "ended_at": 1788469401.551305
+  },
+  {
+    "stage": "postings_write",
+    "wall_s": 3.234270684,
+    "rows": 102117343,
+    "peak_rss_kib": 6436116,
+    "started_at": 1788469401.5514042,
+    "ended_at": 1788469404.7856748
+  },
+  {
+    "stage": "external_ids",
+    "wall_s": 1.78e-7,
+    "rows": 0,
+    "peak_rss_kib": 6436116,
+    "started_at": 1788469404.7857342,
+    "ended_at": 1788469404.7857344
+  },
+  {
+    "stage": "attribute_tail",
+    "wall_s": 6369.114185335,
+    "rows": 102117343,
+    "peak_rss_kib": 25107084,
+    "started_at": 1788469404.792017,
+    "ended_at": 1788475773.9062023
+  },
+  {
+    "stage": "layers",
+    "wall_s": 90.356470835,
+    "rows": 2,
+    "peak_rss_kib": 25107084,
+    "started_at": 1788475773.9066987,
+    "ended_at": 1788475864.2631695
+  },
+  {
+    "stage": "text_index",
+    "wall_s": 2233.944512483,
+    "rows": 57637877,
+    "peak_rss_kib": 25107084,
+    "started_at": 1788476627.1210077,
+    "ended_at": 1788478861.06552
+  },
+  {
+    "stage": "filter_postings",
+    "wall_s": 762.857839023,
+    "rows": 102117343,
+    "peak_rss_kib": 25107084,
+    "started_at": 1788478098.2077382,
+    "ended_at": 1788478861.0655773
+  },
+  {
+    "stage": "record_blob",
+    "wall_s": 905.366856064,
+    "rows": 102117343,
+    "peak_rss_kib": 29941692,
+    "started_at": 1788478861.0658987,
+    "ended_at": 1788479766.4327548
+  },
+  {
+    "stage": "column_release",
+    "wall_s": 12.999516184,
+    "rows": 102117343,
+    "peak_rss_kib": 29941692,
+    "started_at": 1788479766.4328556,
+    "ended_at": 1788479779.4323719
+  },
+  {
+    "stage": "tiler_sort",
+    "wall_s": 8.196535457,
+    "rows": 102117343,
+    "peak_rss_kib": 29941692,
+    "started_at": 1788479779.4324794,
+    "ended_at": 1788479787.6290147
+  },
+  {
+    "stage": "segment_write",
+    "wall_s": 10.400141091,
+    "rows": 102117343,
+    "peak_rss_kib": 29941692,
+    "started_at": 1788479787.6295695,
+    "ended_at": 1788479798.0297105
+  },
+  {
+    "stage": "manifests",
+    "wall_s": 76.151702848,
+    "rows": 70783029628,
+    "peak_rss_kib": 29941692,
+    "started_at": 1788479798.030355,
+    "ended_at": 1788479874.1820579
+  }
+]
