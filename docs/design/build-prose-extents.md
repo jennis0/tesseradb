@@ -2,8 +2,9 @@
 
 **Date:** 2026-09-04
 **Status:** Provisional. Built for the base build; the flush and the fold are unchanged. Byte
-identity against the arena build is held at 10⁶ (`medcpt-1m`, 36 files, none differing) and by the
-unit tests. ⊘ The 10⁷ and 10⁸ runs are owed: they were queued behind another campaign's build.
+identity against the arena build is measured at 10⁶ (`medcpt-1m`, 36 files), 10⁷ (`medcpt-10m-abs`,
+38 files) and 10⁸ (`paperseek`, 46 files), none differing but `MANIFEST.json`'s `created_at` and the
+`CURRENT` that carries its digest.
 **Reads against:** [`records-and-search.md`](records-and-search.md) §3 and §4.4 (the record blob's
 format and addressing, the text family), [`compaction.md`](compaction.md) (the fold's record pass),
 [decision 0091](../decisions/0091-build-is-ingest-into-an-empty-database.md).
@@ -138,7 +139,8 @@ falls as the schema widens and the buffer stays a constant. Nothing new is sized
 
 The prose in one chunk is `staging_rows × mean value length`, which the budget does not bound. At
 rung 4 the join staged about 1.9M rows a chunk over 1.02×10⁸ rows, so 54 chunks, so 54 extents per
-text column. Each holds about 2.2 GB of prose and 760 MB of blocks (measured ratio 2.9×). At 10⁹
+text column. Each holds about 2.2 GB of prose and 760 MB of blocks (measured ratio 2.9×), and the
+merge of both columns' extents into the base blob measured 777.4 s at 16 major faults a second. At 10⁹
 with the same schema it is 540 extents a column.
 
 The merge holds one uncompressed block per extent, 256 KiB, so 54 extents cost 14 MB and 540 cost
@@ -165,7 +167,8 @@ extents and the base blob stand on the disk together for the length of the merge
 own bytes are already in the assembly phase and are not double-charged here.
 
 At rung 4 the abstract column's two terms fall from 115,536 MiB and 115,147 MiB to about 57,768
-and 115,147, which is 113 GB off a 274.5 GB refusal.
+and 115,147, which is 113 GB off a 274.5 GB refusal. The build the model then admits wrote a
+70.78 GB bundle.
 
 ## 6. `--arena-order`
 
@@ -177,7 +180,8 @@ DOIs is 30 GB of keyword payload, read in entity order by the dictionary writer 
 was the whole reason it chose `entity` now chooses `arrival` and pays no second decode.
 
 ⊘ No corpus in the ladder has a keyword payload above the share, so the two-pass fill is now
-unexercised by any measured run. The unit test that asserts the two orders build the same bundle
+unexercised by any measured run: rung 4 sees 1,456 MiB of `openalex_id` against a 17,787 MiB share
+and takes `arrival`. The unit test that asserts the two orders build the same bundle
 stands; the 10⁷ and 10⁸ comparisons do not cover it any more.
 
 ## 7. Determinism
@@ -202,21 +206,37 @@ The join chunk sort is stable, which is what makes last-write-wins an answer rat
 
 ## 8. What it costs
 
-Measured today at 10⁸ (`docs/ingest-campaign.md` §4b): `attribute_tail` 6,369.1 s, `text_index`
-2,234 s, `record_blob` 905.4 s. 9,508 s over the three.
+Measured at 10⁸ on `paperseek`, against the entity-ordered arena build of the same corpus
+(`docs/ingest-campaign.md` §4b and §4c). Both are `--arena-order auto` on the same box.
 
-Modelled here, at 10⁸, on the same box:
-
-| stage | model | reasoning |
+| stage | arena | extents |
 |---|---|---|
-| `attribute_tail` | 1,100 s | the one-pass join measured 704.7 s, plus zstd-3 over 119 GB at 12 cores |
-| `text_index` | 2,000 s | tokenisation is unchanged; the read falls from 128 GiB of arena to 45 GB of blocks |
-| `record_blob` | 1,100 s | 45 GB decompressed, re-encoded and recompressed, against 905.4 s to compress 119 GB read sequentially |
-| total | **4,200 s** | against 9,508 s |
+| `attribute_tail` | 6,369.1 s | **890.2 s** |
+| `text_index` | 2,233.9 s | **1,688.4 s** |
+| `record_blob` | 905.4 s | **777.4 s** |
+| the three | 9,508.4 s | **3,356.0 s** |
+| whole build | 10,578.4 s | **4,169.9 s** |
+| peak `VmHWM` | 29,239 MiB | **19,590 MiB** |
 
-⊘ Modelled, not measured. The compression terms assume zstd level 3 at 150 MB/s a core, which is
-this repository's operating point for the blob and is not measured on this box.
+The arithmetic this section was written from — the one-pass join plus zstd at 150 MB/s a core, the
+text index reading 45 GB of blocks rather than 128 GiB of arena, and the blob decoding and
+recompressing that 45 GB — put the three stages at 4,200 s. They measure 3,356 s, so the model is
+25% conservative, and it is conservative at the join: 890.2 s against 1,100 s.
 
-At 10⁹ with abstracts the same arithmetic gives about 42,000 s over the three stages, 1.2 TB of
-prose and 400 GB of extents. The disk pre-flight is what decides whether that build starts, and
-its column phase at 10⁹ is dominated by the extents and the text index's runs.
+**The join reads the prose once and the arena order stops mattering.** `--arena-order auto` sees
+only `openalex_id`'s 1,456 MiB of keyword payload here, so it takes `arrival` and there is no
+second decode. Major faults over `attribute_tail` are 0 a second against 140.
+
+⊘ **Nothing improves at 10⁷ and nothing was expected to.** On `medcpt-10m-abs` the 10.2 GiB arena
+fits the page cache, so the change buys no I/O and pays compression: 447.9 s against 403.2 s over
+the whole run, `attribute_tail` 71.4 s against 33.8 s, `record_blob` 71.4 s against 64.4 s. What it
+buys at that scale is the peak, 8.0 GB against 11.2 GB, and indifference to a cap — under
+`MemoryMax=4G` the same build takes 461.5 s, 1.03× its uncapped self, at about one major fault a
+second where the arena build could not finish the blob at all before the ascending scatter landed.
+
+⊘ **The 10⁷ join is the one figure worth attacking.** Its extra 38 s is zstd on the join's own
+threads, one per text column, so a corpus of one text column compresses on one core. Block
+compression inside `RecordBlobWriter` is where that would come from, and it is not in this change.
+
+At 10⁹ with abstracts the 10⁸ figures scale to about 9 hours over the three stages, 1.2 TB of prose
+and 400 GB of extents. The disk pre-flight is what decides whether that build starts.

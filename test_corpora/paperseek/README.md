@@ -350,12 +350,34 @@ source's prose is decoded twice and the arena written by entity, and `attribute_
 scatter rather than the decode: the join's chunk buffer does not grow with the corpus, so the arena
 is written as ~54 interleaved ascending runs here against six at 10⁷.
 
-⊘ **The arm most likely to beat this one was not run**: an arrival-order arena *with* the ascending
-scatter, which is what made `record_blob` finish at 10⁷ under a cap. It costs one more three-hour
-build and it is the open question this rung now poses.
-
 ⊘ **The box carried rung 5's share passes and GPU work throughout.** No other `tessera build` and no
 serve battery ran; the disk was this build's alone.
+
+### 2026-09-04 — the same bundle in a third of the time
+
+**Byte-identical output in 1 h 09 m 30 s**, on branch `build/prose-extents`: 46 files compared
+against the bundle above, none differing but `MANIFEST.json`'s `created_at` and the `CURRENT` that
+carries its digest. `docs/ingest-campaign.md` §4c carries the stage table and the 10⁷ counterweight;
+the design is [`build-prose-extents.md`](../../docs/design/build-prose-extents.md).
+
+| | before | this run |
+|---|---|---|
+| `tessera build --arena-order auto` | 10,578.4 s | **4,169.9 s** |
+| `attribute_tail` | 6,369.1 s | **890.2 s** |
+| `text_index` | 2,233.9 s | **1,688.4 s**, the same 57,637,877 terms |
+| `record_blob` | 905.4 s | **777.4 s** |
+| `filter_postings` | 762.9 s | **482.4 s** |
+| peak `VmHWM` | 29,239 MiB | **19,590 MiB** |
+| bundle | 70,783,029,628 B | **70,783,029,628 B**, byte for byte |
+
+A `text` column's prose is no longer placed at an entity index. Each chunk the join stages is
+sorted by entity already, so each chunk of each text column is written out as one record-blob
+extent; the text index reads the extents in block windows and the record blob merges them. The only
+column with an arena left is `openalex_id` at 1,456 MiB, so `--arena-order auto` chooses `arrival`
+and the second decode that cost 6,369.1 s above does not happen.
+
+⊘ **Rung 5's serve batteries ran on the same disk throughout**, where the run above had the disk to
+itself, so these walls are an upper bound. The byte equality does not depend on it.
 
 ### The bracket — 10,000,000 rows, and the declaration proved end to end
 

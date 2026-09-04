@@ -24,7 +24,7 @@ is the owner's to settle.
 | **1** | **GeoNames** | **13,463,857** | **Built, verified and served**, and rebuilt 2026-08-30 on a declared `web_mercator` projection. Not done against §7.1's bar — see §2 |
 | **2** | **Overture places + divisions** | **7.4×10⁷** | **Built and verified**, and rebuilt 2026-08-30 on a declared projection with its boundary polygons in longitude and latitude — see §3 |
 | **3** | **MedCPT / PubMed** | **35,920,666** | **Built, verified and served** 2026-09-02 — see §4.6. The ladder's largest embedding rung and its first `dag` layer: MeSH's 30,217 descriptors with members over 41,321 edges, membership closed upward to **1.66×10⁹ entries** (3.27× rung 2's spill), an 11.15 GB bundle in 12 m 10 s at 16.03 GB peak, `verify --deep` clean. ⊘ Three non-reproducing host faults over two runs, §4.6 |
-| **4** | **PaperSeek + OpenAlex** | **102,117,343** | **Staged and prepared whole; built, verified and served at a 10⁷ prefix; ⊘ stalled at 10⁸** 2026-09-03 — see §4a. The corpus exists: 254 GB staged in one 164.7-minute pass, laid out and joined to OpenAlex in 43.8 minutes at 18.4 GB, 52.2 GB of `points.parquet`, 394,325,928 topic member rows, and the ladder's first compartment that is a property of the row. **`tessera build` reached the abstract text index and stalled there** — not refused, not killed, 93% system time against a 128 GiB mapped arena on a 47 GB box. Both stalls that produced are fixed, and **the whole corpus now builds: 2 h 56 m to a 70.78 GB bundle, `verify --deep` clean, served under a 24 GiB cap with `oom_kill` 0** (2026-09-04, §4b). The rung's finding is that negative and its resolution |
+| **4** | **PaperSeek + OpenAlex** | **102,117,343** | **Staged and prepared whole; built, verified and served at a 10⁷ prefix; ⊘ stalled at 10⁸** 2026-09-03 — see §4a. The corpus exists: 254 GB staged in one 164.7-minute pass, laid out and joined to OpenAlex in 43.8 minutes at 18.4 GB, 52.2 GB of `points.parquet`, 394,325,928 topic member rows, and the ladder's first compartment that is a property of the row. **`tessera build` reached the abstract text index and stalled there** — not refused, not killed, 93% system time against a 128 GiB mapped arena on a 47 GB box. Both stalls that produced are fixed, and **the whole corpus now builds: 2 h 56 m to a 70.78 GB bundle, `verify --deep` clean, served under a 24 GiB cap with `oom_kill` 0** (2026-09-04, §4b), and **1 h 09 m for the same bundle byte for byte** once the prose stopped being held in entity order at all (§4c). The rung's finding is that negative and its resolution |
 | 5 | TreeOfLife | 2.33×10⁸ | Not started. Staged |
 | 6 | GBIF | 3.50×10⁹ | Not started. Staged; needs a second local volume |
 | 7 | Overture buildings | 2.53×10⁹ | Not started. Staged; needs a second local volume |
@@ -66,7 +66,7 @@ block; re-run the script.
 | rung | rows | build wall | peak RSS | bundle | slowest stage |
 |---|---|---|---|---|---|
 | medcpt | 35,920,666 | 15:13 | 11.85 GB | 11.15 GB | layers 6:52 |
-| paperseek | 102,117,343 | 176:10 | 30.66 GB | 70.78 GB | attribute_tail 106:09 |
+| paperseek | 102,117,343 | 67:46 | 20.54 GB | 70.78 GB | text_index 28:08 |
 
 **Serve.** One row per (cap, principal). `measured` is a zoom-0 whole-extent viewport
 under that principal over the same under the 100% principal — the *target* is what the
@@ -815,7 +815,8 @@ now measured, and it went against the argument.
 against a `record_blob` that does not finish is not a close call. But a build that took the
 arrival-order arena *with the ascending scatter* — which is what fixed the blob at 10⁷ — was not
 run at 10⁸, and it is the arm most likely to beat this one. **That is the open question this rung
-now poses**, and it costs one more three-hour build to answer.
+posed**, and §4c answers it: neither arena order, because the prose stops being held in entity
+order at all. The same bundle takes 4,169.9 s.
 
 **The arena is also 17 GB smaller.** The entity fill sizes it to exactly its records —
 `.build-tmp/column-13.arena` is **119,350,876,262 B (111.2 GiB)** — where the arrival fill's
@@ -875,6 +876,56 @@ that reason; `test_corpora/paperseek/measurements.json` carries the parameters a
 ladder's greedy takes the smallest unused term when it lands closer to the pair budget in ratio.
 The campaign's stated ladder for this rung, 0 / 14,028,593 / 102,117,343, is those 62 pairs from
 what was measured.
+
+## 4c. Rung 4, again: the same bundle in a third of the time
+
+**2026-09-04.** Same corpus, same declaration, same box, and **byte-identical output**: 46 files
+compared against §4b's bundle, none differing but `MANIFEST.json`'s `created_at` and the `CURRENT`
+that carries its digest. `tessera build --stage-timings --arena-order auto` under `sample_rss.py`
+on branch `build/prose-extents`. **4,169.9 s — 1 h 09 m 30 s**, against 10,578.4 s.
+
+What changed is that a `text` column's prose is no longer placed at an entity index at all
+([`build-prose-extents.md`](design/build-prose-extents.md)). Each chunk the join stages is already
+sorted by entity, so each chunk of each text column is written out as one record-blob extent in
+that chunk's entity order. The text index reads the extents in block windows; the record blob
+merges them with the entity-ordered columns through the lifecycle's own row merge. The blob's
+format and addressing do not change, which is what the byte equality demonstrates.
+
+| stage | §4b, entity-ordered arena | this run |
+|---|---|---|
+| `source_ids` … `external_ids` | 100.7 s | **83.1 s** |
+| **`attribute_tail`** | 6,369.1 s (106:09) | **890.2 s (14:50)** — 7.2× |
+| `layers` | 90.4 s | **70.4 s** |
+| `text_index` | 2,233.9 s (37:14) | **1,688.4 s (28:08)**, the same 57,637,877 terms |
+| `filter_postings` | 762.9 s | **482.4 s** |
+| `record_blob` | 905.4 s (15:05) | **777.4 s (12:57)** |
+| `column_release` · `tiler_sort` · `segment_write` | 13.0 · 8.2 · 10.4 s | 0.0 · 13.8 · 7.8 s |
+| `manifests` | 76.2 s | **52.8 s** over the same 70,783,029,628 bytes |
+| peak `VmHWM` | 29,239 MiB | **19,590 MiB** |
+
+**The join stopped paying for the blob.** §4b's `attribute_tail` was 6,369.1 s because `auto` chose
+`entity`: 123,869 MiB of declared string payload against a 16,254 MiB share, so the source's prose
+was decoded twice and scattered into a 111 GiB arena. Here the only column with an arena left is
+`openalex_id` at **1,456 MiB**, so `auto` chooses `arrival` and there is no second decode. The
+89 s the extents cost over §4a's one-pass join of 704.7 s is the zstd the join now runs.
+
+**Every stage reads less.** `attribute_tail` runs at **0 major faults a second**, `text_index` at 1
+and `record_blob` at 16, against §4b's 140 a second in the join. `record_blob` reads the extents
+rather than 119 GB of arena, and reads 45 GB to do it.
+
+⊘ **The improvement does not appear at 10⁷ and is not expected to.** On `medcpt-10m-abs`, where the
+10.2 GiB arena fits the page cache, the same change costs 11%: the whole run is 447.9 s against
+403.2 s, `attribute_tail` 71.4 s against 33.8 s and `record_blob` 71.4 s against 64.4 s, the extra
+being compression the arrival-order arena never paid. What it buys there is the peak (8.0 GB
+against 11.2 GB) and indifference to a cap: under `MemoryMax=4G` the same build is **461.5 s**, 1.03×
+its uncapped self, at ~1 major fault a second. The two bundles are byte-identical, 38 files.
+
+⊘ **The box was not quiet.** Rung 5's serve batteries ran on the same disk throughout this build
+and the 10⁷ pair, where §4b's run had the disk to itself. The walls above are therefore an upper
+bound rather than a clean measurement; the byte equality does not depend on it.
+
+**The open question §4b posed is closed by not arising.** That question was which arena order to
+build, and the answer is neither: prose is not held in entity order under any of them.
 
 ## 5. The machinery this campaign built
 
@@ -1101,12 +1152,12 @@ depth, `parent_ids` on the wire and the client — the engine and client tracks'
 
 **Found at rung 4**
 
-- ⊘ **The build's mapped text arena is what stops rung 4, and no budget reaches it** (§4a). The
-  abstract column's `.build-tmp` arena is 128 GiB against a 47 GB box; the build's own anonymous
-  high-water is 5.19 GB. It is neither an OOM nor a refusal — 93% system time, 11 of 13 threads on
-  `folio_wait_bit_common`, PSI `io` `full` at 61%. **This is the campaign's first wall actually
-  met**, and it is not the shape W2 names. The owner's options are a budget arm, a streamed arena,
-  a smaller corpus, or more RAM.
+- ~~**The build's mapped text arena is what stops rung 4, and no budget reaches it**~~ (§4a) —
+  **answered by removing the arena** (§4c). The abstract column's `.build-tmp` arena was 128 GiB
+  against a 47 GB box, at 93% system time with 11 of 13 threads on `folio_wait_bit_common` and PSI
+  `io` `full` at 61%: the campaign's first wall actually met, and not the shape W2 names. A `text`
+  column has no arena now. Its prose is written once as record-blob extents as the join decodes it,
+  and the two passes that read it read those.
 - ⊘ **The abstracts ruling's evidence needs the correction above, not a reversal.** The text-peak
   probe's anonymous extrapolation was accurate; what it could not see at 10⁷ is that the arena it
   never had to page becomes the binding constraint at 10⁸.
