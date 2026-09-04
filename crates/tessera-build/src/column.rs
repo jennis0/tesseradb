@@ -317,6 +317,24 @@ impl EntityColumn {
         })
     }
 
+    /// A `text` column's slot: `n` entities, every one absent, and **no arena**.
+    ///
+    /// The prose of a `text` column is never held in entity order (`build-prose-extents.md`): the
+    /// join spills it as record-blob extents in its own chunks, and the text index and the record
+    /// blob read those. What is left here is the length and the presence bits, so the column keeps
+    /// its place in the declaration-indexed vector every later pass indexes by attribute position.
+    ///
+    /// Nothing marks a presence bit on one of these, so [`Self::str_at`] and [`Self::value_at`]
+    /// answer absence at every entity and neither reaches the empty offset array.
+    pub(crate) fn prose(scratch: &ColumnScratch, ty: ScalarType, n: usize) -> Result<Self> {
+        Ok(EntityColumn {
+            ty,
+            data: ColumnData::Utf8(StringColumn::empty()),
+            present: MappedArray::<u64>::zeroed(&scratch.dir, &scratch.name("present"), n.div_ceil(64))?,
+            len: n,
+        })
+    }
+
     /// Collect an entity-ordered sequence into a typed column, for a caller that already holds the
     /// values in entity order rather than discovering them in file order.
     /// `ExactSizeIterator` rather than `IntoIterator`, so the length is known without collecting:

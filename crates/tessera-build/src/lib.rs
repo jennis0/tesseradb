@@ -29,6 +29,7 @@ pub mod error;
 pub mod input;
 pub mod layers;
 pub mod observer;
+mod prose;
 mod pipeline;
 mod residency;
 pub mod shapes;
@@ -1461,6 +1462,18 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             .iter()
             .enumerate()
             .map(|(index, attribute)| {
+                // A `text` column's values are its extents in both builds (`crate::prose`), so
+                // its slot here carries the length and nothing else.
+                if attribute.ty == tessera_spatial::ScalarType::Text {
+                    return column::EntityColumn::prose(
+                        &scratch,
+                        attribute.ty,
+                        tiler_items.len(),
+                    )
+                    .map_err(|e| {
+                        BuildError::Invalid(format!("attribute '{}': {e}", attribute.name))
+                    });
+                }
                 column::EntityColumn::from_values(
                     &scratch,
                     attribute.ty,
@@ -1469,6 +1482,31 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                 )
                 .map_err(|e| BuildError::Invalid(format!("attribute '{}': {e}", attribute.name)))
             })
+            .collect::<Result<_>>()?;
+        // One extent per text column, holding every value in entity order — which is the shape
+        // the streaming pipeline reaches after several chunks, and the same reader serves both.
+        let mut prose_columns: Vec<prose::ProseColumn> = Vec::new();
+        for (index, attribute) in args.schema.attributes.iter().enumerate() {
+            if attribute.ty != tessera_spatial::ScalarType::Text {
+                continue;
+            }
+            let mut column = prose::ProseColumn::new(tmp.path(), index, &attribute.name);
+            let rows: Vec<(u32, &str)> = tiler_items
+                .iter()
+                .enumerate()
+                .filter_map(|(entity, item)| match &item.scalars[index] {
+                    tessera_spatial::ScalarValue::Utf8(value) => {
+                        Some((entity as u32, value.as_str()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            column.push_extent(&rows)?;
+            prose_columns.push(column);
+        }
+        let open_prose: Vec<prose::OpenProse> = prose_columns
+            .iter()
+            .map(prose::ProseColumn::open)
             .collect::<Result<_>>()?;
         // The record blob beside the postings, from the same entity-major values — the two
         // builds must stay byte-identical, so this path writes every artefact the streaming
@@ -1479,6 +1517,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             &partition_dir,
             &args.schema,
             &by_entity,
+            &open_prose,
             args.memory_budget
                 .unwrap_or_else(pipeline::detect_memory_budget),
         )?;
@@ -1486,7 +1525,10 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             &partition_dir,
             &args.schema,
             &by_entity,
+            &open_prose,
         )?);
+        drop(open_prose);
+        drop(prose_columns);
         drop(by_entity);
         tmp.close()?;
         paths
