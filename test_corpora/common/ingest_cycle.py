@@ -449,6 +449,11 @@ class HoldOut:
                 rest = whole.slice(rows)
                 pending = [rest] if rest.num_rows else []
                 pending_rows = rest.num_rows
+            # **The arena, back, every read group.** Streaming a 52 GB points file carrying
+            # abstracts through Arrow leaves the pool holding every page it has touched — 38 GB
+            # of a 47 GB box beside the server it is loading, which stalls the run for a reason
+            # that has nothing to do with what it measures.
+            pa.default_memory_pool().release_unused()
         if pending_rows:
             whole = pa.concat_tables(pending)
             yield emitted, encode_batch(whole, self.schema), pending_rows

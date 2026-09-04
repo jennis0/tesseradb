@@ -112,15 +112,58 @@ deployment's.
 row is the second row's shape over a 32× larger corpus, and the residue is the flush's own cost
 and the wider rows, not any stage measured here.
 
+## The second point: rung 4, 91.9M base, wide rows
+
+**5,620 → 7,030 rows/s, 1.25×** — the same two fixes, and much less of them. PaperSeek's 10% cell:
+a 91,905,609-row base carrying abstracts, its 10,211,734-row hold-out at C=8. Both cells stopped
+at exactly 8,830,000 rows for the same reason and the comparison is taken there (see the caveat
+below), from the ingest phase's own start:
+
+| | rows | wall | rows/s |
+|---|---|---|---|
+| before | 8,830,000 | 1,571 s | 5,620 |
+| after both fixes | 8,830,000 | 1,256 s | **7,030** |
+
+**The clone is no longer the binding term here; the flush is.** After the fixes the executor reads
+12.92 µs/row against MedCPT's 7.61, and it is differently shaped — `buffer_clone` 4.364,
+`apply_rows` 3.718, `wal_append` 1.797, `wal_fsync` 1.760, `allocate` 0.932, `admit` 0.316. The
+clone is still 34% *because the row trigger cannot hold `B` down*: 25 flushes over 8.83M rows is
+353,000 rows a publication, `B/W ≈ 38`, so the trigger asks every 40,000 rows and a flush against
+a 91.9M-row base takes nine times that long to answer. One window reached 8.76 s. The row trigger
+bounds `B` only as tightly as the flush can keep up, and at rung 4's base it cannot.
+
+The wide rows are the rest of it: `wal_append` and the two `apply_rows` sub-laps that copy a row's
+tail are 2–3× MedCPT's, which is the abstract travelling through the WAL record and the buffered
+item.
+
+⊘ **Both cells stopped at 8.83M rows, and it is the driver.** `HoldOut.batches` streams a 52 GB
+points file through Arrow, whose pool keeps every page it touches; at ~900 batches the driver is
+holding 38 GB of a 47 GB box beside the server it is loading, swap fills, and no further batch is
+acked. The two runs stalled at the *identical* row count, which is what makes the pair comparable
+and what identifies the cause as the harness rather than the engine — an engine limit would not
+land on the same row in both. `release_unused` per read group (committed) halves the growth and
+does not remove it; bounding it properly means reading the hold-out in a subprocess, or a rung 4
+cell with a smaller hold-out. **The 10% cell of rung 4 does not complete on this box.**
+
+The base itself barely fits: a 91.9M-row base bundle carrying abstracts is **96 GB**, its split
+points file 45 GB, and serving a copy — which `--copy-base` must do, or the first cell publishes
+into the base the second one starts from — needs another 96 GB on a disc with 154 GB free after
+the split is deleted.
+
 ## What is left
 
 The clone is still the largest single lap at 2.111 µs/row (28% of the executor) and it is still
 `O(B)`: the fix removed the per-entry allocation, not the per-entry copy. Removing the term
 altogether means the buffer becoming an immutable per-window chunk list held by the generation,
 so a close is `O(W)` — a bigger change than either of these, needing a design note first, worth
-~15% of this cell at the pass-through the run shows. `B` itself is now set by how fast a flush
-completes at a 32M-row base rather than by the trigger: the last cell publishes 9 times and ends
-with 682,067 rows buffered, so **the flush, not the commit window, is what now bounds this cell**.
+~15% of this cell at the pass-through the run shows.
+
+**But the term that would then bind is already visible, in both corpora: the flush.** `B` is no
+longer set by the trigger but by how long a publication takes — MedCPT's last cell publishes 9
+times and ends with 682,067 rows buffered; rung 4's publishes 25 times over 8.83M rows, `B/W ≈ 38`
+against the 4 the trigger asks for. The row trigger bounds `B` only as tightly as the flush can
+answer, so **the flush's cost at a large base is what the next campaign should attribute**, ahead
+of the chunk list.
 
 ## Method
 
@@ -142,5 +185,15 @@ hold-out its predecessor published.
 is 2, which would have allowed it). The laps are the whole of the attribution here, and they
 partition the close's wall clock, so nothing is unaccounted: executor sum plus the flush is the
 `work_service_nanos_ewma` the status block reports.
+
+## The 0091 census
+
+Unchanged by either fix. The full 10% cycle with both in — publication, flush, fold and the
+equivalence census — gives `zoom0_equal: true`, `boxes_equal: true`, and its only differences are
+the six `mesh/descriptors` rows the campaign already records: that layer's member table is
+1.66×10⁹ rows, the driver declines it above `--max-member-rows`, and it is declared and empty on
+the folded deployment by design. `clusters/kmeans` publishes in full — 256 artifacts, 35,920,666
+members — and the whole corpus is visible after the fold: 35,920,666 against 35,920,666 expected.
+Ingest in that run read 65,195 rows/s. [`runs/medcpt-36m-f010-after-full-cycle.json`](runs/medcpt-36m-f010-after-full-cycle.json).
 
 Raw results: [`runs/`](runs/).

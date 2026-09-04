@@ -1,0 +1,10 @@
+[14:47:17] ingesting 10,211,734 rows at C=8
+[14:48:04]   100 batches, 930,000 accepted
+[14:51:54]   200 batches, 1,930,000 accepted
+[14:54:35]   300 batches, 2,910,000 accepted
+[14:58:00]   400 batches, 3,910,000 accepted
+[15:01:14]   500 batches, 4,900,000 accepted
+[15:03:59]   600 batches, 5,870,000 accepted
+[15:07:19]   700 batches, 6,870,000 accepted
+[15:09:52]   800 batches, 7,860,000 accepted
+[15:13:28]   900 batches, 8,830,000 accepted
