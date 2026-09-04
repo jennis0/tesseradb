@@ -216,11 +216,32 @@ def score(wanted: dict, held: dict, x, y, area, entities) -> dict:
 def predicate_spread(out: Path, views: dict, column: str) -> dict:
     """A predicate layer's table: its artifacts are the distinct values of an indexed column, so
     its membership is that column and there is no member file to read."""
-    values = pq.read_table(out / "points.parquet", columns=[column]).column(column).combine_chunks()
-    codes = pc.dictionary_encode(values)
-    keys = np.asarray(codes.dictionary.cast(pa.string()))
-    index = np.asarray(pc.fill_null(codes.indices, -1), dtype=np.int64)
-    del values, codes
+    # **Row group at a time, and never one array.** 2.33x10^8 publisher strings concatenated
+    # overflow a 32-bit offset buffer, which `combine_chunks` reports as
+    # `offset overflow while concatenating arrays`; the codes are what this needs and they are
+    # built against one growing key table instead.
+    reader = pq.ParquetFile(out / "points.parquet")
+    n = reader.metadata.num_rows
+    index = np.empty(n, dtype=np.int32)
+    of_key: dict[str, int] = {}
+    at = 0
+    for group in range(reader.metadata.num_row_groups):
+        got = pc.dictionary_encode(
+            reader.read_row_group(group, columns=[column]).column(column).combine_chunks()
+        )
+        remap = np.empty(len(got.dictionary), dtype=np.int32)
+        for i, value in enumerate(got.dictionary.to_pylist()):
+            if value not in of_key:
+                of_key[value] = len(of_key)
+            remap[i] = of_key[value]
+        codes = np.asarray(pc.fill_null(got.indices, -1), dtype=np.int32)
+        rows = len(codes)
+        index[at : at + rows] = np.where(codes >= 0, remap[np.maximum(codes, 0)], -1)
+        at += rows
+        del got, codes
+    assert at == n, f"read {at:,} rows against {n:,}"
+    keys = np.array([k for k, _ in sorted(of_key.items(), key=lambda kv: kv[1])])
+    index = index.astype(np.int64)
     order = np.argsort(index, kind="stable")
     counts = np.bincount(index[index >= 0], minlength=len(keys))
     bounds = np.concatenate([[int((index < 0).sum())], np.cumsum(counts) + int((index < 0).sum())])
