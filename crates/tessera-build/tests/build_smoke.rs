@@ -183,7 +183,6 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
     write_pairs(&pairs);
 
     let args = BuildArgs {
-        arena_order: Default::default(),
         views: vec![tessera_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
@@ -493,7 +492,6 @@ fn build_refuses_to_clobber_an_existing_bundle() {
     write_points(&points);
     write_pairs(&pairs);
     let args = BuildArgs {
-        arena_order: Default::default(),
         views: vec![tessera_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
@@ -545,7 +543,6 @@ fn an_empty_selection_builds_an_empty_bundle() {
     write_pairs(&pairs);
     let out = tmp.path().join("bundle");
     build(&BuildArgs {
-        arena_order: Default::default(),
         views: vec![tessera_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
@@ -597,7 +594,6 @@ fn morton_input_requires_the_identity_extent() {
     write_pairs(&pairs);
 
     let args = |extent| BuildArgs {
-        arena_order: Default::default(),
         views: vec![tessera_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
@@ -655,7 +651,6 @@ fn morton_input_requires_the_identity_extent() {
     };
     let out = tmp.path().join("bundle-ok");
     build(&BuildArgs {
-        arena_order: Default::default(),
         views: vec![tessera_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
@@ -712,7 +707,6 @@ fn build_rejects_an_unsafe_view_id() {
     write_points(&points);
     write_pairs(&pairs);
     assert!(build(&BuildArgs {
-        arena_order: Default::default(),
         views: vec![tessera_build::ViewArgs {
             visibility: None,
             view_id: "../escape".to_string(),
@@ -768,7 +762,6 @@ fn limit_filters_the_source_entity_id_prefix() {
     write_pairs(&pairs);
 
     let report = build(&BuildArgs {
-        arena_order: Default::default(),
         views: vec![tessera_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
@@ -818,7 +811,6 @@ fn verify_accepts_a_freshly_built_bundle() {
     write_pairs(&pairs);
 
     build(&BuildArgs {
-        arena_order: Default::default(),
         views: vec![tessera_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
@@ -871,7 +863,6 @@ fn verify_rejects_a_columns_file_whose_tessera_ids_do_not_match_the_key() {
     write_pairs(&pairs);
 
     let report = build(&BuildArgs {
-        arena_order: Default::default(),
         views: vec![tessera_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
@@ -1189,7 +1180,6 @@ fn entity_ids_break_signature_ties_on_the_morton_code() {
         write_fixture(&points, &pairs);
 
         let args = BuildArgs {
-            arena_order: Default::default(),
             views: vec![tessera_build::ViewArgs {
                 visibility: None,
                 view_id: "s0".to_string(),

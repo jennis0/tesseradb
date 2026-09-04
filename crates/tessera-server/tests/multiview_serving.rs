@@ -166,7 +166,6 @@ fn build_multiview(dir: &Path) -> std::path::PathBuf {
     };
     let out = dir.join("bundle");
     build(&BuildArgs {
-        arena_order: Default::default(),
         views,
         // `world` is the declared anchor: within a signature group, ids are ordered by the Morton
         // code an item holds *there* (decision 0112).

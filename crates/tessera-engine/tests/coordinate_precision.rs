@@ -110,7 +110,6 @@ fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path, points: &[(f
     write_points(points_path, points);
     write_pairs(pairs_path, points.len() as u64);
     build(&BuildArgs {
-        arena_order: Default::default(),
         views: vec![tessera_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),

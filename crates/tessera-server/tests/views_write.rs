@@ -173,7 +173,6 @@ render = true
         .expect("the fixture declaration parses");
     let out = dir.join("bundle");
     build(&BuildArgs {
-        arena_order: Default::default(),
         views,
         anchor: 0,
         groups: vec![
@@ -1308,7 +1307,6 @@ render = true
     let groups = config.group_registry(&registry, &views);
     let out = dir.join("bundle");
     build(&BuildArgs {
-        arena_order: Default::default(),
         views,
         anchor,
         groups,
@@ -1900,7 +1898,6 @@ async fn serve_families() -> Served {
         .expect("the families declaration parses");
     let out = dir.join("bundle");
     build(&BuildArgs {
-        arena_order: Default::default(),
         views: vec![
             view_args("world", &world_points, &pairs),
             view_args("quarter:2026-Q1", &q1_points, &pairs),

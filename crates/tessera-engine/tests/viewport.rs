@@ -788,7 +788,6 @@ fn item_drill_down_works_on_a_bundle_with_no_external_id_sidecar() {
     write_points_n(&tmp.path().join("points.parquet"), N_ITEMS);
     write_pairs_n(&tmp.path().join("pairs.parquet"), N_ITEMS);
     let args = BuildArgs {
-        arena_order: Default::default(),
         views: vec![tessera_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
@@ -1319,7 +1318,6 @@ fn latency_sanity_at_2_4m_p99_under_50ms() {
     let bundle_root = PathBuf::from("/tmp/tessera-2m4");
     if !bundle_root.join("CURRENT").exists() {
         let args = BuildArgs {
-            arena_order: Default::default(),
             views: vec![tessera_build::ViewArgs {
                 visibility: None,
                 view_id: "s0".to_string(),

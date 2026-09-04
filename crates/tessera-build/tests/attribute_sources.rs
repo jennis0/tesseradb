@@ -155,7 +155,6 @@ fn args(config: &Config, out: PathBuf) -> BuildArgs {
     let acquired_view =
         tessera_build::config::acquire_view(&registry[0]).expect("the view acquires its inputs");
     BuildArgs {
-        arena_order: Default::default(),
         views: vec![tessera_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),

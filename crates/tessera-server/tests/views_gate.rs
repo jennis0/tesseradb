@@ -277,7 +277,6 @@ fn build_gated(dir: &Path) -> std::path::PathBuf {
     }
     let out = dir.join("bundle");
     build(&BuildArgs {
-        arena_order: Default::default(),
         views,
         anchor: 0,
         groups: vec![
@@ -1371,7 +1370,6 @@ fn build_shared_sealed(dir: &Path) -> std::path::PathBuf {
 
     let out = dir.join("shared-bundle");
     build(&BuildArgs {
-        arena_order: Default::default(),
         views,
         anchor: 0,
         groups: vec![

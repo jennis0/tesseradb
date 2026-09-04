@@ -130,7 +130,6 @@ fn two_views_are_two_row_spaces_over_one_entity_space() {
     let out = dir.path().join("bundle");
 
     let report = build(&BuildArgs {
-        arena_order: Default::default(),
         views: vec![
             view_args("world", &world_points, &pairs),
             view_args("quarter:2026-Q2", &quarter_points, &pairs),
@@ -293,7 +292,6 @@ fn a_label_that_disagrees_between_views_refuses() {
         },
     };
     let error = build(&BuildArgs {
-        arena_order: Default::default(),
         views: vec![field_view("a", &a), field_view("b", &b)],
         anchor: 0,
         groups: Vec::new(),
@@ -339,7 +337,6 @@ fn a_discriminator_selects_each_views_rows_out_of_one_file() {
     let out = dir.path().join("bundle");
 
     let report = build(&BuildArgs {
-        arena_order: Default::default(),
         views: vec![
             selected_view("quarter_alt:2026-Q2", "2026-Q2", &points, &pairs),
             selected_view("quarter_alt:2026-Q3", "2026-Q3", &points, &pairs),
@@ -401,7 +398,6 @@ fn a_discriminator_value_outside_the_roster_refuses() {
     write_pairs(&pairs);
 
     let error = build(&BuildArgs {
-        arena_order: Default::default(),
         views: vec![selected_view(
             "quarter_alt:2026-Q2",
             "2026-Q2",
@@ -668,7 +664,6 @@ fn a_roster_key_with_no_rows_is_an_empty_view() {
     let out = dir.path().join("bundle");
 
     let report = build(&BuildArgs {
-        arena_order: Default::default(),
         views: vec![
             selected_view("quarter_alt:2026-Q2", "2026-Q2", &points, &pairs),
             selected_view("quarter_alt:2026-Q3", "2026-Q3", &points, &pairs),
@@ -771,7 +766,6 @@ fn a_group_scoped_attribute_is_one_column_per_view_of_the_group() {
         render: false,
     };
     build(&BuildArgs {
-        arena_order: Default::default(),
         views: vec![
             selected_view("quarter_alt:2026-Q2", "2026-Q2", &points, &pairs),
             selected_view("quarter_alt:2026-Q3", "2026-Q3", &points, &pairs),
@@ -920,7 +914,6 @@ fn a_sparse_views_permutation_costs_its_pages_and_not_its_bound() {
 
     let out = dir.path().join("bundle");
     build(&BuildArgs {
-        arena_order: Default::default(),
         views: vec![
             view_args("world", &world_points, &pairs),
             view_args("quarter:2026-Q2", &sparse_points, &pairs),

@@ -45,36 +45,21 @@
 //! `text` column is the one exception: it has no blob row (`views.md` §5), so the scoped pass
 //! builds it as an ordinary string column and indexes it from the arena.
 //!
-//! # The two orders the arena is filled in
+//! # The arena is filled in arrival order
 //!
-//! **The arena's order reaches no artefact**, so it is chosen for cost. Both fills produce the
-//! same column, the same offsets read back the same values, and the bundle is byte-identical
-//! (`tests/text_index.rs`).
+//! A value is appended where the arena has got to, which is the order the source file yields
+//! them in — one pass, and the cheapest fill there is.
 //!
-//! **Arrival order** is one pass: a value is appended where the arena has got to, which is the
-//! order the source file yields them in. That is the cheap fill and it is what a corpus whose
-//! arena fits the page cache should take.
-//!
-//! **Entity order** is two passes over the source's string columns. Pass one writes no prose and
-//! keeps each entity's length; a prefix sum over the presence bits then lays every record out in
-//! entity order and sizes the arena to exactly their bytes; pass two decodes the source's string
-//! columns again and writes each value at the offset it was given. The price is that second
-//! decode. What it buys is the passes after the join that read the arena by entity and cannot be
-//! reordered: the record blob's merge, and the keyword dictionary. Against an arrival-order arena
-//! that walk is one random read per value, which is free while the arena fits the page cache and
-//! ruinous when it does not.
-//!
-//! **Which one a build takes is decided before the join** from the columns' uncompressed Parquet
-//! payload against the memory budget — `residency::decide_arena_order`, and
-//! [`crate::ArenaOrder`] for the switch that overrides it. Above half the budget the arena is
-//! competing with every other mapped file the join holds, and the two-pass fill wins; below it the
-//! second decode is paid for nothing.
-//!
-//! The one shape entity order has to reason about is an entity written **twice**: pass one records
-//! the last value's length, so pass two writes a value only where its length is the reserved one.
-//! The last write always passes that test and always lands last, and no write that lands can be
-//! shorter than its span — which is what keeps the records back to back with no gap the arena walk
-//! could desynchronise on. See [`ArenaFill`].
+//! From 2026-09-03 to 2026-09-04 a second fill existed: two passes over the source's string
+//! columns, pass one keeping each entity's length and a prefix sum then laying every record out
+//! in entity order, so the passes after the join that read the arena by entity — the record
+//! blob's merge, the keyword dictionary — walked it sequentially rather than at one random read a
+//! value. `--arena-order` chose between the two. It was withdrawn once the join's own scatter
+//! (below) turned out to be the term that mattered: `probes/2026-09-03-entity-ordered-arena/`
+//! measured the record blob finishing at its uncapped wall in *both* orders once the scatter into
+//! the entity-major columns ascends, so the second decode bought nothing a sorted write had not
+//! already bought, and it governed only `keyword`/`utf8` columns even before that (`text` columns
+//! take extents — `build-prose-extents.md` §6) and no corpus in the ladder ever reached its share.
 //!
 //! **The record names its own entity, so a reader that wants every value can walk the arena
 //! instead of the column.** Entity order is signature-then-Morton order and arrival order is the
@@ -213,37 +198,6 @@ enum ColumnData {
 struct StringColumn {
     at: MappedArray<u64>,
     arena: MappedArena,
-    /// Which of the two fills this column is under — see [`ArenaFill`].
-    fill: ArenaFill,
-    /// Under the two-pass fill only: the length pass one last saw for each entity, and the exact
-    /// span pass two's record must occupy. Empty in every other state, and given back the moment
-    /// the fill is sealed.
-    reserved: MappedArray<u32>,
-}
-
-/// Which order a string column's arena is being filled in, and where in that fill it is.
-///
-/// **The two orders produce the same column and differ only in when the bytes are written** — see
-/// the module docs for the switch that chooses between them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ArenaFill {
-    /// One pass: each value is appended where the arena has got to, and `at` records that offset.
-    Arrival,
-    /// Two passes, pass one: nothing is written to the arena, and `reserved[entity]` keeps the
-    /// length of the last value this entity was given.
-    Measuring,
-    /// Two passes, pass two: `at[entity]` is the offset the prefix sum gave this entity, and a
-    /// value is written there **iff its length is the reserved one**.
-    ///
-    /// That test is what keeps the arena contiguous when an entity is written twice. Pass one
-    /// records the *last* length, so the last write always passes the test and is always the last
-    /// one to land; a duplicate of a different length would not fit the span and is skipped, and a
-    /// duplicate of the same length is overwritten by it. Every write that lands therefore fills
-    /// its span exactly, so no gap can open between two records however the writes are ordered.
-    Placing,
-    /// The fill is over and `reserved` has been given back. A write here is a caller that kept
-    /// filling a column past the join, and it is refused rather than silently dropped.
-    Sealed,
 }
 
 /// The header the arena stores before each value's bytes: the entity, then the length.
@@ -308,8 +262,6 @@ impl EntityColumn {
                                 n,
                             )?,
                             arena: MappedArena::create(&scratch.dir, &scratch.name("arena"))?,
-                            fill: ArenaFill::Arrival,
-                            reserved: MappedArray::empty(),
                         })
                     }
                 }
@@ -517,59 +469,6 @@ impl EntityColumn {
         Ok(())
     }
 
-    /// Begin the **two-pass, entity-ordered** fill: pass one measures and writes no prose.
-    ///
-    /// A no-op on a fixed-width column, so a caller may hand it every column of a group.
-    pub(crate) fn begin_measuring(&mut self, scratch: &ColumnScratch) -> Result<()> {
-        let len = self.len;
-        let ColumnData::Utf8(col) = &mut self.data else {
-            return Ok(());
-        };
-        col.reserved = MappedArray::<u32>::zeroed(&scratch.dir, &scratch.name("len"), len)?;
-        col.fill = ArenaFill::Measuring;
-        Ok(())
-    }
-
-    /// Close pass one: lay every present entity's record out in **entity order**, size the arena
-    /// to exactly what they need, and return that size. Zero on a fixed-width column.
-    ///
-    /// One forward sweep over the presence bits: entity *e*'s record starts where entity *e−1*'s
-    /// ended, so `at` comes out ascending and the arena's record marks are taken in the same pass.
-    /// After this the column is in [`ArenaFill::Placing`] and pass two may run.
-    pub(crate) fn reserve_arena(&mut self) -> Result<u64> {
-        let present = self.present.as_slice();
-        let ColumnData::Utf8(col) = &mut self.data else {
-            return Ok(0);
-        };
-        if col.fill != ArenaFill::Measuring {
-            return Err(BuildError::Invalid(
-                "a string column can only be laid out at the end of a measuring pass".into(),
-            ));
-        }
-        let lengths = col.reserved.as_slice();
-        let at = col.at.as_mut_slice();
-        let mut cursor = 0u64;
-        for entity in present_entities_of(present) {
-            col.arena.note_record(cursor);
-            at[entity] = cursor;
-            cursor += RECORD_HEADER as u64 + u64::from(lengths[entity]);
-        }
-        col.arena.reserve_exact(cursor)?;
-        col.fill = ArenaFill::Placing;
-        Ok(cursor)
-    }
-
-    /// Close pass two, giving back the per-entity lengths it no longer needs. A no-op on a column
-    /// that was filled in arrival order.
-    pub(crate) fn seal_arena(&mut self) {
-        if let ColumnData::Utf8(col) = &mut self.data {
-            if col.fill == ArenaFill::Placing {
-                col.reserved = MappedArray::empty();
-                col.fill = ArenaFill::Sealed;
-            }
-        }
-    }
-
     /// Give the arena's pages back to the kernel before a streaming walk over it — see
     /// [`crate::spill::MappedArena::unmap_pages`].
     pub(crate) fn unmap_arena_pages(&self) {
@@ -760,8 +659,6 @@ impl StringColumn {
         StringColumn {
             at: MappedArray::empty(),
             arena: MappedArena::empty(),
-            fill: ArenaFill::Arrival,
-            reserved: MappedArray::empty(),
         }
     }
 
@@ -777,33 +674,12 @@ impl StringColumn {
                 "entity {entity} exceeds the u32 an arena record's header carries"
             ))
         })?;
-        if self.fill == ArenaFill::Measuring {
-            // Pass one writes no byte of prose: the length is all the prefix sum needs, and the
-            // last one written is the one whose value survives.
-            self.reserved.as_mut_slice()[entity] = len;
-            return Ok(());
-        }
-        if self.fill == ArenaFill::Sealed {
-            return Err(BuildError::Invalid(format!(
-                "entity {entity} was given a string value after its arena was sealed"
-            )));
-        }
         // Header and bytes in one write, so a value is never split across a growth and the
         // arena's own record marks land where a record starts.
         let mut record = Vec::with_capacity(RECORD_HEADER + value.len());
         record.extend_from_slice(&tag.to_le_bytes());
         record.extend_from_slice(&len.to_le_bytes());
         record.extend_from_slice(value.as_bytes());
-        if self.fill == ArenaFill::Placing {
-            // Not this entity's final value — see [`ArenaFill::Placing`]. Skipped rather than
-            // written short, because a short record would leave a gap the walk cannot resynchronise
-            // across.
-            if self.reserved.as_slice()[entity] != len {
-                return Ok(());
-            }
-            let offset = self.at.as_slice()[entity];
-            return self.arena.write_at(offset, &record);
-        }
         let offset = self.arena.append(&record)?;
         self.at.as_mut_slice()[entity] = offset;
         Ok(())
@@ -953,155 +829,6 @@ mod tests {
         for entity in 0..N {
             assert_eq!(column.str_at(entity), Some(text(entity).as_str()));
         }
-    }
-
-    /// **The two fills produce the same column**, at every entity, over a write sequence that
-    /// includes the two shapes the entity-ordered one has to reason about: an entity written twice
-    /// (with the second value shorter, longer and the same length as the first), and entities that
-    /// are never written at all.
-    ///
-    /// The comparison is the whole column both ways — `str_at` at every entity, the presence bits,
-    /// and the arena walk `arena_windows`/`for_each_record_in` hands the text index — because the
-    /// entity fill's failure mode is not a wrong value but a *gap*: a record shorter than its
-    /// reserved span leaves bytes no record starts at, and the walk after it decodes a length out
-    /// of a document's prose. Only the walk sees that.
-    #[test]
-    fn the_entity_ordered_fill_equals_the_arrival_one_at_every_entity() {
-        const N: usize = 2_048;
-        // Written in an order that is not entity order, which is what the arena's arrival order
-        // is. Every seventh entity carries a value; a few carry two.
-        let mut writes: Vec<(usize, String)> = Vec::new();
-        for e in (0..N).step_by(7) {
-            writes.push((e, format!("value {e}{}", "x".repeat(e % 53))));
-        }
-        writes.rotate_left(11);
-        // The duplicates: shorter than the first, longer than it, and exactly its length — and one
-        // entity written twice with nothing else between.
-        writes.push((7, "short".into()));
-        writes.push((14, "a".repeat(4_000)));
-        writes.push((21, "value 21".into()));
-        writes.push((28, "first of two".into()));
-        writes.push((28, "second of two".into()));
-        // And a zero-length value, which is a value and not an absence.
-        writes.push((3, String::new()));
-
-        let fill = |entity_order: bool| {
-            let dir = tempfile::TempDir::new().unwrap();
-            let scratch = ColumnScratch::new(dir.path());
-            let mut column = EntityColumn::filled(&scratch, ScalarType::Text, N).unwrap();
-            if entity_order {
-                column.begin_measuring(&scratch).unwrap();
-                for (e, value) in &writes {
-                    column.set_str(*e, value, "t").unwrap();
-                }
-                column.reserve_arena().unwrap();
-            }
-            for (e, value) in &writes {
-                column.set_str(*e, value, "t").unwrap();
-            }
-            if entity_order {
-                column.seal_arena();
-            }
-            let values: Vec<Option<String>> = (0..N)
-                .map(|e| column.str_at(e).map(str::to_owned))
-                .collect();
-            let present: Vec<usize> = column.present_entities().collect();
-            let mut walked: Vec<(usize, String)> = Vec::new();
-            for (lo, hi) in column.arena_windows(5) {
-                column
-                    .for_each_record_in(lo, hi, &mut |entity, value| {
-                        walked.push((entity, value.to_owned()));
-                        Ok(())
-                    })
-                    .unwrap();
-            }
-            walked.sort_unstable();
-            (values, present, walked)
-        };
-
-        let (arrival_values, arrival_present, arrival_walk) = fill(false);
-        let (entity_values, entity_present, entity_walk) = fill(true);
-        assert_eq!(arrival_values, entity_values, "the two fills differ by value");
-        assert_eq!(arrival_present, entity_present);
-        assert_eq!(arrival_walk, entity_walk, "the two arenas walk differently");
-        // The walk is not vacuous, and it is exactly the live values.
-        let live: Vec<(usize, String)> = (0..N)
-            .filter_map(|e| entity_values[e].clone().map(|v| (e, v)))
-            .collect();
-        assert_eq!(entity_walk, live);
-        assert_eq!(entity_values[28].as_deref(), Some("second of two"));
-        assert_eq!(entity_values[3].as_deref(), Some(""));
-    }
-
-    /// **The entity-ordered arena is laid out in entity order and holds no slack**: offsets ascend
-    /// with the entity, and the file is exactly the records' own bytes.
-    ///
-    /// This is the property the record blob is being bought — its walk is entities 0..n — so it is
-    /// asserted directly rather than inferred from the values reading back.
-    #[test]
-    fn the_entity_ordered_arena_ascends_with_the_entity_and_wastes_nothing() {
-        const N: usize = 512;
-        let dir = tempfile::TempDir::new().unwrap();
-        let scratch = ColumnScratch::new(dir.path());
-        let mut column = EntityColumn::filled(&scratch, ScalarType::Text, N).unwrap();
-        let value = |e: usize| format!("{e}:{}", "y".repeat(e % 31));
-        let order: Vec<usize> = (0..N).map(|i| (i * 197) % N).filter(|e| e % 3 == 0).collect();
-        column.begin_measuring(&scratch).unwrap();
-        for &e in &order {
-            column.set_str(e, &value(e), "t").unwrap();
-        }
-        let reserved = column.reserve_arena().unwrap();
-        for &e in &order {
-            column.set_str(e, &value(e), "t").unwrap();
-        }
-        column.seal_arena();
-        let expected: u64 = order
-            .iter()
-            .map(|&e| (RECORD_HEADER + value(e).len()) as u64)
-            .sum();
-        assert_eq!(reserved, expected, "the layout reserved more than the records");
-        let ColumnData::Utf8(strings) = &column.data else {
-            unreachable!("a text column")
-        };
-        let mut last = None;
-        for entity in column.present_entities() {
-            let offset = strings.at.as_slice()[entity];
-            if let Some(previous) = last {
-                assert!(
-                    offset > previous,
-                    "entity {entity} is behind its predecessor in the arena"
-                );
-            }
-            last = Some(offset);
-        }
-        // The walk reaches every record and stops exactly at the end.
-        let mut count = 0usize;
-        for (lo, hi) in column.arena_windows(3) {
-            column
-                .for_each_record_in(lo, hi, &mut |_, _| {
-                    count += 1;
-                    Ok(())
-                })
-                .unwrap();
-        }
-        assert_eq!(count, order.len());
-    }
-
-    /// A write after the fill is sealed is refused, not silently dropped: the arena has no room
-    /// for it, and a caller that got here has kept a column past the join.
-    #[test]
-    fn a_sealed_column_refuses_a_further_value() {
-        let (scratch, _dir) = scratch();
-        let mut column = EntityColumn::filled(&scratch, ScalarType::Text, 4).unwrap();
-        column.begin_measuring(&scratch).unwrap();
-        column.set_str(0, "held", "t").unwrap();
-        column.reserve_arena().unwrap();
-        column.set_str(0, "held", "t").unwrap();
-        column.seal_arena();
-        let error = column
-            .set_str(1, "late", "t")
-            .expect_err("a sealed column takes no more values");
-        assert!(error.to_string().contains("sealed"), "{error}");
     }
 
     /// Every declared type round-trips its own value and refuses another's.

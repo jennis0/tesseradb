@@ -183,7 +183,6 @@ fn fixture() -> Fixture {
     write_members(&tmp.path().join("clumped_members.parquet"), &clumped_rows);
 
     let args = BuildArgs {
-        arena_order: Default::default(),
         views: vec![tessera_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),

@@ -230,7 +230,6 @@ pub fn run_build(
 
             let collector = StageCollector::default();
             let args = BuildArgs {
-                arena_order: Default::default(),
                 views: vec![tessera_build::ViewArgs {
                     visibility: None,
                     view_id: "s0".to_string(),

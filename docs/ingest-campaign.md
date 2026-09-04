@@ -778,6 +778,9 @@ breakdown, the serve-under-cap result and the layer spread at full scale. §4b.
 
 ## 4b. Rung 4, whole: the build completes
 
+⊘ **2026-09-04, dated note.** `--arena-order` is deleted (`build-prose-extents.md` §6); the figures
+below are unaffected history.
+
 **2026-09-04.** The same corpus, the same declaration, the same box — 102,117,343 rows,
 118.9 GB of abstracts indexed as text, 47 GB of RAM. `tessera build --stage-timings
 --stage-timings-json --arena-order auto`, under `sample_rss.py`, on 448 GB of free disk. It is the
@@ -878,6 +881,9 @@ The campaign's stated ladder for this rung, 0 / 14,028,593 / 102,117,343, is tho
 what was measured.
 
 ## 4c. Rung 4, again: the same bundle in a third of the time
+
+⊘ **2026-09-04, dated note.** `--arena-order` is deleted (`build-prose-extents.md` §6); the figures
+below are unaffected history.
 
 **2026-09-04.** Same corpus, same declaration, same box, and **byte-identical output**: 46 files
 compared against §4b's bundle, none differing but `MANIFEST.json`'s `created_at` and the `CURRENT`

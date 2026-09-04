@@ -207,7 +207,6 @@ fn try_fixture(topics: fn(&Path)) -> Result<Fixture, tessera_build::BuildError> 
     write_members(&tmp.path().join("topics_members.parquet"), &topic_members());
 
     let args = BuildArgs {
-        arena_order: Default::default(),
         views: vec![tessera_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),

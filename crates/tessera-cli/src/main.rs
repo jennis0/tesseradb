@@ -94,22 +94,6 @@ enum Command {
         #[arg(long, value_parser = parse_byte_size)]
         memory_budget: Option<u64>,
 
-        /// Which order the declared `keyword` and `utf8` columns' arenas are filled in: `auto`
-        /// (default), `entity` or `arrival`.
-        ///
-        /// **The bundle is the same either way** — the arena is `.build-tmp/` scratch — so this
-        /// buys time, not correctness. `arrival` fills it in one pass as the source yields values;
-        /// `entity` decodes the source's string columns a second time and writes each value at the
-        /// place a prefix sum gave it, which is what makes the passes that read the arena by
-        /// entity sequential on a corpus whose arena does not fit the page cache. `auto` takes
-        /// `entity` when the columns' uncompressed Parquet payload exceeds half the memory
-        /// budget, and prints every number it decided on.
-        ///
-        /// A `text` column has no arena: its prose is written as record-blob extents while the
-        /// join decodes it, so this switch does not reach it.
-        #[arg(long, value_name = "ORDER", default_value = "auto")]
-        arena_order: tessera_build::ArenaOrder,
-
         /// Print each pipeline stage's wall time, row count and peak RSS as it completes.
         ///
         /// **What it is for**: "which of the twelve stages bends with scale" is the question every
@@ -1436,7 +1420,6 @@ fn main() -> ExitCode {
             no_oracle_pairs,
             batch_items,
             memory_budget,
-            arena_order,
             stage_timings,
             stage_timings_json,
             carry_id_key_from,
@@ -1757,7 +1740,6 @@ fn main() -> ExitCode {
             };
 
             let args = tessera_build::BuildArgs {
-                arena_order,
                 views: view_args,
                 anchor,
                 groups,

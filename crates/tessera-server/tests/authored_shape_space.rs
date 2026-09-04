@@ -187,7 +187,6 @@ fn build_projected(out: &Path, tmp: &Path) -> Config {
     write_pairs_n(&pairs_path, PLACES.len() as u64);
     let config = built_layers(tmp);
     build(&BuildArgs {
-        arena_order: Default::default(),
         views: vec![tessera_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),

@@ -170,19 +170,18 @@ At rung 4 the abstract column's two terms fall from 115,536 MiB and 115,147 MiB 
 and 115,147, which is 113 GB off a 274.5 GB refusal. The build the model then admits wrote a
 70.78 GB bundle.
 
-## 6. `--arena-order`
+## 6. `--arena-order`, 2026-09-03 to 2026-09-04
 
-With `text` out of the arena, the switch governs `keyword` and `utf8` columns alone.
+With `text` out of the arena, the switch governed `keyword` and `utf8` columns alone, and this
+section argued for keeping it: a corpus of 10⁹ DOIs is 30 GB of keyword payload, read in entity
+order by the dictionary writer and by the blob, and no corpus in the ladder had a keyword payload
+above the share that would exercise the two-pass fill.
 
-It should stay. The arena defect is the payload against the box, not the family: a corpus of 10⁹
-DOIs is 30 GB of keyword payload, read in entity order by the dictionary writer and by the blob.
-`decide_arena_order` now sums only the columns that still have an arena, so a corpus whose prose
-was the whole reason it chose `entity` now chooses `arrival` and pays no second decode.
-
-⊘ No corpus in the ladder has a keyword payload above the share, so the two-pass fill is now
-unexercised by any measured run: rung 4 sees 1,456 MiB of `openalex_id` against a 17,787 MiB share
-and takes `arrival`. The unit test that asserts the two orders build the same bundle
-stands; the 10⁷ and 10⁸ comparisons do not cover it any more.
+It was deleted the next day. `probes/2026-09-03-entity-ordered-arena/` found that the join's own
+scatter into the entity-major columns — not the arena's fill order — was the term that mattered:
+sorted ascending, the record blob finishes at its uncapped wall in *both* orders, so the two-pass
+fill's second decode was buying nothing a sorted write had not already bought. The arrival-order
+arena, with that scatter, is what remains.
 
 ## 7. Determinism
 

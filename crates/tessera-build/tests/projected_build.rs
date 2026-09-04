@@ -407,7 +407,6 @@ fn build_bundle(
     write_pairs(&pairs, rows);
     let out = tmp.join("bundle");
     let args = BuildArgs {
-        arena_order: Default::default(),
         views: vec![tessera_build::ViewArgs {
             visibility: None,
             view_id: "world".to_string(),

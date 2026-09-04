@@ -110,10 +110,6 @@ fn text_schema(index: bool) -> Schema {
 }
 
 fn build_with(schema: Schema) -> tempfile::TempDir {
-    build_ordered(schema, tessera_build::ArenaOrder::Auto)
-}
-
-fn build_ordered(schema: Schema, arena_order: tessera_build::ArenaOrder) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     let points = dir.path().join("points.parquet");
     let pairs = dir.path().join("pairs.parquet");
@@ -121,7 +117,6 @@ fn build_ordered(schema: Schema, arena_order: tessera_build::ArenaOrder) -> temp
     write_empty_pairs(&pairs);
     let out = dir.path().join("bundle");
     build(&BuildArgs {
-        arena_order,
         views: vec![tessera_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
@@ -203,77 +198,6 @@ fn source_to_entity(out: &Path) -> HashMap<u64, u32> {
         }
     }
     map
-}
-
-/// **The arena's order reaches no byte of the bundle.**
-///
-/// The arena is `.build-tmp/` scratch and its order is internal, which is the whole argument for
-/// letting a switch choose between the two fills: a wrong choice costs time, never correctness. It
-/// is asserted rather than argued because the two fills write the text index's postings from
-/// different arena windows in a different order, and the sort and merge that make that
-/// unobservable are the kind of thing a later change can quietly lose.
-///
-/// `MANIFEST.json` differs in `created_at` alone, and `CURRENT` carries that manifest's digest.
-#[test]
-fn the_two_arena_orders_build_the_same_bundle() {
-    use tessera_build::ArenaOrder;
-
-    let mut files = Vec::new();
-    for order in [ArenaOrder::Arrival, ArenaOrder::Entity] {
-        let dir = build_ordered(text_schema(true), order);
-        let out = dir.path().join("bundle");
-        let mut seen: HashMap<PathBuf, Vec<u8>> = HashMap::new();
-        let mut stack = vec![out.clone()];
-        while let Some(at) = stack.pop() {
-            for entry in std::fs::read_dir(&at).unwrap() {
-                let path = entry.unwrap().path();
-                if path.is_dir() {
-                    stack.push(path);
-                } else {
-                    let rel = path.strip_prefix(&out).unwrap().to_path_buf();
-                    seen.insert(rel, std::fs::read(&path).unwrap());
-                }
-            }
-        }
-        files.push((dir, seen));
-    }
-    let (arrival, entity) = (&files[0].1, &files[1].1);
-    let mut names: Vec<&PathBuf> = arrival.keys().collect();
-    names.sort();
-    assert_eq!(
-        names,
-        {
-            let mut theirs: Vec<&PathBuf> = entity.keys().collect();
-            theirs.sort();
-            theirs
-        },
-        "the two orders wrote different files"
-    );
-    let mut compared = 0usize;
-    for name in names {
-        let display = name.to_string_lossy().to_string();
-        if display.ends_with("MANIFEST.json") || display == "CURRENT" {
-            continue;
-        }
-        assert_eq!(
-            arrival[name],
-            entity[name],
-            "{display} differs between the two arena orders"
-        );
-        compared += 1;
-    }
-    assert!(compared > 5, "only {compared} files were compared");
-    // The manifests agree about everything but when they were written.
-    let manifest = arrival
-        .keys()
-        .find(|k| k.to_string_lossy().ends_with("MANIFEST.json"))
-        .expect("the bundle carries a manifest");
-    let strip = |bytes: &[u8]| {
-        let mut json: serde_json::Value = serde_json::from_slice(bytes).unwrap();
-        json.as_object_mut().unwrap().remove("created_at");
-        json
-    };
-    assert_eq!(strip(&arrival[manifest]), strip(&entity[manifest]));
 }
 
 /// **The index and the blob, both, from one build.**

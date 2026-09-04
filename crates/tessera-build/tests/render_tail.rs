@@ -222,7 +222,6 @@ fn schema() -> Schema {
 fn args(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
     let schema = schema();
     BuildArgs {
-        arena_order: Default::default(),
         views: vec![tessera_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),

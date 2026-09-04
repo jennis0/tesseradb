@@ -222,7 +222,6 @@ fn build_scoped(dir: &Path) -> std::path::PathBuf {
     };
     let out = dir.join("bundle");
     build(&BuildArgs {
-        arena_order: Default::default(),
         views,
         anchor: 0,
         groups: vec![
