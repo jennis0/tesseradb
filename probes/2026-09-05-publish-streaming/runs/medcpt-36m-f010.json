@@ -1,0 +1,4034 @@
+{
+  "fraction": 0.1,
+  "concurrency": 8,
+  "seed": 0,
+  "batch_rows": 10000,
+  "base_rows": 32328599,
+  "holdout_rows": 3592067,
+  "build": {
+    "reused": true
+  },
+  "driver_rss": {
+    "after_base": {
+      "rss": 985686016,
+      "peak": 1789931520
+    },
+    "after_ingest": {
+      "rss": 593711104,
+      "peak": 1789931520
+    },
+    "after_publish": {
+      "rss": 766025728,
+      "peak": 1789931520
+    },
+    "end": {
+      "rss": 690003968,
+      "peak": 1789931520
+    }
+  },
+  "base_copy_s": 8.7,
+  "ingest_config": {},
+  "open_s": 3.02,
+  "ingested_view": null,
+  "base_visible": 32328599,
+  "ingest": {
+    "batches": 360,
+    "rows_offered": 3592067,
+    "accepted": 3592067,
+    "minted": 0,
+    "wall_s": 54.52,
+    "items_per_s": 65884.4,
+    "ack_ms": {
+      "p25": 705.5599,
+      "p50": 964.0598,
+      "p75": 1244.8425,
+      "p95": 2007.4335,
+      "p99": 2596.3019,
+      "max": 3680.9354,
+      "mean": 1053.5445,
+      "n": 360
+    },
+    "statuses": {
+      "200": 360,
+      "429": 10
+    }
+  },
+  "executor_laps": {
+    "bench_timing": true,
+    "rows": 3592067,
+    "windows": 359,
+    "rows_per_window": 10005.8,
+    "us_per_row": {
+      ".buf_insert": 1.173,
+      ".est_fwd": 0.686,
+      ".est_inv": 0.398,
+      ".wal_pos": 0.039,
+      "admit": 0.444,
+      "allocate": 0.86,
+      "apply_rows": 2.463,
+      "buffer_clone": 2.161,
+      "record_batch": 0.006,
+      "submit\u2192receipt": 92.89,
+      "swap": 0.001,
+      "wal_append": 0.683,
+      "wal_fsync": 0.838
+    },
+    "executor_sum_us_per_row": 7.456,
+    "queueing_us_per_row": 85.434,
+    "apply_nanos_total_us_per_row": 5.125,
+    "apply_nanos_max_ms": 550.8,
+    "work_service_nanos_ewma_ms": 78.6
+  },
+  "publish": {
+    "layers": {
+      "clusters/kmeans": {
+        "artifacts": 256,
+        "members": 35920666,
+        "generating_set_entries": 67003,
+        "edges_declared": 0,
+        "edges_in_roster_and_layer": 0,
+        "artifacts_with_several_parents": 0,
+        "read_path": "streamed",
+        "row_groups": 35,
+        "buckets": null,
+        "count_s": null,
+        "partition_s": null,
+        "requests": 17,
+        "prepared_s": 3.2,
+        "wall_s": 70.65,
+        "phase_s": 73.87,
+        "published_artifacts": 256,
+        "published_members": 35920666,
+        "edges_published": 0,
+        "artifacts_per_s": 3.6,
+        "members_per_s": 508456.9,
+        "statuses": {
+          "201": 17
+        },
+        "first_refusal": null,
+        "declined_artifacts": [],
+        "declined_members": 0
+      },
+      "mesh/descriptors": {
+        "artifacts": 30217,
+        "members": 1658437807,
+        "generating_set_entries": 0,
+        "edges_declared": 41321,
+        "edges_in_roster_and_layer": 41321,
+        "artifacts_with_several_parents": 9095,
+        "read_path": "partitioned",
+        "row_groups": 1677,
+        "buckets": 72,
+        "count_s": 30.46,
+        "partition_s": 124.02,
+        "requests": 558,
+        "prepared_s": 373.25,
+        "wall_s": 2305.46,
+        "phase_s": 2680.05,
+        "published_artifacts": 183,
+        "published_members": 190602551,
+        "edges_published": 102,
+        "artifacts_per_s": 0.1,
+        "members_per_s": 82674.4,
+        "statuses": {
+          "201": 93,
+          "422": 465
+        },
+        "first_refusal": {
+          "level": 0,
+          "status": 422,
+          "body": "{\"error\":\"contract\",\"detail\":\"mesh/descriptors publishes an artifact in level 0 whose parent is persons, which the layer does not hold where its declared shape says to look \u2014 the same level for a nested layer, a coarser level for a tiered one\"}"
+        },
+        "declined_artifacts": [
+          {
+            "key": "amino acids, peptides, and proteins",
+            "members": 8160791,
+            "body_bytes": 122411972,
+            "content_counted": false
+          },
+          {
+            "key": "behavioral disciplines and activities",
+            "members": 6508537,
+            "body_bytes": 97628164,
+            "content_counted": false
+          },
+          {
+            "key": "cells",
+            "members": 4952473,
+            "body_bytes": 74287172,
+            "content_counted": false
+          },
+          {
+            "key": "chemical actions and uses",
+            "members": 7458027,
+            "body_bytes": 111870502,
+            "content_counted": false
+          },
+          {
+            "key": "chemical phenomena",
+            "members": 5520111,
+            "body_bytes": 82801755,
+            "content_counted": false
+          },
+          {
+            "key": "diagnosis",
+            "members": 9997916,
+            "body_bytes": 149968821,
+            "content_counted": false
+          },
+          {
+            "key": "environment and public health",
+            "members": 10903830,
+            "body_bytes": 163557551,
+            "content_counted": false
+          },
+          {
+            "key": "eukaryota",
+            "members": 27171642,
+            "body_bytes": 407574711,
+            "content_counted": false
+          },
+          {
+            "key": "geographic locations",
+            "members": 4894093,
+            "body_bytes": 73411487,
+            "content_counted": false
+          },
+          {
+            "key": "health care quality, access, and evaluation",
+            "members": 9984112,
+            "body_bytes": 149761795,
+            "content_counted": false
+          },
+          {
+            "key": "health occupations",
+            "members": 13462867,
+            "body_bytes": 201943095,
+            "content_counted": false
+          },
+          {
+            "key": "information science",
+            "members": 6425329,
+            "body_bytes": 96380026,
+            "content_counted": false
+          },
+          {
+            "key": "investigative techniques",
+            "members": 16523402,
+            "body_bytes": 247851126,
+            "content_counted": false
+          },
+          {
+            "key": "natural science disciplines",
+            "members": 9058142,
+            "body_bytes": 135872229,
+            "content_counted": false
+          },
+          {
+            "key": "organic chemicals",
+            "members": 5152372,
+            "body_bytes": 77285669,
+            "content_counted": false
+          },
+          {
+            "key": "pathological conditions, signs and symptoms",
+            "members": 7571784,
+            "body_bytes": 113576875,
+            "content_counted": false
+          },
+          {
+            "key": "persons",
+            "members": 10865331,
+            "body_bytes": 162980044,
+            "content_counted": false
+          },
+          {
+            "key": "physiological phenomena",
+            "members": 6415157,
+            "body_bytes": 96227450,
+            "content_counted": false
+          },
+          {
+            "key": "population characteristics",
+            "members": 10080219,
+            "body_bytes": 151203383,
+            "content_counted": false
+          },
+          {
+            "key": "therapeutics",
+            "members": 5752742,
+            "body_bytes": 86291214,
+            "content_counted": false
+          },
+          {
+            "key": "age groups",
+            "members": 10055159,
+            "body_bytes": 150827467,
+            "content_counted": false
+          },
+          {
+            "key": "animals",
+            "members": 26396232,
+            "body_bytes": 395943559,
+            "content_counted": false
+          },
+          {
+            "key": "behavioral sciences",
+            "members": 6224372,
+            "body_bytes": 93365671,
+            "content_counted": false
+          },
+          {
+            "key": "diagnostic techniques and procedures",
+            "members": 8545289,
+            "body_bytes": 128179443,
+            "content_counted": false
+          },
+          {
+            "key": "health",
+            "members": 9931470,
+            "body_bytes": 148972128,
+            "content_counted": false
+          },
+          {
+            "key": "health services administration",
+            "members": 10718650,
+            "body_bytes": 160779852,
+            "content_counted": false
+          },
+          {
+            "key": "medicine",
+            "members": 11279206,
+            "body_bytes": 169188170,
+            "content_counted": false
+          },
+          {
+            "key": "pathologic processes",
+            "members": 5293121,
+            "body_bytes": 79396907,
+            "content_counted": false
+          },
+          {
+            "key": "pharmacologic actions",
+            "members": 5520508,
+            "body_bytes": 82807713,
+            "content_counted": false
+          },
+          {
+            "key": "proteins",
+            "members": 7444246,
+            "body_bytes": 111663770,
+            "content_counted": false
+          },
+          {
+            "key": "adult",
+            "members": 7924806,
+            "body_bytes": 118872167,
+            "content_counted": false
+          },
+          {
+            "key": "chordata",
+            "members": 25654035,
+            "body_bytes": 384810605,
+            "content_counted": false
+          },
+          {
+            "key": "public health",
+            "members": 9807639,
+            "body_bytes": 147114670,
+            "content_counted": false
+          },
+          {
+            "key": "quality of health care",
+            "members": 9271789,
+            "body_bytes": 139076929,
+            "content_counted": false
+          },
+          {
+            "key": "epidemiologic methods",
+            "members": 7899664,
+            "body_bytes": 118495053,
+            "content_counted": false
+          },
+          {
+            "key": "health care evaluation mechanisms",
+            "members": 8680347,
+            "body_bytes": 130205310,
+            "content_counted": false
+          },
+          {
+            "key": "middle aged",
+            "members": 4715309,
+            "body_bytes": 70729718,
+            "content_counted": false
+          },
+          {
+            "key": "vertebrates",
+            "members": 25649542,
+            "body_bytes": 384743213,
+            "content_counted": false
+          },
+          {
+            "key": "mammals",
+            "members": 25195709,
+            "body_bytes": 377935714,
+            "content_counted": false
+          },
+          {
+            "key": "eutheria",
+            "members": 25171497,
+            "body_bytes": 377572535,
+            "content_counted": false
+          },
+          {
+            "key": "primates",
+            "members": 21393183,
+            "body_bytes": 320897825,
+            "content_counted": false
+          },
+          {
+            "key": "haplorhini",
+            "members": 21386646,
+            "body_bytes": 320799772,
+            "content_counted": false
+          },
+          {
+            "key": "catarrhini",
+            "members": 21358623,
+            "body_bytes": 320379427,
+            "content_counted": false
+          },
+          {
+            "key": "hominidae",
+            "members": 21276106,
+            "body_bytes": 319141671,
+            "content_counted": false
+          },
+          {
+            "key": "humans",
+            "members": 21268184,
+            "body_bytes": 319022838,
+            "content_counted": false
+          }
+        ],
+        "declined_members": 544920209
+      }
+    },
+    "declined": {},
+    "totals": {
+      "artifacts": 439,
+      "members": 226523217,
+      "wall_s": 2376.11,
+      "requests": 575,
+      "artifacts_per_s": 0.2,
+      "members_per_s": 95333.6
+    },
+    "edges_declared": 41321,
+    "edges_published": 102
+  },
+  "flush": {
+    "status": 202,
+    "request_s": 0.0013,
+    "published": true,
+    "publish_s": 0.001,
+    "expected_visible": 35920666,
+    "visible": 35920666,
+    "visibility_reached": true,
+    "visibility_s": 2.113
+  },
+  "layers_after_ingest": {
+    "served": true,
+    "wall_s": 3.81,
+    "server_ms": 270.448,
+    "visible": 35920666
+  },
+  "fold": {
+    "status": 202,
+    "completed": true,
+    "observed_s": 166.47,
+    "fold_s": 166,
+    "fold_peak_rss_bytes": 8107405312,
+    "folds": 1,
+    "fold_failures": 0,
+    "live_rows": 35920666
+  },
+  "equivalence": {
+    "equal": false,
+    "zoom0_equal": true,
+    "boxes_equal": true,
+    "layers_equal": false,
+    "differences_by_surface": {
+      "layers": 6
+    },
+    "differences": [
+      {
+        "principal": "0.0100",
+        "where": "layers",
+        "layer": "mesh/descriptors",
+        "folded": {
+          "artifacts": 159,
+          "masked_count": 5069793
+        },
+        "all_in": {
+          "artifacts": 10685,
+          "masked_count": 50745010
+        }
+      },
+      {
+        "principal": "0.0500",
+        "where": "layers",
+        "layer": "mesh/descriptors",
+        "folded": {
+          "artifacts": 159,
+          "masked_count": 5069793
+        },
+        "all_in": {
+          "artifacts": 10685,
+          "masked_count": 50745010
+        }
+      },
+      {
+        "principal": "0.1000",
+        "where": "layers",
+        "layer": "mesh/descriptors",
+        "folded": {
+          "artifacts": 177,
+          "masked_count": 20738122
+        },
+        "all_in": {
+          "artifacts": 21262,
+          "masked_count": 201992498
+        }
+      },
+      {
+        "principal": "0.2500",
+        "where": "layers",
+        "layer": "mesh/descriptors",
+        "folded": {
+          "artifacts": 177,
+          "masked_count": 20738122
+        },
+        "all_in": {
+          "artifacts": 21262,
+          "masked_count": 201992498
+        }
+      },
+      {
+        "principal": "0.5000",
+        "where": "layers",
+        "layer": "mesh/descriptors",
+        "folded": {
+          "artifacts": 182,
+          "masked_count": 121426163
+        },
+        "all_in": {
+          "artifacts": 26540,
+          "masked_count": 1047131783
+        }
+      },
+      {
+        "principal": "1.0000",
+        "where": "layers",
+        "layer": "mesh/descriptors",
+        "folded": {
+          "artifacts": 182,
+          "masked_count": 190602509
+        },
+        "all_in": {
+          "artifacts": 28789,
+          "masked_count": 1658404289
+        }
+      }
+    ],
+    "frames": {
+      "folded": {
+        "x_max": 20.183564109802248,
+        "x_min": -17.894932670593263,
+        "y_max": 17.992278499603273,
+        "y_min": -20.08621828079224
+      },
+      "all_in": {
+        "x_max": 20.183564109802248,
+        "x_min": -17.894932670593263,
+        "y_max": 17.992278499603273,
+        "y_min": -20.08621828079224
+      }
+    },
+    "frames_equal": true,
+    "ladder": [
+      {
+        "target": 0.01,
+        "terms": [
+          "K",
+          "V"
+        ]
+      },
+      {
+        "target": 0.05,
+        "terms": [
+          "K",
+          "V"
+        ]
+      },
+      {
+        "target": 0.1,
+        "terms": [
+          "L",
+          "V"
+        ]
+      },
+      {
+        "target": 0.25,
+        "terms": [
+          "L",
+          "V",
+          "unindexed"
+        ]
+      },
+      {
+        "target": 0.5,
+        "terms": [
+          "C",
+          "K"
+        ]
+      },
+      {
+        "target": 1.0,
+        "terms": [
+          "A",
+          "B",
+          "C",
+          "D",
+          "E",
+          "F",
+          "G",
+          "H",
+          "I",
+          "J",
+          "K",
+          "L",
+          "M",
+          "N",
+          "V",
+          "Z",
+          "unindexed"
+        ]
+      }
+    ],
+    "folded": {
+      "0.0100": {
+        "terms": [
+          "K",
+          "V"
+        ],
+        "zoom0_visible": 1026996,
+        "boxes": [
+          {
+            "zoom": 3,
+            "box": [
+              11.879476035224181,
+              6.395639962481949,
+              16.639288132773622,
+              11.155452060031388
+            ],
+            "visible": 5
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -4.260105132774802,
+              -12.606963687145887,
+              0.49970696477463683,
+              -7.847151589596448
+            ],
+            "visible": 18569
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -0.8062658878358118,
+              -7.046841080389127,
+              3.953546209713627,
+              -2.287028982839688
+            ],
+            "visible": 319395
+          },
+          {
+            "zoom": 3,
+            "box": [
+              9.57103332967115,
+              -10.916431666117536,
+              14.33084542722059,
+              -6.156619568568097
+            ],
+            "visible": 651
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -2.1267431351311945,
+              -0.25181321843798976,
+              2.6330689624182444,
+              4.507998879111449
+            ],
+            "visible": 523807
+          },
+          {
+            "zoom": 3,
+            "box": [
+              14.304734855778266,
+              -3.248407515216533,
+              19.064546953327707,
+              1.511404582332906
+            ],
+            "visible": 11535
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -9.54287726880025,
+              6.313763625043281,
+              -4.783065171250811,
+              11.07357572259272
+            ],
+            "visible": 109696
+          },
+          {
+            "zoom": 3,
+            "box": [
+              3.2717231296300344,
+              -12.92721941652861,
+              8.031535227179473,
+              -8.167407318979171
+            ],
+            "visible": 8027
+          },
+          {
+            "zoom": 6,
+            "box": [
+              16.449348952173395,
+              17.03928704823016,
+              17.044325464367077,
+              17.634263560423843
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              12.659433485626982,
+              13.969416702307027,
+              13.25440999782066,
+              14.564393214500706
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -6.382467706916402,
+              7.407189339464655,
+              -5.787491194722722,
+              8.002165851658335
+            ],
+            "visible": 5
+          },
+          {
+            "zoom": 6,
+            "box": [
+              16.033989927795346,
+              5.661373412395311,
+              16.62896643998903,
+              6.256349924588991
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -0.21393605643676383,
+              -16.54915590967588,
+              0.38104045575691603,
+              -15.954179397482198
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -1.6598100882247901,
+              2.877951114576274,
+              -1.0648335760311103,
+              3.4729276267699545
+            ],
+            "visible": 10716
+          },
+          {
+            "zoom": 6,
+            "box": [
+              16.573667524494716,
+              16.423210926179554,
+              17.1686440366884,
+              17.018187438373236
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -0.028605686010286346,
+              12.565994761807586,
+              0.5663708261833935,
+              13.160971274001264
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -8.273265324112089,
+              10.270542982155083,
+              -7.678288811918409,
+              10.865519494348762
+            ],
+            "visible": 3
+          },
+          {
+            "zoom": 9,
+            "box": [
+              2.7012237478186423,
+              -19.84901970240221,
+              3.2962002600123226,
+              -19.254043190208527
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              9.212851657378424,
+              -5.1971055683563305,
+              9.807828169572103,
+              -4.60212905616265
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              13.216435879974297,
+              5.058562985028904,
+              13.811412392167975,
+              5.653539497222584
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -18.148904085105073,
+              -1.5890033378147332,
+              -17.55392757291139,
+              -0.9940268256210534
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              14.844588566573963,
+              -11.09594699663898,
+              15.439565078767641,
+              -10.500970484445302
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -5.809127646843037,
+              12.762529472387241,
+              -5.214151134649357,
+              13.35750598458092
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -10.916873298076789,
+              1.2262493726750432,
+              -10.32189678588311,
+              1.821225884868723
+            ],
+            "visible": 0
+          }
+        ],
+        "layers": {
+          "mesh/descriptors": {
+            "artifacts": 159,
+            "masked_count": 5069793
+          }
+        }
+      },
+      "0.0500": {
+        "terms": [
+          "K",
+          "V"
+        ],
+        "zoom0_visible": 1026996,
+        "boxes": [
+          {
+            "zoom": 3,
+            "box": [
+              11.879476035224181,
+              6.395639962481949,
+              16.639288132773622,
+              11.155452060031388
+            ],
+            "visible": 5
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -4.260105132774802,
+              -12.606963687145887,
+              0.49970696477463683,
+              -7.847151589596448
+            ],
+            "visible": 18569
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -0.8062658878358118,
+              -7.046841080389127,
+              3.953546209713627,
+              -2.287028982839688
+            ],
+            "visible": 319395
+          },
+          {
+            "zoom": 3,
+            "box": [
+              9.57103332967115,
+              -10.916431666117536,
+              14.33084542722059,
+              -6.156619568568097
+            ],
+            "visible": 651
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -2.1267431351311945,
+              -0.25181321843798976,
+              2.6330689624182444,
+              4.507998879111449
+            ],
+            "visible": 523807
+          },
+          {
+            "zoom": 3,
+            "box": [
+              14.304734855778266,
+              -3.248407515216533,
+              19.064546953327707,
+              1.511404582332906
+            ],
+            "visible": 11535
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -9.54287726880025,
+              6.313763625043281,
+              -4.783065171250811,
+              11.07357572259272
+            ],
+            "visible": 109696
+          },
+          {
+            "zoom": 3,
+            "box": [
+              3.2717231296300344,
+              -12.92721941652861,
+              8.031535227179473,
+              -8.167407318979171
+            ],
+            "visible": 8027
+          },
+          {
+            "zoom": 6,
+            "box": [
+              16.449348952173395,
+              17.03928704823016,
+              17.044325464367077,
+              17.634263560423843
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              12.659433485626982,
+              13.969416702307027,
+              13.25440999782066,
+              14.564393214500706
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -6.382467706916402,
+              7.407189339464655,
+              -5.787491194722722,
+              8.002165851658335
+            ],
+            "visible": 5
+          },
+          {
+            "zoom": 6,
+            "box": [
+              16.033989927795346,
+              5.661373412395311,
+              16.62896643998903,
+              6.256349924588991
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -0.21393605643676383,
+              -16.54915590967588,
+              0.38104045575691603,
+              -15.954179397482198
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -1.6598100882247901,
+              2.877951114576274,
+              -1.0648335760311103,
+              3.4729276267699545
+            ],
+            "visible": 10716
+          },
+          {
+            "zoom": 6,
+            "box": [
+              16.573667524494716,
+              16.423210926179554,
+              17.1686440366884,
+              17.018187438373236
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -0.028605686010286346,
+              12.565994761807586,
+              0.5663708261833935,
+              13.160971274001264
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -8.273265324112089,
+              10.270542982155083,
+              -7.678288811918409,
+              10.865519494348762
+            ],
+            "visible": 3
+          },
+          {
+            "zoom": 9,
+            "box": [
+              2.7012237478186423,
+              -19.84901970240221,
+              3.2962002600123226,
+              -19.254043190208527
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              9.212851657378424,
+              -5.1971055683563305,
+              9.807828169572103,
+              -4.60212905616265
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              13.216435879974297,
+              5.058562985028904,
+              13.811412392167975,
+              5.653539497222584
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -18.148904085105073,
+              -1.5890033378147332,
+              -17.55392757291139,
+              -0.9940268256210534
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              14.844588566573963,
+              -11.09594699663898,
+              15.439565078767641,
+              -10.500970484445302
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -5.809127646843037,
+              12.762529472387241,
+              -5.214151134649357,
+              13.35750598458092
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -10.916873298076789,
+              1.2262493726750432,
+              -10.32189678588311,
+              1.821225884868723
+            ],
+            "visible": 0
+          }
+        ],
+        "layers": {
+          "mesh/descriptors": {
+            "artifacts": 159,
+            "masked_count": 5069793
+          }
+        }
+      },
+      "0.1000": {
+        "terms": [
+          "L",
+          "V"
+        ],
+        "zoom0_visible": 3469942,
+        "boxes": [
+          {
+            "zoom": 3,
+            "box": [
+              11.879476035224181,
+              6.395639962481949,
+              16.639288132773622,
+              11.155452060031388
+            ],
+            "visible": 12
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -4.260105132774802,
+              -12.606963687145887,
+              0.49970696477463683,
+              -7.847151589596448
+            ],
+            "visible": 27654
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -0.8062658878358118,
+              -7.046841080389127,
+              3.953546209713627,
+              -2.287028982839688
+            ],
+            "visible": 903638
+          },
+          {
+            "zoom": 3,
+            "box": [
+              9.57103332967115,
+              -10.916431666117536,
+              14.33084542722059,
+              -6.156619568568097
+            ],
+            "visible": 1187
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -2.1267431351311945,
+              -0.25181321843798976,
+              2.6330689624182444,
+              4.507998879111449
+            ],
+            "visible": 2222514
+          },
+          {
+            "zoom": 3,
+            "box": [
+              14.304734855778266,
+              -3.248407515216533,
+              19.064546953327707,
+              1.511404582332906
+            ],
+            "visible": 1127
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -9.54287726880025,
+              6.313763625043281,
+              -4.783065171250811,
+              11.07357572259272
+            ],
+            "visible": 200887
+          },
+          {
+            "zoom": 3,
+            "box": [
+              3.2717231296300344,
+              -12.92721941652861,
+              8.031535227179473,
+              -8.167407318979171
+            ],
+            "visible": 34134
+          },
+          {
+            "zoom": 6,
+            "box": [
+              16.449348952173395,
+              17.03928704823016,
+              17.044325464367077,
+              17.634263560423843
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              12.659433485626982,
+              13.969416702307027,
+              13.25440999782066,
+              14.564393214500706
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -6.382467706916402,
+              7.407189339464655,
+              -5.787491194722722,
+              8.002165851658335
+            ],
+            "visible": 8
+          },
+          {
+            "zoom": 6,
+            "box": [
+              16.033989927795346,
+              5.661373412395311,
+              16.62896643998903,
+              6.256349924588991
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -0.21393605643676383,
+              -16.54915590967588,
+              0.38104045575691603,
+              -15.954179397482198
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -1.6598100882247901,
+              2.877951114576274,
+              -1.0648335760311103,
+              3.4729276267699545
+            ],
+            "visible": 33651
+          },
+          {
+            "zoom": 6,
+            "box": [
+              16.573667524494716,
+              16.423210926179554,
+              17.1686440366884,
+              17.018187438373236
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -0.028605686010286346,
+              12.565994761807586,
+              0.5663708261833935,
+              13.160971274001264
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -8.273265324112089,
+              10.270542982155083,
+              -7.678288811918409,
+              10.865519494348762
+            ],
+            "visible": 8
+          },
+          {
+            "zoom": 9,
+            "box": [
+              2.7012237478186423,
+              -19.84901970240221,
+              3.2962002600123226,
+              -19.254043190208527
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              9.212851657378424,
+              -5.1971055683563305,
+              9.807828169572103,
+              -4.60212905616265
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              13.216435879974297,
+              5.058562985028904,
+              13.811412392167975,
+              5.653539497222584
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -18.148904085105073,
+              -1.5890033378147332,
+              -17.55392757291139,
+              -0.9940268256210534
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              14.844588566573963,
+              -11.09594699663898,
+              15.439565078767641,
+              -10.500970484445302
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -5.809127646843037,
+              12.762529472387241,
+              -5.214151134649357,
+              13.35750598458092
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -10.916873298076789,
+              1.2262493726750432,
+              -10.32189678588311,
+              1.821225884868723
+            ],
+            "visible": 0
+          }
+        ],
+        "layers": {
+          "mesh/descriptors": {
+            "artifacts": 177,
+            "masked_count": 20738122
+          }
+        }
+      },
+      "0.2500": {
+        "terms": [
+          "L",
+          "V",
+          "unindexed"
+        ],
+        "zoom0_visible": 8885841,
+        "boxes": [
+          {
+            "zoom": 3,
+            "box": [
+              11.879476035224181,
+              6.395639962481949,
+              16.639288132773622,
+              11.155452060031388
+            ],
+            "visible": 1833
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -4.260105132774802,
+              -12.606963687145887,
+              0.49970696477463683,
+              -7.847151589596448
+            ],
+            "visible": 108067
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -0.8062658878358118,
+              -7.046841080389127,
+              3.953546209713627,
+              -2.287028982839688
+            ],
+            "visible": 2239616
+          },
+          {
+            "zoom": 3,
+            "box": [
+              9.57103332967115,
+              -10.916431666117536,
+              14.33084542722059,
+              -6.156619568568097
+            ],
+            "visible": 7953
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -2.1267431351311945,
+              -0.25181321843798976,
+              2.6330689624182444,
+              4.507998879111449
+            ],
+            "visible": 5872579
+          },
+          {
+            "zoom": 3,
+            "box": [
+              14.304734855778266,
+              -3.248407515216533,
+              19.064546953327707,
+              1.511404582332906
+            ],
+            "visible": 12167
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -9.54287726880025,
+              6.313763625043281,
+              -4.783065171250811,
+              11.07357572259272
+            ],
+            "visible": 335985
+          },
+          {
+            "zoom": 3,
+            "box": [
+              3.2717231296300344,
+              -12.92721941652861,
+              8.031535227179473,
+              -8.167407318979171
+            ],
+            "visible": 86065
+          },
+          {
+            "zoom": 6,
+            "box": [
+              16.449348952173395,
+              17.03928704823016,
+              17.044325464367077,
+              17.634263560423843
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              12.659433485626982,
+              13.969416702307027,
+              13.25440999782066,
+              14.564393214500706
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -6.382467706916402,
+              7.407189339464655,
+              -5.787491194722722,
+              8.002165851658335
+            ],
+            "visible": 32
+          },
+          {
+            "zoom": 6,
+            "box": [
+              16.033989927795346,
+              5.661373412395311,
+              16.62896643998903,
+              6.256349924588991
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -0.21393605643676383,
+              -16.54915590967588,
+              0.38104045575691603,
+              -15.954179397482198
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -1.6598100882247901,
+              2.877951114576274,
+              -1.0648335760311103,
+              3.4729276267699545
+            ],
+            "visible": 80118
+          },
+          {
+            "zoom": 6,
+            "box": [
+              16.573667524494716,
+              16.423210926179554,
+              17.1686440366884,
+              17.018187438373236
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -0.028605686010286346,
+              12.565994761807586,
+              0.5663708261833935,
+              13.160971274001264
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -8.273265324112089,
+              10.270542982155083,
+              -7.678288811918409,
+              10.865519494348762
+            ],
+            "visible": 8
+          },
+          {
+            "zoom": 9,
+            "box": [
+              2.7012237478186423,
+              -19.84901970240221,
+              3.2962002600123226,
+              -19.254043190208527
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              9.212851657378424,
+              -5.1971055683563305,
+              9.807828169572103,
+              -4.60212905616265
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              13.216435879974297,
+              5.058562985028904,
+              13.811412392167975,
+              5.653539497222584
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -18.148904085105073,
+              -1.5890033378147332,
+              -17.55392757291139,
+              -0.9940268256210534
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              14.844588566573963,
+              -11.09594699663898,
+              15.439565078767641,
+              -10.500970484445302
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -5.809127646843037,
+              12.762529472387241,
+              -5.214151134649357,
+              13.35750598458092
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -10.916873298076789,
+              1.2262493726750432,
+              -10.32189678588311,
+              1.821225884868723
+            ],
+            "visible": 2
+          }
+        ],
+        "layers": {
+          "clusters/kmeans": {
+            "artifacts": 2,
+            "masked_count": 4428
+          },
+          "mesh/descriptors": {
+            "artifacts": 177,
+            "masked_count": 20738122
+          }
+        }
+      },
+      "0.5000": {
+        "terms": [
+          "C",
+          "K"
+        ],
+        "zoom0_visible": 17550207,
+        "boxes": [
+          {
+            "zoom": 3,
+            "box": [
+              11.879476035224181,
+              6.395639962481949,
+              16.639288132773622,
+              11.155452060031388
+            ],
+            "visible": 12
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -4.260105132774802,
+              -12.606963687145887,
+              0.49970696477463683,
+              -7.847151589596448
+            ],
+            "visible": 392381
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -0.8062658878358118,
+              -7.046841080389127,
+              3.953546209713627,
+              -2.287028982839688
+            ],
+            "visible": 8420214
+          },
+          {
+            "zoom": 3,
+            "box": [
+              9.57103332967115,
+              -10.916431666117536,
+              14.33084542722059,
+              -6.156619568568097
+            ],
+            "visible": 2514
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -2.1267431351311945,
+              -0.25181321843798976,
+              2.6330689624182444,
+              4.507998879111449
+            ],
+            "visible": 7698156
+          },
+          {
+            "zoom": 3,
+            "box": [
+              14.304734855778266,
+              -3.248407515216533,
+              19.064546953327707,
+              1.511404582332906
+            ],
+            "visible": 12751
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -9.54287726880025,
+              6.313763625043281,
+              -4.783065171250811,
+              11.07357572259272
+            ],
+            "visible": 229301
+          },
+          {
+            "zoom": 3,
+            "box": [
+              3.2717231296300344,
+              -12.92721941652861,
+              8.031535227179473,
+              -8.167407318979171
+            ],
+            "visible": 170413
+          },
+          {
+            "zoom": 6,
+            "box": [
+              16.449348952173395,
+              17.03928704823016,
+              17.044325464367077,
+              17.634263560423843
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              12.659433485626982,
+              13.969416702307027,
+              13.25440999782066,
+              14.564393214500706
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -6.382467706916402,
+              7.407189339464655,
+              -5.787491194722722,
+              8.002165851658335
+            ],
+            "visible": 22
+          },
+          {
+            "zoom": 6,
+            "box": [
+              16.033989927795346,
+              5.661373412395311,
+              16.62896643998903,
+              6.256349924588991
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -0.21393605643676383,
+              -16.54915590967588,
+              0.38104045575691603,
+              -15.954179397482198
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -1.6598100882247901,
+              2.877951114576274,
+              -1.0648335760311103,
+              3.4729276267699545
+            ],
+            "visible": 243291
+          },
+          {
+            "zoom": 6,
+            "box": [
+              16.573667524494716,
+              16.423210926179554,
+              17.1686440366884,
+              17.018187438373236
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -0.028605686010286346,
+              12.565994761807586,
+              0.5663708261833935,
+              13.160971274001264
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -8.273265324112089,
+              10.270542982155083,
+              -7.678288811918409,
+              10.865519494348762
+            ],
+            "visible": 2098
+          },
+          {
+            "zoom": 9,
+            "box": [
+              2.7012237478186423,
+              -19.84901970240221,
+              3.2962002600123226,
+              -19.254043190208527
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              9.212851657378424,
+              -5.1971055683563305,
+              9.807828169572103,
+              -4.60212905616265
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              13.216435879974297,
+              5.058562985028904,
+              13.811412392167975,
+              5.653539497222584
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -18.148904085105073,
+              -1.5890033378147332,
+              -17.55392757291139,
+              -0.9940268256210534
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              14.844588566573963,
+              -11.09594699663898,
+              15.439565078767641,
+              -10.500970484445302
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -5.809127646843037,
+              12.762529472387241,
+              -5.214151134649357,
+              13.35750598458092
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -10.916873298076789,
+              1.2262493726750432,
+              -10.32189678588311,
+              1.821225884868723
+            ],
+            "visible": 2
+          }
+        ],
+        "layers": {
+          "mesh/descriptors": {
+            "artifacts": 182,
+            "masked_count": 121426163
+          }
+        }
+      },
+      "1.0000": {
+        "terms": [
+          "A",
+          "B",
+          "C",
+          "D",
+          "E",
+          "F",
+          "G",
+          "H",
+          "I",
+          "J",
+          "K",
+          "L",
+          "M",
+          "N",
+          "V",
+          "Z",
+          "unindexed"
+        ],
+        "zoom0_visible": 35920666,
+        "boxes": [
+          {
+            "zoom": 3,
+            "box": [
+              11.879476035224181,
+              6.395639962481949,
+              16.639288132773622,
+              11.155452060031388
+            ],
+            "visible": 1869
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -4.260105132774802,
+              -12.606963687145887,
+              0.49970696477463683,
+              -7.847151589596448
+            ],
+            "visible": 539839
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -0.8062658878358118,
+              -7.046841080389127,
+              3.953546209713627,
+              -2.287028982839688
+            ],
+            "visible": 12976209
+          },
+          {
+            "zoom": 3,
+            "box": [
+              9.57103332967115,
+              -10.916431666117536,
+              14.33084542722059,
+              -6.156619568568097
+            ],
+            "visible": 12345
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -2.1267431351311945,
+              -0.25181321843798976,
+              2.6330689624182444,
+              4.507998879111449
+            ],
+            "visible": 20048235
+          },
+          {
+            "zoom": 3,
+            "box": [
+              14.304734855778266,
+              -3.248407515216533,
+              19.064546953327707,
+              1.511404582332906
+            ],
+            "visible": 24929
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -9.54287726880025,
+              6.313763625043281,
+              -4.783065171250811,
+              11.07357572259272
+            ],
+            "visible": 1047727
+          },
+          {
+            "zoom": 3,
+            "box": [
+              3.2717231296300344,
+              -12.92721941652861,
+              8.031535227179473,
+              -8.167407318979171
+            ],
+            "visible": 301683
+          },
+          {
+            "zoom": 6,
+            "box": [
+              16.449348952173395,
+              17.03928704823016,
+              17.044325464367077,
+              17.634263560423843
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              12.659433485626982,
+              13.969416702307027,
+              13.25440999782066,
+              14.564393214500706
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -6.382467706916402,
+              7.407189339464655,
+              -5.787491194722722,
+              8.002165851658335
+            ],
+            "visible": 63
+          },
+          {
+            "zoom": 6,
+            "box": [
+              16.033989927795346,
+              5.661373412395311,
+              16.62896643998903,
+              6.256349924588991
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -0.21393605643676383,
+              -16.54915590967588,
+              0.38104045575691603,
+              -15.954179397482198
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -1.6598100882247901,
+              2.877951114576274,
+              -1.0648335760311103,
+              3.4729276267699545
+            ],
+            "visible": 390955
+          },
+          {
+            "zoom": 6,
+            "box": [
+              16.573667524494716,
+              16.423210926179554,
+              17.1686440366884,
+              17.018187438373236
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -0.028605686010286346,
+              12.565994761807586,
+              0.5663708261833935,
+              13.160971274001264
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -8.273265324112089,
+              10.270542982155083,
+              -7.678288811918409,
+              10.865519494348762
+            ],
+            "visible": 2108
+          },
+          {
+            "zoom": 9,
+            "box": [
+              2.7012237478186423,
+              -19.84901970240221,
+              3.2962002600123226,
+              -19.254043190208527
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              9.212851657378424,
+              -5.1971055683563305,
+              9.807828169572103,
+              -4.60212905616265
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              13.216435879974297,
+              5.058562985028904,
+              13.811412392167975,
+              5.653539497222584
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -18.148904085105073,
+              -1.5890033378147332,
+              -17.55392757291139,
+              -0.9940268256210534
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              14.844588566573963,
+              -11.09594699663898,
+              15.439565078767641,
+              -10.500970484445302
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -5.809127646843037,
+              12.762529472387241,
+              -5.214151134649357,
+              13.35750598458092
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -10.916873298076789,
+              1.2262493726750432,
+              -10.32189678588311,
+              1.821225884868723
+            ],
+            "visible": 6
+          }
+        ],
+        "layers": {
+          "clusters/kmeans": {
+            "artifacts": 253,
+            "masked_count": 35920607
+          },
+          "mesh/descriptors": {
+            "artifacts": 182,
+            "masked_count": 190602509
+          }
+        }
+      }
+    },
+    "all_in": {
+      "0.0100": {
+        "terms": [
+          "K",
+          "V"
+        ],
+        "zoom0_visible": 1026996,
+        "boxes": [
+          {
+            "zoom": 3,
+            "box": [
+              11.879476035224181,
+              6.395639962481949,
+              16.639288132773622,
+              11.155452060031388
+            ],
+            "visible": 5
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -4.260105132774802,
+              -12.606963687145887,
+              0.49970696477463683,
+              -7.847151589596448
+            ],
+            "visible": 18569
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -0.8062658878358118,
+              -7.046841080389127,
+              3.953546209713627,
+              -2.287028982839688
+            ],
+            "visible": 319395
+          },
+          {
+            "zoom": 3,
+            "box": [
+              9.57103332967115,
+              -10.916431666117536,
+              14.33084542722059,
+              -6.156619568568097
+            ],
+            "visible": 651
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -2.1267431351311945,
+              -0.25181321843798976,
+              2.6330689624182444,
+              4.507998879111449
+            ],
+            "visible": 523807
+          },
+          {
+            "zoom": 3,
+            "box": [
+              14.304734855778266,
+              -3.248407515216533,
+              19.064546953327707,
+              1.511404582332906
+            ],
+            "visible": 11535
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -9.54287726880025,
+              6.313763625043281,
+              -4.783065171250811,
+              11.07357572259272
+            ],
+            "visible": 109696
+          },
+          {
+            "zoom": 3,
+            "box": [
+              3.2717231296300344,
+              -12.92721941652861,
+              8.031535227179473,
+              -8.167407318979171
+            ],
+            "visible": 8027
+          },
+          {
+            "zoom": 6,
+            "box": [
+              16.449348952173395,
+              17.03928704823016,
+              17.044325464367077,
+              17.634263560423843
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              12.659433485626982,
+              13.969416702307027,
+              13.25440999782066,
+              14.564393214500706
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -6.382467706916402,
+              7.407189339464655,
+              -5.787491194722722,
+              8.002165851658335
+            ],
+            "visible": 5
+          },
+          {
+            "zoom": 6,
+            "box": [
+              16.033989927795346,
+              5.661373412395311,
+              16.62896643998903,
+              6.256349924588991
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -0.21393605643676383,
+              -16.54915590967588,
+              0.38104045575691603,
+              -15.954179397482198
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -1.6598100882247901,
+              2.877951114576274,
+              -1.0648335760311103,
+              3.4729276267699545
+            ],
+            "visible": 10716
+          },
+          {
+            "zoom": 6,
+            "box": [
+              16.573667524494716,
+              16.423210926179554,
+              17.1686440366884,
+              17.018187438373236
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -0.028605686010286346,
+              12.565994761807586,
+              0.5663708261833935,
+              13.160971274001264
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -8.273265324112089,
+              10.270542982155083,
+              -7.678288811918409,
+              10.865519494348762
+            ],
+            "visible": 3
+          },
+          {
+            "zoom": 9,
+            "box": [
+              2.7012237478186423,
+              -19.84901970240221,
+              3.2962002600123226,
+              -19.254043190208527
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              9.212851657378424,
+              -5.1971055683563305,
+              9.807828169572103,
+              -4.60212905616265
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              13.216435879974297,
+              5.058562985028904,
+              13.811412392167975,
+              5.653539497222584
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -18.148904085105073,
+              -1.5890033378147332,
+              -17.55392757291139,
+              -0.9940268256210534
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              14.844588566573963,
+              -11.09594699663898,
+              15.439565078767641,
+              -10.500970484445302
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -5.809127646843037,
+              12.762529472387241,
+              -5.214151134649357,
+              13.35750598458092
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -10.916873298076789,
+              1.2262493726750432,
+              -10.32189678588311,
+              1.821225884868723
+            ],
+            "visible": 0
+          }
+        ],
+        "layers": {
+          "mesh/descriptors": {
+            "artifacts": 10685,
+            "masked_count": 50745010
+          }
+        }
+      },
+      "0.0500": {
+        "terms": [
+          "K",
+          "V"
+        ],
+        "zoom0_visible": 1026996,
+        "boxes": [
+          {
+            "zoom": 3,
+            "box": [
+              11.879476035224181,
+              6.395639962481949,
+              16.639288132773622,
+              11.155452060031388
+            ],
+            "visible": 5
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -4.260105132774802,
+              -12.606963687145887,
+              0.49970696477463683,
+              -7.847151589596448
+            ],
+            "visible": 18569
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -0.8062658878358118,
+              -7.046841080389127,
+              3.953546209713627,
+              -2.287028982839688
+            ],
+            "visible": 319395
+          },
+          {
+            "zoom": 3,
+            "box": [
+              9.57103332967115,
+              -10.916431666117536,
+              14.33084542722059,
+              -6.156619568568097
+            ],
+            "visible": 651
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -2.1267431351311945,
+              -0.25181321843798976,
+              2.6330689624182444,
+              4.507998879111449
+            ],
+            "visible": 523807
+          },
+          {
+            "zoom": 3,
+            "box": [
+              14.304734855778266,
+              -3.248407515216533,
+              19.064546953327707,
+              1.511404582332906
+            ],
+            "visible": 11535
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -9.54287726880025,
+              6.313763625043281,
+              -4.783065171250811,
+              11.07357572259272
+            ],
+            "visible": 109696
+          },
+          {
+            "zoom": 3,
+            "box": [
+              3.2717231296300344,
+              -12.92721941652861,
+              8.031535227179473,
+              -8.167407318979171
+            ],
+            "visible": 8027
+          },
+          {
+            "zoom": 6,
+            "box": [
+              16.449348952173395,
+              17.03928704823016,
+              17.044325464367077,
+              17.634263560423843
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              12.659433485626982,
+              13.969416702307027,
+              13.25440999782066,
+              14.564393214500706
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -6.382467706916402,
+              7.407189339464655,
+              -5.787491194722722,
+              8.002165851658335
+            ],
+            "visible": 5
+          },
+          {
+            "zoom": 6,
+            "box": [
+              16.033989927795346,
+              5.661373412395311,
+              16.62896643998903,
+              6.256349924588991
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -0.21393605643676383,
+              -16.54915590967588,
+              0.38104045575691603,
+              -15.954179397482198
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -1.6598100882247901,
+              2.877951114576274,
+              -1.0648335760311103,
+              3.4729276267699545
+            ],
+            "visible": 10716
+          },
+          {
+            "zoom": 6,
+            "box": [
+              16.573667524494716,
+              16.423210926179554,
+              17.1686440366884,
+              17.018187438373236
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -0.028605686010286346,
+              12.565994761807586,
+              0.5663708261833935,
+              13.160971274001264
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -8.273265324112089,
+              10.270542982155083,
+              -7.678288811918409,
+              10.865519494348762
+            ],
+            "visible": 3
+          },
+          {
+            "zoom": 9,
+            "box": [
+              2.7012237478186423,
+              -19.84901970240221,
+              3.2962002600123226,
+              -19.254043190208527
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              9.212851657378424,
+              -5.1971055683563305,
+              9.807828169572103,
+              -4.60212905616265
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              13.216435879974297,
+              5.058562985028904,
+              13.811412392167975,
+              5.653539497222584
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -18.148904085105073,
+              -1.5890033378147332,
+              -17.55392757291139,
+              -0.9940268256210534
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              14.844588566573963,
+              -11.09594699663898,
+              15.439565078767641,
+              -10.500970484445302
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -5.809127646843037,
+              12.762529472387241,
+              -5.214151134649357,
+              13.35750598458092
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -10.916873298076789,
+              1.2262493726750432,
+              -10.32189678588311,
+              1.821225884868723
+            ],
+            "visible": 0
+          }
+        ],
+        "layers": {
+          "mesh/descriptors": {
+            "artifacts": 10685,
+            "masked_count": 50745010
+          }
+        }
+      },
+      "0.1000": {
+        "terms": [
+          "L",
+          "V"
+        ],
+        "zoom0_visible": 3469942,
+        "boxes": [
+          {
+            "zoom": 3,
+            "box": [
+              11.879476035224181,
+              6.395639962481949,
+              16.639288132773622,
+              11.155452060031388
+            ],
+            "visible": 12
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -4.260105132774802,
+              -12.606963687145887,
+              0.49970696477463683,
+              -7.847151589596448
+            ],
+            "visible": 27654
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -0.8062658878358118,
+              -7.046841080389127,
+              3.953546209713627,
+              -2.287028982839688
+            ],
+            "visible": 903638
+          },
+          {
+            "zoom": 3,
+            "box": [
+              9.57103332967115,
+              -10.916431666117536,
+              14.33084542722059,
+              -6.156619568568097
+            ],
+            "visible": 1187
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -2.1267431351311945,
+              -0.25181321843798976,
+              2.6330689624182444,
+              4.507998879111449
+            ],
+            "visible": 2222514
+          },
+          {
+            "zoom": 3,
+            "box": [
+              14.304734855778266,
+              -3.248407515216533,
+              19.064546953327707,
+              1.511404582332906
+            ],
+            "visible": 1127
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -9.54287726880025,
+              6.313763625043281,
+              -4.783065171250811,
+              11.07357572259272
+            ],
+            "visible": 200887
+          },
+          {
+            "zoom": 3,
+            "box": [
+              3.2717231296300344,
+              -12.92721941652861,
+              8.031535227179473,
+              -8.167407318979171
+            ],
+            "visible": 34134
+          },
+          {
+            "zoom": 6,
+            "box": [
+              16.449348952173395,
+              17.03928704823016,
+              17.044325464367077,
+              17.634263560423843
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              12.659433485626982,
+              13.969416702307027,
+              13.25440999782066,
+              14.564393214500706
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -6.382467706916402,
+              7.407189339464655,
+              -5.787491194722722,
+              8.002165851658335
+            ],
+            "visible": 8
+          },
+          {
+            "zoom": 6,
+            "box": [
+              16.033989927795346,
+              5.661373412395311,
+              16.62896643998903,
+              6.256349924588991
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -0.21393605643676383,
+              -16.54915590967588,
+              0.38104045575691603,
+              -15.954179397482198
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -1.6598100882247901,
+              2.877951114576274,
+              -1.0648335760311103,
+              3.4729276267699545
+            ],
+            "visible": 33651
+          },
+          {
+            "zoom": 6,
+            "box": [
+              16.573667524494716,
+              16.423210926179554,
+              17.1686440366884,
+              17.018187438373236
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -0.028605686010286346,
+              12.565994761807586,
+              0.5663708261833935,
+              13.160971274001264
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -8.273265324112089,
+              10.270542982155083,
+              -7.678288811918409,
+              10.865519494348762
+            ],
+            "visible": 8
+          },
+          {
+            "zoom": 9,
+            "box": [
+              2.7012237478186423,
+              -19.84901970240221,
+              3.2962002600123226,
+              -19.254043190208527
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              9.212851657378424,
+              -5.1971055683563305,
+              9.807828169572103,
+              -4.60212905616265
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              13.216435879974297,
+              5.058562985028904,
+              13.811412392167975,
+              5.653539497222584
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -18.148904085105073,
+              -1.5890033378147332,
+              -17.55392757291139,
+              -0.9940268256210534
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              14.844588566573963,
+              -11.09594699663898,
+              15.439565078767641,
+              -10.500970484445302
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -5.809127646843037,
+              12.762529472387241,
+              -5.214151134649357,
+              13.35750598458092
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -10.916873298076789,
+              1.2262493726750432,
+              -10.32189678588311,
+              1.821225884868723
+            ],
+            "visible": 0
+          }
+        ],
+        "layers": {
+          "mesh/descriptors": {
+            "artifacts": 21262,
+            "masked_count": 201992498
+          }
+        }
+      },
+      "0.2500": {
+        "terms": [
+          "L",
+          "V",
+          "unindexed"
+        ],
+        "zoom0_visible": 8885841,
+        "boxes": [
+          {
+            "zoom": 3,
+            "box": [
+              11.879476035224181,
+              6.395639962481949,
+              16.639288132773622,
+              11.155452060031388
+            ],
+            "visible": 1833
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -4.260105132774802,
+              -12.606963687145887,
+              0.49970696477463683,
+              -7.847151589596448
+            ],
+            "visible": 108067
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -0.8062658878358118,
+              -7.046841080389127,
+              3.953546209713627,
+              -2.287028982839688
+            ],
+            "visible": 2239616
+          },
+          {
+            "zoom": 3,
+            "box": [
+              9.57103332967115,
+              -10.916431666117536,
+              14.33084542722059,
+              -6.156619568568097
+            ],
+            "visible": 7953
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -2.1267431351311945,
+              -0.25181321843798976,
+              2.6330689624182444,
+              4.507998879111449
+            ],
+            "visible": 5872579
+          },
+          {
+            "zoom": 3,
+            "box": [
+              14.304734855778266,
+              -3.248407515216533,
+              19.064546953327707,
+              1.511404582332906
+            ],
+            "visible": 12167
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -9.54287726880025,
+              6.313763625043281,
+              -4.783065171250811,
+              11.07357572259272
+            ],
+            "visible": 335985
+          },
+          {
+            "zoom": 3,
+            "box": [
+              3.2717231296300344,
+              -12.92721941652861,
+              8.031535227179473,
+              -8.167407318979171
+            ],
+            "visible": 86065
+          },
+          {
+            "zoom": 6,
+            "box": [
+              16.449348952173395,
+              17.03928704823016,
+              17.044325464367077,
+              17.634263560423843
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              12.659433485626982,
+              13.969416702307027,
+              13.25440999782066,
+              14.564393214500706
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -6.382467706916402,
+              7.407189339464655,
+              -5.787491194722722,
+              8.002165851658335
+            ],
+            "visible": 32
+          },
+          {
+            "zoom": 6,
+            "box": [
+              16.033989927795346,
+              5.661373412395311,
+              16.62896643998903,
+              6.256349924588991
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -0.21393605643676383,
+              -16.54915590967588,
+              0.38104045575691603,
+              -15.954179397482198
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -1.6598100882247901,
+              2.877951114576274,
+              -1.0648335760311103,
+              3.4729276267699545
+            ],
+            "visible": 80118
+          },
+          {
+            "zoom": 6,
+            "box": [
+              16.573667524494716,
+              16.423210926179554,
+              17.1686440366884,
+              17.018187438373236
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -0.028605686010286346,
+              12.565994761807586,
+              0.5663708261833935,
+              13.160971274001264
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -8.273265324112089,
+              10.270542982155083,
+              -7.678288811918409,
+              10.865519494348762
+            ],
+            "visible": 8
+          },
+          {
+            "zoom": 9,
+            "box": [
+              2.7012237478186423,
+              -19.84901970240221,
+              3.2962002600123226,
+              -19.254043190208527
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              9.212851657378424,
+              -5.1971055683563305,
+              9.807828169572103,
+              -4.60212905616265
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              13.216435879974297,
+              5.058562985028904,
+              13.811412392167975,
+              5.653539497222584
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -18.148904085105073,
+              -1.5890033378147332,
+              -17.55392757291139,
+              -0.9940268256210534
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              14.844588566573963,
+              -11.09594699663898,
+              15.439565078767641,
+              -10.500970484445302
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -5.809127646843037,
+              12.762529472387241,
+              -5.214151134649357,
+              13.35750598458092
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -10.916873298076789,
+              1.2262493726750432,
+              -10.32189678588311,
+              1.821225884868723
+            ],
+            "visible": 2
+          }
+        ],
+        "layers": {
+          "clusters/kmeans": {
+            "artifacts": 2,
+            "masked_count": 4428
+          },
+          "mesh/descriptors": {
+            "artifacts": 21262,
+            "masked_count": 201992498
+          }
+        }
+      },
+      "0.5000": {
+        "terms": [
+          "C",
+          "K"
+        ],
+        "zoom0_visible": 17550207,
+        "boxes": [
+          {
+            "zoom": 3,
+            "box": [
+              11.879476035224181,
+              6.395639962481949,
+              16.639288132773622,
+              11.155452060031388
+            ],
+            "visible": 12
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -4.260105132774802,
+              -12.606963687145887,
+              0.49970696477463683,
+              -7.847151589596448
+            ],
+            "visible": 392381
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -0.8062658878358118,
+              -7.046841080389127,
+              3.953546209713627,
+              -2.287028982839688
+            ],
+            "visible": 8420214
+          },
+          {
+            "zoom": 3,
+            "box": [
+              9.57103332967115,
+              -10.916431666117536,
+              14.33084542722059,
+              -6.156619568568097
+            ],
+            "visible": 2514
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -2.1267431351311945,
+              -0.25181321843798976,
+              2.6330689624182444,
+              4.507998879111449
+            ],
+            "visible": 7698156
+          },
+          {
+            "zoom": 3,
+            "box": [
+              14.304734855778266,
+              -3.248407515216533,
+              19.064546953327707,
+              1.511404582332906
+            ],
+            "visible": 12751
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -9.54287726880025,
+              6.313763625043281,
+              -4.783065171250811,
+              11.07357572259272
+            ],
+            "visible": 229301
+          },
+          {
+            "zoom": 3,
+            "box": [
+              3.2717231296300344,
+              -12.92721941652861,
+              8.031535227179473,
+              -8.167407318979171
+            ],
+            "visible": 170413
+          },
+          {
+            "zoom": 6,
+            "box": [
+              16.449348952173395,
+              17.03928704823016,
+              17.044325464367077,
+              17.634263560423843
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              12.659433485626982,
+              13.969416702307027,
+              13.25440999782066,
+              14.564393214500706
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -6.382467706916402,
+              7.407189339464655,
+              -5.787491194722722,
+              8.002165851658335
+            ],
+            "visible": 22
+          },
+          {
+            "zoom": 6,
+            "box": [
+              16.033989927795346,
+              5.661373412395311,
+              16.62896643998903,
+              6.256349924588991
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -0.21393605643676383,
+              -16.54915590967588,
+              0.38104045575691603,
+              -15.954179397482198
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -1.6598100882247901,
+              2.877951114576274,
+              -1.0648335760311103,
+              3.4729276267699545
+            ],
+            "visible": 243291
+          },
+          {
+            "zoom": 6,
+            "box": [
+              16.573667524494716,
+              16.423210926179554,
+              17.1686440366884,
+              17.018187438373236
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -0.028605686010286346,
+              12.565994761807586,
+              0.5663708261833935,
+              13.160971274001264
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -8.273265324112089,
+              10.270542982155083,
+              -7.678288811918409,
+              10.865519494348762
+            ],
+            "visible": 2098
+          },
+          {
+            "zoom": 9,
+            "box": [
+              2.7012237478186423,
+              -19.84901970240221,
+              3.2962002600123226,
+              -19.254043190208527
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              9.212851657378424,
+              -5.1971055683563305,
+              9.807828169572103,
+              -4.60212905616265
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              13.216435879974297,
+              5.058562985028904,
+              13.811412392167975,
+              5.653539497222584
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -18.148904085105073,
+              -1.5890033378147332,
+              -17.55392757291139,
+              -0.9940268256210534
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              14.844588566573963,
+              -11.09594699663898,
+              15.439565078767641,
+              -10.500970484445302
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -5.809127646843037,
+              12.762529472387241,
+              -5.214151134649357,
+              13.35750598458092
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -10.916873298076789,
+              1.2262493726750432,
+              -10.32189678588311,
+              1.821225884868723
+            ],
+            "visible": 2
+          }
+        ],
+        "layers": {
+          "mesh/descriptors": {
+            "artifacts": 26540,
+            "masked_count": 1047131783
+          }
+        }
+      },
+      "1.0000": {
+        "terms": [
+          "A",
+          "B",
+          "C",
+          "D",
+          "E",
+          "F",
+          "G",
+          "H",
+          "I",
+          "J",
+          "K",
+          "L",
+          "M",
+          "N",
+          "V",
+          "Z",
+          "unindexed"
+        ],
+        "zoom0_visible": 35920666,
+        "boxes": [
+          {
+            "zoom": 3,
+            "box": [
+              11.879476035224181,
+              6.395639962481949,
+              16.639288132773622,
+              11.155452060031388
+            ],
+            "visible": 1869
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -4.260105132774802,
+              -12.606963687145887,
+              0.49970696477463683,
+              -7.847151589596448
+            ],
+            "visible": 539839
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -0.8062658878358118,
+              -7.046841080389127,
+              3.953546209713627,
+              -2.287028982839688
+            ],
+            "visible": 12976209
+          },
+          {
+            "zoom": 3,
+            "box": [
+              9.57103332967115,
+              -10.916431666117536,
+              14.33084542722059,
+              -6.156619568568097
+            ],
+            "visible": 12345
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -2.1267431351311945,
+              -0.25181321843798976,
+              2.6330689624182444,
+              4.507998879111449
+            ],
+            "visible": 20048235
+          },
+          {
+            "zoom": 3,
+            "box": [
+              14.304734855778266,
+              -3.248407515216533,
+              19.064546953327707,
+              1.511404582332906
+            ],
+            "visible": 24929
+          },
+          {
+            "zoom": 3,
+            "box": [
+              -9.54287726880025,
+              6.313763625043281,
+              -4.783065171250811,
+              11.07357572259272
+            ],
+            "visible": 1047727
+          },
+          {
+            "zoom": 3,
+            "box": [
+              3.2717231296300344,
+              -12.92721941652861,
+              8.031535227179473,
+              -8.167407318979171
+            ],
+            "visible": 301683
+          },
+          {
+            "zoom": 6,
+            "box": [
+              16.449348952173395,
+              17.03928704823016,
+              17.044325464367077,
+              17.634263560423843
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              12.659433485626982,
+              13.969416702307027,
+              13.25440999782066,
+              14.564393214500706
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -6.382467706916402,
+              7.407189339464655,
+              -5.787491194722722,
+              8.002165851658335
+            ],
+            "visible": 63
+          },
+          {
+            "zoom": 6,
+            "box": [
+              16.033989927795346,
+              5.661373412395311,
+              16.62896643998903,
+              6.256349924588991
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -0.21393605643676383,
+              -16.54915590967588,
+              0.38104045575691603,
+              -15.954179397482198
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -1.6598100882247901,
+              2.877951114576274,
+              -1.0648335760311103,
+              3.4729276267699545
+            ],
+            "visible": 390955
+          },
+          {
+            "zoom": 6,
+            "box": [
+              16.573667524494716,
+              16.423210926179554,
+              17.1686440366884,
+              17.018187438373236
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 6,
+            "box": [
+              -0.028605686010286346,
+              12.565994761807586,
+              0.5663708261833935,
+              13.160971274001264
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -8.273265324112089,
+              10.270542982155083,
+              -7.678288811918409,
+              10.865519494348762
+            ],
+            "visible": 2108
+          },
+          {
+            "zoom": 9,
+            "box": [
+              2.7012237478186423,
+              -19.84901970240221,
+              3.2962002600123226,
+              -19.254043190208527
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              9.212851657378424,
+              -5.1971055683563305,
+              9.807828169572103,
+              -4.60212905616265
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              13.216435879974297,
+              5.058562985028904,
+              13.811412392167975,
+              5.653539497222584
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -18.148904085105073,
+              -1.5890033378147332,
+              -17.55392757291139,
+              -0.9940268256210534
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              14.844588566573963,
+              -11.09594699663898,
+              15.439565078767641,
+              -10.500970484445302
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -5.809127646843037,
+              12.762529472387241,
+              -5.214151134649357,
+              13.35750598458092
+            ],
+            "visible": 0
+          },
+          {
+            "zoom": 9,
+            "box": [
+              -10.916873298076789,
+              1.2262493726750432,
+              -10.32189678588311,
+              1.821225884868723
+            ],
+            "visible": 6
+          }
+        ],
+        "layers": {
+          "clusters/kmeans": {
+            "artifacts": 253,
+            "masked_count": 35920607
+          },
+          "mesh/descriptors": {
+            "artifacts": 28789,
+            "masked_count": 1658404289
+          }
+        }
+      }
+    }
+  },
+  "status_at_end": {
+    "compaction": {
+      "fold_failures": 0,
+      "fold_requested": false,
+      "folds": 1,
+      "last_attr_bytes_read": 4606772022,
+      "last_attr_bytes_written": 4731561550,
+      "last_rss_bytes": 8107405312,
+      "last_secs": 166,
+      "live_rows": 35920666,
+      "passes": [
+        {
+          "anon_bytes": 4082053120,
+          "ms": 43,
+          "pass": "entry",
+          "rss_bytes": 6040793088
+        },
+        {
+          "anon_bytes": 4094283776,
+          "ms": 10789,
+          "pass": "1 row space",
+          "rss_bytes": 6033817600
+        },
+        {
+          "anon_bytes": 4115259392,
+          "ms": 2455,
+          "pass": "2 postings",
+          "rss_bytes": 6058848256
+        },
+        {
+          "anon_bytes": 4129935360,
+          "ms": 6002,
+          "pass": "3 external ids",
+          "rss_bytes": 6054768640
+        },
+        {
+          "anon_bytes": 4127715328,
+          "ms": 74710,
+          "pass": "4a attributes",
+          "rss_bytes": 6041489408
+        },
+        {
+          "anon_bytes": 4127715328,
+          "ms": 40469,
+          "pass": "4c entity terms",
+          "rss_bytes": 6034145280
+        },
+        {
+          "anon_bytes": 4127715328,
+          "ms": 12892,
+          "pass": "5 digests + fsync",
+          "rss_bytes": 6023041024
+        },
+        {
+          "anon_bytes": 4127707136,
+          "ms": 29,
+          "pass": "6 hand-off",
+          "rss_bytes": 6023032832
+        },
+        {
+          "anon_bytes": 4156076032,
+          "ms": 1991,
+          "pass": "7 memberships",
+          "rss_bytes": 6044925952
+        },
+        {
+          "anon_bytes": 4169244672,
+          "ms": 4363,
+          "pass": "8 derived",
+          "rss_bytes": 6344765440
+        },
+        {
+          "anon_bytes": 4169244672,
+          "ms": 0,
+          "pass": "9 report",
+          "rss_bytes": 6344765440
+        },
+        {
+          "anon_bytes": 4169244672,
+          "ms": 321,
+          "pass": "10 manifest",
+          "rss_bytes": 6344765440
+        },
+        {
+          "anon_bytes": 4169244672,
+          "ms": 7,
+          "pass": "11 flip",
+          "rss_bytes": 6344765440
+        },
+        {
+          "anon_bytes": 4169244672,
+          "ms": 0,
+          "pass": "12 retire",
+          "rss_bytes": 6344765440
+        },
+        {
+          "anon_bytes": 4169244672,
+          "ms": 9255,
+          "pass": "13 open",
+          "rss_bytes": 7753940992
+        },
+        {
+          "anon_bytes": 4169244672,
+          "ms": 0,
+          "pass": "14 adopt",
+          "rss_bytes": 7754739712
+        },
+        {
+          "anon_bytes": 4378312704,
+          "ms": 2126,
+          "pass": "15 warm",
+          "rss_bytes": 8107405312
+        },
+        {
+          "anon_bytes": 4378312704,
+          "ms": 14,
+          "pass": "16 wal",
+          "rss_bytes": 8107405312
+        },
+        {
+          "anon_bytes": 4378312704,
+          "ms": 557,
+          "pass": "17 reclaim",
+          "rss_bytes": 6238420992
+        }
+      ]
+    },
+    "compute": {
+      "admission": 48,
+      "in_flight": 0,
+      "queue": 96,
+      "shed_total": 0,
+      "streaming": 0,
+      "waiting": 0
+    },
+    "entity_id_high_water": 35920666,
+    "fragment_cache": {
+      "bound_bytes": 1073741824,
+      "building_refusals": 0,
+      "bytes": 486822,
+      "entries": 5,
+      "evictions": 0,
+      "hits": 7,
+      "misses": 5,
+      "oversized_admissions": 0,
+      "rebuilds": 5,
+      "thrashing": false,
+      "young_evictions": 0
+    },
+    "fragmentation": {
+      "allocation": {
+        "containers": 6445,
+        "postings": 16522997,
+        "rows": 3592067,
+        "runs": 598096,
+        "scope": "commit-window-allocation",
+        "windows": 359
+      },
+      "containers": 1051,
+      "postings": 16522997,
+      "postings_per_container": 15721.215033301618,
+      "rows": 3592067,
+      "run_ratio": 15.088868668240549,
+      "runs": 598096,
+      "scope": "delta-tiers",
+      "tiers": 11
+    },
+    "ingest": {
+      "admission": 64,
+      "in_flight": 0,
+      "max_batch_bytes": 16777216,
+      "max_batch_rows": 10000,
+      "shed_total": 0
+    },
+    "overlay": {
+      "depth": 0,
+      "retirable": 0,
+      "soft_limit_alarms": 0
+    },
+    "partitions": [
+      {
+        "partition": "default",
+        "readiness": true,
+        "segments_version": 15,
+        "watermark": 35920666
+      }
+    ],
+    "row_projection_cache": {
+      "bound_bytes": 2147483648,
+      "building_refusals": 0,
+      "bytes": 60736516,
+      "entries": 15,
+      "evictions": 0,
+      "hits": 151,
+      "misses": 29,
+      "oversized_admissions": 0,
+      "thrashing": false,
+      "waiters_now": 0,
+      "waits_satisfied": 0,
+      "young_evictions": 0
+    },
+    "segments": [
+      {
+        "count": 1,
+        "partition": "default",
+        "view": "knn"
+      }
+    ],
+    "sessions": {
+      "retained": 11,
+      "sweep_at": 16,
+      "sweeps": 0,
+      "swept_total": 0
+    },
+    "write_executor": {
+      "apply_nanos_max": 550804634,
+      "apply_nanos_total": 19196538645,
+      "bench_timing": true,
+      "coalesces": 1,
+      "deny_submitted": 0,
+      "flush": {
+        "buffered_items": 0,
+        "flush_failures": 0,
+        "flush_requested": false,
+        "flush_skips": 0,
+        "flushable_items": 0,
+        "flushes": 11,
+        "in_flight": false,
+        "overlay_publications": 110,
+        "refreshes": 19,
+        "ticks": 515
+      },
+      "flush_stages": {
+        "bench_timing": true,
+        "executions": 11,
+        "executor_nanos": {
+          "artifacts": 219810,
+          "buffer_rebase": 1663989459,
+          "compose": 389619257,
+          "denied": 125867,
+          "discarded": 0,
+          "dispatch": 100725899,
+          "drop_superseded": 66982915,
+          "manifest": 5314769,
+          "manifest_commit": 421254431,
+          "plan": 4504455115,
+          "publish_wall": 2856799366,
+          "rotate": 273399551,
+          "shapes_install": 6002,
+          "swap": 1992152,
+          "with_segment": 33710159
+        },
+        "flushes": 11,
+        "pool_nanos": {
+          "delta_tier": 132406304,
+          "digests": 282972606,
+          "drop_plan": 2903660100,
+          "entity_terms": 100884294,
+          "failed": 0,
+          "filter_extents": 3358920845,
+          "pool_wall": 54367632204,
+          "promote": 680174002,
+          "record_extent": 5353490313,
+          "reopen": 3610241,
+          "rows": 960717498,
+          "scoped_extents": 16719,
+          "segment": 2661131584,
+          "shapes": 2921,
+          "text_extents": 37917327398
+        },
+        "rows_executed": 3592067,
+        "rows_published": 3592067
+      },
+      "merges": 3,
+      "posture": "running",
+      "ready": true,
+      "stage_nanos": {
+        ".buf_insert": 4213383471,
+        ".est_fwd": 2465812350,
+        ".est_inv": 1430728008,
+        ".wal_pos": 140488477,
+        "admit": 1594662787,
+        "allocate": 3088132723,
+        "apply_rows": 8845723630,
+        "buffer_clone": 7763447294,
+        "record_batch": 20409680,
+        "submit\u2192receipt": 333666848439,
+        "swap": 4946528,
+        "wal_append": 2452130933,
+        "wal_fsync": 3011314019
+      },
+      "wal_appends": 470,
+      "wal_fsyncs": 469,
+      "wal_recoveries": 0,
+      "work_completed": 935,
+      "work_depth": 0,
+      "work_in_flight_nanos": 0,
+      "work_service_nanos_ewma": 78550543,
+      "work_submitted": 935
+    }
+  },
+  "ran_s": 3083.2,
+  "driver_peak_rss": 1789931520
+}

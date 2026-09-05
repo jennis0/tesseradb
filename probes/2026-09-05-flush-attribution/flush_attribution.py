@@ -53,6 +53,9 @@ EXECUTE = (
     "scoped_extents", "record_extent", "text_extents", "digests", "reopen", "shapes",
     "drop_plan", "failed",
 )
+# The sub-stages that partition `text_extents`, printed indented under it. They are in
+# `pool_nanos` and not in `EXECUTE`: counted there they would double `text_extents`.
+TEXT = ("text_rows", "text_tokenise_terms", "text_dict", "text_postings", "text_presence")
 
 
 def _per(nanos: int, count: int, rows: int) -> dict:
@@ -84,6 +87,8 @@ def flush_laps(before: dict, after: dict) -> dict:
     pool = diff("pool_nanos")
     execute_sum = sum(pool[s] for s in EXECUTE)
     publish_sum = sum(executor[s] for s in PUBLISH)
+    # A binary from before the sub-laps has no `text_*` keys; the table then shows them absent.
+    text_sum = sum(pool.get(s, 0) for s in TEXT)
     return {
         "bench_timing": bool(fa.get("bench_timing")),
         "executions": executions,
@@ -93,6 +98,8 @@ def flush_laps(before: dict, after: dict) -> dict:
         "pool": {name: _per(n, executions, rows_executed) for name, n in pool.items()},
         "execute_sum": _per(execute_sum, executions, rows_executed),
         "execute_unattributed": _per(pool["pool_wall"] - execute_sum, executions, rows_executed),
+        "text_sum": _per(text_sum, executions, rows_executed),
+        "text_unattributed": _per(pool["text_extents"] - text_sum, executions, rows_executed),
         "executor": {
             name: (
                 _per(n, executions, rows_executed)
@@ -215,6 +222,11 @@ def print_table(result: dict) -> None:
     print(header)
     for name in EXECUTE:
         print(_row(name, laps["pool"][name]))
+        if name == "text_extents" and all(s in laps["pool"] for s in TEXT):
+            for sub in TEXT:
+                print(_row(f".{sub[5:]}", laps["pool"][sub], indent="      "))
+            print(_row("= text sum", laps["text_sum"], indent="      "))
+            print(_row("unattributed", laps["text_unattributed"], indent="      "))
     print(_row("= execute sum", laps["execute_sum"]))
     print(_row("pool_wall", laps["pool"]["pool_wall"]))
     print(_row("unattributed", laps["execute_unattributed"]))

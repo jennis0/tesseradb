@@ -492,11 +492,25 @@ pub enum Ack {
     /// between; across two principals it is a corpus-wide count over objects one of them may not
     /// see, which is C8's row. The `tessera_id` is the only artifact address that crosses the wire.
     ArtifactsPublished { entities: Vec<EntityId> },
-    /// Memberships grew. **Nothing to return: the caller named the artifacts**, by the keys they
-    /// published them under — the same reason [`Ack::Changed`] carries nothing. No identity was
-    /// minted, so there is no new `tessera_id` to hand back, and the ordinals the growth resolved
-    /// to are exactly what never crosses the wire (C8).
-    MembershipsGrown,
+    /// Memberships grew: one receipt per join the caller submitted, in the caller's order.
+    ///
+    /// **The artifact's entity, which the handler turns into a `tessera_id`, and how many of the
+    /// joining members it did not already hold.** No identity was minted, and the ordinals the
+    /// growth resolved to are exactly what never crosses the wire (C8). A membership size is not
+    /// here either: `joined` is bounded by the caller's own list, so it says nothing about the
+    /// members they did not send.
+    MembershipsGrown { grown: Vec<MembershipGrown> },
+}
+
+/// One join's receipt inside [`Ack::MembershipsGrown`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MembershipGrown {
+    /// The artifact's own entity: the address its `tessera_id` blinds, and the one a later
+    /// suppression names.
+    pub entity: EntityId,
+    /// How many of the joining members were not already in the membership. Zero where the join
+    /// named the artifact and added nothing to it, which is accepted rather than refused.
+    pub joined: u64,
 }
 
 /// Why an accepted command failed while executing. See [`SubmitError`] for the "never started"

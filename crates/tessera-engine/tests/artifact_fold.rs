@@ -1218,9 +1218,26 @@ fn publication_refuses_a_deleted_member_and_accepts_a_suppressed_one() {
             fx.members(0..300),
         )],
     );
+    let detail = match refused {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!(
+            "a membership naming a deleted document is refused rather than published into silence"
+        ),
+    };
+    // The refusal is the caller's 422 body, so it carries a count and a position and never an
+    // entity id (I10): every number in it is one of those two.
+    let numbers: Vec<&str> = detail
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|run| !run.is_empty())
+        .collect();
+    assert_eq!(
+        numbers,
+        vec!["1", "0"],
+        "one deleted member, in artifact 0, and nothing else numeric: {detail}"
+    );
     assert!(
-        refused.is_err(),
-        "a membership naming a deleted document is refused rather than published into silence"
+        !detail.contains(&deleted.raw().to_string()),
+        "the deleted entity's id must not appear: {detail}"
     );
 
     // The same batch without the deleted member, and still carrying the suppressed one.
