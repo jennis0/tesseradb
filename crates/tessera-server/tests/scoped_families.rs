@@ -1213,11 +1213,12 @@ const FILLER: Written = Written {
 /// its **key**, never a code.
 fn scoped_batch(rows: &[(u64, f64, f64, Written)]) -> Vec<u8> {
     use arrow::array::BinaryArray;
+    let access = access_column(rows.iter().map(|_| "0"));
     let schema = Arc::new(ArrowSchema::new(vec![
         Field::new("external_id", DataType::Binary, true),
         Field::new("x", DataType::Float64, false),
         Field::new("y", DataType::Float64, false),
-        Field::new("access", DataType::Utf8, false),
+        access_field(&access),
         Field::new("mood", DataType::Utf8, true),
         Field::new("sector", DataType::Utf8, true),
         Field::new("note", DataType::Utf8, true),
@@ -1236,7 +1237,7 @@ fn scoped_batch(rows: &[(u64, f64, f64, Written)]) -> Vec<u8> {
             Arc::new(Float64Array::from_iter_values(
                 rows.iter().map(|(_, _, y, _)| *y),
             )),
-            Arc::new(StringArray::from_iter_values(rows.iter().map(|_| "0"))),
+            Arc::new(access),
             Arc::new(StringArray::from_iter_values(
                 rows.iter().map(|(.., w)| w.mood),
             )),

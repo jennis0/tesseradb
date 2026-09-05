@@ -15,9 +15,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{
-    Array, BinaryArray, Float32Array, Float64Array, StringArray, UInt32Array, UInt64Array,
-};
+use arrow::array::{Array, BinaryArray, Float32Array, Float64Array, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;
@@ -1072,22 +1070,52 @@ pub async fn control_status(server: &TestServer) -> serde_json::Value {
         .unwrap()
 }
 
+/// The wire's `access` column (contracts §3.4, decision 0129): one **list** of labels per row,
+/// each element one label taken verbatim. `rows` gives each row's labels; an empty slice is a row
+/// with no label. Declare the field with the array's own `data_type()`, which carries the list's
+/// element field.
+pub fn access_lists(rows: &[&[&str]]) -> arrow::array::ListArray {
+    let mut builder = arrow::array::ListBuilder::new(arrow::array::StringBuilder::new());
+    for labels in rows {
+        for label in *labels {
+            builder.values().append_value(label);
+        }
+        builder.append(true);
+    }
+    builder.finish()
+}
+
+/// The `access` field for a schema, carrying the list's own element field.
+pub fn access_field(access: &arrow::array::ListArray) -> Field {
+    Field::new("access", access.data_type().clone(), false)
+}
+
+/// [`access_lists`] for the common case of exactly one label per row.
+pub fn access_column<'a>(labels: impl IntoIterator<Item = &'a str>) -> arrow::array::ListArray {
+    let mut builder = arrow::array::ListBuilder::new(arrow::array::StringBuilder::new());
+    for label in labels {
+        builder.values().append_value(label);
+        builder.append(true);
+    }
+    builder.finish()
+}
+
 /// An Arrow ingest batch whose `external_id` column is nullable — contracts §3.4 r6 makes the
 /// external id optional, and an item ingested without one is addressable only by its `tessera_id`.
 ///
 /// Shared rather than copied: two binaries build this body, and a schema that drifted between them
 /// would fail as a server-side parse error rather than as a test disagreement.
 pub fn build_ingest_batch_optional(rows: &[(Option<&[u8]>, f32, f32, &str)]) -> Vec<u8> {
+    let access_array = access_column(rows.iter().map(|(_, _, _, a)| *a));
     let schema = Arc::new(Schema::new(vec![
         Field::new("external_id", DataType::Binary, true),
         Field::new("x", DataType::Float32, false),
         Field::new("y", DataType::Float32, false),
-        Field::new("access", DataType::Utf8, false),
+        access_field(&access_array),
     ]));
     let ext_array = BinaryArray::from_iter(rows.iter().map(|(id, _, _, _)| *id));
     let x_array = Float32Array::from_iter_values(rows.iter().map(|(_, x, _, _)| *x));
     let y_array = Float32Array::from_iter_values(rows.iter().map(|(_, _, y, _)| *y));
-    let access_array = StringArray::from_iter_values(rows.iter().map(|(_, _, _, a)| *a));
 
     let batch = RecordBatch::try_new(
         schema.clone(),

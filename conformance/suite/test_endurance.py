@@ -886,8 +886,9 @@ def test_endurance_long_life(tmp_path_factory):
         fx_keys = window.column("fx_key").to_pylist()
         access = window.column("access").to_pylist()
         visible = []
-        for offset, (fx, terms_text) in enumerate(zip(fx_keys, access)):
-            terms = frozenset(int(part) for part in terms_text.split(",") if part)
+        for offset, (fx, labels) in enumerate(zip(fx_keys, access)):
+            # One label per list element, verbatim (decision 0129).
+            terms = frozenset(int(label) for label in labels)
             if terms & grant:
                 visible.append(fx)
                 ingested_visible.append(

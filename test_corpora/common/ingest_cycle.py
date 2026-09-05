@@ -7,28 +7,40 @@ entities back, builds the complement, serves it, and puts the hold-out through `
 stated as a number instead of a principle: *build is ingest into an empty database*, so a
 deployment assembled either way must answer identically.
 
-Everything is ingested after the build (owner ruling, 2026-09-03)
-----------------------------------------------------------------
+Which route a layer's membership takes
+--------------------------------------
 
-**The base bundle carries points and declarations, and nothing else.** The rung's `corpus.toml` is
-copied with every `[[layer]]`'s `source` and `[layer.members]` removed, so each layer is declared —
-kind, levels, visibility rules, content kinds — and empty. Its artifacts, their memberships and
-their supplied content are then published through `PUT /control/layers/{name}/artifacts` **after
-every point they depend on has been ingested**. An artifact cannot depend on a point that does not
-exist yet, and that ordering is the only constraint: it holds at every fraction, so at *f* = 10% the
-base is 90% of the points and none of the artifacts.
+**The base bundle carries the points, the declarations, and the member table of any layer whose
+membership the build mints from a column.** The rung's `corpus.toml` is copied with every
+`[[layer]]`'s `source` removed, so each layer is declared — kind, levels, visibility rules, content
+kinds — and the route its membership takes follows from what it declares:
 
-**No membership travels on a column, at either entry point, and that follows from the ordering
-rather than from a preference.** A point names its artifacts in a column of the ingest batch or of
-the rows parquet — plain multi-membership under `flat` and `dag` alike
-([decision 0125](../../docs/decisions/0125-a-dag-list-column-is-membership-not-lineage.md)) — but a
-key naming no artifact yet is minted, and `LayerRegistry::resolve_or_mint` refuses to mint on a
-layer that declares supplied content: an artifact served without content its layer declared cannot
-be told apart from one whose content was withheld. Both of this rung's layers declare some. So
-under *artifacts after their points* a column would always arrive first and always be refused —
-at the base build, where the rows are built before anything is published, and on the wire, where
-the batch precedes the publication. Membership arrives with the artifact that holds it. The driver
-drops the rung's own `mesh/descriptors` column from the base points file for the same reason.
+* **A layer with supplied content** (rung 3's MeSH descriptors, every `clusters/kmeans`) is
+  declared and empty at the base: `[layer.members]` is removed with the roster. Its artifacts,
+  their memberships and their supplied content are published through
+  `PUT /control/layers/{name}/artifacts` **after every point they depend on has been ingested**
+  (owner ruling, 2026-09-03). A key naming no artifact yet is minted, and
+  `LayerRegistry::resolve_or_mint` refuses to mint on a layer that declares supplied content — an
+  artifact served without content its layer declared cannot be told apart from one whose content
+  was withheld — so a membership column at either entry point would always arrive first and
+  always be refused. Membership arrives with the artifact that holds it, and the driver drops such
+  a layer's column from the base points file for the same reason.
+* **A layer with no supplied content and no roster** (rung 5's `taxonomy/tree`: an open value set
+  with computed content, minted from a list column) keeps `[layer.members]` at the base build,
+  over the base's rows only, and its hold-out rows carry the same list on the wire as the ingest
+  batch's column named for the layer — one entry per declared level, an unknown key minting the
+  artifact that carries its name and the computed content its points give it
+  ([decision 0128](../../docs/decisions/0128-a-layer-with-no-supplied-content-travels-as-a-column-at-ingest.md);
+  contracts §3.4). Both entry points read that column by one rule (decision 0091), and this is
+  where the ingest cycle exercises the mint-from-column path at scale. The member table is read in
+  lockstep with the points file, both ascending by entity and a row group at a time, so it is
+  never held whole.
+* **An attribute-membership layer** (`publishers/source`) carries nothing: its membership is
+  evaluated against the indexed column every batch already sends.
+
+An artifact cannot depend on a point that does not exist yet, and that ordering is the only
+constraint: it holds at every fraction, so at *f* = 10% the base is 90% of the points and none of
+the published artifacts.
 
 ⊘ **What this drops, deliberately.** An earlier driver built the base *with* the rung's artifact
 roster. That put the layers on the build side of the split and made the *f* = 100% cell impossible
@@ -44,7 +56,8 @@ What it measures, in order
    schema as the whole-corpus build's.
 2. **Online ingest** — Arrow IPC batches of 10,000 rows at *C* concurrent callers, `items/s`
    acked, ack p50/p99, and every refusal counted by status (429 backpressure, 409 duplicate or
-   batch-id conflict, 422 bounds or contract). The batches carry points alone — see below.
+   batch-id conflict, 422 bounds or contract). The batches carry the points, their labels as a
+   list, and the member list of any layer on the column route — see above.
 3. **Publication** — every layer's whole roster, in batches under a byte cap, with each artifact's
    whole member set (base and hold-out alike, by external addressing), its ranked content with its
    generating set, and its `parent` list. Its own figure: artifacts/s and members/s.
@@ -238,15 +251,21 @@ def state_extent(corpus_toml: Path, bundle: Path, view: str | None = None) -> di
     return {"view": chosen["id"], "quantisation": q, "from_version": version}
 
 
-def base_declaration(text: str) -> tuple[str, list[dict]]:
-    """The rung's `corpus.toml` as a **declaration-only** one: every layer stated, none supplied.
+def base_declaration(text: str, keep_members: Sequence[str] = ()) -> tuple[str, list[dict]]:
+    """The rung's `corpus.toml` as the base's: every layer stated, and only a column-route layer's
+    member table kept.
 
     A `[[layer]]` block says two kinds of thing. Its declaration — kind, levels, views, the three
     disclosure controls, the content kinds — is what a running deployment holds and what
     `PUT /control/layers` takes. Its `source` and `[layer.members]` are *acquisition*: where the
     rows come from, which is build-only and is the half decision 0091 excludes from the rule that
-    the two entry points say the same things (`configuration.md` §2). Removing exactly that half
-    leaves a layer that exists, is empty, and can be published into.
+    the two entry points say the same things (`configuration.md` §2). Removing that half leaves a
+    layer that exists, is empty, and can be published into.
+
+    `keep_members` names the layers whose `[layer.members]` stays: the ones with no supplied
+    content and no roster, whose membership the build mints from the member table and whose
+    hold-out rows carry the same list on the wire (decision 0128; the module doc). Every layer's
+    `source` is removed regardless, a roster being the publication route's input.
 
     **A layer declared with no source is legal and needed no change** (`Config::layer_sources`
     carries `None` for it): the build reads no artifact table, plans no artifacts, and writes an
@@ -276,6 +295,10 @@ def base_declaration(text: str) -> tuple[str, list[dict]]:
         if head.startswith("[") and not head.startswith("[layer.members]"):
             skipping = False
         if head.startswith("[layer.members]"):
+            if layer is not None and layer["layer"] in keep_members:
+                layer["kept"] = "[layer.members]"
+                out.append(line)
+                continue
             # The block runs to the next table header at any indent, or to the end of the file.
             skipping = True
             if layer is not None:
@@ -299,8 +322,12 @@ def declared_layers(rung: Path) -> list[dict]:
     One record per layer, in declaration order: `name`; `roster`, the path the layer's own `source`
     names, or None where the layer declares none (an open value set mints its artifacts from the
     member rows); `members`, the path `[layer.members] source` names, or None; `attribute`, the
-    column an attribute-membership layer is drawn from, or None. A `source` is a key into
-    `[sources]` or a file name, as `Config::layer_sources` reads it.
+    column an attribute-membership layer is drawn from, or None; `supplied`, whether the layer
+    declares supplied content; and `route`, how its membership reaches the folded deployment
+    (the module doc): `attribute` for a predicate layer, `column` for a layer with no supplied
+    content and no roster whose member table the base build reads and whose hold-out rows carry
+    on the wire, `publication` for everything else. A `source` is a key into `[sources]` or a file
+    name, as `Config::layer_sources` reads it.
 
     Read off the declaration rather than listed in this file: a table of two layer names ran every
     rung's cell with at most those two, so rung 4's `topics/openalex` was never published and no
@@ -315,12 +342,24 @@ def declared_layers(rung: Path) -> list[dict]:
     out = []
     for layer in declared.get("layer", []):
         membership = layer.get("membership")
+        attribute = membership.get("attribute") if isinstance(membership, dict) else None
+        roster = path_of(layer.get("source"))
+        members = path_of((layer.get("members") or {}).get("source"))
+        supplied = bool((layer.get("content") or {}).get("supplied"))
+        if attribute is not None:
+            route = "attribute"
+        elif roster is None and not supplied and members is not None:
+            route = "column"
+        else:
+            route = "publication"
         out.append(
             {
                 "name": layer["name"],
-                "roster": path_of(layer.get("source")),
-                "members": path_of((layer.get("members") or {}).get("source")),
-                "attribute": membership.get("attribute") if isinstance(membership, dict) else None,
+                "roster": roster,
+                "members": members,
+                "attribute": attribute,
+                "supplied": supplied,
+                "route": route,
                 "value_set": layer.get("value_set"),
                 "hierarchy": (layer.get("hierarchy") or {}).get("kind"),
             }
@@ -328,37 +367,65 @@ def declared_layers(rung: Path) -> list[dict]:
     return out
 
 
+def member_table_columns(schema: pa.Schema) -> tuple[str, str]:
+    """`(entity column, key column)` of a member table, as the build reads one: `entity` (or
+    `entity_id`) and `key`."""
+    names = set(schema.names)
+    entity = next((name for name in ("entity", "entity_id") if name in names), None)
+    if entity is None or "key" not in names:
+        raise ValueError(
+            f"a member table needs an `entity` (or `entity_id`) column and a `key` column; this one "
+            f"has {schema.names}"
+        )
+    return entity, "key"
+
+
 def write_base_inputs(rung: Path, out: Path, base_ids: np.ndarray) -> dict:
-    """The complement's inputs: **the points, and the declaration. Nothing else.**
+    """The complement's inputs: **the points, the declaration, and a column-route layer's member
+    table over the base's rows.** Nothing else.
 
-    No artifact roster and no member table is copied, and that is the whole shape of this driver
-    (owner ruling, 2026-09-03). Every artifact, every membership and every supplied content is
-    published on the wire after the points it depends on have been ingested, so a roster beside the
-    build would be the same layer supplied twice — once as a build input and once as a publication —
-    and the level's keys would collide on the second.
+    No artifact roster is copied, and no member table of a layer on the publication route (the
+    module doc). Every such artifact, its membership and its supplied content is published on the
+    wire after the points it depends on have been ingested, so a roster beside the build would be
+    the same layer supplied twice — once as a build input and once as a publication — and the
+    level's keys would collide on the second.
 
-    **A membership column of the points file is dropped with them.** A rung may name a point's
-    artifacts in a column of its own rows (decision 0125; `mesh.py` writes one), which is the other
-    way a membership arrives at a build — and it would arrive *before* the artifacts exist, on a
-    layer declaring supplied content, which `LayerRegistry::resolve_or_mint` refuses outright: an
-    artifact minted from a key alone could not be served, so the key is unmintable and the build
-    stops. Membership travels with the artifact that holds it here, and only there.
+    **A publication-route layer's membership column is dropped from the points file with it.** A
+    rung may name a point's artifacts in a column of its own rows (decision 0125; `mesh.py` writes
+    one), which is the other way a membership arrives at a build — and it would arrive *before* the
+    artifacts exist, on a layer declaring supplied content, which `LayerRegistry::resolve_or_mint`
+    refuses outright: an artifact minted from a key alone could not be served, so the key is
+    unmintable and the build stops. Membership travels with the artifact that holds it there.
 
-    `corpus.toml` is rewritten by [`base_declaration`], which removes each layer's acquisition and
-    keeps its declaration.
+    **A column-route layer's member table is filtered to the base's rows** and written beside the
+    points under the name the declaration gives it, so the base build mints exactly the artifacts
+    the base's rows name; the hold-out's rows name theirs on the wire (decision 0128).
+
+    `corpus.toml` is rewritten by [`base_declaration`], which removes each layer's roster and
+    keeps a column-route layer's `[layer.members]`.
     """
     out.mkdir(parents=True, exist_ok=True)
-    layers = [layer["name"] for layer in declared_layers(rung)]
+    layers = declared_layers(rung)
+    published = [layer["name"] for layer in layers if layer["route"] == "publication"]
+    on_column = [layer for layer in layers if layer["route"] == "column"]
     kept = {
         "points": filter_parquet(
-            rung / "points.parquet", out / "points.parquet", "entity_id", base_ids, drop=layers
+            rung / "points.parquet", out / "points.parquet", "entity_id", base_ids, drop=published
         ),
         "dropped_membership_columns": [
             name
             for name in pq.ParquetFile(rung / "points.parquet").schema_arrow.names
-            if name in set(layers)
+            if name in set(published)
         ],
+        "member_tables": {},
     }
+    for layer in on_column:
+        members = layer["members"]
+        entity, _ = member_table_columns(pq.ParquetFile(members).schema_arrow)
+        kept["member_tables"][layer["name"]] = {
+            "file": members.name,
+            "rows": filter_parquet(members, out / members.name, entity, base_ids),
+        }
     # **Every file the declaration still names**, read off the declaration rather than listed here.
     # A vocabulary is copied whole — it is a value set, not rows, and a base built from half the
     # corpus declares the same closed set. Any *other* view's points file is filtered by entity id
@@ -388,14 +455,16 @@ def write_base_inputs(rung: Path, out: Path, base_ids: np.ndarray) -> dict:
         got = path_of(source)
         if got.exists():
             kept.setdefault("views", {})[got.name] = filter_parquet(
-                got, out / got.name, "entity_id", base_ids, drop=layers
+                got, out / got.name, "entity_id", base_ids, drop=published
             )
 
     for name in ("branch.parquet", ".env"):
         source = rung / name
         if source.exists() and not (out / name).exists():
             shutil.copy2(source, out / name)
-    declaration, removed = base_declaration((rung / "corpus.toml").read_text())
+    declaration, removed = base_declaration(
+        (rung / "corpus.toml").read_text(), keep_members=[layer["name"] for layer in on_column]
+    )
     (out / "corpus.toml").write_text(declaration)
     kept["declaration_only"] = removed
     (out / "tessera.toml").write_text((rung / "tessera.toml").read_text())
@@ -416,8 +485,9 @@ def wire_columns(rung: Path) -> tuple[str | None, list[str]]:
     column that rung does not have.
 
     The access column is the first `point_visibility.field` any view declares — a rung compartments
-    on one column, and the plugin takes one descriptor list a row; it may be a list per row (rung 3
-    and MedCPT) or one string (rung 4's licence), and [`encode_batch`] handles both. The attribute
+    on one column, and the wire takes one list of labels a row; the rung's column may be a list per
+    row (rung 3 and MedCPT) or one string (rung 4's licence, rung 5's publisher), and
+    [`encode_batch`] sends both as the list (decision 0129). The attribute
     columns are every `[[attribute]]` the declaration names that this rung's points file actually
     holds, which is what makes the ingested rows carry the same columns the built ones do; a rung
     whose points file does not hold one of them is a rung whose build would have refused too.
@@ -439,20 +509,29 @@ def wire_columns(rung: Path) -> tuple[str | None, list[str]]:
     return access, attributes
 
 
-def encode_batch(table: pa.Table, access: str | None, attributes: list[str]) -> bytes:
-    """One Arrow IPC stream for a slice of the hold-out. **Points alone.**
+def encode_batch(
+    table: pa.Table, access: str | None, attributes: list[str], columns: Sequence[str] = ()
+) -> bytes:
+    """One Arrow IPC stream for a slice of the hold-out.
 
-    `access` is the passthrough plugin's wire form — a comma-separated descriptor list, so a list
-    column is joined and a scalar column travels as itself — and `external_id` is the **source
-    entity id, eight bytes little-endian**, the same form the build mints under
-    `--mint-external-ids` (see [`external_ids`]). That is what makes an ingested row addressable on
-    `/control/changes` afterwards, and what an artifact's `members` names it by on the same footing
-    as a base row. Every declared attribute travels beside it, by the name the declaration gives it
-    — see [`wire_columns`].
+    `access` is the wire's **list of labels**, one element per label, each taken verbatim
+    (contracts §3.4, decision 0129): a rung's list column travels as itself, a scalar compartment
+    column as one-element lists, and a null — a null scalar or a null list — as the empty list,
+    which the server would otherwise refuse for the whole batch. **On the wire the empty list is a
+    row visible to nobody; the build fills a null or empty label with the view's
+    `point_visibility.default`.** The two entry points differ there until the owner rules, and this
+    driver applies no default of its own. Nothing here joins or splits a label, so a compartment
+    key containing a comma is one term on both sides of the split. `external_id` is the **source entity id, eight bytes little-endian**, the same form the
+    build mints under `--mint-external-ids` (see [`external_ids`]). That is what makes an ingested
+    row addressable on `/control/changes` afterwards, and what an artifact's `members` names it by
+    on the same footing as a base row. Every declared attribute travels beside it, by the name the
+    declaration gives it — see [`wire_columns`].
 
-    **No membership column, and that is the ordering rather than an omission**: the column would
-    name artifacts that do not exist yet, and a layer declaring supplied content refuses to mint
-    them (`LayerRegistry::resolve_or_mint`). The module docstring has the whole of it.
+    `columns` names the column-route layers (the module doc): each is a column of `table` already
+    named for the layer, carrying the row's member list as the member table spells it — one entry
+    per declared level, null where the row is in no artifact at that level — and it travels as
+    itself. A publication-route layer has no column here, because the column would name artifacts
+    that do not exist yet and a layer declaring supplied content refuses to mint them.
     """
     entities = table.column("entity_id").to_pylist()
     arrays = [
@@ -462,10 +541,18 @@ def encode_batch(table: pa.Table, access: str | None, attributes: list[str]) -> 
     names = ["x", "y"]
     if access is not None:
         column = table.column(access).combine_chunks()
+        if isinstance(column, pa.ChunkedArray):
+            column = pa.concat_arrays(column.chunks) if column.num_chunks else pa.array([], column.type)
         if pa.types.is_list(column.type) or pa.types.is_large_list(column.type):
-            column = pa.array([",".join(v or []) for v in column.to_pylist()], pa.string())
+            column = column.cast(pa.list_(pa.string()))
+            lengths = pc.fill_null(pc.list_value_length(column), 0).to_numpy(zero_copy_only=False)
+            offsets = np.concatenate([[0], np.cumsum(lengths)]).astype(np.int32)
+            column = pa.ListArray.from_arrays(pa.array(offsets, pa.int32()), pc.list_flatten(column))
         else:
-            column = column.cast(pa.string())
+            values = column.cast(pa.string())
+            lengths = pc.cast(pc.is_valid(values), pa.int32()).to_numpy(zero_copy_only=False)
+            offsets = np.concatenate([[0], np.cumsum(lengths)]).astype(np.int32)
+            column = pa.ListArray.from_arrays(pa.array(offsets, pa.int32()), values.drop_null())
         arrays.append(column)
         names.append("access")
     arrays.append(pa.array([int(e).to_bytes(8, "little") for e in entities], pa.binary()))
@@ -477,6 +564,9 @@ def encode_batch(table: pa.Table, access: str | None, attributes: list[str]) -> 
     for name in attributes:
         arrays.append(table.column(name).combine_chunks())
         names.append(name)
+    for name in columns:
+        arrays.append(table.column(name).combine_chunks())
+        names.append(name)
     batch = pa.RecordBatch.from_arrays(
         [pa.array(a) if not isinstance(a, pa.Array) else a for a in arrays], names=names
     )
@@ -486,6 +576,71 @@ def encode_batch(table: pa.Table, access: str | None, attributes: list[str]) -> 
     return sink.getvalue().to_pybytes()
 
 
+class MemberStream:
+    """A column-route layer's member table, read in lockstep with the points file.
+
+    Both files ascend by entity — the rung's preparation writes them so, and this checks it a row
+    group at a time rather than trusting it — so the member rows a points batch needs are the ones
+    up to its last entity. One row group is decoded at a time, filtered to the hold-out, and what is
+    live is the rows past the last batch's entities; at rung 5's 2.3×10⁸ member rows nothing is held
+    whole. A hold-out entity the table does not name is in no artifact and gets a null cell, which
+    is what the build reads for a point the member table leaves out; the count is recorded.
+    """
+
+    def __init__(self, name: str, path: Path, held: np.ndarray):
+        self.name = name
+        self.path = path
+        self.reader = pq.ParquetFile(path)
+        self.entity_column, self.key_column = member_table_columns(self.reader.schema_arrow)
+        self.key_type = self.reader.schema_arrow.field(self.key_column).type
+        self.held = held
+        self.group = 0
+        self.pending: list[pa.Table] = []
+        self.last_entity = -1
+        self.stats = {"file": path.name, "rows_with_keys": 0, "rows_without": 0}
+
+    def _pull(self) -> bool:
+        """Decode the next row group into `pending`, filtered to the hold-out; False when done."""
+        if self.group >= self.reader.metadata.num_row_groups:
+            return False
+        table = self.reader.read_row_group(self.group, columns=[self.entity_column, self.key_column])
+        self.group += 1
+        entities = table.column(self.entity_column).to_numpy()
+        if len(entities):
+            if int(entities[0]) <= self.last_entity or np.any(np.diff(entities.astype(np.int64)) <= 0):
+                raise ValueError(
+                    f"{self.path.name}: `{self.entity_column}` is not strictly ascending across row "
+                    f"group {self.group - 1}; the driver reads a member table in lockstep with the "
+                    f"points file and needs both in entity order"
+                )
+            self.last_entity = int(entities[-1])
+        table = table.filter(pa.array(in_sorted(entities, self.held)))
+        if table.num_rows:
+            self.pending.append(table)
+        return True
+
+    def keys_for(self, entities: np.ndarray) -> pa.Array:
+        """The member list of each of `entities` (ascending), null where the table names none."""
+        if len(entities) == 0:
+            return pa.array([], self.key_type)
+        top = int(entities[-1])
+        while self.last_entity < top and self._pull():
+            pass
+        have = pa.concat_tables(self.pending) if self.pending else None
+        if have is None or have.num_rows == 0:
+            self.stats["rows_without"] += len(entities)
+            return pa.nulls(len(entities), self.key_type)
+        wanted = pa.array(entities).cast(have.column(self.entity_column).type)
+        index = pc.index_in(wanted, value_set=have.column(self.entity_column).combine_chunks())
+        keys = pc.take(have.column(self.key_column).combine_chunks(), index)
+        missing = index.null_count
+        self.stats["rows_without"] += missing
+        self.stats["rows_with_keys"] += len(entities) - missing
+        rest = have.filter(pc.greater(have.column(self.entity_column), top))
+        self.pending = [rest] if rest.num_rows else []
+        return keys
+
+
 class HoldOut:
     """The held-back rows, streamed out of the rung's own parquet as ingest batches.
 
@@ -493,6 +648,10 @@ class HoldOut:
     4 GB of parquet, tens of gigabytes of Arrow — and holding it beside a running server on a
     47 GB box is the run failing for a reason that has nothing to do with what it measures. Only
     `head_rows` rows are kept, for the write cycle, which needs the same bytes twice.
+
+    A column-route layer's member list rides each batch as the column named for the layer, joined
+    from a [`MemberStream`] read in lockstep with the points; `member_stats` records, per layer, how
+    many hold-out rows the table named and how many it did not.
     """
 
     def __init__(self, rung: Path, held: np.ndarray, head_rows: int = 0):
@@ -501,6 +660,14 @@ class HoldOut:
         self.held = np.sort(held)
         self.head_rows = head_rows
         self.head: pa.Table | None = None
+        self.members = [
+            MemberStream(layer["name"], layer["members"], self.held)
+            for layer in declared_layers(rung)
+            if layer["route"] == "column"
+        ]
+        self.columns = [stream.name for stream in self.members]
+        self.member_stats = {stream.name: stream.stats for stream in self.members}
+        self.last_entity = -1
 
     def batches(self, rows: int = BATCH_ROWS):
         """Yield `(first row index, body bytes, row count)` for the whole hold-out, in file order.
@@ -525,6 +692,17 @@ class HoldOut:
             del group
             if table.num_rows == 0:
                 continue
+            if self.members:
+                entities = table.column("entity_id").to_numpy()
+                if int(entities[0]) <= self.last_entity or np.any(np.diff(entities.astype(np.int64)) <= 0):
+                    raise ValueError(
+                        f"points.parquet: `entity_id` is not strictly ascending across row group "
+                        f"{index}; a member table is read in lockstep with it and needs both in "
+                        f"entity order"
+                    )
+                self.last_entity = int(entities[-1])
+                for stream in self.members:
+                    table = table.append_column(stream.name, stream.keys_for(entities))
             if head_rows < self.head_rows:
                 take = min(self.head_rows - head_rows, table.num_rows)
                 head.append(table.slice(0, take))
@@ -533,30 +711,33 @@ class HoldOut:
             pending_rows += table.num_rows
             while pending_rows >= rows:
                 whole = pa.concat_tables(pending)
-                yield emitted, encode_batch(whole.slice(0, rows), self.access, self.attributes), rows
+                yield emitted, self.encode(whole.slice(0, rows)), rows
                 emitted += rows
                 rest = whole.slice(rows)
                 pending = [rest] if rest.num_rows else []
                 pending_rows = rest.num_rows
         if pending_rows:
             whole = pa.concat_tables(pending)
-            yield emitted, encode_batch(whole, self.access, self.attributes), pending_rows
+            yield emitted, self.encode(whole), pending_rows
             emitted += pending_rows
         self.total = emitted
         if head:
             self.head = pa.concat_tables(head)
+
+    def encode(self, table: pa.Table) -> bytes:
+        """[`encode_batch`] over a slice of this hold-out, member columns included."""
+        return encode_batch(table, self.access, self.attributes, self.columns)
 
 
 # ---------------------------------------------------------------------------------------------
 # Publication — the artifacts, after their points
 # ---------------------------------------------------------------------------------------------
 
-#: The publication route's own body cap, `PUBLISH_MAX_BODY_BYTES` in `tessera-server/src/control.rs`.
-#: The batch is the commit unit and an artifact's `members` is its whole membership, so an artifact
-#: whose body alone exceeds this has no smaller spelling. The driver declines it, records its key,
-#: member count and body bytes, and the layer's census row then lists a real difference. Whether
-#: the route grows an existing artifact's membership in pieces is an owner ruling that is pending;
-#: nothing here works around it.
+#: The publication route's own body cap, `PUBLISH_MAX_BODY_BYTES` in `tessera-server/src/control.rs`,
+#: and `PATCH /control/layers/{name}/artifacts`' too. `--publish-max-bytes` is clamped to it. An
+#: artifact whose whole membership does not fit under the working cap is published with as many
+#: members as fit and then **grown** by PATCH in slices under the cap (decision 0127); only an
+#: artifact whose key, content and parents alone do not fit is declined, and recorded.
 ROUTE_MAX_BODY_BYTES = 64 * 1024 * 1024
 
 #: The base64 alphabet, indexed by sextet.
@@ -781,10 +962,13 @@ class Publication:
 
     **Every artifact carries its whole member set**, base rows and ingested rows alike, addressed
     by external id, which is the address both halves share. The batch is the commit unit at the
-    route, so an artifact is published entire or not at all; the cap therefore splits *between*
-    artifacts, and one artifact larger than `--publish-max-bytes` is sent alone. One whose body
-    alone exceeds the route's own cap ([`ROUTE_MAX_BODY_BYTES`]) is declined and recorded with its
-    key, member count and body bytes, before its member list is ever built.
+    route, so the cap splits *between* artifacts. An artifact whose whole body would exceed
+    `--publish-max-bytes` is published with its key, content, parents and as many members as fit
+    under the cap, then **grown** through `PATCH /control/layers/{name}/artifacts` in slices of at
+    most the cap, in the same parent-before-child order and after the batch that published it
+    (decision 0127; contracts §3.4). `grown_artifacts`, `grow_requests` and `grown_members` record
+    that path. Only an artifact whose key, content and parents alone do not fit is declined, and
+    recorded with its key, member count and body bytes before its member list is ever built.
 
     **The member table is read in artifact order once, and never held whole.** A layer's member
     table can be 1.66×10⁹ rows (rung 3's DAG membership), and a driver that inverted it in memory
@@ -810,6 +994,14 @@ class Publication:
     counts what landed, against `edges_declared`. Parents are published before their children
     ([`in_parent_order`]): a parent must already exist or sit earlier in the same batch, an
     ordering an edge has always carried (`annotation-representation.md` §5.0.4).
+
+    **A declined artifact is not held, and a child's edge to it is dropped before sending.** The
+    route refuses an artifact whose parent the layer does not hold, so an edge to a declined parent
+    would refuse every descendant's batch and the census would list the whole tree as missing
+    rather than the artifacts that were declined. The child is kept, its edge to the declined
+    parent is dropped, and `edges_dropped_to_declined` counts them beside `edges_published`. A
+    parent whose batch the route **refused** is a different case: its children's batches are
+    refused too, each refusal is counted and logged, and the census then lists the subtree.
     """
 
     def __init__(self, roster: Path, members: Path | None, work: Path, max_bytes: int, bucket_rows: int):
@@ -819,7 +1011,7 @@ class Publication:
         self.held = set(self.keys)
         self.members_path = members
         self.work = work
-        self.max_bytes = max_bytes
+        self.max_bytes = min(max_bytes, ROUTE_MAX_BODY_BYTES)
         self.bucket_rows = bucket_rows
         self.stats = {
             "artifacts": len(self.rows),
@@ -834,7 +1026,12 @@ class Publication:
             "count_s": None,
             "partition_s": None,
             "declined_artifacts": [],
+            "edges_dropped_to_declined": 0,
+            "grown_artifacts": 0,
+            "grow_slices": 0,
+            "grown_members_sent": 0,
         }
+        self.declined_keys: set[str] = set()
         for row in self.rows:
             own = row.get("parent") or []
             in_layer = [key for key in own if key in self.held]
@@ -901,29 +1098,25 @@ class Publication:
         value_set = pa.array(self.keys, pa.string())
         count = len(self.keys)
 
-        # One pass over key and rank: each artifact's rows, and its membership alone.
+        # One pass over key: each artifact's rows, for the bucket budget.
         t0 = time.perf_counter()
         rows_of = np.zeros(count, np.int64)
-        members_of = np.zeros(count, np.int64)
         for i in range(reader.metadata.num_row_groups):
             group = reader.read_row_group(i, columns=["key", "rank"])
-            idx, rank, _ = member_columns(
+            idx, _, _ = member_columns(
                 group.append_column("entity", pa.nulls(group.num_rows, pa.uint64()).fill_null(0)),
                 value_set, self.members_path,
             )
             del group
             rows_of += np.bincount(idx, minlength=count)
-            members_of += np.bincount(idx[rank < 0], minlength=count)
         self.stats["count_s"] = round(time.perf_counter() - t0, 2)
 
-        # Buckets: ranges of the publication order under the row budget. An artifact whose
-        # membership alone is over the route's cap gets no bucket; it is declined here.
+        # Buckets: ranges of the publication order under the row budget. An artifact over the
+        # budget has a bucket to itself; its membership is published in slices, never declined.
         bucket_of = np.full(count, -1, np.int32)
         bucket_range: list[tuple[int, int]] = []
         start, filled = 0, 0
         for ordinal in range(count):
-            if self._over_cap_by_members(ordinal, int(members_of[ordinal])):
-                continue
             if filled and filled + rows_of[ordinal] > self.bucket_rows:
                 bucket_range.append((start, ordinal))
                 start, filled = ordinal, 0
@@ -931,7 +1124,7 @@ class Publication:
             filled += int(rows_of[ordinal])
         bucket_range.append((start, count))
         self.stats["buckets"] = len(bucket_range)
-        del rows_of, members_of
+        del rows_of
 
         # One pass writing every row to its bucket, as 14-byte records.
         t0 = time.perf_counter()
@@ -965,8 +1158,6 @@ class Publication:
             groups = dict(rank_groups(records["idx"], records["rank"], records["entity"]))
             del records
             for ordinal in range(lo, hi):
-                if bucket_of[ordinal] < 0:
-                    continue
                 yield ordinal, groups.pop(ordinal, {})
 
     # -- bodies ----------------------------------------------------------------------------
@@ -974,23 +1165,14 @@ class Publication:
     def _head(self, i: int) -> bytes:
         return b'{"key":' + json.dumps(self.rows[i]["key"]).encode() + b',"members":'
 
-    def _over_cap_by_members(self, i: int, members: int) -> bool:
-        """Declined at planning: the membership list alone, in the smallest body that could carry
-        it, is over the route's cap. Content only adds to it."""
-        size = len(self._head(i)) + json_list_bytes(members) + 1 + len(self._body(0, [b""]))
-        if size <= ROUTE_MAX_BODY_BYTES:
-            return False
-        self.stats["members"] += members
-        self.stats["declined_artifacts"].append(
-            {"key": self.rows[i]["key"], "members": members, "body_bytes": size, "content_counted": False}
-        )
-        return True
-
     def bodies(self):
-        """Yield `(level, body bytes, artifacts, members, edges)` as each batch fills.
+        """Yield the requests in order: `("put", level, body, artifacts, members, edges)` as each
+        batch fills, and `("grow", level, key, body, members)` for each slice that grows an artifact
+        the batch before it published.
 
         A batch closes when the next artifact would take it over `--publish-max-bytes` or sits on
-        another level; the wrapper is one level per request.
+        another level; the wrapper is one level per request. An artifact whose whole membership does
+        not fit closes the batch it is in, so its slices follow the request that created it.
         """
         if self.members_path is not None:
             self.work.mkdir(parents=True, exist_ok=True)
@@ -999,12 +1181,12 @@ class Publication:
         level = None
         counts = [0, 0, 0]
         for i, groups in self.members():
-            block, members_n, edges_n = self._block(i, groups)
+            block, members_n, edges_n, remainder = self._block(i, groups)
             if block is None:
                 continue
             row_level = int(self.rows[i].get("level") or 0)
             if batch and (row_level != level or size + len(block) + 1 > self.max_bytes):
-                yield level, self._body(level, batch), *counts
+                yield "put", level, self._body(level, batch), *counts
                 batch, size, counts = [], 0, [0, 0, 0]
             batch.append(block)
             size += len(block) + 1
@@ -1012,13 +1194,41 @@ class Publication:
             counts[0] += 1
             counts[1] += members_n
             counts[2] += edges_n
+            if remainder is not None:
+                yield "put", level, self._body(level, batch), *counts
+                batch, size, counts = [], 0, [0, 0, 0]
+                yield from self._grow_slices(row_level, self.rows[i]["key"], remainder)
         if batch:
-            yield level, self._body(level, batch), *counts
+            yield "put", level, self._body(level, batch), *counts
 
-    def _block(self, i: int, groups: dict) -> tuple[bytes | None, int, int]:
-        """One artifact's JSON, or None if declined; with its member and edge counts."""
+    def _grow_body(self, level: int, key: str, members: np.ndarray) -> bytes:
+        return (
+            b'{"level":' + str(level).encode() + b',"addressing":"external","artifacts":[{"key":'
+            + json.dumps(key).encode() + b',"members":' + json_list(members) + b"}]}"
+        )
+
+    def _grow_slices(self, level: int, key: str, members: np.ndarray):
+        """`("grow", level, key, body, members)` for `members`, in slices of at most the cap."""
+        fixed = len(self._grow_body(level, key, EMPTY_ENTITIES)) - 2
+        per_slice = max(1, (self.max_bytes - fixed - 1) // 15)
+        self.stats["grown_artifacts"] += 1
+        self.stats["grown_members_sent"] += len(members)
+        for start in range(0, len(members), per_slice):
+            piece = members[start : start + per_slice]
+            self.stats["grow_slices"] += 1
+            yield "grow", level, key, self._grow_body(level, key, piece), len(piece)
+
+    def _block(self, i: int, groups: dict) -> tuple[bytes | None, int, int, np.ndarray | None]:
+        """One artifact's JSON with as many members as fit under the cap, its member and edge
+        counts, and the members left to grow it with (None when the whole membership fit); or
+        `(None, 0, 0, None)` for an artifact declined because its key, content and parents alone do
+        not fit."""
         row = self.rows[i]
         parents = [key for key in (row.get("parent") or []) if key in self.held]
+        # Parents are published before their children, so a parent's decline is known here.
+        kept_parents = [key for key in parents if key not in self.declined_keys]
+        self.stats["edges_dropped_to_declined"] += len(parents) - len(kept_parents)
+        parents = kept_parents
         members = groups.get(-1, EMPTY_ENTITIES)
         self.stats["members"] += len(members)
         head = self._head(i)
@@ -1040,24 +1250,32 @@ class Publication:
                 }
             ).encode()
         tail += b"}"
-        # Sized before anything large is built: a declined artifact's list is never assembled.
-        size = len(head) + json_list_bytes(len(members)) + len(tail)
+        # Sized before anything large is built: a declined artifact's list is never assembled, and
+        # a grown one's is built only as far as the cap allows.
+        fixed = len(head) + len(tail) + len(self._body(0, [b""]))
         if content_heads:
-            size += len(b',"content":[') + 1 + sum(
+            fixed += len(b',"content":[') + 1 + sum(
                 len(h) + json_list_bytes(len(g)) + 2 for h, g in content_heads
             )
-        if size + len(self._body(0, [b""])) > ROUTE_MAX_BODY_BYTES:
+        budget = self.max_bytes - fixed
+        if budget < json_list_bytes(0):
+            size = fixed + json_list_bytes(len(members))
+            self.declined_keys.add(row["key"])
             self.stats["declined_artifacts"].append(
                 {"key": row["key"], "members": len(members), "body_bytes": size, "content_counted": True}
             )
-            return None, 0, 0
+            return None, 0, 0, None
+        fit = max(0, (budget - 1) // 15)
+        remainder = None
+        if fit < len(members):
+            members, remainder = members[:fit], members[fit:]
         parts = [head, json_list(members)]
         if content_heads:
             parts.append(b',"content":[')
             parts.append(b",".join(h + json_list(g) + b"}" for h, g in content_heads))
             parts.append(b"]")
         parts.append(tail)
-        return b"".join(parts), len(members), len(parents)
+        return b"".join(parts), len(members), len(parents), remainder
 
     def _body(self, level: int, blocks: list[bytes]) -> bytes:
         return (
@@ -1121,6 +1339,18 @@ class Control:
         return requests.put(
             f"{self.base}/control/layers", headers=self.headers, json=declaration, timeout=120
         )
+
+    def grow(self, layer: str, body: bytes, session: requests.Session, timeout=1800):
+        """`PATCH /control/layers/{name}/artifacts` (decision 0127): more members for artifacts the
+        level already holds, the body already serialised, as [`Control.publish`] sends its own."""
+        t0 = time.perf_counter()
+        r = session.patch(
+            f"{self.base}/control/layers/{urllib.parse.quote(layer, safe='')}/artifacts",
+            headers=self.headers | {"Content-Type": "application/json"},
+            data=body,
+            timeout=timeout,
+        )
+        return r, time.perf_counter() - t0
 
     def publish(self, layer: str, body: bytes, session: requests.Session, timeout=1800):
         """`PUT /control/layers/{name}/artifacts`, with the body already serialised.
@@ -1599,6 +1829,7 @@ class Cycle:
             self.log(f"ingesting {len(self.held):,} rows at C={args.concurrency}")
             before = control.status()["write_executor"]
             self.result["ingest"] = self.run_ingest(control, hold.batches(), "cycle")
+            self.result["ingest"]["membership_columns"] = hold.member_stats
             self.result["executor_laps"] = executor_laps(
                 before,
                 control.status()["write_executor"],
@@ -1658,23 +1889,35 @@ class Cycle:
         whose members survived the split would make the two deployments differ in their *roster* as
         well as in their membership, which is a second variable in a test that has one.
 
-        **`declined` is exhaustive.** Every layer the declaration holds either has an entry under
-        `layers` or one under `declined` with its reason: an attribute-membership layer has nothing
-        to publish (an ingested row joins it through the column its batch carries); an open value
-        set has no roster; a roster whose publication failed carries the failure. Within a
-        published layer, an artifact whose body alone would exceed the route's cap is declined per
-        artifact and listed in the layer's `declined_artifacts`, so a census difference on the
-        layer is attributable to named artifacts.
+        **Every declared layer is accounted for.** Each has an entry under `layers`, under
+        `on_column`, or under `declined` with its reason: a column-route layer's membership rode
+        the ingest batches (the module doc) and is recorded under `on_column` with what the hold-out
+        carried; an attribute-membership layer has nothing to publish (an ingested row joins it
+        through the column its batch carries); a layer with supplied content and no roster cannot
+        be published; a roster whose publication failed carries the failure. Within a published
+        layer, an artifact whose body alone would exceed the route's cap is declined per artifact
+        and listed in the layer's `declined_artifacts`, so a census difference on the layer is
+        attributable to named artifacts.
 
         Bodies are sent as they are assembled. `wall_s` is the sum of the requests' round trips,
         the service's cost, and `prepared_s` the time spent inside the body generator, the
         driver's; `phase_s` is the two together with whatever else the loop spent.
         """
-        out: dict = {"layers": {}, "declined": {}}
+        out: dict = {"layers": {}, "on_column": {}, "declined": {}}
         totals = {"artifacts": 0, "members": 0, "wall_s": 0.0, "requests": 0}
         work = self.work / f"publish-{self.args.fraction:g}"
         for layer in declared_layers(self.rung):
             name = layer["name"]
+            if layer["route"] == "column":
+                out["on_column"][name] = {
+                    "reason": "no supplied content and no roster: the base build read the member "
+                    "table over the base's rows, and every hold-out row carried its member list as "
+                    "the ingest batch's column named for the layer (decision 0128)",
+                    "member_rows": pq.ParquetFile(layer["members"]).metadata.num_rows,
+                    "holdout": (self.result.get("ingest") or {}).get("membership_columns", {}).get(name),
+                }
+                self.log(f"  {name}: nothing to publish, membership travelled on the ingest column")
+                continue
             if layer["attribute"] is not None:
                 out["declined"][name] = {
                     "reason": f"membership is the `{layer['attribute']}` attribute column: the layer "
@@ -1685,16 +1928,23 @@ class Cycle:
                 continue
             if layer["roster"] is None:
                 members = layer["members"]
+                if layer["supplied"]:
+                    reason = (
+                        "supplied content and no artifact roster: a layer declaring supplied content "
+                        "refuses to mint from a column, and the publication route takes a roster"
+                    )
+                else:
+                    reason = (
+                        "no artifact roster and no member table: nothing names this layer's "
+                        "artifacts, so there is nothing to mint at the build or to publish"
+                    )
                 out["declined"][name] = {
-                    "reason": f"an open value set with no artifact roster: the artifacts are minted "
-                    f"from the member file's list-keyed rows at a build, and the publication route "
-                    f"takes a roster. Whether the route grows a layer's artifacts in pieces is an "
-                    f"owner ruling that is pending; not published",
+                    "reason": reason + "; not published",
                     "member_rows": pq.ParquetFile(members).metadata.num_rows
                     if members is not None and members.exists()
                     else None,
                 }
-                self.log(f"  {name}: NOT PUBLISHED, open value set with no roster")
+                self.log(f"  {name}: NOT PUBLISHED, {reason.split(':')[0]}")
                 continue
             if not layer["roster"].exists():
                 out["declined"][name] = {"reason": f"roster {layer['roster'].name} is not in the rung directory"}
@@ -1730,7 +1980,10 @@ class Cycle:
         )
         statuses: dict[str, int] = {}
         refusal = None
+        refusals = 0
+        first_by_status: dict[str, dict] = {}
         published = {"artifacts": 0, "members": 0, "edges": 0}
+        grown = {"requests": 0, "members": 0, "joined": 0}
         prepared_s = 0.0
         wall_s = 0.0
         requests_n = 0
@@ -1744,18 +1997,42 @@ class Cycle:
                 prepared_s += time.perf_counter() - t0
                 if item is None:
                     break
-                level, body, artifacts, members_n, edges = item
-                r, dt = control.publish(name, body, session)
+                if item[0] == "grow":
+                    _, level, key, body, members_n = item
+                    artifacts, edges = 0, 0
+                    r, dt = control.grow(name, body, session)
+                    grown["requests"] += 1
+                else:
+                    _, level, body, artifacts, members_n, edges = item
+                    key = None
+                    r, dt = control.publish(name, body, session)
                 del body
                 wall_s += dt
                 requests_n += 1
                 statuses[str(r.status_code)] = statuses.get(str(r.status_code), 0) + 1
-                if r.status_code == 201:
+                if key is not None and r.status_code == 200:
+                    grown["members"] += members_n
+                    published["members"] += members_n
+                    try:
+                        grown["joined"] += sum(int(a.get("joined") or 0) for a in r.json()["artifacts"])
+                    except (ValueError, KeyError, TypeError):
+                        pass
+                elif key is None and r.status_code == 201:
                     published["artifacts"] += artifacts
                     published["members"] += members_n
                     published["edges"] += edges
-                elif refusal is None:
-                    refusal = {"level": level, "status": r.status_code, "body": r.text[:1500]}
+                else:
+                    # **Never quiet.** Each status is logged with its detail the first time it
+                    # appears, and every refusal is counted into the record and the summary line.
+                    refusals += 1
+                    if refusal is None:
+                        refusal = {"level": level, "status": r.status_code, "body": r.text[:1500]}
+                    if str(r.status_code) not in first_by_status:
+                        first_by_status[str(r.status_code)] = {"level": level, "body": r.text[:1500]}
+                        what = f"grow of {key!r}" if key is not None else f"{artifacts} artifact(s) in the batch"
+                        self.log(
+                            f"  {name}: REFUSED {r.status_code} at level {level} ({what}): {r.text[:300]}"
+                        )
         finally:
             publication.cleanup()
         phase_s = time.perf_counter() - t_phase
@@ -1774,17 +2051,31 @@ class Cycle:
                 "artifacts_per_s": round(published["artifacts"] / wall_s, 1) if wall_s else None,
                 "members_per_s": round(published["members"] / wall_s, 1) if wall_s else None,
                 "statuses": statuses,
+                "refusals": refusals,
                 "first_refusal": refusal,
+                "first_refusal_by_status": first_by_status,
+                "grow_requests": grown["requests"],
+                "grown_members": grown["members"],
+                "grown_members_joined": grown["joined"],
+                "grown_members_unjoined": grown["members"] - grown["joined"],
                 "declined_artifacts": declined,
                 "declined_members": sum(d["members"] for d in declined),
             }
         )
+        if grown["members"] != grown["joined"]:
+            self.log(
+                f"  {name}: {grown['members'] - grown['joined']:,} of {grown['members']:,} grown "
+                f"members did not join — the route already held them, or refused them"
+            )
         self.log(
-            f"  {name}: {published['artifacts']:,} artifacts, {published['members']:,} "
-            f"members in {wall_s:.1f} s ({entry['artifacts_per_s']} artifacts/s, "
-            f"{entry['members_per_s']} members/s), {requests_n} requests, "
+            f"  {name}: {published['artifacts']:,} of {stats['artifacts']:,} artifacts, "
+            f"{published['members']:,} members in {wall_s:.1f} s ({entry['artifacts_per_s']} "
+            f"artifacts/s, {entry['members_per_s']} members/s), {requests_n} requests, "
+            f"{refusals} refused; {stats['grown_artifacts']:,} artifact(s) grown by "
+            f"{grown['requests']:,} PATCH(es) carrying {grown['members']:,} members; "
             f"{published['edges']:,}/{stats['edges_declared']:,} parent edges, "
-            f"{len(declined)} artifact(s) declined over the route's cap; {stats['read_path']}, "
+            f"{stats['edges_dropped_to_declined']:,} dropped to declined parents, "
+            f"{len(declined)} artifact(s) declined over the cap; {stats['read_path']}, "
             f"driver {prepared_s:.1f} s"
         )
         return entry
@@ -2001,7 +2292,7 @@ class Cycle:
         def head_slice():
             for start in range(0, n, BATCH_ROWS):
                 chunk = hold.head.slice(start, min(BATCH_ROWS, n - start))
-                yield start, encode_batch(chunk, hold.access, hold.attributes), chunk.num_rows
+                yield start, hold.encode(chunk), chunk.num_rows
 
         out["reingest"] = self.run_ingest(control, head_slice(), "recycle")
         control.flush()
@@ -2082,9 +2373,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--publish-max-bytes",
         type=int,
         default=32 * 1024 * 1024,
-        help="the publication byte cap: a batch is split between artifacts to stay under it. One "
-        "artifact larger than this is sent alone, the batch being the commit unit; the route's own "
-        "cap is 64 MiB",
+        help="the publication byte cap, clamped to the route's own 64 MiB: a batch is split between "
+        "artifacts to stay under it, and an artifact whose whole membership does not fit is published "
+        "with as many members as fit and grown by PATCH in slices under it (decision 0127)",
     )
     ap.add_argument(
         "--state-extent",

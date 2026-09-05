@@ -562,6 +562,7 @@ def ingest_server(tmp_path_factory, private_catalogue_bundle):
 
 def _ingest_batch(rows: int, access: str) -> bytes:
     """A minimal `/control/ingest` body: `(external_id, x, y, access, fx_key)`, Arrow IPC stream.
+    `access` is the one label every row carries, sent as a one-element list (contracts §3.4).
 
     `fx_key` is present because the catalogue declares it, and a declared column must be in every
     batch (contracts §2.2): the scalar tail is read back positionally, so an omitted column shifts
@@ -578,7 +579,7 @@ def _ingest_batch(rows: int, access: str) -> bytes:
             pa.field("external_id", pa.binary()),
             pa.field("x", pa.float32()),
             pa.field("y", pa.float32()),
-            pa.field("access", pa.utf8()),
+            pa.field("access", pa.list_(pa.utf8())),
             pa.field("fx_key", pa.uint64()),
             # The catalogue's filter columns, present for the same contracts §2.2 reason as
             # fx_key. A category value must be a declared key ("alpha" is), and the values are
@@ -609,7 +610,7 @@ def _ingest_batch(rows: int, access: str) -> bytes:
             pa.array([(950_000_000 + i).to_bytes(8, "little") for i in range(rows)], pa.binary()),
             pa.array([1000.0 + i for i in range(rows)], pa.float32()),
             pa.array([2000.0 + i for i in range(rows)], pa.float32()),
-            pa.array([access] * rows, pa.utf8()),
+            pa.array([[access]] * rows, pa.list_(pa.utf8())),
             pa.array(cat.ingest_fx_keys(rows), pa.uint64()),
             pa.array(["alpha"] * rows, pa.utf8()),
             pa.array(["red"] * rows, pa.utf8()),

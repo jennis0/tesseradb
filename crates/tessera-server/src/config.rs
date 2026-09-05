@@ -1484,7 +1484,7 @@ const DEFAULT_COMMIT_WINDOW_MAX_ITEMS: usize = 10_000;
 ///   32 batches are simultaneously submitted, which is the honest "this node is behind on writes"
 ///   signal, and its `retry_after_s` is derived from the queue's own depth and drain;
 /// - the **admission** 429 bounds *blocking threads*, and at these defaults it fires only when
-///   handlers accumulate somewhere that holds no queue slot — a slow `terms_of_label`, slow sidecar
+///   handlers accumulate somewhere that holds no queue slot — a slow `terms_of_labels`, slow sidecar
 ///   IO, or a long-running executor item keeping 64 handlers parked on receipts. It is not a
 ///   backstop for the queue; the two bound different resources, which is the whole reason both keys
 ///   exist.
@@ -1512,7 +1512,7 @@ const DEFAULT_INGEST_QUEUE_BOUND: usize = 32;
 /// nothing, since the surplus can only 429 anyway". That is false, and the refutation is what makes
 /// this a key rather than an expression. An ingest handler holds a blocking thread across:
 ///
-/// - Arrow decode, the plugin's `terms_of_label` loop, `resolve_terms` and the external-ID sidecar
+/// - Arrow decode, the plugin's `terms_of_labels` loop, `resolve_terms` and the external-ID sidecar
 ///   lookup — during which it holds **no queue slot at all**, because it has not submitted yet; and
 /// - its whole blocking wait on the executor's receipt — during which it *also* holds no queue slot,
 ///   because the executor has dequeued the command and is running it.
@@ -2679,10 +2679,7 @@ fn parse(text: &str) -> Result<Config> {
             .serve
             .max_category_values
             .unwrap_or(DEFAULT_MAX_CATEGORY_VALUES),
-        max_suggestions: raw
-            .serve
-            .max_suggestions
-            .unwrap_or(DEFAULT_MAX_SUGGESTIONS),
+        max_suggestions: raw.serve.max_suggestions.unwrap_or(DEFAULT_MAX_SUGGESTIONS),
         max_suggestion_walk: raw
             .serve
             .max_suggestion_walk
@@ -2703,10 +2700,7 @@ fn parse(text: &str) -> Result<Config> {
             .serve
             .max_region_cells
             .unwrap_or(tessera_engine::DEFAULT_MAX_REGION_CELLS),
-        max_browse_rows: raw
-            .serve
-            .max_browse_rows
-            .unwrap_or(DEFAULT_MAX_BROWSE_ROWS),
+        max_browse_rows: raw.serve.max_browse_rows.unwrap_or(DEFAULT_MAX_BROWSE_ROWS),
         region_cache_bytes: raw
             .serve
             .region_cache_bytes

@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{BinaryArray, Float64Array, StringArray, UInt64Array};
+use arrow::array::{BinaryArray, Float64Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
@@ -154,11 +154,12 @@ fn build_projected(out: &Path, tmp: &Path, points: &[(f64, f64)]) {
 
 /// An ingest batch under caller-chosen column names, so the refusal tests can spell them wrong.
 fn ingest_batch(columns: (&str, &str), rows: &[(Vec<u8>, f64, f64, &str)]) -> Vec<u8> {
+    let access = access_column(rows.iter().map(|(_, _, _, a)| *a));
     let schema = Arc::new(Schema::new(vec![
         Field::new("external_id", DataType::Binary, false),
         Field::new(columns.0, DataType::Float64, false),
         Field::new(columns.1, DataType::Float64, false),
-        Field::new("access", DataType::Utf8, false),
+        access_field(&access),
     ]));
     let batch = RecordBatch::try_new(
         Arc::clone(&schema),
@@ -172,9 +173,7 @@ fn ingest_batch(columns: (&str, &str), rows: &[(Vec<u8>, f64, f64, &str)]) -> Ve
             Arc::new(Float64Array::from(
                 rows.iter().map(|(_, _, y, _)| *y).collect::<Vec<_>>(),
             )),
-            Arc::new(StringArray::from_iter_values(
-                rows.iter().map(|(_, _, _, a)| *a),
-            )),
+            Arc::new(access),
         ],
     )
     .unwrap();

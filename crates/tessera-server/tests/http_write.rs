@@ -10,7 +10,7 @@ mod common;
 
 use std::sync::Arc;
 
-use arrow::array::{BinaryArray, Float32Array, Float64Array, StringArray};
+use arrow::array::{BinaryArray, Float32Array, Float64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
@@ -24,11 +24,12 @@ use tessera_plugin::Passthrough;
 use common::*;
 
 fn build_ingest_batch(rows: &[(u64, f32, f32, &str)]) -> Vec<u8> {
+    let access_array = access_column(rows.iter().map(|(_, _, _, a)| *a));
     let schema = Arc::new(Schema::new(vec![
         Field::new("external_id", DataType::Binary, false),
         Field::new("x", DataType::Float32, false),
         Field::new("y", DataType::Float32, false),
-        Field::new("access", DataType::Utf8, false),
+        access_field(&access_array),
     ]));
     let ext: Vec<Vec<u8>> = rows
         .iter()
@@ -37,7 +38,6 @@ fn build_ingest_batch(rows: &[(u64, f32, f32, &str)]) -> Vec<u8> {
     let ext_array = BinaryArray::from_iter_values(ext.iter().map(|v| v.as_slice()));
     let x_array = Float32Array::from_iter_values(rows.iter().map(|(_, x, _, _)| *x));
     let y_array = Float32Array::from_iter_values(rows.iter().map(|(_, _, y, _)| *y));
-    let access_array = StringArray::from_iter_values(rows.iter().map(|(_, _, _, a)| *a));
 
     let batch = RecordBatch::try_new(
         schema.clone(),
@@ -55,6 +55,31 @@ fn build_ingest_batch(rows: &[(u64, f32, f32, &str)]) -> Vec<u8> {
     writer.into_inner().unwrap()
 }
 
+/// One row under a raw external id carrying **several** labels — the list's whole point
+/// (decision 0129): each element is one label, however many there are.
+fn build_ingest_batch_labels(external_id: &[u8], labels: &[&str]) -> Vec<u8> {
+    let access_array = access_lists(&[labels]);
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("external_id", DataType::Binary, false),
+        Field::new("x", DataType::Float32, false),
+        Field::new("y", DataType::Float32, false),
+        access_field(&access_array),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(BinaryArray::from_iter_values([external_id])),
+            Arc::new(Float32Array::from_iter_values([10.0])),
+            Arc::new(Float32Array::from_iter_values([10.0])),
+            Arc::new(access_array),
+        ],
+    )
+    .unwrap();
+    let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
+    writer.write(&batch).unwrap();
+    writer.into_inner().unwrap()
+}
+
 /// [`build_ingest_batch`] with the coordinate columns at the **wider** width.
 ///
 /// Contracts §3.4: an ingest batch's `x`/`y` are `float32` **or** `float64` and the narrower is
@@ -62,11 +87,12 @@ fn build_ingest_batch(rows: &[(u64, f32, f32, &str)]) -> Vec<u8> {
 /// buildable at either width is ingestable at either width (decision 0091). Every other builder
 /// here writes `float32`, which is what keeps that half of the schema exercised too.
 fn build_ingest_batch_f64(rows: &[(u64, f64, f64, &str)]) -> Vec<u8> {
+    let access_array = access_column(rows.iter().map(|(_, _, _, a)| *a));
     let schema = Arc::new(Schema::new(vec![
         Field::new("external_id", DataType::Binary, false),
         Field::new("x", DataType::Float64, false),
         Field::new("y", DataType::Float64, false),
-        Field::new("access", DataType::Utf8, false),
+        access_field(&access_array),
     ]));
     let ext: Vec<Vec<u8>> = rows
         .iter()
@@ -84,9 +110,7 @@ fn build_ingest_batch_f64(rows: &[(u64, f64, f64, &str)]) -> Vec<u8> {
             Arc::new(Float64Array::from_iter_values(
                 rows.iter().map(|(_, _, y, _)| *y),
             )),
-            Arc::new(StringArray::from_iter_values(
-                rows.iter().map(|(_, _, _, a)| *a),
-            )),
+            Arc::new(access_array),
         ],
     )
     .unwrap();
@@ -100,16 +124,16 @@ fn build_ingest_batch_f64(rows: &[(u64, f64, f64, &str)]) -> Vec<u8> {
 /// must construct exact byte strings (repeats across rows, or a specific length) that
 /// `external_id_of`'s 8-byte little-endian convention cannot express.
 fn build_ingest_batch_raw(rows: &[(&[u8], f32, f32, &str)]) -> Vec<u8> {
+    let access_array = access_column(rows.iter().map(|(_, _, _, a)| *a));
     let schema = Arc::new(Schema::new(vec![
         Field::new("external_id", DataType::Binary, false),
         Field::new("x", DataType::Float32, false),
         Field::new("y", DataType::Float32, false),
-        Field::new("access", DataType::Utf8, false),
+        access_field(&access_array),
     ]));
     let ext_array = BinaryArray::from_iter_values(rows.iter().map(|(id, _, _, _)| *id));
     let x_array = Float32Array::from_iter_values(rows.iter().map(|(_, x, _, _)| *x));
     let y_array = Float32Array::from_iter_values(rows.iter().map(|(_, _, y, _)| *y));
-    let access_array = StringArray::from_iter_values(rows.iter().map(|(_, _, _, a)| *a));
 
     let batch = RecordBatch::try_new(
         schema.clone(),
@@ -1763,9 +1787,9 @@ async fn a_partially_applied_change_batch_reports_one_honest_status() {
 // The admission bound, the batch caps, and the never-shed asymmetry
 // =================================================================================================
 
-/// A `Passthrough` that can be made to **park inside `terms_of_label`**, on command.
+/// A `Passthrough` that can be made to **park inside `terms_of_labels`**, on command.
 ///
-/// `terms_of_label` is called from inside `/control/ingest`'s `spawn_blocking` closure
+/// `terms_of_labels` is called from inside `/control/ingest`'s `spawn_blocking` closure
 /// (`control::run_ingest`), which is precisely the blocking-pool thread the ingest admission bound
 /// exists to ration — so parking here holds exactly the resource under test, with no
 /// `fault-injection` dependency and no sleep anywhere.
@@ -1789,6 +1813,15 @@ impl tessera_plugin::Plugin for ParkingPlugin {
         &self,
         access: &[u8],
     ) -> Result<Vec<tessera_plugin::Descriptor>, tessera_plugin::PluginError> {
+        // A view gate's label; `/control/ingest` never reaches it (decision 0129).
+        self.inner.terms_of_label(access)
+    }
+
+    fn terms_of_labels(
+        &self,
+        labels: &[tessera_plugin::Descriptor],
+    ) -> Result<Vec<tessera_plugin::Descriptor>, tessera_plugin::PluginError> {
+        // The wire path, and the one this fixture parks in.
         if self.armed.load(std::sync::atomic::Ordering::SeqCst) {
             // Publish arrival **before** blocking, so the test waits on a condition this thread
             // has actually reached rather than on a duration it hopes is enough.
@@ -1799,15 +1832,6 @@ impl tessera_plugin::Plugin for ParkingPlugin {
                 released = cv.wait(released).unwrap();
             }
         }
-        self.inner.terms_of_label(access)
-    }
-
-    fn terms_of_labels(
-        &self,
-        labels: &[tessera_plugin::Descriptor],
-    ) -> Result<Vec<tessera_plugin::Descriptor>, tessera_plugin::PluginError> {
-        // The wire path is the one this fixture parks in; the list form is the build's and is
-        // never reached from `/control/ingest`.
         self.inner.terms_of_labels(labels)
     }
 
@@ -2481,7 +2505,7 @@ async fn status_stage_barriers_move_when_their_stages_run() {
 /// plane has.
 ///
 /// The construction: a 4-thread blocking pool, `ingest_admission = 2`, and two ingest handlers
-/// parked *inside* `terms_of_label` — i.e. holding two of the four threads as a **fact**, since
+/// parked *inside* `terms_of_labels` — i.e. holding two of the four threads as a **fact**, since
 /// each publishes its arrival before blocking and the test waits on those arrivals. Two more ingest
 /// requests must then be refused **before** `spawn_blocking`, and a viewport must still run.
 ///
@@ -2528,7 +2552,7 @@ fn ingest_admission_sheds_before_the_blocking_pool_fills() {
                     .as_u16()
             }));
         }
-        // Both handlers are inside `terms_of_label`, holding a blocking thread each. A fact, not a
+        // Both handlers are inside `terms_of_labels`, holding a blocking thread each. A fact, not a
         // hope: each published its arrival before it blocked.
         for _ in 0..PARKED_INGEST_ADMISSION {
             fx.arrived.recv().await.expect("a handler must park");
@@ -2604,7 +2628,7 @@ fn ingest_admission_sheds_before_the_blocking_pool_fills() {
 /// that lane to a 429 at all.
 ///
 /// The suppression is deliberately a bare `{external_id, op}` with **no `access` field**, so
-/// `run_changes` makes no `terms_of_label` call and the parking plugin cannot block it. That is a
+/// `run_changes` makes no `terms_of_labels` call and the parking plugin cannot block it. That is a
 /// property of the fixture, not of the deny lane, and it is stated here so a later reader does not
 /// mistake it for part of what is being proved.
 ///
@@ -4076,11 +4100,12 @@ async fn an_undeclared_ingest_column_is_422_naming_the_column() {
     // Two extra columns: one of a type the old code would have stored, one of a type it dropped in
     // silence. Both are undeclared, so both are refused — and the refusal is about the declaration,
     // not about the type.
+    let access = access_column(["0"]);
     let schema = Arc::new(Schema::new(vec![
         Field::new("external_id", DataType::Binary, false),
         Field::new("x", DataType::Float32, false),
         Field::new("y", DataType::Float32, false),
-        Field::new("access", DataType::Utf8, false),
+        access_field(&access),
         Field::new("priority_score", DataType::UInt64, false),
         Field::new("shelf_date", DataType::Date32, false),
     ]));
@@ -4090,7 +4115,7 @@ async fn an_undeclared_ingest_column_is_422_naming_the_column() {
             Arc::new(BinaryArray::from_iter_values([external_id_of(N_ITEMS + 1)])),
             Arc::new(Float32Array::from_iter_values([10.0])),
             Arc::new(Float32Array::from_iter_values([10.0])),
-            Arc::new(StringArray::from_iter_values(["0"])),
+            Arc::new(access),
             Arc::new(arrow::array::UInt64Array::from_iter_values([7u64])),
             Arc::new(arrow::array::Date32Array::from_iter_values([19_000i32])),
         ],
@@ -4239,10 +4264,8 @@ async fn over_bound_ids_are_base64_not_lossy_utf8() {
     .await;
 
     // Passthrough declares `max_terms_per_item = 4096`; one more descriptor than that is the warn.
-    let access = (0..4_097)
-        .map(|i| format!("t{i}"))
-        .collect::<Vec<_>>()
-        .join(",");
+    let labels = (0..4_097).map(|i| format!("t{i}")).collect::<Vec<_>>();
+    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
     let external_id: &[u8] = &[0xFF, 0x01, 0xFE, 0x02, 0x00, 0x00, 0x00, 0x00];
 
     let resp = server
@@ -4251,12 +4274,7 @@ async fn over_bound_ids_are_base64_not_lossy_utf8() {
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "over-bound-1")
         .header("content-type", "application/octet-stream")
-        .body(build_ingest_batch_raw(&[(
-            external_id,
-            10.0,
-            10.0,
-            access.as_str(),
-        )]))
+        .body(build_ingest_batch_labels(external_id, &labels))
         .send()
         .await
         .unwrap();
@@ -4608,18 +4626,19 @@ fn build_scalar_tail_fixture(out: &std::path::Path, tmp: &std::path::Path) {
 /// at that column's wire type — `Timestamp(Microsecond)` for `timestamp_us`, not `Int64`, which is
 /// the pair the downcast-chain defect could never have told apart.
 fn build_scalar_tail_ingest_batch() -> Vec<u8> {
+    let access = access_column(["0"]);
     let mut fields = vec![
         Field::new("external_id", DataType::Binary, false),
         Field::new("x", DataType::Float32, false),
         Field::new("y", DataType::Float32, false),
-        Field::new("access", DataType::Utf8, false),
+        access_field(&access),
     ];
     let external_id = external_id_of(9_600_001);
     let mut columns: Vec<Arc<dyn arrow::array::Array>> = vec![
         Arc::new(BinaryArray::from_iter_values([external_id.as_slice()])),
         Arc::new(Float32Array::from(vec![5.0f32])),
         Arc::new(Float32Array::from(vec![5.0f32])),
-        Arc::new(StringArray::from(vec!["0"])),
+        Arc::new(access),
     ];
     for ty in SCALAR_TAIL_TYPES {
         let column = scalar_tail_column(ty, scalar_tail_planted(ty), 1);

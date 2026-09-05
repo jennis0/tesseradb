@@ -155,9 +155,10 @@ fn pairs_parquet_rows_are_the_terms() {
 }
 
 /// The ingest batch is the wire shape — `(external_id, x, y, access, the declared scalars)` —
-/// with the workspace's 8-byte little-endian external-id convention, the passthrough access
-/// label, and the same values as every other materialiser. A range past `n` draws from the same
-/// functions, which is what lets a driver ingest beyond the built prefix.
+/// with the workspace's 8-byte little-endian external-id convention, the access labels as a list
+/// (one term per element, decision 0129), and the same values as every other materialiser. A
+/// range past `n` draws from the same functions, which is what lets a driver ingest beyond the
+/// built prefix.
 #[test]
 fn ingest_batch_is_the_wire_shape_of_the_same_items() {
     let c = corpus(10);
@@ -187,7 +188,7 @@ fn ingest_batch_is_the_wire_shape_of_the_same_items() {
 
     let external_id = column::<BinaryArray>(&batch, "external_id");
     let x = column::<Float64Array>(&batch, "x");
-    let access = column::<StringArray>(&batch, "access");
+    let access = column::<arrow::array::ListArray>(&batch, "access");
     let fx_key = column::<UInt64Array>(&batch, "fx_key");
     let bay = column::<StringArray>(&batch, "bay");
     let partition = column::<UInt32Array>(&batch, "partition");
@@ -202,13 +203,19 @@ fn ingest_batch_is_the_wire_shape_of_the_same_items() {
             u64::from(partition.value(i)),
             c.partition_artifact_of(PARTITION_LAYER, e)
         );
-        let expected_access = c
-            .terms(e)
-            .iter()
-            .map(|t| t.raw().to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        assert_eq!(access.value(i), expected_access);
+        let expected_access: Vec<String> = c.terms(e).iter().map(|t| t.raw().to_string()).collect();
+        let labels = access.value(i);
+        let labels = labels
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("access is a list of utf8");
+        let got: Vec<String> = (0..labels.len())
+            .map(|j| labels.value(j).to_string())
+            .collect();
+        assert_eq!(
+            got, expected_access,
+            "item {e}: one label per element, none joined"
+        );
         assert_eq!(fx_key.value(i), item.fx_key);
         assert_eq!(opt_str(bay, i).as_deref(), item.bay);
     }

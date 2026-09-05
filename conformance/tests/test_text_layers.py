@@ -286,7 +286,7 @@ def _ingest_body(prose: list[str | None], fx: list[int], external_base: int) -> 
             pa.field("external_id", pa.binary()),
             pa.field("x", pa.float32()),
             pa.field("y", pa.float32()),
-            pa.field("access", pa.utf8()),
+            pa.field("access", pa.list_(pa.utf8())),
             pa.field("fx_key", pa.uint64()),
             pa.field("department", pa.utf8()),
             pa.field("archive", pa.utf8()),
@@ -305,7 +305,7 @@ def _ingest_body(prose: list[str | None], fx: list[int], external_base: int) -> 
             # tile boundary. Geometry is not what this module tests; being served is.
             pa.array([4_000.0 + 37.0 * i for i in range(n)], pa.float32()),
             pa.array([9_000.0 + 53.0 * i for i in range(n)], pa.float32()),
-            pa.array([INGEST_ACCESS] * n, pa.utf8()),
+            pa.array([[INGEST_ACCESS]] * n, pa.list_(pa.utf8())),
             pa.array(fx, pa.uint64()),
             pa.array(["alpha"] * n, pa.utf8()),
             pa.array(["red"] * n, pa.utf8()),

@@ -462,7 +462,11 @@ def expected_census(seed: int, n: int, depth: int, grant_terms: Iterable[int]) -
 
 def terms_of(files: CorpusFiles, es: Iterable[int]) -> dict[int, frozenset[int]]:
     """Each item's terms, from the harness's own materialised inputs (module doc): the pairs
-    relation for the built prefix, the posted ingest batch's `access` labels beyond it."""
+    relation for the built prefix, the posted ingest batch's `access` labels beyond it.
+
+    The `access` column is a list, one label per element, and each element is one descriptor
+    verbatim — `builtin:passthrough`'s rule at both entry points (decision 0129). Nothing here
+    splits a label."""
     import pyarrow.parquet as pq
 
     wanted = set(es)
@@ -475,9 +479,9 @@ def terms_of(files: CorpusFiles, es: Iterable[int]) -> dict[int, frozenset[int]]
         with ipc.open_stream(io.BytesIO(files.ingest.read_bytes())) as reader:
             batch = reader.read_all()
         ids = [int.from_bytes(v, "little") for v in batch.column("external_id").to_pylist()]
-        for e, access in zip(ids, batch.column("access").to_pylist()):
+        for e, labels in zip(ids, batch.column("access").to_pylist()):
             if e in wanted:
-                terms[e].update(int(part) for part in access.split(",") if part)
+                terms[e].update(int(label) for label in labels)
     missing = [e for e in wanted if not terms[e]]
     if missing:
         raise TotalVerificationFailure(

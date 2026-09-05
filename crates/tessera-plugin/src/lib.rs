@@ -75,18 +75,22 @@ impl std::error::Error for PluginError {}
 
 /// The plugin surface, mirroring the ABI's entry points (contracts §4).
 pub trait Plugin: Send + Sync {
-    /// Map an item's `access` bytes to its authorisation descriptors (the *data* side).
+    /// Map one label string to the descriptors it names (the *data* side, scalar form).
+    ///
+    /// The callers are a view gate's `visibility` label (`views.md` §6), compiled at the build
+    /// and checked when a view is created while the service runs. An item's labels do not come
+    /// through here: both entry points carry them as a list and take
+    /// [`Plugin::terms_of_labels`] (decision 0129).
     ///
     /// Deterministic: identical bytes in, identical descriptors out, every time.
     fn terms_of_label(&self, access: &[u8]) -> Result<Vec<Descriptor>, PluginError>;
 
-    /// Map an item's terms, already separated by the caller, to its authorisation descriptors
-    /// (the *data* side, list form).
+    /// Map an item's labels, one element each, to its authorisation descriptors (the *data* side,
+    /// list form).
     ///
-    /// This is the entry point the build uses: the caller's source column already holds one
-    /// string per term, so there is nothing to parse and nothing a separator could split wrongly.
-    /// [`Plugin::terms_of_label`] remains the wire path — an ingest request carries one opaque
-    /// `access` byte string, which only the plugin can decompose.
+    /// This is the entry point both the build and `/control/ingest` use: a points file's term
+    /// column and the wire's `access` column are each a list with one label per element, so
+    /// there is nothing to parse and nothing a separator could split wrongly.
     ///
     /// Required, deliberately without a default. A default would be a labelling rule a plugin
     /// author never wrote, silently inherited; a plugin that folds or rewrites terms must say so
@@ -131,9 +135,10 @@ pub trait Plugin: Send + Sync {
 /// `builtin:passthrough`: the identity plugin, and the only one this build can run. The
 /// conformance oracle implements the same mapping.
 ///
-/// * `access` (the wire path) is a UTF-8 comma-separated descriptor list — split on `,`, trim,
-///   drop empties.
-/// * a term *list* (the build path) is taken verbatim, one descriptor per element.
+/// * an item's label *list* — a points file's term column at the build, the wire's `access`
+///   column at ingest — is taken verbatim, one descriptor per element.
+/// * a single label string (a view gate's) is a UTF-8 comma-separated descriptor list — split
+///   on `,`, trim, drop empties.
 /// * `auth_data` is JSON `{"terms": ["<descriptor>", …]}`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Passthrough;
@@ -190,15 +195,13 @@ impl Plugin for Passthrough {
     }
 
     /// **The identity, and it is this plugin's real answer rather than a fallback.** A
-    /// passthrough descriptor *is* the caller's own label string — `terms_of_label` splits the
-    /// wire's `access` bytes into them and `terms_of_labels` takes a build's term column verbatim
-    /// — so the string a viewer should be shown for a descriptor is the descriptor. There is no
-    /// mapping to look up and none to omit.
+    /// passthrough descriptor *is* the caller's own label string — `terms_of_labels` takes an
+    /// item's label list verbatim at both entry points — so the string a viewer should be shown
+    /// for a descriptor is the descriptor. There is no mapping to look up and none to omit.
     ///
-    /// Non-UTF-8 is refused rather than lossily converted. `terms_of_label` already requires the
-    /// wire's bytes to be UTF-8, so a descriptor that is not is one a build's term column
-    /// supplied, and replacing its bytes with substitution characters would show a viewer a label
-    /// no principal holds.
+    /// Non-UTF-8 is refused rather than lossily converted. A descriptor that is not UTF-8 is one
+    /// a label column supplied as bytes, and replacing its bytes with substitution characters
+    /// would show a viewer a label no principal holds.
     fn present_terms(&self, descriptors: &[Descriptor]) -> Result<Vec<String>, PluginError> {
         descriptors
             .iter()
@@ -307,7 +310,11 @@ mod tests {
         let descriptors = vec![b"cs.LG".to_vec(), b" spaced ".to_vec(), b"1207".to_vec()];
         assert_eq!(
             p.present_terms(&descriptors).unwrap(),
-            vec!["cs.LG".to_string(), " spaced ".to_string(), "1207".to_string()]
+            vec![
+                "cs.LG".to_string(),
+                " spaced ".to_string(),
+                "1207".to_string()
+            ]
         );
         assert!(p.present_terms(&[]).unwrap().is_empty());
         // Fail-closed rather than lossy: a substitution character is a label nobody holds.

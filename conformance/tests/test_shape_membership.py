@@ -319,7 +319,7 @@ def ingest_body(points) -> bytes:
             pa.field("external_id", pa.binary()),
             pa.field("x", pa.float32()),
             pa.field("y", pa.float32()),
-            pa.field("access", pa.utf8()),
+            pa.field("access", pa.list_(pa.utf8())),
             pa.field("fx_key", pa.uint64()),
         ]
     )
@@ -328,7 +328,7 @@ def ingest_body(points) -> bytes:
             pa.array([p[0].to_bytes(8, "little") for p in points], pa.binary()),
             pa.array([p[1] for p in points], pa.float32()),
             pa.array([p[2] for p in points], pa.float32()),
-            pa.array([term_of(p[0]) for p in points], pa.utf8()),
+            pa.array([[term_of(p[0])] for p in points], pa.list_(pa.utf8())),
             pa.array([p[0] for p in points], pa.uint64()),
         ],
         schema=schema,

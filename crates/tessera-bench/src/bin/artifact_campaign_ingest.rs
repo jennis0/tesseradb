@@ -15,14 +15,14 @@
 //!   moves by the number of members that arrived, and a spread across artifacts would only make
 //!   the arithmetic harder to state.
 //!
-//! The access label may be overridden so every ingested point is visible to the principal doing the
-//! checking: at a million terms an item's own two terms are seen by essentially nobody, and a
+//! The access labels may be overridden so every ingested point is visible to the principal doing
+//! the checking: at a million terms an item's own two terms are seen by essentially nobody, and a
 //! freshness check whose new members are invisible to the observer passes vacuously.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use arrow::array::{ArrayRef, StringBuilder, UInt32Builder};
+use arrow::array::{ArrayRef, ListBuilder, StringBuilder, UInt32Builder};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
@@ -61,10 +61,11 @@ struct Args {
     /// The first entity id to ingest. Defaults to `n` — the built prefix's end.
     #[arg(long)]
     start: Option<u64>,
-    /// Override every row's access label with this comma-separated term list, so the checking
-    /// principal can see what arrives.
+    /// Override every row's access labels with these, one label per `--access` (repeat the flag
+    /// for several), so the checking principal can see what arrives. The wire carries `access` as
+    /// a list, one label per element (decision 0129).
     #[arg(long)]
-    access: Option<String>,
+    access: Vec<String>,
     /// Give every row this `partition` value instead of the one the generator would compute.
     #[arg(long)]
     partition_value: Option<u32>,
@@ -94,16 +95,21 @@ fn body_for(args: &Args, corpus: &Corpus, range: std::ops::Range<u64>) -> Vec<u8
 
     // The access override replaces the generator's own label in place, so the column order the
     // declaration fixes is untouched.
-    if let Some(access) = &args.access {
+    if !args.access.is_empty() {
         let index = fields
             .iter()
             .position(|f| f.name() == "access")
             .expect("the generator's ingest batch carries an access column");
-        let mut builder = StringBuilder::new();
+        let mut builder = ListBuilder::new(StringBuilder::new());
         for _ in 0..rows {
-            builder.append_value(access);
+            for label in &args.access {
+                builder.values().append_value(label);
+            }
+            builder.append(true);
         }
-        columns[index] = Arc::new(builder.finish());
+        let access: ArrayRef = Arc::new(builder.finish());
+        fields[index] = Field::new("access", access.data_type().clone(), false);
+        columns[index] = access;
     }
 
     let mut partition = UInt32Builder::with_capacity(rows);
@@ -152,7 +158,8 @@ fn main() {
         .expect("an http client");
 
     let start = args.start.unwrap_or(args.n);
-    let deadline = (args.seconds > 0.0).then(|| Instant::now() + Duration::from_secs_f64(args.seconds));
+    let deadline =
+        (args.seconds > 0.0).then(|| Instant::now() + Duration::from_secs_f64(args.seconds));
     let began = Instant::now();
     let mut sent = 0u64;
     let mut accepted = 0u64;
@@ -205,7 +212,9 @@ fn main() {
         if latencies.is_empty() {
             f64::NAN
         } else {
-            latencies[((q * latencies.len() as f64).ceil() as usize).saturating_sub(1).min(latencies.len() - 1)]
+            latencies[((q * latencies.len() as f64).ceil() as usize)
+                .saturating_sub(1)
+                .min(latencies.len() - 1)]
         }
     };
     let elapsed = began.elapsed().as_secs_f64();

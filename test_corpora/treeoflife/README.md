@@ -399,11 +399,12 @@ rows**, which are the base's own: the driver's wire batch carries one row space,
 enters the **anchor view alone**. A rung with several row spaces measures the write path on one of
 them, and a `geo`-side census differs by construction rather than by defect.
 
-⊘ **2,142,399 rows are visible on the all-in bundle and not on the folded one, and the cause is the
-driver's wire encoding.** `ingest_cycle.encode_batch` writes the passthrough plugin's `access` as a
-**comma-separated descriptor list**, and **70 of the 474 publisher names contain a comma**. On the
-wire each splits into fragments, and every fragment that is not already a term is minted: the folded
-deployment carries **617 terms against the declaration's 475**. Measured on it directly:
+⊘ **2,142,399 rows are visible on the all-in bundle and not on the folded one, and the cause was
+the wire's shape.** This cell was measured with `access` as one string per row, which
+`ingest_cycle.encode_batch` filled with a **comma-joined** label list, and **70 of the 474 publisher
+names contain a comma**. On the wire each split into fragments, and every fragment that was not
+already a term was minted: the folded deployment carries **617 terms against the declaration's 475**.
+Measured on it directly:
 
 | principal | `bioclip` visible |
 |---|---|
@@ -415,9 +416,30 @@ is itself a declared key — 73,442 of them `Natural History Museum, Vienna`, wh
 the real publisher `Natural History Museum` — and the other **2,142,399 are invisible to every
 declared principal**. **Where a fragment is a real key the rows land in that compartment instead**,
 which is why the 25% principal sees **73,212 rows more** on the folded deployment than on the all-in
-one. It is the driver's encoding and not the build: the all-in bundle keys the same rows correctly,
-and this is the first rung whose compartment keys contain the separator that encoding uses. It is
-also why this rung writes no `branch-terms.txt`.
+one. It was the wire and not the build: the all-in bundle keys the same rows correctly, and this is
+the first rung whose compartment keys contain the separator. It is also why this rung writes no
+`branch-terms.txt`.
+
+**The wire now carries `access` as a list, one label per element, taken verbatim**
+([decision 0129](../../docs/decisions/0129-the-ingest-wire-carries-access-labels-as-a-list.md)),
+and `taxonomy/tree` travels as the ingest batch's column named for the layer rather than being
+declined ([decision 0128](../../docs/decisions/0128-a-layer-with-no-supplied-content-travels-as-a-column-at-ingest.md)).
+Proved on `treeoflife-1m` at *f* = 10% (100,000 hold-out rows, 59 of 376 publisher names with a
+comma), the same cell before and after, measured 2026-09-05:
+
+| surface | before | after |
+|---|---|---|
+| zoom 0, 100% principal | 998,281 against 1,000,000 (1,719 comma-named rows visible to no declared principal) | **1,000,000, exact** |
+| zoom 0, 25% principal | +60 on the folded side (`Natural History Museum, Vienna` in `Natural History Museum`) | **exact** |
+| zoom 0, six principals | 3 differ | **all six exact** |
+| `taxonomy/tree`, six principals | absent on the folded side | **exact** — 2,945 artifacts minted from the hold-out's column, 1 to 6 served per principal at zoom 0 |
+| `clusters/kmeans`, `publishers/source` | differ at 25%, 50%, 100% | **exact** |
+| boxes at zooms 3, 6, 9 | 46 differ, at most 84 rows | 46 differ under `extent = "auto"`; **0 with `--state-extent`**, every surface exact |
+| flush, time to visibility | never reached (the all-in total was out of the polling principal's reach) | **0.02 s** |
+
+⊘ The 50% cell above is not yet re-run under the list; when it is, the folded deployment should
+reach 233,055,986 under the 474 declared terms alone and `taxonomy/tree` should be a real
+comparison.
 
 **The equivalence census, retaken.** The run's own was shed mid-body — `ChunkedEncodingError`, on
 the zoom-0 whole-extent request with `layers: "all"` over 1,001,193 artifacts against a stream
@@ -434,13 +456,13 @@ Retaken once after the fold with both sides served in turn, it went through:
 | 100% | 230,913,587 | 233,055,986 | −2,142,399 |
 
 22 differences over three surfaces: 3 at zoom 0, 6 at box level, 13 on layers. **Every layer
-difference is a layer that was never published.** `clusters/kmeans` is declined at 233,118,470
-member rows — the driver inverts a layer's whole membership in memory to address it per artifact —
-and `taxonomy/tree` is not in the driver's layer roster at all, its member file being list-keyed,
-which the publication path does not take. Both are therefore declared and empty on the folded
-deployment. **`publishers/source` needs no publication** — its membership is the indexed column —
-and it reproduces exactly at five of the six principals, the sixth being the wire-encoding
-difference above.
+difference is a layer that was never published.** `clusters/kmeans` was declined at 233,118,470
+member rows — that driver inverted a layer's whole membership in memory to address it per artifact —
+and `taxonomy/tree` was not carried at all, its member file being list-keyed, which the publication
+path does not take; it now travels on the ingest column (decision 0128, above). Both were therefore
+declared and empty on the folded deployment. **`publishers/source` needs no publication** — its
+membership is the indexed column — and it reproduces exactly at five of the six principals, the
+sixth being the wire difference above.
 
 ### What is on disk
 
