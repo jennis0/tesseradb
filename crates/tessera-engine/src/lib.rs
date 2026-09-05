@@ -33,9 +33,9 @@ pub mod row_column;
 pub mod select;
 pub mod session;
 pub mod shapes;
+mod single_flight;
 pub mod suggest;
 pub mod suggest_set;
-mod single_flight;
 pub mod tile_index;
 pub mod timing;
 pub mod viewport;
@@ -65,8 +65,8 @@ pub use compose::{compose, denied_rows_of, visible_to, EffectiveMask, RowProject
 pub use gate::VisibleViews;
 pub use geometry::{GeometryPublication, GeometryRefused, GeometryRefusedReason};
 pub use session::{
-    default_compute_threads, Engine, EngineConfig, EngineError, PartitionStatus,
-    Session, ViewSegments,
+    default_compute_threads, Engine, EngineConfig, EngineError, PartitionStatus, Session,
+    ViewSegments,
 };
 // The row-projection cache's gauges. `single_flight` itself stays private — the cache, its slot
 // state machine and its four eviction rules are engine-internal — but the numbers
@@ -87,10 +87,9 @@ pub use tessera_authz::fragment::CacheStats as FragmentCacheStats;
 pub use timing::{Probe, StageTimings};
 pub use viewport::{
     ArtifactOut, ArtifactRows, ColumnBuf, ComputedSelection, EngineMeta, ItemOut, LayerSelection,
-    LeafColumn, LevelSelection, MetaGroup, MetaRoster, MetaView, PointColumns, PointRows, ScalarOut,
-    SinkClosed,
-    SinkResult, SubCellCount, TileAddress, TileCount, ViewCoordinates, ViewportHead, ViewportOut,
-    ViewportRequest, ViewportSink,
+    LeafColumn, LevelSelection, MetaGroup, MetaRoster, MetaView, PointColumns, PointRows,
+    ScalarOut, SinkClosed, SinkResult, SubCellCount, TileAddress, TileCount, ViewCoordinates,
+    ViewportHead, ViewportOut, ViewportRequest, ViewportSink,
 };
 // `EngineMeta::declared_scalars`' element type, re-exported for the same layering reason
 // `FragmentCacheStats` is: `check-layers.sh` denies a `tessera-server → tessera-store` edge
@@ -140,6 +139,8 @@ pub use write::{
     AcceptError, ExecutorHealth, ExecutorPosture, ExecutorStartError, ExecutorStats, PendingChange,
     PublishGeometryError, WriteStage, DENY_DURABILITY_ATTEMPTS, DENY_WINDOW_MAX_ENTRIES,
 };
+// The flush's own laps, beside `WriteStage`'s and read by the same status block.
+pub use flush::FlushStage;
 // The queue's own `retry_after_s` derivation. Exported because `tessera-server` derives a
 // *second* 429 subject's value from the same estimator over a different depth (contracts §0.3
 // deviation 11: the value is per-subject), and two independent implementations of one estimator is

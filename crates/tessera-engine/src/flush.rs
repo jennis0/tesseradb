@@ -52,6 +52,7 @@ use tessera_store::read::{ColumnsRef, MortonSlice, SegmentData};
 use tessera_store::{write_flush_segment, FlushInput, FlushRow};
 use tessera_types::{EntityId, IdentityKey, TermId};
 
+use crate::write::StageMark;
 use crate::Generation;
 
 /// The tag rule a tier's postings use — `postings.arrow`'s, unchanged (see
@@ -59,6 +60,238 @@ use crate::Generation;
 /// be better still; it is a constant here because a flush's postings are small by construction
 /// (one tick's arrivals) and the threshold only decides an encoding, never a content.
 const SMALL_TERM_THRESHOLD: u32 = 32;
+
+/// The stages of one flush, for attribution under `bench-timing`.
+///
+/// A flush runs on two threads. The executor plans it (`Plan`), builds the pool's inputs
+/// (`Dispatch`) and later publishes the completed unit: `Compose` to `Discarded` partition
+/// `Executor::publish_flush`, and `PublishWall` is that call's whole duration. The pool turns the
+/// plan into durable files: `Promote` to `Failed` partition [`execute_flush`], and `PoolWall` is
+/// that call's whole duration. Both partitions hold whichever way the call returns: a discard or
+/// a failure charges its tail to the stage of that name. `/control/status` reports the two sets in separate maps, and
+/// neither is added to the executor's [`crate::WriteStage`] laps: the pool's time is wall clock on
+/// another thread, and the ingest attribution's partition (executor stages plus queueing equals
+/// submit-to-receipt) holds only while those laps stay the executor's own.
+///
+/// Every stage is nanoseconds accumulated since the executor started. A pool stage per flush is
+/// its total over `flush_executions`; a publication stage per flush is its total over `flushes`;
+/// per row, divide by `flush_rows_executed` or `flush_rows_published`. All zero without
+/// `bench-timing`, where the marks read no clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlushStage {
+    // ---- the executor thread ----
+    /// `plan_flush` over every view at the tick: the buffer scan, the item clones and the sort.
+    Plan,
+    /// `dispatch_flushes` up to the pool spawn: the schemas, the novel-descriptor snapshot and
+    /// the context.
+    Dispatch,
+    /// `publish_flush`'s gates, and composing the flush's filter, record and text extents onto
+    /// the live columns.
+    Compose,
+    /// Assembling the side-manifest from the live partition manifest, deny state included.
+    Manifest,
+    /// `commit_side_manifest`: the manifest write and its fsyncs. The commit point.
+    Commit,
+    /// `Bundle::with_segment`: the new bundle and its extended row space.
+    WithSegment,
+    /// Installing the segment's shape memberships into the live levels.
+    ShapesInstall,
+    /// The buffer clone and the removal of the consumed ids. O(buffered) on the executor.
+    BufferRebase,
+    /// `derive_denied` against the new row space.
+    Denied,
+    /// Extending every stored artifact level's held row form with the segment's rows.
+    Artifacts,
+    /// The generation swap, the refresh dispatch and the cache prunes.
+    Swap,
+    /// `rotate_wal`: the overlay snapshot, the new member and the reclaim.
+    Rotate,
+    /// Dropping the superseded generation, whose buffer holds every row buffered before the swap.
+    /// O(buffered) on the executor when no request still holds it, beside the O(buffered) clone
+    /// `BufferRebase` measures.
+    DropSuperseded,
+    /// A publication that discarded its flush: the time from its last lap to its return.
+    Discarded,
+    /// The whole of `publish_flush`, from the drain's call to its return. Overlaps `Compose`
+    /// through `Discarded` rather than partitioning beside them.
+    PublishWall,
+    // ---- the pool ----
+    /// `promote`: the dictionary-first resolve, the extent write and the postings transpose.
+    Promote,
+    /// Narrowing each buffered row to the segment's render tail.
+    Rows,
+    /// `write_flush_segment`: the Morton sort, the segment's four files and their digests, and
+    /// the store's own fsyncs.
+    Segment,
+    /// The delta postings tier: its tally, its write and its reopen.
+    DeltaTier,
+    /// `write_filter_extents`: one extent per filterable column.
+    FilterExtents,
+    /// `write_entity_terms_extent`: the entity-to-term transpose.
+    EntityTerms,
+    /// `write_scoped_extents`: the group-scoped families' extents and any base a view acquired.
+    ScopedExtents,
+    /// `write_record_extent`: the record-blob extent.
+    RecordExtent,
+    /// `write_text_extents`: the text layers.
+    TextExtents,
+    /// Reading every file written outside the segment directory back for its SHA-256.
+    Digests,
+    /// Memory-mapping the segment's `morton.u32` and `columns.arrow` for the generation.
+    Reopen,
+    /// Resolving the segment against every spatial level of its view.
+    Shapes,
+    /// Dropping the plan's buffered items and the promotion's postings once the unit is built.
+    /// O(rows) frees on the pool.
+    DropPlan,
+    /// An execution that failed: the time from its last lap to its return.
+    Failed,
+    /// The whole of `execute_flush`, whichever way it returns. Overlaps `Promote` through
+    /// `Failed` rather than partitioning beside them. **Declared last**, which is what
+    /// [`FlushStage::COUNT`] is checked against.
+    PoolWall,
+}
+
+// `COUNT` sizes every array indexed by `as usize`; a variant added after `PoolWall` without
+// moving this would index past them.
+const _: () = assert!(FlushStage::COUNT == FlushStage::PoolWall as usize + 1);
+
+impl FlushStage {
+    pub const COUNT: usize = 30;
+    /// The executor thread's stages, in the order they run. `Plan` and `Dispatch` run at the
+    /// tick; the rest run at publication.
+    pub const EXECUTOR: [FlushStage; 15] = [
+        FlushStage::Plan,
+        FlushStage::Dispatch,
+        FlushStage::Compose,
+        FlushStage::Manifest,
+        FlushStage::Commit,
+        FlushStage::WithSegment,
+        FlushStage::ShapesInstall,
+        FlushStage::BufferRebase,
+        FlushStage::Denied,
+        FlushStage::Artifacts,
+        FlushStage::Swap,
+        FlushStage::Rotate,
+        FlushStage::DropSuperseded,
+        FlushStage::Discarded,
+        FlushStage::PublishWall,
+    ];
+    /// The stages that partition `PublishWall`.
+    pub const PUBLISH: [FlushStage; 12] = [
+        FlushStage::Compose,
+        FlushStage::Manifest,
+        FlushStage::Commit,
+        FlushStage::WithSegment,
+        FlushStage::ShapesInstall,
+        FlushStage::BufferRebase,
+        FlushStage::Denied,
+        FlushStage::Artifacts,
+        FlushStage::Swap,
+        FlushStage::Rotate,
+        FlushStage::DropSuperseded,
+        FlushStage::Discarded,
+    ];
+    /// The pool's stages, in the order they run.
+    pub const POOL: [FlushStage; 15] = [
+        FlushStage::Promote,
+        FlushStage::Rows,
+        FlushStage::Segment,
+        FlushStage::DeltaTier,
+        FlushStage::FilterExtents,
+        FlushStage::EntityTerms,
+        FlushStage::ScopedExtents,
+        FlushStage::RecordExtent,
+        FlushStage::TextExtents,
+        FlushStage::Digests,
+        FlushStage::Reopen,
+        FlushStage::Shapes,
+        FlushStage::DropPlan,
+        FlushStage::Failed,
+        FlushStage::PoolWall,
+    ];
+    /// The stages that partition `PoolWall`.
+    pub const EXECUTE: [FlushStage; 14] = [
+        FlushStage::Promote,
+        FlushStage::Rows,
+        FlushStage::Segment,
+        FlushStage::DeltaTier,
+        FlushStage::FilterExtents,
+        FlushStage::EntityTerms,
+        FlushStage::ScopedExtents,
+        FlushStage::RecordExtent,
+        FlushStage::TextExtents,
+        FlushStage::Digests,
+        FlushStage::Reopen,
+        FlushStage::Shapes,
+        FlushStage::DropPlan,
+        FlushStage::Failed,
+    ];
+    pub fn name(self) -> &'static str {
+        match self {
+            FlushStage::Plan => "plan",
+            FlushStage::Dispatch => "dispatch",
+            FlushStage::Compose => "compose",
+            FlushStage::Manifest => "manifest",
+            FlushStage::Commit => "manifest_commit",
+            FlushStage::WithSegment => "with_segment",
+            FlushStage::ShapesInstall => "shapes_install",
+            FlushStage::BufferRebase => "buffer_rebase",
+            FlushStage::Denied => "denied",
+            FlushStage::Artifacts => "artifacts",
+            FlushStage::Swap => "swap",
+            FlushStage::Rotate => "rotate",
+            FlushStage::DropSuperseded => "drop_superseded",
+            FlushStage::Discarded => "discarded",
+            FlushStage::PublishWall => "publish_wall",
+            FlushStage::Promote => "promote",
+            FlushStage::Rows => "rows",
+            FlushStage::Segment => "segment",
+            FlushStage::DeltaTier => "delta_tier",
+            FlushStage::FilterExtents => "filter_extents",
+            FlushStage::EntityTerms => "entity_terms",
+            FlushStage::ScopedExtents => "scoped_extents",
+            FlushStage::RecordExtent => "record_extent",
+            FlushStage::TextExtents => "text_extents",
+            FlushStage::Digests => "digests",
+            FlushStage::Reopen => "reopen",
+            FlushStage::Shapes => "shapes",
+            FlushStage::DropPlan => "drop_plan",
+            FlushStage::Failed => "failed",
+            FlushStage::PoolWall => "pool_wall",
+        }
+    }
+}
+
+/// One `execute_flush`'s laps, accumulated on the pool and handed to the executor's health when
+/// the call returns (`ExecutorHealth::record_flush_execution`). Local rather than shared so a
+/// flush still running on the pool is in no total.
+#[derive(Debug, Default)]
+pub(crate) struct FlushLaps {
+    /// Written by [`FlushLaps::lap`] and read by `ExecutorHealth::record_flush_execution`, both
+    /// of which compile to nothing without the feature.
+    #[cfg_attr(not(feature = "bench-timing"), allow(dead_code))]
+    pub(crate) nanos: [u64; FlushStage::COUNT],
+}
+
+impl FlushLaps {
+    /// Charge the time since `mark` to `stage`, and return a fresh mark. A no-op without
+    /// `bench-timing`, where it returns `mark` unchanged and reads no clock.
+    #[inline(always)]
+    #[allow(unused_variables)]
+    pub(crate) fn lap(&mut self, stage: FlushStage, mark: StageMark) -> StageMark {
+        #[cfg(feature = "bench-timing")]
+        {
+            let now = std::time::Instant::now();
+            self.nanos[stage as usize] += now.duration_since(mark.0).as_nanos() as u64;
+            StageMark(now)
+        }
+        #[cfg(not(feature = "bench-timing"))]
+        {
+            mark
+        }
+    }
+}
 
 /// One flush's immutable plan: the items of one view that will acquire geometry.
 ///
@@ -371,9 +604,34 @@ pub(crate) struct CompletedFlush {
 ///
 /// The order is §7.3's, and the side-manifest is last because it is the commit point: a crash
 /// before it leaves orphan files nothing references, and replay re-flushes deterministically.
+///
+/// `laps` receives the pool's [`FlushStage`]s: each stage's wall clock on this thread, and
+/// `PoolWall` for the whole call whichever way it returns. The caller adds them to the executor's
+/// health after the return.
 pub(crate) fn execute_flush(
     plan: FlushPlan,
     ctx: FlushContext,
+    laps: &mut FlushLaps,
+) -> Result<CompletedFlush, FlushFailed> {
+    let wall = StageMark::now();
+    let mut mark = wall;
+    let result = execute_flush_stages(plan, ctx, laps, &mut mark);
+    if result.is_err() {
+        // A failed flush's time since its last lap, so `PoolWall` stays partitioned whichever way
+        // the call ends.
+        laps.lap(FlushStage::Failed, mark);
+    }
+    laps.lap(FlushStage::PoolWall, wall);
+    result
+}
+
+/// The pool's stages, each lapped as it ends. `mark` is left at the last lap so the caller can
+/// charge a failure's tail.
+fn execute_flush_stages(
+    plan: FlushPlan,
+    ctx: FlushContext,
+    laps: &mut FlushLaps,
+    mark: &mut StageMark,
 ) -> Result<CompletedFlush, FlushFailed> {
     let consumed: Vec<EntityId> = plan.items.iter().map(|(entity, _)| *entity).collect();
 
@@ -389,6 +647,7 @@ pub(crate) fn execute_flush(
     // downward from `u32::MAX` to avoid, arriving by a different route.
     let promotion = promote(&plan, &ctx)?;
     let promoted_from = promotion.extent.as_ref().map(|_| ctx.dict.len());
+    *mark = laps.lap(FlushStage::Promote, *mark);
 
     // ---- the segment, its extents and its locator -------------------------------------------
     //
@@ -443,6 +702,7 @@ pub(crate) fn execute_flush(
             scalars,
         });
     }
+    *mark = laps.lap(FlushStage::Rows, *mark);
     let out = write_flush_segment(
         &ctx.prefix_dir,
         &ctx.partition,
@@ -459,6 +719,7 @@ pub(crate) fn execute_flush(
         },
     )
     .map_err(|e| FlushFailed(format!("segment: {e}")))?;
+    *mark = laps.lap(FlushStage::Segment, *mark);
 
     // ---- the delta postings tier ------------------------------------------------------------
     let tier_tally = tessera_lifecycle::window::FragmentationTally::of_tier(
@@ -476,6 +737,7 @@ pub(crate) fn execute_flush(
         .map_err(|e| FlushFailed(format!("delta tier: {e}")))?;
     let tier =
         Arc::new(DeltaTier::open(&tier_path).map_err(|e| FlushFailed(format!("tier: {e}")))?);
+    *mark = laps.lap(FlushStage::DeltaTier, *mark);
 
     // ---- the manifest's ingredients, not the manifest ---------------------------------------
     //
@@ -486,17 +748,17 @@ pub(crate) fn execute_flush(
     // flush is in flight, and a manifest committed at a lower `n` than the newest is a manifest a
     // restore never reads — the segment silently lost. And the deny fields must reflect the
     // overlay at *publication*, not at plan time, which is a thing only the executor holds.
+    //
+    // **Every file written below the segment's own four is digested in one pass, after the last
+    // write.** The segment writer digests its own files as part of `out.files`; everything else
+    // this function writes is collected here by prefix-relative path and read back under one
+    // stage, so the digest cost is attributable on its own rather than spread across the stages
+    // that wrote the files.
     let mut files = out.files;
-    files.insert(
-        tier_rel.clone(),
-        digest_of(&tier_path).map_err(FlushFailed)?,
-    );
+    let mut to_digest: Vec<String> = vec![tier_rel.clone()];
     let dict_extent = match promotion.extent {
         Some(extent) => {
-            files.insert(
-                extent.path.clone(),
-                digest_of(&ctx.prefix_dir.join(&extent.path)).map_err(FlushFailed)?,
-            );
+            to_digest.push(extent.path.clone());
             Some(extent)
         }
         None => None,
@@ -512,12 +774,10 @@ pub(crate) fn execute_flush(
             .into_iter()
             .chain(extent.dict_rel.as_ref())
         {
-            files.insert(
-                rel.clone(),
-                digest_of(&ctx.prefix_dir.join(rel)).map_err(FlushFailed)?,
-            );
+            to_digest.push(rel.clone());
         }
     }
+    *mark = laps.lap(FlushStage::FilterExtents, *mark);
 
     // ---- the entity→term transpose extent (contracts §2.4) ----------------------------------
     //
@@ -528,11 +788,9 @@ pub(crate) fn execute_flush(
         &entity_terms_extent.offsets,
         &entity_terms_extent.terms,
     ] {
-        files.insert(
-            rel.clone(),
-            digest_of(&ctx.prefix_dir.join(rel)).map_err(FlushFailed)?,
-        );
+        to_digest.push(rel.clone());
     }
+    *mark = laps.lap(FlushStage::EntityTerms, *mark);
 
     // ---- the group-scoped column families' extents (`views.md` §5) --------------------------
     //
@@ -548,10 +806,7 @@ pub(crate) fn execute_flush(
             .into_iter()
             .chain(extent.dict_rel.as_ref())
         {
-            files.insert(
-                rel.clone(),
-                digest_of(&ctx.prefix_dir.join(rel)).map_err(FlushFailed)?,
-            );
+            to_digest.push(rel.clone());
         }
     }
     // **The base a view acquired at this flush is digested too.** It is named by
@@ -569,12 +824,8 @@ pub(crate) fn execute_flush(
             tessera_filter::DICT_FILE,
             "postings.arrow",
         ] {
-            let path = ctx.prefix_dir.join(&rel).join(name);
-            if path.exists() {
-                files.insert(
-                    format!("{rel}/{name}"),
-                    digest_of(&path).map_err(FlushFailed)?,
-                );
+            if ctx.prefix_dir.join(&rel).join(name).exists() {
+                to_digest.push(format!("{rel}/{name}"));
             }
         }
     }
@@ -583,19 +834,18 @@ pub(crate) fn execute_flush(
         all.extend(scoped_extents);
         all
     };
+    *mark = laps.lap(FlushStage::ScopedExtents, *mark);
 
     // ---- the record-blob extent (records §7) ------------------------------------------------
     let record_extent = write_record_extent(&plan, &ctx)?;
-    let mut text_extents = write_text_extents(&plan, &ctx)?;
-    text_extents.extend(scoped_texts);
     if let Some(extent) = &record_extent {
         for rel in [&extent.blocks, &extent.hasrow, &extent.directory] {
-            files.insert(
-                rel.clone(),
-                digest_of(&ctx.prefix_dir.join(rel)).map_err(FlushFailed)?,
-            );
+            to_digest.push(rel.clone());
         }
     }
+    *mark = laps.lap(FlushStage::RecordExtent, *mark);
+    let mut text_extents = write_text_extents(&plan, &ctx)?;
+    text_extents.extend(scoped_texts);
     // **All three files of every text extent, and the omission was not cosmetic.** A digest is not
     // only an integrity check here: `publish_fold` carries a flight extent forward by looking its
     // digest up in the live manifests and *discards the whole fold* when it finds none. So a
@@ -607,12 +857,19 @@ pub(crate) fn execute_flush(
     // reading as absent.
     for extent in &text_extents {
         for rel in [&extent.dict, &extent.postings, &extent.presence] {
-            files.insert(
-                rel.clone(),
-                digest_of(&ctx.prefix_dir.join(rel)).map_err(FlushFailed)?,
-            );
+            to_digest.push(rel.clone());
         }
     }
+    *mark = laps.lap(FlushStage::TextExtents, *mark);
+
+    // ---- the digests, one pass over everything written above ---------------------------------
+    for rel in to_digest {
+        files.insert(
+            rel.clone(),
+            digest_of(&ctx.prefix_dir.join(&rel)).map_err(FlushFailed)?,
+        );
+    }
+    *mark = laps.lap(FlushStage::Digests, *mark);
 
     let seg_dir = segment_dir(&ctx);
     let segment = SegmentData {
@@ -623,6 +880,7 @@ pub(crate) fn execute_flush(
         columns: ColumnsRef::load(&seg_dir.join("columns.arrow"))
             .map_err(|e| FlushFailed(format!("columns: {e}")))?,
     };
+    *mark = laps.lap(FlushStage::Reopen, *mark);
 
     // ---- the shape memberships (`polygon-membership.md` §6.3) ------------------------------
     //
@@ -653,8 +911,9 @@ pub(crate) fn execute_flush(
             cost,
         });
     }
+    *mark = laps.lap(FlushStage::Shapes, *mark);
 
-    Ok(CompletedFlush {
+    let completed = CompletedFlush {
         partition: ctx.partition,
         view: ctx.view,
         consumed,
@@ -680,7 +939,16 @@ pub(crate) fn execute_flush(
         promoted_from_dict_len: promoted_from,
         prefix: ctx.prefix,
         shape_pieces,
-    })
+    };
+    // **Freed here, under a stage, rather than at the return.** The plan holds one `BufferedItem`
+    // per row and the promotion holds the postings in both orientations; freeing them is O(rows)
+    // of allocator work that a lap at the return would leave unattributed. Measured at 0.4 to
+    // 0.6 µs per row on medcpt-1m (`probes/2026-09-05-flush-attribution/`).
+    drop(plan);
+    drop(promotion.postings);
+    drop(promotion.per_entity);
+    laps.lap(FlushStage::DropPlan, *mark);
+    Ok(completed)
 }
 
 /// Why a flush produced nothing. **Every failure is "nothing happened, retry next tick"** (§10):
@@ -1443,8 +1711,12 @@ fn scoped_column_rel(ctx: &FlushContext, column: &str) -> String {
     // directory is the cell's address, the cell is `(attribute → its group, key)`, and the
     // incarnation suffix is the owner view's — a sharing group's door writes the owner's path,
     // and a recreated key's base never lands on its predecessor's.
-    tessera_store::scoped_column_rel(&ctx.partition, column, &ctx.scoped_view, ctx.scoped_incarnation)
-
+    tessera_store::scoped_column_rel(
+        &ctx.partition,
+        column,
+        &ctx.scoped_view,
+        ctx.scoped_incarnation,
+    )
 }
 
 /// Write this flush's extent for every **group-scoped** family of its view's group, and the empty
@@ -2119,6 +2391,31 @@ mod tests {
         other.view = "elsewhere".to_string();
         let generation = generation_with(&[(7, other)], &[]);
         assert!(matches!(plan(&generation), Err(NoFlush::NothingToFlush)));
+    }
+
+    /// The two per-thread sets cover every stage once, and each wall's partition excludes the
+    /// wall itself. `/control/status` and the attribution test index by these sets, so a stage
+    /// added to the enum and left out of them would be measured and reported nowhere.
+    #[test]
+    fn the_stage_sets_cover_the_enum_once_and_each_partition_excludes_its_wall() {
+        let mut seen = [false; FlushStage::COUNT];
+        for stage in FlushStage::EXECUTOR.iter().chain(FlushStage::POOL.iter()) {
+            assert!(!seen[*stage as usize], "{} is listed twice", stage.name());
+            seen[*stage as usize] = true;
+        }
+        assert!(seen.iter().all(|s| *s), "a stage is in neither set");
+        for stage in FlushStage::PUBLISH {
+            assert!(FlushStage::EXECUTOR.contains(&stage));
+            assert_ne!(stage, FlushStage::PublishWall);
+        }
+        for stage in FlushStage::EXECUTE {
+            assert!(FlushStage::POOL.contains(&stage));
+            assert_ne!(stage, FlushStage::PoolWall);
+        }
+        // Everything on the executor that is not the tick's two stages or the wall partitions
+        // the wall; everything on the pool that is not the wall partitions it.
+        assert_eq!(FlushStage::PUBLISH.len() + 3, FlushStage::EXECUTOR.len());
+        assert_eq!(FlushStage::EXECUTE.len() + 1, FlushStage::POOL.len());
     }
 
     /// Ascending by entity id, because `write_flush_segment` requires it and because the extent is

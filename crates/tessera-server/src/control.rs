@@ -3497,6 +3497,10 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
                 "flush_failures": executor.flush_failures,
                 "flushable_items": executor.flushable_items,
                 "flush_requested": executor.flush_requested,
+                // Whether a flush unit is on the pool now. `flushes` counts publications and
+                // `flush_stages.executions` counts pool returns; neither moves while one runs,
+                // and this is what says the two are complete rather than merely equal.
+                "in_flight": executor.flush_in_flight,
                 "buffered_items": executor.buffered_items,
                 "overlay_publications": executor.overlay_publications,
                 // The visibility barrier's second half (decision 0044 D1; correctness-suite
@@ -3535,6 +3539,38 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
                     )
                 })
                 .collect::<serde_json::Map<String, serde_json::Value>>(),
+            // The flush's own laps (`FlushStage`), in two maps because they are wall clock on
+            // two threads: the executor's plan, dispatch and publication, and the pool's
+            // `execute_flush`. Neither is added to `stage_nanos`, so the partition above keeps
+            // holding. `executions` counts `execute_flush` returns on the pool and `flushes`
+            // counts publications; a pool stage per flush is `pool_nanos[s] / executions`, a
+            // publication stage per flush is `executor_nanos[s] / flushes`, and per row divide by
+            // `rows_executed` or `rows_published`. Out of contract (§0.1), as `stage_nanos` is.
+            "flush_stages": {
+                "bench_timing": cfg!(feature = "bench-timing"),
+                "executions": executor.flush_executions,
+                "rows_executed": executor.flush_rows_executed,
+                "flushes": executor.flushes,
+                "rows_published": executor.flush_rows_published,
+                "executor_nanos": tessera_engine::FlushStage::EXECUTOR
+                    .iter()
+                    .map(|stage| {
+                        (
+                            stage.name().to_owned(),
+                            serde_json::json!(executor.flush_stage_nanos[*stage as usize]),
+                        )
+                    })
+                    .collect::<serde_json::Map<String, serde_json::Value>>(),
+                "pool_nanos": tessera_engine::FlushStage::POOL
+                    .iter()
+                    .map(|stage| {
+                        (
+                            stage.name().to_owned(),
+                            serde_json::json!(executor.flush_stage_nanos[*stage as usize]),
+                        )
+                    })
+                    .collect::<serde_json::Map<String, serde_json::Value>>(),
+            },
         },
         // `admission` is the bound, `in_flight` is read live off the semaphore.
         // `shed_total` counts **this bound's** 429s only — the queue-full 429 is produced inside
