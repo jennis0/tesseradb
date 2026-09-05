@@ -13,11 +13,12 @@ two allocation ranges meeting
 
 The answer is an epoch shard. The corpus becomes a list of shards inside one process. Each point
 shard holds its own `u32` entity space and its own `u32` row space per view, with its own
-permutation, postings, overlay, allocator and segments. A shard opens when the previous one's
-allocator fills, or earlier at a configured size. `RowId` stays `u32`; nothing widens. The term
+permutation, postings, overlay, allocator and segments. A freed slot in any shard is reused before
+a shard opens, so a shard opens only when the corpus grows past what the existing shards hold
+(§3.1). `RowId` stays `u32`; nothing widens. The term
 dictionary, the layer and view registries, the artifact registry and session tokens stay whole
 across shards. A request's mask becomes one leaf per shard, summed and unioned rather than
-composed into one bitmap; allocation happens in one open shard; a deletion or suppression applies
+composed into one bitmap; allocation targets one shard at a time; a deletion or suppression applies
 to the shard its identifier inverts to; compaction runs on one shard at a time.
 
 ## 1. Model
@@ -25,7 +26,7 @@ to the shard its identifier inverts to; compaction runs on one shard at a time.
 ### 1.1 What a shard is
 
 A **shard** is `ShardId(u32)`, a newtype in `tessera-types` (`define_id_newtype`). Its value is
-one of 0 to 4095, the width of the identity's shard field (§1.2). A shard id, once used, is never
+one of 0 to 2²⁰ − 1, the width of the identity's shard field (§1.2). A shard id, once used, is never
 reused, the rule contracts §2.1 states for `seg_id`. The manifest is the allocator of shard
 numbers: `next_shard_id` is a monotone counter.
 
@@ -34,15 +35,16 @@ There are two kinds.
 - A **point shard** holds an entity space of `[0, 2³²)`, one row space per view (`u32`), a
   permutation per view, segments per view, its own term postings and delta tiers, its own
   entity-to-term transpose, attribute extents, record-blob extents, text extents, external-id runs
-  and locator, an overlay (`deleted`, `suppressed`) in its own entity space, an allocator, and a
-  compaction generation counter
-  ([decision 0072](../decisions/0072-entity-ids-are-slots-and-are-reused-after-a-fold.md)).
+  and locator, an overlay (`deleted`, `suppressed`) in its own entity space, and an allocator with
+  its free pool (§3.1,
+  [decision 0072](../decisions/0072-entity-ids-are-slots-and-are-reused-after-a-fold.md) as amended
+  by [decision 0126](../decisions/0126-the-generation-counts-a-slots-occupancies-and-a-freed-slot-is-reused-before-a-shard-opens.md)).
 - An **artifact shard**, kind `artifacts`, holds an entity space only: no row space, no
-  permutation, no segments, no Morton order. It holds an allocator, postings over the terms an
-  artifact's own visibility gates on, and an overlay for deleted and suppressed artifacts. It
-  opens, seals, reopens and is dropped by the same rules as a point shard, because artifact churn
-  alone consumes a `u32`: about 14 months at a daily replacement of 10⁷ artifacts
-  ([annotation-representation.md](annotation-representation.md)).
+  permutation, no segments, no Morton order. It holds an allocator with its free pool, postings
+  over the terms an artifact's own visibility gates on, and an overlay for deleted and suppressed
+  artifacts. It opens, seals and is dropped by the same rules as a point shard. A deleted
+  artifact's slot returns to the pool at the artifact shard's compaction and is reused, so a second
+  artifact shard opens only when live artifacts exceed the entity ceiling.
 
 Shard 0 is the build's first point shard and shard 1 its first artifact shard. A later shard of
 either kind takes the next number from `next_shard_id` when it opens. The smallest bundle has two
@@ -64,12 +66,12 @@ flowchart TB
     P3["term postings, delta tiers,<br/>entity-to-term transpose"]
     P4["attribute, record-blob<br/>and text extents"]
     P5["external-id runs and locator"]
-    P6["overlay (deleted, suppressed),<br/>allocator, compaction generation"]
+    P6["overlay (deleted, suppressed),<br/>allocator and free pool"]
   end
   subgraph A["Artifact shard: one open at a time"]
     direction TB
     A1["entity space only:<br/>no row space, no Morton order"]
-    A2["allocator"]
+    A2["allocator and free pool"]
     A3["own-term postings"]
     A4["overlay (deleted, suppressed)"]
   end
@@ -77,36 +79,32 @@ flowchart TB
 
 *What is per point shard, what is in an artifact shard, and what stays global to the bundle.*
 
-A point shard passes through four states.
+A point shard passes through three states.
 
-- **Open** accepts allocation.
-- **Sealed** accepts no allocation, but accepts edits, deletes and suppressions; compaction still
-  runs on it.
-- **Reopened** accepts allocation again, drawn from the slots compaction has freed; it seals again
-  once those slots are gone.
+- **Open** issues slots from its high water and from its free pool.
+- **Sealed** issues slots from its free pool only; it accepts edits, deletes and suppressions, and
+  compaction runs on it.
 - **Dropped** is removed; its number is retired.
 
-Exactly one shard of each kind is open at a time. Several open shards of one kind, one per data
-source for example, is an option this design does not take (§11).
+Exactly one shard of each kind is open at a time, and allocation targets one shard of each kind at
+a time, which may be a sealed shard with slots in its pool (§3.1). Several open shards of one kind,
+one per data source for example, is an option this design does not take (§11).
 
 ```mermaid
 flowchart TD
-  S(["build, or the allocator<br/>sealing the previous shard"]) --> O[open]
-  O -->|"the allocator,<br/>when the shard fills"| SE[sealed]
+  S(["build, or the allocator, when the open shard<br/>is at its seal size and no pool meets the threshold"]) --> O[open]
+  O -->|"the allocator, when the high<br/>water reaches the seal size"| SE[sealed]
   O -->|"an operator:<br/>PUT /control/shards/id sealed"| SE
-  SE -->|"an operator: PUT /control/shards/id open,<br/>when free slots meet the threshold"| RE[reopened]
-  RE -->|"the allocator,<br/>when the freed slots run out"| SE
   SE -->|"an operator:<br/>DELETE /control/shards/id"| DR[dropped]
 ```
 
 *The point-shard state machine: the transitions, and who takes each one.*
 
-| State | Accepts allocation | Accepts edits, deletes, suppressions | Compaction runs | Entered by |
+| State | Issues slots | Accepts edits, deletes, suppressions | Compaction runs | Entered by |
 |---|---|---|---|---|
-| Open | yes | yes | yes | the build, or the allocator opening the next shard |
-| Sealed | no | yes | yes | the allocator (seal by size), or an operator |
-| Reopened | yes, from freed slots | yes | yes | an operator, when free slots meet `shard.reopen_min_free` |
-| Dropped | no | no | no | an operator; refused while a shard accepts allocation |
+| Open | from its high water and its pool | yes | yes | the build, or the allocator when the open shard is at its seal size and no pool meets `shard.reuse_min_free` |
+| Sealed | from its pool | yes | yes | the allocator (seal by size), or an operator |
+| Dropped | no | no | no | an operator; refused while the shard is open |
 
 Global state, held once per bundle: the term dictionary (`dictionary/terms-<k>.dict`, one
 namespace, term ids the policy vocabulary), declared scalars and vocabularies, the layer registry,
@@ -126,8 +124,9 @@ sharded mask (§2.1). It never reaches the store, the wire or disc. I4's compile
 two cases: a `ShardRow` cannot be built from an `EntityId` alone, and a `RowId` cannot be read from
 a `ShardRow` without its shard.
 
-`tessera_id` becomes `FPE_k((shard: 12) ‖ (generation: 20) ‖ (entity: 32))`, decision 0072's
-construction with the shard field carrying the shard number instead of the reserved constant 0.
+`tessera_id` becomes `FPE_k((shard: 20) ‖ (generation: 12) ‖ (entity: 32))`: decision 0072's
+construction at decision 0126's widths, the shard field carrying the shard number instead of the
+reserved constant 0, and the generation counting the slot's occupancies (§3.1).
 `identity.shard_id` leaves the manifest. Inversion yields `(shard, generation, entity)`;
 validation stays whole-identifier equality at the row the slot names, which for an artifact is the
 record (decision 0072).
@@ -183,15 +182,14 @@ Each `shards[]` record:
 | Field | Meaning |
 |---|---|
 | `shard_id`, `kind` | `points` or `artifacts` |
-| `state` | `open`, `sealed`, `reopened` or `dropped` |
+| `state` | `open`, `sealed` or `dropped` |
 | `entity_id_high_water` | seeds the shard's allocator |
-| `entity_id_low_water` | present only for a reopened shard, drawing from freed slots |
 | `opened_at`, `sealed_at` | the second present once sealed |
-| `compaction_generation` | decision 0072's per-shard compaction counter |
 
 The per-shard `SEGMENTS-<n>.json` carries what a `SEGMENTS-<n>.json` carries today: segments,
-extents, the deny and tombstone lists, deltas, the watermark, level versions, the compaction
-generation. It is per shard by construction, since the directory that names it is the shard's own.
+extents, the deny and tombstone lists, deltas, the watermark, level versions. It gains the free
+pool, one bitmap extent per generation bucket, and the count of retired slots (§3.1). It is per
+shard, since the directory that names it is the shard's own.
 `segments_n`, the geometry version and the overlay version all become per shard.
 
 A compaction of one shard hard-links the other shards' directories into the new prefix whole
@@ -350,7 +348,7 @@ cardinality rule applies to the sum). Meta: sums.
 ```mermaid
 flowchart TD
   subgraph W["/control/ingest"]
-    A["commit window:<br/>signature-sorted allocation"] --> B["allocate on the open shard;<br/>it seals and the next opens if it fills"]
+    A["commit window:<br/>signature-sorted allocation"] --> B["allocate from the largest pool, else the<br/>open shard; a shard opens only on growth"]
     B --> C["WAL append:<br/>each row records its shard"]
   end
   subgraph N["/control/changes"]
@@ -363,34 +361,53 @@ flowchart TD
   K --> L[flip CURRENT]
 ```
 
-*The write path: allocation and flush stay in the open shard, a deny resolves to the shard its
-identifier inverts to, and compaction runs over one shard while carrying the rest forward as
-links.*
+*The write path: allocation targets one shard, a deny resolves to the shard its identifier
+inverts to, and compaction runs over one shard while carrying the rest forward as links.*
 
 ### 3.1 Allocation
 
 | | Today | Becomes |
 |---|---|---|
-| allocator | one, bundle-wide | one per shard: `Allocators { by_shard: BTreeMap<ShardId, Allocator>, open: BTreeMap<ShardKind, ShardId> }`, one open shard per kind |
-| point allocation | `allocate(n)` | `allocate(n)` on the open shard; when `remaining() < n` the open shard seals (recorded at the next publication) and the next shard opens, numbered `next_shard_id` |
-| artifact allocation | the two-region allocator: points up from 0, artifacts down from `u32::MAX` | `allocate` on the open artifact shard, which seals and is succeeded on the same rule as a point shard; no `allocate_rowless`, no two regions |
-| seed | one manifest field | each shard's own `entity_id_high_water` seeds its allocator; WAL replay recovers per shard, since a record carries its shard |
+| allocator | one, bundle-wide, monotone | one per shard, each with a free pool: `Allocators { by_shard: BTreeMap<ShardId, Allocator>, open: BTreeMap<ShardKind, ShardId> }`, one open shard per kind |
+| free pool | none; a slot is never reused | per shard, `BTreeMap<u16, Bitmap>`: the slots the shard's compactions have freed, keyed by the generation their next occupant is stamped with |
+| generation | none | the slot's occupancy count (decision 0126): a compaction inverts the identifier stored at each row it removes and returns the slot to the bucket one above the generation it read, or retires the slot if that generation is 2¹² − 1 |
+| point allocation | `allocate(n)` from the high water | `allocate(n)` on the target shard (below); a slot from the pool is stamped with its bucket's generation, a slot above the high water with 0 |
+| artifact allocation | the two-region allocator: points up from 0, artifacts down from `u32::MAX` | `allocate` on the target artifact shard, on the same rule; no `allocate_rowless`, no two regions |
+| seed | one manifest field | each shard's `entity_id_high_water` and its pool, from the side manifest; WAL replay recovers both, since a record carries its shard and its generation |
 
-A commit window's allocation run may straddle a seal boundary; each row records the shard it
-landed in.
+The **allocation target** for a kind is chosen at each commit window: the shard of that kind with
+the largest pool, if that pool holds at least `shard.reuse_min_free` slots; otherwise the open
+shard, from its own pool first and then its high water. When the open shard's high water reaches
+the seal size it seals (recorded at the next publication). The next shard, numbered
+`next_shard_id`, opens only when a window still has rows to place, the open shard is at its seal
+size and no pool meets the threshold. A window may straddle a change of target; each row records
+the shard it landed in. Within a target the window's rows are signature-sorted and take slots in
+ascending order, lowest bucket first, so a run of freed slots is handed out as a run.
+
+Under this rule churn consumes no shard numbers. A corpus at a steady live size opens no shard,
+and the shard count is the live count over the seal size. What reuse costs is locality: a slot
+from the pool sits wherever its previous occupant did, so postings over reused slots hold fewer
+runs than postings over a contiguous allocation at the high water. Decision 0072 accepts this
+cost for reuse inside one shard; this rule applies it in every shard, and its bound is the same,
+containers touched. Not measured.
+
+A slot whose occupant carried generation 2¹² − 1 leaves the pool at the compaction that frees it
+and is never issued again. The shard loses one slot per 4,096 occupancies of that slot. Modelled:
+with the pool drained lowest bucket first, a shard's churned population reaches the cap after
+about 1,100 years at 1% daily churn and about 110 years at 10% (§9).
 
 Seal by size, `shard.seal_rows` for point shards and `shard.seal_artifacts` for artifact shards,
 each defaults to the entity ceiling and is tunable; an operator may set a lower figure. For point
 shards the design expects a value around 2³⁰, to bound compaction and projection cost per shard;
-both defaults are open (§11). Seal is also an operator verb (§3.5).
+both defaults are open (§11), as is `shard.reuse_min_free`. Seal is also an operator verb (§3.5).
 
 ### 3.2 Ingest, the commit window, the WAL, flush
 
 | | Today | Becomes |
 |---|---|---|
-| `WalRow` | no shard field | gains `shard` |
+| `WalRow` | no shard field | gains `shard` and `generation` |
 | commit window | signature-sorted allocation | unchanged in scope |
-| flush | one pass over the buffer | per shard with pending rows: the open shard for new points, a sealed shard for edits that changed geometry or attributes |
+| flush | one pass over the buffer | per shard with pending rows: the allocation target for new points, any shard for edits that changed geometry or attributes |
 | flush output | a segment in the view directory, an extent above the base | a segment in that shard's view directory, an extent above that shard's base in that view's row space |
 | row-projection repair (`extend`) | one call | per shard leaf |
 
@@ -417,35 +434,36 @@ trigger gauges, dead rows, retirable deletions, segment count, and the gated win
 per shard, and the trigger picks the shard with the most to reclaim. The passes run
 over that shard's files only. Publication writes the new prefix with the other shards'
 directories hard-linked whole; the flip, retirement, WAL rotation and reclaim proceed as they do
-today ([compaction.md](compaction.md) §§4–8). Retirement is per shard, and the compaction
-generation counter is per shard (decision 0072). A compaction of shard k rotates only shard k's
-session fragment entries and projections. Merge and coalesce run per shard, suspended only while
+today ([compaction.md](compaction.md) §§4–8). Retirement is per shard. The compaction returns
+each removed row's slot to the shard's pool, in the bucket one above the generation the row's
+identifier inverts to, or retires the slot at the cap (§3.1). A compaction of shard k rotates only
+shard k's session fragment entries and projections. Merge and coalesce run per shard, suspended only while
 that shard's compaction is unpublished. An artifact shard's compaction runs the passes that apply
 to an entity space without rows: postings, external ids, the dictionary and the overlay's
 retirement.
 
 Sealing schedules one closing compaction when any of the shard's gauges is non-zero. Its final form is one base segment per view, one postings tier, one
 external-id run, an overlay holding only suppressions (its deletions retired), and a digest per
-file. A sealed shard with no later edits then stays unchanged on disc until it is reopened or
-dropped.
+file. A sealed shard then stays unchanged on disc until an allocation from its pool, an edit, a
+deletion or a suppression lands in it, or it is dropped; a sealed shard with an empty pool and no
+deletions is stable.
 
 Measured (`probes/2026-09-04-epoch-shard-fold-decomposition/`, one real compaction of the MedCPT
 36M bundle): 330 s total. 1.5% is inherently corpus-wide (dispatch, the manifest, the flip). 50.5%
 is proportional to the compacted shard's rows. 48.1% is the artifact structures §2.5 describes,
 corpus-wide today and per shard under this design.
 
-### 3.5 Reopen and drop
+### 3.5 Seal and drop
 
-`PUT /control/shards/{id}` with `{"state": "open"}` is allowed when the shard's free slots
-(retired since its last compaction, under decision 0072's slot return) meet
-`shard.reopen_min_free`, an operator lever. Allocation then draws from that shard until its free
-slots are gone, when it seals again. The shard already open seals first, since only one shard is
-open at a time. `{"state": "sealed"}` seals a shard immediately.
+`PUT /control/shards/{id}` with `{"state": "sealed"}` seals a shard immediately: its high water
+issues no more slots, and its pool is drawn from on the rule of §3.1. There is no reopen verb; a
+sealed shard's pool is reused without an operator's action.
 
-`DELETE /control/shards/{id}` is refused while a shard is open or reopened. Otherwise, the next
-publication removes its directory, its number is retired, and every identifier it issued becomes
-invalid by whole-identifier equality, since no row carries it any longer. Dropping an artifact shard retires every artifact it holds as deleted, and their records leave
-the registry at the same publication. Both operations are irreversible for identifiers.
+`DELETE /control/shards/{id}` is refused while a shard is open. Otherwise, the next publication
+removes its directory, its number is retired, the allocator stops targeting it, and every
+identifier it issued becomes invalid by whole-identifier equality, since no row carries it any
+longer. Dropping an artifact shard retires every artifact it holds as deleted, and their records
+leave the registry at the same publication. Dropping is irreversible for identifiers.
 
 ### 3.6 Layout changes and views
 
@@ -465,9 +483,9 @@ directory move and the manifest.
 
 ## 5. Control plane and observability
 
-`/control/status` gains `shards: [{shard_id, kind, state, live_rows, entity_id_high_water,
-remaining, overlay: {deleted, suppressed}, retirable_deletions, segments, compaction: {last_secs,
-last_rss_bytes, passes}}]`; the totals it reports today become sums over that array. `GET
+`/control/status` gains `shards: [{shard_id, kind, state, target, live_rows,
+entity_id_high_water, remaining, free_slots, retired_slots, overlay: {deleted, suppressed},
+retirable_deletions, segments, compaction: {last_secs, last_rss_bytes, passes}}]`; the totals it reports today become sums over that array. `GET
 /control/shards` lists the same records. A refusal at open names the shard and the file (ruling F,
 §8).
 
@@ -485,12 +503,13 @@ New fixtures:
 |---|---|
 | (a) | the same corpus built as one point shard and as three: every viewport, item, browse and category response equal, apart from the identifier's shard field |
 | (b) | a sealed shard taking edits, deletions and suppressions: the two removal rules observed per shard |
-| (c) | reopen and allocation from freed slots: no identifier reused, decision 0072's rule across shards |
+| (c) | allocation from a sealed shard's pool: the target follows the largest pool, no identifier is reused, and a slot's successive occupants carry ascending generations |
 | (d) | a dropped shard: every count falls by its contribution, every identifier it issued answers 404, its number never reappears |
 | (e) | a shard with a corrupted file refuses at open, naming the shard |
 | (f) | decision 0091's equivalence across a seal boundary |
 | (g) | the byte-scanner: no entity id, no shard number and no per-shard count on the wire |
 | (h) | an artifact shard sealing at `shard.seal_artifacts` and a second opening: new artifact identifiers carry the new shard number; memberships, generating sets and lineage are unchanged |
+| (i) | a slot at the generation cap: retired at the compaction that frees it, never issued again, the shard's retired count up by one |
 
 ## 7. Invariants and the register
 
@@ -499,7 +518,7 @@ New fixtures:
 | I2 | holds per leaf; the sum is what is served |
 | I4 | `RowId` stays `u32`; `ShardId` is a separate newtype; `ShardRow` is engine-internal only; the compile-fail tests are extended (§1.2) |
 | I7 | direct evaluation over the union of parts, unchanged |
-| I10 | the shard number sits inside the keyed permutation; a viewer cannot read it, since decision 0072 already places it there; [decision 0014](../decisions/0014-i10-weakened-to-construction.md)'s weakening applies unchanged |
+| I10 | the shard number and the generation sit inside the keyed permutation; a viewer cannot read either, since decision 0072 already places them there; [decision 0014](../decisions/0014-i10-weakened-to-construction.md)'s weakening applies unchanged |
 | I12 | the threshold anchors on the summed unfiltered count |
 | I13b | a generating set with members in a shard the process does not hold cannot occur in one process: every shard is held, or the bundle is refused (ruling F) |
 | Rule S / Rule F | the two removal rules apply per shard, as §3.3 states |
@@ -509,10 +528,11 @@ choice, recorded in conformance §4.6's coverage and here.
 
 ## 8. Decisions, as ruled
 
-Seven, owner-ruled 2026-09-04. The body above is the design that follows from them.
+Nine. Seven owner-ruled 2026-09-04, two of them amended and two added on 2026-09-05 (decision
+0126). The body above is the design that follows from them.
 
-**A. The corpus is a list of shards in one process.** A shard opens when the previous
-allocator fills, or earlier at a configured size. Per shard: entity space, row space per view,
+**A. The corpus is a list of shards in one process.** A shard opens when the corpus grows past
+what the existing shards hold. Per shard: entity space, row space per view,
 permutation, postings, overlay, allocator, segments, compaction. Global: the term dictionary, the
 layer and view registries, the artifact registry, session tokens.
 
@@ -520,19 +540,21 @@ layer and view registries, the artifact registry, session tokens.
 store carries a map with one entry, named by a build constant, and nothing composes across
 entries. When partitions are built, they reuse shard composition.
 
-**C. Sealed by default.** Freed slots in a sealed shard are not reused unless an operator
-reopens it, through a lever with a free-slot threshold. This amends decision 0072: slot return
-applies within the open shard. Shard ids are never reused, the same rule contracts §2.1 states for
-`seg_id`.
+**C. A freed slot is reused before a shard opens** (amended 2026-09-05, decision 0126; as first
+ruled, a sealed shard's freed slots waited for an operator to reopen it). The allocation target is
+the shard with the largest pool above `shard.reuse_min_free`, else the open shard; a shard opens
+only when no pool meets the threshold and the open shard is at its seal size. Slot return applies
+in every shard. Shard ids are never reused, the same rule contracts §2.1 states for `seg_id`.
 
 **D. Edits keep identity, so land in their shard.**
 [Decision 0081](../decisions/0081-a-replacement-mints-identities-an-edit-keeps-them.md) already
 rules that an edit keeps its identity rather than minting a new one; a sealed shard is closed to
 allocation, and still accepts edits, deletes and suppressions.
 
-**E. Artifacts have their own shards, each with its own allocator, opening and sealing on the same rule as point shards** (the second clause added by the owner the same day). This replaces the two-region
-allocator. The identity input is unchanged: `(shard: 12, generation: 20, entity: 32)`, per decision
-0072.
+**E. Artifacts have their own shards, each with its own allocator, opening and sealing on the same
+rule as point shards** (the second clause added by the owner the same day). This replaces the
+two-region allocator. With slot reuse a second artifact shard opens only when live artifacts exceed
+the entity ceiling. The identity input's widths are ruling I's.
 
 **F. A shard whose digest fails at open is refused, naming the shard.** Serving the others would
 lower every count with no signal a viewer can see. An operator sees the warning; a viewer sees
@@ -541,6 +563,15 @@ nothing.
 **G. Recorded now, built when compaction or projection time is the problem, at around 10⁹ rows.**
 The rule from now: no new code keys a structure by a single global row total; `RowId` stays `u32`;
 the shard is a parameter passed beside it; new allocator code is per shard.
+
+**H. The generation is the slot's occupancy count, and a slot at the cap retires** (2026-09-05,
+decision 0126). A compaction inverts the identifier of each row it removes and returns the slot to
+the pool bucket one above the generation it read; a slot at 2¹² − 1 is never issued again. No
+shard-level counter exists, so nothing wraps and nothing refuses.
+
+**I. The identity input is `(shard: 20, generation: 12, entity: 32)`** (2026-09-05, decision 0126).
+Shard bits bound live capacity once churn consumes none, so they are the scarcer resource; twelve
+generation bits give a slot 4,096 occupancies.
 
 ## 9. Evidence: measured, modelled, assumed
 
@@ -554,7 +585,9 @@ the shard is a parameter passed beside it; new allocator code is per shard.
 | about 100 ms per 3,000-tile request for a dense principal, single-threaded | modelled, from the treemap-mask columns | `probes/2026-09-04-epoch-shard-treemap-mask/` |
 | 1.39 s to project a 2³⁰-row shard at 25% coverage | modelled, from the projection fit | `probes/2026-09-04-epoch-shard-projection/` |
 | per-session mask cardinality grows sub-linearly with the corpus (1.25 GB per mask at 10¹⁰ rows, 10% coverage, in either construction) | assumed, a stated precondition, to be confirmed before any figure above 2³² is promised | [scaling-analysis.md](../evidence/analysis/scaling-analysis.md) §4 |
-| `count_ranges`' own gain; the shared everywhere set; the request-aware route (§2.5) | not measured | n/a |
+| a shard's reuse life at 12 generation bits: about 1,100 years at 1% daily churn, about 110 at 10% | modelled, 2¹² times the turnover period, pool drained lowest bucket first | decision 0126 |
+| live capacity at 20 shard bits and a 2³⁰ seal: 2⁵⁰ rows | modelled | decision 0126 |
+| `count_ranges`' own gain; the shared everywhere set; the request-aware route (§2.5); the posting locality cost of allocating from the pool (§3.1) | not measured | n/a |
 
 ## 10. Delivery in stages
 
@@ -567,7 +600,7 @@ flowchart LR
   S2 --> S3["S3<br/>per-shard allocation,<br/>flush, overlay, compaction"]
   S3 --> S4["S4<br/>artifact shards"]
   S4 --> S5["S5<br/>artifact structures per shard"]
-  S5 --> S6["S6<br/>control plane: seal,<br/>reopen, drop"]
+  S5 --> S6["S6<br/>control plane:<br/>seal, drop"]
   S6 --> S7["S7<br/>build past<br/>the seal size"]
 ```
 
@@ -578,10 +611,10 @@ order.*
 |---|---|---|
 | S1 | `ShardId`; the store's `Bundle` gains `shards`; every per-view structure moves under a shard; `bundle_format` bump; the manifest lists shards; the engine passes shard 0 everywhere; the compile-fail tests | bundles equivalent, full suite |
 | S2 | `ShardedMask` replaces the engine's bitmaps in projection, composition, filter rows, deny mask, histogram; parts carry a shard; `count_ranges` in the sweep | N=1 no regression on the viewport suite; a bench at N=8 on the treemap probe's shape |
-| S3 | per-shard allocator; the identity's shard field taken from the row's shard; open and seal; per-shard flush, overlay, compaction and closing compaction | fixtures (a), (b), (f) |
+| S3 | per-shard allocator with the free pool and the occupancy stamp; the target rule; open and seal; per-shard flush, overlay, compaction returning slots and retiring at the cap, closing compaction | fixtures (a), (b), (c), (f), (i) |
 | S4 | artifact shards: allocator, own-term postings, overlay, seal and succession; the two-region allocator removed | fixtures (g) extended, (h) |
 | S5 | artifact structures per shard: membership slices, per-shard row forms, one everywhere set per level, containment per shard, histogram sums, the request-aware route | the tile-index probe re-run at N=8 |
-| S6 | control plane: status, seal, reopen, drop, refuse-at-open | fixtures (c), (d), (e) |
+| S6 | control plane: status, seal, drop, refuse-at-open | fixtures (d), (e) |
 | S7 | build past the seal size | decision 0091's equivalence across a seal boundary |
 
 ## 11. What this does not settle
@@ -591,7 +624,7 @@ order.*
   cheaper than an exchange per token up to about a dozen machines. Unmeasured; decided when 10¹⁰
   is real.
 - Several open shards of one kind.
-- The seal-size defaults and the reopen threshold.
+- The seal-size defaults and the reuse threshold `shard.reuse_min_free`.
 - The cost of a re-layout beyond one publication.
 
 ## 12. Specification amendments this document implies
@@ -603,4 +636,5 @@ contracts §2.1 (layout), §2.2 (manifest), §2.3 (the per-shard side-manifest),
 input); write-path §2, §4, §5, §7; compaction §§1–3, §9; annotation-representation.md (the
 allocator regions, membership per shard); [annotation-write-cycle.md](annotation-write-cycle.md)
 (the exhaustion note); [conformance.md](conformance.md) §4.6; scaling-analysis §4 (the shard key
-becomes the epoch); and decision 0072 (slot return per shard, sealed by default).
+becomes the epoch); and decision 0072, which decision 0126 amends (the occupancy count,
+retirement, and slot return in every shard).
