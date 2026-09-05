@@ -3244,6 +3244,26 @@ async fn publish_artifacts(
         }
     };
 
+    // **A deployment nothing can be named in by an external id is one refusal, not one per
+    // member.** A bundle built without `--mint-external-ids` and never flushed with caller-supplied
+    // ids holds no external-id run, so every lookup answers `None` and the per-member refusal
+    // below would read as a list of typos. The check is asked only when nothing resolved: an id
+    // ingested with an external id and not yet flushed resolves through the write path's live map,
+    // so "nothing resolved" with no run is the deployment's state and not this batch's.
+    if matches!(addressing, Addressing::External)
+        && !resolved.is_empty()
+        && resolved.iter().all(Option::is_none)
+        && !state.engine.bundle_carries_external_ids()
+    {
+        return Err(ApiError::Contract(
+            "this deployment carries no external ids: its bundle was built without \
+             `--mint-external-ids` and none of the ids named here has been ingested since, so no \
+             member can be addressed by external id. Rebuild with the flag, or address members by \
+             `tessera_id`. Nothing was allocated or appended"
+                .to_string(),
+        ));
+    }
+
     if let Some(position) = resolved.iter().position(Option::is_none) {
         // Reported as `(artifact, member)` rather than as a flat offset, which is the coordinate
         // the caller's own pipeline holds. The identifier itself is not echoed: it is the caller's
