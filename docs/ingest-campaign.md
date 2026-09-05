@@ -1259,8 +1259,9 @@ call rather than a patch to make mid-campaign.
 - The design pass on artifact response volume (§6, and the memo it points at).
 - Whether `parent_edges`' two nulls need separating, and whether that is worth an issue.
 - Whether this tracker is the campaign's status record or the campaign moves to issues.
-- **Whether rung 3 takes its abstracts** (§4.1) — **still open, and the memory objection is
-  answered**. The 10⁶ figures behind it (`tessera build` 716 MB against 2,246 MB, extrapolating to
+- ~~Whether rung 3 takes its abstracts~~ (§4.1) — **ruled 2026-09-05: taken** (`prepare.py
+  --abstracts`; the rebuild and re-measurement follow). The memory objection had been answered
+  first. The 10⁶ figures behind it (`tessera build` 716 MB against 2,246 MB, extrapolating to
   ~81 GB) were `VmHWM`, which counts file-backed pages the kernel may evict alongside heap it must
   keep — and since 2026-08-30 the columns are mapped, the text index spills under a budget and the
   blob streams, so on prose most of that is page cache.

@@ -48,3 +48,6 @@ Architecture and security rulings, one per file, unchanged once written. A rever
 - [0124](0124-the-suggestion-route-may-follow-the-viewers-cardinality.md): The suggestion route may follow the viewer's own cardinality
 - [0125](0125-a-dag-list-column-is-membership-not-lineage.md): Under `dag` a list of member keys is multi-membership, not a lineage; edges are the artifact row's `parent` list alone
 - [0126](0126-the-generation-counts-a-slots-occupancies-and-a-freed-slot-is-reused-before-a-shard-opens.md): The generation counts a slot's occupancies and retires at the cap; a freed slot is reused before a shard opens; the identity input is `(shard: 20, generation: 12, entity: 32)`
+- [0127](0127-a-membership-grows-through-the-control-plane.md): A membership grows through the control plane, by key, through the existing `ArtifactGrow` path; the publication cap stays
+- [0128](0128-a-layer-with-no-supplied-content-travels-as-a-column-at-ingest.md): A layer with no supplied content keeps its member source at the base build and travels as the ingest batch's column
+- [0129](0129-the-ingest-wire-carries-access-labels-as-a-list.md): The ingest wire carries access labels as a list; the comma grammar goes

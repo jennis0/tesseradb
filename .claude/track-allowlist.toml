@@ -1,13 +1,13 @@
-# Campaign handover file ownership (controller, 2026-09-05). Briefs in
-# .superpowers/sdd/2026-09-05-campaign-handover/. Four tracks branch from the seam commit on main
-# and are merged in the order they finish; none depends on another's files. A file outside a
-# track's list is stop-and-report, never an edit to this file.
+# Campaign handover, second wave (controller, 2026-09-05). Briefs in
+# .superpowers/sdd/2026-09-05-campaign-handover/. Three tracks branch from the seam commit on main.
+# `crates/tessera-server/src/control.rs`, `crates/tessera-server/tests/*` and `conformance/*` are
+# deliberately claimed by both `growth` and `wire`: the publish handler and the ingest handler
+# share one file. Each track keeps to the functions its brief names; the controller merges.
+# A file outside a track's list is stop-and-report, never an edit to this file.
 
 [frozen]
 paths = [
   "CLAUDE.md",
-  "crates/tessera-plugin/*",
-  "conformance/*",
   "docs/agents/*",
   "docs/decisions/*",
   "docs/design/*",
@@ -22,42 +22,39 @@ paths = [
   "Cargo.lock",
 ]
 
-# The ingest driver: bounded hold-out read, streaming publication, the measurement schema.
-[track.harness]
+# Decision 0127: a membership grows through the control plane.
+[track.growth]
 paths = [
-  "test_corpora/common/*",
-  "test_corpora/*/measurements*.json",
-  "test_corpora/*/README.md",
-  "scripts/campaign_report.py",
-  "docs/ingest-campaign.md",
-  "probes/2026-09-05-holdout-memory/*",
-  "probes/2026-09-05-publish-streaming/*",
-]
-
-# The flush's stages, lapped under bench-timing and read on /control/status.
-[track.flush]
-paths = [
+  "crates/tessera-lifecycle/*",
   "crates/tessera-engine/src/write.rs",
-  "crates/tessera-engine/src/flush.rs",
-  "crates/tessera-engine/src/timing.rs",
+  "crates/tessera-engine/src/session.rs",
   "crates/tessera-engine/src/lib.rs",
   "crates/tessera-engine/tests/*",
   "crates/tessera-server/src/control.rs",
-  "crates/tessera-server/src/state.rs",
-  "probes/2026-09-05-flush-attribution/*",
-]
-
-# The stall-shed test: a reader that genuinely refuses to consume.
-[track.shed]
-paths = [
   "crates/tessera-server/tests/*",
+  "docs/openapi/tessera.yaml",
+  "conformance/*",
 ]
 
-# A stale bundle refused at open; an indexed unique key warned about.
-[track.store]
+# Decisions 0128 and 0129: the taxonomy column and the access list, engine and driver.
+[track.wire]
 paths = [
-  "crates/tessera-store/*",
-  "crates/tessera-cli/*",
-  "crates/tessera-build/*",
-  "crates/tessera-engine/src/session.rs",
+  "crates/tessera-plugin/*",
+  "crates/tessera-server/src/control.rs",
+  "crates/tessera-server/tests/*",
+  "conformance/*",
+  "clients/py/tesseradb/*",
+  "test_corpora/common/*",
+  "test_corpora/*/README.md",
+  "test_corpora/*/measurements*.json",
+  "docs/ingest-campaign.md",
+]
+
+# R8(a): sub-laps inside the flush's text extents.
+[track.text-laps]
+paths = [
+  "crates/tessera-engine/src/flush.rs",
+  "crates/tessera-analyse/*",
+  "crates/tessera-filter/*",
+  "probes/2026-09-05-flush-attribution/*",
 ]
