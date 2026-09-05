@@ -10,7 +10,9 @@ row trigger's 4), and nothing lapped the flush's own stages. This probe adds the
 they partition the flush's wall clock, runs them on `medcpt-1m`, and then on the 36M rung, where
 the term is named: **the pool flushes at 14.8 µs a row and the ingest arrives at 15.4, so the
 flush runs back to back and the row trigger cannot hold `B` down; 69% of the pool's time is the
-text index of the flushed rows** (§"Result on MedCPT, 36M"). The 92M cell is not run here.
+text index of the flushed rows** (§"Result on MedCPT, 36M"). At 92M on abstracts the same term is
+90%: **the pool flushes at 133.5 µs a row and the ingest runs at its ceiling, 7,427 rows/s
+against 7,490** (§"Result on PaperSeek, 92M").
 
 ## Result on medcpt-1m, f = 0.10
 
@@ -226,11 +228,61 @@ not one change. Removing it from the flush's critical path would change when an 
 becomes searchable, which is a contract question and the owner's; the sub-laps under §"Inside
 `text_extents`" say where its time goes on the 1M cell. Neither is taken here.
 
+## Result on PaperSeek, 92M, f = 0.10
+
+**Measured 2026-09-05** (`runs/paperseek-92m-f010.json`, binary `2f151dec` with the borrowed-token
+change, the row trigger at 40,000): a 91,905,609-row base carrying abstracts, built in 75 min and
+served as a copy (open 76 s), its 10,211,734-row hold-out at C=8 in 10,000-row batches,
+`--stop-after-ingest`. **The whole hold-out was offered for the first time** — the driver held
+4.55 GiB at its peak (the split) and 2.06 GiB through the ingest, where it had reached 38 GB and
+stalled at 8.83M rows on 2026-09-04. Another track's conformance run shared the box for the first
+third of the ingest (load average 4–6); the shares below do not depend on that, the rate does.
+
+**Ingest 7,427 rows/s** (executor 11.6 µs/row, queueing 105.5), 1,673 `429`s, and **19 batches
+refused with `422`**: a 10,000-row batch of abstracts exceeds the 16 MiB per-batch body cap
+(`ingest.ingest_max_batch_bytes`), so 190,000 rows never entered. That is the driver's defect —
+it sizes a batch by rows and the cap is by bytes — and is fixed separately. **21 flushes, 9,890,000
+rows, 471,000 rows a flush** (`B/W ≈ 12`); 20 had published when ingest ended, the last landed in a
+40.7 s drain.
+
+| stage | thread | 36M: µs / row | 92M: µs / row | 92M: ms / flush |
+|---|---|---|---|---|
+| `record_extent` | pool | 1.66 | 7.45 | 3,508 |
+| `filter_extents` | pool | 0.91 | 2.75 | 1,293 |
+| **`text_extents`** | pool | **10.17** | **120.06** | **56,544** |
+| &nbsp;&nbsp;`tokenise_terms` | pool | 9.90 | 116.50 | 54,868 |
+| &nbsp;&nbsp;`postings` | pool | 0.38 | 2.74 | 1,288 |
+| &nbsp;&nbsp;`dict` | pool | 0.05 | 0.43 | 201 |
+| `drop_plan` | pool | 0.82 | 1.30 | 613 |
+| `segment`, `rows`, `promote`, `digests`, the rest | pool | 1.45 | 1.93 | 909 |
+| **execute sum** | pool | **14.81** | **133.49** | **62,867** |
+| `plan` | executor, at the tick | 1.21 | 3.16 | 1,487 |
+| `compose` | executor | 0.10 | 1.07 | 503 |
+| `buffer_rebase` | executor | 0.47 | 0.59 | 278 |
+| `drop_superseded` | executor | 0.12 | 1.39 | 656 |
+| `rotate` | executor | 0.07 | 0.12 | 55 |
+| **publish sum** | executor | **0.80** | **3.21** | **1,509** |
+
+**The inference held.** The pool executes a flush at **133.5 µs a row**, a ceiling of **7,490
+rows/s**; the ingest ran at **7,427**. Ingest on this rung is the text index's throughput and
+nothing else: `text_extents` is 120 of the 133.5 µs (90%), and inside it the analyser and the term
+map are 116.5 — 11.8× MedCPT's 9.9 for prose about 15× as long. The three file writes are 3.2 µs.
+`record_extent` grew 4.5× (the abstract travels through the record blob), `filter_extents` 3×
+(more filterable columns), and on the executor `compose` 10× per row — the one stage that looks
+like a base-size term, at 0.5 s a flush against a 92M base — with `plan` and `drop_superseded`
+following `B`. None of those is near the text index.
+
+**What follows.** The analyser over the prose is the term at every scale measured; a fix is either
+a faster analyser (the fold, NFKC and the segmenter over ~1,500 characters a row; `perf` is the
+next instrument) or taking the text index off the flush's critical path, which is a contract
+question and the owner's. Neither is taken here.
+
 ## What is left
 
-The 92M cell (`data/ladder/paperseek`, the same flags, after the 91.9M base is rebuilt), which
-measures `text_extents` on abstracts and settles the inference above, and the `Text*` sub-laps
-read at 36M and 92M, where the prose is longer and the term map larger.
+A quiet re-run of the 92M cell once the driver sizes its batches by bytes, so the rate is read on
+the whole hold-out with no `422`s and no other load; `perf record` on `write_text_extents` at that
+cell; and the full 10% cycle on this base — publication with growth, flush, fold, census — which
+is the campaign cell the tracker wants.
 
 ## Method
 

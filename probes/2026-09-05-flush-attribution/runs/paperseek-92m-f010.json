@@ -1,0 +1,740 @@
+{
+  "fraction": 0.1,
+  "concurrency": 8,
+  "seed": 0,
+  "batch_rows": 10000,
+  "base_rows": 91905609,
+  "holdout_rows": 10211734,
+  "build": {
+    "wall_s": 3604.58,
+    "returncode": 0,
+    "stdout": "built /tmp/claude-1000/-home-joe-code-tessera/d152e89c-9244-4bce-b1db-e91f00064b1d/scratchpad/paperseek92/base-0.1/bundle (v00000): 91905609 items, 12 terms, 91905609 pairs, 65072191920 bytes on disk, 0 artifact(s) minted, 0 unclustered member row(s)\n  view knn: 91905609 row(s)\n",
+    "stderr_tail": "warning: vocabulary 'type': `visibility = \"public\"` with `value_set = \"open\"` publishes data-derived value names on nobody's authority (per-point-attributes \u00a73.8, relaxed from a refusal to a warning by owner ruling 2026-08-07). Confirm this is intended\nview 'knn': quantising against x [-18.047295265197754, 20.4786421585083], y [-18.525674991607666, 20.00026243209839]\n        the data spans x [-17.66958999633789, 20.100936889648438], y [-13.0900297164917, 14.564617156982422] \u2014 64252 x 47044 of the 65536 x 65536 cells\n        91905609 point(s) placed, none on the frame's edge\nschema: 6 column(s), 5.12 B/row against the 12 B fixed row (+43%)\n        4.77 GiB per 10^9 items \u2014 unalterable without rewriting the corpus\n        every column materialises in EVERY view \u2014 including ones whose items carry no value for it (\u00a73.9). Per-view columns need contracts \u00a72.6's per-view enumeration\nstage       source_ids      2.09s  rows=91905609     peak=  1430 MiB\nstage       dictionary     16.30s  rows=12           peak=  1753 MiB\nstage    geometry_read     15.82s  rows=91905609     peak=  3975 MiB\nstage       pairs_pack      0.00s  rows=91905609     peak=  3975 MiB\nstage   signature_sort      3.14s  rows=91905609     peak=  5301 MiB\nstage       assignment     37.42s  rows=91905609     peak=  5655 MiB\nstage       assignment      0.27s  rows=91905609     peak=  5654 MiB\nstage   postings_write      2.85s  rows=91905609     peak=  5654 MiB\nstage     external_ids      5.90s  rows=91905609     peak=  5654 MiB\nattribute 'publication_year': 89,004,924 of 91,905,609 entities have a value\nattribute 'type': 91,905,609 of 91,905,609 entities have a value\nattribute 'is_oa': 89,032,905 of 91,905,609 entities have a value\nattribute 'openalex_id': 91,905,609 of 91,905,609 entities have a value\nattribute 'title': 91,905,609 of 91,905,609 entities have a value\nattribute 'abstract': 91,905,609 of 91,905,609 entities have a value\n        0 source row(s) named entities this build did not load\nstage   attribute_tail    849.72s  rows=91905609     peak=  9136 MiB\nstage           layers      0.06s  rows=2            peak=  9136 MiB\nstage       text_index   1517.73s  rows=53716785     peak= 22418 MiB\nstage  filter_postings    409.53s  rows=91905609     peak= 22418 MiB\nstage      record_blob    686.37s  rows=91905609     peak= 23657 MiB\nstage   column_release      0.08s  rows=91905609     peak= 23657 MiB\nstage       tiler_sort      6.64s  rows=91905609     peak= 23657 MiB\nstage    segment_write      6.76s  rows=91905609     peak= 23657 MiB\nattribute 'openalex_id': 91,905,609 distinct key(s) over 91,905,609 row(s) with a value, of 91,905,609 row(s); the index is 827.62 MB\nattribute 'openalex_id': UNIQUE KEY INDEXED. 91,905,609 distinct key(s) over 91,905,609 row(s) with a value (100.0%), so the dictionary holds every value once and the index is 827.62 MB of the 65.07 GB bundle (1.3%). An index over a unique key answers a lookup by that key and nothing else. Reported, not refused: a key indexed for that lookup is meant. Remove `index = true` from the attribute if it is not\nstage        manifests     38.45s  rows=65072191920  peak= 23657 MiB\nview 'knn': 91905609 point(s) landed in 74385496 distinct cell(s) \u2014 80.9% of them have a position of their own\n",
+    "stages": [
+      {
+        "stage": "source_ids",
+        "wall_s": 2.092428321,
+        "rows": 91905609,
+        "peak_rss_kib": 1465040,
+        "started_at": 1788606334.1855502,
+        "ended_at": 1788606336.2779784
+      },
+      {
+        "stage": "dictionary",
+        "wall_s": 16.301775025,
+        "rows": 12,
+        "peak_rss_kib": 1795712,
+        "started_at": 1788606336.7814386,
+        "ended_at": 1788606353.0832136
+      },
+      {
+        "stage": "geometry_read",
+        "wall_s": 15.823501382,
+        "rows": 91905609,
+        "peak_rss_kib": 4070456,
+        "started_at": 1788606353.0833046,
+        "ended_at": 1788606368.906806
+      },
+      {
+        "stage": "pairs_pack",
+        "wall_s": 1.856e-06,
+        "rows": 91905609,
+        "peak_rss_kib": 4070456,
+        "started_at": 1788606368.9068518,
+        "ended_at": 1788606368.9068537
+      },
+      {
+        "stage": "signature_sort",
+        "wall_s": 3.140089678,
+        "rows": 91905609,
+        "peak_rss_kib": 5428332,
+        "started_at": 1788606369.3989935,
+        "ended_at": 1788606372.5390832
+      },
+      {
+        "stage": "assignment",
+        "wall_s": 37.423196439,
+        "rows": 91905609,
+        "peak_rss_kib": 5791560,
+        "started_at": 1788606372.9947119,
+        "ended_at": 1788606410.4179084
+      },
+      {
+        "stage": "assignment",
+        "wall_s": 0.265556976,
+        "rows": 91905609,
+        "peak_rss_kib": 5790516,
+        "started_at": 1788606410.418002,
+        "ended_at": 1788606410.683559
+      },
+      {
+        "stage": "postings_write",
+        "wall_s": 2.8470330390000003,
+        "rows": 91905609,
+        "peak_rss_kib": 5790516,
+        "started_at": 1788606410.68364,
+        "ended_at": 1788606413.530673
+      },
+      {
+        "stage": "external_ids",
+        "wall_s": 5.902634811,
+        "rows": 91905609,
+        "peak_rss_kib": 5790516,
+        "started_at": 1788606413.5307727,
+        "ended_at": 1788606419.4334075
+      },
+      {
+        "stage": "attribute_tail",
+        "wall_s": 849.724068025,
+        "rows": 91905609,
+        "peak_rss_kib": 9356052,
+        "started_at": 1788606431.6284678,
+        "ended_at": 1788607281.3525357
+      },
+      {
+        "stage": "layers",
+        "wall_s": 0.060466628,
+        "rows": 2,
+        "peak_rss_kib": 9356052,
+        "started_at": 1788607281.3526318,
+        "ended_at": 1788607281.4130983
+      },
+      {
+        "stage": "text_index",
+        "wall_s": 1517.726555551,
+        "rows": 53716785,
+        "peak_rss_kib": 22956412,
+        "started_at": 1788607727.9203935,
+        "ended_at": 1788609245.646949
+      },
+      {
+        "stage": "filter_postings",
+        "wall_s": 409.533456613,
+        "rows": 91905609,
+        "peak_rss_kib": 22956412,
+        "started_at": 1788608836.1135426,
+        "ended_at": 1788609245.6469991
+      },
+      {
+        "stage": "record_blob",
+        "wall_s": 686.367448367,
+        "rows": 91905609,
+        "peak_rss_kib": 24225304,
+        "started_at": 1788609258.148523,
+        "ended_at": 1788609944.5159714
+      },
+      {
+        "stage": "column_release",
+        "wall_s": 0.081272303,
+        "rows": 91905609,
+        "peak_rss_kib": 24225304,
+        "started_at": 1788609944.5160606,
+        "ended_at": 1788609944.597333
+      },
+      {
+        "stage": "tiler_sort",
+        "wall_s": 6.637657656,
+        "rows": 91905609,
+        "peak_rss_kib": 24225304,
+        "started_at": 1788609945.0535135,
+        "ended_at": 1788609951.6911712
+      },
+      {
+        "stage": "segment_write",
+        "wall_s": 6.756144821,
+        "rows": 91905609,
+        "peak_rss_kib": 24225304,
+        "started_at": 1788609951.6912887,
+        "ended_at": 1788609958.4474335
+      },
+      {
+        "stage": "manifests",
+        "wall_s": 38.449813269,
+        "rows": 65072191920,
+        "peak_rss_kib": 24225304,
+        "started_at": 1788609958.9682536,
+        "ended_at": 1788609997.418067
+      }
+    ],
+    "bundle_bytes": 65072209427
+  },
+  "driver_rss": {
+    "after_base": {
+      "rss": 768925696,
+      "peak": 4551741440
+    },
+    "after_ingest": {
+      "rss": 2057314304,
+      "peak": 4551741440
+    },
+    "end": {
+      "rss": 2057314304,
+      "peak": 4551741440
+    }
+  },
+  "base_copy_s": 85.02,
+  "ingest_config": {},
+  "open_s": 76.07,
+  "ingested_view": null,
+  "base_visible": 91905609,
+  "first_refusal": {
+    "status": 422,
+    "body": "{\"error\":\"contract\",\"detail\":\"ingest body exceeds the 16777216-byte per-batch cap (ingest.ingest_max_batch_bytes); refused before decoding, so it cost no queue slot and no WAL append\"}"
+  },
+  "flush_laps": {
+    "bench_timing": true,
+    "executions": 21,
+    "flushes": 21,
+    "rows_executed": 9890000,
+    "rows_published": 9890000,
+    "pool": {
+      "delta_tier": {
+        "nanos": 79191501,
+        "ms_per_flush": 3.771,
+        "us_per_row": 0.008
+      },
+      "digests": {
+        "nanos": 3901403156,
+        "ms_per_flush": 185.781,
+        "us_per_row": 0.394
+      },
+      "drop_plan": {
+        "nanos": 12877245875,
+        "ms_per_flush": 613.202,
+        "us_per_row": 1.302
+      },
+      "entity_terms": {
+        "nanos": 174281848,
+        "ms_per_flush": 8.299,
+        "us_per_row": 0.018
+      },
+      "failed": {
+        "nanos": 0,
+        "ms_per_flush": 0.0,
+        "us_per_row": 0.0
+      },
+      "filter_extents": {
+        "nanos": 27156652609,
+        "ms_per_flush": 1293.174,
+        "us_per_row": 2.746
+      },
+      "pool_wall": {
+        "nanos": 1320212337471,
+        "ms_per_flush": 62867.254,
+        "us_per_row": 133.49
+      },
+      "promote": {
+        "nanos": 2465164120,
+        "ms_per_flush": 117.389,
+        "us_per_row": 0.249
+      },
+      "record_extent": {
+        "nanos": 73661525276,
+        "ms_per_flush": 3507.692,
+        "us_per_row": 7.448
+      },
+      "reopen": {
+        "nanos": 24656284,
+        "ms_per_flush": 1.174,
+        "us_per_row": 0.002
+      },
+      "rows": {
+        "nanos": 4882394707,
+        "ms_per_flush": 232.495,
+        "us_per_row": 0.494
+      },
+      "scoped_extents": {
+        "nanos": 27751,
+        "ms_per_flush": 0.001,
+        "us_per_row": 0.0
+      },
+      "segment": {
+        "nanos": 7561243040,
+        "ms_per_flush": 360.059,
+        "us_per_row": 0.765
+      },
+      "shapes": {
+        "nanos": 6149,
+        "ms_per_flush": 0.0,
+        "us_per_row": 0.0
+      },
+      "text_dict": {
+        "nanos": 4221858209,
+        "ms_per_flush": 201.041,
+        "us_per_row": 0.427
+      },
+      "text_extents": {
+        "nanos": 1187427395428,
+        "ms_per_flush": 56544.162,
+        "us_per_row": 120.063
+      },
+      "text_postings": {
+        "nanos": 27048863712,
+        "ms_per_flush": 1288.041,
+        "us_per_row": 2.735
+      },
+      "text_presence": {
+        "nanos": 69204557,
+        "ms_per_flush": 3.295,
+        "us_per_row": 0.007
+      },
+      "text_rows": {
+        "nanos": 951183993,
+        "ms_per_flush": 45.294,
+        "us_per_row": 0.096
+      },
+      "text_tokenise_terms": {
+        "nanos": 1152221501469,
+        "ms_per_flush": 54867.691,
+        "us_per_row": 116.504
+      }
+    },
+    "execute_sum": {
+      "nanos": 1320211187744,
+      "ms_per_flush": 62867.199,
+      "us_per_row": 133.49
+    },
+    "execute_unattributed": {
+      "nanos": 1149727,
+      "ms_per_flush": 0.055,
+      "us_per_row": 0.0
+    },
+    "text_sum": {
+      "nanos": 1184512611940,
+      "ms_per_flush": 56405.362,
+      "us_per_row": 119.769
+    },
+    "text_unattributed": {
+      "nanos": 2914783488,
+      "ms_per_flush": 138.799,
+      "us_per_row": 0.295
+    },
+    "executor": {
+      "artifacts": {
+        "nanos": 4644736,
+        "ms_per_flush": 0.221,
+        "us_per_row": 0.0
+      },
+      "buffer_rebase": {
+        "nanos": 5828823190,
+        "ms_per_flush": 277.563,
+        "us_per_row": 0.589
+      },
+      "compose": {
+        "nanos": 10555052720,
+        "ms_per_flush": 502.622,
+        "us_per_row": 1.067
+      },
+      "denied": {
+        "nanos": 279432,
+        "ms_per_flush": 0.013,
+        "us_per_row": 0.0
+      },
+      "discarded": {
+        "nanos": 0,
+        "ms_per_flush": 0.0,
+        "us_per_row": 0.0
+      },
+      "dispatch": {
+        "nanos": 277275337,
+        "ms_per_flush": 13.204,
+        "us_per_row": 0.028
+      },
+      "drop_superseded": {
+        "nanos": 13771205162,
+        "ms_per_flush": 655.772,
+        "us_per_row": 1.392
+      },
+      "manifest": {
+        "nanos": 19162418,
+        "ms_per_flush": 0.912,
+        "us_per_row": 0.002
+      },
+      "manifest_commit": {
+        "nanos": 86691023,
+        "ms_per_flush": 4.128,
+        "us_per_row": 0.009
+      },
+      "plan": {
+        "nanos": 31236547153,
+        "ms_per_flush": 1487.455,
+        "us_per_row": 3.158
+      },
+      "publish_wall": {
+        "nanos": 31439663001,
+        "ms_per_flush": 1497.127,
+        "us_per_row": 3.179
+      },
+      "rotate": {
+        "nanos": 1162200366,
+        "ms_per_flush": 55.343,
+        "us_per_row": 0.118
+      },
+      "shapes_install": {
+        "nanos": 12690,
+        "ms_per_flush": 0.001,
+        "us_per_row": 0.0
+      },
+      "swap": {
+        "nanos": 29461399,
+        "ms_per_flush": 1.403,
+        "us_per_row": 0.003
+      },
+      "with_segment": {
+        "nanos": 238588422,
+        "ms_per_flush": 11.361,
+        "us_per_row": 0.024
+      }
+    },
+    "publish_sum": {
+      "nanos": 31696121558,
+      "ms_per_flush": 1509.339,
+      "us_per_row": 3.205
+    },
+    "publish_unattributed": {
+      "nanos": -256458557,
+      "ms_per_flush": -12.212,
+      "us_per_row": -0.026
+    },
+    "status_before": {
+      "bench_timing": true,
+      "executions": 0,
+      "executor_nanos": {
+        "artifacts": 0,
+        "buffer_rebase": 0,
+        "compose": 0,
+        "denied": 0,
+        "discarded": 0,
+        "dispatch": 0,
+        "drop_superseded": 0,
+        "manifest": 0,
+        "manifest_commit": 0,
+        "plan": 0,
+        "publish_wall": 0,
+        "rotate": 0,
+        "shapes_install": 0,
+        "swap": 0,
+        "with_segment": 0
+      },
+      "flushes": 0,
+      "pool_nanos": {
+        "delta_tier": 0,
+        "digests": 0,
+        "drop_plan": 0,
+        "entity_terms": 0,
+        "failed": 0,
+        "filter_extents": 0,
+        "pool_wall": 0,
+        "promote": 0,
+        "record_extent": 0,
+        "reopen": 0,
+        "rows": 0,
+        "scoped_extents": 0,
+        "segment": 0,
+        "shapes": 0,
+        "text_dict": 0,
+        "text_extents": 0,
+        "text_postings": 0,
+        "text_presence": 0,
+        "text_rows": 0,
+        "text_tokenise_terms": 0
+      },
+      "rows_executed": 0,
+      "rows_published": 0
+    },
+    "status_after": {
+      "bench_timing": true,
+      "executions": 21,
+      "executor_nanos": {
+        "artifacts": 4644736,
+        "buffer_rebase": 5828823190,
+        "compose": 10555052720,
+        "denied": 279432,
+        "discarded": 0,
+        "dispatch": 277275337,
+        "drop_superseded": 13771205162,
+        "manifest": 19162418,
+        "manifest_commit": 86691023,
+        "plan": 31236547153,
+        "publish_wall": 31439663001,
+        "rotate": 1162200366,
+        "shapes_install": 12690,
+        "swap": 29461399,
+        "with_segment": 238588422
+      },
+      "flushes": 21,
+      "pool_nanos": {
+        "delta_tier": 79191501,
+        "digests": 3901403156,
+        "drop_plan": 12877245875,
+        "entity_terms": 174281848,
+        "failed": 0,
+        "filter_extents": 27156652609,
+        "pool_wall": 1320212337471,
+        "promote": 2465164120,
+        "record_extent": 73661525276,
+        "reopen": 24656284,
+        "rows": 4882394707,
+        "scoped_extents": 27751,
+        "segment": 7561243040,
+        "shapes": 6149,
+        "text_dict": 4221858209,
+        "text_extents": 1187427395428,
+        "text_postings": 27048863712,
+        "text_presence": 69204557,
+        "text_rows": 951183993,
+        "text_tokenise_terms": 1152221501469
+      },
+      "rows_executed": 9890000,
+      "rows_published": 9890000
+    },
+    "executions_at_ingest_end": 20,
+    "flushes_at_ingest_end": 20,
+    "buffered_at_ingest_end": 561734,
+    "drain_s": 40.68,
+    "buffered_after_drain": 131734
+  },
+  "ingest": {
+    "batches": 1022,
+    "rows_offered": 10211734,
+    "accepted": 10021734,
+    "minted": 0,
+    "wall_s": 1349.38,
+    "items_per_s": 7426.9,
+    "ack_ms": {
+      "p25": 670.9652,
+      "p50": 1443.0364,
+      "p75": 1940.3212,
+      "p95": 2552.4065,
+      "p99": 3708.5445,
+      "max": 6442.8583,
+      "mean": 1382.7469,
+      "n": 1022
+    },
+    "statuses": {
+      "200": 1003,
+      "422": 19,
+      "429": 1673
+    }
+  },
+  "executor_laps": {
+    "bench_timing": true,
+    "rows": 10021734,
+    "windows": 1002,
+    "rows_per_window": 10001.7,
+    "us_per_row": {
+      ".buf_insert": 1.719,
+      ".est_fwd": 0.968,
+      ".est_inv": 0.526,
+      ".wal_pos": 0.04,
+      "admit": 0.293,
+      "allocate": 0.826,
+      "apply_rows": 3.297,
+      "buffer_clone": 4.254,
+      "record_batch": 0.001,
+      "submit\u2192receipt": 117.03,
+      "swap": 0.002,
+      "wal_append": 1.546,
+      "wal_fsync": 1.346
+    },
+    "executor_sum_us_per_row": 11.565,
+    "queueing_us_per_row": 105.465,
+    "apply_nanos_total_us_per_row": 9.233,
+    "apply_nanos_max_ms": 2236.6,
+    "work_service_nanos_ewma_ms": 106.9
+  },
+  "stop_after": "ingest",
+  "status_at_end": {
+    "compaction": {
+      "fold_failures": 0,
+      "fold_requested": false,
+      "folds": 0,
+      "last_attr_bytes_read": 0,
+      "last_attr_bytes_written": 0,
+      "last_rss_bytes": 0,
+      "last_secs": 0,
+      "live_rows": 101795609,
+      "passes": []
+    },
+    "compute": {
+      "admission": 48,
+      "in_flight": 0,
+      "queue": 96,
+      "shed_total": 0,
+      "streaming": 0,
+      "waiting": 0
+    },
+    "entity_id_high_water": 101927343,
+    "fragment_cache": {
+      "bound_bytes": 1073741824,
+      "building_refusals": 0,
+      "bytes": 291382,
+      "entries": 22,
+      "evictions": 0,
+      "hits": 4,
+      "misses": 22,
+      "oversized_admissions": 0,
+      "rebuilds": 22,
+      "thrashing": false,
+      "young_evictions": 0
+    },
+    "fragmentation": {
+      "allocation": {
+        "containers": 9233,
+        "postings": 10021734,
+        "rows": 10021734,
+        "runs": 9081,
+        "scope": "commit-window-allocation",
+        "windows": 1002
+      },
+      "containers": 1617,
+      "postings": 9890000,
+      "postings_per_container": 6116.2646876932595,
+      "rows": 9890000,
+      "run_ratio": 408.17430856760376,
+      "runs": 8964,
+      "scope": "delta-tiers",
+      "tiers": 21
+    },
+    "ingest": {
+      "admission": 64,
+      "in_flight": 0,
+      "max_batch_bytes": 16777216,
+      "max_batch_rows": 10000,
+      "shed_total": 0
+    },
+    "overlay": {
+      "depth": 0,
+      "retirable": 0,
+      "soft_limit_alarms": 0
+    },
+    "partitions": [
+      {
+        "partition": "default",
+        "readiness": true,
+        "segments_version": 25,
+        "watermark": 101795609
+      }
+    ],
+    "row_projection_cache": {
+      "bound_bytes": 2147483648,
+      "building_refusals": 0,
+      "bytes": 25428216,
+      "entries": 2,
+      "evictions": 0,
+      "hits": 0,
+      "misses": 26,
+      "oversized_admissions": 0,
+      "thrashing": false,
+      "waiters_now": 0,
+      "waits_satisfied": 0,
+      "young_evictions": 0
+    },
+    "segments": [
+      {
+        "count": 10,
+        "partition": "default",
+        "view": "knn"
+      }
+    ],
+    "sessions": {
+      "retained": 1,
+      "sweep_at": 16,
+      "sweeps": 0,
+      "swept_total": 0
+    },
+    "write_executor": {
+      "apply_nanos_max": 2236614726,
+      "apply_nanos_total": 92525688287,
+      "bench_timing": true,
+      "coalesces": 2,
+      "deny_submitted": 0,
+      "flush": {
+        "buffered_items": 131734,
+        "flush_failures": 0,
+        "flush_requested": false,
+        "flush_skips": 0,
+        "flushable_items": 561734,
+        "flushes": 21,
+        "in_flight": false,
+        "overlay_publications": 0,
+        "refreshes": 25,
+        "ticks": 9852
+      },
+      "flush_stages": {
+        "bench_timing": true,
+        "executions": 21,
+        "executor_nanos": {
+          "artifacts": 4644736,
+          "buffer_rebase": 5828823190,
+          "compose": 10555052720,
+          "denied": 279432,
+          "discarded": 0,
+          "dispatch": 277275337,
+          "drop_superseded": 13771205162,
+          "manifest": 19162418,
+          "manifest_commit": 86691023,
+          "plan": 31236547153,
+          "publish_wall": 31439663001,
+          "rotate": 1162200366,
+          "shapes_install": 12690,
+          "swap": 29461399,
+          "with_segment": 238588422
+        },
+        "flushes": 21,
+        "pool_nanos": {
+          "delta_tier": 79191501,
+          "digests": 3901403156,
+          "drop_plan": 12877245875,
+          "entity_terms": 174281848,
+          "failed": 0,
+          "filter_extents": 27156652609,
+          "pool_wall": 1320212337471,
+          "promote": 2465164120,
+          "record_extent": 73661525276,
+          "reopen": 24656284,
+          "rows": 4882394707,
+          "scoped_extents": 27751,
+          "segment": 7561243040,
+          "shapes": 6149,
+          "text_dict": 4221858209,
+          "text_extents": 1187427395428,
+          "text_postings": 27048863712,
+          "text_presence": 69204557,
+          "text_rows": 951183993,
+          "text_tokenise_terms": 1152221501469
+        },
+        "rows_executed": 9890000,
+        "rows_published": 9890000
+      },
+      "merges": 4,
+      "posture": "running",
+      "ready": true,
+      "stage_nanos": {
+        ".buf_insert": 17228760988,
+        ".est_fwd": 9701641297,
+        ".est_inv": 5275507484,
+        ".wal_pos": 403529377,
+        "admit": 2933870318,
+        "allocate": 8279733059,
+        "apply_rows": 33037046293,
+        "buffer_clone": 42634856441,
+        "record_batch": 10950676,
+        "submit\u2192receipt": 1172840623119,
+        "swap": 16198266,
+        "wal_append": 15495286136,
+        "wal_fsync": 13490330557
+      },
+      "wal_appends": 1003,
+      "wal_fsyncs": 1002,
+      "wal_recoveries": 0,
+      "work_completed": 1003,
+      "work_depth": 0,
+      "work_in_flight_nanos": 0,
+      "work_service_nanos_ewma": 106867569,
+      "work_submitted": 1003
+    }
+  },
+  "ran_s": 5944.8,
+  "driver_peak_rss": 4551741440
+}
