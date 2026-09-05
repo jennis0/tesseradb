@@ -1872,6 +1872,15 @@ fn main() -> ExitCode {
                     report.rows,
                     report.entity_id_high_water
                 );
+                // Each indexed keyword against the rows carrying it, and the warning a key unique
+                // per row earns: the same figures the build printed, read back from the bundle
+                // (`tessera_build::unique_key`). Reported, never a failure.
+                for column in &report.keyword_cardinalities {
+                    eprintln!("{}", column.report());
+                    if let Some(warning) = column.warning(report.bundle_bytes) {
+                        eprintln!("{warning}");
+                    }
+                }
             };
             if deep {
                 match tessera_build::verify_deep(&bundle, &tessera_build::VerifyOpts::default()) {
@@ -1956,6 +1965,11 @@ fn main() -> ExitCode {
             for finding in &report.findings {
                 eprintln!("  FAILED       {}: {}", finding.object, finding.detail);
             }
+            // Warnings leave the check clean and the exit status untouched: an indexed keyword the
+            // source's footer says is unique per row is a cost to know about, not a mistake.
+            for warning in &report.warnings {
+                eprintln!("  WARNING      {}: {}", warning.object, warning.detail);
+            }
             // **The frame a projected view will quantise against** (`projections.md` §4.2) —
             // computed from the declaration alone, so the square and the resolution the snap costs
             // are readable without a build. Reported, never a finding.
@@ -2038,7 +2052,7 @@ fn main() -> ExitCode {
             }
             eprintln!(
                 "check OK: {} source(s), {} view(s), {} view group(s) over {} declared view(s), \
-                 {} vocabulary(ies), {} attribute(s), {} layer(s)",
+                 {} vocabulary(ies), {} attribute(s), {} layer(s), {} warning(s)",
                 report.sources.len(),
                 config.views.len(),
                 config.view_groups.len(),
@@ -2052,7 +2066,8 @@ fn main() -> ExitCode {
                 // from the schema because a family has no slot in the manifest's flat list
                 // (`views.md` §5), not because they are fewer columns.
                 config.schema.attributes.len() + config.scoped_attributes.len(),
-                config.layers.len()
+                config.layers.len(),
+                report.warnings.len()
             );
             ExitCode::SUCCESS
         }

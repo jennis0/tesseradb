@@ -426,3 +426,66 @@ fn the_manifest_records_the_declared_type() {
         "a keyword has no vocabulary — that is what distinguishes it from a category"
     );
 }
+
+/// **An indexed key that is unique per row is reported, and a repeating one is not**
+/// (`tessera_build::unique_key`). `arxiv_id` is distinct on every item that carries one and `doi`
+/// takes three values, so the build's report names the first and says nothing emphatic about the
+/// second; `tessera verify` reads the same figures back from the bundle. Never a refusal: the
+/// build succeeds either way.
+#[test]
+fn an_indexed_unique_key_is_warned_about_at_build_and_verify_and_a_repeating_one_is_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let points = dir.path().join("points.parquet");
+    let pairs = dir.path().join("pairs.parquet");
+    write_points(&points, &doi_of);
+    write_empty_pairs(&pairs);
+    let out = dir.path().join("bundle");
+    let report = build(&args(
+        &points,
+        &pairs,
+        out.clone(),
+        parse_schema(KEYWORD_SCHEMA),
+    ))
+    .expect("the build succeeds");
+
+    let by_name = |name: &str| -> tessera_build::KeywordCardinality {
+        report
+            .keyword_cardinalities
+            .iter()
+            .find(|column| column.attribute == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("{name} is indexed and must be reported"))
+    };
+    assert_eq!(report.keyword_cardinalities.len(), 2);
+
+    // Every seventh item carries neither value, so 34 of the 40 rows are present in each column.
+    let arxiv = by_name("arxiv_id");
+    assert_eq!((arxiv.distinct, arxiv.present, arxiv.rows), (34, 34, N));
+    assert!(arxiv.is_unique_key());
+    let warning = arxiv
+        .warning(report.bundle_bytes)
+        .expect("a key unique per row warns");
+    assert!(warning.contains("UNIQUE KEY INDEXED"), "{warning}");
+    assert!(
+        warning.contains("34 distinct key(s) over 34 row(s)"),
+        "{warning}"
+    );
+
+    let doi = by_name("doi");
+    assert_eq!((doi.distinct, doi.present, doi.rows), (3, 34, N));
+    assert!(!doi.is_unique_key());
+    assert_eq!(doi.warning(report.bundle_bytes), None);
+
+    // The bytes are the three files the manifest digests for the column, and nothing else.
+    let cdir = column_dir(&out, "arxiv_id");
+    let on_disk: u64 = [DICT_FILE, "values.arrow", "presence.roaring"]
+        .iter()
+        .map(|file| std::fs::metadata(cdir.join(file)).unwrap().len())
+        .sum();
+    assert_eq!(arxiv.index_bytes, on_disk);
+    assert!(arxiv.index_bytes < report.bundle_bytes);
+
+    let verified = tessera_build::verify(&out).expect("the bundle verifies");
+    assert_eq!(verified.keyword_cardinalities, report.keyword_cardinalities);
+    assert_eq!(verified.bundle_bytes, report.bundle_bytes);
+}

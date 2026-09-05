@@ -29,6 +29,7 @@ use std::path::Path;
 
 use arrow::datatypes::{DataType, Schema as ArrowSchema};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use tessera_spatial::tiler::ScalarType;
 
 use crate::config::{
     ArtifactSource, Config, Extent, Fields, PointVisibility, Roster, ViewGroup, ENTITY_ID,
@@ -120,6 +121,9 @@ pub struct CheckReport {
     /// Per shape layer, what its geometry is — computed from the geometry alone, before any
     /// build (`polygon-membership.md` §6.5); a layer that could not be sized says why.
     pub shapes: Vec<std::result::Result<crate::shapes::ShapeLayerReport, String>>,
+    /// Things worth an operator's eye that refuse nothing and leave the check clean: an indexed
+    /// keyword whose source footer says it is unique per row (`crate::unique_key`).
+    pub warnings: Vec<Finding>,
 }
 
 impl CheckReport {
@@ -129,6 +133,13 @@ impl CheckReport {
 
     fn note(&mut self, object: impl Into<String>, detail: impl Into<String>) {
         self.findings.push(Finding {
+            object: object.into(),
+            detail: detail.into(),
+        });
+    }
+
+    fn warn(&mut self, object: impl Into<String>, detail: impl Into<String>) {
+        self.warnings.push(Finding {
             object: object.into(),
             detail: detail.into(),
         });
@@ -314,8 +325,33 @@ fn check_attribute_sources(config: &Config, report: &mut CheckReport) {
                         field.data_type()
                     ),
                 );
+                continue;
+            }
+            if attribute.ty == ScalarType::Keyword && attribute.index {
+                unique_key_by_footer(report, &object, &group.path, attribute.column());
             }
         }
+    }
+}
+
+/// An indexed keyword whose source footer records a distinct count within a few per cent of its
+/// non-null values (`crate::unique_key`): the one thing about a unique key a check that reads no
+/// row can see, and only where the writer recorded it. A warning, never a finding.
+fn unique_key_by_footer(report: &mut CheckReport, object: &str, path: &Path, column: &str) {
+    match crate::unique_key::footer_distinct_count(path, column) {
+        Ok(Some(count)) => {
+            if let Some(warning) = count.warning() {
+                report.warn(object, warning);
+            }
+        }
+        Ok(None) => {}
+        Err(detail) => report.warn(
+            object,
+            format!(
+                "the footer's statistics could not be read, so nothing is said about whether the \
+                 indexed key is unique: {detail}"
+            ),
+        ),
     }
 }
 
@@ -473,10 +509,7 @@ fn check_view_group(config: &Config, group: &ViewGroup, report: &mut CheckReport
             for view in views {
                 let object = format!("{object}, view '{}'", view.key);
                 let Some(path) = &view.source else {
-                    report.sources.push(SourceChecked {
-                        object,
-                        path: None,
-                    });
+                    report.sources.push(SourceChecked { object, path: None });
                     continue;
                 };
                 let Some(schema) = open(report, &object, path) else {
@@ -502,10 +535,7 @@ fn check_view_group(config: &Config, group: &ViewGroup, report: &mut CheckReport
         }
         Roster::Table(_) | Roster::Discriminator => {
             let Some(path) = &group.source else {
-                report.sources.push(SourceChecked {
-                    object,
-                    path: None,
-                });
+                report.sources.push(SourceChecked { object, path: None });
                 return;
             };
             let Some(schema) = open(report, &object, path) else {
