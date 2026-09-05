@@ -1,9 +1,7 @@
-# Campaign handover, second wave (controller, 2026-09-05). Briefs in
-# .superpowers/sdd/2026-09-05-campaign-handover/. Three tracks branch from the seam commit on main.
-# `crates/tessera-server/src/control.rs`, `crates/tessera-server/tests/*` and `conformance/*` are
-# deliberately claimed by both `growth` and `wire`: the publish handler and the ingest handler
-# share one file. Each track keeps to the functions its brief names; the controller merges.
-# A file outside a track's list is stop-and-report, never an edit to this file.
+# Campaign handover, third wave (controller, 2026-09-05): issue #141, the keyword coalesce seam.
+# Brief in .superpowers/sdd/2026-09-05-campaign-handover/brief-keyword-coalesce.md. One track,
+# branched from the seam commit on main. A file outside its list is stop-and-report, never an edit
+# to this file.
 
 [frozen]
 paths = [
@@ -22,44 +20,19 @@ paths = [
   "Cargo.lock",
 ]
 
-# Decision 0127: a membership grows through the control plane.
-[track.growth]
+# Issue #141: a keyword column's flush extents coalesce between folds, dictionary and all.
+[track.keyword-coalesce]
 paths = [
-  "crates/tessera-lifecycle/*",
+  "crates/tessera-filter-write/*",
+  "crates/tessera-filter/*",
+  "crates/tessera-engine/src/coalesce.rs",
+  "crates/tessera-engine/src/compose.rs",
+  "crates/tessera-engine/src/filter.rs",
   "crates/tessera-engine/src/write.rs",
-  "crates/tessera-engine/src/session.rs",
   "crates/tessera-engine/src/lib.rs",
   "crates/tessera-engine/tests/*",
-  "crates/tessera-server/src/control.rs",
+  "crates/tessera-store/src/manifest.rs",
   "crates/tessera-server/tests/*",
-  "docs/openapi/tessera.yaml",
-  "conformance/*",
-]
-
-# Decisions 0128 and 0129: the taxonomy column and the access list, engine and driver.
-[track.wire]
-paths = [
-  "crates/tessera-plugin/*",
-  "crates/tessera-server/src/control.rs",
-  "crates/tessera-server/tests/*",
-  "conformance/*",
-  "clients/py/tesseradb/*",
-  "test_corpora/common/*",
-  "test_corpora/*/README.md",
-  "test_corpora/*/measurements*.json",
-  "docs/ingest-campaign.md",
-  "crates/tessera-corpus/*",
-  "crates/tessera-bench/*",
-  "crates/tessera-server/src/config.rs",
-  "crates/tessera-server/src/state.rs",
-  "crates/tessera-server/src/error.rs",
-]
-
-# R8(a): sub-laps inside the flush's text extents.
-[track.text-laps]
-paths = [
-  "crates/tessera-engine/src/flush.rs",
-  "crates/tessera-analyse/*",
-  "crates/tessera-filter/*",
-  "probes/2026-09-05-flush-attribution/*",
+  "conformance/suite/test_endurance.py",
+  "conformance/tests/*",
 ]
