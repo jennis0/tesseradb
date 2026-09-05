@@ -23,6 +23,31 @@ one artifact: 1.19 GiB over the same table, and the figure does not move with th
 (0.99 GiB over paperseek's 394M rows, 1.20 GiB for the whole medcpt-1m cycle including its
 split and hold-out).
 
+## The 36M cycle, and the cascade a declined root causes
+
+**Measured 2026-09-05** (`runs/medcpt-36m-f010.json`, binary `e442e139`, box otherwise idle):
+MedCPT at *f* = 0.10, C = 8, the full cycle. Base 32,328,599 rows; 3,592,067 rows ingested at
+**65,884 rows/s**; flush to visibility **2.1 s**; fold **166 s at 8.1 GB** peak; **driver peak
+1.79 GiB** over the whole cycle (the reader this probe measures, at the base size that used to
+stall it). `clusters/kmeans` published in full: 256 artifacts, 35,920,666 members in 70.6 s,
+**508,457 members/s**, 17 requests, census exact.
+
+`mesh/descriptors` did not: **183 of 30,217 artifacts published**, 190,602,551 members, 558
+requests over 2,305 s, of which **465 answered 422** — "publishes an artifact whose parent is
+*X*, which the layer does not hold". The 45 roots over the cap were declined as designed, and
+every descendant of a declined root then named a parent the level did not hold. The DAG's 30,217
+descriptors hang almost entirely under those 45, so the decline cascaded to 29,989 artifacts, and
+the census for the layer lists the whole hierarchy as missing (folded 182 artifacts against the
+all-in build's 28,789 under the 100% principal) rather than the 45 declined. The driver recorded
+the statuses in the layer's block and said nothing in its log line. Two driver defects, both
+assigned to the `wire` track: a child's edge to a declined parent is dropped and counted rather
+than sent, and a refused publication is logged as one. Decision 0127's growth request removes the
+decline itself; until it lands this cascade is what a declined root costs.
+
+Publish throughput over the requests that landed: 82,674 members/s on MeSH against 508,457 on
+kmeans, the difference being 465 refused requests each carrying a full body, and the roster's 9,095
+multi-parent artifacts in 72 buckets against kmeans' 256 in a stream.
+
 ## The two 1M cycles
 
 `runs/medcpt-1m-f010.json`. Base 900,000 rows built in 7.0 s; 100,000 rows ingested at
