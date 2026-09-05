@@ -875,7 +875,7 @@ impl ExecutorHealth {
             fold_holding: AtomicBool::new(false),
             apply_nanos_total: AtomicU64::new(0),
             stage_nanos: Default::default(),
-            flush_stage_nanos: Default::default(),
+            flush_stage_nanos: std::array::from_fn(|_| AtomicU64::new(0)),
             flush_executions: AtomicU64::new(0),
             flush_rows_executed: AtomicU64::new(0),
             flush_rows_published: AtomicU64::new(0),
