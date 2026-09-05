@@ -27,7 +27,10 @@ module doc is the account of what is maintained and how:
 ⊘ **(b), the warm at publication, is not built**, and every drop path that remains still puts the
 whole-level projection on the next request: a **merge** (which renumbers the extent rows a form now
 holds), a form at a level version its delta does not follow, and a form under another prefix. Each
-is said at `warn` where it happens.
+is said at `warn` where it happens. **The merge case is measured** (`probes/2026-09-05-merge-arm/`,
+2026-09-06): the first request after a merge on rung 3's mesh level paid 108 s and was shed, every
+flush before it cost nothing, and a merge is selected every `tier_width` small flushes — so (b) is
+needed wherever ingest is continuous, not a refinement.
 
 **Measured at rung 3** — `probes/2026-09-03-growth-trigger/after-the-fix/`, which carries the runs,
 the log lines and the reason the bundle a run touches cannot be run against twice. Both binaries on

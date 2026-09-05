@@ -414,9 +414,11 @@ ruling.)* Each operation's obligation to the form:
 - **A merge** renumbers extent rows the form now holds. It is caught, not rebased: a form records
   the segments its rows came from and is served only to a row space whose segments it agrees with,
   so a merged generation misses and the level is projected whole on the next request that names
-  it. ⊘ **Drop-and-rebuild, unmeasured.** This is the one operation where the ruling's (b) — the
-  rebuild taken at the publication, on the pool, with the previous form served meanwhile — would
-  matter, and (b) is not built (the memo's built block says so and names the drop paths that remain).
+  it. ⊘ **Drop-and-rebuild, measured at 108 s on the request that follows the merge** — shed at
+  the 60 s stream deadline at rung 3's 30,217-artifact level, once per merge
+  (`probes/2026-09-05-merge-arm/`). This is the operation the ruling's (b) — the rebuild taken at
+  the publication, on the pool, with the previous form served meanwhile — exists for, and (b) is
+  not built (the memo's built block says so and names the drop paths that remain).
 - **The fold** rebuilds the form inline, as before (rep §5.0.3).
 
 The projection is still keyed by prefix, view and store version and *not* by the segments version:
@@ -800,8 +802,9 @@ For mechanical integration; neither sibling document is edited here.
   above from the cache side.
 - **The merge arm's cost** (spec §4.1): the flush arm is built and measured (a one-row growth
   returns in 0.04 s and the request after it serves in 125 ms, `probes/2026-09-03-growth-trigger/`);
-  the merge arm is drop-and-rebuild and unmeasured, a whole-level projection on the next request
-  after every merge, and the ruling's (b) is what would move it off the request.
+  the merge arm is drop-and-rebuild, measured at 108 s and shed on the first request after a merge
+  (`probes/2026-09-05-merge-arm/`), a merge being selected every `tier_width` small flushes; the
+  ruling's (b) is what would move it off the request.
 - **The runtime create/edit verb's contract shape** (rep §5.1) — carried, still contracts work.
 - **Bulk suppression of a caller-defined *subset* of a layer** (every label whose `G` touches a
   compromised source, say): expressible today as N artifact suppressions; whether a set-valued
