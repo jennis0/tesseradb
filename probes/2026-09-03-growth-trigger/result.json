@@ -1,0 +1,29 @@
+{
+ "open_s": 30.1,
+ "before_1": {
+  "served": true,
+  "wall_s": 6.97,
+  "server_ms": 922.923
+ },
+ "before_2": {
+  "served": true,
+  "wall_s": 5.82,
+  "server_ms": 143.404
+ },
+ "grow": {
+  "status": 200,
+  "body": "{\"accepted\":1,\"over_bound\":0,\"over_bound_ids\":[],\"clipped\":0,\"tessera_ids\":[7889953827089086312],\"minted\":0}"
+ },
+ "withdraw": 200,
+ "flushes_after_grow": 0,
+ "after_growth_1": {
+  "served": false,
+  "wall_s": 176.68,
+  "error": "Response ended prematurely"
+ },
+ "after_growth_2": {
+  "served": true,
+  "wall_s": 10.45,
+  "server_ms": 670.031
+ }
+}
