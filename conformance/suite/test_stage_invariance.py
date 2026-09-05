@@ -121,7 +121,8 @@ def _ingest_body(items: list[IngestItem]) -> bytes:
             pa.field("external_id", pa.binary()),
             pa.field("x", pa.float32()),
             pa.field("y", pa.float32()),
-            pa.field("access", pa.utf8()),
+            # One list of labels per row, each element one label verbatim (contracts §3.4).
+            pa.field("access", pa.list_(pa.utf8())),
             pa.field("fx_key", pa.uint64()),
             pa.field("department", pa.utf8()),
             pa.field("archive", pa.utf8()),
@@ -138,7 +139,7 @@ def _ingest_body(items: list[IngestItem]) -> bytes:
             pa.array([i.external_id.to_bytes(8, "little") for i in items], pa.binary()),
             pa.array([i.x for i in items], pa.float32()),
             pa.array([i.y for i in items], pa.float32()),
-            pa.array([INGEST_ACCESS] * len(items), pa.utf8()),
+            pa.array([[INGEST_ACCESS]] * len(items), pa.list_(pa.utf8())),
             pa.array([i.fx_key for i in items], pa.uint64()),
             pa.array([FILTER_DEPARTMENT] * len(items), pa.utf8()),
             pa.array([sorted(cat.ARCHIVE_CODES)[0]] * len(items), pa.utf8()),

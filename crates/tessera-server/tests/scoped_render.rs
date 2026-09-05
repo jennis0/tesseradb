@@ -244,61 +244,63 @@ fn build_bundle(dir: &Path, declared: bool) -> std::path::PathBuf {
             // `views.md` §5 r26 — the whole of the licence the filter cases below are answered
             // by. The family has two homes, the hot tail of each view of the group and the
             // entity-space column beside it that every build writes whatever the flags.
-            true => vec![ScopedColumnFamily {
-                attribute: Attribute {
-                    name: "heat".to_string(),
-                    title: None,
-                    field: None,
-                    ty: ScalarType::F32,
-                    analyser: None,
-                    vocabulary: None,
-                    value_set: None,
-                    index: false,
-                    render: true,
+            true => vec![
+                ScopedColumnFamily {
+                    attribute: Attribute {
+                        name: "heat".to_string(),
+                        title: None,
+                        field: None,
+                        ty: ScalarType::F32,
+                        analyser: None,
+                        vocabulary: None,
+                        value_set: None,
+                        index: false,
+                        render: true,
+                    },
+                    group: "quarter".to_string(),
+                    views: family_views.clone(),
+                    source: None,
                 },
-                group: "quarter".to_string(),
-                views: family_views.clone(),
-                source: None,
-            },
-            // **A `text` family**, indexed so it has a column at all. Its extent is a token
-            // dictionary and positional postings and holds **no value per entity**, which is why
-            // the cell arm cannot compare its stored prose across a flush and refuses instead
-            // (decision 0116, review finding F1).
-            ScopedColumnFamily {
-                attribute: Attribute {
-                    name: "note".to_string(),
-                    title: None,
-                    field: None,
-                    ty: ScalarType::Text,
-                    analyser: Some("unicode/icu4x-2.2/p1".to_string()),
-                    vocabulary: None,
-                    value_set: None,
-                    index: true,
-                    render: false,
+                // **A `text` family**, indexed so it has a column at all. Its extent is a token
+                // dictionary and positional postings and holds **no value per entity**, which is why
+                // the cell arm cannot compare its stored prose across a flush and refuses instead
+                // (decision 0116, review finding F1).
+                ScopedColumnFamily {
+                    attribute: Attribute {
+                        name: "note".to_string(),
+                        title: None,
+                        field: None,
+                        ty: ScalarType::Text,
+                        analyser: Some("unicode/icu4x-2.2/p1".to_string()),
+                        vocabulary: None,
+                        value_set: None,
+                        index: true,
+                        render: false,
+                    },
+                    group: "quarter".to_string(),
+                    views: family_views.clone(),
+                    source: None,
                 },
-                group: "quarter".to_string(),
-                views: family_views.clone(),
-                source: None,
-            },
-            // **Neither flag**: stored, served at the drill-down, not searchable and not drawn
-            // (owner ruling). It is here because a flush gated its extents on the *filter* licence,
-            // so such a family served the build's values and nothing ingested since.
-            ScopedColumnFamily {
-                attribute: Attribute {
-                    name: "tag".to_string(),
-                    title: None,
-                    field: None,
-                    ty: ScalarType::F32,
-                    analyser: None,
-                    vocabulary: None,
-                    value_set: None,
-                    index: false,
-                    render: false,
+                // **Neither flag**: stored, served at the drill-down, not searchable and not drawn
+                // (owner ruling). It is here because a flush gated its extents on the *filter* licence,
+                // so such a family served the build's values and nothing ingested since.
+                ScopedColumnFamily {
+                    attribute: Attribute {
+                        name: "tag".to_string(),
+                        title: None,
+                        field: None,
+                        ty: ScalarType::F32,
+                        analyser: None,
+                        vocabulary: None,
+                        value_set: None,
+                        index: false,
+                        render: false,
+                    },
+                    group: "quarter".to_string(),
+                    views: family_views.clone(),
+                    source: None,
                 },
-                group: "quarter".to_string(),
-                views: family_views.clone(),
-                source: None,
-            }],
+            ],
             false => Vec::new(),
         },
         attribute_sources: Vec::new(),
@@ -444,11 +446,12 @@ async fn try_ingest_families(
     tag: Option<&[Option<f32>]>,
 ) -> (u16, String) {
     use arrow::array::{BinaryArray, StringArray};
+    let access = access_column(rows.iter().map(|(_, _, _, a)| *a));
     let mut fields = vec![
         Field::new("external_id", DataType::Binary, true),
         Field::new("x", DataType::Float32, false),
         Field::new("y", DataType::Float32, false),
-        Field::new("access", DataType::Utf8, false),
+        access_field(&access),
     ];
     let mut columns: Vec<arrow::array::ArrayRef> = vec![
         Arc::new(BinaryArray::from_iter(
@@ -460,9 +463,7 @@ async fn try_ingest_families(
         Arc::new(Float32Array::from_iter_values(
             rows.iter().map(|(_, _, y, _)| *y),
         )),
-        Arc::new(StringArray::from_iter_values(
-            rows.iter().map(|(_, _, _, a)| *a),
-        )),
+        Arc::new(access),
     ];
     if let Some(heat) = heat {
         fields.push(Field::new("heat", DataType::Float32, true));
@@ -499,12 +500,13 @@ async fn try_ingest_families(
 
 /// An Arrow ingest body carrying the reserved columns and a nullable `heat`.
 fn batch_with_heat(rows: &[(Vec<u8>, f32, f32, &str)], heat: &[Option<f32>]) -> Vec<u8> {
-    use arrow::array::{BinaryArray, StringArray};
+    use arrow::array::BinaryArray;
+    let access = access_column(rows.iter().map(|(_, _, _, a)| *a));
     let schema = Arc::new(ArrowSchema::new(vec![
         Field::new("external_id", DataType::Binary, true),
         Field::new("x", DataType::Float32, false),
         Field::new("y", DataType::Float32, false),
-        Field::new("access", DataType::Utf8, false),
+        access_field(&access),
         Field::new("heat", DataType::Float32, true),
     ]));
     let batch = RecordBatch::try_new(
@@ -519,9 +521,7 @@ fn batch_with_heat(rows: &[(Vec<u8>, f32, f32, &str)], heat: &[Option<f32>]) -> 
             Arc::new(Float32Array::from_iter_values(
                 rows.iter().map(|(_, _, y, _)| *y),
             )),
-            Arc::new(StringArray::from_iter_values(
-                rows.iter().map(|(_, _, _, a)| *a),
-            )),
+            Arc::new(access),
             Arc::new(Float32Array::from(heat.to_vec())),
         ],
     )
@@ -628,7 +628,11 @@ async fn entity_of(served: &Served, token: &str, id: u64) -> u64 {
 }
 
 /// [`entity_of`] over a whole response, keyed by source entity.
-async fn by_entity(served: &Served, token: &str, values: &BTreeMap<u64, f32>) -> BTreeMap<u64, f32> {
+async fn by_entity(
+    served: &Served,
+    token: &str,
+    values: &BTreeMap<u64, f32>,
+) -> BTreeMap<u64, f32> {
     let mut out = BTreeMap::new();
     for (&id, &value) in values {
         out.insert(entity_of(served, token, id).await, value);
@@ -677,10 +681,7 @@ async fn a_scoped_render_column_reaches_every_view_of_its_group_with_that_views_
     // The overlap is the point: one entity, two views, two values.
     let overlap: Vec<u64> = members(0).filter(|e| members(1).contains(e)).collect();
     assert!(!overlap.is_empty(), "the two quarters overlap");
-    let differing = overlap
-        .iter()
-        .filter(|e| seen[0][e] != seen[1][e])
-        .count();
+    let differing = overlap.iter().filter(|e| seen[0][e] != seen[1][e]).count();
     assert!(
         differing > 0,
         "an entity in both quarters draws with each quarter's own value"
@@ -1529,8 +1530,7 @@ async fn a_sharing_groups_door_writes_the_cell_the_owners_view_addresses() {
     // And the lane the sharing door's own row carries is the value it supplied, not the absence a
     // view that could not write the family used to take.
     let expected = members(0).count() + 1;
-    let (_, values) =
-        settled_points(&served, &served.token, "quarter_map:2026-Q1", expected).await;
+    let (_, values) = settled_points(&served, &served.token, "quarter_map:2026-Q1", expected).await;
     let by_entity = by_entity(&served, &served.token, &values).await;
     assert_eq!(
         by_entity[&NEW], VALUE,
@@ -1696,7 +1696,10 @@ async fn a_flushed_text_cell_refuses_a_second_value_equal_or_not() {
         None,
     )
     .await;
-    assert_eq!(status, 200, "a null names no value to disagree with: {body}");
+    assert_eq!(
+        status, 200,
+        "a null names no value to disagree with: {body}"
+    );
 }
 
 /// **In one window the buffer answers, so text compares exactly** (`views.md` §5, decision 0116).
@@ -1833,7 +1836,8 @@ async fn a_neither_flag_family_gains_its_column_from_a_flush_and_keeps_it_throug
     let (status, _) = viewport_bytes(&served, &served.token, "quarter:2026-Q1").await;
     assert!(
         status == 200 || status == 429,
-        "the view still answers after the rewrite, or sheds: {status}"    );
+        "the view still answers after the rewrite, or sheds: {status}"
+    );
 }
 
 // The drill-down: every view the point is in, and every scoped value, that this principal may see

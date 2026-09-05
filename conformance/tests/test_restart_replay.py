@@ -158,9 +158,9 @@ BATCH_ID = "conformance-restart-replay-batch-1"
 
 def _build_ingest_batch(*, access: str = "999002") -> bytes:
     """One small Arrow IPC stream, schema `(external_id: binary, x: float32, y: float32,
-    access: utf8)` (R5) — three brand-new items, external ids far outside the fixture's own
+    access: list<utf8>)` (R5) — three brand-new items, external ids far outside the fixture's own
     source-id range (the catalogue's is `< 150,000`), so there's no collision.
-    `access` (the third item's access string) is a parameter so a caller can build a body that
+    `access` (the third item's one label) is a parameter so a caller can build a body that
     differs from the original under the SAME batch id, for the conflict/replay-evidence check."""
     external_ids = [
         (900_000_001).to_bytes(8, "little"),
@@ -176,7 +176,7 @@ def _build_ingest_batch(*, access: str = "999002") -> bytes:
             pa.field("external_id", pa.binary()),
             pa.field("x", pa.float32()),
             pa.field("y", pa.float32()),
-            pa.field("access", pa.utf8()),
+            pa.field("access", pa.list_(pa.utf8())),
             # The catalogue declares `fx_key`, and a declared column must be present in every
             # batch (contracts §2.2) — the tail is read back positionally, so an omission shifts
             # every later scalar rather than defaulting. The fixture chooses the values.
@@ -206,7 +206,7 @@ def _build_ingest_batch(*, access: str = "999002") -> bytes:
             pa.array(external_ids, type=pa.binary()),
             pa.array(xs, type=pa.float32()),
             pa.array(ys, type=pa.float32()),
-            pa.array(accesses, type=pa.utf8()),
+            pa.array([[label] for label in accesses], type=pa.list_(pa.utf8())),
             pa.array(ingest_fx_keys(len(external_ids)), type=pa.uint64()),
             pa.array(["alpha"] * len(external_ids), type=pa.utf8()),
             pa.array(["red"] * len(external_ids), type=pa.utf8()),

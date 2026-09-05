@@ -256,7 +256,7 @@ async fn open(tmp: TempDir) -> Served {
         &tmp.path().join("wal.log"),
     )
     .await;
-    let auth = authorise(&server, &["0", "1"]).await;
+    let auth = authorise(&server, &["0", "1"][..]).await;
     let token = auth["token"].as_str().unwrap().to_string();
     Served { server, token, tmp }
 }
@@ -267,7 +267,7 @@ async fn open(tmp: TempDir) -> Served {
 /// it therefore re-authorises first, exactly as a client would; `tests/views_gate.rs` is where
 /// the *not*-re-authorising case is asserted.
 async fn reauthorise(served: &mut Served) {
-    served.token = authorise(&served.server, &["0", "1"]).await["token"]
+    served.token = authorise(&served.server, &["0", "1"][..]).await["token"]
         .as_str()
         .unwrap()
         .to_string();
@@ -376,15 +376,17 @@ async fn points(served: &Served, view: &str) -> Vec<PointRow> {
 /// One ingest batch of `(external id, x, y, access)` rows into `view`.
 /// One ingest row: the external id, its position, its access label and the declared attribute —
 /// every declared column, which the schema check requires.
-type Row<'a> = (Vec<u8>, f32, f32, &'a str, Option<i32>);
+type Row<'a> = (Vec<u8>, f32, f32, &'a [&'a str], Option<i32>);
 
 /// One ingest body.
 fn batch(rows: &[Row<'_>]) -> Vec<u8> {
+    let labels: Vec<&[&str]> = rows.iter().map(|(_, _, _, access, _)| *access).collect();
+    let access = access_lists(&labels);
     let schema = Arc::new(Schema::new(vec![
         Field::new("external_id", DataType::Binary, true),
         Field::new("x", DataType::Float32, false),
         Field::new("y", DataType::Float32, false),
-        Field::new("access", DataType::Utf8, false),
+        access_field(&access),
         Field::new("score", DataType::Int32, true),
     ]));
     let batch = RecordBatch::try_new(
@@ -399,9 +401,7 @@ fn batch(rows: &[Row<'_>]) -> Vec<u8> {
             Arc::new(arrow::array::Float32Array::from_iter_values(
                 rows.iter().map(|(_, _, y, ..)| *y),
             )),
-            Arc::new(arrow::array::StringArray::from_iter_values(
-                rows.iter().map(|(_, _, _, access, _)| *access),
-            )),
+            Arc::new(access),
             Arc::new(arrow::array::Int32Array::from_iter(
                 rows.iter().map(|(.., score)| *score),
             )),
@@ -547,7 +547,7 @@ async fn a_created_view_is_served_ingested_flushed_and_survives_a_restart() {
                 format!("q5-{i}").into_bytes(),
                 100.0 + i as f32,
                 200.0,
-                "0",
+                &["0"][..],
                 Some(i),
             )
         })
@@ -768,7 +768,7 @@ async fn a_known_external_id_joins_a_second_view_and_is_placed_in_each() {
             &served,
             "first",
             "world",
-            &[(id.clone(), 10.0, 10.0, "0", Some(7))]
+            &[(id.clone(), 10.0, 10.0, &["0"][..], Some(7))]
         )
         .await
         .status(),
@@ -780,7 +780,7 @@ async fn a_known_external_id_joins_a_second_view_and_is_placed_in_each() {
         &served,
         "join",
         "quarter:2026-Q5",
-        &[(id.clone(), 800.0, 300.0, "0", Some(7))],
+        &[(id.clone(), 800.0, 300.0, &["0"][..], Some(7))],
     )
     .await;
     assert_eq!(
@@ -820,7 +820,7 @@ async fn a_known_external_id_joins_a_second_view_and_is_placed_in_each() {
             &served,
             "join-again",
             "quarter:2026-Q5",
-            &[(id.clone(), 810.0, 310.0, "0", Some(7))]
+            &[(id.clone(), 810.0, 310.0, &["0"][..], Some(7))]
         )
         .await
         .status(),
@@ -846,7 +846,7 @@ async fn a_join_refuses_a_second_row_a_relabel_and_a_changed_attribute() {
             &served,
             "first",
             "world",
-            &[(id.clone(), 10.0, 10.0, "0", Some(7))]
+            &[(id.clone(), 10.0, 10.0, &["0"][..], Some(7))]
         )
         .await
         .status(),
@@ -859,7 +859,7 @@ async fn a_join_refuses_a_second_row_a_relabel_and_a_changed_attribute() {
             &served,
             "same-view",
             "world",
-            &[(id.clone(), 11.0, 11.0, "0", Some(7))]
+            &[(id.clone(), 11.0, 11.0, &["0"][..], Some(7))]
         )
         .await
         .status(),
@@ -873,7 +873,7 @@ async fn a_join_refuses_a_second_row_a_relabel_and_a_changed_attribute() {
             &served,
             "relabel",
             "quarter:2026-Q5",
-            &[(id.clone(), 800.0, 300.0, "1", Some(7))]
+            &[(id.clone(), 800.0, 300.0, &["1"][..], Some(7))]
         )
         .await
         .status(),
@@ -886,7 +886,7 @@ async fn a_join_refuses_a_second_row_a_relabel_and_a_changed_attribute() {
         &served,
         "reattribute",
         "quarter:2026-Q5",
-        &[(id.clone(), 800.0, 300.0, "0", Some(9))],
+        &[(id.clone(), 800.0, 300.0, &["0"][..], Some(9))],
     )
     .await;
     assert_eq!(resp.status(), 409);
@@ -902,7 +902,7 @@ async fn a_join_refuses_a_second_row_a_relabel_and_a_changed_attribute() {
             &served,
             "attribute-absent",
             "quarter:2026-Q5",
-            &[(id.clone(), 800.0, 300.0, "0", None)]
+            &[(id.clone(), 800.0, 300.0, &["0"][..], None)]
         )
         .await
         .status(),
@@ -935,7 +935,7 @@ async fn a_suppressed_holder_joins_a_view_and_stays_hidden_until_it_is_unsuppres
         &served,
         "first",
         "world",
-        &[(id.clone(), 10.0, 10.0, "0", Some(7))],
+        &[(id.clone(), 10.0, 10.0, &["0"][..], Some(7))],
     )
     .await;
     assert_eq!(resp.status(), 200);
@@ -977,7 +977,7 @@ async fn a_suppressed_holder_joins_a_view_and_stays_hidden_until_it_is_unsuppres
             &served,
             "join",
             "quarter:2026-Q5",
-            &[(id.clone(), 800.0, 300.0, "0", Some(7))]
+            &[(id.clone(), 800.0, 300.0, &["0"][..], Some(7))]
         )
         .await
         .status(),
@@ -1045,7 +1045,7 @@ async fn delete_dangling_deletes_only_the_entities_this_view_alone_held() {
             &served,
             "elsewhere",
             "world",
-            &[(also_elsewhere.clone(), 10.0, 10.0, "0", Some(1))]
+            &[(also_elsewhere.clone(), 10.0, 10.0, &["0"][..], Some(1))]
         )
         .await
         .status(),
@@ -1057,8 +1057,8 @@ async fn delete_dangling_deletes_only_the_entities_this_view_alone_held() {
             "into-q5",
             "quarter:2026-Q5",
             &[
-                (only_here.clone(), 800.0, 300.0, "0", Some(2)),
-                (also_elsewhere.clone(), 810.0, 310.0, "0", Some(1)),
+                (only_here.clone(), 800.0, 300.0, &["0"][..], Some(2)),
+                (also_elsewhere.clone(), 810.0, 310.0, &["0"][..], Some(1)),
             ]
         )
         .await
@@ -1076,7 +1076,7 @@ async fn delete_dangling_deletes_only_the_entities_this_view_alone_held() {
             &served,
             "buffered",
             "quarter:2026-Q5",
-            &[(buffered.clone(), 820.0, 320.0, "0", Some(3))]
+            &[(buffered.clone(), 820.0, 320.0, &["0"][..], Some(3))]
         )
         .await
         .status(),
@@ -1098,7 +1098,7 @@ async fn delete_dangling_deletes_only_the_entities_this_view_alone_held() {
             &served,
             "reingest-deleted",
             "world",
-            &[(only_here.clone(), 20.0, 20.0, "0", Some(2))]
+            &[(only_here.clone(), 20.0, 20.0, &["0"][..], Some(2))]
         )
         .await
         .status(),
@@ -1110,7 +1110,7 @@ async fn delete_dangling_deletes_only_the_entities_this_view_alone_held() {
             &served,
             "reingest-live",
             "world",
-            &[(also_elsewhere.clone(), 30.0, 30.0, "0", Some(1))]
+            &[(also_elsewhere.clone(), 30.0, 30.0, &["0"][..], Some(1))]
         )
         .await
         .status(),
@@ -1122,7 +1122,7 @@ async fn delete_dangling_deletes_only_the_entities_this_view_alone_held() {
             &served,
             "reingest-buffered",
             "world",
-            &[(buffered.clone(), 40.0, 40.0, "0", Some(3))]
+            &[(buffered.clone(), 40.0, 40.0, &["0"][..], Some(3))]
         )
         .await
         .status(),
@@ -1146,7 +1146,7 @@ async fn delete_dangling_deletes_only_the_entities_this_view_alone_held() {
             &served,
             "both-world",
             "world",
-            &[(both.clone(), 60.0, 60.0, "0", Some(6))]
+            &[(both.clone(), 60.0, 60.0, &["0"][..], Some(6))]
         )
         .await
         .status(),
@@ -1157,7 +1157,7 @@ async fn delete_dangling_deletes_only_the_entities_this_view_alone_held() {
             &served,
             "both-q7",
             "quarter:2026-Q7",
-            &[(both.clone(), 800.0, 300.0, "0", Some(6))]
+            &[(both.clone(), 800.0, 300.0, &["0"][..], Some(6))]
         )
         .await
         .status(),
@@ -1184,7 +1184,7 @@ async fn delete_dangling_deletes_only_the_entities_this_view_alone_held() {
             &served,
             "both-again",
             "world",
-            &[(both.clone(), 70.0, 70.0, "0", Some(6))]
+            &[(both.clone(), 70.0, 70.0, &["0"][..], Some(6))]
         )
         .await
         .status(),
@@ -1204,7 +1204,7 @@ async fn delete_dangling_deletes_only_the_entities_this_view_alone_held() {
         &served,
         "q6",
         "quarter:2026-Q6",
-        &[(solitary.clone(), 800.0, 300.0, "0", Some(4))],
+        &[(solitary.clone(), 800.0, 300.0, &["0"][..], Some(4))],
     )
     .await;
     assert_eq!(resp.status(), 200);
@@ -1223,7 +1223,7 @@ async fn delete_dangling_deletes_only_the_entities_this_view_alone_held() {
         &served,
         "reingest-solitary",
         "world",
-        &[(solitary.clone(), 50.0, 50.0, "0", Some(4))],
+        &[(solitary.clone(), 50.0, 50.0, &["0"][..], Some(4))],
     )
     .await;
     assert_eq!(resp.status(), 200);
@@ -1360,7 +1360,7 @@ async fn a_minted_group_takes_a_create_a_drop_and_a_join() {
             &served,
             "unknown-key",
             "quarter:2026-Q9",
-            &[(b"nobody".to_vec(), 10.0, 10.0, "0", Some(1))]
+            &[(b"nobody".to_vec(), 10.0, 10.0, &["0"][..], Some(1))]
         )
         .await
         .status(),
@@ -1390,7 +1390,7 @@ async fn a_minted_group_takes_a_create_a_drop_and_a_join() {
         &served,
         "join-minted",
         "quarter:2026-Q2",
-        &[(known.clone(), 400.0, 400.0, "0,1", Some(3))],
+        &[(known.clone(), 400.0, 400.0, &["0", "1"][..], Some(3))],
     )
     .await;
     assert_eq!(resp.status(), 200, "a join into a minted group's view");
@@ -1415,7 +1415,7 @@ async fn a_minted_group_takes_a_create_a_drop_and_a_join() {
         &served,
         "join-minted-world",
         "world",
-        &[(known, 60.0, 60.0, "0", Some(3))],
+        &[(known, 60.0, 60.0, &["0"][..], Some(3))],
     )
     .await;
     assert_eq!(resp.status(), 409, "the entity is alive in `world` already");
@@ -1572,7 +1572,7 @@ async fn a_fold_after_a_drop_reclaims_the_dropped_view_and_a_recreate_adopts_not
                 format!("q2-{i}").into_bytes(),
                 100.0 + i as f32,
                 200.0,
-                "0",
+                &["0"][..],
                 Some(i),
             )
         })
@@ -1734,7 +1734,7 @@ async fn a_join_naming_a_different_label_is_refused_after_the_entity_has_flushed
             &served,
             "first",
             "world",
-            &[(id.clone(), 10.0, 10.0, "0", Some(7))]
+            &[(id.clone(), 10.0, 10.0, &["0"][..], Some(7))]
         )
         .await
         .status(),
@@ -1746,7 +1746,7 @@ async fn a_join_naming_a_different_label_is_refused_after_the_entity_has_flushed
         &served,
         "relabel-after-flush",
         "quarter:2026-Q5",
-        &[(id.clone(), 800.0, 300.0, "1", Some(7))],
+        &[(id.clone(), 800.0, 300.0, &["1"][..], Some(7))],
     )
     .await;
     assert_eq!(
@@ -1772,7 +1772,7 @@ async fn a_join_naming_a_different_label_is_refused_after_the_entity_has_flushed
             &served,
             "join-after-flush",
             "quarter:2026-Q5",
-            &[(id.clone(), 800.0, 300.0, "0", Some(7))]
+            &[(id.clone(), 800.0, 300.0, &["0"][..], Some(7))]
         )
         .await
         .status(),
@@ -1964,11 +1964,12 @@ const HELD: Attrs<'static> = Attrs {
 };
 
 fn families_batch(id: &[u8], x: f32, y: f32, a: Attrs<'_>) -> Vec<u8> {
+    let access = access_column(["0"]);
     let schema = Arc::new(Schema::new(vec![
         Field::new("external_id", DataType::Binary, true),
         Field::new("x", DataType::Float32, false),
         Field::new("y", DataType::Float32, false),
-        Field::new("access", DataType::Utf8, false),
+        access_field(&access),
         Field::new("score", DataType::Int32, true),
         Field::new("depth", DataType::Int32, true),
         Field::new("tag", DataType::Utf8, true),
@@ -1981,7 +1982,7 @@ fn families_batch(id: &[u8], x: f32, y: f32, a: Attrs<'_>) -> Vec<u8> {
             Arc::new(arrow::array::BinaryArray::from_iter([Some(id)])),
             Arc::new(arrow::array::Float32Array::from_iter_values([x])),
             Arc::new(arrow::array::Float32Array::from_iter_values([y])),
-            Arc::new(arrow::array::StringArray::from_iter_values(["0"])),
+            Arc::new(access),
             Arc::new(arrow::array::Int32Array::from_iter([a.score])),
             Arc::new(arrow::array::Int32Array::from_iter([a.depth])),
             Arc::new(arrow::array::StringArray::from_iter([a.tag])),
@@ -2499,10 +2500,12 @@ async fn a_row_promoted_to_a_join_after_its_handler_pass_still_meets_the_arms() 
     // is the one that must hold whichever ordering each pair took.
     for round in 0..8u32 {
         let id = format!("race-{round}").into_bytes();
-        let (world_batch, quarter_batch) =
-            (format!("race-world-{round}"), format!("race-quarter-{round}"));
-        let world_rows = [(id.clone(), 10.0f32, 10.0f32, "0", Some(7))];
-        let quarter_rows = [(id.clone(), 400.0f32, 400.0f32, "1", Some(7))];
+        let (world_batch, quarter_batch) = (
+            format!("race-world-{round}"),
+            format!("race-quarter-{round}"),
+        );
+        let world_rows = [(id.clone(), 10.0f32, 10.0f32, &["0"][..], Some(7))];
+        let quarter_rows = [(id.clone(), 400.0f32, 400.0f32, &["1"][..], Some(7))];
         let (first, second) = tokio::join!(
             ingest(&served, &world_batch, "world", &world_rows),
             ingest(&served, &quarter_batch, "quarter:2026-Q5", &quarter_rows),
@@ -2544,16 +2547,21 @@ async fn the_join_rules_refusal_body_is_pinned_whole() {
     );
     let id = b"pinned-body".to_vec();
     assert_eq!(
-        ingest(&served, "pin-first", "world", &[(id.clone(), 10.0, 10.0, "0", Some(7))])
-            .await
-            .status(),
+        ingest(
+            &served,
+            "pin-first",
+            "world",
+            &[(id.clone(), 10.0, 10.0, &["0"][..], Some(7))]
+        )
+        .await
+        .status(),
         200
     );
     let resp = ingest(
         &served,
         "pin-join",
         "quarter:2026-Q5",
-        &[(id, 800.0, 300.0, "0", Some(9))],
+        &[(id, 800.0, 300.0, &["0"][..], Some(9))],
     )
     .await;
     assert_eq!(resp.status(), 409);
@@ -2585,7 +2593,13 @@ async fn the_join_rules_refusal_body_is_pinned_whole() {
 async fn a_row_demoted_from_a_join_allocates_a_fresh_entity_that_keeps_its_label() {
     let mut served = serve().await;
     let id = b"demoted".to_vec();
-    let resp = ingest(&served, "demote-first", "world", &[(id.clone(), 10.0, 10.0, "0", Some(7))]).await;
+    let resp = ingest(
+        &served,
+        "demote-first",
+        "world",
+        &[(id.clone(), 10.0, 10.0, &["0"][..], Some(7))],
+    )
+    .await;
     assert_eq!(resp.status(), 200);
     let first: u64 = resp.json::<Value>().await.unwrap()["tessera_ids"][0]
         .as_u64()
@@ -2611,7 +2625,7 @@ async fn a_row_demoted_from_a_join_allocates_a_fresh_entity_that_keeps_its_label
         &served,
         "demote-second",
         "quarter:2026-Q1",
-        &[(id, 800.0, 300.0, "1", Some(7))],
+        &[(id, 800.0, 300.0, &["1"][..], Some(7))],
     )
     .await;
     assert_eq!(resp.status(), 200, "a deleted holder does not collide");
@@ -2643,7 +2657,7 @@ async fn a_row_demoted_from_a_join_allocates_a_fresh_entity_that_keeps_its_label
             &served,
             &format!("demote-race-seed-{round}"),
             "world",
-            &[(id.clone(), 10.0, 10.0, "0", Some(7))],
+            &[(id.clone(), 10.0, 10.0, &["0"][..], Some(7))],
         )
         .await;
         assert_eq!(seed.status(), 200);
@@ -2651,9 +2665,10 @@ async fn a_row_demoted_from_a_join_allocates_a_fresh_entity_that_keeps_its_label
             .as_u64()
             .unwrap();
 
-        let body = json!([{ "tessera_id": holder.to_string(), "idset": FIXTURE_IDSET, "op": "delete" }]);
+        let body =
+            json!([{ "tessera_id": holder.to_string(), "idset": FIXTURE_IDSET, "op": "delete" }]);
         let batch_id = format!("demote-race-again-{round}");
-        let rows = [(id, 800.0, 300.0, "1", Some(7))];
+        let rows = [(id, 800.0, 300.0, &["1"][..], Some(7))];
         let (deleted, again) = tokio::join!(
             served
                 .server
@@ -2664,7 +2679,11 @@ async fn a_row_demoted_from_a_join_allocates_a_fresh_entity_that_keeps_its_label
                 .send(),
             ingest(&served, &batch_id, "quarter:2026-Q1", &rows),
         );
-        assert_eq!(deleted.unwrap().status(), 200, "round {round}: the delete lands");
+        assert_eq!(
+            deleted.unwrap().status(),
+            200,
+            "round {round}: the delete lands"
+        );
         let status = again.status().as_u16();
         let text = again.text().await.unwrap();
         match status {
@@ -2744,7 +2763,7 @@ async fn a_recreated_key_holds_only_its_own_rows_across_a_replay_and_a_fold() {
                 format!("first-{i}").into_bytes(),
                 300.0 + i as f32,
                 300.0,
-                "0",
+                &["0"][..],
                 Some(i),
             )
         })
@@ -2768,7 +2787,7 @@ async fn a_recreated_key_holds_only_its_own_rows_across_a_replay_and_a_fold() {
                 format!("stale-{i}").into_bytes(),
                 320.0 + i as f32,
                 320.0,
-                "0",
+                &["0"][..],
                 Some(i),
             )
         })
@@ -2806,7 +2825,7 @@ async fn a_recreated_key_holds_only_its_own_rows_across_a_replay_and_a_fold() {
                 format!("second-{i}").into_bytes(),
                 500.0 + i as f32,
                 500.0,
-                "0",
+                &["0"][..],
                 Some(i),
             )
         })
@@ -2894,7 +2913,7 @@ async fn a_drop_prunes_every_spelling_of_the_key_on_the_live_path_and_at_replay(
                 format!("shared-{i}").into_bytes(),
                 600.0 + i as f32,
                 600.0,
-                "0",
+                &["0"][..],
                 Some(i),
             )
         })
@@ -2926,7 +2945,7 @@ async fn a_drop_prunes_every_spelling_of_the_key_on_the_live_path_and_at_replay(
             &served,
             "fresh-q5",
             "quarter:2026-Q5",
-            &[(b"fresh-q5".to_vec(), 610.0, 610.0, "0", Some(0))],
+            &[(b"fresh-q5".to_vec(), 610.0, 610.0, &["0"][..], Some(0))],
         )
         .await
         .status(),
@@ -2956,7 +2975,7 @@ async fn a_drop_prunes_every_spelling_of_the_key_on_the_live_path_and_at_replay(
                 format!("owned-{i}").into_bytes(),
                 700.0 + i as f32,
                 700.0,
-                "0",
+                &["0"][..],
                 Some(i),
             )
         })
@@ -2989,7 +3008,7 @@ async fn a_drop_prunes_every_spelling_of_the_key_on_the_live_path_and_at_replay(
             &served,
             "fresh-q6",
             "quarter:2026-Q6",
-            &[(b"fresh-q6".to_vec(), 710.0, 710.0, "0", Some(0))],
+            &[(b"fresh-q6".to_vec(), 710.0, 710.0, &["0"][..], Some(0))],
         )
         .await
         .status(),

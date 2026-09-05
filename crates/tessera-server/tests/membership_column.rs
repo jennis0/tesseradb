@@ -231,13 +231,10 @@ fn base64_external_id(e: u64) -> String {
     base64::engine::general_purpose::STANDARD.encode(external_id_of(e))
 }
 
-/// The access label an ingested row carries — the same terms the pairs file gives a built one.
-fn access_of(e: u64) -> String {
-    terms_of(e)
-        .iter()
-        .map(|t| t.to_string())
-        .collect::<Vec<_>>()
-        .join(",")
+/// The labels an ingested row carries, one per term — the same terms the pairs file gives a
+/// built one.
+fn access_of(e: u64) -> Vec<String> {
+    terms_of(e).iter().map(|t| t.to_string()).collect()
 }
 
 struct Built {
@@ -315,11 +312,18 @@ async fn serve(built: &Built) -> TestServer {
 /// One ingest batch: the reserved geometry columns, and a column **named for the layer** carrying
 /// each point's artifacts.
 fn ingest_batch(rows: &[u64], column: &str, keys: ArrayRef) -> Vec<u8> {
+    let labels: Vec<Vec<String>> = rows.iter().map(|e| access_of(*e)).collect();
+    let labels: Vec<Vec<&str>> = labels
+        .iter()
+        .map(|row| row.iter().map(String::as_str).collect())
+        .collect();
+    let labels: Vec<&[&str]> = labels.iter().map(Vec::as_slice).collect();
+    let access = access_lists(&labels);
     let schema = Arc::new(Schema::new(vec![
         Field::new("external_id", DataType::Binary, false),
         Field::new("x", DataType::Float32, false),
         Field::new("y", DataType::Float32, false),
-        Field::new("access", DataType::Utf8, false),
+        access_field(&access),
         Field::new(column, keys.data_type().clone(), true),
     ]));
     let ext: Vec<Vec<u8>> = rows.iter().map(|e| external_id_of(*e)).collect();
@@ -335,9 +339,7 @@ fn ingest_batch(rows: &[u64], column: &str, keys: ArrayRef) -> Vec<u8> {
             Arc::new(Float32Array::from_iter_values(
                 rows.iter().map(|e| y_of(*e) as f32),
             )),
-            Arc::new(StringArray::from_iter_values(
-                rows.iter().map(|e| access_of(*e)),
-            )),
+            Arc::new(access),
             keys,
         ],
     )

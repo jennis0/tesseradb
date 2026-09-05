@@ -51,7 +51,7 @@ use crate::state::AppState;
 ///
 /// `spawn_blocking` dispatches onto a process-wide **unbounded FIFO** served by at most
 /// `max_blocking_threads` threads. An ingest closure holds its thread across the Arrow decode, the
-/// plugin's `terms_of_label` loop, the external-ID sidecar IO **and** its whole blocking wait on the
+/// plugin's `terms_of_labels` loop, the external-ID sidecar IO **and** its whole blocking wait on the
 /// executor's receipt, and frees it only when all of that completes — an fsync plus an
 /// `IngestBuffer` clone that is O(total buffered items).
 ///
@@ -510,7 +510,9 @@ struct RawIngestItem {
     /// engine's out-of-frame check, the WAL record, the buffer and the flush's quantiser.
     x: f64,
     y: f64,
-    access: Vec<u8>,
+    /// The row's labels, one element of the wire's `access` list each, verbatim (decision 0129).
+    /// Empty for a row that carries none; a null list or a null element is refused at the parse.
+    labels: Vec<Vec<u8>>,
     scalars: Vec<WalScalar>,
     /// The group-scoped values this row carries for its view's group, positional against the
     /// families the batch was parsed with (`views.md` §5). Empty for a plain view and for a group
@@ -1101,7 +1103,7 @@ fn parse_ingest_batch(
         // (`projections.md` §3) — the same place `tessera_build::input` runs it, which is what
         // makes a projected view ingestable rather than only buildable (decision 0091).
         clipped += project_columns(projection, &mut x, &mut y)?;
-        let access = utf8_col(&batch, "access")?;
+        let access = labels_col(&batch, "access")?;
 
         // Whole-batch schema validation, before a single row is read: a batch whose scalar tail
         // does not match the declaration has no effect at all, exactly as a duplicate 409 does.
@@ -1276,7 +1278,7 @@ fn parse_ingest_batch(
                 external_id,
                 x: x[i],
                 y: y[i],
-                access: access.value(i).as_bytes().to_vec(),
+                labels: access.labels_at(i)?,
                 scalars,
                 scoped: scoped_values,
             });
@@ -1492,16 +1494,124 @@ fn coordinate_col(
     }
 }
 
-fn utf8_col<'a>(
+/// The `access` column: one list of labels per row, `list<utf8>` or `large_list<utf8>`
+/// (contracts §3.4, decision 0129).
+///
+/// **A list, because that is what the data is.** Each element is one label and is taken verbatim
+/// — the plugin's [`tessera_plugin::Plugin::terms_of_labels`], the same call a build puts a
+/// points file's term column through — so a label containing whatever separator a grammar might
+/// have chosen is one term, as it is at the build. A scalar `utf8` column is refused at the
+/// schema rather than read as a one-label row: it is the shape a separator grammar lived in, and
+/// accepting it beside the list would leave two spellings for one column.
+enum LabelCells<'a> {
+    List(&'a arrow::array::ListArray),
+    Large(&'a arrow::array::LargeListArray),
+}
+
+impl LabelCells<'_> {
+    fn values(&self) -> &arrow::array::StringArray {
+        let values: &Arc<dyn Array> = match self {
+            LabelCells::List(list) => list.values(),
+            LabelCells::Large(list) => list.values(),
+        };
+        values
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .expect("labels_col checked the element type")
+    }
+
+    /// The range of `values()` row `row` occupies, or `None` where the row's list is null.
+    fn entries(&self, row: usize) -> Option<std::ops::Range<usize>> {
+        match self {
+            LabelCells::List(list) => (!list.is_null(row)).then(|| {
+                let offsets = list.value_offsets();
+                offsets[row] as usize..offsets[row + 1] as usize
+            }),
+            LabelCells::Large(list) => (!list.is_null(row)).then(|| {
+                let offsets = list.value_offsets();
+                offsets[row] as usize..offsets[row + 1] as usize
+            }),
+        }
+    }
+
+    /// Row `row`'s labels, verbatim and in order. An empty list is a row with no label.
+    ///
+    /// **A null list and a null element are both refused**, naming the row. A null list could be
+    /// read as "no label" or as "label not supplied", and the two differ in what every principal
+    /// may see of the row; a null element has no bytes to be a label. Neither is guessed at.
+    fn labels_at(&self, row: usize) -> Result<Vec<Vec<u8>>, ApiError> {
+        let Some(entries) = self.entries(row) else {
+            return Err(ApiError::Contract(format!(
+                "ingest body: column 'access' is null at row {row}. A row with no label is an \
+                 empty list; a null could mean that or an omission, so it is refused rather than \
+                 read as either"
+            )));
+        };
+        let values = self.values();
+        entries
+            .map(|index| {
+                if values.is_null(index) {
+                    return Err(ApiError::Contract(format!(
+                        "ingest body: column 'access' has a null element at row {row}; every \
+                         element of a row's list is one label, taken verbatim"
+                    )));
+                }
+                Ok(values.value(index).as_bytes().to_vec())
+            })
+            .collect()
+    }
+}
+
+fn labels_col<'a>(
     batch: &'a arrow::record_batch::RecordBatch,
     name: &str,
-) -> Result<&'a arrow::array::StringArray, ApiError> {
-    batch
-        .column_by_name(name)
-        .and_then(|c| c.as_any().downcast_ref::<arrow::array::StringArray>())
-        .ok_or_else(|| {
-            ApiError::Contract(format!("ingest body: column '{name}' missing or not utf8"))
-        })
+) -> Result<LabelCells<'a>, ApiError> {
+    use arrow::array::{LargeListArray, ListArray};
+    use arrow::datatypes::DataType;
+
+    const SHAPE: &str = "list<utf8> or large_list<utf8>, one label per element, an empty list \
+                         for a row with no label (contracts §3.4)";
+    let Some(column) = batch.column_by_name(name) else {
+        return Err(ApiError::Contract(format!(
+            "ingest body: column '{name}' missing; it is {SHAPE}"
+        )));
+    };
+    let cells = match column.data_type() {
+        DataType::List(_) => LabelCells::List(
+            column
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .expect("a List column downcasts to a ListArray"),
+        ),
+        DataType::LargeList(_) => LabelCells::Large(
+            column
+                .as_any()
+                .downcast_ref::<LargeListArray>()
+                .expect("a LargeList column downcasts to a LargeListArray"),
+        ),
+        DataType::Utf8 | DataType::LargeUtf8 => {
+            return Err(ApiError::Contract(format!(
+                "ingest body: column '{name}' is utf8, one string per row; it is {SHAPE}. Each \
+                 element is one label, verbatim, so a label containing a comma is one term \
+                 (decision 0129)"
+            )));
+        }
+        other => {
+            return Err(ApiError::Contract(format!(
+                "ingest body: column '{name}' is {other:?}; it is {SHAPE}"
+            )));
+        }
+    };
+    let element = match &cells {
+        LabelCells::List(list) => list.values().data_type().clone(),
+        LabelCells::Large(list) => list.values().data_type().clone(),
+    };
+    if element != DataType::Utf8 {
+        return Err(ApiError::Contract(format!(
+            "ingest body: column '{name}' is a list of {element:?}; it is {SHAPE}"
+        )));
+    }
+    Ok(cells)
 }
 
 #[derive(serde::Serialize)]
@@ -1609,7 +1719,7 @@ fn run_ingest(
     // is why the *byte* cap is enforced a layer earlier, on the route, where nothing has been
     // decoded at all.
     //
-    // **Placed before the `terms_of_label`/`resolve_terms` loop below, which narrows a known
+    // **Placed before the `terms_of_labels`/`resolve_terms` loop below, which narrows a known
     // consequence without closing it.** `resolve_terms` runs pre-submit, so extension-id dictionary
     // state grows even on refused batches; checking the row cap first keeps an over-large batch out
     // of that. A batch that is *under* the row cap and fails later still contributes. Stated because
@@ -1636,11 +1746,13 @@ fn run_ingest(
     let mut over_bound: u64 = 0;
 
     for item in &items {
+        // The list form, the same call a build puts a points file's term column through
+        // (decision 0129): every element is one label and nothing here parses it.
         let descriptors = state
             .engine
             .plugin()
-            .terms_of_label(&item.access)
-            .map_err(|e| ApiError::Contract(format!("access field: {e}")))?;
+            .terms_of_labels(&item.labels)
+            .map_err(|e| ApiError::Contract(format!("access column: {e}")))?;
         let terms = state.engine.resolve_terms(&descriptors);
         if terms.len() as u32 > bounds.max_terms_per_item {
             over_bound += 1;
@@ -3864,10 +3976,15 @@ mod tests {
 
         /// One batch of the fixed columns plus `department` (as `column`) and `score`.
         fn body(column: arrow::array::ArrayRef, nullable: bool) -> Vec<u8> {
+            // One label per row, as a list (decision 0129).
+            let mut access = arrow::array::ListBuilder::new(arrow::array::StringBuilder::new());
+            access.values().append_value("public");
+            access.append(true);
+            let access = access.finish();
             let schema = Arc::new(Schema::new(vec![
                 Field::new("x", DataType::Float32, false),
                 Field::new("y", DataType::Float32, false),
-                Field::new("access", DataType::Utf8, false),
+                Field::new("access", access.data_type().clone(), false),
                 Field::new("department", column.data_type().clone(), nullable),
                 Field::new("score", DataType::Float32, false),
             ]));
@@ -3876,7 +3993,7 @@ mod tests {
                 vec![
                     Arc::new(Float32Array::from(vec![0.5])),
                     Arc::new(Float32Array::from(vec![0.5])),
-                    Arc::new(StringArray::from(vec!["public"])),
+                    Arc::new(access),
                     column,
                     Arc::new(Float32Array::from(vec![1.0])),
                 ],
