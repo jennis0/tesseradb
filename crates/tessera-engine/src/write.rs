@@ -3209,20 +3209,21 @@ impl WritePath {
         }
     }
 
-    /// Grow the memberships of artifacts that already exist. See `Executor::commit_growth`.
+    /// Grow the memberships of artifacts that already exist, answering one receipt per join in
+    /// the caller's order. See `Executor::commit_growth`.
     pub(crate) fn grow_memberships(
         &self,
         layer: String,
         level: u32,
         joins: Vec<tessera_lifecycle::IncomingGrowth>,
-    ) -> Result<(), AcceptError> {
+    ) -> Result<Vec<tessera_lifecycle::MembershipGrown>, AcceptError> {
         let receipt = self.handle()?.submit(Command::GrowMemberships {
             layer,
             level,
             joins,
         })?;
         match receipt.outcome {
-            Ok(Ack::MembershipsGrown) => Ok(()),
+            Ok(Ack::MembershipsGrown { grown }) => Ok(grown),
             Ok(other) => {
                 unreachable!("a GrowMemberships command answers MembershipsGrown, not {other:?}")
             }
@@ -9964,6 +9965,37 @@ fn settle_joins(generation: &Generation, rows: &mut [UnallocatedRow]) -> Result<
     Ok(())
 }
 
+/// What `commit_growth` answers per join: the artifact's entity and how many of the joining
+/// members it did not already hold.
+///
+/// Every key here has resolved in `prepare_grow` under the same lock, so the second lookup cannot
+/// fail; a failure is a bug in that ordering and is treated as one. The difference is taken
+/// against the membership as it stands **before** the record is applied, which is the only time
+/// it exists.
+fn growth_receipt(
+    registry: &LayerRegistry,
+    store: &ArtifactStore,
+    layer: &str,
+    level: u32,
+    joins: &[tessera_lifecycle::IncomingGrowth],
+) -> Vec<tessera_lifecycle::MembershipGrown> {
+    joins
+        .iter()
+        .map(|join| {
+            let ordinal = registry
+                .resolve_growth_key(layer, level, &join.key, store)
+                .expect("prepare_grow resolved every key before the receipt was read");
+            let record = store
+                .get(layer, level, ordinal)
+                .expect("a resolved ordinal names a record");
+            tessera_lifecycle::MembershipGrown {
+                entity: record.entity,
+                joined: join.joining.andnot_cardinality(&record.members),
+            }
+        })
+        .collect()
+}
+
 impl Executor {
     /// Resolve one batch's membership keys, and check the edges its adjacency declared.
     ///
@@ -11241,17 +11273,27 @@ impl Executor {
         let before = self
             .live
             .with_artifacts(|store| store.level_version(&layer, level));
+        // The receipt is read beside the preparation, under the same lock and **before** the
+        // record is applied: afterwards every joining member is a member, and how many were new
+        // is gone.
         let prepared = self.live.with_publication_state(|registry, store, _| {
-            registry.prepare_grow(&layer, level, &joins, store)
+            let record = registry.prepare_grow(&layer, level, &joins, store)?;
+            Ok::<_, tessera_lifecycle::RegistryError>((
+                record,
+                growth_receipt(registry, store, &layer, level, &joins),
+            ))
         });
-        let record = match prepared {
+        let (record, grown) = match prepared {
             // Every key resolved and nothing was joining. No record is owed for a no-op, and
             // appending an empty one would pin the log at a growth that changed nothing.
-            Ok(None) => {
-                respond.ack(Ack::MembershipsGrown, &Published::nothing_to_apply(&joins));
+            Ok((None, grown)) => {
+                respond.ack(
+                    Ack::MembershipsGrown { grown },
+                    &Published::nothing_to_apply(&joins),
+                );
                 return;
             }
-            Ok(Some(record)) => record,
+            Ok((Some(record), grown)) => (record, grown),
             Err(e) => {
                 respond.fail(ExecError::LayerRefused {
                     detail: e.to_string(),
@@ -11292,7 +11334,7 @@ impl Executor {
         // tail pack like any other unpublished record; one below it waits for the fold, held in the
         // log by the pin. Marking the manifest dirty is what gets the first case published.
         self.deny_dirty = true;
-        respond.ack(Ack::MembershipsGrown, &published);
+        respond.ack(Ack::MembershipsGrown { grown }, &published);
     }
 
     /// Validate, allocate, append, sync, apply — in that order, which is the whole of the

@@ -268,8 +268,11 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/control/layers/{name}/artifacts",
             // **Not the inherited 2 MiB default** — see [`PUBLISH_MAX_BODY_BYTES`]. A membership is
             // as large as the artifact is, and the batch is the commit unit, so a single artifact
-            // over the cap has no smaller spelling.
+            // over the cap has no smaller spelling in one publication. `PATCH` grows an artifact
+            // the level holds by the same cap per request (decision 0127); one route entry, so the
+            // two verbs cannot be given two caps.
             axum::routing::put(publish_artifacts)
+                .patch(grow_memberships)
                 .layer(axum::extract::DefaultBodyLimit::max(PUBLISH_MAX_BODY_BYTES)),
         );
     // The faults build's arming surface (decision 0071) — absent from a default build rather
@@ -2732,6 +2735,143 @@ fn position_in_batch(widths: &[usize], flat: usize) -> (usize, usize) {
     (widths.len(), 0)
 }
 
+/// The two body refusals shared by the verbs on `/control/layers/{name}/artifacts`.
+///
+/// Contracts §3.1's 422 row is "malformed request, **bounds exceeded**", and a `JsonRejection` is
+/// one or the other. Branched on the rejection's own status rather than collapsed, on [`ingest`]'s
+/// argument: a caller whose 4 KB body was truncated mid-upload must not be told to send fewer
+/// artifacts. The rejection's `Display` is not forwarded (this module's rule). `noun` names the
+/// request in the refusal and `remedy` is what an over-cap caller does next, which differs: a
+/// publication has no smaller spelling of one artifact, a growth is a delta and splits freely.
+fn artifact_body<T>(
+    body: Result<Json<T>, axum::extract::rejection::JsonRejection>,
+    noun: &str,
+    remedy: &str,
+) -> Result<T, ApiError> {
+    body.map(|Json(body)| body).map_err(|rejection| {
+        if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            ApiError::Contract(format!(
+                "the {noun} body exceeds the {PUBLISH_MAX_BODY_BYTES}-byte per-request cap; \
+                 refused before decoding, so it allocated no ordinal and appended nothing. {remedy}"
+            ))
+        } else {
+            ApiError::Contract(format!(
+                "the {noun} body is not the JSON this route takes, or the connection failed \
+                 mid-upload. Nothing was decoded, allocated or appended"
+            ))
+        }
+    })
+}
+
+/// Resolve every member address of a batch to an entity, **once, at the boundary** — the rule
+/// `/control/changes` follows and for the same reason. A `tessera_id` is a keyed permutation of
+/// entity space, so a membership stored under one would be reinterpreted by the next key rotation
+/// and would name a different set of documents (I10, decision 0025). Shared by the publication and
+/// the growth verbs, so the two cannot disagree about what an address means or what an
+/// unresolvable one costs.
+///
+/// `flat` is every address of the batch in one list and `widths` how many each artifact
+/// contributed, so each address form is resolved in a single batched call whatever the shape of
+/// the batch: the external half opens each bundle extent at most once regardless of N, and the
+/// tessera half takes one generation snapshot for the idset check and every inversion. `layout`
+/// says in words what the positions count, for the refusal.
+///
+/// **An unresolvable member refuses the batch rather than being dropped.** A silently dropped
+/// member shrinks both the masked count a viewer is shown and the declared size the proportional
+/// criterion divides by — so a typo in a pipeline would quietly move artifacts across their own
+/// existence threshold, in the direction of hiding them, with nothing anywhere saying so.
+fn resolve_member_addresses(
+    state: &AppState,
+    addressing: Addressing,
+    idset: Option<u32>,
+    flat: &[&String],
+    widths: &[usize],
+    layout: &str,
+) -> Result<Vec<tessera_types::EntityId>, ApiError> {
+    let resolved: Vec<Option<tessera_types::EntityId>> = match addressing {
+        Addressing::Tessera => {
+            let idset = idset.ok_or_else(|| {
+                ApiError::Contract(
+                    "tessera-addressed members carry the idset they were minted under, so a list \
+                     gathered before a key rotation is refused rather than reinterpreted"
+                        .to_string(),
+                )
+            })?;
+            let ids = flat
+                .iter()
+                .map(|raw| {
+                    raw.parse::<u64>()
+                        .map(TesseraId::new)
+                        .map_err(|_| ApiError::Contract(format!("'{raw}' is not a tessera_id")))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            // Refuses with `StaleIdSet` before inverting anything — see `resolve_tessera_ids`.
+            state
+                .engine
+                .resolve_tessera_ids(&ids, idset)
+                .map_err(crate::error::map_engine_error)?
+        }
+        Addressing::External => {
+            if idset.is_some() {
+                return Err(ApiError::Contract(
+                    "idset accompanies tessera_id, never external_id: an external id means \
+                     nothing to a key, so there is nothing for an idset to check"
+                        .to_string(),
+                ));
+            }
+            let keys: Vec<Vec<u8>> = flat
+                .iter()
+                .map(|s| {
+                    base64::engine::general_purpose::STANDARD
+                        .decode(s)
+                        .map_err(|e| {
+                            ApiError::Contract(format!("a member external_id is not base64: {e}"))
+                        })
+                })
+                .collect::<Result<_, _>>()?;
+            state
+                .engine
+                .resolve_external_ids(&keys)
+                .map_err(map_store_error)?
+        }
+    };
+
+    // **A deployment nothing can be named in by an external id is one refusal, not one per
+    // member.** A bundle built without `--mint-external-ids` and never flushed with caller-supplied
+    // ids holds no external-id run, so every lookup answers `None` and the per-member refusal
+    // below would read as a list of typos. The check is asked only when nothing resolved: an id
+    // ingested with an external id and not yet flushed resolves through the write path's live map,
+    // so "nothing resolved" with no run is the deployment's state and not this batch's.
+    if matches!(addressing, Addressing::External)
+        && !resolved.is_empty()
+        && resolved.iter().all(Option::is_none)
+        && !state.engine.bundle_carries_external_ids()
+    {
+        return Err(ApiError::Contract(
+            "this deployment carries no external ids: its bundle was built without \
+             `--mint-external-ids` and none of the ids named here has been ingested since, so no \
+             member can be addressed by external id. Rebuild with the flag, or address members by \
+             `tessera_id`. Nothing was allocated or appended"
+                .to_string(),
+        ));
+    }
+
+    if let Some(position) = resolved.iter().position(Option::is_none) {
+        // Reported as `(artifact, member)` rather than as a flat offset, which is the coordinate
+        // the caller's own pipeline holds. The identifier itself is not echoed: it is the caller's
+        // data, and `error.rs` keeps caller-supplied bytes out of a response body.
+        let (artifact, member) = position_in_batch(widths, position);
+        return Err(ApiError::Unknown(format!(
+            "id {member} of artifact {artifact} names nothing this deployment holds — {layout}. \
+             The batch was refused rather than accepted without it: a dropped member moves both \
+             the count a viewer is shown and the size its existence criterion divides by, and a \
+             dropped generating-set entry widens who may read the content"
+        )));
+    }
+
+    Ok(resolved.into_iter().flatten().collect())
+}
+
 /// How a batch addresses its members. **One form per request, not per member**, which is the one
 /// place this deliberately differs from `/control/changes`: a change names a handful of items and
 /// pays a tagged object each; a clustering names its whole corpus, and a per-member tag would be
@@ -3061,33 +3201,19 @@ async fn publish_artifacts(
     axum::extract::Path(name): axum::extract::Path<String>,
     body: Result<Json<PublishBody>, axum::extract::rejection::JsonRejection>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    // Contracts §3.1's 422 row is "malformed request, **bounds exceeded**", and a `JsonRejection`
-    // is one or the other. Branched on the rejection's own status rather than collapsed, on
-    // [`ingest`]'s argument: a caller whose 4 KB body was truncated mid-upload must not be told to
-    // publish fewer artifacts. The rejection's `Display` is not forwarded (this module's rule).
-    let body = body.map_err(|rejection| {
-        if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
-            ApiError::Contract(format!(
-                "the publication body exceeds the {PUBLISH_MAX_BODY_BYTES}-byte per-request cap; \
-                 refused before decoding, so it allocated no ordinal and appended nothing. Send \
-                 fewer artifacts per request — but a single artifact's membership has no smaller \
-                 spelling, the batch being the commit unit"
-            ))
-        } else {
-            ApiError::Contract(
-                "the publication body is not the JSON this route takes, or the connection failed \
-                 mid-upload. Nothing was decoded, allocated or appended"
-                    .to_string(),
-            )
-        }
-    })?;
     let PublishBody {
         level,
         addressing,
         idset,
         default_space,
         mut artifacts,
-    } = body.0;
+    } = artifact_body(
+        body,
+        "publication",
+        "Send fewer artifacts per request — but a single artifact's membership has no smaller \
+         spelling in one publication, the batch being the commit unit; an artifact larger than \
+         the cap is published with as many members as fit and grown with `PATCH`",
+    )?;
 
     if artifacts.is_empty() {
         return Err(ApiError::Contract(
@@ -3196,90 +3322,17 @@ async fn publish_artifacts(
         })
         .collect();
 
-    let resolved: Vec<Option<tessera_types::EntityId>> = match addressing {
-        Addressing::Tessera => {
-            let idset = idset.ok_or_else(|| {
-                ApiError::Contract(
-                    "tessera-addressed members carry the idset they were minted under, so a list \
-                     gathered before a key rotation is refused rather than reinterpreted"
-                        .to_string(),
-                )
-            })?;
-            let ids = flat
-                .iter()
-                .map(|raw| {
-                    raw.parse::<u64>()
-                        .map(TesseraId::new)
-                        .map_err(|_| ApiError::Contract(format!("'{raw}' is not a tessera_id")))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            // Refuses with `StaleIdSet` before inverting anything — see `resolve_tessera_ids`.
-            state
-                .engine
-                .resolve_tessera_ids(&ids, idset)
-                .map_err(crate::error::map_engine_error)?
-        }
-        Addressing::External => {
-            if idset.is_some() {
-                return Err(ApiError::Contract(
-                    "idset accompanies tessera_id, never external_id: an external id means \
-                     nothing to a key, so there is nothing for an idset to check"
-                        .to_string(),
-                ));
-            }
-            let keys: Vec<Vec<u8>> = flat
-                .iter()
-                .map(|s| {
-                    base64::engine::general_purpose::STANDARD
-                        .decode(s)
-                        .map_err(|e| {
-                            ApiError::Contract(format!("a member external_id is not base64: {e}"))
-                        })
-                })
-                .collect::<Result<_, _>>()?;
-            state
-                .engine
-                .resolve_external_ids(&keys)
-                .map_err(map_store_error)?
-        }
-    };
-
-    // **A deployment nothing can be named in by an external id is one refusal, not one per
-    // member.** A bundle built without `--mint-external-ids` and never flushed with caller-supplied
-    // ids holds no external-id run, so every lookup answers `None` and the per-member refusal
-    // below would read as a list of typos. The check is asked only when nothing resolved: an id
-    // ingested with an external id and not yet flushed resolves through the write path's live map,
-    // so "nothing resolved" with no run is the deployment's state and not this batch's.
-    if matches!(addressing, Addressing::External)
-        && !resolved.is_empty()
-        && resolved.iter().all(Option::is_none)
-        && !state.engine.bundle_carries_external_ids()
-    {
-        return Err(ApiError::Contract(
-            "this deployment carries no external ids: its bundle was built without \
-             `--mint-external-ids` and none of the ids named here has been ingested since, so no \
-             member can be addressed by external id. Rebuild with the flag, or address members by \
-             `tessera_id`. Nothing was allocated or appended"
-                .to_string(),
-        ));
-    }
-
-    if let Some(position) = resolved.iter().position(Option::is_none) {
-        // Reported as `(artifact, member)` rather than as a flat offset, which is the coordinate
-        // the caller's own pipeline holds. The identifier itself is not echoed: it is the caller's
-        // data, and `error.rs` keeps caller-supplied bytes out of a response body.
-        let (artifact, member) = position_in_batch(&widths, position);
-        return Err(ApiError::Unknown(format!(
-            "id {member} of artifact {artifact} names nothing this deployment holds — its members \
-             first, then each content's generating set. The batch was refused rather than \
-             published without it: a dropped member moves both the count a viewer is shown and the \
-             size its existence criterion divides by, and a dropped generating-set entry widens \
-             who may read the content"
-        )));
-    }
+    let resolved = resolve_member_addresses(
+        &state,
+        addressing,
+        idset,
+        &flat,
+        &widths,
+        "its members first, then each content's generating set",
+    )?;
 
     // Walked back in exactly the order it was flattened: members, then each content's set.
-    let mut entities = resolved.into_iter().flatten();
+    let mut entities = resolved.into_iter();
     let incoming: Vec<tessera_lifecycle::IncomingArtifact> = artifacts
         .into_iter()
         .zip(shapes)
@@ -3344,6 +3397,123 @@ async fn publish_artifacts(
         body["shapes"] = serde_json::Value::Array(shape_reports);
     }
     Ok((StatusCode::CREATED, Json(body)))
+}
+
+/// `PATCH /control/layers/{name}/artifacts`'s body: the publication's addressing, and per artifact
+/// the key and the members joining, and nothing else.
+///
+/// `deny_unknown_fields` is what keeps content, lineage, shape and attachment off this verb: a
+/// growth adds members and never anything else (decision 0127; `artifacts-from-points.md` §6.1),
+/// and a body carrying one of those fields is refused at decoding, before anything is resolved.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GrowBody {
+    /// Defaults to the layer's only level, as a publication's does.
+    #[serde(default)]
+    level: u32,
+    addressing: Addressing,
+    /// Required for `tessera` addressing and refused otherwise, on [`PublishBody::idset`]'s rule.
+    #[serde(default)]
+    idset: Option<u32>,
+    artifacts: Vec<GrowingArtifactBody>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GrowingArtifactBody {
+    /// The key the artifact was published under. One the level does not hold refuses the batch;
+    /// nothing is minted on this verb, whatever the layer's value set says.
+    key: String,
+    /// The members joining, addressed as [`IncomingArtifactBody::members`] are. Empty names the
+    /// artifact and adds nothing, which is accepted and answers `joined: 0`.
+    members: Vec<String>,
+}
+
+/// `PATCH /control/layers/{name}/artifacts` — grow the memberships of artifacts the level already
+/// holds (decision 0127).
+///
+/// **The publication's resource and body cap, with the precondition inverted.** `PUT` publishes an
+/// artifact under a key the level does not hold and refuses one it does; `PATCH` adds members to a
+/// key the level holds and refuses one it does not. A publisher whose artifact is larger than the
+/// cap publishes it once, with its key, its content, its parents and as many members as fit, then
+/// grows it here in requests of at most the cap. Each request is a delta, so a membership has as
+/// many spellings as it needs, and the batch is still the commit unit: every key resolves and
+/// every member resolves or nothing is applied.
+///
+/// Members are resolved as a publication's are ([`resolve_member_addresses`]), and the request
+/// reaches `Engine::grow_memberships` carrying keys and entities and nothing else: no ordinal is
+/// claimed, no content or lineage travels ([`GrowBody`] refuses the fields), and an unknown key is
+/// refused rather than minted. The two member refusals and the suppressed-artifact rule are the
+/// engine's (`artifacts-from-points.md` §6.1). A growth discloses what a publication discloses.
+///
+/// The response carries, per artifact, its `tessera_id` and how many of the joining members were
+/// not already in the membership — **never an ordinal and never a membership size** (C8). `joined`
+/// does tell the caller how many of the members they sent were already members, a lower bound on
+/// the size the publication route never states; it is accepted as an operator-plane figure, the
+/// operator having written the membership it bounds. `200` rather than `201`: nothing was created.
+async fn grow_memberships(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+    body: Result<Json<GrowBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let GrowBody {
+        level,
+        addressing,
+        idset,
+        artifacts,
+    } = artifact_body(
+        body,
+        "growth",
+        "Send fewer members per request: a growth is a delta, so a membership may be grown in as \
+         many requests as it needs",
+    )?;
+
+    if artifacts.is_empty() {
+        return Err(ApiError::Contract(
+            "a growth names at least one artifact".to_string(),
+        ));
+    }
+
+    let widths: Vec<usize> = artifacts.iter().map(|a| a.members.len()).collect();
+    let flat: Vec<&String> = artifacts.iter().flat_map(|a| a.members.iter()).collect();
+    let resolved =
+        resolve_member_addresses(&state, addressing, idset, &flat, &widths, "its members")?;
+
+    // Walked back in exactly the order it was flattened.
+    let mut entities = resolved.into_iter();
+    let joins: Vec<tessera_lifecycle::IncomingGrowth> = artifacts
+        .into_iter()
+        .map(|artifact| {
+            let members: Vec<tessera_types::EntityId> =
+                entities.by_ref().take(artifact.members.len()).collect();
+            tessera_lifecycle::IncomingGrowth::from_entities(artifact.key, members)
+        })
+        .collect();
+    let keys: Vec<String> = joins.iter().map(|j| j.key.clone()).collect();
+
+    // The shared blocking pool, on `publish_artifacts`'s argument: a growth is not a deny, and
+    // delaying one under ingest load is backpressure working.
+    let grown =
+        tokio::task::spawn_blocking(move || state.engine.grow_memberships(name, level, joins))
+            .await
+            .map_err(crate::error::map_join_error)?
+            .map_err(crate::error::map_accept_error)?;
+
+    let artifacts: Vec<serde_json::Value> = grown
+        .iter()
+        .zip(keys)
+        .map(|(receipt, key)| {
+            serde_json::json!({
+                "key": key,
+                "tessera_id": receipt.tessera_id.raw().to_string(),
+                "joined": receipt.joined,
+            })
+        })
+        .collect();
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({ "artifacts": artifacts })),
+    ))
 }
 
 /// `POST /control/faults/arm` — the correctness suite's arming surface (decision 0071;

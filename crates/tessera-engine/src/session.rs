@@ -3514,29 +3514,37 @@ impl Engine {
         // One `verdict` lookup per declared member, on the control plane, against the live overlay
         // — which cannot go stale in the wrong direction between here and the executor, a deletion
         // being irreversible.
+        //
+        // **The refusal reports a count and a position, never an entity id** (I10): the detail is
+        // forwarded to the caller as the 422 body, and an entity id in it would cross the boundary.
         let generation = self.generation();
-        let deleted: Vec<u64> = artifacts
-            .iter()
-            .flat_map(|artifact| {
-                artifact.members.iter().chain(
+        let mut deleted = 0u64;
+        let mut first_artifact = None;
+        for (index, artifact) in artifacts.iter().enumerate() {
+            let in_this = artifact
+                .members
+                .iter()
+                .chain(
                     artifact
                         .contents
                         .iter()
                         .flat_map(|content| content.generated_from.iter()),
                 )
-            })
-            .filter(|entity| generation.overlay.is_deleted(EntityId::new(*entity as u64)))
-            .map(u64::from)
-            .take(16)
-            .collect();
-        if !deleted.is_empty() {
+                .filter(|entity| generation.overlay.is_deleted(EntityId::new(*entity as u64)))
+                .count() as u64;
+            if in_this > 0 {
+                deleted += in_this;
+                first_artifact.get_or_insert(index);
+            }
+        }
+        if let Some(first_artifact) = first_artifact {
             return Err(crate::write::AcceptError::Exec(
                 tessera_lifecycle::ExecError::LayerRefused {
                     detail: format!(
-                        "this batch names deleted entities {deleted:?} as members or as content \
-                         sources; a deleted member contributes to no count and makes supplied \
-                         content unservable from birth, so the batch is refused rather than \
-                         published into silence"
+                        "{deleted} member(s) or content source(s) of this batch are deleted, the \
+                         first in artifact {first_artifact}; a deleted member contributes to no \
+                         count and makes supplied content unservable from birth, so the batch is \
+                         refused rather than published into silence"
                     ),
                 },
             ));
@@ -3582,12 +3590,16 @@ impl Engine {
     /// already there. An unknown key is refused on **this** route whatever the layer's value set
     /// says — see [`tessera_lifecycle::IncomingGrowth`]; the column at `/control/ingest` is where an
     /// open layer creates the artifact a key names.
+    ///
+    /// The answer is one [`GrownMembership`] per join, in the caller's order: the artifact's
+    /// `tessera_id` and how many of the joining members it did not already hold. Neither an
+    /// ordinal nor a membership size (C8).
     pub fn grow_memberships(
         &self,
         layer: String,
         level: u32,
         joins: Vec<tessera_lifecycle::IncomingGrowth>,
-    ) -> std::result::Result<(), crate::write::AcceptError> {
+    ) -> std::result::Result<Vec<GrownMembership>, crate::write::AcceptError> {
         let high_water = self.allocator_high_water() as u32;
         let rowless: u64 = joins
             .iter()
@@ -3605,26 +3617,57 @@ impl Engine {
             ));
         }
 
+        // A count and the key of the first join naming one, never an entity id (I10): the detail
+        // is the caller's 422 body.
         let generation = self.generation();
-        let deleted: Vec<u64> = joins
-            .iter()
-            .flat_map(|join| join.joining.iter())
-            .filter(|entity| generation.overlay.is_deleted(EntityId::new(*entity as u64)))
-            .map(u64::from)
-            .take(16)
-            .collect();
-        if !deleted.is_empty() {
+        let mut deleted = 0u64;
+        let mut first_key = None;
+        for join in &joins {
+            let in_this = join
+                .joining
+                .iter()
+                .filter(|entity| generation.overlay.is_deleted(EntityId::new(*entity as u64)))
+                .count() as u64;
+            if in_this > 0 {
+                deleted += in_this;
+                first_key.get_or_insert(join.key.as_str());
+            }
+        }
+        if let Some(first_key) = first_key {
             return Err(crate::write::AcceptError::Exec(
                 tessera_lifecycle::ExecError::LayerRefused {
                     detail: format!(
-                        "these joins name deleted entities {deleted:?}; a deleted member contributes \
-                         to no count, so the join is refused rather than applied into silence"
+                        "{deleted} joining member(s) are deleted, the first joining '{first_key}'; a \
+                         deleted member contributes to no count, so the batch is refused rather \
+                         than applied into silence"
                     ),
                 },
             ));
         }
 
-        self.write.grow_memberships(layer, level, joins)
+        let grown = self.write.grow_memberships(layer, level, joins)?;
+        let shard = generation.bundle.manifest.identity.shard_id;
+        grown
+            .into_iter()
+            .map(|receipt| {
+                let tessera_id =
+                    self.identity_key
+                        .forward(shard, receipt.entity)
+                        .map_err(|_| {
+                            crate::write::AcceptError::Exec(
+                                tessera_lifecycle::ExecError::LayerRefused {
+                                    detail:
+                                        "an artifact's entity id lies outside the identity space"
+                                            .to_string(),
+                                },
+                            )
+                        })?;
+                Ok(GrownMembership {
+                    tessera_id,
+                    joined: receipt.joined,
+                })
+            })
+            .collect()
     }
 
     /// Which layers this principal may know exist, and which of those are currently served.
@@ -3697,6 +3740,18 @@ impl Engine {
     pub fn published_artifacts(&self) -> usize {
         self.write.with_artifacts(|store| store.total())
     }
+}
+
+/// One join's answer from [`Engine::grow_memberships`].
+///
+/// `joined` is bounded by the members the caller sent, so it says nothing about the members they
+/// did not: a membership size never crosses the boundary (C8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrownMembership {
+    /// The artifact's identifier, the same one its publication answered with.
+    pub tessera_id: TesseraId,
+    /// How many of the joining members were not already in the membership.
+    pub joined: u64,
 }
 
 /// Where an artifact sits, as [`Engine::locate_artifact`] answers it.
