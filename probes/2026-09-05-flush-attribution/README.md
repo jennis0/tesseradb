@@ -74,6 +74,47 @@ on the pool, and on the executor the superseded generation, whose buffer holds e
 before the swap. Both are now stages. The partition is also asserted by
 `crates/tessera-engine/tests/flush_attribution.rs` on a fixture.
 
+### Inside `text_extents`, medcpt-1m
+
+**Measured 2026-09-05** (`runs/medcpt-1m-f010-text.json`), the same cell and flags, the binary
+at `e54ff573` with the six `Text*` sub-laps. The controller's 36M ingest cycle was running on the
+box throughout (load average 14.6 on 12 cores), so every figure here is inflated against the
+table above: ingest ran at 57,226 rows/s against 170,000, and `text_extents` read 10.3 µs a row
+against 8.5. Read the shares. Two executions, two publications, 100,000 rows in each count.
+
+`write_text_extents` runs once per indexed `text` column (MedCPT declares one). Per column it
+gathers the column's rows from the plan and creates the layer's directory; then for each row it
+runs the analyser over the prose (`Analyser::tokens`: the case fold, the NFKC normalisation and
+the word segmenter, returning one `String` per token) and inserts each token into a `BTreeMap`
+from term to posting list; then it writes the dictionary from the map's keys, the postings from
+its values, and the presence bitmap. The sub-laps are those six, and the two per-row ones read
+the clock twice a row.
+
+| sub-stage | ms / flush | µs / row | share of `text_extents` |
+|---|---|---|---|
+| `text_rows` | 3.9 | 0.08 | 0.8% |
+| **`text_tokenise`** | **272.5** | **5.45** | **52.8%** |
+| **`text_terms`** | **210.5** | **4.21** | **40.8%** |
+| `text_dict` | 5.3 | 0.11 | 1.0% |
+| `text_postings` | 22.5 | 0.45 | 4.4% |
+| `text_presence` | 0.5 | 0.01 | 0.1% |
+| **text sum** | **515.2** | **10.30** | 99.9% |
+| `text_extents` | 515.7 | 10.31 | |
+| *unattributed* | 0.6 | 0.01 | 0.1% |
+
+**The sub-laps partition `text_extents`**: 0.6 ms a flush is unattributed, which is the
+digest-list pushes after the call returns and the 200,000 clock reads. The pool's partition still
+closes (5 µs a flush unattributed); the sub-laps are in `pool_nanos` and not in the execute sum.
+
+**94% of the text index is the per-row loop, and none of it is the files.** The analyser is
+5.45 µs a row over a ~100-character title, and the term-map insert is 4.21: the three writes
+together are 0.57. The map insert is one `String` allocation per token from `Analyser::tokens`
+and a `BTreeMap<String, _>` lookup per token; `tessera-analyse` documents that a term seen before
+is looked up and its freshly allocated key dropped, and provides `for_each_token`, which yields
+borrowed tokens over reused buffers for exactly this loop. The build's text index uses it; the
+flush's does not. Not changed here: the stage does what it did, and the sub-laps say what a
+change would have to move.
+
 ## What the figures say at this base, and what they do not
 
 At a 900,000-row base a flush of 50,000 rows costs **599 ms on the pool and 128 ms on the
@@ -153,15 +194,14 @@ costs in proportion to the prose, its pool flushes at ~140 µs a row there, whic
 **What follows is a memo, not a fix.** The stage is the analyser, the dictionary, the postings
 and the presence bitmap for the flushed rows' text (`write_text_extents`, write-path §4.3); it is
 not one change. Removing it from the flush's critical path would change when an ingested row
-becomes searchable, which is a contract question and the owner's; making it cheaper needs its own
-sub-laps first. Neither is taken here.
+becomes searchable, which is a contract question and the owner's; the sub-laps under §"Inside
+`text_extents`" say where its time goes on the 1M cell. Neither is taken here.
 
 ## What is left
 
 The 92M cell (`data/ladder/paperseek`, the same flags, after the 91.9M base is rebuilt), which
-measures `text_extents` on abstracts and settles the inference above. Then sub-laps inside
-`text_extents` — the analyser, the dictionary sort, the postings write, the presence bitmap — at
-whichever cell makes them worth reading.
+measures `text_extents` on abstracts and settles the inference above, and the `Text*` sub-laps
+read at 36M and 92M, where the prose is longer and the term map larger.
 
 ## Method
 
@@ -181,6 +221,9 @@ trigger asks again at each publication while the buffer holds `flush_max_items` 
 still buffer with nothing in flight is the trigger with nothing more to ask. `drain_s` in the
 result is how long that took; on this cell every flush landed in it, and on a large cell most will
 land during the ingest. `--print <result.json>` re-prints a finished run's table.
+
+The six `text_*` stages in `pool_nanos` partition `text_extents` and are printed indented under
+it with their own sum and residue; they are not in the execute sum.
 
 `executions` counts `execute_flush` returns on the pool, `Ok` or `Err`; `flushes` counts
 publications that swapped. The pool commits its laps only when it returns, so a flush still

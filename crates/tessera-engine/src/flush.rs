@@ -913,7 +913,7 @@ fn execute_flush_stages(
         }
     }
     *mark = laps.lap(FlushStage::RecordExtent, *mark);
-    let mut text_extents = write_text_extents(&plan, &ctx, laps, mark)?;
+    let mut text_extents = write_text_extents(&plan, &ctx, laps, *mark)?;
     text_extents.extend(scoped_texts);
     // **All three files of every text extent, and the omission was not cosmetic.** A digest is not
     // only an integrity check here: `publish_fold` carries a flight extent forward by looking its
@@ -1659,17 +1659,19 @@ pub(crate) struct ScopedColumnSpec {
 /// The analysis runs here, at flush execution on the pool (write-path §4.3), and never on the
 /// serial group-commit section whose latency both the ingest and the deny lane share.
 ///
-/// `laps` and `mark` take the `Text*` sub-laps ([`FlushStage::TEXT`]); the caller laps
-/// `TextExtents` over the whole call on its return.
+/// `laps` takes the `Text*` sub-laps ([`FlushStage::TEXT`]), run from a copy of `mark`, the
+/// caller's last lap. The caller's own mark does not move: it laps `TextExtents` over the whole
+/// call on its return, and the sub-laps sum to at most that.
 fn write_text_extents(
     plan: &FlushPlan,
     ctx: &FlushContext,
     laps: &mut FlushLaps,
-    mark: &mut StageMark,
+    mark: StageMark,
 ) -> Result<Vec<tessera_store::manifest::TextExtent>, FlushFailed> {
     if ctx.text_schema.is_empty() {
         return Ok(Vec::new());
     }
+    let mut mark = mark;
     let mut out = Vec::with_capacity(ctx.text_schema.len());
     for spec in &ctx.text_schema {
         let mut rows = Vec::with_capacity(plan.items.len());
@@ -1688,7 +1690,7 @@ fn write_text_extents(
         let rel_dir = format!("partitions/{}/attrs/{}/extents", ctx.partition, spec.name);
         let sub = Some(TextLaps {
             laps: &mut *laps,
-            mark: &mut *mark,
+            mark: &mut mark,
         });
         if let Some(extent) =
             write_text_layer(&rel_dir, &spec.name, None, &spec.analyser, rows, ctx, sub)?
@@ -2503,10 +2505,19 @@ mod tests {
             assert!(FlushStage::POOL.contains(&stage));
             assert_ne!(stage, FlushStage::PoolWall);
         }
+        // The `Text*` sub-stages are on the pool, partition `TextExtents`, and are in `EXECUTE`
+        // no more than the wall is: counted there they would double `TextExtents`.
+        for stage in FlushStage::TEXT {
+            assert!(FlushStage::POOL.contains(&stage));
+            assert!(!FlushStage::EXECUTE.contains(&stage));
+        }
         // Everything on the executor that is not the tick's two stages or the wall partitions
-        // the wall; everything on the pool that is not the wall partitions it.
+        // the wall; everything on the pool that is not the wall or a sub-stage partitions it.
         assert_eq!(FlushStage::PUBLISH.len() + 3, FlushStage::EXECUTOR.len());
-        assert_eq!(FlushStage::EXECUTE.len() + 1, FlushStage::POOL.len());
+        assert_eq!(
+            FlushStage::EXECUTE.len() + FlushStage::TEXT.len() + 1,
+            FlushStage::POOL.len()
+        );
     }
 
     /// Ascending by entity id, because `write_flush_segment` requires it and because the extent is
