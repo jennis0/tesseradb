@@ -3582,12 +3582,16 @@ impl Engine {
     /// already there. An unknown key is refused on **this** route whatever the layer's value set
     /// says — see [`tessera_lifecycle::IncomingGrowth`]; the column at `/control/ingest` is where an
     /// open layer creates the artifact a key names.
+    ///
+    /// The answer is one [`GrownMembership`] per join, in the caller's order: the artifact's
+    /// `tessera_id` and how many of the joining members it did not already hold. Neither an
+    /// ordinal nor a membership size (C8).
     pub fn grow_memberships(
         &self,
         layer: String,
         level: u32,
         joins: Vec<tessera_lifecycle::IncomingGrowth>,
-    ) -> std::result::Result<(), crate::write::AcceptError> {
+    ) -> std::result::Result<Vec<GrownMembership>, crate::write::AcceptError> {
         let high_water = self.allocator_high_water() as u32;
         let rowless: u64 = joins
             .iter()
@@ -3624,7 +3628,29 @@ impl Engine {
             ));
         }
 
-        self.write.grow_memberships(layer, level, joins)
+        let grown = self.write.grow_memberships(layer, level, joins)?;
+        let shard = generation.bundle.manifest.identity.shard_id;
+        grown
+            .into_iter()
+            .map(|receipt| {
+                let tessera_id =
+                    self.identity_key
+                        .forward(shard, receipt.entity)
+                        .map_err(|_| {
+                            crate::write::AcceptError::Exec(
+                                tessera_lifecycle::ExecError::LayerRefused {
+                                    detail:
+                                        "an artifact's entity id lies outside the identity space"
+                                            .to_string(),
+                                },
+                            )
+                        })?;
+                Ok(GrownMembership {
+                    tessera_id,
+                    joined: receipt.joined,
+                })
+            })
+            .collect()
     }
 
     /// Which layers this principal may know exist, and which of those are currently served.
@@ -3697,6 +3723,18 @@ impl Engine {
     pub fn published_artifacts(&self) -> usize {
         self.write.with_artifacts(|store| store.total())
     }
+}
+
+/// One join's answer from [`Engine::grow_memberships`].
+///
+/// `joined` is bounded by the members the caller sent, so it says nothing about the members they
+/// did not: a membership size never crosses the boundary (C8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrownMembership {
+    /// The artifact's identifier, the same one its publication answered with.
+    pub tessera_id: TesseraId,
+    /// How many of the joining members were not already in the membership.
+    pub joined: u64,
 }
 
 /// Where an artifact sits, as [`Engine::locate_artifact`] answers it.
