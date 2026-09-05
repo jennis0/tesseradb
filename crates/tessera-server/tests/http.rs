@@ -741,7 +741,10 @@ async fn stage_timing_header_respects_the_compile_gate_and_carries_no_identifier
     if cfg!(feature = "bench-timing") {
         let value =
             stage_ns.expect("bench-timing is on and stage_timing is true, so stage_ns is present");
-        let text = value.as_str().expect("stage_ns is a CSV string").to_string();
+        let text = value
+            .as_str()
+            .expect("stage_ns is a CSV string")
+            .to_string();
         let text = text.as_str();
 
         let fields: Vec<&str> = text.split(',').collect();
@@ -2005,49 +2008,121 @@ async fn viewport_tiles_are_served_in_request_order_with_first_occurrence_dedup(
         groups.push(&all.points[at..at + served as usize]);
         at += served as usize;
     }
-    let expected: Vec<(u64, u64)> = groups.iter().rev().flat_map(|g| g.iter().copied()).collect();
+    let expected: Vec<(u64, u64)> = groups
+        .iter()
+        .rev()
+        .flat_map(|g| g.iter().copied())
+        .collect();
     assert_eq!(
         out.points, expected,
         "points must concatenate in the request's tile order"
     );
 }
 
-/// The emit phase's shed machinery, end to end over a real socket — the three behaviours the
-/// implementation review named as dark: a reader that STOPS reading is shed by the write-stall
-/// deadline; a reader that DISCONNECTS is shed by the closed channel; and in both cases the
-/// `streaming` gauge (slot held, compute released — `streamed-serving.md` §5) returns to zero
-/// and the gate goes on serving.
+/// Open a raw connection to the viewer port, write a `POST /v1/viewport` request, and read to the
+/// end of the response headers. Returns the socket, the status line with the headers, and any body
+/// bytes the header read carried past them. The receive buffer is fixed at 64 KiB before
+/// connecting, so what the kernel holds on this side cannot grow; a caller that does not read
+/// leaves the producer's frames in the server's send buffer and the body channel, and nowhere
+/// else.
+async fn raw_viewport_request(
+    addr: std::net::SocketAddr,
+    token: &str,
+    body: &serde_json::Value,
+) -> (tokio::net::TcpStream, String, Vec<u8>) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let socket = match addr {
+        std::net::SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4(),
+        std::net::SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6(),
+    }
+    .unwrap();
+    socket.set_recv_buffer_size(64 * 1024).unwrap();
+    let mut stream = socket.connect(addr).await.unwrap();
+    let body = body.to_string();
+    let request = format!(
+        "POST /v1/viewport HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        let n = stream.read(&mut chunk).await.unwrap();
+        assert!(
+            n > 0,
+            "the connection closed before the response headers arrived"
+        );
+        buf.extend_from_slice(&chunk[..n]);
+        if let Some(end) = find(&buf, b"\r\n\r\n") {
+            let headers = String::from_utf8_lossy(&buf[..end]).into_owned();
+            let carried = buf[end + 4..].to_vec();
+            return (stream, headers, carried);
+        }
+    }
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Decode an HTTP/1.1 chunked body that may end anywhere. Returns the payload bytes present and
+/// whether the terminating zero-length chunk was seen.
+fn dechunk(body: &[u8]) -> (Vec<u8>, bool) {
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    loop {
+        let Some(line_len) = find(&body[at..], b"\r\n") else {
+            return (out, false);
+        };
+        let size_field = body[at..at + line_len]
+            .split(|b| *b == b';')
+            .next()
+            .unwrap_or(&[]);
+        let size = std::str::from_utf8(size_field)
+            .ok()
+            .and_then(|s| usize::from_str_radix(s.trim(), 16).ok());
+        let Some(size) = size else {
+            return (out, false);
+        };
+        at += line_len + 2;
+        if size == 0 {
+            return (out, true);
+        }
+        let available = body.len().saturating_sub(at).min(size);
+        out.extend_from_slice(&body[at..at + available]);
+        if available < size {
+            return (out, false);
+        }
+        // The CRLF that closes the chunk's data.
+        at += size + 2;
+        if at > body.len() {
+            return (out, false);
+        }
+    }
+}
+
+/// The emit phase's shed path over a real socket: a reader that stops reading is shed by the
+/// per-send stall budget, a reader that disconnects is shed by the closed channel, and in both
+/// cases the `streaming` gauge (slot held, compute released; `streamed-serving.md` §5) returns to
+/// zero and the gate goes on serving a full request.
 ///
-/// Uses a 2M-item fixture so the response (~32 MB at these parameters) genuinely overruns the
-/// loopback socket buffers, which autotune to ~10 MB combined — a response that fits in kernel
-/// buffers "streams" to a stopped reader without the producer ever parking, and the test would
-/// pass without touching the shed path at all (measured: the 300k fixture's ~5 MB response did
-/// exactly that on first run).
-///
-/// ## ⊘ This test is environment-sensitive, and the sensitivity is unresolved
-///
-/// **The premise is that a reader which stops reading creates backpressure.** Where it does not,
-/// the producer never parks, the stream completes, and the final assertion here fires with *"a
-/// shed stream must never read as a complete response"* — the whole body arriving with its
-/// trailer intact.
-///
-/// Observed 2026-08-16 on a WSL2 host with 48 GB: reproducible failure, having passed repeatedly
-/// on the same machine and the **same binary** earlier the same day. What was ruled out:
-///
-/// - **Not a code regression.** Bisected to `06c7542`, which predates the artifacts frame, and it
-///   fails there identically.
-/// - **Not kernel socket buffers.** `net.ipv4.tcp_rmem` maxes at 33 554 432 here — not the "~10 MB
-///   combined" above, so the stated margin was already zero. Widening the response to ~78 MB
-///   (zoom 7, which serves every item rather than `tiles × k` of them) did not change the outcome,
-///   which is what rules the kernel out: 2.4× the bytes against a fixed ceiling would have.
-///
-/// What that leaves is buffering above the socket — the HTTP client draining the body into its own
-/// memory while nothing polls it — which no response size defeats. **Fixing it means giving the
-/// test a reader that genuinely refuses to consume**, not a larger response and not more patience.
-/// Until then this is a known-red test on hosts where it reproduces, and it is a real gap: the
-/// stall-shed path it covers is otherwise untested.
+/// The stalled and disconnecting readers are raw sockets ([`raw_viewport_request`]) that read to
+/// the end of the response headers and no further. An HTTP client library may drain the body into
+/// its own memory while nothing polls it; a body absorbed that way creates no backpressure, so the
+/// producer never parks and the stream completes. With the raw socket the client's receive buffer
+/// is fixed small, so the only room for unread frames is the server's send buffer and the bounded
+/// body channel. Measured on Linux with the default `tcp_wmem`: 2.8 MB of the 3.5 MB response is
+/// held there once the reader stops, and the rest parks the producer until the stall budget
+/// fires. The response is a 2M-item fixture at zoom 6 with `k` 200; its size is tiles × k, so
+/// more items would not widen that margin, and the assertion below names the bytes held so a
+/// narrower points frame shows up as a number. On 2026-08-16 this test failed on a host where the
+/// same binary had passed the same day; a code regression was ruled out by bisection and the
+/// kernel's socket buffers by a larger response failing identically against a fixed buffer
+/// ceiling, which left the client's buffering, and the raw reader removes it.
 #[tokio::test]
 async fn a_stalled_or_disconnected_stream_is_shed_and_the_gauge_returns_to_zero() {
+    use tokio::io::AsyncReadExt as _;
     const SHED_FIXTURE_ITEMS: u64 = 2_000_000;
     let tmp = TempDir::new().unwrap();
     let bundle_root = tmp.path().join("bundle");
@@ -2074,13 +2149,14 @@ async fn a_stalled_or_disconnected_stream_is_shed_and_the_gauge_returns_to_zero(
         "view": "s0", "zoom": 6, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200
     });
 
-    // Observed through `TestServer::state` after driving the requests over HTTP — the
+    // Observed through `TestServer::state` after driving the requests over HTTP, the
     // observe-not-drive licence that field's doc grants. `/control/status` publishes the same
     // gauge; the direct read spares the operator credential and a JSON parse per poll.
     let wait_for_streaming = |state: std::sync::Arc<tessera_server::state::AppState>,
                               want: usize,
                               patience_ms: u64| async move {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(patience_ms);
+        let started = std::time::Instant::now();
+        let deadline = started + std::time::Duration::from_millis(patience_ms);
         loop {
             let now = state.compute_gate.status().streaming;
             if now == want {
@@ -2088,57 +2164,64 @@ async fn a_stalled_or_disconnected_stream_is_shed_and_the_gauge_returns_to_zero(
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "streaming gauge stuck at {now}, wanted {want}"
+                "streaming gauge stuck at {now}, wanted {want}, after {:?}",
+                started.elapsed()
             );
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     };
 
-    // 1. The stalled reader: take the headers, then stop reading, holding the connection open.
-    //    The producer fills the channel and the socket buffers, parks, and the stall deadline
-    //    sheds it — observable as the gauge rising and then returning to zero while we still
-    //    hold the response.
-    let resp = server
-        .client
-        .post(server.viewer_url("/v1/viewport"))
-        .bearer_auth(token)
-        .json(&big_request)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
+    // 1. The stalled reader: take the headers, then stop reading, holding the socket open. The
+    //    producer fills the channel and the socket buffers, parks, and the stall budget sheds it,
+    //    observable as the gauge rising and then returning to zero while the socket is still open.
+    let (mut stalled, headers, carried) =
+        raw_viewport_request(server.viewer_addr, token, &big_request).await;
+    assert!(
+        headers.starts_with("HTTP/1.1 200 "),
+        "status line and headers:\n{headers}"
+    );
+    assert!(
+        headers
+            .to_ascii_lowercase()
+            .contains("transfer-encoding: chunked"),
+        "the streamed body is chunked; headers were:\n{headers}"
+    );
     wait_for_streaming(std::sync::Arc::clone(&server.state), 1, 5_000).await;
     wait_for_streaming(std::sync::Arc::clone(&server.state), 0, 10_000).await;
-    // The shed is loud at this end too: reading the held body now must NOT produce a complete
-    // response — either the transport aborts, or the bytes end without a trailer.
-    match resp.bytes().await {
-        Err(_) => {}
-        Ok(bytes) => {
-            let frames = tessera_wire::split_frames(&bytes);
-            let complete = matches!(
-                &frames,
-                Ok(frames) if frames.last().map(|(k, _)| *k) == Some(tessera_wire::FRAME_TRAILER)
-            );
-            assert!(
-                !complete,
-                "a shed stream must never read as a complete response"
-            );
-        }
-    }
+    // The shed is visible at this end too: what the socket still holds must not read as a
+    // complete response. The body's abort makes hyper cut the connection, so the drain ends in
+    // EOF or a reset, and the frames it carried end without a trailer.
+    let mut rest = carried;
+    let drain = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        stalled.read_to_end(&mut rest),
+    )
+    .await;
+    let (payload, terminated) = dechunk(&rest);
+    let frames = tessera_wire::split_frames(&payload);
+    let complete = matches!(
+        &frames,
+        Ok(frames) if frames.last().map(|(k, _)| *k) == Some(tessera_wire::FRAME_TRAILER)
+    );
+    assert!(
+        !complete,
+        "a shed stream must never read as a complete response: {} body bytes after the shed, \
+         chunked terminator seen: {terminated}, drain: {drain:?}",
+        rest.len()
+    );
+    drop(stalled);
 
-    // 2. The disconnecting reader: drop the response as soon as the headers arrive. The body —
-    //    and with it the channel receiver and the cancel guard — drops, and the producer's next
-    //    send observes the closure immediately.
-    let resp = server
-        .client
-        .post(server.viewer_url("/v1/viewport"))
-        .bearer_auth(token)
-        .json(&big_request)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    drop(resp);
+    // 2. The disconnecting reader: take the headers, then close the socket. The server's next
+    //    write fails, the response body drops, and with it the channel receiver and the cancel
+    //    guard; the producer's next send observes the closed channel.
+    let (disconnecting, headers, _) =
+        raw_viewport_request(server.viewer_addr, token, &big_request).await;
+    assert!(
+        headers.starts_with("HTTP/1.1 200 "),
+        "status line and headers:\n{headers}"
+    );
+    wait_for_streaming(std::sync::Arc::clone(&server.state), 1, 5_000).await;
+    drop(disconnecting);
     wait_for_streaming(std::sync::Arc::clone(&server.state), 0, 10_000).await;
 
     // 3. The gate is undamaged: a full request is served and decodes complete.
