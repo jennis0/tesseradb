@@ -393,29 +393,42 @@ content depended on what the fold did to `G`.
 
 ## 4. Rules the tables rest on
 
-### 4.1 Membership: entity-canonical, base-row accelerated
+### 4.1 Membership: entity-canonical, row form maintained
 
 The disk-canonical membership is entity space (rep §2.4); the resident row form is derived (rep
-§2.1) and is rebuilt inside the fold (rep §5.0.3). This document adds the boundary condition the
-representation left implicit: **the row form covers members holding base rows; a member whose row
-is still in a flush extent contributes nothing until the fold folds it.** That keeps the row form
-untouched by flush (appends move no bits) and by merge (only extent rows renumber, and the form
-references none), at the price of understating a count for members ingested since the last fold —
-fail-closed, the same posture as a buffered point being invisible until its flush, and typically
-zero for clusterings, whose members predate the layer. A deployment whose selections need same-day
-counts over fresh ingests can direct-evaluate the residue in entity space — I1's `direct_eval(L)`
-shape, one level up — recorded as the refinement, not the default. ⊘ The refinement is not built.
+§2.1) and is rebuilt inside the fold (rep §5.0.3). **The row form covers the whole row space — base
+rows and every flushed extent — and is maintained by the operations that change it rather than
+rebuilt by the request that follows them.** *(Amended 2026-09-05 from the base-rows-only rule an
+earlier revision stated here; §2 records why that rule was wrong on its premise, and
+`docs/evidence/memos/2026-09-03-post-flush-artifact-frames.md` records the measurement — a one-row
+growth into a 30,217-artifact level cost the next request a 94–177 s projection — and the owner's
+ruling.)* Each operation's obligation to the form:
 
-**This is what removes the flush-union and merge-rebase arms rather than deferring them.** An
-earlier plan gave the row operator three arms — union the new extents at a flush, rebase over the
-merged span at a merge, rebuild at the fold — and named the merge arm as the one a reader leaves
-out, fail-open when left out because a merged span's row ids name different entities afterwards. A
-form that references no extent row has no such state: a flush appends rows it does not hold and a
-merge renumbers rows it does not hold, so **the fold is the only operation that invalidates it**,
-and the fold rebuilds it inline (rep §5.0.3). The projection is therefore keyed by prefix, view and
-store version and *not* by the segments version — keying on the version a flush moves would rebuild
-every level on every flush, tens of seconds per level at 10⁷ artifacts, for a set of bits that did
-not move.
+- **A write to the level's records** — a publication, a growth, a window's close — applies its
+  own delta to every held form of that level: the new ordinal's rows, or the joining rows, and the
+  label at those rows where the level is served row-major. The form's version moves with the
+  store's. Built (`ArtifactProjections::bring_forward`).
+- **A flush** extends every held form of its view by the segment it published, before the
+  generation swaps, so an ingested member counts from its flush. Built
+  (`ArtifactProjections::extend_flushed`).
+- **A merge** renumbers extent rows the form now holds. It is caught, not rebased: a form records
+  the segments its rows came from and is served only to a row space whose segments it agrees with,
+  so a merged generation misses and the level is projected whole on the next request that names
+  it. ⊘ **Drop-and-rebuild, unmeasured.** This is the one operation where the ruling's (b) — the
+  rebuild taken at the publication, on the pool, with the previous form served meanwhile — would
+  matter, and (b) is not built (the memo's built block says so and names the drop paths that remain).
+- **The fold** rebuilds the form inline, as before (rep §5.0.3).
+
+The projection is still keyed by prefix, view and store version and *not* by the segments version:
+a flush moves the segments version and extends the form in place, and keying on it would rebuild
+every level on every flush for a set of bits the flush did not move. What the segments version does
+gate is the form's *coverage*, checked at every use, which is what catches the merge.
+
+**Generating sets stay base-only.** A supplied content's `G` is projected at base rows and is not
+extended by a flush: the containment partition beside it is composed from the level's records at a
+version and knows nothing of the geometry, and a generating set that lost a member in projection can
+never be contained — fail-closed, and the direction this must fail in. A label whose sample includes
+documents ingested since the last fold is therefore withheld from everyone until that fold.
 
 ### 4.2 The fold's report is the notification mechanism
 
@@ -766,7 +779,7 @@ For mechanical integration; neither sibling document is edited here.
 | rep §12's freeze-`\|G\|` ruling request | **withdrawn**, replaced by spec §9's first ruling |
 | rep §8, route 2 (the resolved visibility set) | **qualified** by spec §4.4: the set is candidacy, the live count decides; the drill-down interaction is reopened and carried in spec §11 |
 | rep §2.4 (`members/<ordinal>.roaring`, entity space on disk) | **confirmed and extended**: `G` joins the entity-space disk plane as ground truth, mmapped only on touch, and takes membership's shape — a derived row operator, unioned forward at flush and rebuilt at the fold (spec §2, §4.1) |
-| rep §2.1 / §2.2.1's "merge and flush cadence never touch it" | **qualified** by spec §4.1: true because the row form is bounded at base rows, which is now a stated rule rather than an assumption about who declares members |
+| rep §2.1 / §2.2.1's "merge and flush cadence never touch it" | **withdrawn** by spec §4.1 (amended 2026-09-05): a flush extends the row form and a merge invalidates it; neither leaves it untouched, and the fold is no longer the only operation that changes it |
 | model §2 / §2.1 / rep §2.3, `(layer, level, ordinal)` addressing | **contradicted at the wire only** (spec §5): the address is internal; the wire identity is `tessera_id`. **Ruled** (spec §9), with the control plane permitted the structured address |
 | model §5 / rep §9, layer reachability "resolved once at authorise" | **superseded** by spec §6: reachability is keyed on layer version, a gate edit bumps it, and a live `verdict` on the layer entity runs ahead of it. Resolving once at authorise held every open session on the pre-edit gate for its remaining life |
 | rep §4, "this predicate and no other" | **extended**, not contradicted: an attached artifact is additionally tested on its target's `verdict` and gate, or a suppressed cluster's labels serve on every route that does not traverse the edge (rep §4, amended) |
@@ -785,9 +798,10 @@ For mechanical integration; neither sibling document is edited here.
 - **The resolved set's invalidation events** — layer version and generation key are settled (rep
   §5.0.1); whether `overlay_version` participates, and at what granularity, is the same question as
   above from the cache side.
-- **The three arms' cost** (spec §2, §4.1): flush-union, merge-rebase and fold-rebuild are each
-  specified and none is measured. The merge arm is the one whose bound is least obvious, since it is
-  proportional to the merged span rather than to the artifact population.
+- **The merge arm's cost** (spec §4.1): the flush arm is built and measured (a one-row growth
+  returns in 0.04 s and the request after it serves in 125 ms, `probes/2026-09-03-growth-trigger/`);
+  the merge arm is drop-and-rebuild and unmeasured, a whole-level projection on the next request
+  after every merge, and the ruling's (b) is what would move it off the request.
 - **The runtime create/edit verb's contract shape** (rep §5.1) — carried, still contracts work.
 - **Bulk suppression of a caller-defined *subset* of a layer** (every label whose `G` touches a
   compromised source, say): expressible today as N artifact suppressions; whether a set-valued
