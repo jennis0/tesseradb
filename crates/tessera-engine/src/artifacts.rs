@@ -937,7 +937,9 @@ impl ArtifactRows {
     /// entry, which at rung 3's `mesh/descriptors` is 1.66×10⁹ of them and ~100 s **on the
     /// executor thread**, where it blocks every ingest and every deny. So the column takes the
     /// delta — `added` is `(row, ordinal)` for the rows this amendment gave that artifact and no
-    /// others, and [`RowColumn::with_added`] shares the pack rather than reading it.
+    /// others, and [`RowColumn::amend`] shares the pack rather than reading it. The column is
+    /// amended in place: `Arc::make_mut` copies it only where a request is still reading this
+    /// form, and then copies the amendment and the counts, never the pack.
     ///
     /// Neither is re-adopted from the prefix, and **I11** is why: the fold's files describe the
     /// level as it was before the amendment, and a *narrow* extent settles an artifact whose
@@ -949,19 +951,15 @@ impl ArtifactRows {
     /// recorded layout and the served one may differ, reached by [`Self::with_column`]'s route.
     fn amend_derived(&mut self, added: &[(u32, u32)], row_count: u32) -> bool {
         self.index = TileIndex::build(&self.membership, row_count);
-        let Some(column) = &self.column else {
+        let Some(column) = &mut self.column else {
             return false;
         };
-        match column.with_added(added, row_count) {
-            Some(amended) => {
-                self.column = Some(Arc::new(amended));
-                false
-            }
-            None => {
-                self.layout = ServingLayout::ArtifactMajor;
-                self.column = None;
-                true
-            }
+        if Arc::make_mut(column).amend(added, row_count) {
+            false
+        } else {
+            self.layout = ServingLayout::ArtifactMajor;
+            self.column = None;
+            true
         }
     }
 

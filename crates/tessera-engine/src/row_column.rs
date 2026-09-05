@@ -86,6 +86,11 @@ use crate::compose::WholeMask;
 
 /// One `(view, layer, level)`'s row-addressed membership — mapped where a fold wrote it, a buffer
 /// where a publication built it.
+///
+/// `Clone` so that `Arc::make_mut` can amend a column in place: between requests the executor
+/// thread is the column's only holder and no copy is made; where a request is still reading the
+/// form, the copy is the amendment and the counts, never the pack.
+#[derive(Clone)]
 pub struct RowColumn {
     /// **Shared, because a live tail is attached by deriving a second column over the same base.**
     /// A predicate level's base is a function of the prefix and the level's version; its tail moves
@@ -113,12 +118,13 @@ pub struct RowColumn {
     /// ⊘ **Bounded by what has accumulated since the last fold**, on [`TailLabels`]' own note and
     /// with the same reset: the fold rewrites the level's column whole, and a deployment that
     /// never folds accumulates one entry per `(row, artifact)` every write adds whatever this
-    /// structure does.
-    added: Option<Arc<Added>>,
+    /// structure does. What has accumulated bounds the memory and not the write: a write costs its
+    /// own batch ([`RowColumn::amend`]), however much is already held.
+    added: Option<Added>,
 }
 
 /// Labels added to rows a column already addresses — see [`RowColumn::added`].
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct Added {
     /// `(row, ordinal)`, ascending and deduplicated, and never a pair the column already carries.
     pairs: Vec<(u32, u32)>,
@@ -136,6 +142,35 @@ impl Added {
         let lo = self.pairs.partition_point(|(r, _)| *r < row);
         let hi = self.pairs.partition_point(|(r, _)| *r <= row);
         &self.pairs[lo..hi]
+    }
+
+    /// Merge `batch` into [`Self::pairs`], keeping it ascending. `batch` is ascending,
+    /// deduplicated and disjoint from what is held, which [`RowColumn::amend`] arranges.
+    ///
+    /// An append where the batch lies wholly above what is held, which is where a flush's rows and
+    /// most growths lie; otherwise one pass from the back, in place. The held list is never
+    /// re-sorted, so a write costs its batch plus, on the merge path, one move of what is held.
+    fn merge(&mut self, batch: Vec<(u32, u32)>) {
+        let Some(&first) = batch.first() else {
+            return;
+        };
+        if self.pairs.last().is_none_or(|last| *last < first) {
+            self.pairs.extend(batch);
+            return;
+        }
+        let held = self.pairs.len();
+        self.pairs.resize(held + batch.len(), (0, 0));
+        let (mut i, mut j, mut k) = (held, batch.len(), self.pairs.len());
+        while j > 0 {
+            k -= 1;
+            if i > 0 && self.pairs[i - 1] > batch[j - 1] {
+                self.pairs[k] = self.pairs[i - 1];
+                i -= 1;
+            } else {
+                self.pairs[k] = batch[j - 1];
+                j -= 1;
+            }
+        }
     }
 }
 
@@ -318,114 +353,70 @@ impl RowColumn {
         }
     }
 
-    /// **This column with `pairs` added at the rows they name** — what a growth, a publication or a
-    /// flush writes into a level whose column is already built.
+    /// **Add `pairs` at the rows they name** — what a growth, a publication or a flush writes into
+    /// a level whose column is already built.
     ///
-    /// `pairs` is `(row, ordinal)` in any order. A pair the column already carries is dropped
-    /// rather than counted twice. The cost is the pairs, and the pack is neither read whole,
-    /// copied nor rewritten: it is shared, exactly as [`Self::with_tail`] shares it.
+    /// `pairs` is `(row, ordinal)` in any order, repeats allowed. A pair the column already carries
+    /// is dropped rather than counted twice. The cost is the batch and not what has accumulated:
+    /// the batch is sorted on its own, merged into the amendment already held
+    /// ([`Added::merge`]), and moves [`Self::declared`] by one per pair added. The pack is neither
+    /// read whole, copied nor rewritten: it is shared, exactly as [`Self::with_tail`] shares it.
     ///
-    /// **`None` where the form cannot express the result** — the label column, and a row that
-    /// would come to carry two artifacts. That is the double claim the module doc forbids: the
-    /// memberships have stopped partitioning, so the layout has stopped being true, and the
-    /// caller's answer is the artifact-major route, which answers identically and says so. A list
-    /// column has no such case.
+    /// **`false` where the form cannot express the result**, and the column is then as it was —
+    /// the label column, and a row that would come to carry two artifacts, whether the first claim
+    /// is in the pack, in an earlier amendment or elsewhere in this batch. That is the double claim
+    /// the module doc forbids: the memberships have stopped partitioning, so the layout has
+    /// stopped being true, and the caller's answer is the artifact-major route, which answers
+    /// identically and says so. A list column has no such case.
     ///
     /// **Recomposing instead is what this replaces.** At rung 3's `mesh/descriptors` — 30,217
     /// artifacts over 1.66×10⁹ entries — composing the list column again cost ~100 s on the
     /// executor thread, where it blocks every ingest and every deny, for one entity joining three
     /// artifacts (`2026-09-03-post-flush-artifact-frames.md`).
-    pub fn with_added(&self, pairs: &[(u32, u32)], row_count: u32) -> Option<Self> {
+    pub fn amend(&mut self, pairs: &[(u32, u32)], row_count: u32) -> bool {
         let label_form = matches!(*self.pack, Pack::Label(_));
-        let mut merged: Vec<(u32, u32)> = self
-            .added
-            .as_ref()
-            .map(|added| added.pairs.clone())
-            .unwrap_or_default();
-        // The rows already spoken for, for the label form's refusal — O(containers) to ask,
-        // against a scan of `merged` per pair.
-        let mut claimed = self
-            .added
-            .as_ref()
-            .map(|added| added.rows.clone())
-            .unwrap_or_default();
-        for (row, ordinal) in pairs {
+        let mut batch: Vec<(u32, u32)> = pairs.to_vec();
+        batch.sort_unstable();
+        batch.dedup();
+        // What the column does not yet carry, in batch order. Nothing is written until the whole
+        // batch has been read, so a refusal leaves the column as it was.
+        let mut kept: Vec<(u32, u32)> = Vec::with_capacity(batch.len());
+        for (row, ordinal) in batch {
             let mut carried = false;
             let mut occupied = false;
-            self.for_each_label(*row, |held| {
+            self.for_each_label(row, |held| {
                 occupied = true;
-                carried |= held == *ordinal;
+                carried |= held == ordinal;
             });
             if carried {
                 continue;
             }
-            if label_form && (occupied || claimed.contains(*row)) {
-                return None;
+            // `kept` is ascending by row, so a second claim inside the batch is the pair before.
+            if label_form && (occupied || kept.last().is_some_and(|(r, _)| *r == row)) {
+                return false;
             }
-            claimed.add(*row);
-            merged.push((*row, *ordinal));
+            kept.push((row, ordinal));
         }
-        merged.sort_unstable();
-        merged.dedup();
-        let mut rows = Bitmap::new();
-        let mut row_end = row_count;
-        for (row, _) in &merged {
-            rows.add(*row);
-            row_end = row_end.max(row.saturating_add(1));
+        let added = self.added.get_or_insert_with(Added::default);
+        added.row_end = added.row_end.max(row_count);
+        if let Some((last, _)) = kept.last() {
+            added.row_end = added.row_end.max(last.saturating_add(1));
         }
-        rows.run_optimize();
-        Some(self.over_added(Some(Arc::new(Added {
-            pairs: merged,
-            rows,
-            row_end,
-        }))))
-    }
-
-    /// This column over the same pack and tail, with `added` in place of whatever it held.
-    ///
-    /// **The one place [`Self::declared`] is re-folded**, because a per-artifact count is the
-    /// base's plus the tail's plus the amendment's and no two of those are held together. The walk
-    /// is over the tail and the amendment, never over the pack — that is what `base_declared`
-    /// exists for.
-    fn over_added(&self, added: Option<Arc<Added>>) -> Self {
-        let mut declared = self.base_declared.as_ref().clone();
-        // **A publication adds ordinals the pack never had**, and `declared` is what
-        // [`Self::len`] answers from — so the column has to grow to cover them or every reader
-        // sized by that length would index past its own count.
-        if let Some(added) = &added {
-            let highest = added
-                .pairs
-                .iter()
-                .map(|(_, ordinal)| *ordinal as usize + 1)
-                .max()
-                .unwrap_or(0);
-            if declared.len() < highest {
-                declared.resize(highest, 0);
+        // **A publication adds ordinals the pack never had**, and `declared` is what [`Self::len`]
+        // answers from — so the column grows to cover them or every reader sized by that length
+        // would index past its own count.
+        if let Some(highest) = kept.iter().map(|(_, ordinal)| *ordinal as usize + 1).max() {
+            if self.declared.len() < highest {
+                self.declared.resize(highest, 0);
             }
         }
-        if let Some(tail) = &self.tail {
-            for label in &tail.labels {
-                if *label != ROW_COLUMN_HOLE {
-                    if let Some(count) = declared.get_mut(*label as usize) {
-                        *count += 1;
-                    }
-                }
-            }
+        for (row, ordinal) in &kept {
+            self.declared[*ordinal as usize] += 1;
+            added.rows.add(*row);
         }
-        if let Some(added) = &added {
-            for (_, ordinal) in &added.pairs {
-                if let Some(count) = declared.get_mut(*ordinal as usize) {
-                    *count += 1;
-                }
-            }
-        }
-        RowColumn {
-            pack: Arc::clone(&self.pack),
-            declared,
-            base_declared: Arc::clone(&self.base_declared),
-            tail: self.tail.clone(),
-            added,
-        }
+        added.rows.run_optimize();
+        added.merge(kept);
+        true
     }
 
     /// Which form this is.
@@ -1157,5 +1148,161 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Every `(row, ordinal)` the column labels, ascending — the observable an amendment changes.
+    fn every_pair(column: &RowColumn) -> Vec<(u32, u32)> {
+        let mut out = Vec::new();
+        for row in 0..column.row_count() {
+            column.for_each_label(row, |ordinal| out.push((row, ordinal)));
+        }
+        out.sort_unstable();
+        out
+    }
+
+    /// What an amended column holds beside its pack: pairs, rows, `row_end` and the counts.
+    #[derive(Debug, PartialEq)]
+    struct Amendment {
+        pairs: Vec<(u32, u32)>,
+        rows: Vec<u32>,
+        row_end: u32,
+        declared: Vec<u32>,
+    }
+
+    fn amendment(column: &RowColumn) -> Amendment {
+        let added = column.added.as_ref().expect("the column was amended");
+        Amendment {
+            pairs: added.pairs.clone(),
+            rows: added.rows.iter().collect(),
+            row_end: added.row_end,
+            declared: column.declared.clone(),
+        }
+    }
+
+    /// **Many small amendments equal one**, on both row-major forms. The writes append above the
+    /// highest row amended so far, merge into rows below it, repeat a pair the pack carries and one
+    /// an earlier write added, name an ordinal the pack never had and, on the list form, put a
+    /// second label at rows an earlier write labelled. What is compared is the representation —
+    /// pairs, rows, `row_end` and the declared counts — and the counts are then checked against a
+    /// walk of the labels.
+    #[test]
+    fn many_small_amendments_equal_one_batch_on_both_forms() {
+        for layout in [ServingLayout::RowMajorLabel, ServingLayout::RowMajorList] {
+            let list = layout == ServingLayout::RowMajorList;
+            // Ordinal 0 holds rows 0..10, 1 holds 20..30, 2 is a hole, 3 holds 40..50; on the list
+            // form ordinal 1 also holds 45..50. Rows 10..20, 30..40 and 50..64 belong to nobody.
+            let zero: Vec<u32> = (0..10).collect();
+            let one: Vec<u32> = (20..30).chain(if list { 45..50 } else { 0..0 }).collect();
+            let three: Vec<u32> = (40..50).collect();
+            let membership = rows_of(&[
+                Some(zero.as_slice()),
+                Some(one.as_slice()),
+                None,
+                Some(three.as_slice()),
+            ]);
+            let base = RowColumn::compose(&membership, 64, layout).expect("composes");
+
+            let mut writes: Vec<(Vec<(u32, u32)>, u32)> = vec![
+                // A flush's rows, above everything held: an append.
+                ((64..72).map(|row| (row, 1)).collect(), 72),
+                // A growth into unclaimed base rows below the highest amended row: a merge.
+                ((12..16).map(|row| (row, 3)).collect(), 72),
+                // An append carrying a pair the pack holds and a pair the first write added.
+                (
+                    [(5, 0), (64, 1)]
+                        .into_iter()
+                        .chain((80..84).map(|row| (row, 0)))
+                        .collect(),
+                    90,
+                ),
+                // A merge, out of order and with a repeat, to an ordinal the pack never had.
+                (vec![(35, 5), (33, 5), (34, 5), (33, 5)], 90),
+            ];
+            if list {
+                // A second label at rows an earlier write labelled, and at rows the pack labels.
+                writes.push((vec![(64, 2), (66, 2), (12, 0), (25, 3)], 90));
+            }
+
+            let mut stepwise = base.clone();
+            let mut every: Vec<(u32, u32)> = Vec::new();
+            for (batch, row_count) in &writes {
+                assert!(
+                    stepwise.amend(batch, *row_count),
+                    "{layout:?}: no write here claims a row twice"
+                );
+                every.extend(batch);
+            }
+            every.reverse();
+            let mut at_once = base.clone();
+            assert!(at_once.amend(&every, 90));
+
+            assert_eq!(amendment(&stepwise), amendment(&at_once), "{layout:?}");
+            assert_eq!(every_pair(&stepwise), every_pair(&at_once), "{layout:?}");
+            assert_eq!(stepwise.row_count(), 90, "{layout:?}");
+            assert_eq!(stepwise.len(), 6, "{layout:?}: ordinal 5 widened the column");
+
+            let mut counted = vec![0u32; stepwise.len()];
+            for (_, ordinal) in every_pair(&stepwise) {
+                counted[ordinal as usize] += 1;
+            }
+            assert_eq!(stepwise.declared, counted, "{layout:?}: the counts are the labels");
+
+            let pack_only = every_pair(&base);
+            let beyond_the_pack: Vec<(u32, u32)> = every_pair(&stepwise)
+                .into_iter()
+                .filter(|pair| !pack_only.contains(pair))
+                .collect();
+            assert_eq!(
+                stepwise.added.as_ref().unwrap().pairs,
+                beyond_the_pack,
+                "{layout:?}: the amendment holds exactly what the pack does not"
+            );
+            assert_eq!(
+                stepwise.as_bytes(),
+                base.as_bytes(),
+                "{layout:?}: the pack is untouched"
+            );
+        }
+    }
+
+    /// **A growth into a row an earlier growth labelled is refused on the label form.** The first
+    /// claim is in the amendment rather than in the pack and the rule is the same; the refusal
+    /// leaves the column as it was. A pair already carried is dropped rather than refused, and the
+    /// list form takes the second label.
+    #[test]
+    fn a_growth_into_a_row_already_amended_is_refused_on_the_label_form() {
+        let membership = rows_of(&[Some(&[0, 1]), Some(&[4, 5])]);
+        let mut label = RowColumn::compose(&membership, 8, ServingLayout::RowMajorLabel)
+            .expect("partitions");
+        assert!(label.amend(&[(2, 0), (9, 1)], 10));
+        let before = amendment(&label);
+        assert!(!label.amend(&[(9, 0)], 10), "row 9 already carries ordinal 1");
+        assert!(
+            !label.amend(&[(7, 0), (2, 1)], 10),
+            "one double claim refuses the whole batch"
+        );
+        assert!(
+            !label.amend(&[(7, 0), (7, 1)], 10),
+            "and so does a double claim inside the batch"
+        );
+        assert_eq!(amendment(&label), before, "a refused amendment changes nothing");
+        assert!(
+            label.amend(&[(9, 1), (2, 0), (0, 0)], 10),
+            "pairs already carried are dropped, not refused"
+        );
+        assert_eq!(amendment(&label), before);
+
+        let mut list = RowColumn::compose(&membership, 8, ServingLayout::RowMajorList)
+            .expect("always builds");
+        assert!(list.amend(&[(2, 0), (9, 1)], 10));
+        assert!(
+            list.amend(&[(9, 0), (2, 1)], 10),
+            "the list form carries a row several artifacts claim"
+        );
+        assert_eq!(list.declared, vec![4, 4]);
+        assert_eq!(
+            every_pair(&list)[2..],
+            [(2, 0), (2, 1), (4, 1), (5, 1), (9, 0), (9, 1)]
+        );
     }
 }

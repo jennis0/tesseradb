@@ -561,6 +561,62 @@ fn a_member_that_joins_after_its_flush_counts_at_the_growth() {
     );
 }
 
+/// **A growth into rows an earlier growth gave another artifact falls back on the label form.**
+///
+/// The first growth labels rows the pack left unclaimed, so the second claim is in the amendment
+/// rather than in the pack. A label column cannot carry two artifacts at one row, so the level is
+/// served artifact-major from that write on, and the counts a viewer is told are unchanged.
+#[test]
+fn a_growth_into_rows_already_amended_falls_back_on_the_label_form() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(declaration(LAYER, Some(ServingLayout::RowMajorLabel)))
+        .unwrap();
+    publish(&engine, "a0", fx.members(0..100));
+    publish(&engine, "a1", fx.members(500..600));
+    assert_eq!(
+        served(&engine),
+        vec![("a0".to_string(), 100), ("a1".to_string(), 100)]
+    );
+    let fallbacks = engine.layout_fallbacks();
+
+    grow(&engine, "a1", fx.members(700..720));
+    assert_eq!(
+        served(&engine),
+        vec![("a0".to_string(), 100), ("a1".to_string(), 120)]
+    );
+    assert_eq!(engine.layout_fallbacks(), fallbacks, "disjoint rows still partition");
+    assert!(
+        engine
+            .held_artifact_form_for_test("s0", LAYER, 0)
+            .expect("held")
+            .column()
+            .is_some(),
+        "the label column took the first growth"
+    );
+
+    grow(&engine, "a0", fx.members(700..710));
+    assert_eq!(
+        served(&engine),
+        vec![("a0".to_string(), 110), ("a1".to_string(), 120)],
+        "the answers are unchanged by the layout"
+    );
+    assert_eq!(
+        engine.layout_fallbacks(),
+        fallbacks + 1,
+        "a row that would carry two artifacts is refused by the label form"
+    );
+    assert!(
+        engine
+            .held_artifact_form_for_test("s0", LAYER, 0)
+            .expect("held")
+            .column()
+            .is_none(),
+        "the level is served artifact-major from that write on"
+    );
+}
+
 // ---- the differential ------------------------------------------------------------------------
 
 /// Every observable half of one level's row form, in a shape two forms can be compared on.

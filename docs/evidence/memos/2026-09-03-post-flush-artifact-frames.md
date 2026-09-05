@@ -17,10 +17,12 @@ module doc is the account of what is maintained and how:
   base alone and an ingested member counts from its flush rather than from the next fold;
 - a form is checked against the row space at every cache hit (`ArtifactRows::covers`), which is
   what a *merge* — the one publication that renumbers extent rows — is caught by;
-- the **row-major column takes the delta too** (`RowColumn::with_added`) rather than being composed
+- the **row-major column takes the delta too** (`RowColumn::amend`) rather than being composed
   again over the amended form. Composing it again cost ~100 s for one entity joining three
   artifacts at rung 3's `mesh/descriptors`, on the executor thread, where it blocks every ingest
-  and every deny.
+  and every deny. The amendment is held beside the pack and is bounded in size by what has
+  accumulated since the last fold; a write costs its own batch, merged into what is held, so the
+  amendment's size bounds the memory and not the write.
 
 ⊘ **(b), the warm at publication, is not built**, and every drop path that remains still puts the
 whole-level projection on the next request: a **merge** (which renumbers the extent rows a form now
