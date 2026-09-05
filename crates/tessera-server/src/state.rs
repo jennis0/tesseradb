@@ -455,7 +455,7 @@ impl ComputeGate {
 ///
 /// `spawn_blocking` dispatches onto a process-wide **unbounded FIFO** served by a fixed number of
 /// threads, and an ingest handler holds one of those threads across the Arrow decode, the plugin's
-/// `terms_of_label` loop, the external-ID sidecar IO **and** its whole blocking wait on the
+/// `terms_of_labels` loop, the external-ID sidecar IO **and** its whole blocking wait on the
 /// executor's receipt. Unbounded, ingest can therefore occupy the whole pool. The deny lane is
 /// insulated from that by its own runtime (`control::DENY_RUNTIME`), but the viewer plane shares
 /// the FIFO and has **no timeout on the wait**, so an admitted viewport — one `ComputeGate` had

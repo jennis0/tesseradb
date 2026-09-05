@@ -20,8 +20,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, BinaryBuilder, Float64Builder, StringBuilder, TimestampMicrosecondBuilder,
-    UInt32Builder, UInt64Builder,
+    ArrayRef, BinaryBuilder, Float64Builder, ListBuilder, StringBuilder,
+    TimestampMicrosecondBuilder, UInt32Builder, UInt64Builder,
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
@@ -354,9 +354,9 @@ impl Corpus {
 
     /// One `/control/ingest` body for items `range`, in the wire shape (contracts §3.4):
     /// `external_id` (the item's 8 little-endian bytes — the workspace's existing test
-    /// convention), `x`, `y`, `access` (the passthrough label: comma-joined decimal term
-    /// descriptors), then every declared scalar in declared order — a category as its key, values
-    /// null where the item carries none.
+    /// convention), `x`, `y`, `access` (a **list** of labels, one decimal term descriptor per
+    /// element, taken verbatim — decision 0129), then every declared scalar in declared order — a
+    /// category as its key, values null where the item carries none.
     ///
     /// `range` may start at `n`: the lookups are defined for every `e`, which is how a driver
     /// ingests items beyond the built prefix from the same functions (spec §12.1's "the same
@@ -374,7 +374,11 @@ impl Corpus {
             Field::new("external_id", DataType::Binary, false),
             Field::new("x", DataType::Float64, false),
             Field::new("y", DataType::Float64, false),
-            Field::new("access", DataType::Utf8, false),
+            Field::new(
+                "access",
+                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                false,
+            ),
             Field::new("fx_key", DataType::UInt64, false),
             Field::new("weight", DataType::UInt32, true),
             Field::new(
@@ -394,7 +398,7 @@ impl Corpus {
         let mut external_id = BinaryBuilder::new();
         let mut x = Float64Builder::with_capacity(rows);
         let mut y = Float64Builder::with_capacity(rows);
-        let mut access = StringBuilder::new();
+        let mut access = ListBuilder::new(StringBuilder::new());
         let mut fx_key = UInt64Builder::with_capacity(rows);
         let mut weight = UInt32Builder::with_capacity(rows);
         let mut seen_at = TimestampMicrosecondBuilder::with_capacity(rows);
@@ -407,13 +411,10 @@ impl Corpus {
             external_id.append_value(e.to_le_bytes());
             x.append_value(item.x);
             y.append_value(item.y);
-            access.append_value(
-                self.terms(e)
-                    .iter()
-                    .map(|t| t.raw().to_string())
-                    .collect::<Vec<_>>()
-                    .join(","),
-            );
+            for t in self.terms(e) {
+                access.values().append_value(t.raw().to_string());
+            }
+            access.append(true);
             fx_key.append_value(item.fx_key);
             weight.append_option(item.weight);
             seen_at.append_option(item.seen_at);

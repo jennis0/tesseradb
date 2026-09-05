@@ -297,7 +297,7 @@ impl IntoResponse for ApiError {
 /// `tessera_engine::estimate_retry_after_s` for the three specific reasons.
 ///
 /// **And it has a fourth, specific to this subject: the argument is stronger than its operand.** An
-/// admission permit is held across the Arrow decode, `terms_of_label`, `resolve_terms`, the
+/// admission permit is held across the Arrow decode, `terms_of_labels`, `resolve_terms`, the
 /// external-ID sidecar IO **and** the receipt wait, whereas `work_service_nanos` measures the
 /// executor's service time alone. So "one work item's service time" systematically **under**-states
 /// how long a permit is actually held, by however long the pre-submit work took. It is the right
