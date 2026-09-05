@@ -1,4 +1,4 @@
-# The flush's stages: the laps, and their proof on medcpt-1m
+# The flush's stages: the laps, their proof on medcpt-1m, and the term at 36M
 
 **Status:** Evidence — measurement, never normative. WSL2, 12 cores, 47 GB, local NVMe. Read the
 shapes, not the milliseconds; this box's run-to-run bar is ~30%
@@ -7,8 +7,10 @@ shapes, not the milliseconds; this box's run-to-run bar is ~30%
 Commissioned by the campaign handover's §3: after the executor fixes the term binding rung 4's
 ingest is the flush (25 publications over 8.83M rows into a 91.9M base, `B/W ≈ 38` against the
 row trigger's 4), and nothing lapped the flush's own stages. This probe adds the laps, proves
-they partition the flush's wall clock, and runs them on `medcpt-1m`. **The 36M and 92M cells are
-not run here**; the binding term at a large base is not named by this document.
+they partition the flush's wall clock, runs them on `medcpt-1m`, and then on the 36M rung, where
+the term is named: **the pool flushes at 14.8 µs a row and the ingest arrives at 15.4, so the
+flush runs back to back and the row trigger cannot hold `B` down; 69% of the pool's time is the
+text index of the flushed rows** (§"Result on MedCPT, 36M"). The 92M cell is not run here.
 
 ## Result on medcpt-1m, f = 0.10
 
@@ -98,15 +100,68 @@ executor** (50 ms to plan at the tick, 78 ms to publish). Nothing here is a larg
   and its fsyncs. Each is a candidate to grow with the base or the overlay, and none can be
   ranked from a 900,000-row base.
 
+## Result on MedCPT, 36M, f = 0.10
+
+**Measured 2026-09-05** on a quiet box (`runs/medcpt-36m-f010.json`): a 32,328,599-row base built
+once, its 3,592,067-row hold-out at C=8 in 10,000-row batches, `--stop-after-ingest`, the row
+trigger at its default 40,000, the binary at `d4f5813d`. Ingest ran at **64,911 rows/s**
+(executor 8.17 µs/row, queueing 95.2), the campaign's own figure for this cell reproduced. **Ten
+flushes, 3,560,000 rows executed and published, 356,000 rows a flush** — `B/W ≈ 9` against the
+trigger's 4; nine had published when ingest ended with 462,067 rows buffered, the tenth landed in
+the 7.0 s drain. Both partitions close (3.0 ms and 0.04 ms a flush unattributed); `failed` and
+`discarded` are zero.
+
+| stage | thread | 1M: µs / row | 36M: µs / row | 36M: ms / flush |
+|---|---|---|---|---|
+| `promote` | pool | 0.18 | 0.19 | 65.9 |
+| `rows` | pool | 0.24 | 0.23 | 82.8 |
+| `segment` | pool | 0.70 | 0.69 | 244.9 |
+| `filter_extents` | pool | 0.66 | 0.91 | 324.3 |
+| `record_extent` | pool | 1.11 | 1.66 | 589.5 |
+| **`text_extents`** | pool | **8.53** | **10.17** | **3,621.3** |
+| `drop_plan` | pool | 0.40 | 0.82 | 292.6 |
+| the other six | pool | 0.16 | 0.14 | 51.0 |
+| **execute sum** | pool | **11.98** | **14.81** | **5,272.4** |
+| `plan` | executor, at the tick | 1.01 | 1.21 | 432.0 |
+| `compose` | executor | 0.16 | 0.10 | 37.1 |
+| `buffer_rebase` | executor | 0.24 | 0.47 | 168.1 |
+| `rotate` | executor | 0.20 | 0.07 | 26.2 |
+| `drop_superseded` | executor | 0.88 | 0.12 | 44.3 |
+| the other seven | executor | 0.07 | 0.02 | 8.1 |
+| **publish sum** | executor | **1.55** | **0.80** | **283.8** |
+
+**Per row, the flush grew a quarter, not thirty-six times.** The pool's cost went from 12.0 to
+14.8 µs a row over a 36× larger base, most of it in `text_extents` (+1.6), `record_extent`
+(+0.6) and `drop_plan` (+0.4); the executor's publication fell (the superseded buffer's free landed
+on a request thread here, not the executor's). No stage in the table is a base-size term:
+`compose` is 4.6× per flush and 0.6× per row, `rotate` 2.6× and 0.4×, `manifest_commit` 5.8 ms
+against 3.7. What grew per flush is `B`, and what set `B` is the pool's throughput.
+
+**The term, with its number.** The pool executes a flush at **14.81 µs a row**, so its ceiling is
+67,500 rows/s; the ingest arrived at 64,911 rows/s, 15.4 µs a row. The pool was therefore busy
+96% of the phase, every flush was planned against whatever had arrived during the last one, and
+the row trigger — which fires at 40,000 buffered rows — was always already due. `B` is not the
+trigger's 40,000 but `rate × T_flush`, and `T_flush` is `14.8 µs × B`: the two are consistent only
+with a pool at saturation, which is what was measured. **Of the 14.81 µs, `text_extents` is
+10.17 — 69% — and it is a cost per flushed row and not per base row: 8.5 at a 900,000-row base,
+10.2 at 32,000,000, a fifth more over 36×.** MedCPT's text column is a title of ~100 characters. Rung 4's is an abstract of
+~1,500, and its ingest read 7,030 rows/s with the flush binding
+([`../2026-09-04-ingest-executor/`](../2026-09-04-ingest-executor/README.md)): if the text index
+costs in proportion to the prose, its pool flushes at ~140 µs a row there, which is 7,100 rows/s.
+**That is inferred from two points and one assumption, not measured**; the 92M cell measures it.
+
+**What follows is a memo, not a fix.** The stage is the analyser, the dictionary, the postings
+and the presence bitmap for the flushed rows' text (`write_text_extents`, write-path §4.3); it is
+not one change. Removing it from the flush's critical path would change when an ingested row
+becomes searchable, which is a contract question and the owner's; making it cheaper needs its own
+sub-laps first. Neither is taken here.
+
 ## What is left
 
-The 36M cell (`data/ladder/medcpt`, `--fraction 0.10 --concurrency 8 --stop-after-ingest
---reuse-base --copy-base`, a `bench-timing` release binary, the same driver flags as the
-executor probe) with the row trigger in force, then the 92M cell once the driver's hold-out read
-is bounded. Its reading is: which stages grew from the per-row figures above, by how much, and
-whether the growth is in `B` (the three executor terms and `drop_plan`) or in the base
-(`compose`, `segment`, `manifest_commit`, `rotate`). The binding term is to be named with a
-number there, and a fix or a memo follows, in that order.
+The 92M cell (`data/ladder/paperseek`, the same flags, after the 91.9M base is rebuilt), which
+measures `text_extents` on abstracts and settles the inference above. Then sub-laps inside
+`text_extents` — the analyser, the dictionary sort, the postings write, the presence bitmap — at
+whichever cell makes them worth reading.
 
 ## Method
 
