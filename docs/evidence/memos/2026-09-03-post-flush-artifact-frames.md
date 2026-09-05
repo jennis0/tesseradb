@@ -2,8 +2,8 @@
 
 **Status:** problem statement with the fix ruled, 2026-09-03. Found by the measurement campaign's
 ingest cycle on rung 3 (MedCPT) at 3.6×10⁷ rows; the trigger was first misattributed to the
-flush and settled by `probes/2026-09-03-growth-trigger/` the same day. The fix below is agreed
-with the owner and **⊘ not yet built**.
+flush and settled by `probes/2026-09-03-growth-trigger/` the same day. The fix below was agreed
+with the owner and built the same day; what remains unbuilt is marked where it is claimed.
 
 **Built 2026-09-03**, on the owner's ruling, in `crates/tessera-engine/src/artifacts.rs` — whose
 module doc is the account of what is maintained and how:
