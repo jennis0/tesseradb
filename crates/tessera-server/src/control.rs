@@ -3447,8 +3447,10 @@ struct GrowingArtifactBody {
 /// engine's (`artifacts-from-points.md` §6.1). A growth discloses what a publication discloses.
 ///
 /// The response carries, per artifact, its `tessera_id` and how many of the joining members were
-/// not already in the membership — **never an ordinal and never a membership size** (C8). `200`
-/// rather than `201`: nothing was created.
+/// not already in the membership — **never an ordinal and never a membership size** (C8). `joined`
+/// does tell the caller how many of the members they sent were already members, a lower bound on
+/// the size the publication route never states; it is accepted as an operator-plane figure, the
+/// operator having written the membership it bounds. `200` rather than `201`: nothing was created.
 async fn grow_memberships(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,

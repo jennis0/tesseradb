@@ -3514,29 +3514,37 @@ impl Engine {
         // One `verdict` lookup per declared member, on the control plane, against the live overlay
         // — which cannot go stale in the wrong direction between here and the executor, a deletion
         // being irreversible.
+        //
+        // **The refusal reports a count and a position, never an entity id** (I10): the detail is
+        // forwarded to the caller as the 422 body, and an entity id in it would cross the boundary.
         let generation = self.generation();
-        let deleted: Vec<u64> = artifacts
-            .iter()
-            .flat_map(|artifact| {
-                artifact.members.iter().chain(
+        let mut deleted = 0u64;
+        let mut first_artifact = None;
+        for (index, artifact) in artifacts.iter().enumerate() {
+            let in_this = artifact
+                .members
+                .iter()
+                .chain(
                     artifact
                         .contents
                         .iter()
                         .flat_map(|content| content.generated_from.iter()),
                 )
-            })
-            .filter(|entity| generation.overlay.is_deleted(EntityId::new(*entity as u64)))
-            .map(u64::from)
-            .take(16)
-            .collect();
-        if !deleted.is_empty() {
+                .filter(|entity| generation.overlay.is_deleted(EntityId::new(*entity as u64)))
+                .count() as u64;
+            if in_this > 0 {
+                deleted += in_this;
+                first_artifact.get_or_insert(index);
+            }
+        }
+        if let Some(first_artifact) = first_artifact {
             return Err(crate::write::AcceptError::Exec(
                 tessera_lifecycle::ExecError::LayerRefused {
                     detail: format!(
-                        "this batch names deleted entities {deleted:?} as members or as content \
-                         sources; a deleted member contributes to no count and makes supplied \
-                         content unservable from birth, so the batch is refused rather than \
-                         published into silence"
+                        "{deleted} member(s) or content source(s) of this batch are deleted, the \
+                         first in artifact {first_artifact}; a deleted member contributes to no \
+                         count and makes supplied content unservable from birth, so the batch is \
+                         refused rather than published into silence"
                     ),
                 },
             ));
@@ -3609,20 +3617,29 @@ impl Engine {
             ));
         }
 
+        // A count and the key of the first join naming one, never an entity id (I10): the detail
+        // is the caller's 422 body.
         let generation = self.generation();
-        let deleted: Vec<u64> = joins
-            .iter()
-            .flat_map(|join| join.joining.iter())
-            .filter(|entity| generation.overlay.is_deleted(EntityId::new(*entity as u64)))
-            .map(u64::from)
-            .take(16)
-            .collect();
-        if !deleted.is_empty() {
+        let mut deleted = 0u64;
+        let mut first_key = None;
+        for join in &joins {
+            let in_this = join
+                .joining
+                .iter()
+                .filter(|entity| generation.overlay.is_deleted(EntityId::new(*entity as u64)))
+                .count() as u64;
+            if in_this > 0 {
+                deleted += in_this;
+                first_key.get_or_insert(join.key.as_str());
+            }
+        }
+        if let Some(first_key) = first_key {
             return Err(crate::write::AcceptError::Exec(
                 tessera_lifecycle::ExecError::LayerRefused {
                     detail: format!(
-                        "these joins name deleted entities {deleted:?}; a deleted member contributes \
-                         to no count, so the join is refused rather than applied into silence"
+                        "{deleted} joining member(s) are deleted, the first joining '{first_key}'; a \
+                         deleted member contributes to no count, so the batch is refused rather \
+                         than applied into silence"
                     ),
                 },
             ));

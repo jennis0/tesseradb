@@ -369,7 +369,15 @@ async fn a_deleted_member_refuses_the_batch_and_a_suppressed_member_joins() {
     .await;
     let (status, body) = grow(&server, json!([{ "key": "a", "members": members(10..20) }])).await;
     assert_eq!(status, 422, "{body}");
-    assert!(body.to_string().contains("deleted"), "{body}");
+    let detail = body["detail"].as_str().expect("the envelope's detail");
+    assert!(detail.contains("deleted"), "{detail}");
+    // The body carries a count and the key, never an entity id (I10): the only number in it is
+    // the one deleted member.
+    let numbers: Vec<&str> = detail
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|run| !run.is_empty())
+        .collect();
+    assert_eq!(numbers, vec!["1"], "{detail}");
     assert_eq!(count(&server, &["0"]).await, 10, "nothing joined");
 
     // 16 is suppressed: it joins, and is not counted until the suppression is lifted.
@@ -633,7 +641,11 @@ async fn a_growth_body_carries_keys_and_members_and_nothing_else() {
     assert_eq!(status, 422, "a growth naming nothing: {body}");
     let (status, body) = grow_raw(
         &server,
-        json!({ "addressing": "external", "default_space": "wgs84", "artifacts": [] }),
+        json!({
+            "addressing": "external",
+            "default_space": "wgs84",
+            "artifacts": [{ "key": "a", "members": members(10..20) }]
+        }),
     )
     .await;
     assert_eq!(status, 422, "a batch field a growth has no use for: {body}");
