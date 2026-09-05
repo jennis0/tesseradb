@@ -347,9 +347,14 @@ async fn viewport(served: &Served, view: &str) -> reqwest::Response {
 async fn points(served: &Served, view: &str) -> Vec<PointRow> {
     // Two responses here are the server behaving as specified under machine load, and neither is
     // the answer under test. A 429 is the admission gate shedding (contracts §3.1) — honour
-    // `Retry-After` and ask again. `x-tessera-stale: 1` is a publication served from a superseded
-    // generation while the refresh runs (`geometry-pinning.md` §7) — serve-stale-not-block is the
-    // design, so wait for a fresh one. Anything else is asserted as the real response.
+    // `Retry-After` and ask again. `x-tessera-stale: 1` says the client's *presented* stamp was
+    // not the generation answered from (`geometry-pinning.md` §7) — so wait for a fresh one.
+    // **It is not a signal that a session's projection is one publication behind**: a session
+    // whose cache entry predates the last flush is served from that entry while the refresh runs
+    // on the pool, with no header, since this helper presents no stamp. A test that reads rows
+    // published since its session was authorised must re-authorise first (a fresh session builds
+    // at the live generation), or poll for the count it expects, as `scoped_render.rs` does.
+    // Anything else is asserted as the real response.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     loop {
         let resp = viewport(served, view).await;
@@ -2704,6 +2709,12 @@ async fn a_row_demoted_from_a_join_allocates_a_fresh_entity_that_keeps_its_label
         }
     }
     flush(&served).await;
+    // A fresh session, as the first half takes one: the session authorised before the race holds
+    // a projection built at the previous generation, and until the pool's refresh lands it is
+    // served from that entry — every pre-race row, none of the flush's — with no header to say
+    // so (see `points`). Under load that read landed first and the rows below looked lost; they
+    // were published, and a session built at the live generation sees them.
+    reauthorise(&mut served).await;
     let served_ids: Vec<u64> = points(&served, "quarter:2026-Q1")
         .await
         .iter()
