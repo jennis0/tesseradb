@@ -1958,14 +1958,19 @@ impl ArtifactProjections {
             return;
         }
         let map_key = (view.to_string(), layer.to_string(), level);
-        let held = {
-            let cached = self.cached.lock().unwrap_or_else(|e| e.into_inner());
-            match cached.get(&map_key) {
-                Some((key, rows)) => (key.clone(), Arc::clone(rows)),
-                None => return,
-            }
+        // **Taken out of the map, not cloned from it.** A request that arrives meanwhile misses
+        // either way — the store is already at the new version and the held key is not — so the
+        // absence costs nothing it would not have paid; and taking the entry is what leaves this
+        // thread the only holder of the `Arc` between requests, so the `make_mut` below copies
+        // only where a request is still reading the form.
+        let Some((key, mut rows)) = self
+            .cached
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&map_key)
+        else {
+            return;
         };
-        let (key, mut rows) = held;
         // **`before + 1`, never the store's current version.** Every route that changes a level's
         // records bumps it exactly once (`ArtifactStore::bump`'s four callers), so the version this
         // delta produces is the one it followed plus one — and reading the store instead is wrong
@@ -1994,10 +1999,7 @@ impl ArtifactProjections {
             None
         };
         if let Some(reason) = reason {
-            self.cached
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&map_key);
+            // The entry is already out of the map; dropping `rows` here is what drops the form.
             tracing::warn!(
                 layer = %layer,
                 level,
@@ -2009,10 +2011,11 @@ impl ArtifactProjections {
             return;
         }
 
-        // **A clone only where a request is reading this form**, and it is the same peak the
-        // rebuild it replaces would have paid: `get_or_build` builds a second form beside the one
-        // still cached. Where nothing else holds the `Arc` — the case between requests — this is
-        // free.
+        // **A copy only where a request is still reading this form** — the entry was taken from
+        // the map above, so between requests this thread is the `Arc`'s only holder and `make_mut`
+        // copies nothing. Where a reader does hold it, the copy is the memberships' pointers
+        // (`MembershipRows` holds one `Arc` per bitmap) plus the records, generating sets and tile
+        // index whole, and `cloned_ms` below is what that cost.
         let started = std::time::Instant::now();
         let shared = Arc::strong_count(&rows) > 1;
         let amended = Arc::make_mut(&mut rows);

@@ -311,7 +311,10 @@ impl RowColumn {
             declared,
             base_declared: Arc::clone(&self.base_declared),
             tail: Some(tail),
-            added: self.added.clone(),
+            // A predicate base is never amended — `bring_forward` and `extend_flushed` take a
+            // stored level only — so there is no amendment to carry, and `declared` above counts
+            // none. Carrying one here would understate the proportional criterion's denominator.
+            added: None,
         }
     }
 
