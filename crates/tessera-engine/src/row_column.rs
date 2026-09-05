@@ -89,7 +89,10 @@ use crate::compose::WholeMask;
 ///
 /// `Clone` so that `Arc::make_mut` can amend a column in place: between requests the executor
 /// thread is the column's only holder and no copy is made; where a request is still reading the
-/// form, the copy is the amendment and the counts, never the pack.
+/// form, the copy is the amendment, the counts and a live tail's labels where there is one — never
+/// the pack or the base counts, which stay behind their `Arc`s. That copy is what makes the
+/// cost bound below conditional: a write under a reader pays the accumulated amendment once more,
+/// which is small beside the form's own copy `bring_forward` logs as `cloned_ms`.
 #[derive(Clone)]
 pub struct RowColumn {
     /// **Shared, because a live tail is attached by deriving a second column over the same base.**
@@ -119,7 +122,7 @@ pub struct RowColumn {
     /// with the same reset: the fold rewrites the level's column whole, and a deployment that
     /// never folds accumulates one entry per `(row, artifact)` every write adds whatever this
     /// structure does. What has accumulated bounds the memory and not the write: a write costs its
-    /// own batch ([`RowColumn::amend`]), however much is already held.
+    /// own batch ([`RowColumn::amend`]) while the column is unshared, however much is already held.
     added: Option<Added>,
 }
 

@@ -939,7 +939,7 @@ impl ArtifactRows {
     /// delta — `added` is `(row, ordinal)` for the rows this amendment gave that artifact and no
     /// others, and [`RowColumn::amend`] shares the pack rather than reading it. The column is
     /// amended in place: `Arc::make_mut` copies it only where a request is still reading this
-    /// form, and then copies the amendment and the counts, never the pack.
+    /// form, and then copies the amendment and the counts (and a live tail's labels), never the pack.
     ///
     /// Neither is re-adopted from the prefix, and **I11** is why: the fold's files describe the
     /// level as it was before the amendment, and a *narrow* extent settles an artifact whose
