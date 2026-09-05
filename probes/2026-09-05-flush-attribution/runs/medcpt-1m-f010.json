@@ -1,0 +1,503 @@
+{
+  "fraction": 0.1,
+  "concurrency": 8,
+  "seed": 0,
+  "batch_rows": 10000,
+  "base_rows": 900000,
+  "holdout_rows": 100000,
+  "build": {
+    "reused": true
+  },
+  "base_copy_s": 0.09,
+  "ingest_config": {},
+  "open_s": 0.51,
+  "ingested_view": null,
+  "base_visible": 900000,
+  "flush_laps": {
+    "bench_timing": true,
+    "executions": 2,
+    "flushes": 2,
+    "rows_executed": 100000,
+    "rows_published": 100000,
+    "pool": {
+      "delta_tier": {
+        "nanos": 2856808,
+        "ms_per_flush": 1.428,
+        "us_per_row": 0.029
+      },
+      "digests": {
+        "nanos": 10794290,
+        "ms_per_flush": 5.397,
+        "us_per_row": 0.108
+      },
+      "drop_plan": {
+        "nanos": 57347084,
+        "ms_per_flush": 28.674,
+        "us_per_row": 0.573
+      },
+      "entity_terms": {
+        "nanos": 3215628,
+        "ms_per_flush": 1.608,
+        "us_per_row": 0.032
+      },
+      "filter_extents": {
+        "nanos": 67693379,
+        "ms_per_flush": 33.847,
+        "us_per_row": 0.677
+      },
+      "pool_wall": {
+        "nanos": 1338715035,
+        "ms_per_flush": 669.358,
+        "us_per_row": 13.387
+      },
+      "promote": {
+        "nanos": 29763523,
+        "ms_per_flush": 14.882,
+        "us_per_row": 0.298
+      },
+      "record_extent": {
+        "nanos": 117035802,
+        "ms_per_flush": 58.518,
+        "us_per_row": 1.17
+      },
+      "reopen": {
+        "nanos": 209385,
+        "ms_per_flush": 0.105,
+        "us_per_row": 0.002
+      },
+      "rows": {
+        "nanos": 25741491,
+        "ms_per_flush": 12.871,
+        "us_per_row": 0.257
+      },
+      "scoped_extents": {
+        "nanos": 1610,
+        "ms_per_flush": 0.001,
+        "us_per_row": 0.0
+      },
+      "segment": {
+        "nanos": 74316119,
+        "ms_per_flush": 37.158,
+        "us_per_row": 0.743
+      },
+      "shapes": {
+        "nanos": 324,
+        "ms_per_flush": 0.0,
+        "us_per_row": 0.0
+      },
+      "text_extents": {
+        "nanos": 949719313,
+        "ms_per_flush": 474.86,
+        "us_per_row": 9.497
+      }
+    },
+    "execute_sum": {
+      "nanos": 1338694756,
+      "ms_per_flush": 669.347,
+      "us_per_row": 13.387
+    },
+    "execute_unattributed": {
+      "nanos": 20279,
+      "ms_per_flush": 0.01,
+      "us_per_row": 0.0
+    },
+    "executor": {
+      "artifacts": {
+        "nanos": 35515,
+        "ms_per_flush": 0.018,
+        "us_per_row": 0.0
+      },
+      "buffer_rebase": {
+        "nanos": 26284569,
+        "ms_per_flush": 13.142,
+        "us_per_row": 0.263
+      },
+      "compose": {
+        "nanos": 22484516,
+        "ms_per_flush": 11.242,
+        "us_per_row": 0.225
+      },
+      "denied": {
+        "nanos": 15367,
+        "ms_per_flush": 0.008,
+        "us_per_row": 0.0
+      },
+      "dispatch": {
+        "nanos": 3597321,
+        "ms_per_flush": 1.799,
+        "us_per_row": 0.036
+      },
+      "drop_superseded": {
+        "nanos": 100205454,
+        "ms_per_flush": 50.103,
+        "us_per_row": 1.002
+      },
+      "manifest": {
+        "nanos": 84070,
+        "ms_per_flush": 0.042,
+        "us_per_row": 0.001
+      },
+      "manifest_commit": {
+        "nanos": 11193977,
+        "ms_per_flush": 5.597,
+        "us_per_row": 0.112
+      },
+      "plan": {
+        "nanos": 115855297,
+        "ms_per_flush": 57.928,
+        "us_per_row": 1.159
+      },
+      "publish_wall": {
+        "nanos": 187751985,
+        "ms_per_flush": 93.876,
+        "us_per_row": 1.878
+      },
+      "rotate": {
+        "nanos": 27123347,
+        "ms_per_flush": 13.562,
+        "us_per_row": 0.271
+      },
+      "shapes_install": {
+        "nanos": 728,
+        "ms_per_flush": 0.0,
+        "us_per_row": 0.0
+      },
+      "swap": {
+        "nanos": 55382,
+        "ms_per_flush": 0.028,
+        "us_per_row": 0.001
+      },
+      "with_segment": {
+        "nanos": 197200,
+        "ms_per_flush": 0.099,
+        "us_per_row": 0.002
+      }
+    },
+    "publish_sum": {
+      "nanos": 187680125,
+      "ms_per_flush": 93.84,
+      "us_per_row": 1.877
+    },
+    "publish_unattributed": {
+      "nanos": 71860,
+      "ms_per_flush": 0.036,
+      "us_per_row": 0.001
+    },
+    "status_before": {
+      "bench_timing": true,
+      "executions": 0,
+      "executor_nanos": {
+        "artifacts": 0,
+        "buffer_rebase": 0,
+        "compose": 0,
+        "denied": 0,
+        "dispatch": 0,
+        "drop_superseded": 0,
+        "manifest": 0,
+        "manifest_commit": 0,
+        "plan": 0,
+        "publish_wall": 0,
+        "rotate": 0,
+        "shapes_install": 0,
+        "swap": 0,
+        "with_segment": 0
+      },
+      "flushes": 0,
+      "pool_nanos": {
+        "delta_tier": 0,
+        "digests": 0,
+        "drop_plan": 0,
+        "entity_terms": 0,
+        "filter_extents": 0,
+        "pool_wall": 0,
+        "promote": 0,
+        "record_extent": 0,
+        "reopen": 0,
+        "rows": 0,
+        "scoped_extents": 0,
+        "segment": 0,
+        "shapes": 0,
+        "text_extents": 0
+      },
+      "rows_executed": 0,
+      "rows_published": 0
+    },
+    "status_after": {
+      "bench_timing": true,
+      "executions": 2,
+      "executor_nanos": {
+        "artifacts": 35515,
+        "buffer_rebase": 26284569,
+        "compose": 22484516,
+        "denied": 15367,
+        "dispatch": 3597321,
+        "drop_superseded": 100205454,
+        "manifest": 84070,
+        "manifest_commit": 11193977,
+        "plan": 115855297,
+        "publish_wall": 187751985,
+        "rotate": 27123347,
+        "shapes_install": 728,
+        "swap": 55382,
+        "with_segment": 197200
+      },
+      "flushes": 2,
+      "pool_nanos": {
+        "delta_tier": 2856808,
+        "digests": 10794290,
+        "drop_plan": 57347084,
+        "entity_terms": 3215628,
+        "filter_extents": 67693379,
+        "pool_wall": 1338715035,
+        "promote": 29763523,
+        "record_extent": 117035802,
+        "reopen": 209385,
+        "rows": 25741491,
+        "scoped_extents": 1610,
+        "segment": 74316119,
+        "shapes": 324,
+        "text_extents": 949719313
+      },
+      "rows_executed": 100000,
+      "rows_published": 100000
+    },
+    "executions_at_ingest_end": 0,
+    "flushes_at_ingest_end": 0,
+    "buffered_at_ingest_end": 100000,
+    "drain_s": 2.02,
+    "buffered_after_drain": 0
+  },
+  "ingest": {
+    "batches": 10,
+    "rows_offered": 100000,
+    "accepted": 100000,
+    "minted": 0,
+    "wall_s": 0.64,
+    "items_per_s": 157327.4,
+    "ack_ms": {
+      "p25": 71.0704,
+      "p50": 154.0136,
+      "p75": 169.3377,
+      "p95": 203.4191,
+      "p99": 203.4191,
+      "max": 203.4191,
+      "mean": 131.5205,
+      "n": 10
+    },
+    "statuses": {
+      "200": 10
+    }
+  },
+  "executor_laps": {
+    "bench_timing": true,
+    "rows": 100000,
+    "windows": 10,
+    "rows_per_window": 10000.0,
+    "us_per_row": {
+      ".buf_insert": 0.795,
+      ".est_fwd": 0.44,
+      ".est_inv": 0.2,
+      ".wal_pos": 0.036,
+      "admit": 0.096,
+      "allocate": 0.598,
+      "apply_rows": 1.507,
+      "buffer_clone": 0.082,
+      "record_batch": 0.001,
+      "submit\u2192receipt": 9.362,
+      "swap": 0.001,
+      "wal_append": 0.457,
+      "wal_fsync": 0.575
+    },
+    "executor_sum_us_per_row": 3.317,
+    "queueing_us_per_row": 6.045,
+    "apply_nanos_total_us_per_row": 2.193,
+    "apply_nanos_max_ms": 31.0,
+    "work_service_nanos_ewma_ms": 36.0
+  },
+  "stop_after": "ingest",
+  "status_at_end": {
+    "compaction": {
+      "fold_failures": 0,
+      "fold_requested": false,
+      "folds": 0,
+      "last_attr_bytes_read": 0,
+      "last_attr_bytes_written": 0,
+      "last_rss_bytes": 0,
+      "last_secs": 0,
+      "live_rows": 1000000,
+      "passes": []
+    },
+    "compute": {
+      "admission": 48,
+      "in_flight": 0,
+      "queue": 96,
+      "shed_total": 0,
+      "streaming": 0,
+      "waiting": 0
+    },
+    "entity_id_high_water": 1000000,
+    "fragment_cache": {
+      "bound_bytes": 1073741824,
+      "building_refusals": 0,
+      "bytes": 1536,
+      "entries": 3,
+      "evictions": 0,
+      "hits": 0,
+      "misses": 3,
+      "oversized_admissions": 0,
+      "rebuilds": 3,
+      "thrashing": false,
+      "young_evictions": 0
+    },
+    "fragmentation": {
+      "allocation": {
+        "containers": 193,
+        "postings": 459925,
+        "rows": 100000,
+        "runs": 17756,
+        "scope": "commit-window-allocation",
+        "windows": 10
+      },
+      "containers": 65,
+      "postings": 459925,
+      "postings_per_container": 7075.7692307692305,
+      "rows": 100000,
+      "run_ratio": 14.382419632800179,
+      "runs": 17756,
+      "scope": "delta-tiers",
+      "tiers": 2
+    },
+    "ingest": {
+      "admission": 64,
+      "in_flight": 0,
+      "max_batch_bytes": 16777216,
+      "max_batch_rows": 10000,
+      "shed_total": 0
+    },
+    "overlay": {
+      "depth": 0,
+      "retirable": 0,
+      "soft_limit_alarms": 0
+    },
+    "partitions": [
+      {
+        "partition": "default",
+        "readiness": true,
+        "segments_version": 2,
+        "watermark": 1000000
+      }
+    ],
+    "row_projection_cache": {
+      "bound_bytes": 2147483648,
+      "building_refusals": 0,
+      "bytes": 254216,
+      "entries": 2,
+      "evictions": 0,
+      "hits": 0,
+      "misses": 3,
+      "oversized_admissions": 0,
+      "thrashing": false,
+      "waiters_now": 0,
+      "waits_satisfied": 0,
+      "young_evictions": 0
+    },
+    "segments": [
+      {
+        "count": 3,
+        "partition": "default",
+        "view": "knn"
+      }
+    ],
+    "sessions": {
+      "retained": 1,
+      "sweep_at": 16,
+      "sweeps": 0,
+      "swept_total": 0
+    },
+    "write_executor": {
+      "apply_nanos_max": 30951977,
+      "apply_nanos_total": 219292850,
+      "bench_timing": true,
+      "coalesces": 0,
+      "deny_submitted": 0,
+      "flush": {
+        "buffered_items": 0,
+        "flush_failures": 0,
+        "flush_requested": false,
+        "flush_skips": 0,
+        "flushable_items": 60000,
+        "flushes": 2,
+        "in_flight": false,
+        "overlay_publications": 0,
+        "refreshes": 2,
+        "ticks": 53
+      },
+      "flush_stages": {
+        "bench_timing": true,
+        "executions": 2,
+        "executor_nanos": {
+          "artifacts": 35515,
+          "buffer_rebase": 26284569,
+          "compose": 22484516,
+          "denied": 15367,
+          "dispatch": 3597321,
+          "drop_superseded": 100205454,
+          "manifest": 84070,
+          "manifest_commit": 11193977,
+          "plan": 115855297,
+          "publish_wall": 187751985,
+          "rotate": 27123347,
+          "shapes_install": 728,
+          "swap": 55382,
+          "with_segment": 197200
+        },
+        "flushes": 2,
+        "pool_nanos": {
+          "delta_tier": 2856808,
+          "digests": 10794290,
+          "drop_plan": 57347084,
+          "entity_terms": 3215628,
+          "filter_extents": 67693379,
+          "pool_wall": 1338715035,
+          "promote": 29763523,
+          "record_extent": 117035802,
+          "reopen": 209385,
+          "rows": 25741491,
+          "scoped_extents": 1610,
+          "segment": 74316119,
+          "shapes": 324,
+          "text_extents": 949719313
+        },
+        "rows_executed": 100000,
+        "rows_published": 100000
+      },
+      "merges": 0,
+      "posture": "running",
+      "ready": true,
+      "stage_nanos": {
+        ".buf_insert": 79498611,
+        ".est_fwd": 43990495,
+        ".est_inv": 20032433,
+        ".wal_pos": 3597590,
+        "admit": 9575005,
+        "allocate": 59795434,
+        "apply_rows": 150730346,
+        "buffer_clone": 8170884,
+        "record_batch": 92900,
+        "submit\u2192receipt": 936191815,
+        "swap": 81359,
+        "wal_append": 45726480,
+        "wal_fsync": 57489111
+      },
+      "wal_appends": 10,
+      "wal_fsyncs": 10,
+      "wal_recoveries": 0,
+      "work_completed": 10,
+      "work_depth": 0,
+      "work_in_flight_nanos": 0,
+      "work_service_nanos_ewma": 36030418,
+      "work_submitted": 10
+    }
+  },
+  "ran_s": 4.0
+}
