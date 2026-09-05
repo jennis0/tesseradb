@@ -34,6 +34,7 @@ mod prose;
 mod residency;
 pub mod shapes;
 pub(crate) mod spill;
+pub mod unique_key;
 
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap};
@@ -73,6 +74,10 @@ pub use observer::{BuildObserver, BuildStage, NoopObserver};
 pub use tessera_store::manifest::{
     GroupDescriptor, GroupMetadataField, GroupViewDescriptor, Quantisation, ViewMetadataType,
     ViewMetadataValue,
+};
+pub use unique_key::{
+    footer_distinct_count, keyword_cardinalities, FooterCount, KeywordCardinality,
+    UNIQUE_KEY_FRACTION,
 };
 
 /// The single bundle prefix a batch build writes. Later publications get their own prefix; the
@@ -438,6 +443,10 @@ pub struct BuildReport {
     /// one byte of the bundle — the one defect a bundle comparison cannot see. The linear build
     /// counts the same thing serially, so the two are comparable (`tests/attribute_pass.rs`).
     pub attribute_coverage: Vec<AttributeCoverage>,
+    /// Each indexed keyword column's distinct-key count against the rows carrying one, with the
+    /// bytes its index cost (`unique_key`). Printed at every build; a key unique per row earns a
+    /// warning and never a refusal.
+    pub keyword_cardinalities: Vec<KeywordCardinality>,
 }
 
 /// **How many of the grid's cells the placed points actually landed in**, beside how many points
@@ -805,7 +814,7 @@ pub struct AttributeCoverage {
 }
 
 /// A count with thousands separators, because these are the numbers an operator compares by eye.
-fn thousands(n: u64) -> String {
+pub(crate) fn thousands(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {
@@ -2000,6 +2009,12 @@ fn write_manifests(
         },
         files: manifest_files,
     };
+    // Read back from the files just written, before the manifest is, so a keyword column whose
+    // dictionary does not open refuses here rather than after `CURRENT` has moved. The same pass
+    // runs at `tessera verify`, so the two report one set of figures.
+    let keyword_cardinalities =
+        unique_key::keyword_cardinalities(&prefix_dir, &manifest, &[(PHASH, &segments)])?;
+    unique_key::report_keyword_cardinalities(&keyword_cardinalities, bundle_bytes);
     // Both bundle artefacts, not written here: MANIFEST.json and CURRENT are pass 5's writers
     // too (compaction §10's rule paragraph — a bundle artefact's writer lives in
     // `tessera-store`), so this build and a fold cannot serialise the same shape two different
@@ -2032,6 +2047,7 @@ fn write_manifests(
         artifact_levels: Vec::new(),
         hierarchy_shapes: Vec::new(),
         attribute_coverage: Vec::new(),
+        keyword_cardinalities,
     })
 }
 
@@ -2044,6 +2060,11 @@ pub struct VerifyReport {
     pub segments: usize,
     pub rows: u64,
     pub entity_id_high_water: u64,
+    /// Every file the manifests name, summed: the denominator an index's cost is stated against.
+    pub bundle_bytes: u64,
+    /// Each indexed keyword column's figures, read from the bundle exactly as the build reported
+    /// them (`unique_key`).
+    pub keyword_cardinalities: Vec<KeywordCardinality>,
 }
 
 /// Verify a bundle at `root`: run the read protocol (which checks every manifest digest, every
@@ -2162,6 +2183,29 @@ fn verified_open(root: &Path) -> Result<(tessera_store::read::Bundle, VerifyRepo
         serde_json::from_slice(&bytes)
             .map_err(|e| BuildError::Invalid(format!("CURRENT is not valid JSON: {e}")))?
     };
+    // Sorted so two runs over one bundle report the columns in one order.
+    let mut partitions: Vec<(&str, &tessera_store::manifest::SegmentsManifest)> = bundle
+        .partitions
+        .iter()
+        .map(|(phash, data)| (phash.as_str(), &data.manifest))
+        .collect();
+    partitions.sort_by(|a, b| a.0.cmp(b.0));
+    let bundle_bytes = bundle
+        .manifest
+        .files
+        .values()
+        .chain(
+            partitions
+                .iter()
+                .flat_map(|(_, segments)| segments.files.values()),
+        )
+        .map(|file| file.size)
+        .sum();
+    let keyword_cardinalities = unique_key::keyword_cardinalities(
+        &root.join(&current.prefix),
+        &bundle.manifest,
+        &partitions,
+    )?;
     let report = VerifyReport {
         prefix: current.prefix,
         partitions: bundle.partitions.len(),
@@ -2169,6 +2213,8 @@ fn verified_open(root: &Path) -> Result<(tessera_store::read::Bundle, VerifyRepo
         segments,
         rows,
         entity_id_high_water: bundle.manifest.entity_id_high_water,
+        bundle_bytes,
+        keyword_cardinalities,
     };
     Ok((bundle, report))
 }

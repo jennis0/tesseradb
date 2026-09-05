@@ -668,6 +668,16 @@ impl ExternalIdSidecar {
         self.open_extents() > 0 || self.locator.as_ref().is_some_and(|l| l.is_open())
     }
 
+    /// Whether this bundle holds any external-id run at all: the build's, or one a flush wrote.
+    ///
+    /// A bundle built without `--mint-external-ids` and never flushed with caller-supplied ids has
+    /// none, and every lookup through it answers `Ok(None)`. A caller that must distinguish "this
+    /// id names nothing" from "nothing here can be named by an external id" asks this first. Opens
+    /// nothing: the answer is the manifest's run list.
+    pub fn has_runs(&self) -> bool {
+        !self.runs.is_empty()
+    }
+
     /// How many runs have been fully opened (mapped, digest- and sortedness-verified) so far
     /// — the observable behind the residency claim, which is that steady state is *base + one
     /// run* rather than the whole family.
@@ -1067,6 +1077,27 @@ mod tests {
         let results = s.resolve_many(&[b"a".to_vec(), b"b".to_vec()]).unwrap();
         assert_eq!(results, vec![None, None]);
         assert_eq!(s.open_extents(), 0);
+    }
+
+    /// `has_runs` is the manifest's run list and nothing else: a sidecar over no runs says so, one
+    /// over a run says so without opening it, and an empty run counts (a bundle always names at
+    /// least one extent once it has minted, even over no items).
+    #[test]
+    fn has_runs_reads_the_run_list_and_opens_nothing() {
+        assert!(!ExternalIdSidecar::deferred(vec![]).has_runs());
+
+        let dir = tempfile::tempdir().unwrap();
+        let run = sorted_extent(dir.path(), "external-ids-0.arrow", &[(b"k".to_vec(), 0)]);
+        let s = ExternalIdSidecar::deferred(vec![run]);
+        assert!(s.has_runs());
+        assert_eq!(
+            s.open_extents(),
+            0,
+            "the answer comes from the run list, not the file"
+        );
+
+        let empty = sorted_extent(dir.path(), "external-ids-1.arrow", &[]);
+        assert!(ExternalIdSidecar::deferred(vec![empty]).has_runs());
     }
 
     #[test]
