@@ -207,6 +207,11 @@ pub struct ExecutorHealth {
     /// count: the endpoint's 202 means "accepted, not yet done", and two requests before one tick
     /// are satisfied by that tick together.
     pub(crate) flush_requested: AtomicBool,
+    /// Whether a flush is executing on the pool. A tick arriving while it is set is skipped, never
+    /// queued: two concurrent flushes would double-consume the buffer range (§1.1). Set by the
+    /// executor before the spawn, cleared by the pool after its sends, and read by
+    /// `/control/status` so a reader can tell "no flush has landed yet" from "one is running".
+    pub(crate) flush_in_flight: AtomicBool,
     /// A completed flush has been sent to `flush_done` and not yet drained.
     ///
     /// **The pool's half of the completion handshake** ([`FLUSH_COMPLETION_POLL`]): set
@@ -394,6 +399,22 @@ pub struct ExecutorHealth {
     /// uninstrumented builds take the same path, exactly as `timing.rs` argues for the read side.
     /// Zeros in a release build mean "not measured", never "free".
     stage_nanos: [AtomicU64; WriteStage::COUNT],
+    /// **The flush, partitioned** ([`crate::flush::FlushStage`]), beside `stage_nanos` and never
+    /// added to it: the pool's stages are wall clock on another thread, and the ingest
+    /// attribution's partition of `stage_nanos` against `submit→receipt` holds only while those
+    /// laps stay this thread's own. The executor's stages are written as they happen
+    /// ([`Self::flush_lap`]); the pool's arrive once per `execute_flush` return
+    /// ([`Self::record_flush_execution`]), so a status read never counts a running flush's partial
+    /// laps. Zero without `bench-timing`, as `stage_nanos` is.
+    flush_stage_nanos: [AtomicU64; crate::flush::FlushStage::COUNT],
+    /// `execute_flush` returns on the pool, whichever way. `flushes` counts publications; the two
+    /// differ by the executions the rebase discarded and by any completed unit still in the
+    /// channel.
+    flush_executions: AtomicU64,
+    /// Rows in every `execute_flush` that returned `Ok`.
+    flush_rows_executed: AtomicU64,
+    /// Rows a publication removed from the buffer, summed over every flush that swapped.
+    flush_rows_published: AtomicU64,
     apply_nanos_max: AtomicU64,
     /// Work-lane jobs whose `execute` has returned. **The other half of the queue-depth gauge**:
     /// `work_submitted - work_completed` is what [`ExecutorStats::work_depth`] reports and what
@@ -601,7 +622,7 @@ impl WriteStage {
 /// A lap mark. Carries an `Instant` only under `bench-timing`; a zero-sized token otherwise, so
 /// the uninstrumented build allocates no clock and the call sites need no `#[cfg]`.
 #[derive(Clone, Copy)]
-pub(crate) struct StageMark(#[cfg(feature = "bench-timing")] std::time::Instant);
+pub(crate) struct StageMark(#[cfg(feature = "bench-timing")] pub(crate) std::time::Instant);
 
 impl StageMark {
     #[inline(always)]
@@ -628,6 +649,16 @@ pub struct ExecutorStats {
     /// Per-stage nanoseconds for the window close, indexed by [`WriteStage`]. **All zero without
     /// `bench-timing`** — see [`ExecutorHealth::stage_nanos`].
     pub stage_nanos: [u64; WriteStage::COUNT],
+    /// Per-stage nanoseconds for the flush, indexed by [`crate::flush::FlushStage`]. **All zero
+    /// without `bench-timing`** — see [`ExecutorHealth::flush_stage_nanos`].
+    pub flush_stage_nanos: [u64; crate::flush::FlushStage::COUNT],
+    /// `execute_flush` returns on the pool, `Ok` or `Err` — see
+    /// [`ExecutorHealth::flush_executions`].
+    pub flush_executions: u64,
+    /// Rows in every `execute_flush` that returned `Ok`.
+    pub flush_rows_executed: u64,
+    /// Rows removed from the buffer by every publication that swapped.
+    pub flush_rows_published: u64,
     pub apply_nanos_max: u64,
     /// Flush ticks fired since the executor started (§1.3).
     pub ticks: u64,
@@ -670,6 +701,8 @@ pub struct ExecutorStats {
     pub last_fold_attr_written: u64,
     /// Whether a `POST /control/flush` is awaiting the next tick.
     pub flush_requested: bool,
+    /// Whether a flush unit is executing on the pool — see [`ExecutorHealth::flush_in_flight`].
+    pub flush_in_flight: bool,
     /// Whether this node's overlay has diverged from its durable WAL (§7.2). **Latching**: it
     /// publishes no flush and rotates no WAL until restarted.
     pub overlay_diverged: bool,
@@ -812,6 +845,7 @@ impl ExecutorHealth {
             deny_submitted: AtomicU64::new(0),
             ticks: AtomicU64::new(0),
             flush_requested: AtomicBool::new(false),
+            flush_in_flight: AtomicBool::new(false),
             flush_completed_pending: AtomicBool::new(false),
             overlay_diverged: AtomicBool::new(false),
             prefix_diverged: AtomicBool::new(false),
@@ -841,6 +875,10 @@ impl ExecutorHealth {
             fold_holding: AtomicBool::new(false),
             apply_nanos_total: AtomicU64::new(0),
             stage_nanos: Default::default(),
+            flush_stage_nanos: Default::default(),
+            flush_executions: AtomicU64::new(0),
+            flush_rows_executed: AtomicU64::new(0),
+            flush_rows_published: AtomicU64::new(0),
             apply_nanos_max: AtomicU64::new(0),
             work_completed: AtomicU64::new(0),
             work_service_nanos_ewma: AtomicU64::new(0),
@@ -933,6 +971,12 @@ impl ExecutorHealth {
             deny_submitted: self.deny_submitted.load(Ordering::Relaxed),
             apply_nanos_total: self.apply_nanos_total.load(Ordering::Relaxed),
             stage_nanos: std::array::from_fn(|i| self.stage_nanos[i].load(Ordering::Relaxed)),
+            flush_stage_nanos: std::array::from_fn(|i| {
+                self.flush_stage_nanos[i].load(Ordering::Relaxed)
+            }),
+            flush_executions: self.flush_executions.load(Ordering::Relaxed),
+            flush_rows_executed: self.flush_rows_executed.load(Ordering::Relaxed),
+            flush_rows_published: self.flush_rows_published.load(Ordering::Relaxed),
             apply_nanos_max: self.apply_nanos_max.load(Ordering::Relaxed),
             wal_appends: self.wal.appends(),
             wal_fsyncs: self.wal.fsyncs(),
@@ -967,6 +1011,7 @@ impl ExecutorHealth {
             last_fold_attr_written: self.last_fold_attr_written.load(Ordering::Relaxed),
             buffered_items: self.buffered_items.load(Ordering::Relaxed),
             flush_requested: self.flush_requested.load(Ordering::SeqCst),
+            flush_in_flight: self.flush_in_flight.load(Ordering::SeqCst),
         }
     }
 
@@ -1030,6 +1075,48 @@ impl ExecutorHealth {
         #[cfg(not(feature = "bench-timing"))]
         {
             mark
+        }
+    }
+
+    /// Charge the time since `mark` to a flush stage run on this thread, and return a fresh
+    /// mark. A no-op without `bench-timing`, as [`Self::lap`] is.
+    #[inline(always)]
+    #[allow(unused_variables)]
+    pub(crate) fn flush_lap(&self, stage: crate::flush::FlushStage, mark: StageMark) -> StageMark {
+        #[cfg(feature = "bench-timing")]
+        {
+            let now = std::time::Instant::now();
+            self.flush_stage_nanos[stage as usize].fetch_add(
+                now.duration_since(mark.0).as_nanos() as u64,
+                Ordering::Relaxed,
+            );
+            StageMark(now)
+        }
+        #[cfg(not(feature = "bench-timing"))]
+        {
+            mark
+        }
+    }
+
+    /// One `execute_flush` returned on the pool: count it, count its rows if it succeeded, and
+    /// add its laps. Called from the pool thread, after the return and before the completed unit
+    /// is sent, so the stage totals and `flush_executions` move together.
+    #[allow(unused_variables)]
+    pub(crate) fn record_flush_execution(
+        &self,
+        laps: &crate::flush::FlushLaps,
+        rows: Option<usize>,
+    ) {
+        self.flush_executions.fetch_add(1, Ordering::Relaxed);
+        if let Some(rows) = rows {
+            self.flush_rows_executed
+                .fetch_add(rows as u64, Ordering::Relaxed);
+        }
+        #[cfg(feature = "bench-timing")]
+        for (slot, nanos) in self.flush_stage_nanos.iter().zip(laps.nanos) {
+            if nanos != 0 {
+                slot.fetch_add(nanos, Ordering::Relaxed);
+            }
         }
     }
 
@@ -2765,7 +2852,6 @@ impl WritePath {
                     window_seq: 0,
                     flush_max_age_secs: flush.max_age_secs,
                     flush_max_items: flush.max_items,
-                    flush_in_flight: Arc::new(AtomicBool::new(false)),
                     flush_attempt: 0,
                     // Above every candidate present at open, per partition — see the field's doc.
                     next_manifest_n: flush.next_manifest_n,
@@ -5082,9 +5168,6 @@ struct Executor {
     flush_max_age_secs: u64,
     /// §4.1's `flush_max_items` — buffered rows at which the tick comes due ahead of its period.
     flush_max_items: usize,
-    /// Whether a flush is executing on the pool. A tick arriving while it is set is skipped, never
-    /// queued — two concurrent flushes would double-consume the buffer range (§1.1).
-    flush_in_flight: Arc<AtomicBool>,
     /// Distinguishes two flush attempts at the same `segments_version` — see the `seg_id` this
     /// feeds.
     flush_attempt: u64,
@@ -5467,7 +5550,7 @@ impl Executor {
         // first iteration after the in-flight flush lands — which `FLUSH_COMPLETION_POLL` bounds
         // to within ~20 ms of its publication. Consuming it here would silently drop an
         // operator's "drain now" whenever it raced a scheduled flush.
-        if self.flush_in_flight.load(Ordering::SeqCst) {
+        if self.health.flush_in_flight.load(Ordering::SeqCst) {
             if due {
                 self.last_tick = std::time::Instant::now();
                 self.health.ticks.fetch_add(1, Ordering::Relaxed);
@@ -5513,6 +5596,7 @@ impl Executor {
         // and the publication follow through `dispatch_flushes`. The count it produces on the way
         // is what an operator needs to see a stalled flush: items that *would* acquire geometry at
         // this tick, which stays at zero on a gated node and grows on one whose flush is failing.
+        let mark = StageMark::now();
         let mut flushable = 0usize;
         let mut plans: Vec<(String, crate::flush::FlushPlan)> = Vec::new();
         for view in views_of(&generation) {
@@ -5538,6 +5622,7 @@ impl Executor {
                 }
             }
         }
+        self.health.flush_lap(crate::flush::FlushStage::Plan, mark);
         self.health
             .flushable_items
             .store(flushable, Ordering::SeqCst);
@@ -8206,7 +8291,10 @@ impl Executor {
     fn publish_completed_flushes(&mut self) -> bool {
         let mut any = false;
         while let Ok(completed) = self.flush_done.try_recv() {
+            let mark = StageMark::now();
             self.publish_flush(completed);
+            self.health
+                .flush_lap(crate::flush::FlushStage::PublishWall, mark);
             any = true;
         }
         if any {
@@ -8234,6 +8322,7 @@ impl Executor {
         generation: &Arc<Generation>,
         plans: Vec<(String, crate::flush::FlushPlan)>,
     ) {
+        let mark = StageMark::now();
         let submit = self.flush_submit.clone();
         let Some((partition, partition_data)) = generation.bundle.partitions.iter().next() else {
             return;
@@ -8504,14 +8593,17 @@ impl Executor {
         if contexts.is_empty() {
             return;
         }
+        self.health
+            .flush_lap(crate::flush::FlushStage::Dispatch, mark);
 
-        self.flush_in_flight.store(true, Ordering::SeqCst);
-        let in_flight = Arc::clone(&self.flush_in_flight);
+        self.health.flush_in_flight.store(true, Ordering::SeqCst);
         let health = Arc::clone(&self.health);
         self.pool.spawn(move || {
             for (plan, ctx) in contexts {
-                match crate::flush::execute_flush(plan, ctx) {
+                let mut laps = crate::flush::FlushLaps::default();
+                match crate::flush::execute_flush(plan, ctx, &mut laps) {
                     Ok(completed) => {
+                        health.record_flush_execution(&laps, Some(completed.consumed.len()));
                         // **Pending is set before the send** — the completion handshake's whole
                         // ordering; see `ExecutorHealth::flush_completed_pending`.
                         health.flush_completed_pending.store(true, Ordering::SeqCst);
@@ -8520,6 +8612,7 @@ impl Executor {
                         let _ = submit.send(completed);
                     }
                     Err(e) => {
+                        health.record_flush_execution(&laps, None);
                         // **Nothing happened, retry next tick** (§10). The side-manifest is the
                         // only commit point, so a failure before it leaves orphan files nothing
                         // references and the buffer intact.
@@ -8534,7 +8627,7 @@ impl Executor {
                     }
                 }
             }
-            in_flight.store(false, Ordering::SeqCst);
+            health.flush_in_flight.store(false, Ordering::SeqCst);
         });
     }
 
@@ -8627,7 +8720,7 @@ impl Executor {
             .saturating_sub(self.last_tick.elapsed());
         let wait = if self.wal.is_poisoned() {
             until_tick.min(WAL_RECOVERY_POLL_INTERVAL)
-        } else if self.flush_in_flight.load(Ordering::SeqCst)
+        } else if self.health.flush_in_flight.load(Ordering::SeqCst)
             || self.health.flush_completed_pending.load(Ordering::SeqCst)
             || self.coalesce_in_flight.load(Ordering::SeqCst)
             || self
@@ -13121,6 +13214,7 @@ impl Executor {
     /// next tick re-plans.
     fn publish_flush(&mut self, completed: crate::flush::CompletedFlush) {
         let started = std::time::Instant::now();
+        let mut mark = StageMark::now();
         // **A node whose durable state disagrees with what it is serving publishes nothing**
         // (`may_publish`). The unit's files are orphans and its inputs still stand, which is the
         // same posture every other publication failure takes.
@@ -13277,6 +13371,9 @@ impl Executor {
                 return;
             }
         };
+        mark = self
+            .health
+            .flush_lap(crate::flush::FlushStage::Compose, mark);
 
         let mut manifest = partition_data.manifest.clone();
         let manifest_n = self.allocate_manifest_n();
@@ -13394,6 +13491,9 @@ impl Executor {
             &live.vocabularies,
             &live.bundle.manifest.vocabularies,
         );
+        mark = self
+            .health
+            .flush_lap(crate::flush::FlushStage::Manifest, mark);
 
         // **The commit point, and it is still the manifest** — only the thread moved. A failure
         // here discards the flush: its files become orphans nothing references, the buffer is
@@ -13425,6 +13525,9 @@ impl Executor {
             );
             return;
         }
+        mark = self
+            .health
+            .flush_lap(crate::flush::FlushStage::Commit, mark);
 
         let seg_id = completed.segment.seg_id.clone();
         // Stamped with the flush's own incarnation for `Manifest::with_scoped_columns`, which
@@ -13464,6 +13567,9 @@ impl Executor {
             let manifest = next_bundle.manifest.with_scoped_columns(&scoped_columns);
             next_bundle.with_views(manifest)
         };
+        mark = self
+            .health
+            .flush_lap(crate::flush::FlushStage::WithSegment, mark);
 
         // **The segment's shape memberships, installed before the swap** (`polygon-membership.md`
         // §6.3). The pool resolved them against the levels as held when the flush was planned; a
@@ -13493,6 +13599,9 @@ impl Executor {
                 None => {}
             }
         }
+        mark = self
+            .health
+            .flush_lap(crate::flush::FlushStage::ShapesInstall, mark);
 
         // **Exactly what was consumed, from the then-current buffer.** O(buffered) on this thread,
         // which is the term the deny-ack memo measured as dominant at 1 M buffered (165 ms p50);
@@ -13513,6 +13622,9 @@ impl Executor {
         self.health
             .buffered_items
             .store(buffer.len(), Ordering::SeqCst);
+        mark = self
+            .health
+            .flush_lap(crate::flush::FlushStage::BufferRebase, mark);
 
         let watermark = next_bundle
             .partitions
@@ -13527,6 +13639,9 @@ impl Executor {
         // or deleted item its place in the mask the moment it acquires a row: until now it was
         // buffered, had no row, and so appeared in no mask at all.
         let denied = Arc::new(crate::compose::derive_denied(&live.overlay, &next_bundle));
+        mark = self
+            .health
+            .flush_lap(crate::flush::FlushStage::Denied, mark);
 
         // **And every stored level's held row form gains this segment's rows, before the swap.**
         // A form covers the whole row space, so a segment nothing added to it would leave every
@@ -13560,6 +13675,9 @@ impl Executor {
                 )
             });
         }
+        mark = self
+            .health
+            .flush_lap(crate::flush::FlushStage::Artifacts, mark);
 
         let next = Arc::new(Generation {
             prefix: live.prefix.clone(),
@@ -13605,9 +13723,26 @@ impl Executor {
             .prune_generations_below(segments_version.saturating_sub(KEEP_SUPERSEDED_GENERATIONS));
         self.prune_region_cache(segments_version);
         self.health.flushes.fetch_add(1, Ordering::Relaxed);
+        self.health
+            .flush_rows_published
+            .fetch_add(completed.consumed.len() as u64, Ordering::Relaxed);
         self.health.record_tier_fragmentation(completed.tier_tally);
+        mark = self.health.flush_lap(crate::flush::FlushStage::Swap, mark);
 
         self.rotate_wal();
+        mark = self
+            .health
+            .flush_lap(crate::flush::FlushStage::Rotate, mark);
+        // **The superseded generation is freed here, under a stage, rather than at the return.**
+        // `live` is its last reference once the swap has happened (a request in flight holds its
+        // own, and then the free lands on that thread instead), and its buffer holds every row
+        // that was buffered before the swap: an O(buffered) free on this thread, beside the
+        // O(buffered) clone `BufferRebase` measures and about four times its cost per row on
+        // medcpt-1m (`probes/2026-09-05-flush-attribution/`).
+        drop(live);
+        drop(completed.consumed);
+        self.health
+            .flush_lap(crate::flush::FlushStage::DropSuperseded, mark);
     }
 
     /// Reclaim what the publication just made redundant — **after** the generation swap and never
