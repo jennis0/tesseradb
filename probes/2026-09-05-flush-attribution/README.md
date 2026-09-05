@@ -210,6 +210,16 @@ with a pool at saturation, which is what was measured. **Of the 14.81 µs, `text
 costs in proportion to the prose, its pool flushes at ~140 µs a row there, which is 7,100 rows/s.
 **That is inferred from two points and one assumption, not measured**; the 92M cell measures it.
 
+**The same cell with the borrowed-token change in, and the sub-laps** (`runs/medcpt-36m-f010-text-taken.json`,
+binary `2f151dec`, 11:52, load average 4–5 from another track's builds — *not a quiet box*):
+11 flushes, 3,460,000 rows, ingest 60,621 rows/s. `text_extents` **10.40 µs a row** against the
+quiet run's 10.17; execute sum 15.72 against 14.81. Both differences are inside this box's
+run-to-run bar under that load, so the change's 0.8–1.1 µs at 1M is neither confirmed nor
+contradicted at 36M by this pair; a quiet re-run is the reading. What the sub-laps say is not
+load-dependent: `tokenise_terms` 9.90 of the 10.40 (95%), `postings` 0.38, `rows` 0.06,
+`dict` 0.05, `presence` 0.003. **The analyser over the prose is the term**, and the three file
+writes are 4% of the stage.
+
 **What follows is a memo, not a fix.** The stage is the analyser, the dictionary, the postings
 and the presence bitmap for the flushed rows' text (`write_text_extents`, write-path §4.3); it is
 not one change. Removing it from the flush's critical path would change when an ingested row
