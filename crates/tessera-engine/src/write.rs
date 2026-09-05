@@ -404,8 +404,8 @@ pub struct ExecutorHealth {
     /// attribution's partition of `stage_nanos` against `submit→receipt` holds only while those
     /// laps stay this thread's own. The executor's stages are written as they happen
     /// ([`Self::flush_lap`]); the pool's arrive once per `execute_flush` return
-    /// ([`Self::record_flush_execution`]), so a status read never counts a running flush's partial
-    /// laps. Zero without `bench-timing`, as `stage_nanos` is.
+    /// ([`Self::record_flush_execution`]), so a flush still running on the pool is in no total.
+    /// Zero without `bench-timing`, as `stage_nanos` is.
     flush_stage_nanos: [AtomicU64; crate::flush::FlushStage::COUNT],
     /// `execute_flush` returns on the pool, whichever way. `flushes` counts publications; the two
     /// differ by the executions the rebase discarded and by any completed unit still in the
@@ -1100,7 +1100,8 @@ impl ExecutorHealth {
 
     /// One `execute_flush` returned on the pool: count it, count its rows if it succeeded, and
     /// add its laps. Called from the pool thread, after the return and before the completed unit
-    /// is sent, so the stage totals and `flush_executions` move together.
+    /// is sent. The adds are separate relaxed stores, so a status read during this call can see
+    /// the count without some of the laps; a flush still on the pool is in none of them.
     #[allow(unused_variables)]
     pub(crate) fn record_flush_execution(
         &self,
@@ -3809,7 +3810,7 @@ const OVERLAY_PUBLICATION_MAX_WINDOWS: u64 = 64;
 /// not ring the doorbell.** `flush_submit`'s doc records why: an executor holding a clone of its
 /// own bell sender would keep the channel alive for ever and `WritePath::drop`'s join would hang —
 /// and a pool task holding one re-creates the same hang for the duration of a flush at shutdown.
-/// So the wake-up is a poll, armed only while [`Executor::run`]'s `flush_in_flight` /
+/// So the wake-up is a poll, armed only while [`ExecutorHealth`]'s `flush_in_flight` /
 /// `flush_completed_pending` pair says there is something to wait for: a quiescent executor still
 /// sleeps the full tick, and a flush's publication lands within this interval of its files being
 /// durable rather than at the next tick — which is what keeps `POST /control/flush` "prompt" on
@@ -13213,13 +13214,28 @@ impl Executor {
     /// against a row space that no longer exists. Its files are orphans nothing references, and the
     /// next tick re-plans.
     fn publish_flush(&mut self, completed: crate::flush::CompletedFlush) {
-        let started = std::time::Instant::now();
         let mut mark = StageMark::now();
+        if !self.publish_flush_stages(completed, &mut mark) {
+            // A discarded flush's time since its last lap, so `PublishWall` stays partitioned
+            // whichever way the publication ends.
+            self.health
+                .flush_lap(crate::flush::FlushStage::Discarded, mark);
+        }
+    }
+
+    /// The publication's stages, each lapped as it ends. Returns whether the flush swapped;
+    /// `mark` is left at the last lap so the caller can charge a discard's tail.
+    fn publish_flush_stages(
+        &mut self,
+        completed: crate::flush::CompletedFlush,
+        mark: &mut StageMark,
+    ) -> bool {
+        let started = std::time::Instant::now();
         // **A node whose durable state disagrees with what it is serving publishes nothing**
         // (`may_publish`). The unit's files are orphans and its inputs still stand, which is the
         // same posture every other publication failure takes.
         if !self.may_publish() {
-            return;
+            return false;
         }
         let live = self.generation.load_full();
         if live.prefix != completed.prefix {
@@ -13229,7 +13245,7 @@ impl Executor {
                 live = %live.prefix,
                 "discarding a completed flush planned against a superseded prefix"
             );
-            return;
+            return false;
         }
 
         // **A promoting flush's ordinals are positions**, assigned as `dict.len() + i` against the
@@ -13251,7 +13267,7 @@ impl Executor {
                 "discarding a completed flush whose dictionary moved under it: the ordinals in \
                  its extent are positions, and they are no longer the positions it assigned"
             );
-            return;
+            return false;
         }
 
         // **Assembled here, from the live partition manifest, and written before the swap.**
@@ -13264,7 +13280,7 @@ impl Executor {
                 partition = %completed.partition,
                 "discarding a completed flush for a partition this bundle no longer carries"
             );
-            return;
+            return false;
         };
         // **Composed before the manifest is written, because a composition that refuses must not
         // leave a published manifest naming the extents it refused.** The refusal is unreachable —
@@ -13349,7 +13365,7 @@ impl Executor {
                          open; discarding it rather than publishing a manifest naming a column no \
                          request could read. Its files are orphans and the buffer is retained"
                     );
-                    return;
+                    return false;
                 }
             }
         };
@@ -13368,12 +13384,12 @@ impl Executor {
                      columns; discarding it rather than publishing a bundle whose filter answers \
                      would be wrong. Its files are orphans and the buffer is retained"
                 );
-                return;
+                return false;
             }
         };
-        mark = self
+        *mark = self
             .health
-            .flush_lap(crate::flush::FlushStage::Compose, mark);
+            .flush_lap(crate::flush::FlushStage::Compose, *mark);
 
         let mut manifest = partition_data.manifest.clone();
         let manifest_n = self.allocate_manifest_n();
@@ -13491,9 +13507,9 @@ impl Executor {
             &live.vocabularies,
             &live.bundle.manifest.vocabularies,
         );
-        mark = self
+        *mark = self
             .health
-            .flush_lap(crate::flush::FlushStage::Manifest, mark);
+            .flush_lap(crate::flush::FlushStage::Manifest, *mark);
 
         // **The commit point, and it is still the manifest** — only the thread moved. A failure
         // here discards the flush: its files become orphans nothing references, the buffer is
@@ -13523,11 +13539,11 @@ impl Executor {
                 "ALARM: a completed flush's side-manifest could not be committed; its files are \
                  orphans, the buffer is retained, and the next tick will re-plan"
             );
-            return;
+            return false;
         }
-        mark = self
+        *mark = self
             .health
-            .flush_lap(crate::flush::FlushStage::Commit, mark);
+            .flush_lap(crate::flush::FlushStage::Commit, *mark);
 
         let seg_id = completed.segment.seg_id.clone();
         // Stamped with the flush's own incarnation for `Manifest::with_scoped_columns`, which
@@ -13553,7 +13569,7 @@ impl Executor {
                 // plan and here. Discarded, not forced: forcing would put the segment at a
                 // `row_base` that is no longer the end of row space, aliasing rows.
                 tracing::warn!(error = %e, "discarding a completed flush that no longer rebases");
-                return;
+                return false;
             }
         };
         // **And the family's own list gains the view this flush wrote a base for**
@@ -13567,9 +13583,9 @@ impl Executor {
             let manifest = next_bundle.manifest.with_scoped_columns(&scoped_columns);
             next_bundle.with_views(manifest)
         };
-        mark = self
+        *mark = self
             .health
-            .flush_lap(crate::flush::FlushStage::WithSegment, mark);
+            .flush_lap(crate::flush::FlushStage::WithSegment, *mark);
 
         // **The segment's shape memberships, installed before the swap** (`polygon-membership.md`
         // §6.3). The pool resolved them against the levels as held when the flush was planned; a
@@ -13599,9 +13615,9 @@ impl Executor {
                 None => {}
             }
         }
-        mark = self
+        *mark = self
             .health
-            .flush_lap(crate::flush::FlushStage::ShapesInstall, mark);
+            .flush_lap(crate::flush::FlushStage::ShapesInstall, *mark);
 
         // **Exactly what was consumed, from the then-current buffer.** O(buffered) on this thread,
         // which is the term the deny-ack memo measured as dominant at 1 M buffered (165 ms p50);
@@ -13622,9 +13638,9 @@ impl Executor {
         self.health
             .buffered_items
             .store(buffer.len(), Ordering::SeqCst);
-        mark = self
+        *mark = self
             .health
-            .flush_lap(crate::flush::FlushStage::BufferRebase, mark);
+            .flush_lap(crate::flush::FlushStage::BufferRebase, *mark);
 
         let watermark = next_bundle
             .partitions
@@ -13639,9 +13655,9 @@ impl Executor {
         // or deleted item its place in the mask the moment it acquires a row: until now it was
         // buffered, had no row, and so appeared in no mask at all.
         let denied = Arc::new(crate::compose::derive_denied(&live.overlay, &next_bundle));
-        mark = self
+        *mark = self
             .health
-            .flush_lap(crate::flush::FlushStage::Denied, mark);
+            .flush_lap(crate::flush::FlushStage::Denied, *mark);
 
         // **And every stored level's held row form gains this segment's rows, before the swap.**
         // A form covers the whole row space, so a segment nothing added to it would leave every
@@ -13675,9 +13691,9 @@ impl Executor {
                 )
             });
         }
-        mark = self
+        *mark = self
             .health
-            .flush_lap(crate::flush::FlushStage::Artifacts, mark);
+            .flush_lap(crate::flush::FlushStage::Artifacts, *mark);
 
         let next = Arc::new(Generation {
             prefix: live.prefix.clone(),
@@ -13727,22 +13743,25 @@ impl Executor {
             .flush_rows_published
             .fetch_add(completed.consumed.len() as u64, Ordering::Relaxed);
         self.health.record_tier_fragmentation(completed.tier_tally);
-        mark = self.health.flush_lap(crate::flush::FlushStage::Swap, mark);
+        *mark = self.health.flush_lap(crate::flush::FlushStage::Swap, *mark);
 
         self.rotate_wal();
-        mark = self
+        *mark = self
             .health
-            .flush_lap(crate::flush::FlushStage::Rotate, mark);
+            .flush_lap(crate::flush::FlushStage::Rotate, *mark);
         // **The superseded generation is freed here, under a stage, rather than at the return.**
         // `live` is its last reference once the swap has happened (a request in flight holds its
         // own, and then the free lands on that thread instead), and its buffer holds every row
         // that was buffered before the swap: an O(buffered) free on this thread, beside the
-        // O(buffered) clone `BufferRebase` measures and about four times its cost per row on
-        // medcpt-1m (`probes/2026-09-05-flush-attribution/`).
+        // O(buffered) clone `BufferRebase` measures. Per row published on medcpt-1m the drop read
+        // 0.9 µs against the clone's 0.24; per item the two are close, the clone copying the
+        // buffer minus the consumed ids and the drop freeing the whole of it
+        // (`probes/2026-09-05-flush-attribution/`).
         drop(live);
         drop(completed.consumed);
         self.health
-            .flush_lap(crate::flush::FlushStage::DropSuperseded, mark);
+            .flush_lap(crate::flush::FlushStage::DropSuperseded, *mark);
+        true
     }
 
     /// Reclaim what the publication just made redundant — **after** the generation swap and never

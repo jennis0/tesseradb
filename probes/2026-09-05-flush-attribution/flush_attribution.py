@@ -46,12 +46,12 @@ from test_corpora.common import ingest_cycle  # noqa: E402
 TICK = ("plan", "dispatch")
 PUBLISH = (
     "compose", "manifest", "manifest_commit", "with_segment", "shapes_install",
-    "buffer_rebase", "denied", "artifacts", "swap", "rotate", "drop_superseded",
+    "buffer_rebase", "denied", "artifacts", "swap", "rotate", "drop_superseded", "discarded",
 )
 EXECUTE = (
     "promote", "rows", "segment", "delta_tier", "filter_extents", "entity_terms",
     "scoped_extents", "record_extent", "text_extents", "digests", "reopen", "shapes",
-    "drop_plan",
+    "drop_plan", "failed",
 )
 
 
@@ -136,7 +136,15 @@ def drain_flushes(control, log) -> dict:
             not st["flush"]["in_flight"]
             and st["flush"]["flushes"] == st["flush_stages"]["executions"]
         )
-        key = (st["flush"]["flushes"], st["flush_stages"]["executions"], st["flush"]["buffered_items"])
+        # `flushes` moves inside the publication, before its last stages are lapped, so the two
+        # walls are in the key: a still wall is a publication that has returned.
+        key = (
+            st["flush"]["flushes"],
+            st["flush_stages"]["executions"],
+            st["flush"]["buffered_items"],
+            st["flush_stages"]["executor_nanos"]["publish_wall"],
+            st["flush_stages"]["pool_nanos"]["pool_wall"],
+        )
         if settled and previous == key:
             break
         if time.perf_counter() > deadline:

@@ -14,9 +14,11 @@ not run here**; the binding term at a large base is not named by this document.
 
 A 900,000-row base, a 100,000-row hold-out through `/control/ingest` at C=8 in 10,000-row
 batches, the row trigger at its default 40,000, `--stop-after-ingest`. The ingest phase took
-0.6 s at 157,000 rows/s; a flush at this base takes longer than that, so neither of the two
+0.6 s at 170,000 rows/s; a flush at this base takes longer than that, so neither of the two
 flushes the trigger asked for had published when the phase ended, and both landed in the 2.0 s
-drain the probe waits for. Two executions, two publications, 100,000 rows in each count.
+drain the probe waits for. Two executions, two publications, 100,000 rows in each count. Another
+track's server was idle-serving on this box during the run; two earlier runs on a quiet box read
+within 12% of every figure below.
 
 Milliseconds per flush and microseconds per row, differenced across the phase from
 `/control/status`'s `write_executor.flush_stages` under `bench-timing`. Per row divides a pool
@@ -25,67 +27,74 @@ divide by executions.
 
 | stage | thread | ms / flush | µs / row |
 |---|---|---|---|
-| `promote` | pool | 14.9 | 0.30 |
-| `rows` | pool | 12.9 | 0.26 |
-| `segment` | pool | 37.2 | 0.74 |
+| `promote` | pool | 8.7 | 0.18 |
+| `rows` | pool | 11.9 | 0.24 |
+| `segment` | pool | 34.9 | 0.70 |
 | `delta_tier` | pool | 1.4 | 0.03 |
-| `filter_extents` | pool | 33.8 | 0.68 |
+| `filter_extents` | pool | 32.8 | 0.66 |
 | `entity_terms` | pool | 1.6 | 0.03 |
 | `scoped_extents` | pool | 0.0 | 0.00 |
-| `record_extent` | pool | 58.5 | 1.17 |
-| **`text_extents`** | pool | **474.9** | **9.50** |
-| `digests` | pool | 5.4 | 0.11 |
+| `record_extent` | pool | 55.7 | 1.11 |
+| **`text_extents`** | pool | **426.5** | **8.53** |
+| `digests` | pool | 5.2 | 0.10 |
 | `reopen` | pool | 0.1 | 0.00 |
 | `shapes` | pool | 0.0 | 0.00 |
-| `drop_plan` | pool | 28.7 | 0.57 |
-| **execute sum** | pool | **669.3** | **13.39** |
-| `pool_wall` | pool | 669.4 | 13.39 |
-| *unattributed* | pool | 0.01 | 0.00 |
-| `plan` | executor, at the tick | 57.9 | 1.16 |
-| `dispatch` | executor, at the tick | 1.8 | 0.04 |
-| `compose` | executor | 11.2 | 0.22 |
+| `drop_plan` | pool | 19.9 | 0.40 |
+| `failed` | pool | 0.0 | 0.00 |
+| **execute sum** | pool | **598.7** | **11.98** |
+| `pool_wall` | pool | 598.7 | 11.98 |
+| *unattributed* | pool | 0.005 | 0.00 |
+| `plan` | executor, at the tick | 50.4 | 1.01 |
+| `dispatch` | executor, at the tick | 1.3 | 0.03 |
+| `compose` | executor | 8.1 | 0.16 |
 | `manifest` | executor | 0.0 | 0.00 |
-| `manifest_commit` | executor | 5.6 | 0.11 |
+| `manifest_commit` | executor | 3.7 | 0.07 |
 | `with_segment` | executor | 0.1 | 0.00 |
 | `shapes_install` | executor | 0.0 | 0.00 |
-| `buffer_rebase` | executor | 13.1 | 0.26 |
+| `buffer_rebase` | executor | 12.1 | 0.24 |
 | `denied` | executor | 0.0 | 0.00 |
 | `artifacts` | executor | 0.0 | 0.00 |
 | `swap` | executor | 0.0 | 0.00 |
-| `rotate` | executor | 13.6 | 0.27 |
-| **`drop_superseded`** | executor | **50.1** | **1.00** |
-| **publish sum** | executor | **93.8** | **1.88** |
-| `publish_wall` | executor | 93.9 | 1.88 |
-| *unattributed* | executor | 0.04 | 0.00 |
+| `rotate` | executor | 9.9 | 0.20 |
+| **`drop_superseded`** | executor | **43.7** | **0.88** |
+| `discarded` | executor | 0.0 | 0.00 |
+| **publish sum** | executor | **77.7** | **1.55** |
+| `publish_wall` | executor | 77.7 | 1.55 |
+| *unattributed* | executor | 0.02 | 0.00 |
 
-**The laps partition both walls.** The pool's thirteen stages sum to within 10 µs of
-`execute_flush`'s 669 ms; the executor's eleven sum to within 36 µs of `publish_flush`'s 94 ms.
+**The laps partition both walls.** The pool's fourteen stages sum to within 5 µs of
+`execute_flush`'s 599 ms; the executor's twelve sum to within 23 µs of `publish_flush`'s 78 ms.
+A failed execution or a discarded publication charges its tail to `failed` or `discarded`, so the
+partition holds whichever way a flush ends; both were zero here.
 The residue is the clock reads. The first run of this probe left 22 ms and 39 ms per flush
-unattributed, and both were the locals dropping at the return: the plan's 50,000 buffered items
+unattributed (3.7% and 50% of their walls), and both were the locals dropping at the return: the plan's 50,000 buffered items
 on the pool, and on the executor the superseded generation, whose buffer holds every row buffered
 before the swap. Both are now stages. The partition is also asserted by
 `crates/tessera-engine/tests/flush_attribution.rs` on a fixture.
 
 ## What the figures say at this base, and what they do not
 
-At a 900,000-row base a flush of 50,000 rows costs **669 ms on the pool and 152 ms on the
-executor** (58 ms to plan at the tick, 94 ms to publish). Nothing here is a large-base term yet:
+At a 900,000-row base a flush of 50,000 rows costs **599 ms on the pool and 128 ms on the
+executor** (50 ms to plan at the tick, 78 ms to publish). Nothing here is a large-base term yet:
 
-- **`text_extents` is 71% of the pool's time**, 9.5 µs per row. MedCPT declares an indexed text
+- **`text_extents` is 71% of the pool's time**, 8.5 µs per row. MedCPT declares an indexed text
   column, and this is its analyser and the layer's dictionary, postings and presence for the
   batch. It is work per flushed row, not per base row, and the 36M cell will show whether it
-  stays at 9.5.
+  stays at 8.5.
 - **The executor pays O(B) three times per flush**, where `B` is the buffer's occupancy: the
-  plan clones every buffered item of the view and sorts them (`plan`, 1.16 µs per row), the
-  rebase clones the buffer minus the consumed ids (`buffer_rebase`, 0.26), and the swap frees
-  the superseded buffer (`drop_superseded`, 1.00; it lands on this thread when no request still
+  plan clones every buffered item of the view and sorts them (`plan`, 1.01 µs per row), the
+  rebase clones the buffer minus the consumed ids (`buffer_rebase`, 0.24), and the swap frees
+  the superseded buffer (`drop_superseded`, 0.88; it lands on this thread when no request still
   holds the old generation, and on that request's thread otherwise). The plan's items are freed
-  again on the pool (`drop_plan`, 0.57). Freeing a buffered item costs more than copying it.
+  again on the pool (`drop_plan`, 0.40). Those are per row published. Per item they are closer:
+  over the two flushes the clone copied 50,000 items (100,000 buffered minus 50,000 consumed,
+  then none) and the drop freed 150,000, so 0.48 µs per item copied against 0.58 per item freed.
 - The **plan takes every buffered row of the view**, not `flush_max_items` of them. When a flush
   is slower than the trigger's period the next plan is `B`-sized, which is the `B/W ≈ 38` the
-  executor probe recorded at rung 4 and the reason the executor's O(B) terms matter there.
-- `rotate` (13.6 ms) is the overlay snapshot and a new WAL member; `compose` (11.2 ms) opens the
-  flush's extents onto the live columns; `manifest_commit` (5.6 ms) is the side-manifest write
+  executor probe recorded at rung 4. That the executor's O(B) terms matter there is inferred
+  from this, not measured on this cell.
+- `rotate` (9.9 ms) is the overlay snapshot and a new WAL member; `compose` (8.1 ms) opens the
+  flush's extents onto the live columns; `manifest_commit` (3.7 ms) is the side-manifest write
   and its fsyncs. Each is a candidate to grow with the base or the overlay, and none can be
   ranked from a 900,000-row base.
 
