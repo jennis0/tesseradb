@@ -55,7 +55,7 @@ EXECUTE = (
 )
 # The sub-stages that partition `text_extents`, printed indented under it. They are in
 # `pool_nanos` and not in `EXECUTE`: counted there they would double `text_extents`.
-TEXT = ("text_rows", "text_tokenise", "text_terms", "text_dict", "text_postings", "text_presence")
+TEXT = ("text_rows", "text_tokenise_terms", "text_dict", "text_postings", "text_presence")
 
 
 def _per(nanos: int, count: int, rows: int) -> dict:

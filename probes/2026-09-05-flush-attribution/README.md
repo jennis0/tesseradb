@@ -76,44 +76,63 @@ before the swap. Both are now stages. The partition is also asserted by
 
 ### Inside `text_extents`, medcpt-1m
 
-**Measured 2026-09-05** (`runs/medcpt-1m-f010-text.json`), the same cell and flags, the binary
-at `e54ff573` with the six `Text*` sub-laps. The controller's 36M ingest cycle was running on the
-box throughout (load average 14.6 on 12 cores), so every figure here is inflated against the
-table above: ingest ran at 57,226 rows/s against 170,000, and `text_extents` read 10.3 µs a row
-against 8.5. Read the shares. Two executions, two publications, 100,000 rows in each count.
-
 `write_text_extents` runs once per indexed `text` column (MedCPT declares one). Per column it
 gathers the column's rows from the plan and creates the layer's directory; then for each row it
-runs the analyser over the prose (`Analyser::tokens`: the case fold, the NFKC normalisation and
-the word segmenter, returning one `String` per token) and inserts each token into a `BTreeMap`
-from term to posting list; then it writes the dictionary from the map's keys, the postings from
-its values, and the presence bitmap. The sub-laps are those six, and the two per-row ones read
-the clock twice a row.
+runs the analyser over the prose (the case fold, the NFKC normalisation and the word segmenter)
+and inserts each token into a `BTreeMap` from term to posting list; then it writes the dictionary
+from the map's keys, the postings from its values, and the presence bitmap. The sub-laps are
+those stages, and the per-row one reads the clock once a row.
+
+**Measured 2026-09-05** on a quiet box (load average 3.3), `runs/medcpt-1m-f010-text-taken.json`,
+the same cell and flags, the binary with the change below. Two executions, two publications,
+100,000 rows in each count; ingest 148,333 rows/s.
 
 | sub-stage | ms / flush | µs / row | share of `text_extents` |
 |---|---|---|---|
-| `text_rows` | 3.9 | 0.08 | 0.8% |
-| **`text_tokenise`** | **272.5** | **5.45** | **52.8%** |
-| **`text_terms`** | **210.5** | **4.21** | **40.8%** |
-| `text_dict` | 5.3 | 0.11 | 1.0% |
-| `text_postings` | 22.5 | 0.45 | 4.4% |
-| `text_presence` | 0.5 | 0.01 | 0.1% |
-| **text sum** | **515.2** | **10.30** | 99.9% |
-| `text_extents` | 515.7 | 10.31 | |
-| *unattributed* | 0.6 | 0.01 | 0.1% |
+| `text_rows` | 2.8 | 0.06 | 0.7% |
+| **`text_tokenise_terms`** | **375.1** | **7.50** | **94.2%** |
+| `text_dict` | 3.5 | 0.07 | 0.9% |
+| `text_postings` | 16.2 | 0.32 | 4.1% |
+| `text_presence` | 0.3 | 0.01 | 0.1% |
+| **text sum** | **397.9** | **7.96** | 99.9% |
+| `text_extents` | 398.2 | 7.96 | |
+| *unattributed* | 0.35 | 0.007 | 0.1% |
 
-**The sub-laps partition `text_extents`**: 0.6 ms a flush is unattributed, which is the
-digest-list pushes after the call returns and the 200,000 clock reads. The pool's partition still
-closes (5 µs a flush unattributed); the sub-laps are in `pool_nanos` and not in the execute sum.
+**The sub-laps partition `text_extents`**: 0.35 ms a flush is unattributed, which is the
+digest-list pushes after the call returns and the 100,000 clock reads. The pool's partition still
+closes (4 µs a flush unattributed); the sub-laps are in `pool_nanos` and not in the execute sum.
 
-**94% of the text index is the per-row loop, and none of it is the files.** The analyser is
-5.45 µs a row over a ~100-character title, and the term-map insert is 4.21: the three writes
-together are 0.57. The map insert is one `String` allocation per token from `Analyser::tokens`
-and a `BTreeMap<String, _>` lookup per token; `tessera-analyse` documents that a term seen before
-is looked up and its freshly allocated key dropped, and provides `for_each_token`, which yields
-borrowed tokens over reused buffers for exactly this loop. The build's text index uses it; the
-flush's does not. Not changed here: the stage does what it did, and the sub-laps say what a
-change would have to move.
+**94% of the text index is the analyser and the term map, and none of it is the files**: the
+three writes together are 0.40 µs a row.
+
+**One change, taken.** The loop first ran `Analyser::tokens`, one `String` per token, and
+inserted each into the map by value; `tessera-analyse` documents that a term seen before is then
+looked up and its freshly allocated key dropped, and provides `for_each_token`, borrowed tokens
+over reused buffers, which the build's text index already used. The flush's loop now uses it and
+allocates a key on a term's first sighting alone. Under the earlier two per-row laps the owned
+form read, on a loaded box (load average 14.6, `runs/medcpt-1m-f010-text.json`), 5.45 µs a row
+in the analyser and 4.21 in the map insert. The output is the same three files:
+`flush::tests::a_text_layer_round_trips_through_the_files_it_writes` checks the dictionary,
+postings and presence against an expectation computed from `Analyser::tokens` row by row.
+
+Before and after, the two binaries alternated on the same box; the loaded pairs are in the
+session's scratch and the quiet pair is `runs/medcpt-1m-f010-text-taken.json` (after) and, for the
+before, the figures here:
+
+| | load average | `text_extents` µs/row | analyser + map µs/row | execute sum µs/row |
+|---|---|---|---|---|
+| before, owned tokens | 3.8 | 9.06 | 8.50 | 12.53 |
+| after, borrowed tokens | 3.5 | 8.00 | 7.55 | 11.23 |
+| before | 3.3 | 8.76 | 8.22 | 12.49 |
+| after | 3.1 | 7.96 | 7.50 | 11.14 |
+| before, under the controller's 36M cycle | 15.9 | 9.33 | 8.80 | |
+| after, under it | 14.9 | 8.77 | 8.20 | |
+
+The change removes 0.8 to 1.1 µs a row from `text_extents`, 9 to 12%, and the pool's flush cost
+falls from 12.5 to 11.2 µs a row on this cell. What is left, 7.5 µs a row, is the analyser over
+a ~100-character title with the map's `&str` lookup inside its callback; the two are one lap
+because the callback interleaves them. Under load the differences are inside this box's
+run-to-run bar and only the quiet pairs are read.
 
 ## What the figures say at this base, and what they do not
 

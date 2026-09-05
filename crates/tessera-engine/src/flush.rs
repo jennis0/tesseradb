@@ -137,19 +137,17 @@ pub enum FlushStage {
     /// `write_record_extent`: the record-blob extent.
     RecordExtent,
     /// `write_text_extents`: the text layers of the entity-scoped `text` columns. Partitioned by
-    /// the six `Text*` stages that follow; a group-scoped family's text layer is written by
+    /// the five `Text*` stages that follow; a group-scoped family's text layer is written by
     /// `write_scoped_extents` and is in `ScopedExtents`, undivided.
     TextExtents,
     /// Within [`FlushStage::TextExtents`]: gathering one column's rows from the plan and creating
     /// the layer's directory.
     TextRows,
-    /// Within [`FlushStage::TextExtents`]: the analyser over each row's prose (`Analyser::tokens`:
-    /// the case fold, the normalisation and the word segmenter, one `String` per token) and the
-    /// row's presence bit.
-    TextTokenise,
-    /// Within [`FlushStage::TextExtents`]: inserting each row's tokens into the term map, a
-    /// `BTreeMap` from term to its posting list.
-    TextTerms,
+    /// Within [`FlushStage::TextExtents`]: the analyser over each row's prose
+    /// (`Analyser::for_each_token`: the case fold, the normalisation and the word segmenter, each
+    /// token borrowed) and, in its callback, the token's insert into the term map, a `BTreeMap`
+    /// from term to its posting list. One lap for both: the callback interleaves them.
+    TextTokeniseTerms,
     /// Within [`FlushStage::TextExtents`]: `write_sorted_dict` over the term map's keys, which
     /// the map already holds in order. None of the three writes fsyncs.
     TextDict,
@@ -180,7 +178,7 @@ pub enum FlushStage {
 const _: () = assert!(FlushStage::COUNT == FlushStage::PoolWall as usize + 1);
 
 impl FlushStage {
-    pub const COUNT: usize = 36;
+    pub const COUNT: usize = 35;
     /// The executor thread's stages, in the order they run. `Plan` and `Dispatch` run at the
     /// tick; the rest run at publication.
     pub const EXECUTOR: [FlushStage; 15] = [
@@ -217,7 +215,7 @@ impl FlushStage {
     ];
     /// The pool's stages, in the order they run, the `Text*` sub-stages after the stage they
     /// partition.
-    pub const POOL: [FlushStage; 21] = [
+    pub const POOL: [FlushStage; 20] = [
         FlushStage::Promote,
         FlushStage::Rows,
         FlushStage::Segment,
@@ -228,8 +226,7 @@ impl FlushStage {
         FlushStage::RecordExtent,
         FlushStage::TextExtents,
         FlushStage::TextRows,
-        FlushStage::TextTokenise,
-        FlushStage::TextTerms,
+        FlushStage::TextTokeniseTerms,
         FlushStage::TextDict,
         FlushStage::TextPostings,
         FlushStage::TextPresence,
@@ -258,10 +255,9 @@ impl FlushStage {
         FlushStage::Failed,
     ];
     /// The stages that partition `TextExtents`, in the order they run for each text column.
-    pub const TEXT: [FlushStage; 6] = [
+    pub const TEXT: [FlushStage; 5] = [
         FlushStage::TextRows,
-        FlushStage::TextTokenise,
-        FlushStage::TextTerms,
+        FlushStage::TextTokeniseTerms,
         FlushStage::TextDict,
         FlushStage::TextPostings,
         FlushStage::TextPresence,
@@ -293,8 +289,7 @@ impl FlushStage {
             FlushStage::RecordExtent => "record_extent",
             FlushStage::TextExtents => "text_extents",
             FlushStage::TextRows => "text_rows",
-            FlushStage::TextTokenise => "text_tokenise",
-            FlushStage::TextTerms => "text_terms",
+            FlushStage::TextTokeniseTerms => "text_tokenise_terms",
             FlushStage::TextDict => "text_dict",
             FlushStage::TextPostings => "text_postings",
             FlushStage::TextPresence => "text_presence",
@@ -1692,13 +1687,38 @@ fn write_text_extents(
             laps: &mut *laps,
             mark: &mut mark,
         });
-        if let Some(extent) =
-            write_text_layer(&rel_dir, &spec.name, None, &spec.analyser, rows, ctx, sub)?
-        {
+        if let Some(extent) = write_text_layer(
+            &rel_dir,
+            &spec.name,
+            None,
+            &spec.analyser,
+            rows,
+            TextTarget::of(ctx),
+            sub,
+        )? {
             out.push(extent);
         }
     }
     Ok(out)
+}
+
+/// Where a text layer's files go: the prefix they are written under, the segment they are named
+/// for, and the incarnation an extent of a view carries. What [`write_text_layer`] needs of a
+/// [`FlushContext`], so a test can write a layer without building one.
+struct TextTarget<'a> {
+    prefix_dir: &'a Path,
+    seg_id: &'a str,
+    incarnation: tessera_types::view::ViewIncarnation,
+}
+
+impl<'a> TextTarget<'a> {
+    fn of(ctx: &'a FlushContext) -> Self {
+        TextTarget {
+            prefix_dir: &ctx.prefix_dir,
+            seg_id: &ctx.seg_id,
+            incarnation: ctx.incarnation,
+        }
+    }
 }
 
 /// One text layer: its own dictionary over this batch's terms, the postings against it, and the
@@ -1713,23 +1733,28 @@ fn write_text_extents(
 /// `None` where no row carried a value, for the reason [`write_text_extents`] gives.
 ///
 /// `sub` takes the `Text*` sub-laps where the caller's stage is `TextExtents`, and is `None` from
-/// the scoped pass, whose layer is in `ScopedExtents`. The two per-row laps read the clock twice
-/// a row under `bench-timing` and are a moved mark otherwise.
+/// the scoped pass, whose layer is in `ScopedExtents`. The per-row lap reads the clock once a row
+/// under `bench-timing` and is a moved mark otherwise.
+///
+/// The tokens are borrowed (`Analyser::for_each_token`) and a term allocates its key on its first
+/// sighting alone; a term seen before is looked up by `&str`. Measured on medcpt-1m against the
+/// owned-token form (`probes/2026-09-05-flush-attribution/`).
 fn write_text_layer(
     rel_dir: &str,
     column: &str,
     view: Option<String>,
     analyser: &tessera_analyse::Analyser,
     rows: Vec<(u32, &WalScalar)>,
-    ctx: &FlushContext,
+    target: TextTarget<'_>,
     mut sub: Option<TextLaps<'_>>,
 ) -> Result<Option<tessera_store::manifest::TextExtent>, FlushFailed> {
-    let dir = ctx.prefix_dir.join(rel_dir);
+    let dir = target.prefix_dir.join(rel_dir);
     std::fs::create_dir_all(&dir).map_err(|e| FlushFailed(format!("{}: {e}", dir.display())))?;
     text_lap(&mut sub, FlushStage::TextRows);
 
     let mut terms: std::collections::BTreeMap<String, Vec<u32>> = std::collections::BTreeMap::new();
     let mut presence = croaring::Bitmap::new();
+    let mut scratch = tessera_analyse::TokenScratch::default();
     for (entity, value) in rows {
         let prose = match value {
             WalScalar::Utf8(s) => s.as_str(),
@@ -1743,39 +1768,45 @@ fn write_text_layer(
             }
         };
         presence.add(entity);
-        let tokens = analyser.tokens(prose);
-        text_lap(&mut sub, FlushStage::TextTokenise);
-        for token in tokens {
-            let postings = terms.entry(token).or_default();
-            if postings.last() != Some(&entity) {
-                postings.push(entity);
-            }
-        }
-        text_lap(&mut sub, FlushStage::TextTerms);
+        analyser.for_each_token(
+            prose,
+            &mut scratch,
+            &mut |token| match terms.get_mut(token) {
+                Some(postings) => {
+                    if postings.last() != Some(&entity) {
+                        postings.push(entity);
+                    }
+                }
+                None => {
+                    terms.insert(token.to_string(), vec![entity]);
+                }
+            },
+        );
+        text_lap(&mut sub, FlushStage::TextTokeniseTerms);
     }
     if presence.is_empty() {
         return Ok(None);
     }
 
-    let dict_rel = format!("{rel_dir}/{}-dict.bin", ctx.seg_id);
-    let postings_rel = format!("{rel_dir}/{}-postings.arrow", ctx.seg_id);
-    let presence_rel = format!("{rel_dir}/{}-presence.roaring", ctx.seg_id);
+    let dict_rel = format!("{rel_dir}/{}-dict.bin", target.seg_id);
+    let postings_rel = format!("{rel_dir}/{}-postings.arrow", target.seg_id);
+    let presence_rel = format!("{rel_dir}/{}-presence.roaring", target.seg_id);
     tessera_filter::write_sorted_dict(
-        &ctx.prefix_dir.join(&dict_rel),
+        &target.prefix_dir.join(&dict_rel),
         terms.keys().map(String::as_str),
     )
     .map_err(|e| FlushFailed(format!("{dict_rel}: {e}")))?;
     text_lap(&mut sub, FlushStage::TextDict);
     let per_term: Vec<Vec<u32>> = terms.into_values().collect();
     tessera_authz::postings::write_postings(
-        &ctx.prefix_dir.join(&postings_rel),
+        &target.prefix_dir.join(&postings_rel),
         &per_term,
         tessera_types::SMALL_TERM_THRESHOLD_DEFAULT,
     )
     .map_err(|e| FlushFailed(format!("{postings_rel}: {e}")))?;
     text_lap(&mut sub, FlushStage::TextPostings);
     std::fs::write(
-        ctx.prefix_dir.join(&presence_rel),
+        target.prefix_dir.join(&presence_rel),
         presence.serialize::<croaring::Portable>(),
     )
     .map_err(|e| FlushFailed(format!("{presence_rel}: {e}")))?;
@@ -1785,7 +1816,7 @@ fn write_text_layer(
         column: column.to_string(),
         // The incarnation travels with the view, and is `None` for the same rows `view` is:
         // an entity-scoped column belongs to no view (decision 0115).
-        incarnation: view.as_ref().map(|_| ctx.incarnation),
+        incarnation: view.as_ref().map(|_| target.incarnation),
         view,
         dict: dict_rel,
         postings: postings_rel,
@@ -1890,7 +1921,7 @@ fn write_scoped_extents(plan: &FlushPlan, ctx: &FlushContext) -> Result<ScopedWr
                 Some(ctx.scoped_view.clone()),
                 analyser,
                 scoped_rows(spec, plan)?,
-                ctx,
+                TextTarget::of(ctx),
                 None,
             )? {
                 texts.push(extent);
@@ -2528,6 +2559,114 @@ mod tests {
         let plan = plan(&generation).unwrap();
         let ids: Vec<u64> = plan.items.iter().map(|(e, _)| e.raw()).collect();
         assert_eq!(ids, vec![3, 7, 9]);
+    }
+
+    // ---- the text layer's three files (write-path §4.3) -----------------------------------
+
+    /// **The three files reconstruct the batch's terms, through the readers that serve them.**
+    /// The expectation is computed here from `Analyser::tokens` a row at a time, so the writer's
+    /// borrowed-token loop is checked against the owned-token segmentation it must agree with:
+    /// the dictionary is the sorted distinct term set, each term's posting is the ascending list
+    /// of the entities whose prose contains it (once, however often the row repeats it), and the
+    /// presence bitmap holds every entity that carried prose, the one whose prose analyses to no
+    /// term included.
+    #[test]
+    fn a_text_layer_round_trips_through_the_files_it_writes() {
+        let analyser = tessera_analyse::Analyser::default();
+        let prose: Vec<(u32, WalScalar)> = vec![
+            (3, WalScalar::Utf8("Alpha beta".to_string())),
+            (5, WalScalar::Utf8("beta GAMMA, beta!".to_string())),
+            (7, WalScalar::Null),
+            (9, WalScalar::Utf8(String::new())),
+            (11, WalScalar::Utf8("gamma alpha alpha delta".to_string())),
+        ];
+
+        // The expectation, from the owned-token analyser one row at a time.
+        let mut expected_terms: std::collections::BTreeMap<String, Vec<u32>> = Default::default();
+        let mut expected_presence = Vec::new();
+        for (entity, value) in &prose {
+            let WalScalar::Utf8(text) = value else {
+                continue;
+            };
+            expected_presence.push(*entity);
+            let distinct: std::collections::BTreeSet<String> =
+                analyser.tokens(text).into_iter().collect();
+            for term in distinct {
+                expected_terms.entry(term).or_default().push(*entity);
+            }
+        }
+        assert!(
+            expected_terms.values().any(|p| p.len() > 1),
+            "the fixture shares a term across rows"
+        );
+        assert!(
+            !analyser.tokens("beta GAMMA, beta!").len().eq(&2),
+            "the fixture repeats a term within a row"
+        );
+
+        let dir = tempfile::TempDir::new().expect("a temp dir");
+        let rows: Vec<(u32, &WalScalar)> = prose.iter().map(|(e, v)| (*e, v)).collect();
+        let extent = write_text_layer(
+            "attrs/title/extents",
+            "title",
+            None,
+            &analyser,
+            rows,
+            TextTarget {
+                prefix_dir: dir.path(),
+                seg_id: "flush-1-0",
+                incarnation: tessera_types::view::DECLARED_INCARNATION,
+            },
+            None,
+        )
+        .expect("the layer writes")
+        .expect("rows carried prose");
+
+        let dict = tessera_filter::SortedDict::open(
+            &dir.path().join(&extent.dict),
+            tessera_filter::Access::Mapped,
+        )
+        .expect("the dictionary reopens");
+        dict.self_check().expect("the dictionary is well formed");
+        let mut keys = Vec::new();
+        dict.walk(|_, key| keys.push(key.to_string()))
+            .expect("the dictionary walks");
+        assert_eq!(
+            keys,
+            expected_terms.keys().cloned().collect::<Vec<_>>(),
+            "the dictionary is the sorted distinct term set"
+        );
+
+        let postings = tessera_authz::postings::PostingsReader::open(
+            &dir.path().join(&extent.postings),
+            false,
+        )
+        .expect("the postings reopen");
+        assert_eq!(postings.term_count() as usize, expected_terms.len());
+        for (ordinal, (term, expected)) in expected_terms.iter().enumerate() {
+            let entities: Vec<u32> = match postings
+                .posting_at(ordinal as u32)
+                .expect("the record decodes")
+                .expect("every term has a record")
+            {
+                tessera_authz::postings::PostingRef::Array(bytes) => bytes
+                    .chunks_exact(4)
+                    .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                    .collect(),
+                tessera_authz::postings::PostingRef::Roaring(view) => view.iter().collect(),
+            };
+            assert_eq!(&entities, expected, "the posting of '{term}'");
+        }
+
+        let presence = croaring::Bitmap::deserialize::<croaring::Portable>(
+            &std::fs::read(dir.path().join(&extent.presence)).expect("the presence reads"),
+        );
+        assert_eq!(
+            presence.iter().collect::<Vec<_>>(),
+            expected_presence,
+            "presence holds every entity with prose, the empty string's included"
+        );
+        assert_eq!(expected_presence, vec![3, 5, 9, 11]);
     }
 
     // ---- the keyword family's extent (records §4.3, §7) ------------------------------------
