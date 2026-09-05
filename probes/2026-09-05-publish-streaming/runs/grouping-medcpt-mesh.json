@@ -1,0 +1,301 @@
+{
+  "rung": "medcpt",
+  "layer": "mesh/descriptors",
+  "member_file": "mesh-descriptors-members.parquet",
+  "bucket_rows": 16000000,
+  "max_bytes": 33554432,
+  "route_max_body_bytes": 67108864,
+  "wall_s": 333.0,
+  "peak_rss_bytes": 1279844352,
+  "peak_work_bytes": 15480791130,
+  "bodies": 558,
+  "body_bytes": 16707248004,
+  "artifacts_assembled": 30172,
+  "members_assembled": 1113517598,
+  "edges_assembled": 41292,
+  "declined_artifacts_n": 45,
+  "declined_members": 544920209,
+  "declined_artifacts": [
+    {
+      "key": "amino acids, peptides, and proteins",
+      "members": 8160791,
+      "body_bytes": 122411972,
+      "content_counted": false
+    },
+    {
+      "key": "behavioral disciplines and activities",
+      "members": 6508537,
+      "body_bytes": 97628164,
+      "content_counted": false
+    },
+    {
+      "key": "cells",
+      "members": 4952473,
+      "body_bytes": 74287172,
+      "content_counted": false
+    },
+    {
+      "key": "chemical actions and uses",
+      "members": 7458027,
+      "body_bytes": 111870502,
+      "content_counted": false
+    },
+    {
+      "key": "chemical phenomena",
+      "members": 5520111,
+      "body_bytes": 82801755,
+      "content_counted": false
+    },
+    {
+      "key": "diagnosis",
+      "members": 9997916,
+      "body_bytes": 149968821,
+      "content_counted": false
+    },
+    {
+      "key": "environment and public health",
+      "members": 10903830,
+      "body_bytes": 163557551,
+      "content_counted": false
+    },
+    {
+      "key": "eukaryota",
+      "members": 27171642,
+      "body_bytes": 407574711,
+      "content_counted": false
+    },
+    {
+      "key": "geographic locations",
+      "members": 4894093,
+      "body_bytes": 73411487,
+      "content_counted": false
+    },
+    {
+      "key": "health care quality, access, and evaluation",
+      "members": 9984112,
+      "body_bytes": 149761795,
+      "content_counted": false
+    },
+    {
+      "key": "health occupations",
+      "members": 13462867,
+      "body_bytes": 201943095,
+      "content_counted": false
+    },
+    {
+      "key": "information science",
+      "members": 6425329,
+      "body_bytes": 96380026,
+      "content_counted": false
+    },
+    {
+      "key": "investigative techniques",
+      "members": 16523402,
+      "body_bytes": 247851126,
+      "content_counted": false
+    },
+    {
+      "key": "natural science disciplines",
+      "members": 9058142,
+      "body_bytes": 135872229,
+      "content_counted": false
+    },
+    {
+      "key": "organic chemicals",
+      "members": 5152372,
+      "body_bytes": 77285669,
+      "content_counted": false
+    },
+    {
+      "key": "pathological conditions, signs and symptoms",
+      "members": 7571784,
+      "body_bytes": 113576875,
+      "content_counted": false
+    },
+    {
+      "key": "persons",
+      "members": 10865331,
+      "body_bytes": 162980044,
+      "content_counted": false
+    },
+    {
+      "key": "physiological phenomena",
+      "members": 6415157,
+      "body_bytes": 96227450,
+      "content_counted": false
+    },
+    {
+      "key": "population characteristics",
+      "members": 10080219,
+      "body_bytes": 151203383,
+      "content_counted": false
+    },
+    {
+      "key": "therapeutics",
+      "members": 5752742,
+      "body_bytes": 86291214,
+      "content_counted": false
+    },
+    {
+      "key": "age groups",
+      "members": 10055159,
+      "body_bytes": 150827467,
+      "content_counted": false
+    },
+    {
+      "key": "animals",
+      "members": 26396232,
+      "body_bytes": 395943559,
+      "content_counted": false
+    },
+    {
+      "key": "behavioral sciences",
+      "members": 6224372,
+      "body_bytes": 93365671,
+      "content_counted": false
+    },
+    {
+      "key": "diagnostic techniques and procedures",
+      "members": 8545289,
+      "body_bytes": 128179443,
+      "content_counted": false
+    },
+    {
+      "key": "health",
+      "members": 9931470,
+      "body_bytes": 148972128,
+      "content_counted": false
+    },
+    {
+      "key": "health services administration",
+      "members": 10718650,
+      "body_bytes": 160779852,
+      "content_counted": false
+    },
+    {
+      "key": "medicine",
+      "members": 11279206,
+      "body_bytes": 169188170,
+      "content_counted": false
+    },
+    {
+      "key": "pathologic processes",
+      "members": 5293121,
+      "body_bytes": 79396907,
+      "content_counted": false
+    },
+    {
+      "key": "pharmacologic actions",
+      "members": 5520508,
+      "body_bytes": 82807713,
+      "content_counted": false
+    },
+    {
+      "key": "proteins",
+      "members": 7444246,
+      "body_bytes": 111663770,
+      "content_counted": false
+    },
+    {
+      "key": "adult",
+      "members": 7924806,
+      "body_bytes": 118872167,
+      "content_counted": false
+    },
+    {
+      "key": "chordata",
+      "members": 25654035,
+      "body_bytes": 384810605,
+      "content_counted": false
+    },
+    {
+      "key": "public health",
+      "members": 9807639,
+      "body_bytes": 147114670,
+      "content_counted": false
+    },
+    {
+      "key": "quality of health care",
+      "members": 9271789,
+      "body_bytes": 139076929,
+      "content_counted": false
+    },
+    {
+      "key": "epidemiologic methods",
+      "members": 7899664,
+      "body_bytes": 118495053,
+      "content_counted": false
+    },
+    {
+      "key": "health care evaluation mechanisms",
+      "members": 8680347,
+      "body_bytes": 130205310,
+      "content_counted": false
+    },
+    {
+      "key": "middle aged",
+      "members": 4715309,
+      "body_bytes": 70729718,
+      "content_counted": false
+    },
+    {
+      "key": "vertebrates",
+      "members": 25649542,
+      "body_bytes": 384743213,
+      "content_counted": false
+    },
+    {
+      "key": "mammals",
+      "members": 25195709,
+      "body_bytes": 377935714,
+      "content_counted": false
+    },
+    {
+      "key": "eutheria",
+      "members": 25171497,
+      "body_bytes": 377572535,
+      "content_counted": false
+    },
+    {
+      "key": "primates",
+      "members": 21393183,
+      "body_bytes": 320897825,
+      "content_counted": false
+    },
+    {
+      "key": "haplorhini",
+      "members": 21386646,
+      "body_bytes": 320799772,
+      "content_counted": false
+    },
+    {
+      "key": "catarrhini",
+      "members": 21358623,
+      "body_bytes": 320379427,
+      "content_counted": false
+    },
+    {
+      "key": "hominidae",
+      "members": 21276106,
+      "body_bytes": 319141671,
+      "content_counted": false
+    },
+    {
+      "key": "humans",
+      "members": 21268184,
+      "body_bytes": 319022838,
+      "content_counted": false
+    }
+  ],
+  "artifacts": 30217,
+  "members": 1658437807,
+  "generating_set_entries": 0,
+  "edges_declared": 41321,
+  "edges_in_roster_and_layer": 41321,
+  "artifacts_with_several_parents": 9095,
+  "read_path": "partitioned",
+  "row_groups": 1677,
+  "buckets": 72,
+  "count_s": 31.1,
+  "partition_s": 115.64
+}
