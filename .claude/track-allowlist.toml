@@ -48,6 +48,11 @@ paths = [
   "test_corpora/*/README.md",
   "test_corpora/*/measurements*.json",
   "docs/ingest-campaign.md",
+  "crates/tessera-corpus/*",
+  "crates/tessera-bench/*",
+  "crates/tessera-server/src/config.rs",
+  "crates/tessera-server/src/state.rs",
+  "crates/tessera-server/src/error.rs",
 ]
 
 # R8(a): sub-laps inside the flush's text extents.
