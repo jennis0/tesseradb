@@ -516,10 +516,12 @@ def encode_batch(
 
     `access` is the wire's **list of labels**, one element per label, each taken verbatim
     (contracts §3.4, decision 0129): a rung's list column travels as itself, a scalar compartment
-    column as one-element lists, and a null as the empty list — a row with no label, which is what
-    the build reads a null as under the view's `point_visibility.default`. Nothing here joins or
-    splits a label, so a compartment key containing a comma is one term on both sides of the
-    split. `external_id` is the **source entity id, eight bytes little-endian**, the same form the
+    column as one-element lists, and a null — a null scalar or a null list — as the empty list,
+    which the server would otherwise refuse for the whole batch. **On the wire the empty list is a
+    row visible to nobody; the build fills a null or empty label with the view's
+    `point_visibility.default`.** The two entry points differ there until the owner rules, and this
+    driver applies no default of its own. Nothing here joins or splits a label, so a compartment
+    key containing a comma is one term on both sides of the split. `external_id` is the **source entity id, eight bytes little-endian**, the same form the
     build mints under `--mint-external-ids` (see [`external_ids`]). That is what makes an ingested
     row addressable on `/control/changes` afterwards, and what an artifact's `members` names it by
     on the same footing as a base row. Every declared attribute travels beside it, by the name the
@@ -543,6 +545,9 @@ def encode_batch(
             column = pa.concat_arrays(column.chunks) if column.num_chunks else pa.array([], column.type)
         if pa.types.is_list(column.type) or pa.types.is_large_list(column.type):
             column = column.cast(pa.list_(pa.string()))
+            lengths = pc.fill_null(pc.list_value_length(column), 0).to_numpy(zero_copy_only=False)
+            offsets = np.concatenate([[0], np.cumsum(lengths)]).astype(np.int32)
+            column = pa.ListArray.from_arrays(pa.array(offsets, pa.int32()), pc.list_flatten(column))
         else:
             values = column.cast(pa.string())
             lengths = pc.cast(pc.is_valid(values), pa.int32()).to_numpy(zero_copy_only=False)
@@ -994,7 +999,9 @@ class Publication:
     route refuses an artifact whose parent the layer does not hold, so an edge to a declined parent
     would refuse every descendant's batch and the census would list the whole tree as missing
     rather than the artifacts that were declined. The child is kept, its edge to the declined
-    parent is dropped, and `edges_dropped_to_declined` counts them beside `edges_published`.
+    parent is dropped, and `edges_dropped_to_declined` counts them beside `edges_published`. A
+    parent whose batch the route **refused** is a different case: its children's batches are
+    refused too, each refusal is counted and logged, and the census then lists the subtree.
     """
 
     def __init__(self, roster: Path, members: Path | None, work: Path, max_bytes: int, bucket_rows: int):
@@ -1921,15 +1928,23 @@ class Cycle:
                 continue
             if layer["roster"] is None:
                 members = layer["members"]
+                if layer["supplied"]:
+                    reason = (
+                        "supplied content and no artifact roster: a layer declaring supplied content "
+                        "refuses to mint from a column, and the publication route takes a roster"
+                    )
+                else:
+                    reason = (
+                        "no artifact roster and no member table: nothing names this layer's "
+                        "artifacts, so there is nothing to mint at the build or to publish"
+                    )
                 out["declined"][name] = {
-                    "reason": "supplied content and no artifact roster: a layer declaring supplied "
-                    "content refuses to mint from a column, and the publication route takes a "
-                    "roster; not published",
+                    "reason": reason + "; not published",
                     "member_rows": pq.ParquetFile(members).metadata.num_rows
                     if members is not None and members.exists()
                     else None,
                 }
-                self.log(f"  {name}: NOT PUBLISHED, supplied content with no roster")
+                self.log(f"  {name}: NOT PUBLISHED, {reason.split(':')[0]}")
                 continue
             if not layer["roster"].exists():
                 out["declined"][name] = {"reason": f"roster {layer['roster'].name} is not in the rung directory"}
@@ -2042,10 +2057,16 @@ class Cycle:
                 "grow_requests": grown["requests"],
                 "grown_members": grown["members"],
                 "grown_members_joined": grown["joined"],
+                "grown_members_unjoined": grown["members"] - grown["joined"],
                 "declined_artifacts": declined,
                 "declined_members": sum(d["members"] for d in declined),
             }
         )
+        if grown["members"] != grown["joined"]:
+            self.log(
+                f"  {name}: {grown['members'] - grown['joined']:,} of {grown['members']:,} grown "
+                f"members did not join — the route already held them, or refused them"
+            )
         self.log(
             f"  {name}: {published['artifacts']:,} of {stats['artifacts']:,} artifacts, "
             f"{published['members']:,} members in {wall_s:.1f} s ({entry['artifacts_per_s']} "

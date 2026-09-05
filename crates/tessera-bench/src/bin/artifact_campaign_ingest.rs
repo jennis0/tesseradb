@@ -15,8 +15,8 @@
 //!   moves by the number of members that arrived, and a spread across artifacts would only make
 //!   the arithmetic harder to state.
 //!
-//! The access labels may be overridden so every ingested point is visible to the principal doing the
-//! checking: at a million terms an item's own two terms are seen by essentially nobody, and a
+//! The access labels may be overridden so every ingested point is visible to the principal doing
+//! the checking: at a million terms an item's own two terms are seen by essentially nobody, and a
 //! freshness check whose new members are invisible to the observer passes vacuously.
 
 use std::sync::Arc;

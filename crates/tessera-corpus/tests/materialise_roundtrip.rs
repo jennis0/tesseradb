@@ -156,8 +156,9 @@ fn pairs_parquet_rows_are_the_terms() {
 
 /// The ingest batch is the wire shape — `(external_id, x, y, access, the declared scalars)` —
 /// with the workspace's 8-byte little-endian external-id convention, the access labels as a list
-/// (one term per element, decision 0129), and the same values as every other materialiser. A range past `n` draws from the same
-/// functions, which is what lets a driver ingest beyond the built prefix.
+/// (one term per element, decision 0129), and the same values as every other materialiser. A
+/// range past `n` draws from the same functions, which is what lets a driver ingest beyond the
+/// built prefix.
 #[test]
 fn ingest_batch_is_the_wire_shape_of_the_same_items() {
     let c = corpus(10);
