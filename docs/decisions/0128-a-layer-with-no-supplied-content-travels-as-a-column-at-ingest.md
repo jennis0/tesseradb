@@ -1,6 +1,6 @@
 # 0128 — A layer with no supplied content keeps its member source at the base build and travels as a column at ingest
 
-**Date:** 2026-09-05 · **Status:** Settled (owner ruling) · ⊘ Not built in the driver
+**Date:** 2026-09-05 · **Status:** Settled (owner ruling) · Built in the driver 2026-09-05 (`declared_layers`' `column` route)
 
 ## What this answers
 

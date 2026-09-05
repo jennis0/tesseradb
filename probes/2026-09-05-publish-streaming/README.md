@@ -23,6 +23,18 @@ one artifact: 1.19 GiB over the same table, and the figure does not move with th
 (0.99 GiB over paperseek's 394M rows, 1.20 GiB for the whole medcpt-1m cycle including its
 split and hold-out).
 
+## Growth on a DAG, medcpt-1m (decision 0127, driver side)
+
+**Measured 2026-09-05** (`runs/medcpt-1m-f010-grow.json`, and `runs/medcpt-1m-f010-grow-after-fixes.json`
+after the referee's fixes; binary from the `wire` track's tree): medcpt-1m at *f* = 0.10 with
+`--publish-max-bytes 262144`, so that many artifacts exceed the cap, and `--state-extent`. Every
+artifact published: `mesh/descriptors` **29,229 of 29,229**, of which **416 were published with a
+first slice and grown by 1,550 `PATCH` requests carrying 22,885,982 members** (`joined` from the
+route sums to the same; `grown_members_unjoined` 0), **40,075 of 40,075 parent edges**, 0 refusals,
+0 declined; `clusters/kmeans` 43 of 43, 30 grown. **Census exact on every surface and principal**
+(`mesh/descriptors` 16,063 artifacts and 45,958,206 masked members at 100% on both sides). The
+first growth of a hierarchy's roots on the wire; the 36M cascade below is what it replaces.
+
 ## The 36M cycle, and the cascade a declined root causes
 
 **Measured 2026-09-05** (`runs/medcpt-36m-f010.json`, binary `e442e139`, box otherwise idle):

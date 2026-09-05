@@ -1,6 +1,6 @@
 # 0129 — The ingest wire carries access labels as a list
 
-**Date:** 2026-09-05 · **Status:** Settled (owner ruling) · ⊘ Not built
+**Date:** 2026-09-05 · **Status:** Settled (owner ruling) · Built 2026-09-05 (contracts §3.4 r78); `Plugin::terms_of_label` survives for the view gate's label pending a ruling on that grammar
 
 ## What this answers
 

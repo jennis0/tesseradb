@@ -1,6 +1,6 @@
 # 0127 — A membership grows through the control plane
 
-**Date:** 2026-09-05 · **Status:** Settled (owner ruling) · ⊘ Not built
+**Date:** 2026-09-05 · **Status:** Settled (owner ruling) · Built 2026-09-05 as `PATCH /control/layers/{name}/artifacts` (contracts §3.4 r77); the ingest driver publishes then grows
 
 ## What this answers
 

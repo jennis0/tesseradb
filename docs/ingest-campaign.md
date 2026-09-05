@@ -1069,7 +1069,8 @@ and a layer with no supplied content travels as the ingest batch's column named 
 ([decision 0128](decisions/0128-a-layer-with-no-supplied-content-travels-as-a-column-at-ingest.md)).
 Proved on `treeoflife-1m` at *f* = 10%: zoom 0 exact at all six principals where three had differed,
 `taxonomy/tree` exact where it had been absent, and with `--state-extent` every surface exact
-([the rung's README](../test_corpora/treeoflife/README.md)). ⊘ This 50% cell is not yet re-run
+([the rung's README](../test_corpora/treeoflife/README.md); records under
+[`probes/2026-09-05-publish-streaming/runs/`](../probes/2026-09-05-publish-streaming/runs/)). ⊘ This 50% cell is not yet re-run
 under the list.
 
 **The 0091 census, retaken.** The run's own was shed mid-body on the zoom-0 whole-extent request

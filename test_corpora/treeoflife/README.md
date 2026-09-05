@@ -425,7 +425,9 @@ the first rung whose compartment keys contain the separator. It is also why this
 and `taxonomy/tree` travels as the ingest batch's column named for the layer rather than being
 declined ([decision 0128](../../docs/decisions/0128-a-layer-with-no-supplied-content-travels-as-a-column-at-ingest.md)).
 Proved on `treeoflife-1m` at *f* = 10% (100,000 hold-out rows, 59 of 376 publisher names with a
-comma), the same cell before and after, measured 2026-09-05:
+comma), the same cell before and after, measured 2026-09-05 (records in
+`probes/2026-09-05-publish-streaming/runs/`: `treeoflife-1m-f010.json` before,
+`treeoflife-1m-f010-list-wire.json` and `treeoflife-1m-f010-list-wire-state-extent.json` after):
 
 | surface | before | after |
 |---|---|---|
