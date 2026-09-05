@@ -68,7 +68,10 @@ const SMALL_TERM_THRESHOLD: u32 = 32;
 /// `Executor::publish_flush`, and `PublishWall` is that call's whole duration. The pool turns the
 /// plan into durable files: `Promote` to `Failed` partition [`execute_flush`], and `PoolWall` is
 /// that call's whole duration. Both partitions hold whichever way the call returns: a discard or
-/// a failure charges its tail to the stage of that name. `/control/status` reports the two sets in separate maps, and
+/// a failure charges its tail to the stage of that name. `TextExtents` is itself partitioned by
+/// the `Text*` stages ([`FlushStage::TEXT`]), which are in [`FlushStage::POOL`] and not in
+/// [`FlushStage::EXECUTE`]: they are read beside the stage they divide, never added to it.
+/// `/control/status` reports the two sets in separate maps, and
 /// neither is added to the executor's [`crate::WriteStage`] laps: the pool's time is wall clock on
 /// another thread, and the ingest attribution's partition (executor stages plus queueing equals
 /// submit-to-receipt) holds only while those laps stay the executor's own.
@@ -133,8 +136,28 @@ pub enum FlushStage {
     ScopedExtents,
     /// `write_record_extent`: the record-blob extent.
     RecordExtent,
-    /// `write_text_extents`: the text layers.
+    /// `write_text_extents`: the text layers of the entity-scoped `text` columns. Partitioned by
+    /// the six `Text*` stages that follow; a group-scoped family's text layer is written by
+    /// `write_scoped_extents` and is in `ScopedExtents`, undivided.
     TextExtents,
+    /// Within [`FlushStage::TextExtents`]: gathering one column's rows from the plan and creating
+    /// the layer's directory.
+    TextRows,
+    /// Within [`FlushStage::TextExtents`]: the analyser over each row's prose (`Analyser::tokens`:
+    /// the case fold, the normalisation and the word segmenter, one `String` per token) and the
+    /// row's presence bit.
+    TextTokenise,
+    /// Within [`FlushStage::TextExtents`]: inserting each row's tokens into the term map, a
+    /// `BTreeMap` from term to its posting list.
+    TextTerms,
+    /// Within [`FlushStage::TextExtents`]: `write_sorted_dict` over the term map's keys, which
+    /// the map already holds in order. None of the three writes fsyncs.
+    TextDict,
+    /// Within [`FlushStage::TextExtents`]: collecting the posting lists, encoding each and writing
+    /// `postings.arrow`.
+    TextPostings,
+    /// Within [`FlushStage::TextExtents`]: serialising and writing the presence bitmap.
+    TextPresence,
     /// Reading every file written outside the segment directory back for its SHA-256.
     Digests,
     /// Memory-mapping the segment's `morton.u32` and `columns.arrow` for the generation.
@@ -157,7 +180,7 @@ pub enum FlushStage {
 const _: () = assert!(FlushStage::COUNT == FlushStage::PoolWall as usize + 1);
 
 impl FlushStage {
-    pub const COUNT: usize = 30;
+    pub const COUNT: usize = 36;
     /// The executor thread's stages, in the order they run. `Plan` and `Dispatch` run at the
     /// tick; the rest run at publication.
     pub const EXECUTOR: [FlushStage; 15] = [
@@ -192,8 +215,9 @@ impl FlushStage {
         FlushStage::DropSuperseded,
         FlushStage::Discarded,
     ];
-    /// The pool's stages, in the order they run.
-    pub const POOL: [FlushStage; 15] = [
+    /// The pool's stages, in the order they run, the `Text*` sub-stages after the stage they
+    /// partition.
+    pub const POOL: [FlushStage; 21] = [
         FlushStage::Promote,
         FlushStage::Rows,
         FlushStage::Segment,
@@ -203,6 +227,12 @@ impl FlushStage {
         FlushStage::ScopedExtents,
         FlushStage::RecordExtent,
         FlushStage::TextExtents,
+        FlushStage::TextRows,
+        FlushStage::TextTokenise,
+        FlushStage::TextTerms,
+        FlushStage::TextDict,
+        FlushStage::TextPostings,
+        FlushStage::TextPresence,
         FlushStage::Digests,
         FlushStage::Reopen,
         FlushStage::Shapes,
@@ -226,6 +256,15 @@ impl FlushStage {
         FlushStage::Shapes,
         FlushStage::DropPlan,
         FlushStage::Failed,
+    ];
+    /// The stages that partition `TextExtents`, in the order they run for each text column.
+    pub const TEXT: [FlushStage; 6] = [
+        FlushStage::TextRows,
+        FlushStage::TextTokenise,
+        FlushStage::TextTerms,
+        FlushStage::TextDict,
+        FlushStage::TextPostings,
+        FlushStage::TextPresence,
     ];
     pub fn name(self) -> &'static str {
         match self {
@@ -253,6 +292,12 @@ impl FlushStage {
             FlushStage::ScopedExtents => "scoped_extents",
             FlushStage::RecordExtent => "record_extent",
             FlushStage::TextExtents => "text_extents",
+            FlushStage::TextRows => "text_rows",
+            FlushStage::TextTokenise => "text_tokenise",
+            FlushStage::TextTerms => "text_terms",
+            FlushStage::TextDict => "text_dict",
+            FlushStage::TextPostings => "text_postings",
+            FlushStage::TextPresence => "text_presence",
             FlushStage::Digests => "digests",
             FlushStage::Reopen => "reopen",
             FlushStage::Shapes => "shapes",
@@ -266,12 +311,21 @@ impl FlushStage {
 /// One `execute_flush`'s laps, accumulated on the pool and handed to the executor's health when
 /// the call returns (`ExecutorHealth::record_flush_execution`). Local rather than shared so a
 /// flush still running on the pool is in no total.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct FlushLaps {
     /// Written by [`FlushLaps::lap`] and read by `ExecutorHealth::record_flush_execution`, both
     /// of which compile to nothing without the feature.
     #[cfg_attr(not(feature = "bench-timing"), allow(dead_code))]
     pub(crate) nanos: [u64; FlushStage::COUNT],
+}
+
+// Written out because `Default` is derived for arrays of 32 elements and fewer only.
+impl Default for FlushLaps {
+    fn default() -> Self {
+        FlushLaps {
+            nanos: [0; FlushStage::COUNT],
+        }
+    }
 }
 
 impl FlushLaps {
@@ -290,6 +344,21 @@ impl FlushLaps {
         {
             mark
         }
+    }
+}
+
+/// The `Text*` sub-laps of one text layer's write ([`FlushStage::TEXT`]): the pool's laps and
+/// the mark they run from. Passed as `None` where the layer's time belongs to another stage.
+struct TextLaps<'a> {
+    laps: &'a mut FlushLaps,
+    mark: &'a mut StageMark,
+}
+
+/// Charge the time since the mark to `stage` and move the mark, where there are laps to charge.
+#[inline(always)]
+fn text_lap(sub: &mut Option<TextLaps<'_>>, stage: FlushStage) {
+    if let Some(sub) = sub {
+        *sub.mark = sub.laps.lap(stage, *sub.mark);
     }
 }
 
@@ -844,7 +913,7 @@ fn execute_flush_stages(
         }
     }
     *mark = laps.lap(FlushStage::RecordExtent, *mark);
-    let mut text_extents = write_text_extents(&plan, &ctx)?;
+    let mut text_extents = write_text_extents(&plan, &ctx, laps, mark)?;
     text_extents.extend(scoped_texts);
     // **All three files of every text extent, and the omission was not cosmetic.** A digest is not
     // only an integrity check here: `publish_fold` carries a flight extent forward by looking its
@@ -1589,9 +1658,14 @@ pub(crate) struct ScopedColumnSpec {
 ///
 /// The analysis runs here, at flush execution on the pool (write-path §4.3), and never on the
 /// serial group-commit section whose latency both the ingest and the deny lane share.
+///
+/// `laps` and `mark` take the `Text*` sub-laps ([`FlushStage::TEXT`]); the caller laps
+/// `TextExtents` over the whole call on its return.
 fn write_text_extents(
     plan: &FlushPlan,
     ctx: &FlushContext,
+    laps: &mut FlushLaps,
+    mark: &mut StageMark,
 ) -> Result<Vec<tessera_store::manifest::TextExtent>, FlushFailed> {
     if ctx.text_schema.is_empty() {
         return Ok(Vec::new());
@@ -1612,8 +1686,12 @@ fn write_text_extents(
             ));
         }
         let rel_dir = format!("partitions/{}/attrs/{}/extents", ctx.partition, spec.name);
+        let sub = Some(TextLaps {
+            laps: &mut *laps,
+            mark: &mut *mark,
+        });
         if let Some(extent) =
-            write_text_layer(&rel_dir, &spec.name, None, &spec.analyser, rows, ctx)?
+            write_text_layer(&rel_dir, &spec.name, None, &spec.analyser, rows, ctx, sub)?
         {
             out.push(extent);
         }
@@ -1631,6 +1709,10 @@ fn write_text_extents(
 /// index.
 ///
 /// `None` where no row carried a value, for the reason [`write_text_extents`] gives.
+///
+/// `sub` takes the `Text*` sub-laps where the caller's stage is `TextExtents`, and is `None` from
+/// the scoped pass, whose layer is in `ScopedExtents`. The two per-row laps read the clock twice
+/// a row under `bench-timing` and are a moved mark otherwise.
 fn write_text_layer(
     rel_dir: &str,
     column: &str,
@@ -1638,9 +1720,11 @@ fn write_text_layer(
     analyser: &tessera_analyse::Analyser,
     rows: Vec<(u32, &WalScalar)>,
     ctx: &FlushContext,
+    mut sub: Option<TextLaps<'_>>,
 ) -> Result<Option<tessera_store::manifest::TextExtent>, FlushFailed> {
     let dir = ctx.prefix_dir.join(rel_dir);
     std::fs::create_dir_all(&dir).map_err(|e| FlushFailed(format!("{}: {e}", dir.display())))?;
+    text_lap(&mut sub, FlushStage::TextRows);
 
     let mut terms: std::collections::BTreeMap<String, Vec<u32>> = std::collections::BTreeMap::new();
     let mut presence = croaring::Bitmap::new();
@@ -1657,12 +1741,15 @@ fn write_text_layer(
             }
         };
         presence.add(entity);
-        for token in analyser.tokens(prose) {
+        let tokens = analyser.tokens(prose);
+        text_lap(&mut sub, FlushStage::TextTokenise);
+        for token in tokens {
             let postings = terms.entry(token).or_default();
             if postings.last() != Some(&entity) {
                 postings.push(entity);
             }
         }
+        text_lap(&mut sub, FlushStage::TextTerms);
     }
     if presence.is_empty() {
         return Ok(None);
@@ -1676,6 +1763,7 @@ fn write_text_layer(
         terms.keys().map(String::as_str),
     )
     .map_err(|e| FlushFailed(format!("{dict_rel}: {e}")))?;
+    text_lap(&mut sub, FlushStage::TextDict);
     let per_term: Vec<Vec<u32>> = terms.into_values().collect();
     tessera_authz::postings::write_postings(
         &ctx.prefix_dir.join(&postings_rel),
@@ -1683,11 +1771,13 @@ fn write_text_layer(
         tessera_types::SMALL_TERM_THRESHOLD_DEFAULT,
     )
     .map_err(|e| FlushFailed(format!("{postings_rel}: {e}")))?;
+    text_lap(&mut sub, FlushStage::TextPostings);
     std::fs::write(
         ctx.prefix_dir.join(&presence_rel),
         presence.serialize::<croaring::Portable>(),
     )
     .map_err(|e| FlushFailed(format!("{presence_rel}: {e}")))?;
+    text_lap(&mut sub, FlushStage::TextPresence);
 
     Ok(Some(tessera_store::manifest::TextExtent {
         column: column.to_string(),
@@ -1799,6 +1889,7 @@ fn write_scoped_extents(plan: &FlushPlan, ctx: &FlushContext) -> Result<ScopedWr
                 analyser,
                 scoped_rows(spec, plan)?,
                 ctx,
+                None,
             )? {
                 texts.push(extent);
             }
