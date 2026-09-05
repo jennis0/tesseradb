@@ -106,14 +106,16 @@ median under each condition, end to end; the last is the median cell's server-si
 
 **Ingest.** *f* of the entities held back, the complement built, the hold-out ingested
 online. `visibility` is when a zoom-0 viewport reached the expected count after the
-flush, not the flush's own wall; `fold` is the server's own `compaction.last_secs`.
+flush, not the flush's own wall; `fold` is the server's own `compaction.last_secs`;
+`driver peak` is the driver process's own `VmHWM` over the whole cell, the harness's
+cost beside the server and not the server's (`—` where the cell predates the field).
 
-| rung | f | C | items/s | ack p50 | ack p99 | visibility | fold | 0091 equivalence |
-|---|---|---|---|---|---|---|---|---|
-| medcpt | 100% | 8 | 11,267.0 | 3.07 s | 16.62 s | 1.2 s | 1:43 | zoom-0 exact, layers 6 |
-| medcpt | 50% | 8 | 10,746.0 | 2.58 s | 19.20 s | 0.8 s | 1:56 | zoom-0 exact, layers 6 |
-| medcpt | 10% | 8 | 65,194.8 | 1.19 s | 2.85 s | 0.4 s | 2:00 | zoom-0 exact, layers 6 |
-| treeoflife | 50% | 8 | 11,059.8 | 5.99 s | 15.13 s | 15:02 | 21:53 | 22 difference(s) |
+| rung | f | C | items/s | ack p50 | ack p99 | visibility | fold | driver peak | 0091 equivalence |
+|---|---|---|---|---|---|---|---|---|---|
+| medcpt | 100% | 8 | 11,267.0 | 3.07 s | 16.62 s | 1.2 s | 1:43 | — | zoom-0 exact, layers 6 |
+| medcpt | 50% | 8 | 10,746.0 | 2.58 s | 19.20 s | 0.8 s | 1:56 | — | zoom-0 exact, layers 6 |
+| medcpt | 10% | 8 | 65,194.8 | 1.19 s | 2.85 s | 0.4 s | 2:00 | — | zoom-0 exact, layers 6 |
+| treeoflife | 50% | 8 | 11,059.8 | 5.99 s | 15.13 s | 15:02 | 21:53 | — | 22 difference(s) |
 
 <!-- /campaign-table -->
 

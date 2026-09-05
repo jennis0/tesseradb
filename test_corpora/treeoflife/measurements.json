@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "rung": "treeoflife",
   "rows": 233055986,
   "binary_commit": "b17dc413",
@@ -10946,6 +10946,7 @@
       "visibility_s": 902.367,
       "fold_s": 1313,
       "fold_peak_rss": 28897955840,
+      "driver_peak_rss": null,
       "equivalence": {
         "equal": false,
         "zoom0_equal": false,

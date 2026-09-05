@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "rung": "medcpt",
   "rows": 35920666,
   "binary_commit": "c47d2ade",
@@ -8710,6 +8710,7 @@
       "visibility_s": 1.214,
       "fold_s": 103,
       "fold_peak_rss": 11308052480,
+      "driver_peak_rss": null,
       "equivalence": {
         "equal": false,
         "zoom0_equal": true,
@@ -9120,6 +9121,7 @@
       "visibility_s": 0.8,
       "fold_s": 116,
       "fold_peak_rss": 8484818944,
+      "driver_peak_rss": null,
       "equivalence": {
         "equal": false,
         "zoom0_equal": true,
@@ -9406,6 +9408,7 @@
       "visibility_s": 0.418,
       "fold_s": 120,
       "fold_peak_rss": 4964958208,
+      "driver_peak_rss": null,
       "equivalence": {
         "equal": false,
         "zoom0_equal": true,

@@ -1,0 +1,97 @@
+{
+  "rung": "paperseek",
+  "layer": "topics/openalex",
+  "member_file": "topics-openalex-members.parquet",
+  "bucket_rows": 16000000,
+  "max_bytes": 33554432,
+  "route_max_body_bytes": 67108864,
+  "wall_s": 68.3,
+  "peak_rss_bytes": 1062612992,
+  "peak_work_bytes": 3133907728,
+  "bodies": 113,
+  "body_bytes": 3461366091,
+  "artifacts_assembled": 4787,
+  "members_assembled": 230715873,
+  "edges_assembled": 4787,
+  "declined_artifacts_n": 11,
+  "declined_members": 163610055,
+  "declined_artifacts": [
+    {
+      "key": "1",
+      "members": 13664578,
+      "body_bytes": 204968743,
+      "content_counted": false
+    },
+    {
+      "key": "2",
+      "members": 23761762,
+      "body_bytes": 356426503,
+      "content_counted": false
+    },
+    {
+      "key": "3",
+      "members": 40846248,
+      "body_bytes": 612693793,
+      "content_counted": false
+    },
+    {
+      "key": "4",
+      "members": 20308894,
+      "body_bytes": 304633483,
+      "content_counted": false
+    },
+    {
+      "key": "11",
+      "members": 4556155,
+      "body_bytes": 68342399,
+      "content_counted": false
+    },
+    {
+      "key": "13",
+      "members": 6072460,
+      "body_bytes": 91086974,
+      "content_counted": false
+    },
+    {
+      "key": "17",
+      "members": 7082609,
+      "body_bytes": 106239209,
+      "content_counted": false
+    },
+    {
+      "key": "22",
+      "members": 14359087,
+      "body_bytes": 215386379,
+      "content_counted": false
+    },
+    {
+      "key": "23",
+      "members": 4764248,
+      "body_bytes": 71463794,
+      "content_counted": false
+    },
+    {
+      "key": "27",
+      "members": 17299245,
+      "body_bytes": 259488749,
+      "content_counted": false
+    },
+    {
+      "key": "33",
+      "members": 10894769,
+      "body_bytes": 163421609,
+      "content_counted": false
+    }
+  ],
+  "artifacts": 4798,
+  "members": 394325928,
+  "generating_set_entries": 0,
+  "edges_declared": 4794,
+  "edges_in_roster_and_layer": 4794,
+  "artifacts_with_several_parents": 0,
+  "read_path": "partitioned",
+  "row_groups": 1448,
+  "buckets": 15,
+  "count_s": 5.59,
+  "partition_s": 21.97
+}
