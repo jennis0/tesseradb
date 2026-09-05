@@ -2647,6 +2647,23 @@ impl Engine {
         self.generation.load().external_index.0.is_open()
     }
 
+    /// Whether the served bundle holds any external-id run: the build's (`--mint-external-ids`)
+    /// or one a flush wrote from caller-supplied ids.
+    ///
+    /// For a route that addresses items by external id and finds that none of the ids it was
+    /// given resolve. Against a bundle with no run, that is not a list of ids that name nothing;
+    /// it is a deployment nothing can be named in by an external id, and the refusal should say
+    /// so once rather than once per member. The check is not inside [`Self::resolve_external_ids`]
+    /// because that call also serves `/control/ingest`'s duplicate check, where a deployment with
+    /// no external ids yet is the ordinary state of a first batch into an empty database.
+    ///
+    /// Reads the manifest's run list; opens nothing. Ids ingested with an external id and not yet
+    /// flushed live in the write path's live map, which this does not consult: a caller resolves
+    /// its ids first, and asks this only when none resolved.
+    pub fn bundle_carries_external_ids(&self) -> bool {
+        self.generation.load().external_index.0.has_runs()
+    }
+
     /// The plugin this engine was opened with — the `/control/ingest` handler calls
     /// `terms_of_label` through this to turn an item's `access` bytes into descriptors.
     pub fn plugin(&self) -> &Arc<dyn Plugin> {
