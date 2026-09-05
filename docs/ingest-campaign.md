@@ -1054,17 +1054,23 @@ fold; `geo` holds 88,455,838, which are the base's own. The driver's wire batch 
 space, so a rung with several of them measures the write path on one, and a `geo`-side census
 differs by construction.
 
-⊘ **2,142,399 rows are visible on the all-in bundle and not on the folded one, and it is the
-driver's wire encoding rather than the write path.** `encode_batch` writes the passthrough plugin's
-`access` as a **comma-separated descriptor list**, and 70 of the 474 publisher names contain a
-comma. Each splits on the wire into fragments and every fragment not already a term is minted: the
+⊘ **2,142,399 rows are visible on the all-in bundle and not on the folded one, and it was the
+wire's shape rather than the write path.** This cell sent `access` as one string per row, which
+`encode_batch` filled with a comma-joined label list, and 70 of the 474 publisher names contain a
+comma. Each split on the wire into fragments and every fragment not already a term was minted: the
 folded deployment carries **617 terms against the declaration's 475**. Measured on it — 230,913,587
 visible under the 474 declared terms, **233,055,986 under those plus the 148 fragments**. Worse than
 hiding: **where a fragment is itself a real key the rows land in that compartment**, which is why
 the 25% principal sees **73,212 rows more** on the folded deployment (`Natural History Museum,
-Vienna` → `Natural History Museum`). **This is the first rung whose compartment keys contain the
-separator the ingest encoding uses**, and it is worth fixing in the driver before a rung whose keys
-are free text is measured.
+Vienna` → `Natural History Museum`). This was the first rung whose compartment keys contain a
+comma. **Ruled and built 2026-09-05**: the wire carries `access` as a list, one label per element,
+taken verbatim ([decision 0129](decisions/0129-the-ingest-wire-carries-access-labels-as-a-list.md)),
+and a layer with no supplied content travels as the ingest batch's column named for it
+([decision 0128](decisions/0128-a-layer-with-no-supplied-content-travels-as-a-column-at-ingest.md)).
+Proved on `treeoflife-1m` at *f* = 10%: zoom 0 exact at all six principals where three had differed,
+`taxonomy/tree` exact where it had been absent, and with `--state-extent` every surface exact
+([the rung's README](../test_corpora/treeoflife/README.md)). ⊘ This 50% cell is not yet re-run
+under the list.
 
 **The 0091 census, retaken.** The run's own was shed mid-body on the zoom-0 whole-extent request
 with `layers: "all"` — 1,001,193 artifacts against a stream deadline, §6's artifact-response-volume
@@ -1244,13 +1250,14 @@ so rung 3's cells are unaffected. ⊘ **The hold-out still enters the anchor vie
 view's rows for the same entities do not travel, so a rung with several row spaces measures the
 write path on one of them.
 
-⊘ **A fourth is open and is not fixed here.** The driver writes the passthrough plugin's `access` as
-a comma-separated descriptor list, so a compartment key containing a comma is split on the wire and
-its fragments minted as terms — 2,142,399 of rung 5's ingested rows became invisible to every
-declared principal, and 73,212 landed in **another publisher's** compartment (§4b). Every rung below
-has keys with no commas — country codes, MeSH branch letters, licence names — so nothing before this
-one could see it. It wants an escaped encoding or a non-textual descriptor list, which is an owner
-call rather than a patch to make mid-campaign.
+**A fourth was the wire's shape, and the wire changed.** `access` on `/control/ingest` was one
+string per row, which the driver filled with a comma-joined label list, so a compartment key
+containing a comma split on the wire and its fragments were minted as terms — 2,142,399 of rung 5's
+ingested rows became invisible to every declared principal, and 73,212 landed in **another
+publisher's** compartment (§4b). Every rung below has keys with no commas — country codes, MeSH
+branch letters, licence names — so nothing before this one could see it. The owner ruled that the
+wire carries a list, one label per element, taken verbatim (decision 0129); the plugin's list form
+is now the only path an item's labels take at either entry point, and the driver sends the list.
 
 ## 8. Open, and what is next
 
