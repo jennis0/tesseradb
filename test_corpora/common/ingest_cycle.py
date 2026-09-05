@@ -99,14 +99,6 @@ from .deployment import Deployment
 #: cap's own boundary rather than sitting comfortably under it.
 BATCH_ROWS = 10_000
 
-#: `layer name -> (roster file, member file)` for the rungs this driver runs. The names are the
-#: rung's own, and a layer whose roster is absent is skipped — which is how a rung prepared without
-#: `mesh.py` runs the same cell with one layer instead of two.
-LAYER_SOURCES = {
-    "clusters/kmeans": ("clusters-kmeans.parquet", "clusters-kmeans-members.parquet"),
-    "mesh/descriptors": ("mesh-descriptors.parquet", "mesh-descriptors-members.parquet"),
-}
-
 
 # ---------------------------------------------------------------------------------------------
 # The split
@@ -150,7 +142,10 @@ def filter_parquet(
     """Copy `source` to `out`, keeping rows whose `column` is in `keep`. **A row group at a time.**
 
     Streaming rather than `read_table().filter()` because rung 3's points file is 4 GB of parquet:
-    read whole it is tens of gigabytes of Arrow, and the machine this runs on has 47.
+    read whole it is tens of gigabytes of Arrow, and the machine this runs on has 47. Through
+    `read_row_group` rather than `iter_batches`, for the reason `HoldOut.batches` gives: the batch
+    reader retains part of every row group it has yielded, and over rung 4's file that is tens of
+    gigabytes by the time the split ends.
 
     **Written under the source's own compression**, not `ParquetWriter`'s default. Rung 4's points
     file is 52 GB of ZSTD carrying abstracts; rewritten as Snappy the 90% base copy passes 130 GB
@@ -168,10 +163,8 @@ def filter_parquet(
     kept = 0
     try:
         wanted = [name for name in reader.schema_arrow.names if name not in set(drop)]
-        # 2^20 rows of a narrow points file is a few tens of MB and of a wide one — ten columns
-        # including an abstract — several GB, which is the whole of a run's headroom on this box.
-        for batch in reader.iter_batches(batch_size=1 << 17, columns=wanted):
-            table = pa.Table.from_batches([batch])
+        for index in range(reader.metadata.num_row_groups):
+            table = reader.read_row_group(index, columns=wanted)
             mask = pa.array(in_sorted(table.column(column).to_numpy(), keep))
             table = table.filter(mask)
             if writer is None:
@@ -300,6 +293,41 @@ def base_declaration(text: str) -> tuple[str, list[dict]]:
     return "".join(out), removed
 
 
+def declared_layers(rung: Path) -> list[dict]:
+    """Every `[[layer]]` of the rung's declaration, with the files its acquisition names.
+
+    One record per layer, in declaration order: `name`; `roster`, the path the layer's own `source`
+    names, or None where the layer declares none (an open value set mints its artifacts from the
+    member rows); `members`, the path `[layer.members] source` names, or None; `attribute`, the
+    column an attribute-membership layer is drawn from, or None. A `source` is a key into
+    `[sources]` or a file name, as `Config::layer_sources` reads it.
+
+    Read off the declaration rather than listed in this file: a table of two layer names ran every
+    rung's cell with at most those two, so rung 4's `topics/openalex` was never published and no
+    record said so.
+    """
+    declared = tomllib.loads((rung / "corpus.toml").read_text())
+    named = declared.get("sources", {})
+
+    def path_of(key: str | None) -> Path | None:
+        return None if key is None else rung / named.get(key, key)
+
+    out = []
+    for layer in declared.get("layer", []):
+        membership = layer.get("membership")
+        out.append(
+            {
+                "name": layer["name"],
+                "roster": path_of(layer.get("source")),
+                "members": path_of((layer.get("members") or {}).get("source")),
+                "attribute": membership.get("attribute") if isinstance(membership, dict) else None,
+                "value_set": layer.get("value_set"),
+                "hierarchy": (layer.get("hierarchy") or {}).get("kind"),
+            }
+        )
+    return out
+
+
 def write_base_inputs(rung: Path, out: Path, base_ids: np.ndarray) -> dict:
     """The complement's inputs: **the points, and the declaration. Nothing else.**
 
@@ -320,7 +348,7 @@ def write_base_inputs(rung: Path, out: Path, base_ids: np.ndarray) -> dict:
     keeps its declaration.
     """
     out.mkdir(parents=True, exist_ok=True)
-    layers = list(LAYER_SOURCES)
+    layers = [layer["name"] for layer in declared_layers(rung)]
     kept = {
         "points": filter_parquet(
             rung / "points.parquet", out / "points.parquet", "entity_id", base_ids, drop=layers
@@ -475,16 +503,26 @@ class HoldOut:
         self.head: pa.Table | None = None
 
     def batches(self, rows: int = BATCH_ROWS):
-        """Yield `(first row index, body bytes, row count)` for the whole hold-out, in file order."""
+        """Yield `(first row index, body bytes, row count)` for the whole hold-out, in file order.
+
+        **One row group at a time through `read_row_group`, not `iter_batches`.** Measured on
+        rung 4's 52 GB points file (`probes/2026-09-05-holdout-memory/`): pyarrow 25's
+        `iter_batches` reader keeps about 150 MB of every row group it has yielded alive in
+        Arrow's pool for the life of the iterator, whatever the caller drops and whichever
+        allocator backs the pool (`mimalloc` and `system` measured), so the driver reached 38 GB by
+        900 batches and the cell stalled. `read_row_group` holds one decoded row group at a time
+        and the same file streams whole with the driver under 3 GB.
+        """
         reader = pq.ParquetFile(self.rung / "points.parquet")
         pending: list[pa.Table] = []
         pending_rows = 0
         emitted = 0
         head: list[pa.Table] = []
         head_rows = 0
-        for batch in reader.iter_batches(batch_size=1 << 17):
-            table = pa.Table.from_batches([batch])
-            table = table.filter(pa.array(in_sorted(table.column("entity_id").to_numpy(), self.held)))
+        for index in range(reader.metadata.num_row_groups):
+            group = reader.read_row_group(index)
+            table = group.filter(pa.array(in_sorted(group.column("entity_id").to_numpy(), self.held)))
+            del group
             if table.num_rows == 0:
                 continue
             if head_rows < self.head_rows:
@@ -500,11 +538,6 @@ class HoldOut:
                 rest = whole.slice(rows)
                 pending = [rest] if rest.num_rows else []
                 pending_rows = rest.num_rows
-            # **The arena, back, every read group.** Streaming a 52 GB points file carrying
-            # abstracts through Arrow leaves the pool holding every page it has touched — 38 GB
-            # of a 47 GB box beside the server it is loading, which stalls the run for a reason
-            # that has nothing to do with what it measures.
-            pa.default_memory_pool().release_unused()
         if pending_rows:
             whole = pa.concat_tables(pending)
             yield emitted, encode_batch(whole, self.access, self.attributes), pending_rows
@@ -518,95 +551,82 @@ class HoldOut:
 # Publication — the artifacts, after their points
 # ---------------------------------------------------------------------------------------------
 
+#: The publication route's own body cap, `PUBLISH_MAX_BODY_BYTES` in `tessera-server/src/control.rs`.
+#: The batch is the commit unit and an artifact's `members` is its whole membership, so an artifact
+#: whose body alone exceeds this has no smaller spelling. The driver declines it, records its key,
+#: member count and body bytes, and the layer's census row then lists a real difference. Whether
+#: the route grows an existing artifact's membership in pieces is an owner ruling that is pending;
+#: nothing here works around it.
+ROUTE_MAX_BODY_BYTES = 64 * 1024 * 1024
 
-def external_ids(points: Path) -> np.ndarray:
-    """`entity_id -> base64 external id`, as a fixed-width bytes array indexed by entity id.
+#: The base64 alphabet, indexed by sextet.
+_B64 = np.frombuffer(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/", np.uint8)
+
+#: A member table's row, as the partitioning pass writes it: the artifact's ordinal in publication
+#: order, the row's rank (−1 is the membership, `k` is `contents[k]`'s generating set) and the
+#: entity. 14 bytes; 1.66×10⁹ rows of rung 3's DAG membership are 23 GB of transient files.
+MEMBER_RECORD = np.dtype([("idx", "<i4"), ("rank", "<i2"), ("entity", "<u8")])
+
+EMPTY_ENTITIES = np.zeros(0, np.uint64)
+
+
+def external_ids_b64(entities: np.ndarray) -> np.ndarray:
+    """`(n, 12)` uint8: each entity id as eight little-endian bytes, base64.
 
     **The external id is the source entity id, little-endian, because that is the one address both
     halves of the split share.** A publication names its members by external id, and its members
     are base rows and ingested rows alike: the ingested half carries whatever `external_id` the
-    batch supplied, and the built half carries whatever the build minted — which is
-    `source_id.to_le_bytes()` under `--mint-external-ids` (`tessera-build`'s `ExternalIdRow`), and
+    batch supplied, and the built half carries whatever the build minted, which is
+    `source_id.to_le_bytes()` under `--mint-external-ids` (`tessera-build`'s `ExternalIdRow`) and
     nothing at all without it. So the driver builds the base with that flag and sends the same
     eight bytes on ingest, and one member list then addresses both.
 
+    Computed from the ids in NumPy rather than looked up in a table indexed by entity id: rung 5's
+    table was 16 bytes for each of 2.3×10⁸ entities, 3.7 GB, filled by a Python loop over every
+    id. Eight bytes are two full base64 groups and one group of two bytes, so the twelfth
+    character is always `=`.
+
     ⊘ **This is why the PMID is no longer the external id.** An earlier driver sent the PMID, which
-    is the natural caller identifier for this corpus and is still the `pmid` attribute — but the
-    build has no way to mint *that* as an external id from a column, so a published membership over
-    base rows was unaddressable and the whole batch was refused, naming member 0 of artifact 0.
-    Measured 2026-09-03.
-
-    Encoded **once per entity** rather than once per member: rung 3's member table names each
-    article ~46 times. `S16` and not `object`: 3.6×10⁷ Python `bytes` are several gigabytes of
-    interpreter objects beside a running server, and base64 of eight bytes is twelve characters.
-    NumPy strips trailing NULs on the way out and base64 contains none, so the value that comes
-    back is exactly what went in.
+    is the natural caller identifier for that corpus and is still the `pmid` attribute, but the
+    build cannot mint an external id from a column, so a published membership over base rows was
+    unaddressable and the whole batch was refused, naming member 0 of artifact 0.
     """
-    ids = pq.read_table(points, columns=["entity_id"]).column("entity_id").to_numpy()
-    out = np.zeros(int(ids.max()) + 1, dtype="S16")
-    for lo in range(0, len(ids), 1 << 21):
-        chunk = ids[lo : lo + (1 << 21)]
-        out[chunk] = [
-            base64.b64encode(int(e).to_bytes(8, "little")) for e in chunk.tolist()
-        ]
+    raw = np.ascontiguousarray(entities, dtype="<u8").view(np.uint8).reshape(-1, 8)
+    out = np.empty((len(raw), 12), np.uint8)
+    for group in range(2):
+        b0, b1, b2 = raw[:, 3 * group], raw[:, 3 * group + 1], raw[:, 3 * group + 2]
+        out[:, 4 * group] = _B64[b0 >> 2]
+        out[:, 4 * group + 1] = _B64[((b0 & 3) << 4) | (b1 >> 4)]
+        out[:, 4 * group + 2] = _B64[((b1 & 15) << 2) | (b2 >> 6)]
+        out[:, 4 * group + 3] = _B64[b2 & 63]
+    b6, b7 = raw[:, 6], raw[:, 7]
+    out[:, 8] = _B64[b6 >> 2]
+    out[:, 9] = _B64[((b6 & 3) << 4) | (b7 >> 4)]
+    out[:, 10] = _B64[(b7 & 15) << 2]
+    out[:, 11] = ord("=")
     return out
 
 
-def member_groups(path: Path, keys: Sequence[str]) -> dict:
-    """`(key index, rank) -> entity ids`, read off a rung's member table in one pass.
+def json_list_bytes(count: int) -> int:
+    """The length [`json_list`] produces for `count` ids: `["` + 12 chars + `"` and a comma each."""
+    return 2 if count == 0 else 15 * count + 1
 
-    A member row carries a `rank`: **null is the artifact's membership, `k` is `contents[k]`'s
-    generating set** — the same reading the build's member pass makes (`tessera-build/src/layers.rs`),
-    so the wire publishes what a build would have planned.
 
-    Grouped by a single `lexsort` over the whole table rather than by a per-key dictionary: at
-    4.6×10⁷ rows the dictionary is the cost of the run, and the sort is three columns of numbers.
+def json_list(entities: np.ndarray) -> bytes:
+    """A JSON array of base64 external ids, as bytes, assembled in NumPy.
+
+    One `(n, 15)` byte array — quote, twelve characters, quote, comma — then one copy. No Python
+    string is made per member: `json.dumps` over 7.6×10⁵ of them was the largest single cost in
+    a publication, and a list of 4×10⁶ Python `bytes` is a gigabyte of interpreter objects.
     """
-    idx_parts, rank_parts, entity_parts = [], [], []
-    value_set = pa.array(list(keys), pa.string())
-    reader = pq.ParquetFile(path)
-    for batch in reader.iter_batches(batch_size=1 << 21, columns=["key", "rank", "entity"]):
-        idx = pc.index_in(batch.column("key"), value_set=value_set)
-        if idx.null_count:
-            missing = pc.filter(batch.column("key"), pc.is_null(idx)).to_pylist()[:3]
-            raise ValueError(f"{path.name}: member rows name keys the roster does not: {missing}")
-        idx_parts.append(idx.to_numpy(zero_copy_only=False).astype(np.int32))
-        rank = batch.column("rank")
-        rank_parts.append(np.where(
-            np.asarray(rank.is_null()), np.int16(-1), rank.fill_null(0).to_numpy().astype(np.int16)
-        ))
-        entity_parts.append(batch.column("entity").to_numpy().astype(np.uint64))
-    if not idx_parts:
-        return {}
-    idx = np.concatenate(idx_parts)
-    rank = np.concatenate(rank_parts)
-    entity = np.concatenate(entity_parts)
-    del idx_parts, rank_parts, entity_parts
-    order = np.lexsort((rank, idx))
-    idx, rank, entity = idx[order], rank[order], entity[order]
-    del order
-    # One integer per `(key, rank)` group, so the boundaries are a single `diff`. 1024 ranks is
-    # three orders above any ranking a rung writes, and it is checked rather than assumed: a wider
-    # ranking would silently fold two groups into one.
-    if rank.max(initial=0) >= 1023:
-        raise ValueError(f"{path.name}: a content rank of {int(rank.max())} does not fit this pass")
-    key = idx.astype(np.int64) * 1024 + (rank.astype(np.int64) + 1)
-    edges = np.flatnonzero(np.diff(key)) + 1
-    out = {}
-    for lo, hi in zip(np.r_[0, edges], np.r_[edges, len(key)]):
-        out[(int(idx[lo]), int(rank[lo]))] = entity[lo:hi]
-    return out
-
-
-def json_list(values: np.ndarray) -> bytes:
-    """A JSON array of base64 external ids, assembled as bytes.
-
-    `json.dumps` over 7.6×10⁵ strings is the largest single cost in a publication and it produces
-    exactly this; the join does the same work without building the intermediate list.
-    """
-    if not len(values):
+    if not len(entities):
         return b"[]"
-    return b'["' + b'","'.join(values.tolist()) + b'"]'
+    cell = np.empty((len(entities), 15), np.uint8)
+    cell[:, 0] = ord('"')
+    cell[:, 1:13] = external_ids_b64(entities)
+    cell[:, 13] = ord('"')
+    cell[:, 14] = ord(",")
+    return b"[" + cell.tobytes()[:-1] + b"]"
 
 
 def in_parent_order(table: pa.Table) -> pa.Table:
@@ -657,105 +677,387 @@ def in_parent_order(table: pa.Table) -> pa.Table:
     return table.take(pa.array(order, pa.int64()))
 
 
-class Publication:
-    """One layer's roster, published in batches under a byte cap.
+def key_order_is_parent_order(keys: Sequence[str], parents: Sequence[list | None]) -> bool:
+    """Whether publishing the roster in key order would put every parent before its children.
 
-    **Every artifact carries its whole member set** — base rows and ingested rows alike, addressed
+    True for a layer with no edges. Where it holds, a member file sorted by key can be streamed
+    and published in file order; where it does not, the file is partitioned into publication
+    order first.
+    """
+    held = set(keys)
+    return all(
+        parent < key
+        for key, own in zip(keys, parents)
+        for parent in (own or [])
+        if parent in held
+    )
+
+
+def key_ranges(path: Path) -> list[tuple[str, str]] | None:
+    """`(min key, max key)` per row group from the file's own statistics; None if any lacks them."""
+    reader = pq.ParquetFile(path)
+    column = reader.schema_arrow.names.index("key")
+    out = []
+    for i in range(reader.metadata.num_row_groups):
+        statistics = reader.metadata.row_group(i).column(column).statistics
+        if statistics is None or not statistics.has_min_max:
+            return None
+        out.append((statistics.min, statistics.max))
+    return out
+
+
+def grouped_by_key(ranges: Sequence[tuple[str, str]]) -> bool:
+    """Whether consecutive row groups' key ranges never overlap, so every key's rows are contiguous.
+
+    Two adjacent row groups may share one key at their boundary; a row group whose maximum exceeds
+    the next one's minimum means a key's rows can be anywhere in the file. Parquet orders string
+    statistics bytewise, as Python compares `str`.
+    """
+    return all(a_max <= b_min for (_, a_max), (b_min, _) in zip(ranges, ranges[1:]))
+
+
+def member_columns(table: pa.Table, value_set: pa.Array, path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """`(ordinal int32, rank int16, entity uint64)` for one read of a member table.
+
+    The ordinal is the key's position in `value_set`, the roster in publication order. A `key`
+    read as a dictionary is mapped through its dictionary, so a 10⁶-row row group costs one
+    `index_in` over its distinct keys and one NumPy take; a row whose key the roster does not hold
+    is a refusal naming it. `rank` null becomes −1.
+    """
+    keys = table.column("key")
+    if keys.null_count:
+        raise ValueError(f"{path.name}: {keys.null_count} member rows have a null key")
+    parts = []
+    for chunk in keys.chunks:
+        if pa.types.is_dictionary(chunk.type):
+            at = pc.fill_null(pc.index_in(chunk.dictionary, value_set=value_set), -1)
+            part = at.to_numpy().astype(np.int32)[chunk.indices.to_numpy()]
+            if (part < 0).any():
+                unknown = chunk.dictionary.to_pylist()
+                missing = [k for k, a in zip(unknown, at.to_pylist()) if a < 0][:3]
+                raise ValueError(f"{path.name}: member rows name keys the roster does not: {missing}")
+        else:
+            at = pc.fill_null(pc.index_in(chunk, value_set=value_set), -1)
+            part = at.to_numpy().astype(np.int32)
+            if (part < 0).any():
+                missing = pc.filter(chunk, pc.equal(at, -1)).to_pylist()[:3]
+                raise ValueError(f"{path.name}: member rows name keys the roster does not: {missing}")
+        parts.append(part)
+    idx = parts[0] if len(parts) == 1 else np.concatenate(parts)
+    ranks = table.column("rank")
+    rank = pc.fill_null(ranks, 0).to_numpy().astype(np.int64)
+    if rank.max(initial=0) >= np.iinfo(np.int16).max:
+        raise ValueError(f"{path.name}: a content rank of {int(rank.max())} does not fit this pass")
+    rank = rank.astype(np.int16)
+    rank[pc.is_null(ranks).to_numpy(zero_copy_only=False)] = -1
+    entity = table.column("entity").to_numpy().astype(np.uint64)
+    return idx, rank, entity
+
+
+def rank_groups(idx: np.ndarray, rank: np.ndarray, entity: np.ndarray):
+    """Yield `(ordinal, {rank: entities})` for every ordinal present, in ordinal order.
+
+    One `lexsort` over the rows, then the group boundaries are one `diff`.
+    """
+    if not len(idx):
+        return
+    order = np.lexsort((rank, idx))
+    idx, rank, entity = idx[order], rank[order], entity[order]
+    del order
+    edges = np.flatnonzero((np.diff(idx) != 0) | (np.diff(rank) != 0)) + 1
+    starts, ends = np.r_[0, edges], np.r_[edges, len(idx)]
+    current, groups = int(idx[0]), {}
+    for lo, hi in zip(starts, ends):
+        ordinal = int(idx[lo])
+        if ordinal != current:
+            yield current, groups
+            current, groups = ordinal, {}
+        groups[int(rank[lo])] = entity[lo:hi]
+    yield current, groups
+
+
+class Publication:
+    """One declared layer's roster, published in batches under a byte cap, as they are assembled.
+
+    **Every artifact carries its whole member set**, base rows and ingested rows alike, addressed
     by external id, which is the address both halves share. The batch is the commit unit at the
     route, so an artifact is published entire or not at all; the cap therefore splits *between*
-    artifacts, and one artifact larger than the cap is sent alone.
+    artifacts, and one artifact larger than `--publish-max-bytes` is sent alone. One whose body
+    alone exceeds the route's own cap ([`ROUTE_MAX_BODY_BYTES`]) is declined and recorded with its
+    key, member count and body bytes, before its member list is ever built.
+
+    **The member table is read in artifact order once, and never held whole.** A layer's member
+    table can be 1.66×10⁹ rows (rung 3's DAG membership), and a driver that inverted it in memory
+    to address it per artifact held ~25 GB of bodies for it and declined the layer instead. Two
+    readers, chosen from the file's own row-group statistics:
+
+    * **Streamed**, where consecutive row groups' key ranges do not overlap (a k-means member file,
+      written one cluster after another) and key order is a parent-before-child order for this
+      layer. Row groups are read one at a time; a key closes when the next row group's minimum is
+      past it, so what is live is the row groups spanning one key boundary. A key that reappears
+      after closing is a refusal, so the statistics are checked rather than trusted.
+    * **Partitioned**, otherwise. One pass over `key` and `rank` counts each artifact's rows, and
+      buckets are planned as ranges of the publication order under `--publish-bucket-rows` (an
+      artifact over the budget has a bucket to itself). One pass writes every row as a 14-byte
+      record into its bucket under `--work`; then one bucket at a time is read back, sorted, and
+      published. Peak memory is one bucket plus one artifact's body, whatever the table's size.
+      Buckets are ranges of the publication order, so a parent is never in a later bucket than
+      its child. An artifact whose membership alone already exceeds the route's cap is declined
+      at planning and its rows are not written.
 
     **The roster's `parent` list travels as the artifact's `parent`**, which is where a `dag`
-    layer's edges are spelled and the only place they are (decision 0125). The route grew the field
-    to carry it — it had none, so a published `dag` layer came out flat whatever its roster said
-    (`docs/evidence/memos/2026-09-03-dag-membership-at-ingest.md`) — and `edges_published` counts
-    what landed, against `edges_declared`.
-
-    **Parents are published before their children**, which is what [`in_parent_order`] is for: a
-    parent must already exist or sit earlier in the same batch, an ordering an edge has always
-    carried (`annotation-representation.md` §5.0.4). A roster in key order is not in that order.
+    layer's edges are spelled and the only place they are (decision 0125); `edges_published`
+    counts what landed, against `edges_declared`. Parents are published before their children
+    ([`in_parent_order`]): a parent must already exist or sit earlier in the same batch, an
+    ordering an edge has always carried (`annotation-representation.md` §5.0.4).
     """
 
-    def __init__(self, roster: Path, members: Path, external: np.ndarray, max_bytes: int):
+    def __init__(self, roster: Path, members: Path | None, work: Path, max_bytes: int, bucket_rows: int):
         self.table = in_parent_order(pq.read_table(roster))
-        self.members = members
-        self.external = external
+        self.rows = self.table.to_pylist()
+        self.keys = [row["key"] for row in self.rows]
+        self.held = set(self.keys)
+        self.members_path = members
+        self.work = work
         self.max_bytes = max_bytes
-
-    def bodies(self) -> tuple[list, dict]:
-        """`[(level, body bytes, artifacts, members, edges)]`, and what the roster declared.
-
-        Assembled in full before the first request, so the publication's own wall measures the
-        service and not pyarrow — the driver's share is reported separately as `prepared_s`. What
-        that costs is the whole roster's bodies in memory at once: ~700 MB for 4.6×10⁷ members,
-        which is why a layer past `--max-member-rows` is declined rather than published slowly.
-        """
-        rows = self.table.to_pylist()
-        keys = [r["key"] for r in rows]
-        groups = member_groups(self.members, keys)
-        held = set(keys)
-        stats = {
-            "artifacts": len(rows),
+        self.bucket_rows = bucket_rows
+        self.stats = {
+            "artifacts": len(self.rows),
             "members": 0,
             "generating_set_entries": 0,
             "edges_declared": 0,
             "edges_in_roster_and_layer": 0,
             "artifacts_with_several_parents": 0,
+            "read_path": None,
+            "row_groups": None,
+            "buckets": None,
+            "count_s": None,
+            "partition_s": None,
+            "declined_artifacts": [],
         }
-        by_level: dict[int, list[tuple[bytes, int]]] = {}
-        for i, row in enumerate(rows):
-            parents = [key for key in (row.get("parent") or []) if key in held]
-            stats["edges_declared"] += len(row.get("parent") or [])
-            stats["edges_in_roster_and_layer"] += len(parents)
-            stats["artifacts_with_several_parents"] += 1 if len(parents) > 1 else 0
-            members = self.external[groups.get((i, -1), np.zeros(0, np.uint64))]
-            stats["members"] += len(members)
-            parts = [b'{"key":', json.dumps(row["key"]).encode(), b',"members":', json_list(members)]
-            contents = row.get("contents") or []
-            if contents:
-                blocks = []
-                for rank, values in enumerate(contents):
-                    generated = self.external[groups.get((i, rank), np.zeros(0, np.uint64))]
-                    stats["generating_set_entries"] += len(generated)
-                    blocks.append(
-                        b'{"values":'
-                        + json.dumps(list(values)).encode()
-                        + b',"generated_from":'
-                        + (json_list(generated) if len(generated) else b"[]")
-                        + b"}"
-                    )
-                parts += [b',"content":[', b",".join(blocks), b"]"]
-            if parents:
-                parts += [b',"parent":', json.dumps(parents).encode()]
-            if row.get("attached_layer"):
-                parts += [
-                    b',"attached_to":',
-                    json.dumps(
-                        {
-                            "layer": row["attached_layer"],
-                            "level": int(row.get("attached_level") or 0),
-                            "key": row["attached_key"],
-                        }
-                    ).encode(),
-                ]
-            parts.append(b"}")
-            level = int(row.get("level") or 0)
-            by_level.setdefault(level, []).append((b"".join(parts), len(members), len(parents)))
-        out = []
-        for level, blocks in by_level.items():
-            batch, size, counts = [], 0, [0, 0, 0]
-            for block, n, e in blocks:
-                if batch and size + len(block) > self.max_bytes:
-                    out.append((level, self._body(level, batch), *counts))
-                    batch, size, counts = [], 0, [0, 0, 0]
-                batch.append(block)
-                size += len(block) + 1
-                counts[0] += 1
-                counts[1] += n
-                counts[2] += e
-            if batch:
-                out.append((level, self._body(level, batch), *counts))
-        return out, stats
+        for row in self.rows:
+            own = row.get("parent") or []
+            in_layer = [key for key in own if key in self.held]
+            self.stats["edges_declared"] += len(own)
+            self.stats["edges_in_roster_and_layer"] += len(in_layer)
+            self.stats["artifacts_with_several_parents"] += 1 if len(in_layer) > 1 else 0
+
+    # -- the member table, one artifact at a time -----------------------------------------
+
+    def members(self):
+        """Yield `(roster index, {rank: entities})` for every artifact, parents before children."""
+        if self.members_path is None:
+            self.stats["read_path"] = "no member table"
+            for i in range(len(self.rows)):
+                yield i, {}
+            return
+        ranges = key_ranges(self.members_path)
+        self.stats["row_groups"] = pq.ParquetFile(self.members_path).metadata.num_row_groups
+        parents = [row.get("parent") for row in self.rows]
+        if ranges is not None and grouped_by_key(ranges) and key_order_is_parent_order(self.keys, parents):
+            self.stats["read_path"] = "streamed"
+            yield from self._streamed(ranges)
+        else:
+            self.stats["read_path"] = "partitioned"
+            yield from self._partitioned()
+
+    def _streamed(self, ranges: Sequence[tuple[str, str]]):
+        reader = pq.ParquetFile(self.members_path, read_dictionary=["key"])
+        value_set = pa.array(self.keys, pa.string())
+        by_key = sorted(range(len(self.keys)), key=self.keys.__getitem__)
+        closed = np.zeros(len(self.keys), bool)
+        window: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+        next_to_close = 0
+        for i in range(len(ranges)):
+            group = reader.read_row_group(i, columns=["key", "rank", "entity"])
+            idx, rank, entity = member_columns(group, value_set, self.members_path)
+            del group
+            if closed[idx].any():
+                reopened = self.keys[int(idx[closed[idx]][0])]
+                raise ValueError(
+                    f"{self.members_path.name}: {reopened!r} has rows after the row group its "
+                    f"statistics said it ended in; the file is not grouped by key"
+                )
+            window.append((idx, rank, entity))
+            bound = ranges[i + 1][0] if i + 1 < len(ranges) else None
+            closing = []
+            while next_to_close < len(by_key) and (bound is None or self.keys[by_key[next_to_close]] < bound):
+                closing.append(by_key[next_to_close])
+                next_to_close += 1
+            if not closing:
+                continue
+            closed[closing] = True
+            idx, rank, entity = (np.concatenate(parts) for parts in zip(*window))
+            done = closed[idx]
+            groups = dict(rank_groups(idx[done], rank[done], entity[done]))
+            keep = ~done
+            window = [(idx[keep], rank[keep], entity[keep])] if keep.any() else []
+            del idx, rank, entity, done, keep
+            for ordinal in closing:
+                yield ordinal, groups.pop(ordinal, {})
+
+    def _partitioned(self):
+        reader = pq.ParquetFile(self.members_path, read_dictionary=["key"])
+        value_set = pa.array(self.keys, pa.string())
+        count = len(self.keys)
+
+        # One pass over key and rank: each artifact's rows, and its membership alone.
+        t0 = time.perf_counter()
+        rows_of = np.zeros(count, np.int64)
+        members_of = np.zeros(count, np.int64)
+        for i in range(reader.metadata.num_row_groups):
+            group = reader.read_row_group(i, columns=["key", "rank"])
+            idx, rank, _ = member_columns(
+                group.append_column("entity", pa.nulls(group.num_rows, pa.uint64()).fill_null(0)),
+                value_set, self.members_path,
+            )
+            del group
+            rows_of += np.bincount(idx, minlength=count)
+            members_of += np.bincount(idx[rank < 0], minlength=count)
+        self.stats["count_s"] = round(time.perf_counter() - t0, 2)
+
+        # Buckets: ranges of the publication order under the row budget. An artifact whose
+        # membership alone is over the route's cap gets no bucket; it is declined here.
+        bucket_of = np.full(count, -1, np.int32)
+        bucket_range: list[tuple[int, int]] = []
+        start, filled = 0, 0
+        for ordinal in range(count):
+            if self._over_cap_by_members(ordinal, int(members_of[ordinal])):
+                continue
+            if filled and filled + rows_of[ordinal] > self.bucket_rows:
+                bucket_range.append((start, ordinal))
+                start, filled = ordinal, 0
+            bucket_of[ordinal] = len(bucket_range)
+            filled += int(rows_of[ordinal])
+        bucket_range.append((start, count))
+        self.stats["buckets"] = len(bucket_range)
+        del rows_of, members_of
+
+        # One pass writing every row to its bucket, as 14-byte records.
+        t0 = time.perf_counter()
+        self.work.mkdir(parents=True, exist_ok=True)
+        handles = [open(self.work / f"bucket-{b:05d}.bin", "wb") for b in range(len(bucket_range))]
+        try:
+            for i in range(reader.metadata.num_row_groups):
+                group = reader.read_row_group(i, columns=["key", "rank", "entity"])
+                idx, rank, entity = member_columns(group, value_set, self.members_path)
+                del group
+                bucket = bucket_of[idx]
+                order = np.argsort(bucket, kind="stable")
+                records = np.empty(len(idx), MEMBER_RECORD)
+                records["idx"], records["rank"], records["entity"] = idx[order], rank[order], entity[order]
+                bounds = np.searchsorted(bucket[order], np.arange(len(bucket_range) + 1))
+                del idx, rank, entity, bucket, order
+                for b, handle in enumerate(handles):
+                    if bounds[b + 1] > bounds[b]:
+                        handle.write(records[bounds[b]:bounds[b + 1]].tobytes())
+                del records
+        finally:
+            for handle in handles:
+                handle.close()
+        self.stats["partition_s"] = round(time.perf_counter() - t0, 2)
+
+        # One bucket at a time, sorted, every ordinal of its range yielded whether or not it has rows.
+        for b, (lo, hi) in enumerate(bucket_range):
+            path = self.work / f"bucket-{b:05d}.bin"
+            records = np.fromfile(path, MEMBER_RECORD)
+            path.unlink()
+            groups = dict(rank_groups(records["idx"], records["rank"], records["entity"]))
+            del records
+            for ordinal in range(lo, hi):
+                if bucket_of[ordinal] < 0:
+                    continue
+                yield ordinal, groups.pop(ordinal, {})
+
+    # -- bodies ----------------------------------------------------------------------------
+
+    def _head(self, i: int) -> bytes:
+        return b'{"key":' + json.dumps(self.rows[i]["key"]).encode() + b',"members":'
+
+    def _over_cap_by_members(self, i: int, members: int) -> bool:
+        """Declined at planning: the membership list alone, in the smallest body that could carry
+        it, is over the route's cap. Content only adds to it."""
+        size = len(self._head(i)) + json_list_bytes(members) + 1 + len(self._body(0, [b""]))
+        if size <= ROUTE_MAX_BODY_BYTES:
+            return False
+        self.stats["members"] += members
+        self.stats["declined_artifacts"].append(
+            {"key": self.rows[i]["key"], "members": members, "body_bytes": size, "content_counted": False}
+        )
+        return True
+
+    def bodies(self):
+        """Yield `(level, body bytes, artifacts, members, edges)` as each batch fills.
+
+        A batch closes when the next artifact would take it over `--publish-max-bytes` or sits on
+        another level; the wrapper is one level per request.
+        """
+        if self.members_path is not None:
+            self.work.mkdir(parents=True, exist_ok=True)
+        batch: list[bytes] = []
+        size = 0
+        level = None
+        counts = [0, 0, 0]
+        for i, groups in self.members():
+            block, members_n, edges_n = self._block(i, groups)
+            if block is None:
+                continue
+            row_level = int(self.rows[i].get("level") or 0)
+            if batch and (row_level != level or size + len(block) + 1 > self.max_bytes):
+                yield level, self._body(level, batch), *counts
+                batch, size, counts = [], 0, [0, 0, 0]
+            batch.append(block)
+            size += len(block) + 1
+            level = row_level
+            counts[0] += 1
+            counts[1] += members_n
+            counts[2] += edges_n
+        if batch:
+            yield level, self._body(level, batch), *counts
+
+    def _block(self, i: int, groups: dict) -> tuple[bytes | None, int, int]:
+        """One artifact's JSON, or None if declined; with its member and edge counts."""
+        row = self.rows[i]
+        parents = [key for key in (row.get("parent") or []) if key in self.held]
+        members = groups.get(-1, EMPTY_ENTITIES)
+        self.stats["members"] += len(members)
+        head = self._head(i)
+        contents = row.get("contents") or []
+        content_heads: list[tuple[bytes, np.ndarray]] = []
+        for rank, values in enumerate(contents):
+            generated = groups.get(rank, EMPTY_ENTITIES)
+            self.stats["generating_set_entries"] += len(generated)
+            content_heads.append((b'{"values":' + json.dumps(list(values)).encode() + b',"generated_from":', generated))
+        tail = b""
+        if parents:
+            tail += b',"parent":' + json.dumps(parents).encode()
+        if row.get("attached_layer"):
+            tail += b',"attached_to":' + json.dumps(
+                {
+                    "layer": row["attached_layer"],
+                    "level": int(row.get("attached_level") or 0),
+                    "key": row["attached_key"],
+                }
+            ).encode()
+        tail += b"}"
+        # Sized before anything large is built: a declined artifact's list is never assembled.
+        size = len(head) + json_list_bytes(len(members)) + len(tail)
+        if content_heads:
+            size += len(b',"content":[') + 1 + sum(
+                len(h) + json_list_bytes(len(g)) + 2 for h, g in content_heads
+            )
+        if size + len(self._body(0, [b""])) > ROUTE_MAX_BODY_BYTES:
+            self.stats["declined_artifacts"].append(
+                {"key": row["key"], "members": len(members), "body_bytes": size, "content_counted": True}
+            )
+            return None, 0, 0
+        parts = [head, json_list(members)]
+        if content_heads:
+            parts.append(b',"content":[')
+            parts.append(b",".join(h + json_list(g) + b"}" for h, g in content_heads))
+            parts.append(b"]")
+        parts.append(tail)
+        return b"".join(parts), len(members), len(parents)
 
     def _body(self, level: int, blocks: list[bytes]) -> bytes:
         return (
@@ -763,6 +1065,11 @@ class Publication:
             + b",".join(blocks)
             + b"]}"
         )
+
+    def cleanup(self) -> None:
+        """Remove the layer's transient buckets. Called whether or not the publication finished."""
+        if self.work.exists():
+            shutil.rmtree(self.work, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1093,11 +1400,8 @@ class Cycle:
                 shutil.rmtree(base_dir)
             self.log(f"splitting: base {len(base_ids):,} rows, hold-out {len(held):,} rows")
             write_base_inputs(self.rung, base_dir, base_ids)
-            # **Give the split's arena back before the build starts.** Arrow's pool keeps every
-            # page it has touched, so after a wide 10^8-row split the driver sits on tens of
-            # gigabytes it will never read again — on this box, 41 GB of a 47 GB machine, in front
-            # of a build that needs a dozen. `release_unused` is the pool's own answer and costs
-            # nothing when there is nothing to give back.
+            # Whatever the split's last row group left in the pool goes back before the build,
+            # which runs beside this process and needs the memory more.
             pa.default_memory_pool().release_unused()
         if self.args.state_extent:
             self.result["stated_extent"] = state_extent(
@@ -1228,6 +1532,7 @@ class Cycle:
         if self.result.get("blocked"):
             self.log("BLOCKED at the base build; the refusal is in the result")
             return self.result
+        self.result["driver_rss"] = {"after_base": driver_rss()}
 
         scratch = self.work / f"serve-{args.fraction:g}"
         # **A run that flushes writes into the bundle it serves.** Every publication adds a side
@@ -1300,6 +1605,7 @@ class Cycle:
                 self.result["ingest"]["accepted"],
             )
             self.log(f"  {self.result['ingest']['items_per_s']} items/s")
+            self.result["driver_rss"]["after_ingest"] = driver_rss()
             if args.stop_after_ingest:
                 # **The attribution cell, not the cycle.** Everything after this measures
                 # publication, flush and the fold; a run that only wants the executor's laps
@@ -1313,6 +1619,7 @@ class Cycle:
             # (`Session::resolve_external_ids` consults the live map first), so the ordering the
             # ruling states — points before the artifacts that name them — is the only one there is.
             self.result["publish"] = self.publish_layers(control)
+            self.result["driver_rss"]["after_publish"] = driver_rss()
 
             # **Each phase's failure is recorded and the run continues.** A cell that died at the
             # flush used to lose its ingest figures too, which are the expensive half; and a
@@ -1337,87 +1644,73 @@ class Cycle:
                 ))
         finally:
             self.result["status_at_end"] = safe(lambda: Control(served.control, served.credential("operator")).status())
+            self.result["driver_rss"]["end"] = driver_rss()
             served.stop()
         return self.result
 
     # -- the artifacts, on the wire --------------------------------------------------------
 
     def publish_layers(self, control: Control) -> dict:
-        """Publish every declared layer's roster, in batches under the byte cap. Its own figure.
+        """Publish every declared layer, or record why it was not. Its own figure.
 
-        **The whole roster, and the whole of each artifact's membership** — base rows and ingested
+        **The whole roster, and the whole of each artifact's membership**, base rows and ingested
         rows alike. An artifact exists because the layer declares it, so publishing only the ones
         whose members survived the split would make the two deployments differ in their *roster* as
         well as in their membership, which is a second variable in a test that has one.
 
-        A layer whose member table is larger than `--max-member-rows` is **declined and recorded**,
-        not silently skipped: the driver inverts the table in memory to address it per artifact, and
-        rung 3's DAG membership is 1.66×10⁹ rows. The layer is then declared and empty on the folded
-        deployment, every count on it differs from the all-in build's by design, and the equivalence
-        block reports the difference rather than hiding it.
+        **`declined` is exhaustive.** Every layer the declaration holds either has an entry under
+        `layers` or one under `declined` with its reason: an attribute-membership layer has nothing
+        to publish (an ingested row joins it through the column its batch carries); an open value
+        set has no roster; a roster whose publication failed carries the failure. Within a
+        published layer, an artifact whose body alone would exceed the route's cap is declined per
+        artifact and listed in the layer's `declined_artifacts`, so a census difference on the
+        layer is attributable to named artifacts.
+
+        Bodies are sent as they are assembled. `wall_s` is the sum of the requests' round trips,
+        the service's cost, and `prepared_s` the time spent inside the body generator, the
+        driver's; `phase_s` is the two together with whatever else the loop spent.
         """
-        external = external_ids(self.rung / "points.parquet")
         out: dict = {"layers": {}, "declined": {}}
         totals = {"artifacts": 0, "members": 0, "wall_s": 0.0, "requests": 0}
-        for layer, (roster, members) in LAYER_SOURCES.items():
-            roster_path, members_path = self.rung / roster, self.rung / members
-            if not roster_path.exists():
-                continue
-            rows = pq.ParquetFile(members_path).metadata.num_rows
-            if rows > self.args.max_member_rows:
-                out["declined"][layer] = (
-                    f"{rows:,} member rows exceeds --max-member-rows "
-                    f"{self.args.max_member_rows:,}; the driver would have to hold the whole "
-                    f"membership in memory to address it per artifact"
-                )
-                self.log(f"  {layer}: DECLINED, {rows:,} member rows")
-                continue
-            t0 = time.perf_counter()
-            bodies, stats = Publication(
-                roster_path, members_path, external, self.args.publish_max_bytes
-            ).bodies()
-            prepared_s = time.perf_counter() - t0
-            statuses: dict[str, int] = {}
-            refusal = None
-            session = requests.Session()
-            t0 = time.perf_counter()
-            published = {"artifacts": 0, "members": 0, "edges": 0}
-            for level, body, artifacts, members_n, edges in bodies:
-                r, _ = control.publish(layer, body, session)
-                statuses[str(r.status_code)] = statuses.get(str(r.status_code), 0) + 1
-                if r.status_code == 201:
-                    published["artifacts"] += artifacts
-                    published["members"] += members_n
-                    published["edges"] += edges
-                elif refusal is None:
-                    refusal = {"level": level, "status": r.status_code, "body": r.text[:1500]}
-            wall = time.perf_counter() - t0
-            entry = dict(stats)
-            entry.update(
-                {
-                    "requests": len(bodies),
-                    "prepared_s": round(prepared_s, 2),
-                    "wall_s": round(wall, 2),
-                    "published_artifacts": published["artifacts"],
-                    "published_members": published["members"],
-                    "edges_published": published["edges"],
-                    "artifacts_per_s": round(published["artifacts"] / wall, 1) if wall else None,
-                    "members_per_s": round(published["members"] / wall, 1) if wall else None,
-                    "statuses": statuses,
-                    "first_refusal": refusal,
+        work = self.work / f"publish-{self.args.fraction:g}"
+        for layer in declared_layers(self.rung):
+            name = layer["name"]
+            if layer["attribute"] is not None:
+                out["declined"][name] = {
+                    "reason": f"membership is the `{layer['attribute']}` attribute column: the layer "
+                    f"has no roster and no member table, and an ingested row joins it through the "
+                    f"attribute its batch carries",
                 }
-            )
-            out["layers"][layer] = entry
-            totals["artifacts"] += published["artifacts"]
-            totals["members"] += published["members"]
-            totals["wall_s"] += wall
-            totals["requests"] += len(bodies)
-            self.log(
-                f"  {layer}: {published['artifacts']:,} artifacts, {published['members']:,} "
-                f"members in {wall:.1f} s ({entry['artifacts_per_s']} artifacts/s, "
-                f"{entry['members_per_s']} members/s), {len(bodies)} requests, "
-                f"{published['edges']:,}/{stats['edges_declared']:,} parent edges"
-            )
+                self.log(f"  {name}: nothing to publish, membership is the `{layer['attribute']}` attribute")
+                continue
+            if layer["roster"] is None:
+                members = layer["members"]
+                out["declined"][name] = {
+                    "reason": f"an open value set with no artifact roster: the artifacts are minted "
+                    f"from the member file's list-keyed rows at a build, and the publication route "
+                    f"takes a roster. Whether the route grows a layer's artifacts in pieces is an "
+                    f"owner ruling that is pending; not published",
+                    "member_rows": pq.ParquetFile(members).metadata.num_rows
+                    if members is not None and members.exists()
+                    else None,
+                }
+                self.log(f"  {name}: NOT PUBLISHED, open value set with no roster")
+                continue
+            if not layer["roster"].exists():
+                out["declined"][name] = {"reason": f"roster {layer['roster'].name} is not in the rung directory"}
+                self.log(f"  {name}: NOT PUBLISHED, {layer['roster'].name} absent")
+                continue
+            try:
+                entry = self.publish_layer(control, name, layer, work / name.replace("/", "__"))
+            except Exception as e:  # noqa: BLE001 — the failure is the layer's record
+                out["declined"][name] = {"reason": f"{type(e).__name__}: {e}"[:1500]}
+                self.log(f"  {name}: FAILED, {type(e).__name__}: {str(e)[:200]}")
+                continue
+            out["layers"][name] = entry
+            totals["artifacts"] += entry["published_artifacts"]
+            totals["members"] += entry["published_members"]
+            totals["wall_s"] += entry["wall_s"]
+            totals["requests"] += entry["requests"]
         totals["wall_s"] = round(totals["wall_s"], 2)
         totals["artifacts_per_s"] = (
             round(totals["artifacts"] / totals["wall_s"], 1) if totals["wall_s"] else None
@@ -1429,6 +1722,72 @@ class Cycle:
         out["edges_declared"] = sum(e["edges_declared"] for e in out["layers"].values())
         out["edges_published"] = sum(e["edges_published"] for e in out["layers"].values())
         return out
+
+    def publish_layer(self, control: Control, name: str, layer: dict, work: Path) -> dict:
+        """One layer: its bodies assembled and sent in turn, one caller, serial."""
+        publication = Publication(
+            layer["roster"], layer["members"], work, self.args.publish_max_bytes, self.args.publish_bucket_rows
+        )
+        statuses: dict[str, int] = {}
+        refusal = None
+        published = {"artifacts": 0, "members": 0, "edges": 0}
+        prepared_s = 0.0
+        wall_s = 0.0
+        requests_n = 0
+        session = requests.Session()
+        t_phase = time.perf_counter()
+        bodies = publication.bodies()
+        try:
+            while True:
+                t0 = time.perf_counter()
+                item = next(bodies, None)
+                prepared_s += time.perf_counter() - t0
+                if item is None:
+                    break
+                level, body, artifacts, members_n, edges = item
+                r, dt = control.publish(name, body, session)
+                del body
+                wall_s += dt
+                requests_n += 1
+                statuses[str(r.status_code)] = statuses.get(str(r.status_code), 0) + 1
+                if r.status_code == 201:
+                    published["artifacts"] += artifacts
+                    published["members"] += members_n
+                    published["edges"] += edges
+                elif refusal is None:
+                    refusal = {"level": level, "status": r.status_code, "body": r.text[:1500]}
+        finally:
+            publication.cleanup()
+        phase_s = time.perf_counter() - t_phase
+        stats = publication.stats
+        declined = stats.pop("declined_artifacts")
+        entry = dict(stats)
+        entry.update(
+            {
+                "requests": requests_n,
+                "prepared_s": round(prepared_s, 2),
+                "wall_s": round(wall_s, 2),
+                "phase_s": round(phase_s, 2),
+                "published_artifacts": published["artifacts"],
+                "published_members": published["members"],
+                "edges_published": published["edges"],
+                "artifacts_per_s": round(published["artifacts"] / wall_s, 1) if wall_s else None,
+                "members_per_s": round(published["members"] / wall_s, 1) if wall_s else None,
+                "statuses": statuses,
+                "first_refusal": refusal,
+                "declined_artifacts": declined,
+                "declined_members": sum(d["members"] for d in declined),
+            }
+        )
+        self.log(
+            f"  {name}: {published['artifacts']:,} artifacts, {published['members']:,} "
+            f"members in {wall_s:.1f} s ({entry['artifacts_per_s']} artifacts/s, "
+            f"{entry['members_per_s']} members/s), {requests_n} requests, "
+            f"{published['edges']:,}/{stats['edges_declared']:,} parent edges, "
+            f"{len(declined)} artifact(s) declined over the route's cap; {stats['read_path']}, "
+            f"driver {prepared_s:.1f} s"
+        )
+        return entry
 
     def probe_layers_after_ingest(self, served, session_cred, view, quant, all_terms) -> dict:
         """One zoom-0 viewport **with `layers: "all"`** after the flush, timed and allowed to fail.
@@ -1550,13 +1909,14 @@ class Cycle:
         folded = census(served.viewer, served.session, session_cred, view, quant, ladder, boxes)
         folded_frame = quant
 
-        # The all-in deployment, served beside it on its own ports and scratch.
+        # The all-in deployment, served beside it on its own ports and scratch: the three ports
+        # after the folded deployment's, so a cycle takes six consecutive ports from `--port0`.
         scratch = self.work / "serve-allin"
         allin = Deployment(
             self.rung,
             self.rung / "bundle",
             scratch,
-            (self.args.port0 + 10, self.args.port0 + 11, self.args.port0 + 12),
+            (self.args.port0 + 3, self.args.port0 + 4, self.args.port0 + 5),
             self.binary,
         )
         allin.clear_scratch()
@@ -1662,6 +2022,20 @@ class Cycle:
         return out
 
 
+def driver_rss() -> dict:
+    """This process's `VmRSS` and `VmHWM`, in bytes, from `/proc/self/status`.
+
+    The driver's resident set is a figure of every cell. It runs beside the server it loads, on
+    the same box, and a driver that grows with the corpus stops the cell before the write path is
+    measured. `peak` is the process's high-water mark and only rises.
+    """
+    out: dict = {}
+    for line in Path("/proc/self/status").read_text().splitlines():
+        if line.startswith(("VmRSS:", "VmHWM:")):
+            out[line.split(":")[0]] = int(line.split()[1]) * 1024
+    return {"rss": out.get("VmRSS"), "peak": out.get("VmHWM")}
+
+
 def safe(fn):
     try:
         return fn()
@@ -1720,11 +2094,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         "equivalence census compare like with like",
     )
     ap.add_argument(
-        "--max-member-rows",
+        "--publish-bucket-rows",
         type=int,
-        default=200_000_000,
-        help="decline to publish a layer whose member table is larger than this: the driver holds "
-        "it in memory to address it per artifact, and rung 3's DAG membership is 1.66e9 rows",
+        default=16_000_000,
+        help="the partitioning publication reader's bucket budget, in member rows: a bucket is a "
+        "range of the publication order holding at most this many rows, or one artifact where that "
+        "artifact alone is larger. 16e6 rows is ~220 MB on disk and under 1 GB read back and sorted",
     )
     ap.add_argument("--flush-timeout", type=float, default=900.0)
     ap.add_argument("--fold-timeout", type=float, default=7200.0)
@@ -1732,6 +2107,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     started = time.time()
     result = Cycle(args).run()
     result["ran_s"] = round(time.time() - started, 1)
+    # `VmHWM` of the driver itself, whichever phase set it: the split, the hold-out's batches,
+    # the publication's buckets or the census. Beside the server's own fold peak in the cell.
+    result["driver_peak_rss"] = driver_rss()["peak"]
     Path(args.out).write_text(json.dumps(result, indent=2, default=str))
     print(f"wrote {args.out}")
     return 0

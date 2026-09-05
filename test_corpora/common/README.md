@@ -44,12 +44,12 @@ checkout use them.
 
 ## `measurements.json`
 
-`schema_version` is `2`. A renderer refuses a file whose version it does not know rather than
+`schema_version` is `3`. A renderer refuses a file whose version it does not know rather than
 reading its fields under a schema they were not written to.
 
 ```jsonc
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "rung": "medcpt",              // the directory under test_corpora/
   "rows": 35920666,              // the corpus's row count, as the rung's own README states it
   "binary_commit": "…",          // the git commit of the tessera binary the figures were taken with.
@@ -127,6 +127,7 @@ second file per rung would put two halves of one measurement in two places.
 | `visibility_s` | seconds | from the same request to a zoom-0 viewport reaching the expected count. **The number a viewer experiences**, and not the same as `flush_s` |
 | `fold_s` | seconds | the server's own `compaction.last_secs`. `POST /control/compact` answers 202 immediately, so an outside timer would measure the request |
 | `fold_peak_rss` | bytes | the server's own `compaction.last_rss_bytes` |
+| `driver_peak_rss` | bytes or `null` | the driver process's own `VmHWM` when the cell ended, from `/proc/self/status`. The split, the hold-out's batches, the publication's buckets and the census are all in it; the server's memory is not. `null` where the cell was measured before the field existed |
 | `equivalence` | — | decision 0091's test, split by surface — see below |
 | `write_cycle` | — | deletes, suppressions, re-ingests, a second fold, and the census again; each with its latency to visibility |
 
@@ -139,12 +140,16 @@ artifacts, memberships and supplied content are published through
 |---|---|---|
 | `layers.<name>.artifacts`, `.members`, `.generating_set_entries` | count | what the rung's roster and member table declared for that layer |
 | `layers.<name>.published_artifacts`, `.published_members` | count | what the route answered 201 for. A difference from the two above is a refusal, and `first_refusal` carries it verbatim |
-| `layers.<name>.requests` | count | publications sent. A batch is split between artifacts to stay under `--publish-max-bytes`; one artifact over it is sent alone, the batch being the commit unit |
-| `layers.<name>.prepared_s` | seconds | reading the roster and inverting the member table, in the driver. **Not** part of the throughput below: it measures pyarrow, not the service |
-| `layers.<name>.wall_s`, `.artifacts_per_s`, `.members_per_s` | — | the publication itself, one caller, serial |
+| `layers.<name>.requests` | count | publications sent. A batch is split between artifacts to stay under `--publish-max-bytes`; one artifact over it is sent alone, the batch being the commit unit. One whose body alone is over the route's 64 MiB cap is not sent at all: see `declined_artifacts` |
+| `layers.<name>.read_path` | — | how the member table was read: `streamed` where its row groups' key ranges do not overlap and key order puts every parent before its children, `partitioned` otherwise (one counting pass, one pass into on-disk buckets under `--work`, then one bucket at a time), `no member table` for a roster without one |
+| `layers.<name>.row_groups`, `.buckets`, `.count_s`, `.partition_s` | — | the member file's row groups; the partitioned reader's bucket count, counting-pass wall and partitioning-pass wall (`null` when streamed) |
+| `layers.<name>.prepared_s` | seconds | the driver's share of the phase: time inside the body generator, which reads the member table and assembles each body. **Not** part of the throughput below: it measures pyarrow and NumPy, not the service |
+| `layers.<name>.wall_s`, `.artifacts_per_s`, `.members_per_s` | — | the requests' round trips summed, one caller, serial: the service's cost. Bodies are sent as they are assembled, so the two shares interleave in wall-clock time |
+| `layers.<name>.phase_s` | seconds | the layer's whole publication phase, end to end |
 | `layers.<name>.edges_declared`, `.artifacts_with_several_parents` | count | the roster's `parent` lists, which under `dag` are where a layer's edges are spelled and the only place they are (decision 0125) |
 | `layers.<name>.edges_published` | count | edges on artifacts the route answered 201 for. The route had no `parent` field until 2026-09-03 and a published `dag` layer came out flat; parents are published parent-before-child, which is why the roster is reordered by depth first |
-| `declined` | object | a layer whose member table exceeds `--max-member-rows`, with the count. **Not patched around**: it is declared and empty on the folded deployment, so every count on it differs from the all-in build's by design, and `equivalence.layers` says so |
+| `layers.<name>.declined_artifacts[]`, `.declined_members` | — | artifacts whose body alone would exceed the route's cap, each with `key`, `members` and `body_bytes`. The batch is the commit unit and a membership has no smaller spelling, so these are not sent; whether the route grows a membership in pieces is an owner ruling that is pending. `content_counted` is false where the artifact was declined at planning on its membership list alone, so `body_bytes` omits its content. A layer census difference on such a layer is attributable to these keys |
+| `declined` | object | one entry per declared layer that was **not** published, with a `reason`: an attribute-membership layer has nothing to publish (an ingested row joins it through the column its batch carries); an open value set has no roster and is not published under the same pending ruling; a failure carries its exception. `member_rows` where there is a member file. **Every declared layer is either under `layers` or here.** A layer here is declared and empty on the folded deployment, so every count on it differs from the all-in build's by design, and `equivalence.layers` says so |
 | `edges_declared`, `edges_published` | count | the two summed over the layers |
 
 **`equivalence` is split into three surfaces because they are not equally comparable.**
