@@ -1,19 +1,20 @@
-# Value-suggestion campaign file ownership (controller, 2026-09-02). Briefs in
-# .superpowers/sdd/2026-09-02-value-suggestion/. Tracks branch from the promotion commit and are
-# merged in order engine → server → conformance, client alongside.
+# Campaign handover file ownership (controller, 2026-09-05). Briefs in
+# .superpowers/sdd/2026-09-05-campaign-handover/. Four tracks branch from the seam commit on main
+# and are merged in the order they finish; none depends on another's files. A file outside a
+# track's list is stop-and-report, never an edit to this file.
 
 [frozen]
 paths = [
+  "CLAUDE.md",
   "crates/tessera-plugin/*",
+  "conformance/*",
+  "docs/agents/*",
   "docs/decisions/*",
-  "docs/design/[!c]*",
-  "docs/design/c[!o]*",
-  "docs/design/co[!n]*",
-  "docs/design/con[!f]*",
-  "docs/design/concurrency-lifecycle.md",
-  "docs/design/configuration.md",
-  "docs/design/contracts.md",
-  "scripts/*",
+  "docs/design/*",
+  "scripts/check-*",
+  "scripts/fmt-file.sh",
+  "scripts/install-hooks.sh",
+  ".claude/track-allowlist.toml",
 ]
 
 [shared]
@@ -21,33 +22,42 @@ paths = [
   "Cargo.lock",
 ]
 
-[track.engine]
+# The ingest driver: bounded hold-out read, streaming publication, the measurement schema.
+[track.harness]
 paths = [
-  "crates/tessera-authz/src/tier.rs",
-  "crates/tessera-server/*",
-  "conformance/*",
-  "docs/design/conformance.md",
-  "crates/tessera-analyse/*",
-  "crates/tessera-filter/*",
+  "test_corpora/common/*",
+  "test_corpora/*/measurements*.json",
+  "test_corpora/*/README.md",
+  "scripts/campaign_report.py",
+  "docs/ingest-campaign.md",
+  "probes/2026-09-05-holdout-memory/*",
+  "probes/2026-09-05-publish-streaming/*",
+]
+
+# The flush's stages, lapped under bench-timing and read on /control/status.
+[track.flush]
+paths = [
+  "crates/tessera-engine/src/write.rs",
+  "crates/tessera-engine/src/flush.rs",
+  "crates/tessera-engine/src/timing.rs",
+  "crates/tessera-engine/src/lib.rs",
+  "crates/tessera-engine/tests/*",
+  "crates/tessera-server/src/control.rs",
+  "crates/tessera-server/src/state.rs",
+  "probes/2026-09-05-flush-attribution/*",
+]
+
+# The stall-shed test: a reader that genuinely refuses to consume.
+[track.shed]
+paths = [
+  "crates/tessera-server/tests/*",
+]
+
+# A stale bundle refused at open; an indexed unique key warned about.
+[track.store]
+paths = [
   "crates/tessera-store/*",
-  "crates/tessera-engine/*",
-  "crates/tessera-bench/*",
-]
-
-[track.server]
-paths = [
-  "crates/tessera-server/*",
-  "docs/openapi/tessera.yaml",
-]
-
-[track.client]
-paths = [
-  "clients/ts/*",
-  "clients/py/tesseradb/static/*",
-]
-
-[track.conformance]
-paths = [
-  "conformance/*",
-  "docs/design/conformance.md",
+  "crates/tessera-cli/*",
+  "crates/tessera-build/*",
+  "crates/tessera-engine/src/session.rs",
 ]
