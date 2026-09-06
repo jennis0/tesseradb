@@ -118,6 +118,12 @@ pub struct RowColumn {
     /// rows it touched and the pack's bytes are not read, copied or rewritten
     /// (`2026-09-03-post-flush-artifact-frames.md`).
     ///
+    /// **Every label at an extent row is here**, whether a flush, a growth or the column's own
+    /// composition put it there ([`Self::compose_over_base`]), and the pack labels base rows
+    /// alone. That is the rule a merge's rebase rests on ([`Self::rebase`]): the rows a merge
+    /// renumbers are extent rows, so their labels are all in the one half of the column that can
+    /// be edited.
+    ///
     /// ⊘ **Bounded by what has accumulated since the last fold**, on [`TailLabels`]' own note and
     /// with the same reset: the fold rewrites the level's column whole, and a deployment that
     /// never folds accumulates one entry per `(row, artifact)` every write adds whatever this
@@ -145,6 +151,17 @@ impl Added {
         let lo = self.pairs.partition_point(|(r, _)| *r < row);
         let hi = self.pairs.partition_point(|(r, _)| *r <= row);
         &self.pairs[lo..hi]
+    }
+
+    /// Remove every pair at a row in `lo..hi`, returning how many each ordinal lost — the half of
+    /// a merge's rebase that gives the renumbered span up ([`RowColumn::rebase`]). One
+    /// `partition_point` at each end and one move of what lies above, never a pass over the pairs
+    /// below.
+    fn drain_span(&mut self, lo: u32, hi: u32) -> Vec<(u32, u32)> {
+        let from = self.pairs.partition_point(|(r, _)| *r < lo);
+        let to = self.pairs.partition_point(|(r, _)| *r < hi);
+        self.rows.remove_range(lo..hi);
+        self.pairs.drain(from..to).collect()
     }
 
     /// Merge `batch` into [`Self::pairs`], keeping it ascending. `batch` is ascending,
@@ -255,6 +272,61 @@ impl RowColumn {
             }
         };
         Self::assemble(ordinals, row_count, layout, &each)
+    }
+
+    /// [`Self::compose`] with **the pack over the base rows alone and every row above them in the
+    /// amendment** — what a form built while the row space already carries extents composes.
+    ///
+    /// The split is what a merge's rebase rests on ([`Self::rebase`]): a merge renumbers extent
+    /// rows, and the amendment is the one half of a column that can give a span of rows up and
+    /// take it again, while the pack is packed bytes that are shared and never rewritten. A pack
+    /// that reached above the base would hold labels at rows a merge has since renumbered, with no
+    /// edit cheaper than composing the column again. So the pack covers `[0, base_rows)` whatever
+    /// the row space held when the column was composed, and the rows in `[base_rows, row_count)`
+    /// enter through [`Self::amend`], which a flush and a growth also use. A membership entirely
+    /// below the base costs nothing extra; one that reaches above it is copied once, at the
+    /// composition that already walks it whole.
+    ///
+    /// `None` on [`Self::compose`]'s terms: a label column whose memberships do not partition.
+    pub fn compose_over_base(
+        membership: &MembershipRows,
+        base_rows: u32,
+        row_count: u32,
+        layout: ServingLayout,
+    ) -> Option<Self> {
+        let ordinals = membership.len() as u32;
+        let reaches_above = |rows: &Bitmap| rows.maximum().is_some_and(|max| max >= base_rows);
+        let each = |visit: &mut dyn FnMut(u32, &Bitmap)| {
+            for ordinal in 0..ordinals {
+                if let Some(rows) = membership.get(ordinal) {
+                    if reaches_above(rows) {
+                        let mut below = rows.clone();
+                        below.remove_range(base_rows..);
+                        visit(ordinal, &below);
+                    } else {
+                        visit(ordinal, rows);
+                    }
+                }
+            }
+        };
+        let mut column = Self::assemble(ordinals, base_rows, layout, &each)?;
+        if row_count <= base_rows {
+            return Some(column);
+        }
+        let mut above: Vec<(u32, u32)> = Vec::new();
+        for ordinal in 0..ordinals {
+            if let Some(rows) = membership.get(ordinal).filter(|rows| reaches_above(rows)) {
+                let mut iter = rows.iter();
+                iter.reset_at_or_after(base_rows);
+                above.extend(iter.map(|row| (row, ordinal)));
+            }
+        }
+        // A label column composed over the base already partitions, and the rows above it are the
+        // same memberships' rows, so the amendment cannot be refused here.
+        if !column.amend(&above, row_count) {
+            return None;
+        }
+        Some(column)
     }
 
     /// The same column, projected straight from a level's records without building the row form
@@ -420,6 +492,39 @@ impl RowColumn {
         added.rows.run_optimize();
         added.merge(kept);
         true
+    }
+
+    /// **Give up every label in `lo..hi` and take `pairs` in their place** — what a row-space merge
+    /// does to a level's column: the rows inside the merged span name other entities afterwards,
+    /// so the labels there are dropped and the same memberships are labelled again at the rows
+    /// they now hold. `pairs` is the renumbered span's `(row, ordinal)` in any order, as
+    /// [`Self::amend`] takes them.
+    ///
+    /// **Only the amendment can hold a label inside the span**, and that is what makes this an
+    /// edit rather than a composition: the pack covers the base rows alone
+    /// ([`Self::compose_over_base`]), a merge never consumes the base segment, and a live tail
+    /// belongs to an attribute predicate whose column is composed again at every geometry move
+    /// and is never rebased. So the span's labels are drained from the amendment in one move, the
+    /// counts go down by what was drained, and the new pairs enter through `amend`. A merge
+    /// preserves the row count, so `row_count` is what it was.
+    ///
+    /// `false` on [`Self::amend`]'s terms — the label form and a row that would carry two
+    /// artifacts. The span's old labels are already gone by then, so the caller does what it does
+    /// for a refused amendment: the level is served artifact-major from here on, and every answer
+    /// is unchanged.
+    pub fn rebase(&mut self, lo: u32, hi: u32, pairs: &[(u32, u32)], row_count: u32) -> bool {
+        debug_assert!(
+            lo >= self.base_rows(),
+            "a merge's span begins inside the base rows, which a merge never consumes"
+        );
+        if let Some(added) = &mut self.added {
+            for (_, ordinal) in added.drain_span(lo, hi) {
+                if let Some(count) = self.declared.get_mut(ordinal as usize) {
+                    *count = count.saturating_sub(1);
+                }
+            }
+        }
+        self.amend(pairs, row_count)
     }
 
     /// Which form this is.
@@ -1272,6 +1377,72 @@ mod tests {
     /// claim is in the amendment rather than in the pack and the rule is the same; the refusal
     /// leaves the column as it was. A pair already carried is dropped rather than refused, and the
     /// list form takes the second label.
+    /// **A column composed over the base answers as one composed whole**, on both forms: the same
+    /// pairs, counts and row count — and its pack stops at the base, every row above it being in
+    /// the amendment. Ordinal 1 straddles the base so one membership is split between the two.
+    #[test]
+    fn a_column_composed_over_the_base_answers_as_one_composed_whole() {
+        let membership = rows_of(&[
+            Some(&[0, 1, 2]),
+            Some(&[6, 7, 8, 9]),
+            None,
+            Some(&[12, 13, 15]),
+        ]);
+        for layout in [ServingLayout::RowMajorLabel, ServingLayout::RowMajorList] {
+            let whole = RowColumn::compose(&membership, 16, layout).expect("partitions");
+            let split =
+                RowColumn::compose_over_base(&membership, 8, 16, layout).expect("partitions");
+            assert_eq!(every_pair(&split), every_pair(&whole), "{layout:?}");
+            assert_eq!(split.declared, whole.declared, "{layout:?}");
+            assert_eq!(split.row_count(), 16, "{layout:?}");
+            assert_eq!(split.base_rows(), 8, "{layout:?}: the pack stops at the base");
+            assert_eq!(
+                amendment(&split).pairs,
+                vec![(8, 1), (9, 1), (12, 3), (13, 3), (15, 3)],
+                "{layout:?}: every row above the base is in the amendment"
+            );
+            let mask: Bitmap = (0..16).filter(|r| r % 2 == 1).collect();
+            assert_eq!(split.histogram(&mask), whole.histogram(&mask), "{layout:?}");
+        }
+        // Nothing above the base: no amendment at all, so the column can still transpose.
+        let base_only = RowColumn::compose_over_base(&membership, 16, 16, ServingLayout::RowMajorList)
+            .expect("builds");
+        assert!(base_only.added.is_none());
+        assert!(base_only.transpose().is_some());
+    }
+
+    /// **A rebase gives up exactly the span's labels and takes the new ones**, equal to a column
+    /// composed over the rebased memberships: the rows in `8..16` are permuted as a merge permutes
+    /// them, and rows below and above the span stay as they were, on both forms.
+    #[test]
+    fn a_rebase_relabels_the_span_and_nothing_else() {
+        let before = rows_of(&[
+            Some(&[0, 1, 8, 9, 20]),
+            Some(&[4, 12, 13, 21]),
+            None,
+            Some(&[14, 15, 22]),
+        ]);
+        // The merge's permutation of rows 8..16: 8→13, 9→12, 12→8, 13→9, 14→15, 15→14.
+        let after = rows_of(&[
+            Some(&[0, 1, 13, 12, 20]),
+            Some(&[4, 8, 9, 21]),
+            None,
+            Some(&[15, 14, 22]),
+        ]);
+        for layout in [ServingLayout::RowMajorLabel, ServingLayout::RowMajorList] {
+            let mut column =
+                RowColumn::compose_over_base(&before, 8, 24, layout).expect("partitions");
+            let span: Vec<(u32, u32)> = vec![(13, 0), (12, 0), (8, 1), (9, 1), (15, 3), (14, 3)];
+            assert!(column.rebase(8, 16, &span, 24), "{layout:?}");
+            let expected =
+                RowColumn::compose_over_base(&after, 8, 24, layout).expect("partitions");
+            assert_eq!(every_pair(&column), every_pair(&expected), "{layout:?}");
+            assert_eq!(column.declared, expected.declared, "{layout:?}");
+            assert_eq!(amendment(&column), amendment(&expected), "{layout:?}");
+            assert_eq!(column.row_count(), 24, "{layout:?}: a merge preserves the row count");
+        }
+    }
+
     #[test]
     fn a_growth_into_a_row_already_amended_is_refused_on_the_label_form() {
         let membership = rows_of(&[Some(&[0, 1]), Some(&[4, 5])]);

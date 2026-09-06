@@ -4971,6 +4971,19 @@ fn views_of(generation: &Generation) -> Vec<String> {
 /// A `spatial` layer's membership is the rows inside its shapes and an `attribute` layer's is the
 /// rows carrying a value; both are evaluated against the geometry, so neither has anything to take
 /// from a publication's or a growth's record.
+/// One view's row space in `bundle`, or `None` where the partition or the view is not there.
+fn view_row_space<'a>(
+    bundle: &'a tessera_store::read::Bundle,
+    partition: &str,
+    view: &str,
+) -> Option<&'a tessera_store::permutation::RowSpace> {
+    bundle
+        .partitions
+        .get(partition)
+        .and_then(|p| p.views.get(view))
+        .map(|v| &v.row_space)
+}
+
 fn stored_membership(declaration: &tessera_types::layer::LayerDeclaration) -> bool {
     matches!(
         declaration.membership,
@@ -6189,6 +6202,7 @@ impl Executor {
                 "a merge resolved its segment against a spatial level's shapes"
             );
         }
+        let merged_seg_id = completed.segment.seg_id.clone();
         let next_bundle = match live.bundle.with_merged(
             &completed.plan.partition,
             &completed.plan.view,
@@ -6211,6 +6225,35 @@ impl Executor {
         };
 
         let segments_version = live.segments_version + 1;
+        // **And every stored level's held row form is rebased over the merged extent, before the
+        // swap** — the twin of the flush's extension. The rows inside the merged span name other
+        // entities now, so a form that kept its bits there would count one segment's rows as
+        // another's; a form dropped instead would be projected whole by the next request naming
+        // the level, which at rung 3 was 108 s and a shed request, once per merge
+        // (`probes/2026-09-05-merge-arm/`). The rebase costs the members inside the merged
+        // extent's entity range per artifact (`ArtifactProjections::rebase_merged`).
+        if let (Some(previous), Some(space)) = (
+            view_row_space(&live.bundle, &completed.plan.partition, &completed.plan.view),
+            view_row_space(&next_bundle, &completed.plan.partition, &completed.plan.view),
+        ) {
+            let stored = |layer: &str| {
+                self.live
+                    .registered_layer(layer)
+                    .is_some_and(|held| stored_membership(&held.declaration))
+            };
+            self.live.with_artifacts(|store| {
+                self.artifact_projections.rebase_merged(
+                    &live.prefix,
+                    &completed.plan.view,
+                    store,
+                    previous,
+                    space,
+                    &merged_seg_id,
+                    segments_version,
+                    &stored,
+                )
+            });
+        }
         // **Re-derived over the new row space, because row ids changed meaning inside the span.**
         // Carrying the mask forward would leave denied rows pointing at whichever entities now
         // occupy those ids — the one way this mask can silently re-expose a deleted item.
@@ -13709,12 +13752,10 @@ impl Executor {
         // twin of the shape pieces installed above: one `project_extents_from` per artifact over
         // the entities inside this extent's own range, on this thread, against the whole-level
         // projection the alternative puts on the next request.
-        if let Some(space) = next_bundle
-            .partitions
-            .get(&completed.partition)
-            .and_then(|p| p.views.get(&completed.view))
-            .map(|v| &v.row_space)
-        {
+        if let (Some(previous), Some(space)) = (
+            view_row_space(&live.bundle, &completed.partition, &completed.view),
+            view_row_space(&next_bundle, &completed.partition, &completed.view),
+        ) {
             // The same rule the delta path takes, asked per layer because this reaches every level
             // the view holds a form for: a rule-derived level is fresh by its own version move and
             // has nothing here to gain.
@@ -13728,7 +13769,9 @@ impl Executor {
                     &live.prefix,
                     &completed.view,
                     store,
+                    previous,
                     space,
+                    segments_version,
                     &stored,
                 )
             });

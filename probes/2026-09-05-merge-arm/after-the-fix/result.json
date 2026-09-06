@@ -1,0 +1,99 @@
+{
+ "flushes": [
+  {
+   "ingest_status": 200,
+   "accepted": 1000,
+   "published": true,
+   "publish_s": 0.5,
+   "request": {
+    "served": true,
+    "wall_s": 5.98,
+    "server_ms": 162.5,
+    "visible": 35921666
+   }
+  },
+  {
+   "ingest_status": 200,
+   "accepted": 1000,
+   "published": true,
+   "publish_s": 0.5,
+   "request": {
+    "served": true,
+    "wall_s": 5.69,
+    "server_ms": 147.7,
+    "visible": 35922666
+   }
+  },
+  {
+   "ingest_status": 200,
+   "accepted": 1000,
+   "published": true,
+   "publish_s": 0.5,
+   "request": {
+    "served": true,
+    "wall_s": 5.38,
+    "server_ms": 158.5,
+    "visible": 35923666
+   }
+  },
+  {
+   "ingest_status": 200,
+   "accepted": 1000,
+   "published": true,
+   "publish_s": 0.5,
+   "request": {
+    "served": true,
+    "wall_s": 5.45,
+    "server_ms": 129.1,
+    "visible": 35924666
+   }
+  }
+ ],
+ "rows_per_flush": 1000,
+ "open_s": 26.1,
+ "before": [
+  {
+   "served": true,
+   "wall_s": 5.73,
+   "server_ms": 248.5,
+   "visible": 35920666
+  },
+  {
+   "served": true,
+   "wall_s": 5.83,
+   "server_ms": 130.7,
+   "visible": 35920666
+  }
+ ],
+ "merge": {
+  "published": true,
+  "wait_s": 84.3,
+  "merges": 1
+ },
+ "after_merge": [
+  {
+   "served": true,
+   "wall_s": 5.46,
+   "server_ms": 130.2,
+   "visible": 35924666
+  },
+  {
+   "served": true,
+   "wall_s": 5.25,
+   "server_ms": 139.8,
+   "visible": 35924666
+  }
+ ],
+ "status_at_end": {
+  "buffered_items": 0,
+  "flush_failures": 0,
+  "flush_requested": false,
+  "flush_skips": 0,
+  "flushable_items": 0,
+  "flushes": 4,
+  "in_flight": false,
+  "overlay_publications": 0,
+  "refreshes": 20,
+  "ticks": 5
+ }
+}

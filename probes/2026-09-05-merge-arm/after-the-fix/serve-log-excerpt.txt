@@ -1,0 +1,5 @@
+2026-09-06T01:34:36.359847Z  INFO tessera_engine::artifacts: a level's row form and tile index are built layer=clusters/kmeans level=0 view=knn ordinals=256 everywhere=46 adopted=true transposed=false layout=ArtifactMajor blocks_per_artifact=7.3359375
+2026-09-06T01:34:50.798066Z  INFO tessera_engine::artifacts: a level's row form and tile index are built layer=mesh/descriptors level=0 view=knn ordinals=30217 everywhere=29723 adopted=false transposed=true layout=RowMajorList blocks_per_artifact=241.36744216831585
+2026-09-06T01:34:50.806290Z  INFO tessera_engine::session: the engine built every level's artifact row form; no request pays for one levels=2 elapsed_ms=14676 builds=2
+2026-09-06T01:36:58.141758Z  INFO tessera_engine::artifacts: a level's held row form took a merge's rebase layer=clusters/kmeans level=0 view=knn seg_id=merge-4-1 span_rows=4000 rows_relabelled=0 elapsed_ms=0
+2026-09-06T01:36:58.169117Z  INFO tessera_engine::artifacts: a level's held row form took a merge's rebase layer=mesh/descriptors level=0 view=knn seg_id=merge-4-1 span_rows=4000 rows_relabelled=0 elapsed_ms=27

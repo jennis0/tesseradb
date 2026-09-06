@@ -503,6 +503,31 @@ impl MembershipRows {
         }
     }
 
+    /// Replace the slot's rows in `lo..hi` with `rows` — the one way a held form's membership
+    /// changes without growing, and a merge is the one operation that asks for it: the rows inside
+    /// the merged span name other entities afterwards, so the bits there are cleared and the same
+    /// members' new rows put in. `remove_range` is O(containers in the span). A hole stays a hole,
+    /// on [`Self::or_rows`]' rule.
+    ///
+    /// **An artifact with no row in the span, before or after, is not touched.** The form is still
+    /// in the map while this runs, so every bitmap is shared and `make_mut` copies it; at rung 3's
+    /// `mesh/descriptors` the copy of every artifact was a *measured* 3.4 s on the executor thread
+    /// for a merge that relabelled nothing. `range_cardinality` is O(containers in the span).
+    fn rebase_rows(&mut self, idx: usize, lo: u32, hi: u32, rows: &Bitmap) -> bool {
+        match self.rows.get_mut(idx).and_then(Option::as_mut) {
+            Some(held) => {
+                if rows.is_empty() && held.range_cardinality(lo..hi) == 0 {
+                    return true;
+                }
+                let held = Arc::make_mut(held);
+                held.remove_range(lo..hi);
+                held.or_inplace(rows);
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn get(&self, ordinal: u32) -> Option<&Bitmap> {
         self.rows
             .get(ordinal as usize)
@@ -848,6 +873,17 @@ impl ArtifactRows {
     /// is over `space`. The counts are identical; what the extra bits buy is that a session one
     /// geometry behind the newest (decision 0044) reads the same form rather than rebuilding it
     /// against the newest reader for ever.
+    ///
+    /// **On the executor this cannot be false for a form that was current.** Every geometry
+    /// publication brings the held forms with it before the swap: a flush extends them
+    /// ([`ArtifactProjections::extend_flushed`]) and a merge rebases the span it renumbered
+    /// ([`ArtifactProjections::rebase_merged`]), so a form that agreed with the outgoing
+    /// generation agrees with the incoming one, and both entry points `debug_assert` that. What
+    /// can still reach either is a form a request built against a generation that was superseded
+    /// while it built and inserted afterwards; that form never agreed with the outgoing
+    /// generation, is dropped with a `warn`, and costs the next request naming the level a
+    /// projection. The request path reads this at every hit for that reason and one more: a
+    /// request may itself hold the older of two live generations.
     pub fn covers(&self, space: &RowSpace) -> bool {
         self.covered.len() >= space.extent_count() && self.agrees_with(space)
     }
@@ -955,6 +991,59 @@ impl ArtifactRows {
             return false;
         };
         if Arc::make_mut(column).amend(added, row_count) {
+            false
+        } else {
+            self.layout = ServingLayout::ArtifactMajor;
+            self.column = None;
+            true
+        }
+    }
+
+    /// **Every artifact's membership rebased over the extent at `start`** — what a row-space merge
+    /// does to a held form. The merged extent stands where the run it consumed stood, at the same
+    /// `row_base` with the same row count, and the rows inside it are the consumed segments' rows
+    /// in another order; so each artifact's bits in that span are cleared and its members
+    /// re-projected through the one extent, [`Self::extend_by`]'s projection asked of one extent
+    /// rather than of every extent from a point. Rows below the span are base rows or earlier
+    /// extents' rows, which a merge does not move; rows above it belong to later extents, whose
+    /// `row_base` a merge preserves.
+    ///
+    /// The cost is one `remove_range` per artifact and the members inside the merged extent's
+    /// entity range — the work the level would otherwise pay as a whole projection on the next
+    /// request that named it (`probes/2026-09-05-merge-arm/`: 108 s at rung 3, shed).
+    ///
+    /// Returns `(lo, hi, added)`: the span cleared and the `(row, ordinal)` pairs the column
+    /// takes back, on [`Self::extend_by`]'s terms.
+    fn rebase_span<'a>(
+        &mut self,
+        artifacts: impl Iterator<Item = (u32, &'a ArtifactRecord)>,
+        space: &RowSpace,
+        start: usize,
+    ) -> (u32, u32, Vec<(u32, u32)>) {
+        let extent = &space.extents()[start];
+        let lo = extent.row_base;
+        let hi = lo.saturating_add(extent.row_count());
+        let mut added = Vec::new();
+        for (ordinal, record) in artifacts {
+            let rows = space.project_extent(&record.members, start);
+            if self.membership.rebase_rows(ordinal as usize, lo, hi, &rows)
+                && self.layout.is_row_major()
+            {
+                added.extend(rows.iter().map(|row| (row, ordinal)));
+            }
+        }
+        (lo, hi, added)
+    }
+
+    /// [`Self::amend_derived`] for a rebase: the tile index re-derived, the column's labels in
+    /// `lo..hi` given up and `added` taken in their place ([`RowColumn::rebase`]). `true` on that
+    /// method's terms.
+    fn rebase_derived(&mut self, lo: u32, hi: u32, added: &[(u32, u32)], row_count: u32) -> bool {
+        self.index = TileIndex::build(&self.membership, row_count);
+        let Some(column) = &mut self.column else {
+            return false;
+        };
+        if Arc::make_mut(column).rebase(lo, hi, added, row_count) {
             false
         } else {
             self.layout = ServingLayout::ArtifactMajor;
@@ -1458,9 +1547,28 @@ pub enum LevelDelta<'a> {
     Published(&'a [u32]),
 }
 
+/// One held row form, what it describes and how far its rows have been brought.
+#[derive(Debug)]
+struct Held {
+    key: ProjectionKey,
+    /// The `segments_version` the form's rows were last brought to — the generation it was built
+    /// against, or the last one whose publication extended or rebased it on the executor.
+    ///
+    /// **What keeps a request from undoing the executor's work.** A request builds a form against
+    /// the generation it loaded and inserts it when the build ends; at rung 3 a build is tens of
+    /// seconds and the tick is ninety, so a build that straddles a flush or a merge is the
+    /// ordinary case rather than a race. Inserted unconditionally, that form would replace one the
+    /// publication had just extended or rebased with one that is a segment short or holds the
+    /// consumed segments' rows — and the next request would find `covers` false and project the
+    /// level again. So an insert keeps whichever of the two is at the later version
+    /// ([`ArtifactProjections::insert_newest`]).
+    at: u64,
+    rows: Arc<ArtifactRows>,
+}
+
 #[derive(Debug, Default)]
 pub struct ArtifactProjections {
-    cached: Mutex<BTreeMap<LevelAddress, (ProjectionKey, Arc<ArtifactRows>)>>,
+    cached: Mutex<BTreeMap<LevelAddress, Held>>,
     /// The containment partitions, keyed **without the view**.
     ///
     /// **The expression is view-independent, and composing it is not cheap.** It names entities'
@@ -1825,7 +1933,21 @@ impl ArtifactProjections {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(&(view.to_string(), layer.to_string(), level))
-            .map(|(_, rows)| Arc::clone(rows))
+            .map(|held| Arc::clone(&held.rows))
+    }
+
+    /// File `held` under `address` unless what is there is at a later segments version — see
+    /// [`Held::at`]. Between two forms at one version the newer insert wins, which is the
+    /// replace-on-mismatch rule the map has always had.
+    fn insert_newest(&self, address: LevelAddress, held: Held) {
+        let mut cached = self.cached.lock().unwrap_or_else(|e| e.into_inner());
+        if cached
+            .get(&address)
+            .is_some_and(|standing| standing.at > held.at)
+        {
+            return;
+        }
+        cached.insert(address, held);
     }
 
     /// How many forms are held. Operator plane only, beside [`Self::builds`] — a count of
@@ -1961,7 +2083,7 @@ impl ArtifactProjections {
         // absence costs nothing it would not have paid; and taking the entry is what leaves this
         // thread the only holder of the `Arc` between requests, so the `make_mut` below copies
         // only where a request is still reading the form.
-        let Some((key, mut rows)) = self
+        let Some(Held { key, at, mut rows }) = self
             .cached
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1990,8 +2112,9 @@ impl ArtifactProjections {
         } else if !(rows.covers(space) && rows.extends_to(space)) {
             // **Exactly this row space, not merely one it can answer for.** The amendment sizes
             // the tile index and the column to `space`, so a form holding rows above what `space`
-            // addresses would have them dropped rather than kept — and the executor never sees one
-            // (it holds the newest generation), which makes this the unreachable-state arm.
+            // addresses would have them dropped rather than kept. The executor holds the newest
+            // generation, so what reaches this arm is a form a request built against a superseded
+            // generation and inserted afterwards — see [`ArtifactRows::covers`].
             Some("the form's rows are not rows of this view's row space")
         } else {
             None
@@ -2079,10 +2202,7 @@ impl ArtifactProjections {
             level_version: now,
             ..key
         };
-        self.cached
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(map_key, (key, rows));
+        self.insert_newest(map_key, Held { key, at, rows });
     }
 
     /// **Extend every stored level's held form in one view by the segment a flush has published.**
@@ -2097,49 +2217,41 @@ impl ArtifactProjections {
     /// derived level's form is keyed on the geometry and is rebuilt by the flush's own move of it,
     /// which is what makes its answer fresh by construction.
     ///
-    /// A form that does not extend — a merge, or a form left behind by an earlier drop — is dropped
-    /// and rebuilt by the next request, said at `warn` for [`Self::bring_forward`]'s reason.
+    /// `previous` is the row space the outgoing generation served and `next` the one being
+    /// published; `at` is the segments version `next` carries. A form that agreed with `previous`
+    /// extends to `next`, because a flush appends and nothing else moved between the two — asserted
+    /// in a debug build. A form that did not agree with `previous` was built by a request against a
+    /// generation superseded while it built ([`ArtifactRows::covers`]); it is dropped with a `warn`,
+    /// and the next request naming the level projects it.
+    #[allow(clippy::too_many_arguments)]
     pub fn extend_flushed(
         &self,
         prefix: &str,
         view: &str,
         store: &ArtifactStore,
-        space: &RowSpace,
+        previous: &RowSpace,
+        next: &RowSpace,
+        at: u64,
         stored: &dyn Fn(&str) -> bool,
     ) {
-        let held: Vec<(LevelAddress, ProjectionKey, Arc<ArtifactRows>)> = {
-            let cached = self.cached.lock().unwrap_or_else(|e| e.into_inner());
-            cached
-                .iter()
-                .filter(|((held_view, layer, _), _)| held_view == view && stored(layer))
-                .filter(|(_, (key, _))| key.prefix == prefix)
-                .map(|(address, (key, rows))| (address.clone(), key.clone(), Arc::clone(rows)))
-                .collect()
-        };
-        for (address, key, mut rows) in held {
+        for (address, key, mut rows) in self.held_of_view(prefix, view, stored) {
             let (_, layer, level) = &address;
-            if rows.covers(space) {
+            if rows.covers(next) {
                 continue;
             }
-            if !rows.extends_to(space) {
-                self.cached
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&address);
-                tracing::warn!(
-                    layer = %layer,
-                    level,
-                    view = %view,
-                    "a level's held row form does not extend to this view's row space — its \
-                     segments were permuted rather than appended to — so it is dropped and the \
-                     next request naming this level projects it whole"
+            if !rows.extends_to(next) {
+                debug_assert!(
+                    !rows.agrees_with(previous),
+                    "a held row form agreed with the outgoing generation and does not extend to \
+                     the flushed one: a publication permuted rows without rebasing the form"
                 );
+                self.drop_disagreeing(&address, view);
                 continue;
             }
             let amended = Arc::make_mut(&mut rows);
-            let added = amended.extend_by(store.level(layer, *level), space);
-            let lost = amended.amend_derived(&added, total_rows(space));
-            amended.covering(space);
+            let added = amended.extend_by(store.level(layer, *level), next);
+            let lost = amended.amend_derived(&added, total_rows(next));
+            amended.covering(next);
             if lost {
                 self.fallbacks
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2151,11 +2263,122 @@ impl ArtifactProjections {
                      artifact-major. Every answer is unchanged; the layout is not"
                 );
             }
-            self.cached
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(address, (key, rows));
+            self.insert_newest(address, Held { key, at, rows });
         }
+    }
+
+    /// **Rebase every stored level's held form in one view over the extent a merge has published**
+    /// — the one geometry publication that permutes rows a form holds rather than appending to
+    /// them, taken in place before the swap exactly as a flush's extension is.
+    ///
+    /// The merged extent `merged` stands at the index the consumed run's first segment stood at,
+    /// with the same `row_base` and row count, so what changes for a form is the bits inside that
+    /// span and the segment list it records. [`ArtifactRows::rebase_span`] clears the span and
+    /// re-projects each artifact's members through the merged extent; the column gives up the
+    /// span's labels and takes the re-projected ones ([`RowColumn::rebase`]); the tile index is
+    /// derived again; and the form's record of its segments becomes `next`'s. The containment
+    /// partition is untouched, being per ordinal and rank and not per row.
+    ///
+    /// Without this the form failed [`ArtifactRows::covers`] on the next request and the level
+    /// was projected whole inside it — 108 s at rung 3's `mesh/descriptors`, shed at the 60 s
+    /// stream deadline, once per merge (`probes/2026-09-05-merge-arm/`).
+    ///
+    /// `previous`, `next`, `at` and the disposition of a form that did not agree with `previous`
+    /// are [`Self::extend_flushed`]'s. A form that agreed with `previous` covers it exactly — the
+    /// executor holds the newest generation, so no held form is longer — and is rebased.
+    #[allow(clippy::too_many_arguments)]
+    pub fn rebase_merged(
+        &self,
+        prefix: &str,
+        view: &str,
+        store: &ArtifactStore,
+        previous: &RowSpace,
+        next: &RowSpace,
+        merged: &str,
+        at: u64,
+        stored: &dyn Fn(&str) -> bool,
+    ) {
+        let Some(start) = next
+            .extents()
+            .iter()
+            .position(|extent| extent.seg_id == merged)
+        else {
+            return;
+        };
+        for (address, key, mut rows) in self.held_of_view(prefix, view, stored) {
+            let (_, layer, level) = &address;
+            if !(rows.covers(previous) && rows.extends_to(previous)) {
+                debug_assert!(
+                    !rows.agrees_with(previous),
+                    "a held row form agreed with the outgoing generation and is not the whole of \
+                     it: a flush appended a segment without extending the form"
+                );
+                self.drop_disagreeing(&address, view);
+                continue;
+            }
+            let started = std::time::Instant::now();
+            let amended = Arc::make_mut(&mut rows);
+            let (lo, hi, added) = amended.rebase_span(store.level(layer, *level), next, start);
+            let lost = amended.rebase_derived(lo, hi, &added, total_rows(next));
+            amended.covering(next);
+            tracing::info!(
+                layer = %layer,
+                level,
+                view = %view,
+                seg_id = %merged,
+                span_rows = hi - lo,
+                rows_relabelled = added.len(),
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "a level's held row form took a merge's rebase"
+            );
+            if lost {
+                self.fallbacks
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tracing::warn!(
+                    layer = %layer,
+                    level,
+                    view = %view,
+                    "this level's rebased memberships no longer partition, so it is served \
+                     artifact-major. Every answer is unchanged; the layout is not"
+                );
+            }
+            self.insert_newest(address, Held { key, at, rows });
+        }
+    }
+
+    /// Every form held for `view` under `prefix` whose layer `stored` admits, cloned out of the map
+    /// so the amendment runs outside its lock.
+    fn held_of_view(
+        &self,
+        prefix: &str,
+        view: &str,
+        stored: &dyn Fn(&str) -> bool,
+    ) -> Vec<(LevelAddress, ProjectionKey, Arc<ArtifactRows>)> {
+        let cached = self.cached.lock().unwrap_or_else(|e| e.into_inner());
+        cached
+            .iter()
+            .filter(|((held_view, layer, _), _)| held_view == view && stored(layer))
+            .filter(|(_, held)| held.key.prefix == prefix)
+            .map(|(address, held)| (address.clone(), held.key.clone(), Arc::clone(&held.rows)))
+            .collect()
+    }
+
+    /// Drop a form whose rows are not rows of the generation being published — see
+    /// [`ArtifactRows::covers`] on the one way such a form is held.
+    fn drop_disagreeing(&self, address: &LevelAddress, view: &str) {
+        let (_, layer, level) = address;
+        self.cached
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(address);
+        tracing::warn!(
+            layer = %layer,
+            level,
+            view = %view,
+            "a level's held row form was built against a generation superseded while it built and \
+             does not agree with the one being published; it is dropped and the next request \
+             naming this level projects it whole"
+        );
     }
 
     /// This level's row form for the generation `store` is in, building it if what is held is
@@ -2203,7 +2426,7 @@ impl ArtifactProjections {
         };
         let map_key = (view.to_string(), layer.to_string(), level);
 
-        if let Some((held, rows)) = self
+        if let Some(held) = self
             .cached
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -2215,8 +2438,8 @@ impl ArtifactProjections {
             // of it. See that method for why the row space is not simply a fourth term here: a
             // flush *brings the form forward* rather than invalidating it, so a form whose rows
             // are one segment short is a form to extend and not one to rebuild.
-            if *held == key && rows.covers(space) {
-                return Arc::clone(rows);
+            if held.key == key && held.rows.covers(space) {
+                return Arc::clone(&held.rows);
             }
         }
 
@@ -2269,9 +2492,13 @@ impl ArtifactProjections {
                     &built,
                 )
             } else {
-                let composed =
-                    RowColumn::compose(built.membership(), built.index().row_count(), layout)
-                        .map(Arc::new);
+                let composed = RowColumn::compose_over_base(
+                    built.membership(),
+                    built.base_rows,
+                    built.index().row_count(),
+                    layout,
+                )
+                .map(Arc::new);
                 if composed.is_some() {
                     self.columns_composed
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2305,10 +2532,14 @@ impl ArtifactProjections {
             );
             self.builds
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            self.cached
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(map_key, (key, Arc::clone(&rows)));
+            self.insert_newest(
+                map_key,
+                Held {
+                    key,
+                    at: segments_version,
+                    rows: Arc::clone(&rows),
+                },
+            );
             return rows;
         }
         let mut adopted = self.claim_index(prefix, view, layer, level, key.level_version);
@@ -2430,10 +2661,14 @@ impl ArtifactProjections {
         );
         self.builds
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.cached
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(map_key, (key, Arc::clone(&rows)));
+        self.insert_newest(
+            map_key,
+            Held {
+                key,
+                at: segments_version,
+                rows: Arc::clone(&rows),
+            },
+        );
         rows
     }
 
@@ -2638,8 +2873,16 @@ impl ArtifactProjections {
                 return Some(Arc::new(claimed));
             }
         }
-        let composed =
-            RowColumn::compose(rows.membership(), rows.index().row_count(), layout).map(Arc::new);
+        // **Over the base rows, with the extent rows as the amendment** — the split a merge's
+        // rebase rests on (`RowColumn::compose_over_base`). A pack composed over a row space that
+        // already carried extents would hold labels at rows the next merge renumbers.
+        let composed = RowColumn::compose_over_base(
+            rows.membership(),
+            rows.base_rows,
+            rows.index().row_count(),
+            layout,
+        )
+        .map(Arc::new);
         if composed.is_some() {
             self.columns_composed
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);

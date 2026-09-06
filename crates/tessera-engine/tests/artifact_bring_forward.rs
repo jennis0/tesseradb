@@ -256,8 +256,11 @@ fn fold(engine: &Engine) {
 }
 
 /// Flush enough times to fill the merge policy's tier, then let one merge publish — the one
-/// operation that renumbers rows a form now holds.
-fn merge(engine: &Engine) {
+/// operation that renumbers rows a form now holds. Returns the points it ingested, one per
+/// flushed segment, whose rows the merge renumbers.
+fn merge(engine: &Engine) -> Vec<EntityId> {
+    let merges = engine.write_executor_stats().merges;
+    let mut ingested = Vec::new();
     engine.set_merge_for_test(false);
     for batch in [
         b"merge-a".as_slice(),
@@ -265,20 +268,21 @@ fn merge(engine: &Engine) {
         b"merge-c".as_slice(),
         b"merge-d".as_slice(),
     ] {
-        ingest(engine, batch);
+        ingested.push(ingest(engine, batch));
         flush(engine);
     }
     engine.set_merge_for_test(true);
-    ingest(engine, b"merge-e");
+    ingested.push(ingest(engine, b"merge-e"));
     flush(engine);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while engine.write_executor_stats().merges == 0 {
+    while engine.write_executor_stats().merges == merges {
         assert!(
             std::time::Instant::now() < deadline,
             "the merge never published"
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
+    ingested
 }
 
 // ---- (a) the delta reaches the held form ---------------------------------------------------
@@ -617,6 +621,67 @@ fn a_growth_into_rows_already_amended_falls_back_on_the_label_form() {
     );
 }
 
+// ---- the merge rebases the form in place -----------------------------------------------------
+
+/// **A merge is taken by the warm form, not paid by the next request.**
+///
+/// A row-space merge renumbers the rows inside the span it collapses, which are rows the form
+/// holds. The publication rebases the form over the merged extent before the swap; nothing is
+/// projected on the request that follows, and the counts on the other side are the memberships'
+/// own sizes. Before the rebase the form failed `covers` and the level was projected whole inside
+/// that request: 108 s at rung 3, shed (`probes/2026-09-05-merge-arm/`).
+///
+/// Both layouts, because only one of them holds a column to rebase.
+#[test]
+fn a_merge_is_applied_to_the_warm_form_rather_than_rebuilding_it() {
+    for layout in [ServingLayout::ArtifactMajor, ServingLayout::RowMajorList] {
+        let fx = fixture();
+        let engine = fx.open();
+        engine
+            .register_layer(declaration(LAYER, Some(layout)))
+            .unwrap();
+        publish(&engine, "a0", fx.members(0..100));
+        publish(&engine, "a1", fx.members(500..600));
+        // A member on an extent row before the merge, so the span the merge renumbers holds a
+        // labelled row and not only unclaimed ones.
+        let fresh = ingest(&engine, b"pre-merge");
+        flush(&engine);
+        grow(&engine, "a0", vec![fresh]);
+        assert_eq!(
+            served(&engine),
+            vec![("a0".to_string(), 101), ("a1".to_string(), 100)]
+        );
+        let warm = engine.artifact_cache_builds().0;
+        let composed = engine.columns_composed();
+
+        let merged = merge(&engine);
+
+        assert_eq!(
+            served(&engine),
+            vec![("a0".to_string(), 101), ("a1".to_string(), 100)],
+            "{layout:?}: the merge renumbered rows this form holds and changed no count"
+        );
+        assert_eq!(
+            engine.artifact_cache_builds().0,
+            warm,
+            "{layout:?}: nothing was projected again: the form was rebased at the publication"
+        );
+        assert_eq!(
+            engine.columns_composed(),
+            composed,
+            "{layout:?}: no column was composed: the amendment gave the span up and took it back"
+        );
+        // And the rebased form is the form: a member on a merged row joins at its new row.
+        grow(&engine, "a1", vec![merged[2]]);
+        assert_eq!(
+            served(&engine),
+            vec![("a0".to_string(), 101), ("a1".to_string(), 101)],
+            "{layout:?}: a row the merge renumbered joins an artifact at the row it now holds"
+        );
+        assert_eq!(engine.artifact_cache_builds().0, warm);
+    }
+}
+
 // ---- the differential ------------------------------------------------------------------------
 
 /// Every observable half of one level's row form, in a shape two forms can be compared on.
@@ -736,28 +801,75 @@ fn an_amended_form_equals_one_built_from_scratch() {
             );
         }
 
-        // **And the one publication a form cannot be brought forward over.** A merge permutes rows
-        // inside the span it collapses, so a form holding extent rows is discarded by
-        // `ArtifactRows::covers` and rebuilt — which is the expensive answer and must still be the
-        // *right* one. Nothing here asserts a build did not happen; what it asserts is that the
-        // counts are the memberships' own sizes on the other side of the renumbering.
-        merge(&engine);
+        // **And the one publication that permutes rows the form holds.** A merge collapses a run
+        // of extents into one and re-sorts the rows inside it; the publication rebases every held
+        // form over the merged extent before the swap. The sequence then continues on the rebased
+        // form — a growth naming a row the merge renumbered, and a publication placing an ordinal
+        // over the merged row space — and the whole is compared once more with a form built from
+        // scratch. Nothing here was projected again: the builds counter is read before the merge
+        // and after the publication.
+        let builds = engine.artifact_cache_builds().0;
+        let merged = merge(&engine);
+        let after_merge = form_of(&engine, LAYER);
         assert_eq!(
             served(&engine),
             maintained_answers,
             "{layout:?}: the merge renumbered rows this form holds and changed no count"
         );
-        let after_merge = form_of(&engine, LAYER);
+        grow(&engine, "a0", vec![merged[0], merged[3]]);
+        publish(&engine, "a3", vec![merged[1], merged[4]]);
+        let after_writes = served(&engine);
+        assert_eq!(
+            after_writes,
+            vec![
+                ("a0".to_string(), 152),
+                ("a1".to_string(), 101),
+                ("a2".to_string(), 1),
+                ("a3".to_string(), 2)
+            ],
+            "{layout:?}: rows the merge renumbered join and publish at the rows they now hold"
+        );
+        assert_eq!(
+            engine.artifact_cache_builds().0,
+            builds,
+            "{layout:?}: the merge, the growth after it and the publication after it were all \
+             taken by the held form"
+        );
+        let maintained = form_of(&engine, LAYER);
+        assert!(
+            maintained[0].contains(&format!("layout={layout:?}")),
+            "{layout:?}: the rebased form fell back to another layout — {}",
+            maintained[0]
+        );
+
         engine.forget_artifact_forms_for_test(LAYER);
         assert_eq!(
             served(&engine),
-            maintained_answers,
-            "{layout:?}: and the form built from scratch over the merged row space agrees"
+            after_writes,
+            "{layout:?}: the form built from scratch over the merged row space agrees"
         );
+        let rebuilt = form_of(&engine, LAYER);
         assert_eq!(
-            after_merge,
-            form_of(&engine, LAYER),
-            "{layout:?}: ordinal for ordinal, on the other side of a merge too"
+            maintained.len(),
+            rebuilt.len(),
+            "{layout:?}: the two forms cover the same ordinals after the merge"
         );
+        for (amended, built) in maintained.iter().zip(&rebuilt) {
+            assert_eq!(
+                amended, built,
+                "{layout:?}: the rebased form and the built one describe different levels"
+            );
+        }
+        // The form as it stood between the merge and the writes is the one both routes agree on
+        // too: every ordinal below the two writes' is unchanged by them.
+        for (ordinal, line) in after_merge.iter().enumerate().skip(1) {
+            let touched = line.starts_with("0:") || line.starts_with("3:");
+            if !touched {
+                assert_eq!(
+                    line, &rebuilt[ordinal],
+                    "{layout:?}: an ordinal the writes after the merge did not touch differs"
+                );
+            }
+        }
     }
 }

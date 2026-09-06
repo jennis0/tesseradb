@@ -1110,6 +1110,16 @@ impl RowSpace {
         rows
     }
 
+    /// The rows contributed by the one extent at `index` — what a merge's publication re-projects
+    /// into a held row form for the span it renumbered (`tessera_engine::artifacts`). Empty where
+    /// `index` names no extent.
+    pub fn project_extent(&self, mask: &croaring::Bitmap, index: usize) -> croaring::Bitmap {
+        match self.extents.get(index) {
+            Some(extent) => extent.project(mask),
+            None => croaring::Bitmap::new(),
+        }
+    }
+
     pub fn extent_count(&self) -> usize {
         self.extents.len()
     }

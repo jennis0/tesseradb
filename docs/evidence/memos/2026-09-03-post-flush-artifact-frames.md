@@ -15,8 +15,13 @@ module doc is the account of what is maintained and how:
 - a **flush** extends every held form of its view by the segment it published
   (`ArtifactProjections::extend_flushed`), so a form covers the whole row space rather than the
   base alone and an ingested member counts from its flush rather than from the next fold;
-- a form is checked against the row space at every cache hit (`ArtifactRows::covers`), which is
-  what a *merge* — the one publication that renumbers extent rows — is caught by;
+- a **merge** rebases every held form of its view over the merged extent
+  (`ArtifactProjections::rebase_merged`, built 2026-09-06): each artifact's bits inside the
+  merged span are cleared and its members re-projected through the one merged extent, the column
+  gives the span's labels up and takes the new ones, and the form's segment record becomes the
+  merged row space's. A form is still checked against the row space at every cache hit
+  (`ArtifactRows::covers`), because a request may hold the older of two live generations; on the
+  executor a form that was current cannot fail it;
 - the **row-major column takes the delta too** (`RowColumn::amend`) rather than being composed
   again over the amended form. Composing it again cost ~100 s for one entity joining three
   artifacts at rung 3's `mesh/descriptors`, on the executor thread, where it blocks every ingest
@@ -24,13 +29,18 @@ module doc is the account of what is maintained and how:
   accumulated since the last fold; a write costs its own batch, merged into what is held, so the
   amendment's size bounds the memory and not the write.
 
-⊘ **(b), the warm at publication, is not built**, and every drop path that remains still puts the
-whole-level projection on the next request: a **merge** (which renumbers the extent rows a form now
-holds), a form at a level version its delta does not follow, and a form under another prefix. Each
-is said at `warn` where it happens. **The merge case is measured** (`probes/2026-09-05-merge-arm/`,
-2026-09-06): the first request after a merge on rung 3's mesh level paid 108 s and was shed, every
-flush before it cost nothing, and a merge is selected every `tier_width` small flushes — so (b) is
-needed wherever ingest is continuous, not a refinement.
+**The merge case is measured before and after** (`probes/2026-09-05-merge-arm/` and its
+`after-the-fix/`, 2026-09-06): the first request after a merge on rung 3's mesh level paid 108 s
+and was shed; with the rebase it serves in 130 ms, and the rebase itself is 27 ms on the executor
+for a 30,217-artifact level. (b), the warm at publication, is superseded by the rebase: the merge
+was the operation it was reserved for, and the form is now brought forward by every geometry
+publication rather than rebuilt by any.
+
+⊘ **Two drop paths remain**, each said at `warn` where it happens and each putting the whole-level
+projection on the next request: a form at a level version its delta does not follow, and a form
+under another prefix. Both are forms a request built against a generation that was superseded
+while it built; a held form at a later segments version is no longer replaced by such a build
+(`ArtifactProjections::insert_newest`), so the drop reaches only a form nothing newer stood beside.
 
 **Measured at rung 3** — `probes/2026-09-03-growth-trigger/after-the-fix/`, which carries the runs,
 the log lines and the reason the bundle a run touches cannot be run against twice. Both binaries on
