@@ -1756,8 +1756,8 @@ fn run_ingest(
              row should carry, or label the rows (decision 0133)"
         )));
     }
-    // The default's own descriptors, resolved once: the plugin reads it as it reads a row's
-    // label, so a default the plugin refuses is refused here rather than filled.
+    // The default as a one-element label list, the shape a row's own labels take, so the loop
+    // below hands the plugin one or the other and resolves each row's descriptors the same way.
     let default_labels: Option<Vec<Vec<u8>>> = point_default
         .as_ref()
         .map(|label| vec![label.as_bytes().to_vec()]);

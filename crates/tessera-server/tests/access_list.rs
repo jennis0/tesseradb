@@ -14,12 +14,18 @@
 
 mod common;
 
+use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{BinaryArray, Float32Array, ListBuilder, StringArray, StringBuilder};
+use arrow::array::{
+    ArrayRef, BinaryArray, Float32Array, Float64Array, ListArray, ListBuilder, StringArray,
+    StringBuilder, UInt64Array,
+};
+use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
+use parquet::arrow::ArrowWriter;
 use tempfile::TempDir;
 
 use common::*;
@@ -157,6 +163,135 @@ async fn served_with_default(default: Option<&str>) -> (TempDir, TestServer) {
     )
     .await;
     (tmp, server)
+}
+
+/// A points file carrying its own `list<string>` access column, `N_ITEMS` rows: every row
+/// labelled `ir:analyst` except `NULL_ROW`, whose label is null. The field-sourced shape, which
+/// is the one the build fills a null label on.
+const NULL_ROW: u64 = 5;
+
+fn write_field_points(path: &Path) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+        Field::new(
+            "categories",
+            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+            true,
+        ),
+    ]));
+    let ids: Vec<u64> = (0..N_ITEMS).collect();
+    let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
+    let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
+    let mut offsets: Vec<i32> = vec![0];
+    let mut flat: Vec<&str> = Vec::new();
+    let mut present: Vec<bool> = Vec::new();
+    for &e in &ids {
+        if e == NULL_ROW {
+            present.push(false);
+        } else {
+            present.push(true);
+            flat.push("ir:analyst");
+        }
+        offsets.push(flat.len() as i32);
+    }
+    let values: ArrayRef = Arc::new(StringArray::from(flat));
+    let list = ListArray::new(
+        Arc::new(Field::new("item", DataType::Utf8, true)),
+        OffsetBuffer::new(offsets.into()),
+        values,
+        Some(present.into()),
+    );
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(ids)),
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(list),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+}
+
+/// A server over a field-sourced view (`point_visibility = { field = "categories", default }`)
+/// built from [`write_field_points`].
+async fn served_field_sourced(default: &str) -> (TempDir, TestServer) {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    let points = tmp.path().join("points.parquet");
+    write_field_points(&points);
+    tessera_build::build(&tessera_build::BuildArgs {
+        views: vec![tessera_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points,
+            point_fields: Default::default(),
+            select: None,
+            access: tessera_build::config::AccessInput {
+                source: tessera_build::config::AccessSource::Field("categories".to_string()),
+                default: Some(default.to_string()),
+            },
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
+        attribute_sources: Vec::new(),
+        out: bundle_root.clone(),
+        limit: None,
+        identity_key: test_key(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        idset: FIXTURE_IDSET,
+        shard_id: 0,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
+        mint_external_ids: true,
+        emit_oracle_pairs: false,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema: Default::default(),
+    })
+    .expect("a field-sourced view with a null row builds under a declared default");
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+    (tmp, server)
+}
+
+/// **The two doors agree on a field-sourced view**, which is the case decision 0133 exists for:
+/// the build filled its null-label row with the declared default, and an ingested row with an
+/// empty label list lands under the same default. Both are served to a holder of that term and
+/// to nobody else; the rows labelled by the file are untouched by either fill.
+#[tokio::test]
+async fn a_field_sourced_view_fills_a_null_label_and_an_empty_list_alike() {
+    let (_tmp, server) = served_field_sourced("ir:sealed").await;
+
+    // The build's fill: one row, `NULL_ROW`, reachable by the default's term alone.
+    assert_eq!(visible_to(&server, &["ir:sealed"]).await, 1);
+    assert_eq!(visible_to(&server, &["ir:analyst"]).await, N_ITEMS - 1);
+    assert_eq!(visible_to(&server, &[]).await, 0);
+
+    let body = body_with_access(1, Arc::new(access_lists(&[&[]])));
+    let resp = ingest(&server, "field-empty", body).await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    flush(&server).await;
+
+    // The ingest door's fill: the same term now reaches both rows, and no other principal
+    // gained one.
+    assert_eq!(visible_to(&server, &["ir:sealed"]).await, 2);
+    assert_eq!(visible_to(&server, &["ir:analyst"]).await, N_ITEMS - 1);
+    assert_eq!(visible_to(&server, &[]).await, 0);
 }
 
 /// Every element is one label, verbatim. A label containing a comma is one term: the rows
