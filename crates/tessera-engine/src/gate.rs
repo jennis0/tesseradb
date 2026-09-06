@@ -7,13 +7,13 @@
 //! group's and can never widen it — the relation decision 0089 gives an artifact to its layer,
 //! and the I12 direction.
 //!
-//! **Satisfaction is the item-visibility predicate verbatim** (§6.1): the label resolves through
-//! the plugin to a set of descriptors, those resolve through the dictionary to terms, and the gate
-//! is satisfied iff that set **intersects** the principal's satisfied set. It is deliberately
-//! *not* the conservative label join's required-set reading: under that reading a disjunctive gate
-//! (`finance | legal`) yields an empty required set and every principal passes, which is a
-//! fail-open on exactly what the gate protects. Intersection gives a disjunctive gate its intended
-//! meaning.
+//! **Satisfaction is the item-visibility predicate verbatim** (§6.1): the gate's labels resolve
+//! through the plugin to a set of descriptors, one per label (decision 0132), those resolve
+//! through the dictionary to terms, and the gate is satisfied iff that set **intersects** the
+//! principal's satisfied set. It is deliberately *not* the conservative label join's required-set
+//! reading: under that reading a disjunctive gate (`["finance", "legal"]`) yields an empty
+//! required set and every principal passes, which is a fail-open on exactly what the gate
+//! protects. Intersection gives a disjunctive gate its intended meaning.
 //!
 //! **`public` never reaches the plugin.** It is stored as `None` — the absence of a gate — because
 //! it is the one label every principal holds inside the trust boundary (decision 0088, term 0),
@@ -101,9 +101,9 @@ pub(crate) fn resolve(
     satisfied: &FxHashSet<TermId>,
     plugin: &dyn Plugin,
 ) -> VisibleViews {
-    // One plugin call per **distinct label**, not per view: a group of forty quarters under one
+    // One plugin call per **distinct gate**, not per view: a group of forty quarters under one
     // gate asks once. The memo is scoped to this resolution, so nothing survives into the session.
-    let mut memo: HashMap<&str, bool> = HashMap::new();
+    let mut memo: HashMap<&[String], bool> = HashMap::new();
 
     let mut groups: FxHashSet<String> = FxHashSet::default();
     // Which group a view id belongs to, for the outer bound below. Built from the rosters rather
@@ -160,23 +160,26 @@ pub(crate) fn resolve(
     VisibleViews { views, groups }
 }
 
-/// Does `label` name a term this principal holds? `None` is `public` — satisfied by construction,
-/// inside the trust boundary, and never through the plugin (decision 0088).
+/// Does one of `labels` name a term this principal holds? `None` is `public` — satisfied by
+/// construction, inside the trust boundary, and never through the plugin (decision 0088).
 ///
-/// A descriptor the dictionary does not carry is simply unsatisfiable, which is the same
-/// fail-closed reading `Engine::authorise` gives a credential's unknown descriptor.
+/// Each label is one element of the plugin's list call, taken verbatim (decision 0132): a gate
+/// declared as `"finance,legal"` is one term with a comma in it, and a gate wanting both is the
+/// two-element list. A descriptor the dictionary does not carry is simply unsatisfiable, which is
+/// the same fail-closed reading `Engine::authorise` gives a credential's unknown descriptor.
 fn passes<'a>(
-    memo: &mut HashMap<&'a str, bool>,
-    label: Option<&'a str>,
+    memo: &mut HashMap<&'a [String], bool>,
+    labels: Option<&'a [String]>,
     dict: &Dict,
     satisfied: &FxHashSet<TermId>,
     plugin: &dyn Plugin,
 ) -> bool {
-    let Some(label) = label else { return true };
-    if let Some(&known) = memo.get(label) {
+    let Some(labels) = labels else { return true };
+    if let Some(&known) = memo.get(labels) {
         return known;
     }
-    let verdict = match plugin.terms_of_label(label.as_bytes()) {
+    let descriptors: Vec<Vec<u8>> = labels.iter().map(|l| l.as_bytes().to_vec()).collect();
+    let verdict = match plugin.terms_of_labels(&descriptors) {
         // **Intersection, not the required set** — see this module's own doc for why the
         // conservative label join is fail-open on a disjunctive gate.
         Ok(descriptors) => descriptors.iter().any(|descriptor| {
@@ -185,6 +188,6 @@ fn passes<'a>(
         }),
         Err(_) => false,
     };
-    memo.insert(label, verdict);
+    memo.insert(labels, verdict);
     verdict
 }

@@ -217,7 +217,7 @@ impl ViewRoster {
         &self,
         facts: GroupFacts<'_>,
         key: &str,
-        visibility: Option<String>,
+        visibility: Option<Vec<String>>,
         metadata: BTreeMap<String, ViewMetadataValue>,
     ) -> Result<WalRecord, RosterError> {
         if let Some(owner) = facts.members_of {
@@ -245,8 +245,9 @@ impl ViewRoster {
         //
         // A real label is **not checked here**: whether the plugin can read it is a question only
         // the engine can ask, and `Engine::create_view` asks it before this record is prepared, on
-        // the same route an item's `access` bytes take at ingest.
-        let visibility = visibility.filter(|label| label != "public");
+        // the same route an item's `access` labels take at ingest. The gate is a list of labels,
+        // each one term (decision 0132); `public` is recognised only as the whole of the list.
+        let visibility = visibility.filter(|labels| labels.as_slice() != ["public"]);
         // **A `timestamp_us` arrives as an integer, and the declaration is what says so.** JSON
         // carries no date type, so a record's `starts` is microseconds since the epoch as a
         // number; typing it from the wire alone would make every timestamp an `int` and refuse
@@ -641,17 +642,18 @@ mod tests {
     /// **`public` and no gate are one statement, and the record keeps the shorter** (`views.md`
     /// §6, decision 0088): every principal holds the label inside the trust boundary, so a record
     /// storing the word would make the roster's `visibility` sometimes a term to look up and
-    /// sometimes a reserved one. A real label is stored as written — whether the plugin can read
-    /// it is `Engine::create_view`'s question, this crate holding no plugin.
+    /// sometimes a reserved one. A real label list is stored as written, each element one label
+    /// (decision 0132); whether the plugin can read it is `Engine::create_view`'s question, this
+    /// crate holding no plugin.
     #[test]
     fn public_is_recorded_as_no_gate_and_a_label_is_recorded_as_written() {
         let roster = ViewRoster::new();
-        let gate_of = |declared: Option<&str>| {
+        let gate_of = |declared: Option<&[&str]>| {
             let record = roster
                 .prepare_create(
                     facts("quarter", &[]),
                     "k",
-                    declared.map(str::to_string),
+                    declared.map(|labels| labels.iter().map(|l| l.to_string()).collect()),
                     BTreeMap::new(),
                 )
                 .expect("a well-formed record");
@@ -660,8 +662,16 @@ mod tests {
                 other => panic!("expected a create record, got {other:?}"),
             }
         };
-        assert_eq!(gate_of(Some("finance")).as_deref(), Some("finance"));
-        assert_eq!(gate_of(Some("public")), None);
+        assert_eq!(
+            gate_of(Some(&["finance"])),
+            Some(vec!["finance".to_string()])
+        );
+        assert_eq!(
+            gate_of(Some(&["finance,legal", "tax"])),
+            Some(vec!["finance,legal".to_string(), "tax".to_string()]),
+            "a comma inside a label is part of the label"
+        );
+        assert_eq!(gate_of(Some(&["public"])), None);
         assert_eq!(gate_of(None), None);
     }
 }

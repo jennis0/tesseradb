@@ -248,7 +248,8 @@ pub enum Command {
     CreateView {
         group: String,
         key: String,
-        visibility: Option<String>,
+        /// The gate's labels, each one term (decision 0132); `None` is `public`.
+        visibility: Option<Vec<String>>,
         metadata: std::collections::BTreeMap<String, tessera_types::view::ViewMetadataValue>,
     },
     /// Drop a view of a view group, tombstoning its key for ever (`views.md` §3.4).

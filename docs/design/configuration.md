@@ -126,7 +126,7 @@ no `fields` map and so has no way to say otherwise; it is `(entity_id, term_id)`
 | `fields` | D | canonical `entity_id`, and `x`, `y` or `morton` + `residual` — or `lon`, `lat` under a projection. The geometry shapes are mutually exclusive (§8). `entity_id` defaults to `[defaults].entity_id_field` |
 | `extent` | R | the quantisation frame: `"auto"`, `{ auto = true, margin = f }`, `{ min, max }` or `{ x = [a,b], y = [c,d] }` — and under a projection, `"auto"` or `{ lon = [a,b], lat = [c,d] }`. See below |
 | `point_visibility` | R | `{ field, default }`, or `{ source, default }` — where each point's label is, and what a point carrying none gets. See below |
-| `visibility` | D `public` | the view's own gate — an access label, or `public` ([`views.md`](views.md) §6). A label is resolved to its term set by the plugin and satisfied where that set meets the principal's; `public` is the label every principal holds and compiles to no gate. A label the plugin cannot read, or one naming no terms, is refused at parse — it would gate the view against everybody |
+| `visibility` | D `public` | the view's own gate — one access label, a list of access labels, or `public` ([`views.md`](views.md) §6). Each label is one term, taken as written, a comma included; a list names several terms, one per element (decision 0132). The labels are resolved to their term set by the plugin and satisfied where that set meets the principal's; `public` is the label every principal holds and compiles to no gate, and is accepted only as the whole of the gate. A list the plugin cannot read, an empty element, or a gate naming no terms, is refused at parse — it would gate the view against everybody |
 
 **`[[view_group]]`** — a set of views sharing every setting, differing by a key and per-view
 metadata ([`views.md`](views.md) §3,
@@ -140,8 +140,8 @@ addressed `<group>:<key>`, which is a view's only address (decision 0113).
 |---|---|---|
 | `members` | O | another `[[view_group]]`'s name: this group's views are that group's (views §3.3). Chains are refused, and a group naming it declares no `metadata` and no roster — those belong to the group that owns the keys |
 | `metadata` | O | the per-view values a view carries, `name = type` over the `[[attribute]]` types; a category is `{ type = "category", vocabulary = … }`. A name the roster already uses — `key`, `source`, `visibility`, or the discriminator's own column — is refused |
-| `[[view_group.view]]` | O, repeatable | **form A**: one view per block — `key`, `source`, `visibility`, and one key per declared metadata name. The file *is* the view, so the group declares no `source` of its own |
-| `[view_group.views]` | O | **form B**: the roster as a table — `source` and `fields` over the canonical `key`, `visibility` and the metadata names — beside the group's own `source`, whose `fields.view` says which view each row of points lands in |
+| `[[view_group.view]]` | O, repeatable | **form A**: one view per block — `key`, `source`, `visibility` (one label or a list, as on the group), and one key per declared metadata name. The file *is* the view, so the group declares no `source` of its own |
+| `[view_group.views]` | O | **form B**: the roster as a table — `source` and `fields` over the canonical `key`, `visibility` and the metadata names — beside the group's own `source`, whose `fields.view` says which view each row of points lands in. The `visibility` column is a `string`, one label per row, or a `list<string>` whose elements are the row's labels; a null row takes the group's gate |
 
 **The roster decides where the points come from**, and declaring both forms is refused, as `source`
 beside inline `artifacts` is. A group declaring **neither** has its views minted from the

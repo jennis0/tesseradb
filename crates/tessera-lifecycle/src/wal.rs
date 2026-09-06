@@ -668,7 +668,10 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 // **17**: `WalRow` gained `scoped` — a row's values for the group-scoped attribute families of
 // its view's group (`views.md` §5). Postcard is positional, so the field is on-disk format and a
 // log at 16 is refused rather than read one list short.
-const WAL_VERSION: u16 = 18;
+// **18**: a view gate's `visibility` became a list of labels, each one term (decision 0132),
+// where it was one string. Postcard is positional, so the field is on-disk format and a log at
+// 18 is refused rather than read a string's bytes as a list's length.
+const WAL_VERSION: u16 = 19;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts

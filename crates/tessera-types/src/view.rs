@@ -159,12 +159,35 @@ pub struct CreatedView {
     /// `LayerCreate` already follow. A build-declared view is incarnation 0, so a key first used
     /// at a build and dropped comes back at 1 or above.
     pub incarnation: ViewIncarnation,
-    /// This view's own gate; `None` takes the group's.
-    ///
-    /// ⊘ **Recorded and never evaluated** (`views.md` §6): no gate is evaluated anywhere and no
-    /// visible-view set exists, which is why the create refuses anything but `public`.
-    pub visibility: Option<String>,
+    /// This view's own gate: the labels a principal must hold one of, each one term verbatim
+    /// (`views.md` §6, decision 0132); `None` takes the group's. Never empty: a gate naming no
+    /// terms is refused before a record is prepared.
+    pub visibility: Option<Vec<String>>,
     pub metadata: BTreeMap<String, ViewMetadataValue>,
+}
+
+/// A view gate's `visibility` as a declaration or a request body spells it (`views.md` §6,
+/// decision 0132): one label, or a list of labels. Each element is one label, taken verbatim; a
+/// comma inside a label is part of the label. One label is the common case, and the list is how a
+/// gate names several terms.
+///
+/// Untagged, so a TOML key or a JSON field accepts `"finance"` and `["finance", "legal"]` alike.
+/// This is the wire and file shape only; the stored form is the list ([`CreatedView::visibility`]).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum DeclaredGate {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl DeclaredGate {
+    /// The labels, one per element. A single label becomes a one-element list.
+    pub fn into_labels(self) -> Vec<String> {
+        match self {
+            DeclaredGate::One(label) => vec![label],
+            DeclaredGate::Many(labels) => labels,
+        }
+    }
 }
 
 /// One **dead incarnation** of a key — what a drop leaves behind (`views.md` §3.4,

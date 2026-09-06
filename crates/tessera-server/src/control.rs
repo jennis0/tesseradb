@@ -2694,11 +2694,11 @@ async fn drop_layer(
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ViewRecord {
-    /// This view's own gate; absent takes the group's. ⊘ Only `"public"` is accepted — no gate is
-    /// evaluated anywhere (`views.md` §6), so a label would be a control accepted and never
-    /// enforced. The refusal is the write executor's, beside every other roster rule.
+    /// This view's own gate; absent takes the group's. One label, or a list of labels, each
+    /// element one term taken verbatim (`views.md` §6, decision 0132). Whether the plugin can
+    /// read the list is the engine's question; every other roster rule is the write executor's.
     #[serde(default)]
-    visibility: Option<String>,
+    visibility: Option<tessera_types::view::DeclaredGate>,
     /// One entry per name the group declared, typed against it. `timestamp_us` is **microseconds
     /// since the epoch as a JSON integer**: JSON carries no date type, and a string would have to
     /// name a format the roster does not otherwise have.
@@ -2783,7 +2783,9 @@ async fn create_view(
     for (name, value) in &record.metadata {
         metadata.insert(name.clone(), metadata_value(name, value)?);
     }
-    let visibility = record.visibility;
+    let visibility = record
+        .visibility
+        .map(tessera_types::view::DeclaredGate::into_labels);
     let (group_name, view_key) = (group.clone(), key.clone());
     // The **shared** blocking pool, not the deny runtime beside it, on `register_layer`'s rule: a
     // creation is not a deny, and delaying one under ingest load is backpressure working rather

@@ -656,18 +656,53 @@ async fn a_create_refuses_a_taken_key_a_bad_key_a_wrong_record_and_an_unknown_gr
         422,
         "an undeclared name has no type, so it is refused rather than stored"
     );
+    let empty_list = create(
+        &served,
+        "quarter",
+        "2026-Q5",
+        json!({ "visibility": [], "metadata": { "label": "Q5", "starts": 1 } }),
+    )
+    .await;
+    assert_eq!(
+        empty_list.status(),
+        422,
+        "a gate naming no terms is satisfied by nobody, so the view would be reachable by no \
+         principal at all (views §6)"
+    );
+    let body: Value = empty_list.json().await.unwrap();
+    assert!(
+        body["detail"].as_str().unwrap().contains("names no terms"),
+        "the refusal says why: {body}"
+    );
+    // **An empty element is refused naming its position** (decision 0132): each element of a
+    // gate is one label, and an empty one is no label rather than a term to drop.
+    for (declared, position) in [(json!([""]), "term 0"), (json!(["finance", ""]), "term 1")] {
+        let resp = create(
+            &served,
+            "quarter",
+            "2026-Q5",
+            json!({ "visibility": declared, "metadata": { "label": "Q5", "starts": 1 } }),
+        )
+        .await;
+        assert_eq!(resp.status(), 422, "an empty element is refused: {declared}");
+        let body: Value = resp.json().await.unwrap();
+        let detail = body["detail"].as_str().unwrap();
+        assert!(
+            detail.contains(position) && detail.contains("is empty"),
+            "the refusal names the empty element: {detail}"
+        );
+    }
     assert_eq!(
         create(
             &served,
             "quarter",
             "2026-Q5",
-            json!({ "visibility": " , , ", "metadata": { "label": "Q5", "starts": 1 } })
+            json!({ "visibility": ["public", "finance"], "metadata": { "label": "Q5", "starts": 1 } })
         )
         .await
         .status(),
         422,
-        "a gate naming no terms is satisfied by nobody, so the view would be reachable by no \
-         principal at all (views §6)"
+        "`public` beside another label is a gate everybody passes, spelled as if narrower"
     );
 
     // None of the refusals created anything, so the key they named is still free.

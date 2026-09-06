@@ -156,7 +156,7 @@ const GATE_TERM: &str = "1";
 
 fn view_args(view: &str, points: &Path, pairs: &Path, visibility: Option<&str>) -> ViewArgs {
     ViewArgs {
-        visibility: visibility.map(str::to_string),
+        visibility: visibility.map(|label| vec![label.to_string()]),
         view_id: view.to_string(),
         projection: tessera_spatial::Projection::None,
         extent: extent(),
@@ -175,7 +175,7 @@ fn roster(gated: bool) -> Vec<GroupViewDescriptor> {
         .iter()
         .map(|(key, _)| GroupViewDescriptor {
             key: key.to_string(),
-            visibility: (gated && *key == GATED_QUARTER).then(|| GATE_TERM.to_string()),
+            visibility: (gated && *key == GATED_QUARTER).then(|| vec![GATE_TERM.to_string()]),
             metadata: Default::default(),
         })
         .collect()

@@ -912,29 +912,57 @@ fn a_point_default_may_not_be_inherited() {
     );
 }
 
-/// A view's own gate is a label the manifest records and `Engine::authorise` evaluates
-/// (`views.md` §6). What is refused is a label the plugin cannot read, or one that names no terms
-/// at all — a gate satisfied by nobody, the view being reachable by no principal including the
-/// author.
+/// A view's own gate is a list of labels the manifest records and `Engine::authorise` evaluates
+/// (`views.md` §6, decision 0132): one label written as a string, several as a list, each
+/// element one term taken verbatim. What is refused is a list the plugin cannot read, an empty
+/// element, or a list naming no terms at all — a gate satisfied by nobody, the view being
+/// reachable by no principal including the author.
 #[test]
 fn a_views_own_visibility_is_a_label_the_plugin_can_read() {
-    let text = with_line(SEVERITY, "").replace(
-        "name             = \"s0\"",
-        "name             = \"s0\"\nvisibility       = \"ir:analyst\"",
-    );
-    let config = ok(&text);
+    let gate_of = |declared: &str| {
+        let text = with_line(SEVERITY, "").replace(
+            "name             = \"s0\"",
+            &format!("name             = \"s0\"\nvisibility       = {declared}"),
+        );
+        ok(&text).views[0].visibility.clone()
+    };
     assert_eq!(
-        config.views[0].visibility.as_deref(),
-        Some("ir:analyst"),
-        "the label reaches the compiled view"
+        gate_of("\"ir:analyst\""),
+        Some(vec!["ir:analyst".to_string()]),
+        "one label reaches the compiled view as a one-element list"
     );
+    assert_eq!(
+        gate_of("\"finance,legal\""),
+        Some(vec!["finance,legal".to_string()]),
+        "a comma inside a label is part of the label: one term, not two"
+    );
+    assert_eq!(
+        gate_of("[\"finance\", \"legal\"]"),
+        Some(vec!["finance".to_string(), "legal".to_string()]),
+        "a list declares one term per element"
+    );
+    assert_eq!(gate_of("[\"public\"]"), None, "`public` as the whole list is no gate");
 
-    let empty = with_line(SEVERITY, "").replace(
-        "name             = \"s0\"",
-        "name             = \"s0\"\nvisibility       = \" , , \"",
-    );
-    let message = err(&empty);
+    let refusal = |declared: &str| {
+        err(&with_line(SEVERITY, "").replace(
+            "name             = \"s0\"",
+            &format!("name             = \"s0\"\nvisibility       = {declared}"),
+        ))
+    };
+    let message = refusal("[]");
     assert!(message.contains("names no terms"), "{message}");
+    let message = refusal("[\"finance\", \"\"]");
+    assert!(
+        message.contains("element 1") && message.contains("is empty"),
+        "an empty element is refused naming its position: {message}"
+    );
+    let message = refusal("\"\"");
+    assert!(message.contains("is empty"), "{message}");
+    let message = refusal("[\"public\", \"finance\"]");
+    assert!(
+        message.contains("`public` beside another label"),
+        "`public` beside a label is a gate everybody passes, and is refused: {message}"
+    );
 }
 
 /// `public` is the documented default and the current behaviour, so writing it records nothing
@@ -3531,7 +3559,7 @@ fn a_groups_gate_and_a_roster_records_gate_are_both_recorded() {
     let config = ok(&text);
     assert_eq!(
         config.view_groups[0].visibility.as_deref(),
-        Some("ir:analyst")
+        Some(&["ir:analyst".to_string()][..])
     );
 
     let text = with_group("").replace(
@@ -3547,7 +3575,7 @@ fn a_groups_gate_and_a_roster_records_gate_are_both_recorded() {
             _ => None,
         })
         .flatten()
-        .filter(|v| v.visibility.as_deref() == Some("ir:analyst"))
+        .filter(|v| v.visibility.as_deref() == Some(&["ir:analyst".to_string()][..]))
         .count();
     assert_eq!(gated, 1, "one roster record carries the gate, and one only");
 }

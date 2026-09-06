@@ -1032,10 +1032,17 @@ an attribute. The two are kept apart so that neither grows the other's surface.
 Who may reach a view follows the shape a layer already has: a gate on the kind, and a gate on
 the individual.
 
-- **`visibility`** on a `[[view]]` or a `[[view_group]]` — an access label, or `public`
-  (decision 0088), defaulting to `public` (owner ruling 2026-08-30): a view is a coordinate
-  system over items that carry their own labels, and the ordinary corpus gates none of them.
-  One key, spelled as it is on a layer.
+- **`visibility`** on a `[[view]]` or a `[[view_group]]` — one access label, a list of access
+  labels, or `public` (decision 0088), defaulting to `public` (owner ruling 2026-08-30): a view
+  is a coordinate system over items that carry their own labels, and the ordinary corpus gates
+  none of them. One key, spelled as it is on a layer.
+- **A label is one label, taken verbatim** (decision 0132). Whatever bytes it contains, a comma
+  included, it is one term; no grammar is read into it. A gate wanting several terms declares
+  them as a list, one label per element, and the same list is what the create operation's record
+  carries. An empty element, and a list with no element, are refused where the author can read
+  the message: an empty element is no label, and an empty list is a gate satisfied by nobody.
+  `public` is recognised only as the whole of the gate; beside another label it is refused, being
+  a gate everybody passes spelled as if it were narrower.
 - **A group's view carries its own `visibility` on the roster** — the inline block's key, the
   roster table's column, the create operation's record — and a view carrying none takes the
   group's, as an artifact's `inherited` takes its layer's.
@@ -1045,11 +1052,12 @@ A view of a group is reachable only where its group is: the group's gate is the 
 the view's is taken as written inside it, so a view gate can narrow and cannot widen — the
 relation decision 0089 gives an artifact to its layer, and the I12 direction.
 
-Satisfaction is the item-visibility predicate verbatim (§6.1): the label resolves to its term
-set, and the gate is satisfied iff that set intersects the principal's satisfied set. Not the
-conservative label join — under §12.2's required-set reading a disjunctive gate
-(`finance | legal`) yields an empty required set and every principal passes, which is a fail-open
-on exactly what the gate protects. Intersection gives a disjunctive gate its intended meaning.
+Satisfaction is the item-visibility predicate verbatim (§6.1): the gate's labels resolve to
+their term set, one term per label, and the gate is satisfied iff that set intersects the
+principal's satisfied set. Not the conservative label join — under §12.2's required-set reading
+a disjunctive gate (`["finance", "legal"]`) yields an empty required set and every principal
+passes, which is a fail-open on exactly what the gate protects. Intersection gives a disjunctive
+gate its intended meaning.
 
 - The principal's **visible-view set is resolved once at authorise and is fixed for the
   session's life**, every view of every group evaluated whatever the outcome, so the
@@ -1068,15 +1076,17 @@ on exactly what the gate protects. Intersection gives a disjunctive gate its int
 - The gate is conjunctive with item labels, never substitutive: an item inside a gated view is
   still governed by its own label.
 
-> **Implemented 2026-08-31 — the gate, end to end** (contracts §3.2, §3.4 r57). `visibility` is
-> accepted on a `[[view]]`, a `[[view_group]]`, an inline roster block, a `[view_group.views]`
-> table row and `PUT /control/views/{group}/{key}`, and is stored on the manifest — the group's on
-> its `GroupDescriptor`, each view's on its `ViewDescriptor` with the roster record carrying the
-> published copy and a disagreement between the two refused at open. `public` compiles to the
-> absence of a gate; any other label is put through the plugin's `terms_of_label` at acceptance —
-> the same call an item's `access` bytes take at ingest — and a label the plugin cannot read, or
-> one naming no terms at all, is refused where its author can read the message rather than stored
-> as a gate nobody could satisfy.
+> **Implemented 2026-08-31 — the gate, end to end** (contracts §3.2, §3.4 r57; the list form at
+> r79, decision 0132). `visibility` is accepted on a `[[view]]`, a `[[view_group]]`, an inline
+> roster block, a `[view_group.views]` table row and `PUT /control/views/{group}/{key}` — one
+> label as a string, several as a list; the table row's column is a `string` or a `list<string>`
+> — and is stored on the manifest as the list — the group's on its `GroupDescriptor`, each view's
+> on its `ViewDescriptor` with the roster record carrying the published copy and a disagreement
+> between the two refused at open. `public` compiles to the absence of a gate; any other list is
+> put through the plugin's `terms_of_labels` at acceptance, one element per label — the same call
+> an item's `access` list takes at ingest — and a list the plugin cannot read, an empty element,
+> or a list naming no terms at all, is refused where its author can read the message rather than
+> stored as a gate nobody could satisfy.
 >
 > At authorise, after the mask is materialised, **every view of every group is evaluated whatever
 > the outcome** and the result is an immutable per-session visible-view set: the label's term set

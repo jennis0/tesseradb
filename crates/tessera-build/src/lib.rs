@@ -158,13 +158,14 @@ pub struct ViewArgs {
     /// refusal naming the entity and the files.
     pub access: crate::config::AccessInput,
     /// **This view's own gate** (`views.md` §6), compiled from the declaration
-    /// (`config::compile_view_gate`): an access label, or `None` for `public`. It reaches
-    /// the manifest as [`tessera_store::manifest::ViewDescriptor::visibility`], which is the one
-    /// input `Engine::authorise` evaluates a view's own half of the gate from.
+    /// (`config::compile_view_gate`): a list of access labels, each one term (decision 0132), or
+    /// `None` for `public`. It reaches the manifest as
+    /// [`tessera_store::manifest::ViewDescriptor::visibility`], which is the one input
+    /// `Engine::authorise` evaluates a view's own half of the gate from.
     ///
-    /// For a view of a group this is the **roster record's** label — the group's own half is on
+    /// For a view of a group this is the **roster record's** gate — the group's own half is on
     /// [`BuildArgs::groups`], and the two are conjunctive.
-    pub visibility: Option<String>,
+    pub visibility: Option<Vec<String>>,
 }
 
 /// One group-scoped attribute, and the views of its group whose values this build reads

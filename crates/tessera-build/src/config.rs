@@ -275,8 +275,9 @@ struct ViewBlock {
     extent: Option<toml::Value>,
     #[serde(default)]
     point_visibility: Option<PointVisibilityBlock>,
+    /// One label, or a list of labels (`views.md` §6, decision 0132).
     #[serde(default)]
-    visibility: Option<String>,
+    visibility: Option<tessera_types::view::DeclaredGate>,
 }
 
 /// `[[view_group]]` — a set of views sharing every setting, differing by a key and per-view
@@ -315,8 +316,9 @@ struct ViewGroupBlock {
     extent: Option<toml::Value>,
     #[serde(default)]
     point_visibility: Option<PointVisibilityBlock>,
+    /// One label, or a list of labels (`views.md` §6, decision 0132).
     #[serde(default)]
-    visibility: Option<String>,
+    visibility: Option<tessera_types::view::DeclaredGate>,
     /// Another group's name: this group's views are that group's (`views.md` §3.3). Chains are
     /// refused, so the owner of a key set is always one hop away.
     #[serde(default)]
@@ -940,10 +942,10 @@ pub struct View {
     /// The two `auto` spellings still need the data: [`frame_view`] turns them into [`Bounds`],
     /// and turns a [`Extent::LonLat`] box into the aligned square containing it.
     pub extent: Extent,
-    /// The view's own gate: `None` is `public` (`views.md` §6). ⊘ Nothing evaluates it, so a
-    /// label is refused at parse and this is `None` on every view that compiles — see
-    /// [`compile_view_gate`].
-    pub visibility: Option<String>,
+    /// The view's own gate: the labels a principal must hold one of, each element one term
+    /// (`views.md` §6, decision 0132); `None` is `public`. Compiled by [`compile_view_gate`],
+    /// which has asked the plugin to read every element.
+    pub visibility: Option<Vec<String>>,
     /// Where each point's own access label is, and what a point carrying none gets.
     pub point_visibility: PointVisibility,
 }
@@ -973,10 +975,9 @@ pub struct ViewGroup {
     /// the group, which is what makes its views comparable and a key set meaningful.
     pub extent: Extent,
     pub point_visibility: PointVisibility,
-    /// The group's own gate: `None` is `public`. ⊘ No gate is evaluated (`views.md` §6), so a
-    /// label here is refused at parse rather than recorded — this holds only what a `public`
-    /// declaration compiles to, and exists so the field is the shape the gate will take.
-    pub visibility: Option<String>,
+    /// The group's own gate, the outer bound over every view of it (`views.md` §6): a list of
+    /// labels, each one term; `None` is `public`.
+    pub visibility: Option<Vec<String>>,
     /// The group whose views these are, where this group declares `members` (`views.md` §3.3);
     /// `None` where it owns them. Chains are refused, so this always names an owner.
     pub members: Option<String>,
@@ -1040,9 +1041,9 @@ pub struct RosterView {
     /// This view's points. `None` is legal and is a view declared and empty, exactly as it is on
     /// a plain `[[view]]`.
     pub source: Option<PathBuf>,
-    /// This view's own gate, narrowing the group's; `None` takes the group's. ⊘ As
-    /// [`ViewGroup::visibility`], a label is refused at parse while no gate is evaluated.
-    pub visibility: Option<String>,
+    /// This view's own gate, narrowing the group's, in the shape [`ViewGroup::visibility`]
+    /// takes; `None` takes the group's.
+    pub visibility: Option<Vec<String>>,
     /// This view's metadata, one entry per declared name.
     pub metadata: BTreeMap<String, MetadataValue>,
 }
@@ -3019,7 +3020,11 @@ fn compile_views(
             )?
         };
         let extent = compile_extent(&object, projection, block.extent.as_ref())?;
-        let visibility = compile_view_gate(&object, block.visibility.as_deref())?;
+        let declared = block
+            .visibility
+            .clone()
+            .map(tessera_types::view::DeclaredGate::into_labels);
+        let visibility = compile_view_gate(&object, declared.as_deref())?;
 
         let point_visibility =
             compile_point_visibility(&object, block.point_visibility.as_ref(), sources)?;
@@ -3239,51 +3244,79 @@ fn check_view_name(object: &str, name: &str) -> Result<()> {
         .map_err(|detail| declaration_error(format!("{object}: {detail}")))
 }
 
-/// A `[[view]]`'s, a `[[view_group]]`'s or a roster record's own `visibility` (`views.md` §6).
+/// A `[[view]]`'s, a `[[view_group]]`'s or a roster record's own `visibility` (`views.md` §6):
+/// a list of labels, each one term taken verbatim (decision 0132). A declaration spells one
+/// label as a string and several as a list; both arrive here as the list.
 ///
 /// **`public` compiles to `None`**, which is what every downstream reader takes as *no gate*: it
 /// is the label every principal holds inside the trust boundary (decision 0088), so storing the
 /// word and storing nothing are the same statement and the shorter one cannot be misread as a
-/// term to look up.
+/// term to look up. It is recognised only as the whole of the list: beside another label it
+/// would be a gate everybody passes, spelled as if it were narrower, so that is refused.
 ///
-/// **Any other label is compiled after the plugin has been asked to read it** — the same question
-/// an item's `access` bytes are put through at ingest ([`Plugin::terms_of_label`]), because a view
+/// **Any other list is compiled after the plugin has been asked to read it** — the same question
+/// an item's `access` list is put through at ingest ([`Plugin::terms_of_labels`]), because a view
 /// gate is satisfied by exactly the item-visibility predicate (`views.md` §6) and a label the
-/// plugin cannot parse is one no principal could ever satisfy. Refusing it here is the difference
+/// plugin cannot read is one no principal could ever satisfy. Refusing it here is the difference
 /// between a typo an author fixes at the build and a view that is silently reachable by nobody.
-/// A label that parses to **no descriptors at all** is refused for the same reason: its term set
-/// is empty, it intersects nothing, and it gates the view against every principal including the
-/// one who wrote it.
+/// An empty list, and an empty element, are refused for the same reason: an empty term set
+/// intersects nothing and gates the view against every principal including the one who wrote
+/// it, and an empty element is no label.
 ///
 /// The plugin asked is `builtin:passthrough`, which is the only one a build runs
 /// (`tessera_build::build`); a deployment serving the bundle under a different plugin is a
 /// mismatch the gate fails closed on rather than one this check could anticipate.
-fn compile_view_gate(object: &str, declared: Option<&str>) -> Result<Option<String>> {
-    let Some(label) = declared else {
+fn compile_view_gate(object: &str, declared: Option<&[String]>) -> Result<Option<Vec<String>>> {
+    let Some(labels) = declared else {
         return Ok(None);
     };
-    if label == PUBLIC {
+    if labels == [PUBLIC] {
         return Ok(None);
     }
-    check_label(object, "visibility", label)?;
+    if labels.is_empty() {
+        return Err(declaration_error(format!(
+            "{object}: `visibility = []` names no terms. A gate is satisfied where its term set \
+             meets the principal's, so an empty one is satisfied by nobody and the view would be \
+             reachable by no principal at all — including this build's author. Write `public`, \
+             or the labels the gate names, one per element"
+        )));
+    }
+    if labels.iter().any(|l| l == PUBLIC) {
+        return Err(declaration_error(format!(
+            "{object}: `visibility = {labels:?}` lists `public` beside another label. `public` \
+             is the label every principal holds, so a gate naming it is satisfied by everybody; \
+             write `public` alone, or leave it out of the list"
+        )));
+    }
+    for (i, label) in labels.iter().enumerate() {
+        if label.is_empty() {
+            return Err(declaration_error(format!(
+                "{object}: element {i} of `visibility = {labels:?}` is empty. Each element is \
+                 one label a principal holds, taken as written, and an empty one is no label. \
+                 Write `public`, or the labels the gate names, one per element"
+            )));
+        }
+        check_label(object, "visibility", label)?;
+    }
+    let descriptors: Vec<Vec<u8>> = labels.iter().map(|l| l.as_bytes().to_vec()).collect();
     let descriptors = tessera_plugin::Passthrough::new()
-        .terms_of_label(label.as_bytes())
+        .terms_of_labels(&descriptors)
         .map_err(|e| {
             declaration_error(format!(
-                "{object}: `visibility = \"{label}\"` is not a label the plugin can read ({e}). A \
-                 view's gate is satisfied by the item-visibility predicate (views §6), so a label \
-                 the plugin cannot turn into terms is one no principal could satisfy"
+                "{object}: `visibility = {labels:?}` is not a label list the plugin can read \
+                 ({e}). A view's gate is satisfied by the item-visibility predicate (views §6), \
+                 so a label the plugin cannot turn into a term is one no principal could satisfy"
             ))
         })?;
     if descriptors.is_empty() {
         return Err(declaration_error(format!(
-            "{object}: `visibility = \"{label}\"` names no terms. A gate is satisfied where its \
+            "{object}: `visibility = {labels:?}` names no terms. A gate is satisfied where its \
              term set meets the principal's, so an empty one is satisfied by nobody and the view \
              would be reachable by no principal at all — including this build's author. Write \
-             `public`, or a label naming terms"
+             `public`, or labels naming terms"
         )));
     }
-    Ok(Some(label.to_string()))
+    Ok(Some(labels.to_vec()))
 }
 
 /// Compile every `[[view_group]]` (`views.md` §3, decision 0108).
@@ -3487,7 +3520,11 @@ fn compile_view_group(
     };
 
     let extent = compile_extent(&object, projection, block.extent.as_ref())?;
-    let visibility = compile_view_gate(&object, block.visibility.as_deref())?;
+    let declared = block
+        .visibility
+        .clone()
+        .map(tessera_types::view::DeclaredGate::into_labels);
+    let visibility = compile_view_gate(&object, declared.as_deref())?;
     let point_visibility =
         compile_point_visibility(&object, block.point_visibility.as_ref(), sources)?;
     // The discriminator's column name, which no metadata name may take — `None` under form A,
@@ -3862,14 +3899,15 @@ fn compile_roster_view(
     let visibility = match table.get("visibility") {
         None => None,
         Some(value) => {
-            let declared = value.as_str().ok_or_else(|| {
-                declaration_error(format!(
-                    "{object}: `visibility` is {}, and it is an access label or `public` \
-                     (views §6)",
-                    value.type_str()
-                ))
-            })?;
-            compile_view_gate(&object, Some(declared))?
+            let declared: tessera_types::view::DeclaredGate =
+                value.clone().try_into().map_err(|_| {
+                    declaration_error(format!(
+                        "{object}: `visibility` is {}, and it is an access label, a list of \
+                         access labels, or `public` (views §6)",
+                        value.type_str()
+                    ))
+                })?;
+            compile_view_gate(&object, Some(&declared.into_labels()))?
         }
     };
 
@@ -6054,8 +6092,9 @@ pub struct BuildView {
     /// Form B: how this view's rows are picked out of a shared points file (`views.md` §3.1).
     /// `None` where the file *is* the view — every plain view, and every view of a form A group.
     pub select: Option<ViewSelector>,
-    /// This view's own gate; `None` takes its group's. ⊘ No gate is evaluated (`views.md` §6).
-    pub visibility: Option<String>,
+    /// This view's own gate, a list of labels each one term (`views.md` §6, decision 0132);
+    /// `None` takes its group's.
+    pub visibility: Option<Vec<String>>,
 }
 
 /// The roster table's rows as roster records (`views.md` §3.1's form B).
