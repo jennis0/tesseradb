@@ -978,36 +978,48 @@ impl ArtifactRows {
         &mut self,
         artifacts: impl Iterator<Item = (u32, &'a ArtifactRecord)>,
         space: &RowSpace,
-    ) -> Vec<(u32, u32)> {
+    ) -> (Vec<(u32, u32)>, u64) {
         let from = self.covered.len();
         let mut added = Vec::new();
+        let mut taken = 0u64;
         for (ordinal, record) in artifacts {
             let rows = space.project_extents_from(&record.members, from);
             if rows.is_empty() {
                 continue;
             }
-            if self.membership.or_rows(ordinal as usize, &rows) && self.layout.is_row_major() {
-                added.extend(rows.iter().map(|row| (row, ordinal)));
+            if self.membership.or_rows(ordinal as usize, &rows) {
+                taken += rows.cardinality();
+                if self.layout.is_row_major() {
+                    added.extend(rows.iter().map(|row| (row, ordinal)));
+                }
             }
         }
-        added
+        (added, taken)
     }
 
     /// [`Self::extend_by`] for a spatial level: `piece` is the new segment's resolution, one
     /// segment-local row set per ordinal, taken at `row_base`. Parallel to the level's ordinals as
     /// the shapes were held when the segment was resolved; a hole takes nothing.
-    fn extend_by_resolved(&mut self, piece: &[Option<Bitmap>], row_base: u32) -> Vec<(u32, u32)> {
+    fn extend_by_resolved(
+        &mut self,
+        piece: &[Option<Bitmap>],
+        row_base: u32,
+    ) -> (Vec<(u32, u32)>, u64) {
         let mut added = Vec::new();
+        let mut taken = 0u64;
         for (ordinal, part) in piece.iter().enumerate() {
             let Some(part) = part.as_ref().filter(|part| !part.is_empty()) else {
                 continue;
             };
             let rows = part.add_offset(i64::from(row_base));
-            if self.membership.or_rows(ordinal, &rows) && self.layout.is_row_major() {
-                added.extend(rows.iter().map(|row| (row, ordinal as u32)));
+            if self.membership.or_rows(ordinal, &rows) {
+                taken += rows.cardinality();
+                if self.layout.is_row_major() {
+                    added.extend(rows.iter().map(|row| (row, ordinal as u32)));
+                }
             }
         }
-        added
+        (added, taken)
     }
 
     /// [`Self::rebase_span`] for a spatial level: `piece` is the merged segment's resolution,
@@ -1017,21 +1029,25 @@ impl ArtifactRows {
         piece: &[Option<Bitmap>],
         space: &RowSpace,
         start: usize,
-    ) -> (u32, u32, Vec<(u32, u32)>) {
+    ) -> (u32, u32, Vec<(u32, u32)>, u64) {
         let extent = &space.extents()[start];
         let lo = extent.row_base;
         let hi = lo.saturating_add(extent.row_count());
         let mut added = Vec::new();
+        let mut taken = 0u64;
         for (ordinal, part) in piece.iter().enumerate() {
             let rows = match part {
                 Some(part) => part.add_offset(i64::from(lo)),
                 None => continue,
             };
-            if self.membership.rebase_rows(ordinal, lo, hi, &rows) && self.layout.is_row_major() {
-                added.extend(rows.iter().map(|row| (row, ordinal as u32)));
+            if self.membership.rebase_rows(ordinal, lo, hi, &rows) {
+                taken += rows.cardinality();
+                if self.layout.is_row_major() {
+                    added.extend(rows.iter().map(|row| (row, ordinal as u32)));
+                }
             }
         }
-        (lo, hi, added)
+        (lo, hi, added, taken)
     }
 
     /// **Carry the two derived structures over the amendment** — the tile index, re-derived, and
@@ -1089,20 +1105,22 @@ impl ArtifactRows {
         artifacts: impl Iterator<Item = (u32, &'a ArtifactRecord)>,
         space: &RowSpace,
         start: usize,
-    ) -> (u32, u32, Vec<(u32, u32)>) {
+    ) -> (u32, u32, Vec<(u32, u32)>, u64) {
         let extent = &space.extents()[start];
         let lo = extent.row_base;
         let hi = lo.saturating_add(extent.row_count());
         let mut added = Vec::new();
+        let mut taken = 0u64;
         for (ordinal, record) in artifacts {
             let rows = space.project_extent(&record.members, start);
-            if self.membership.rebase_rows(ordinal as usize, lo, hi, &rows)
-                && self.layout.is_row_major()
-            {
-                added.extend(rows.iter().map(|row| (row, ordinal)));
+            if self.membership.rebase_rows(ordinal as usize, lo, hi, &rows) {
+                taken += rows.cardinality();
+                if self.layout.is_row_major() {
+                    added.extend(rows.iter().map(|row| (row, ordinal)));
+                }
             }
         }
-        (lo, hi, added)
+        (lo, hi, added, taken)
     }
 
     /// [`Self::amend_derived`] for a rebase: the tile index re-derived, the column's labels in
@@ -2354,8 +2372,9 @@ impl ArtifactProjections {
             let Some(source) = rows_of(layer, *level) else {
                 continue;
             };
+            let started = std::time::Instant::now();
             let amended = Arc::make_mut(&mut rows);
-            let added = match source {
+            let (added, rows_taken) = match source {
                 SegmentRows::Projected => amended.extend_by(store.level(layer, *level), next),
                 SegmentRows::Resolved(piece) => {
                     // The one segment resolved is the one this flush published, so a form more
@@ -2374,6 +2393,18 @@ impl ArtifactProjections {
             };
             let lost = amended.amend_derived(&added, total_rows(next));
             amended.covering(next);
+            // **What the flush cost the executor thread**, beside the merge's line: the rows the
+            // segment put into memberships, over every artifact, and the column labels among
+            // them. Operator plane only.
+            tracing::info!(
+                layer = %layer,
+                level,
+                view = %view,
+                rows_taken,
+                labels_added = added.len(),
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "a level's held row form took a flush's segment"
+            );
             if lost {
                 self.fallbacks
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2451,7 +2482,7 @@ impl ArtifactProjections {
             };
             let started = std::time::Instant::now();
             let amended = Arc::make_mut(&mut rows);
-            let (lo, hi, added) = match source {
+            let (lo, hi, added, rows_taken) = match source {
                 SegmentRows::Projected => {
                     amended.rebase_span(store.level(layer, *level), next, start)
                 }
@@ -2465,7 +2496,8 @@ impl ArtifactProjections {
                 view = %view,
                 seg_id = %merged,
                 span_rows = hi - lo,
-                rows_relabelled = added.len(),
+                rows_taken,
+                labels_added = added.len(),
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 "a level's held row form took a merge's rebase"
             );
