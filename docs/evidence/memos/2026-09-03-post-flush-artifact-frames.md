@@ -42,7 +42,7 @@ module doc is the account of what is maintained and how:
 and was shed; with the rebase it serves in 130 ms, and the rebase itself is 27 ms on the executor
 for a 30,217-artifact level — over a 4,000-row span holding no labelled row (`rows_relabelled=0`:
 the probe's points are fresh entities in no membership), so that figure is the per-artifact walk
-and the tile index alone. A rebase over a span holding labelled rows is unmeasured. (b), the warm at publication, is superseded by the rebase: the merge
+and the tile index alone. Over a 4,000-row span holding 4,000 labelled rows the rebase is 2 ms on the artifact-major cluster level, and one artifact's masked count is unchanged across the merge (`probes/2026-09-05-merge-arm/after-the-fix/`, the labelled run, 2026-09-06). (b), the warm at publication, is superseded by the rebase: the merge
 was the operation it was reserved for, and the form is now brought forward by every geometry
 publication rather than rebuilt by any.
 

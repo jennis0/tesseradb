@@ -50,3 +50,23 @@ them. An artifact with no row in the span, before or after, is now left alone
 The parent README's reason holds: a run writes side manifests into the copy it serves and a later
 open carries forward only the derived extents whose level version still matches, so the copy is
 recreated from the original after every run. Nothing here changes that.
+
+## The labelled span (2026-09-06, main at 063cecee)
+
+The runs above merged a span of fresh entities in no membership, so the rebase relabelled
+nothing. This run gave every ingested row a `clusters/kmeans` membership (`MEMBER_LAYER`,
+keys round-robin from the roster) and read one artifact's masked count through the browse
+search form at every step, as the oracle for whether the memberships reached the form.
+`run-labelled-span.json`, `run-labelled-span.serve-log-excerpt.txt`.
+
+| step | request | `km-000000` masked count |
+|---|---|---|
+| after open | 25.1 s open; 250 / 140 ms | 307,065 |
+| after flush 1 … 4 | 129–150 ms | 307,069 / 307,073 / 307,077 / 307,081 (+4 each: 1,000 rows over 256 keys) |
+| after the merge | 145 / 165 ms | **307,081** — unchanged, so the rebase kept every membership |
+
+The engine's own lines: each flush's extension took **1,000 rows into memberships** in 1–14 ms;
+the merge's rebase over a **4,000-row span holding 4,000 labelled rows** took **2 ms** on the
+cluster level (artifact-major) and 26 ms on the mesh level (row-major, empty span). The `rows_taken`
+field is new with this run: the earlier line counted column labels only, which is 0 for an
+artifact-major level whatever the span holds, and a flush had no line at all.

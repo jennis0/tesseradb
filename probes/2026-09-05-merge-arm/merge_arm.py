@@ -23,7 +23,7 @@ rung = R / "data/ladder/medcpt"
 scratch = Path(sys.argv[1])
 FLUSHES = int(os.environ.get("FLUSHES", "4"))
 ROWS = int(os.environ.get("ROWS_PER_FLUSH", "1000"))
-out: dict = {"flushes": [], "rows_per_flush": ROWS}
+out: dict = {"flushes": [], "rows_per_flush": ROWS, "member_layer": os.environ.get("MEMBER_LAYER")}
 
 
 def log(m):
@@ -31,6 +31,13 @@ def log(m):
 
 
 ACCESS, ATTRIBUTES = wire_columns(rung)
+# `MEMBER_LAYER=clusters/kmeans` gives every ingested row a membership on that layer, so the
+# rebase at the merge has labelled rows in its span; unset, the rows are in no artifact.
+MEMBER_LAYER = os.environ.get("MEMBER_LAYER")
+MEMBER_KEYS: list[str] = []
+if MEMBER_LAYER:
+    roster = {"clusters/kmeans": "clusters-kmeans.parquet", "mesh/descriptors": "mesh-descriptors.parquet"}[MEMBER_LAYER]
+    MEMBER_KEYS = pq.read_table(rung / roster, columns=["key"]).column("key").to_pylist()
 
 
 def batch(points: pa.Table, start: int, n: int, offset: int) -> bytes:
@@ -39,6 +46,13 @@ def batch(points: pa.Table, start: int, n: int, offset: int) -> bytes:
     rows = points.slice(start, n).combine_chunks()
     ids = pa.array([offset + i for i in range(n)], pa.uint64())
     rows = rows.set_column(rows.schema.get_field_index("entity_id"), "entity_id", ids)
+    if MEMBER_KEYS:
+        # A membership per row, so the flushed segments hold labelled rows and the merged span is
+        # a real one: keys taken round-robin from the roster, which is enough for the cost and
+        # says nothing about where the point belongs.
+        keys = pa.array([MEMBER_KEYS[(start + i) % len(MEMBER_KEYS)] for i in range(n)], pa.string())
+        rows = rows.append_column(MEMBER_LAYER, keys)
+        return encode_batch(rows, ACCESS, ATTRIBUTES, [MEMBER_LAYER])
     return encode_batch(rows, ACCESS, ATTRIBUTES)
 
 
@@ -68,6 +82,20 @@ try:
         log(f"{name}: {r}")
         return r
 
+    def artifact_count(name):
+        """One cluster artifact's masked count, by the browse search form — the oracle for whether
+        the ingested memberships reached the form. Recorded only when rows carry a membership."""
+        if not MEMBER_KEYS:
+            return None
+        token, _ = serve_battery.authorise(d.session, cred, terms)
+        r = requests.post(f"{d.viewer}/v1/artifacts/browse", headers={"Authorization": f"Bearer {token}"},
+                          json={"view": view, "layer": MEMBER_LAYER, "q": MEMBER_KEYS[0], "limit": 5}, timeout=120)
+        r.raise_for_status()
+        hit = [a for a in r.json()["artifacts"] if a.get("key") == MEMBER_KEYS[0]]
+        count = int(hit[0]["masked_count"]) if hit else None
+        log(f"{name}: {MEMBER_KEYS[0]} masked_count={count}")
+        return count
+
     def flush_stats():
         return control.status()["write_executor"]["flush"]
 
@@ -75,6 +103,7 @@ try:
         return control.status()["write_executor"]["merges"]
 
     out["before"] = [req("before_1"), req("before_2")]
+    out["artifact_before"] = artifact_count("artifact_before")
     # Only the rows the flushes need — the whole table is 13 GB resident and took the first run
     # ten minutes to load for 4,000 rows.
     needed = FLUSHES * ROWS
@@ -95,6 +124,7 @@ try:
                  "publish_s": round(publish_s, 2)}
         log(f"flush {i+1}: {entry}")
         entry["request"] = req(f"after_flush_{i+1}")
+        entry["artifact_count"] = artifact_count(f"artifact_after_flush_{i+1}")
         out["flushes"].append(entry)
     merges_before = merges()
     t0 = time.perf_counter()
@@ -102,6 +132,7 @@ try:
     out["merge"] = {"published": merged, "wait_s": round(merge_wait_s, 1), "merges": merges()}
     log(f"merge: {out['merge']}")
     out["after_merge"] = [req("after_merge_1"), req("after_merge_2")]
+    out["artifact_after_merge"] = artifact_count("artifact_after_merge")
     out["status_at_end"] = flush_stats()
 finally:
     import signal

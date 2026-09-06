@@ -417,8 +417,8 @@ ruling.)* Each operation's obligation to the form:
   re-added. The base segment is never consumed by a merge, so base rows are untouched and the cost
   is proportional to the memberships in the merged segments. Built
   (`ArtifactProjections::rebase_merged`, 2026-09-06); the request after a merge on rung 3's mesh
-  level went from shed at 108 s to 130 ms (`probes/2026-09-05-merge-arm/`). ⊘ The rebase is
-  measured only over a span that relabelled nothing.
+  level went from shed at 108 s to 130 ms, and a rebase over a 4,000-row span holding 4,000
+  labelled rows is 2 ms with every membership kept (`probes/2026-09-05-merge-arm/`).
 - **The fold** rebuilds the form inline, as before (rep §5.0.3).
 
 The projection is still keyed by prefix, view and store version and *not* by the segments version:
@@ -811,8 +811,8 @@ For mechanical integration; neither sibling document is edited here.
 - **The merge arm's cost** (spec §4.1): the flush arm is built and measured (a one-row growth
   returns in 0.04 s and the request after it serves in 125 ms, `probes/2026-09-03-growth-trigger/`);
   the merge arm is taken in place since 2026-09-06 (130 ms on the request after a merge,
-  `probes/2026-09-05-merge-arm/after-the-fix/`); what remains unmeasured is a rebase over a span
-  that holds labelled rows.
+  `probes/2026-09-05-merge-arm/after-the-fix/`, 2 ms for a rebase over a 4,000-row labelled
+  span). Closed, 2026-09-06.
 - **The runtime create/edit verb's contract shape** (rep §5.1) — carried, still contracts work.
 - **Bulk suppression of a caller-defined *subset* of a layer** (every label whose `G` touches a
   compromised source, say): expressible today as N artifact suppressions; whether a set-valued

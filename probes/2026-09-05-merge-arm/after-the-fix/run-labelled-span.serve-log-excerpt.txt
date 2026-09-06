@@ -1,0 +1,16 @@
+2026-09-06T12:15:47.360874Z  INFO tessera_engine::artifacts: a level's row form and tile index are built layer=clusters/kmeans level=0 view=knn ordinals=256 everywhere=46 adopted=true transposed=false layout=ArtifactMajor blocks_per_artifact=7.3359375
+2026-09-06T12:15:59.728191Z  INFO tessera_engine::artifacts: a level's row form and tile index are built layer=mesh/descriptors level=0 view=knn ordinals=30217 everywhere=29723 adopted=false transposed=true layout=RowMajorList blocks_per_artifact=241.36744216831585
+2026-09-06T12:16:10.802114Z  INFO tessera_engine::artifacts: a level's held row form took a write's delta layer=clusters/kmeans level=0 view=knn rows_added=0 cloned=false cloned_ms=0 elapsed_ms=3
+2026-09-06T12:16:10.858920Z  INFO tessera_engine::artifacts: a level's held row form took a flush's segment layer=clusters/kmeans level=0 view=knn rows_taken=1000 labels_added=0 elapsed_ms=10
+2026-09-06T12:16:10.883594Z  INFO tessera_engine::artifacts: a level's held row form took a flush's segment layer=mesh/descriptors level=0 view=knn rows_taken=0 labels_added=0 elapsed_ms=24
+2026-09-06T12:16:15.138538Z  INFO tessera_engine::artifacts: a level's held row form took a write's delta layer=clusters/kmeans level=0 view=knn rows_added=0 cloned=false cloned_ms=0 elapsed_ms=3
+2026-09-06T12:16:15.179185Z  INFO tessera_engine::artifacts: a level's held row form took a flush's segment layer=clusters/kmeans level=0 view=knn rows_taken=1000 labels_added=0 elapsed_ms=14
+2026-09-06T12:16:15.199774Z  INFO tessera_engine::artifacts: a level's held row form took a flush's segment layer=mesh/descriptors level=0 view=knn rows_taken=0 labels_added=0 elapsed_ms=20
+2026-09-06T12:16:19.887000Z  INFO tessera_engine::artifacts: a level's held row form took a write's delta layer=clusters/kmeans level=0 view=knn rows_added=0 cloned=false cloned_ms=0 elapsed_ms=2
+2026-09-06T12:16:19.914504Z  INFO tessera_engine::artifacts: a level's held row form took a flush's segment layer=clusters/kmeans level=0 view=knn rows_taken=1000 labels_added=0 elapsed_ms=1
+2026-09-06T12:16:19.931538Z  INFO tessera_engine::artifacts: a level's held row form took a flush's segment layer=mesh/descriptors level=0 view=knn rows_taken=0 labels_added=0 elapsed_ms=16
+2026-09-06T12:16:24.122831Z  INFO tessera_engine::artifacts: a level's held row form took a write's delta layer=clusters/kmeans level=0 view=knn rows_added=0 cloned=false cloned_ms=0 elapsed_ms=2
+2026-09-06T12:16:24.150709Z  INFO tessera_engine::artifacts: a level's held row form took a flush's segment layer=clusters/kmeans level=0 view=knn rows_taken=1000 labels_added=0 elapsed_ms=1
+2026-09-06T12:16:24.166897Z  INFO tessera_engine::artifacts: a level's held row form took a flush's segment layer=mesh/descriptors level=0 view=knn rows_taken=0 labels_added=0 elapsed_ms=15
+2026-09-06T12:17:55.157531Z  INFO tessera_engine::artifacts: a level's held row form took a merge's rebase layer=clusters/kmeans level=0 view=knn seg_id=merge-8-1 span_rows=4000 rows_taken=4000 labels_added=0 elapsed_ms=2
+2026-09-06T12:17:55.184211Z  INFO tessera_engine::artifacts: a level's held row form took a merge's rebase layer=mesh/descriptors level=0 view=knn seg_id=merge-8-1 span_rows=4000 rows_taken=0 labels_added=0 elapsed_ms=26
