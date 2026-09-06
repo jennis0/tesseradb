@@ -20,9 +20,11 @@
 //!   it; a **merge** resolves the merged segment on the executor and the form's span is rebased
 //!   over it; a **publication** into the level resolves the new shapes over every live segment and
 //!   the form takes them as its delta; a **fold** renumbers every row and rebuilds the form from
-//!   the segments it wrote. A row is tested once in its life, and the form is never joined again
-//!   because the geometry moved (`ArtifactProjections::extend_flushed`, `rebase_merged`,
-//!   `bring_forward`).
+//!   the segments it wrote. While the form is maintained a row is tested once in its life, and
+//!   the form is never joined again because the geometry moved
+//!   (`ArtifactProjections::extend_flushed`, `rebase_merged`, `bring_forward`); a form built
+//!   again — after a fold, or after its layer's forms were dropped — resolves every segment
+//!   against every shape once more.
 //!
 //! **The base segment's piece is persisted and claimed, never resolved twice across a restart.**
 //! The build and every fold write what they resolved in the layout's own form — the row-major

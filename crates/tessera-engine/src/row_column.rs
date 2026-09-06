@@ -1373,10 +1373,6 @@ mod tests {
         }
     }
 
-    /// **A growth into a row an earlier growth labelled is refused on the label form.** The first
-    /// claim is in the amendment rather than in the pack and the rule is the same; the refusal
-    /// leaves the column as it was. A pair already carried is dropped rather than refused, and the
-    /// list form takes the second label.
     /// **A column composed over the base answers as one composed whole**, on both forms: the same
     /// pairs, counts and row count — and its pack stops at the base, every row above it being in
     /// the amendment. Ordinal 1 straddles the base so one membership is split between the two.
@@ -1451,6 +1447,10 @@ mod tests {
         }
     }
 
+    /// **A growth into a row an earlier growth labelled is refused on the label form.** The first
+    /// claim is in the amendment rather than in the pack and the rule is the same; the refusal
+    /// leaves the column as it was. A pair already carried is dropped rather than refused, and the
+    /// list form takes the second label.
     #[test]
     fn a_growth_into_a_row_already_amended_is_refused_on_the_label_form() {
         let membership = rows_of(&[Some(&[0, 1]), Some(&[4, 5])]);

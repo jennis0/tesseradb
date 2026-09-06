@@ -2032,15 +2032,17 @@ impl ArtifactProjections {
             .map(|held| Arc::clone(&held.rows))
     }
 
-    /// File `held` under `address` unless what is there is at a later segments version — see
-    /// [`Held::at`]. Between two forms at one version the newer insert wins, which is the
+    /// File `held` under `address` unless what is there is at a later segments version, or at
+    /// the same one and a later level version — see [`Held::at`]; the second term is the same
+    /// straddle on a level publication's path, where `bring_forward` re-filed the form at the
+    /// version the write moved the level to and a build that loaded the version before finishes
+    /// afterwards. Between two forms at one coordinate the newer insert wins, which is the
     /// replace-on-mismatch rule the map has always had.
     fn insert_newest(&self, address: LevelAddress, held: Held) {
         let mut cached = self.cached.lock().unwrap_or_else(|e| e.into_inner());
-        if cached
-            .get(&address)
-            .is_some_and(|standing| standing.at > held.at)
-        {
+        if cached.get(&address).is_some_and(|standing| {
+            (standing.at, standing.key.level_version) > (held.at, held.key.level_version)
+        }) {
             return;
         }
         cached.insert(address, held);
@@ -2405,8 +2407,10 @@ impl ArtifactProjections {
     /// stream deadline, once per merge (`probes/2026-09-05-merge-arm/`).
     ///
     /// `previous`, `next`, `at` and the disposition of a form that did not agree with `previous`
-    /// are [`Self::extend_flushed`]'s. A form that agreed with `previous` covers it exactly — the
-    /// executor holds the newest generation, so no held form is longer — and is rebased.
+    /// are [`Self::extend_flushed`]'s, and so is a form that agrees with `previous` but stops
+    /// short of it: a build against an older generation inserted where nothing stood, which the
+    /// flushes between had nothing to extend. A form that covers `previous` exactly is rebased;
+    /// the executor holds the newest generation, so no held form is longer.
     #[allow(clippy::too_many_arguments)]
     pub fn rebase_merged(
         &self,
@@ -2429,10 +2433,15 @@ impl ArtifactProjections {
         for (address, key, mut rows) in self.held_of_view(prefix, view) {
             let (_, layer, level) = &address;
             if !(rows.covers(previous) && rows.extends_to(previous)) {
+                // A form that agrees with `previous` and is shorter than it is a straddling
+                // build's: built against an older generation and inserted where nothing stood,
+                // after the flushes between had nothing to extend. It is dropped with the others.
+                // What cannot happen is a form that agrees, covers `previous` whole and does not
+                // equal it: no held form is longer than the newest generation.
                 debug_assert!(
-                    !rows.agrees_with(previous),
-                    "a held row form agreed with the outgoing generation and is not the whole of \
-                     it: a flush appended a segment without extending the form"
+                    !rows.agrees_with(previous) || rows.covered.len() < previous.extent_count(),
+                    "a held row form agreed with the outgoing generation and covered more of it \
+                     than the generation has"
                 );
                 self.drop_disagreeing(&address, view);
                 continue;
