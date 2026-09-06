@@ -77,21 +77,34 @@
 //!   ([`ArtifactProjections::extend_flushed`]), which is what makes an ingested member count from
 //!   its flush rather than from the next fold.
 //!
-//! Both re-derive the tile index and the row-major column from the amended form, because both are
-//! pure functions of it and the fold's own files describe the level as it was (**I11**: nothing
-//! persisted is amended, and nothing persisted is reused past what it describes). Both are
+//! - a **merge** rebases every held form of the view over the extent it published
+//!   ([`ArtifactProjections::rebase_merged`]): the rows inside the merged span are cleared and
+//!   the members re-projected through the one merged extent. Extent rows are the rows a merge
+//!   renumbers, and this is the one publication that permutes rows a form holds.
+//!
+//! All three re-derive the tile index and amend the row-major column in place, because both are
+//! pure functions of the form and the fold's own files describe the level as it was (**I11**:
+//! nothing persisted is amended, and nothing persisted is reused past what it describes). All are
 //! per `(view, layer, level)` and derived from the level's records and the row space, which is what
 //! keeps them the same shared structure a built form is (**I2**).
 //!
+//! **A spatial level's form is the same form with another source of rows.** Its membership is
+//! resolved from the level's shapes rather than projected from records (`crate::shapes`), so the
+//! rows a flush or a merge brings are the segment's resolution and the rows a publication brings
+//! are the new shapes' resolution over every live segment ([`SegmentRows::Resolved`],
+//! [`DeltaRows::Resolved`]); everything from the union on is shared with a stored level. An
+//! attribute predicate's form is the exception: its membership is the value column, evaluated per
+//! request, so it takes no delta and is keyed on the geometry ([`ProjectionKey::live`]).
+//!
 //! **What stays base-only is the generating sets**, deliberately — see [`MembershipRows::put`].
 //!
-//! **And what a merge does is what [`ArtifactRows::covers`] is for.** Extent rows are the rows a
-//! merge renumbers, so a form holding them is checked against the row space at every cache hit and
-//! rebuilt where the segments were permuted rather than appended to. Before 2026-09-03 the form
-//! held base rows alone and needed no such check; it also understated every count by the members
-//! ingested since the last fold, and rebuilt the level whole — 94 to 177 s at rung 3, inside a
-//! request — at every write that moved the level's version
-//! (`docs/evidence/memos/2026-09-03-post-flush-artifact-frames.md`).
+//! **[`ArtifactRows::covers`] is read at every cache hit** because a request may hold the older of
+//! two live generations; on the executor every publication brings the held forms with it, so a
+//! form that was current cannot fail it there. Before 2026-09-03 the form held base rows alone and
+//! needed no such check; it also understated every count by the members ingested since the last
+//! fold, and rebuilt the level whole — 94 to 177 s at rung 3, inside a request — at every write
+//! that moved the level's version (`docs/evidence/memos/2026-09-03-post-flush-artifact-frames.md`).
+//! Until 2026-09-06 a merge dropped the form and the next request paid the same projection.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -932,6 +945,22 @@ impl ArtifactRows {
         self.membership.get(ordinal).cloned().unwrap_or_default()
     }
 
+    /// [`Self::publish_at`] for a membership **resolved elsewhere** — a spatial level's new shape,
+    /// resolved over every live segment with the row bases applied — exactly as
+    /// [`Self::build_resolved`]'s walk would have placed it.
+    fn publish_resolved(
+        &mut self,
+        ordinal: u32,
+        record: &ArtifactRecord,
+        rows: Bitmap,
+        space: &RowSpace,
+    ) -> Bitmap {
+        let idx = ordinal as usize;
+        self.records.put(idx, record);
+        self.membership.put_resolved(idx, record, rows, space);
+        self.membership.get(ordinal).cloned().unwrap_or_default()
+    }
+
     /// **Every artifact's membership extended by the extents this form does not yet cover** — what
     /// a flush does to a stored level's held form.
     ///
@@ -962,6 +991,47 @@ impl ArtifactRows {
             }
         }
         added
+    }
+
+    /// [`Self::extend_by`] for a spatial level: `piece` is the new segment's resolution, one
+    /// segment-local row set per ordinal, taken at `row_base`. Parallel to the level's ordinals as
+    /// the shapes were held when the segment was resolved; a hole takes nothing.
+    fn extend_by_resolved(&mut self, piece: &[Option<Bitmap>], row_base: u32) -> Vec<(u32, u32)> {
+        let mut added = Vec::new();
+        for (ordinal, part) in piece.iter().enumerate() {
+            let Some(part) = part.as_ref().filter(|part| !part.is_empty()) else {
+                continue;
+            };
+            let rows = part.add_offset(i64::from(row_base));
+            if self.membership.or_rows(ordinal, &rows) && self.layout.is_row_major() {
+                added.extend(rows.iter().map(|row| (row, ordinal as u32)));
+            }
+        }
+        added
+    }
+
+    /// [`Self::rebase_span`] for a spatial level: `piece` is the merged segment's resolution,
+    /// taken at the span's start.
+    fn rebase_span_resolved(
+        &mut self,
+        piece: &[Option<Bitmap>],
+        space: &RowSpace,
+        start: usize,
+    ) -> (u32, u32, Vec<(u32, u32)>) {
+        let extent = &space.extents()[start];
+        let lo = extent.row_base;
+        let hi = lo.saturating_add(extent.row_count());
+        let mut added = Vec::new();
+        for (ordinal, part) in piece.iter().enumerate() {
+            let rows = match part {
+                Some(part) => part.add_offset(i64::from(lo)),
+                None => continue,
+            };
+            if self.membership.rebase_rows(ordinal, lo, hi, &rows) && self.layout.is_row_major() {
+                added.extend(rows.iter().map(|row| (row, ordinal as u32)));
+            }
+        }
+        (lo, hi, added)
     }
 
     /// **Carry the two derived structures over the amendment** — the tile index, re-derived, and
@@ -1403,8 +1473,8 @@ impl ArtifactRows {
 pub enum PredicateSource<'a> {
     /// `membership = { attribute = f }` — the indexed column `f`, addressed by entity.
     Attribute(AttributeSource<'a>),
-    /// `membership = "spatial"` — the level's held shapes and the segments whose pieces join into
-    /// this generation's membership (`crate::shapes`).
+    /// `membership = "spatial"` — the level's held shapes and the segments whose resolutions the
+    /// form is assembled from, once (`crate::shapes`).
     Spatial(SpatialSource<'a>),
 }
 
@@ -1424,13 +1494,13 @@ pub struct AttributeSource<'a> {
     pub code_of_key: &'a dyn Fn(&str) -> Option<u32>,
 }
 
-/// The held structures a spatial level's membership is joined from, and what it is joined over.
+/// The held structures a spatial level's form is assembled from when it is built, and what it is
+/// assembled over. Built once; from then on the form is maintained by the publications that move
+/// it, as a stored level's is.
 pub struct SpatialSource<'a> {
-    /// The level's shapes, index and per-segment pieces, at this generation's level version.
+    /// The level's shapes, index and staged pieces, at this generation's level version.
     pub level: Arc<crate::shapes::ShapeLevel>,
-    /// This generation's segments and their row bases, base first. **Every segment**, which is
-    /// what makes the membership fresh by construction: a flush resolves the segment it publishes
-    /// and the next request joins a list that now includes it, so the points in it count.
+    /// This generation's segments and their row bases, base first.
     pub segments: &'a [(&'a tessera_store::read::SegmentData, u32)],
     /// The generation's whole row count, base and extents — what the joined form is sized to.
     pub total_rows: u32,
@@ -1466,20 +1536,20 @@ struct ProjectionKey {
     prefix: String,
     view: String,
     level_version: u64,
-    /// **The geometry a *predicate* level's membership was evaluated against, and `0` for every
-    /// other level.**
+    /// **The geometry an *attribute* predicate's membership was evaluated against, and `0` for
+    /// every other level.**
     ///
-    /// A stored membership is a set the form can be **extended** by the segment a flush publishes
-    /// ([`ArtifactProjections::extend_flushed`]), which is why `segments_version` is not a term
-    /// above. A predicate's membership is not stored and there is no delta to extend by: an
-    /// attribute layer's live tail covers the rows a flush appended, and a shape's ranges are
-    /// resolved against the segment list itself. Both move when the geometry does, so both are
-    /// rebuilt then — which is the whole of *never stale*, and the cost of it is that a predicate
-    /// level's form is derived once per flush rather than once per fold.
+    /// A stored membership and a spatial one are sets the form can be **extended** by the segment
+    /// a flush publishes and **rebased** over the extent a merge publishes
+    /// ([`ArtifactProjections::extend_flushed`], [`ArtifactProjections::rebase_merged`]), which
+    /// is why `segments_version` is not a term above. An attribute predicate's membership is the
+    /// value column: its live tail covers the rows a flush appended and is read per request, so
+    /// there is no delta to take and the form is rebuilt when the geometry moves — once per flush
+    /// rather than once per fold, over a column that is four bytes a row.
     ///
-    /// **Zero rather than an `Option`**, because a level either has a rule to evaluate or it does
-    /// not: an enumerated level filed under a geometry would rebuild on every flush what a walk of
-    /// one extent brings forward.
+    /// **Zero rather than an `Option`**, because a level either evaluates a column or it does not:
+    /// an enumerated or a spatial level filed under a geometry would rebuild on every flush what a
+    /// walk of one extent brings forward.
     live: u64,
 }
 
@@ -1545,6 +1615,32 @@ pub enum LevelDelta<'a> {
     /// The ordinals a publication claimed. The records themselves are read back from the store,
     /// which has already applied them.
     Published(&'a [u32]),
+}
+
+/// **Where the rows of a write's delta come from**, per level — what
+/// [`ArtifactProjections::bring_forward`] is told beside the delta.
+///
+/// `None` at the call is an attribute predicate, whose membership is the value column and takes
+/// no delta.
+pub enum DeltaRows<'a> {
+    /// A stored membership: the delta's rows are the records' members, projected through the
+    /// view's row space.
+    Projected,
+    /// A spatial membership: the rows of the ordinal asked for, resolved from its shape over every
+    /// live segment with the row bases applied. A growth never reaches a spatial level (the
+    /// registry refuses one), so this is asked for a publication's new ordinals only.
+    Resolved(&'a dyn Fn(u32) -> Bitmap),
+}
+
+/// **Where a level's rows come from when a geometry publication brings its held form forward** —
+/// what [`ArtifactProjections::extend_flushed`] and [`ArtifactProjections::rebase_merged`] are
+/// told per `(layer, level)`. `None` is a level that takes no delta here: an attribute predicate.
+pub enum SegmentRows {
+    /// A stored membership: the segment's rows are projected from the records through its extent.
+    Projected,
+    /// A spatial membership: the segment resolved against the level's shapes, segment-local rows
+    /// per ordinal, parallel to the level's ordinals.
+    Resolved(Arc<Vec<Option<Bitmap>>>),
 }
 
 /// One held row form, what it describes and how far its rows have been brought.
@@ -2062,21 +2158,20 @@ impl ArtifactProjections {
         space: &RowSpace,
         delta: &LevelDelta<'_>,
         before: u64,
-        stored: bool,
+        source: Option<&DeltaRows<'_>>,
     ) {
-        // **A level whose membership is a *rule* has no delta to take.** A shape's members are the
-        // rows inside it and an attribute predicate's are the rows carrying a value; neither is in
-        // the record this delta came from, so applying one would add nothing and — because it also
-        // moves the key — would make the form *hit* on the next request, ahead of the shape pieces
-        // `ShapeStore::warm` installs after the publication. Such a level is left alone and rebuilt
-        // by its own version move, which is what it has always been.
+        // **An attribute predicate has no delta to take.** Its members are the rows carrying a
+        // value, which is not in the record this delta came from, so applying one would add
+        // nothing and — because it also moves the key — would make the form *hit* on the next
+        // request over a value column the geometry has since moved. Such a level is left alone and
+        // rebuilt by its own version move, which is what it has always been.
         //
         // **Asked of the declaration and not of [`ProjectionKey::live`]**, which is the segments
         // version and is `0` on a bundle nothing has flushed — indistinguishable there from the `0`
         // a stored level is filed under.
-        if !stored {
+        let Some(source) = source else {
             return;
-        }
+        };
         let map_key = (view.to_string(), layer.to_string(), level);
         // **Taken out of the map, not cloned from it.** A request that arrives meanwhile misses
         // either way — the store is already at the new version and the held key is not — so the
@@ -2158,7 +2253,12 @@ impl ArtifactProjections {
             LevelDelta::Published(ordinals) => {
                 for ordinal in *ordinals {
                     if let Some(record) = store.get(layer, level, *ordinal) {
-                        let fresh = amended.publish_at(*ordinal, record, space);
+                        let fresh = match source {
+                            DeltaRows::Projected => amended.publish_at(*ordinal, record, space),
+                            DeltaRows::Resolved(rows) => {
+                                amended.publish_resolved(*ordinal, record, rows(*ordinal), space)
+                            }
+                        };
                         if row_major {
                             added.extend(fresh.iter().map(|row| (row, *ordinal)));
                         }
@@ -2212,10 +2312,11 @@ impl ArtifactProjections {
     /// artifact would count for nobody until the next fold. This is where the segment reaches them
     /// — one `project_extents_from` per artifact, over the entities inside that extent's own range.
     ///
-    /// **Stored levels only**, which `stored` answers from the layer's declaration and not from
-    /// [`ProjectionKey::live`] — see [`Self::bring_forward`] on why the key cannot say. A rule-
-    /// derived level's form is keyed on the geometry and is rebuilt by the flush's own move of it,
-    /// which is what makes its answer fresh by construction.
+    /// `rows` says per `(layer, level)` where the segment's rows come from — projected from a
+    /// stored membership's records, or the segment's resolution against a spatial level's shapes
+    /// ([`SegmentRows`]) — and `None` for an attribute predicate, whose form is keyed on the
+    /// geometry and rebuilt by the flush's own move of it. Asked of the declaration and not of
+    /// [`ProjectionKey::live`], for [`Self::bring_forward`]'s reason.
     ///
     /// `previous` is the row space the outgoing generation served and `next` the one being
     /// published; `at` is the segments version `next` carries. A form that agreed with `previous`
@@ -2232,9 +2333,9 @@ impl ArtifactProjections {
         previous: &RowSpace,
         next: &RowSpace,
         at: u64,
-        stored: &dyn Fn(&str) -> bool,
+        rows_of: &dyn Fn(&str, u32) -> Option<SegmentRows>,
     ) {
-        for (address, key, mut rows) in self.held_of_view(prefix, view, stored) {
+        for (address, key, mut rows) in self.held_of_view(prefix, view) {
             let (_, layer, level) = &address;
             if rows.covers(next) {
                 continue;
@@ -2248,8 +2349,27 @@ impl ArtifactProjections {
                 self.drop_disagreeing(&address, view);
                 continue;
             }
+            let Some(source) = rows_of(layer, *level) else {
+                continue;
+            };
             let amended = Arc::make_mut(&mut rows);
-            let added = amended.extend_by(store.level(layer, *level), next);
+            let added = match source {
+                SegmentRows::Projected => amended.extend_by(store.level(layer, *level), next),
+                SegmentRows::Resolved(piece) => {
+                    // The one segment resolved is the one this flush published, so a form more
+                    // than one segment short has nothing here for the others — the straddling
+                    // build's form again, dropped for the same reason.
+                    let Some(extent) = next
+                        .extents()
+                        .last()
+                        .filter(|_| amended.covered.len() + 1 == next.extent_count())
+                    else {
+                        self.drop_disagreeing(&address, view);
+                        continue;
+                    };
+                    amended.extend_by_resolved(&piece, extent.row_base)
+                }
+            };
             let lost = amended.amend_derived(&added, total_rows(next));
             amended.covering(next);
             if lost {
@@ -2274,10 +2394,11 @@ impl ArtifactProjections {
     /// The merged extent `merged` stands at the index the consumed run's first segment stood at,
     /// with the same `row_base` and row count, so what changes for a form is the bits inside that
     /// span and the segment list it records. [`ArtifactRows::rebase_span`] clears the span and
-    /// re-projects each artifact's members through the merged extent; the column gives up the
-    /// span's labels and takes the re-projected ones ([`RowColumn::rebase`]); the tile index is
-    /// derived again; and the form's record of its segments becomes `next`'s. The containment
-    /// partition is untouched, being per ordinal and rank and not per row.
+    /// re-projects each artifact's members through the merged extent — or, for a spatial level,
+    /// puts the merged segment's resolution there ([`SegmentRows::Resolved`]); the column gives up
+    /// the span's labels and takes the new ones ([`RowColumn::rebase`]); the tile index is derived
+    /// again; and the form's record of its segments becomes `next`'s. The containment partition is
+    /// untouched, being per ordinal and rank and not per row.
     ///
     /// Without this the form failed [`ArtifactRows::covers`] on the next request and the level
     /// was projected whole inside it — 108 s at rung 3's `mesh/descriptors`, shed at the 60 s
@@ -2296,7 +2417,7 @@ impl ArtifactProjections {
         next: &RowSpace,
         merged: &str,
         at: u64,
-        stored: &dyn Fn(&str) -> bool,
+        rows_of: &dyn Fn(&str, u32) -> Option<SegmentRows>,
     ) {
         let Some(start) = next
             .extents()
@@ -2305,7 +2426,7 @@ impl ArtifactProjections {
         else {
             return;
         };
-        for (address, key, mut rows) in self.held_of_view(prefix, view, stored) {
+        for (address, key, mut rows) in self.held_of_view(prefix, view) {
             let (_, layer, level) = &address;
             if !(rows.covers(previous) && rows.extends_to(previous)) {
                 debug_assert!(
@@ -2316,9 +2437,17 @@ impl ArtifactProjections {
                 self.drop_disagreeing(&address, view);
                 continue;
             }
+            let Some(source) = rows_of(layer, *level) else {
+                continue;
+            };
             let started = std::time::Instant::now();
             let amended = Arc::make_mut(&mut rows);
-            let (lo, hi, added) = amended.rebase_span(store.level(layer, *level), next, start);
+            let (lo, hi, added) = match source {
+                SegmentRows::Projected => {
+                    amended.rebase_span(store.level(layer, *level), next, start)
+                }
+                SegmentRows::Resolved(piece) => amended.rebase_span_resolved(&piece, next, start),
+            };
             let lost = amended.rebase_derived(lo, hi, &added, total_rows(next));
             amended.covering(next);
             tracing::info!(
@@ -2346,18 +2475,17 @@ impl ArtifactProjections {
         }
     }
 
-    /// Every form held for `view` under `prefix` whose layer `stored` admits, cloned out of the map
-    /// so the amendment runs outside its lock.
+    /// Every form held for `view` under `prefix`, cloned out of the map so the amendment runs
+    /// outside its lock.
     fn held_of_view(
         &self,
         prefix: &str,
         view: &str,
-        stored: &dyn Fn(&str) -> bool,
     ) -> Vec<(LevelAddress, ProjectionKey, Arc<ArtifactRows>)> {
         let cached = self.cached.lock().unwrap_or_else(|e| e.into_inner());
         cached
             .iter()
-            .filter(|((held_view, layer, _), _)| held_view == view && stored(layer))
+            .filter(|((held_view, _, _), _)| held_view == view)
             .filter(|(_, held)| held.key.prefix == prefix)
             .map(|(address, held)| (address.clone(), held.key.clone(), Arc::clone(&held.rows)))
             .collect()
@@ -2417,11 +2545,11 @@ impl ArtifactProjections {
             prefix: prefix.to_string(),
             view: view.to_string(),
             level_version: store.level_version(layer, level),
-            // See [`ProjectionKey::live`]: a rule is evaluated against the geometry, a stored
-            // membership is not.
+            // See [`ProjectionKey::live`]: a value column is evaluated against the geometry; a
+            // stored membership and a spatial one are brought forward with it.
             live: match predicate {
-                Some(_) => segments_version,
-                None => 0,
+                Some(PredicateSource::Attribute(_)) => segments_version,
+                _ => 0,
             },
         };
         let map_key = (view.to_string(), layer.to_string(), level);
@@ -2457,21 +2585,22 @@ impl ArtifactProjections {
         let partition = source
             .filter(|source| source.signature_shaped())
             .and_then(|source| self.partition_for(prefix, layer, level, store, source));
-        // **A spatial level's membership is the join of its segments' resolved pieces**
-        // (`crate::shapes`), in this generation's whole row space: every segment was resolved
-        // against the level's shapes when it was published, so what happens here is an
-        // O(containers) union per segment and never a per-point test. The result is a per-row
-        // source and takes the same road an enumerated level's takes from here — the tile index,
-        // the column where the layout is row-major, the histogram — which is what lets the
-        // layout be chosen for it rather than fixed.
+        // **A spatial level's membership is assembled from its segments' resolutions**
+        // (`crate::shapes`), in this generation's whole row space, once: open and the fold stage
+        // every segment's piece before this runs, so what happens here is an O(containers) union
+        // per segment; a segment nothing staged is resolved here, which is this build paying for
+        // it and not a request-path fallback. The result is a per-row source and takes the same
+        // road an enumerated level's takes from here — the tile index, the column where the layout
+        // is row-major, the histogram — and from here on the form is maintained as an enumerated
+        // level's is.
         //
         // **The fold-written column is claimed only while the generation has no extents.** That
         // column is over the base rows; a flushed segment's rows lie above them, and a column
         // that does not label them would count every point ingested since the fold as in no
         // shape — the staleness a spatial membership must not have. With extents the column is
-        // composed over the joined form instead.
+        // composed over the assembled form instead.
         if let Some(PredicateSource::Spatial(spatial)) = predicate {
-            let joined = spatial.level.joined(spatial.segments);
+            let (joined, assembly) = spatial.level.assemble(spatial.segments);
             let built = ArtifactRows::build_resolved(
                 store.level(layer, level),
                 joined,
@@ -2526,9 +2655,13 @@ impl ArtifactProjections {
                 view = %view,
                 ordinals = rows.index().len(),
                 segments = spatial.segments.len(),
-                pieces_held = spatial.level.pieces_held(),
+                staged = assembly.staged,
+                resolved = assembly.resolved,
+                rows_tested = assembly.rows_tested,
+                resolve_ms = assembly.resolve_ms,
+                elapsed_ms = assembly.elapsed_ms,
                 layout = ?rows.layout(),
-                "a spatial level's row form is joined from its segments' resolved pieces"
+                "a spatial level's row form is assembled from its segments' resolutions"
             );
             self.builds
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);

@@ -3,7 +3,7 @@
 //! `membership = "spatial"` is *the rows whose stored position is inside the shape*, exactly, for
 //! every kind. Nothing about that membership is stored in an artifact's record — the record holds
 //! the shape — so it has to be resolved against the rows, and this module decides where and when.
-//! Three things are held, at three lifetimes:
+//! Three things are held:
 //!
 //! - **Per artifact, for the artifact's life**: the canonical shape and its decomposition — the
 //!   interior tiles whole, the boundary cells as code and parity only
@@ -12,12 +12,17 @@
 //! - **Per level**: a coarse geometry-derived index from tiles to the artifacts whose bounds meet
 //!   them ([`tessera_store::derived::ShapeIndex`]), so a segment is tested only against the
 //!   shapes it can touch.
-//! - **Per segment**: the membership of every row in it, resolved when the segment is published —
-//!   in the flush's own unit of work on the pool, before the generation swaps; at the fold's
-//!   artifact pass for the segments the fold wrote; at open for every segment the bundle holds.
-//!   A segment is immutable and its id is never reused (contracts §2.1), so a piece keyed by
-//!   `seg_id` is valid for as long as the segment is served, across every generation that carries
-//!   it. A row is tested once in its life.
+//! - **Per `(view, layer, level)`, the row form**, held and maintained by `crate::artifacts`
+//!   exactly as a stored level's is: one bitmap per artifact over the view's whole row space, with
+//!   the tile index and the row-major column derived from it. A segment is resolved against the
+//!   level's shapes once, when it is published, and its rows go into the form with the row base
+//!   applied. A **flush** resolves its segment on the pool and the publication extends the form by
+//!   it; a **merge** resolves the merged segment on the executor and the form's span is rebased
+//!   over it; a **publication** into the level resolves the new shapes over every live segment and
+//!   the form takes them as its delta; a **fold** renumbers every row and rebuilds the form from
+//!   the segments it wrote. A row is tested once in its life, and the form is never joined again
+//!   because the geometry moved (`ArtifactProjections::extend_flushed`, `rebase_merged`,
+//!   `bring_forward`).
 //!
 //! **The base segment's piece is persisted and claimed, never resolved twice across a restart.**
 //! The build and every fold write what they resolved in the layout's own form — the row-major
@@ -29,26 +34,18 @@
 //! state are zero or a few small pieces. A refused file is said so at `warn`; a segment with no
 //! file at all is the ordinary case for a flush segment and is said so at `info`.
 //!
+//! **A piece exists only between its resolution and the build that takes it.** Open and the fold
+//! both resolve or claim every segment of a level before the level's form is built, so each
+//! stages its pieces on the level ([`ShapeLevel::stage`]) and the form's build takes them
+//! ([`ShapeLevel::assemble`]); a segment the build finds unstaged is resolved there, which is the
+//! build paying for what nothing staged and not a fallback. Nothing per segment is held once the
+//! form has it, so nothing has to be retired when a merge or a fold consumes a segment.
+//!
 //! **The decompositions are persisted too**, per artifact per view in one `shape-held` file per
 //! level (`tessera_store::derived::shape_held_bytes`), because on Overture's part 0 the descent
 //! was 8.9 s of a 9.3 s open once the pieces were claimed and the decode alone is 76 ms. An entry
 //! is used only for the canonical bytes it was descended from — length and digest — and under the
 //! level version it was written at; otherwise the shape is decomposed again, counted, and said.
-//!
-//! **Per generation the pieces are joined with the row bases applied** ([`ShapeLevel::joined`]) —
-//! an `add_offset` and a union per segment, O(containers) — into the per-row source the serving
-//! layout machinery consumes as it consumes an enumerated layer's member table: the row form, the
-//! tile index, the row-major column, the masked-count histogram
-//! (`crate::artifacts::ArtifactProjections::get_or_build`). Nothing downstream of the join knows
-//! the membership came from a shape.
-//!
-//! **The fallback, and why it is loud.** Every publication that introduces a segment resolves it
-//! before the swap, so a request should never find a piece missing. If one is missing — a
-//! publication route this module was not wired into — [`ShapeLevel::joined`] resolves it on the
-//! request path and warns, rather than serving the level with the segment's rows absent: absent
-//! rows would be a masked count that silently understates for every viewer, which is the failure
-//! the design's conformance section names as invisible from inside. Correctness rests on the
-//! fallback; the cost budget rests on the hooks.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -140,7 +137,8 @@ pub struct ShapeLevel {
     /// no persisted entry matched the shape.
     pub held_claimed: u64,
     pub held_decomposed: u64,
-    pieces: Mutex<HashMap<String, Arc<Vec<Option<Bitmap>>>>>,
+    /// Pieces resolved or claimed ahead of the form's build, by segment id — see the module doc.
+    staged: Mutex<HashMap<String, Arc<Vec<Option<Bitmap>>>>>,
 }
 
 /// One segment's resolution, for the traces and the build report.
@@ -236,7 +234,7 @@ impl ShapeLevel {
             decompose_ms: (decompose_ns / 1_000_000) as u64,
             held_claimed,
             held_decomposed,
-            pieces: Mutex::new(HashMap::new()),
+            staged: Mutex::new(HashMap::new()),
         }
     }
 
@@ -272,65 +270,105 @@ impl ShapeLevel {
             .sum()
     }
 
-    /// Resolve one segment and hold the piece under its id, replacing any earlier piece for the
-    /// same id (a re-resolution after a shape republication).
-    pub fn resolve(&self, segment: &SegmentData) -> (Arc<Vec<Option<Bitmap>>>, ResolutionCost) {
+    /// Resolve one segment against every shape: segment-local rows per ordinal, parallel to the
+    /// level's ordinals, and the cost. Pure — the caller decides what the rows are for.
+    pub fn resolve(&self, segment: &SegmentData) -> (Vec<Option<Bitmap>>, ResolutionCost) {
         let started = Instant::now();
         let resolved = resolve_segment(segment, &self.shapes, &self.index);
-        let cost = ResolutionCost {
+        let cost = Self::cost_of(&resolved, started);
+        (resolved.rows, cost)
+    }
+
+    /// Resolve one segment against the shapes at `ordinals` alone — what a publication into the
+    /// level asks for its new artifacts, over every live segment. The other ordinals are `None`.
+    ///
+    /// The resolution walks a copy of the shape list with every other slot empty and an index
+    /// over that copy, so the segment is tested against the new shapes and nothing else; the copy
+    /// is the new shapes' decompositions, once per segment.
+    pub fn resolve_ordinals(
+        &self,
+        segment: &SegmentData,
+        ordinals: &[u32],
+    ) -> (Vec<Option<Bitmap>>, ResolutionCost) {
+        let started = Instant::now();
+        let mut only: Vec<Option<HeldShape>> = vec![None; self.shapes.len()];
+        for ordinal in ordinals {
+            if let Some(slot) = only.get_mut(*ordinal as usize) {
+                *slot = self.shapes[*ordinal as usize].clone();
+            }
+        }
+        let index = ShapeIndex::build(&only);
+        let resolved = resolve_segment(segment, &only, &index);
+        let cost = Self::cost_of(&resolved, started);
+        (resolved.rows, cost)
+    }
+
+    fn cost_of(
+        resolved: &tessera_store::derived::ResolvedSegment,
+        started: Instant,
+    ) -> ResolutionCost {
+        ResolutionCost {
             rows_tested: resolved.rows_tested,
             rows_interior: resolved.rows_interior,
             artifacts_skipped: resolved.artifacts_skipped,
             artifacts_empty: resolved.artifacts_empty,
             elapsed_ms: started.elapsed().as_millis() as u64,
-        };
-        let piece = Arc::new(resolved.rows);
-        lock(&self.pieces).insert(segment.seg_id.clone(), Arc::clone(&piece));
-        (piece, cost)
+        }
     }
 
-    /// Install a piece resolved elsewhere — the flush's, resolved on the pool before publication.
-    pub fn install(&self, seg_id: &str, piece: Arc<Vec<Option<Bitmap>>>) {
-        lock(&self.pieces).insert(seg_id.to_string(), piece);
+    /// Hold a segment's piece until the form's build takes it — open's and the fold's route.
+    pub fn stage(&self, seg_id: &str, piece: Arc<Vec<Option<Bitmap>>>) {
+        lock(&self.staged).insert(seg_id.to_string(), piece);
     }
 
-    pub fn piece(&self, seg_id: &str) -> Option<Arc<Vec<Option<Bitmap>>>> {
-        lock(&self.pieces).get(seg_id).cloned()
+    /// A staged piece, left staged — the fold's writers read it before the flip's build takes it.
+    pub fn staged(&self, seg_id: &str) -> Option<Arc<Vec<Option<Bitmap>>>> {
+        lock(&self.staged).get(seg_id).cloned()
     }
 
-    pub fn has_piece(&self, seg_id: &str) -> bool {
-        lock(&self.pieces).contains_key(seg_id)
+    pub fn has_staged(&self, seg_id: &str) -> bool {
+        lock(&self.staged).contains_key(seg_id)
     }
 
-    /// Every segment's piece, with the row bases applied and unioned: the level's membership in
-    /// this generation's view row space, one bitmap per ordinal.
-    ///
-    /// Resolves a missing piece on the spot and says so — see the module doc on why the fallback
-    /// is loud rather than absent.
-    pub fn joined(&self, segments: &[(&SegmentData, u32)]) -> Vec<Option<Bitmap>> {
+    /// Drop every staged piece — after the build that was to take them has run, so a level no
+    /// form was built for (a suppressed layer's, say) does not hold one piece per fold for ever.
+    pub fn clear_staged(&self) {
+        lock(&self.staged).clear();
+    }
+
+    /// **The level's membership over one generation's whole row space**, one bitmap per ordinal,
+    /// built from the segments: each segment's piece taken from what was staged for it or resolved
+    /// here, with the row base applied. What `crate::artifacts` builds a spatial level's row form
+    /// from, once; from then on the form is maintained.
+    pub fn assemble(
+        &self,
+        segments: &[(&SegmentData, u32)],
+    ) -> (Vec<Option<Bitmap>>, AssemblyReport) {
+        let started = Instant::now();
+        let mut report = AssemblyReport::default();
         let mut rows: Vec<Option<Bitmap>> = self
             .shapes
             .iter()
             .map(|held| held.as_ref().map(|_| Bitmap::new()))
             .collect();
         for (segment, row_base) in segments {
-            let piece = match self.piece(&segment.seg_id) {
-                Some(piece) => piece,
+            let piece = match lock(&self.staged).remove(&segment.seg_id) {
+                Some(piece) => {
+                    report.staged += 1;
+                    piece
+                }
                 None => {
-                    tracing::warn!(
-                        layer = %self.layer,
-                        level = self.level,
-                        view = %self.view,
-                        seg_id = %segment.seg_id,
-                        "a segment reached a request unresolved against this level's shapes; \
-                         resolved now, on the request path — every publication route should have \
-                         resolved it before the swap"
-                    );
-                    self.resolve(segment).0
+                    let (resolved, cost) = self.resolve(segment);
+                    report.resolved += 1;
+                    report.rows_tested += cost.rows_tested;
+                    report.resolve_ms += cost.elapsed_ms;
+                    Arc::new(resolved)
                 }
             };
             for (ordinal, part) in piece.iter().enumerate() {
-                if let (Some(part), Some(rows)) = (part, rows.get_mut(ordinal).and_then(Option::as_mut)) {
+                if let (Some(part), Some(rows)) =
+                    (part, rows.get_mut(ordinal).and_then(Option::as_mut))
+                {
                     if !part.is_empty() {
                         rows.or_inplace(&part.add_offset(i64::from(*row_base)));
                     }
@@ -340,24 +378,28 @@ impl ShapeLevel {
         for rows in rows.iter_mut().flatten() {
             rows.run_optimize();
         }
-        rows
+        report.elapsed_ms = started.elapsed().as_millis() as u64;
+        (rows, report)
     }
+}
 
-    /// Drop the pieces of segments no generation serves any more.
-    pub fn retain_segments(&self, live: &dyn Fn(&str) -> bool) {
-        lock(&self.pieces).retain(|seg_id, _| live(seg_id));
-    }
-
-    pub fn pieces_held(&self) -> usize {
-        lock(&self.pieces).len()
-    }
+/// What one [`ShapeLevel::assemble`] did, for the build's log line.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AssemblyReport {
+    /// Segments whose piece was staged ahead of the build.
+    pub staged: u64,
+    /// Segments resolved by the build itself.
+    pub resolved: u64,
+    pub rows_tested: u64,
+    pub resolve_ms: u64,
+    pub elapsed_ms: u64,
 }
 
 /// Every spatial level's held structures, keyed by `(view, layer, level)`.
 #[derive(Default)]
 pub struct ShapeStore {
     levels: Mutex<HashMap<(String, String, u32), Arc<ShapeLevel>>>,
-    /// What the last [`ShapeStore::warm`] did — the open's, until a publication runs another.
+    /// What the open's [`ShapeStore::warm`] did.
     last_warm: Mutex<WarmReport>,
 }
 
@@ -431,11 +473,10 @@ impl ShapeStore {
         lock(&self.levels).retain(|(_, l, _), _| l != layer);
     }
 
-    /// Drop every piece for a segment no view of the generation serves — after a merge or a fold
-    /// has replaced the segments it read.
-    pub fn retain_segments(&self, live: &dyn Fn(&str) -> bool) {
+    /// Drop every level's staged pieces — see [`ShapeLevel::clear_staged`].
+    pub fn clear_staged(&self) {
         for held in lock(&self.levels).values() {
-            held.retain_segments(live);
+            held.clear_staged();
         }
     }
 
@@ -443,15 +484,12 @@ impl ShapeStore {
         lock(&self.levels).len()
     }
 
-    /// Claim or resolve every segment of `view_data` that `level` does not yet hold a piece for.
+    /// Claim or resolve every segment of `view_data` that `level` has nothing staged for, and
+    /// stage it for the build that follows.
     ///
-    /// What open, a publication into the level and a fold all do: the segments are the
-    /// generation's, the shapes are the level's, and a piece is keyed by a segment id that is
-    /// never reused — so a segment already resolved against this level version is never
-    /// resolved twice. A segment `persisted` names is read rather than resolved, where the file's
-    /// key equals this level version and this segment; otherwise it is resolved and the reason is
-    /// said.
-    pub fn resolve_missing(
+    /// A segment `persisted` names is read rather than resolved, where the file's key equals this
+    /// level version and this segment; otherwise it is resolved and the reason is said.
+    pub fn stage_missing(
         level: &ShapeLevel,
         view_data: &ViewData,
         persisted: &PersistedPieces<'_>,
@@ -459,17 +497,18 @@ impl ShapeStore {
     ) -> WarmReport {
         let mut total = WarmReport::default();
         for segment in &view_data.segments {
-            if level.has_piece(&segment.seg_id) {
+            if level.has_staged(&segment.seg_id) {
                 continue;
             }
             let started = Instant::now();
             if let Some(piece) = persisted.claim(level, segment, store) {
-                level.install(&segment.seg_id, Arc::new(piece));
+                level.stage(&segment.seg_id, Arc::new(piece));
                 total.pieces_claimed += 1;
                 total.claim_ms += started.elapsed().as_millis() as u64;
                 continue;
             }
-            let (_, cost) = level.resolve(segment);
+            let (piece, cost) = level.resolve(segment);
+            level.stage(&segment.seg_id, Arc::new(piece));
             total.pieces_resolved += 1;
             total.rows_tested += cost.rows_tested;
             total.rows_interior += cost.rows_interior;
@@ -478,19 +517,15 @@ impl ShapeStore {
         total
     }
 
-    /// Build every spatial level's held structures and resolve every segment the bundle serves —
-    /// what `Engine::open` does before it serves anything, and what a publication into a layer
-    /// does for that layer (`polygon-membership.md` §6.3: built at publication and at open, never
-    /// on a request).
-    ///
-    /// `only` narrows the pass to one layer where a publication moved just that one; `persisted`
-    /// is what the prefix holds already resolved, claimed before anything is resolved.
+    /// Build every spatial level's held structures and stage every segment the bundle serves —
+    /// what `Engine::open` does before it builds the row forms and serves anything
+    /// (`polygon-membership.md` §6.3: built at open, never on a request). `persisted` is what the
+    /// prefix holds already resolved, claimed before anything is resolved.
     pub fn warm(
         &self,
         bundle: &Bundle,
         layers: &[RegisteredLayer],
         store: &ArtifactStore,
-        only: Option<&str>,
         persisted: &PersistedPieces<'_>,
     ) -> WarmReport {
         let started = Instant::now();
@@ -498,9 +533,6 @@ impl ShapeStore {
         for registered in layers {
             let declaration = &registered.declaration;
             if declaration.membership != MembershipSource::Spatial || declaration.shape.is_none() {
-                continue;
-            }
-            if only.is_some_and(|name| name != declaration.name) {
                 continue;
             }
             for view in &declaration.views {
@@ -513,7 +545,7 @@ impl ShapeStore {
                 };
                 for level in 0..registered.runs.len() as u32 {
                     let held = self.level(view, &declaration.name, level, store, persisted);
-                    let cost = Self::resolve_missing(&held, view_data, persisted, store);
+                    let cost = Self::stage_missing(&held, view_data, persisted, store);
                     report.levels += 1;
                     report.artifacts += held.artifacts();
                     report.rows_tested += cost.rows_tested;
@@ -534,8 +566,8 @@ impl ShapeStore {
         report
     }
 
-    /// What the last warm pass did — the open's, for the operator plane and the tests that assert
-    /// an open claimed rather than resolved.
+    /// What the open's warm pass did, for the operator plane and the tests that assert an open
+    /// claimed rather than resolved.
     pub fn last_warm(&self) -> WarmReport {
         *lock(&self.last_warm)
     }
@@ -786,8 +818,8 @@ fn invert_column(column: &RowColumn, level: &ShapeLevel, store: &ArtifactStore) 
 
 /// One flush segment's resolution against one level, carried from the pool to the publication
 /// (`crate::flush`): the level it was resolved against, so a publication that finds the level
-/// rebuilt meanwhile re-resolves against the current one rather than installing a piece computed
-/// over the shapes of a level version no longer served.
+/// rebuilt meanwhile re-resolves against the current one rather than extending a form with rows
+/// computed over the shapes of a level version no longer served.
 pub struct ShapePiece {
     pub level: Arc<ShapeLevel>,
     pub rows: Arc<Vec<Option<Bitmap>>>,

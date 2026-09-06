@@ -971,7 +971,7 @@ fn execute_flush_stages(
         );
         shape_pieces.push(crate::shapes::ShapePiece {
             level: Arc::clone(level),
-            rows,
+            rows: Arc::new(rows),
             cost,
         });
     }

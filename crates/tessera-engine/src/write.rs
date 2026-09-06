@@ -6187,21 +6187,6 @@ impl Executor {
             .iter()
             .map(|i| i.seg_id.clone())
             .collect();
-        // **The merged segment's shape memberships, before the swap**: its rows are the consumed
-        // segments' rows renumbered, so their pieces do not carry over and the new segment is
-        // resolved whole (`polygon-membership.md` §6.3).
-        for held in self.shapes.levels_of_view(&completed.plan.view) {
-            let (_, cost) = held.resolve(&completed.segment);
-            tracing::info!(
-                layer = %held.layer,
-                level = held.level,
-                view = %completed.plan.view,
-                seg_id = %completed.segment.seg_id,
-                rows_tested = cost.rows_tested,
-                elapsed_ms = cost.elapsed_ms,
-                "a merge resolved its segment against a spatial level's shapes"
-            );
-        }
         let merged_seg_id = completed.segment.seg_id.clone();
         let next_bundle = match live.bundle.with_merged(
             &completed.plan.partition,
@@ -6225,23 +6210,44 @@ impl Executor {
         };
 
         let segments_version = live.segments_version + 1;
-        // **And every stored level's held row form is rebased over the merged extent, before the
+        // **And every held row form of the view is rebased over the merged extent, before the
         // swap** — the twin of the flush's extension. The rows inside the merged span name other
         // entities now, so a form that kept its bits there would count one segment's rows as
         // another's; a form dropped instead would be projected whole by the next request naming
         // the level, which at rung 3 was 108 s and a shed request, once per merge
-        // (`probes/2026-09-05-merge-arm/`). The rebase costs the members inside the merged
-        // extent's entity range per artifact (`ArtifactProjections::rebase_merged`).
+        // (`probes/2026-09-05-merge-arm/`). A stored level's rebase costs the members inside the
+        // merged extent's entity range per artifact; a spatial level's is the merged segment
+        // resolved whole against its shapes, its rows being the consumed segments' rows renumbered
+        // (`polygon-membership.md` §6.3) — `ArtifactProjections::rebase_merged`.
         if let (Some(previous), Some(space)) = (
-            view_row_space(&live.bundle, &completed.plan.partition, &completed.plan.view),
-            view_row_space(&next_bundle, &completed.plan.partition, &completed.plan.view),
+            view_row_space(
+                &live.bundle,
+                &completed.plan.partition,
+                &completed.plan.view,
+            ),
+            view_row_space(
+                &next_bundle,
+                &completed.plan.partition,
+                &completed.plan.view,
+            ),
         ) {
-            let stored = |layer: &str| {
-                self.live
-                    .registered_layer(layer)
-                    .is_some_and(|held| stored_membership(&held.declaration))
-            };
+            let merged_segment = next_bundle
+                .partitions
+                .get(&completed.plan.partition)
+                .and_then(|p| p.views.get(&completed.plan.view))
+                .and_then(|v| v.segments.iter().find(|s| s.seg_id == merged_seg_id))
+                .map(|s| s.as_ref());
             self.live.with_artifacts(|store| {
+                let rows_of = |layer: &str, level: u32| {
+                    self.segment_rows_of(
+                        &completed.plan.view,
+                        layer,
+                        level,
+                        merged_segment,
+                        &[],
+                        store,
+                    )
+                };
                 self.artifact_projections.rebase_merged(
                     &live.prefix,
                     &completed.plan.view,
@@ -6250,7 +6256,7 @@ impl Executor {
                     space,
                     &merged_seg_id,
                     segments_version,
-                    &stored,
+                    &rows_of,
                 )
             });
         }
@@ -7747,6 +7753,9 @@ impl Executor {
         // the retire is about to bump, and the whole warm would be discarded on the first request —
         // paying the stall it exists to prevent, having already paid for the warm.
         self.warm_artifact_caches();
+        // The pieces the artifact pass staged were taken by the builds above; what is left is
+        // staged for a level nothing built a form for, and would otherwise be held for ever.
+        self.shapes.clear_staged();
         stairs.record("15 warm");
 
         // ---- step 7: rotate the WAL ------------------------------------------------------------
@@ -11086,15 +11095,21 @@ impl Executor {
         delta: &crate::artifacts::LevelDelta<'_>,
         before: u64,
     ) {
-        // **Only a level whose membership is *stored* has a delta to take.** A shape's members and
-        // an attribute predicate's are evaluated against the geometry, so a record's delta says
-        // nothing about them — see `ArtifactProjections::bring_forward`, which will not touch such
-        // a form. An unregistered layer is not one either; there is nothing to read.
-        let stored = self
-            .live
-            .registered_layer(layer)
-            .is_some_and(|held| stored_membership(&held.declaration));
-        if !stored {
+        // **Where the delta's rows come from.** A stored membership's are the records' members,
+        // projected; a spatial level's are the new shapes, resolved over every live segment of
+        // the view — the level's shapes are rebuilt here at the version the record just moved it
+        // to, and the resolution touches the new ordinals alone. An attribute predicate's members
+        // are the rows carrying a value, which a record's delta says nothing about, so its form
+        // takes none — see `ArtifactProjections::bring_forward`. An unregistered layer has
+        // nothing to read.
+        let Some(registered) = self.live.registered_layer(layer) else {
+            return;
+        };
+        let stored = stored_membership(&registered.declaration);
+        let spatial = registered.declaration.membership
+            == tessera_types::layer::MembershipSource::Spatial
+            && registered.declaration.shape.is_some();
+        if !stored && !spatial {
             return;
         }
         let generation = self.generation.load_full();
@@ -11111,6 +11126,66 @@ impl Executor {
         self.live.with_artifacts(|store| {
             for (view, data) in views {
                 let Some(data) = data else { continue };
+                if stored {
+                    self.artifact_projections.bring_forward(
+                        &generation.prefix,
+                        view,
+                        layer,
+                        level,
+                        store,
+                        &data.row_space,
+                        delta,
+                        before,
+                        Some(&crate::artifacts::DeltaRows::Projected),
+                    );
+                    continue;
+                }
+                // A growth never reaches a spatial level: the registry refuses one before a
+                // record is written (`RegistryError::NotEnumerated`).
+                let crate::artifacts::LevelDelta::Published(ordinals) = delta else {
+                    continue;
+                };
+                let held = self.shapes.level(
+                    view,
+                    layer,
+                    level,
+                    store,
+                    &crate::shapes::PersistedPieces::none(),
+                );
+                let Ok(segments) = crate::viewport::segments_with_row_bases(view, data) else {
+                    continue;
+                };
+                let started = std::time::Instant::now();
+                let mut joined: Vec<Option<croaring::Bitmap>> = vec![None; held.shapes.len()];
+                let mut rows_tested = 0u64;
+                for (segment, row_base) in &segments {
+                    let (piece, cost) = held.resolve_ordinals(segment, ordinals);
+                    rows_tested += cost.rows_tested;
+                    for (ordinal, part) in piece.into_iter().enumerate() {
+                        let Some(part) = part else { continue };
+                        let slot = joined[ordinal].get_or_insert_with(croaring::Bitmap::new);
+                        if !part.is_empty() {
+                            slot.or_inplace(&part.add_offset(i64::from(*row_base)));
+                        }
+                    }
+                }
+                tracing::info!(
+                    layer = %layer,
+                    level,
+                    view = %view,
+                    artifacts = ordinals.len(),
+                    segments = segments.len(),
+                    rows_tested,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "a publication into a spatial level resolved its new shapes over every segment"
+                );
+                let rows_of = |ordinal: u32| {
+                    joined
+                        .get(ordinal as usize)
+                        .cloned()
+                        .flatten()
+                        .unwrap_or_default()
+                };
                 self.artifact_projections.bring_forward(
                     &generation.prefix,
                     view,
@@ -11120,10 +11195,65 @@ impl Executor {
                     &data.row_space,
                     delta,
                     before,
-                    stored,
+                    Some(&crate::artifacts::DeltaRows::Resolved(&rows_of)),
                 );
             }
         });
+    }
+
+    /// **Where a geometry publication's rows come from, per level of one view** — what
+    /// `ArtifactProjections::extend_flushed` and `rebase_merged` are told
+    /// (`crate::artifacts::SegmentRows`). A stored level projects; a spatial level takes
+    /// `resolved` where the flush's pool resolved the segment against the shapes now held, and
+    /// resolves the segment here otherwise — a level rebuilt by a publication since the flush was
+    /// planned, or one no flush plan saw; an attribute predicate takes nothing.
+    fn segment_rows_of(
+        &self,
+        view: &str,
+        layer: &str,
+        level: u32,
+        segment: Option<&tessera_store::read::SegmentData>,
+        resolved: &[crate::shapes::ShapePiece],
+        store: &tessera_lifecycle::membership::ArtifactStore,
+    ) -> Option<crate::artifacts::SegmentRows> {
+        let registered = self.live.registered_layer(layer)?;
+        if stored_membership(&registered.declaration) {
+            return Some(crate::artifacts::SegmentRows::Projected);
+        }
+        if registered.declaration.membership != tessera_types::layer::MembershipSource::Spatial
+            || registered.declaration.shape.is_none()
+        {
+            return None;
+        }
+        let held = self.shapes.level(
+            view,
+            layer,
+            level,
+            store,
+            &crate::shapes::PersistedPieces::none(),
+        );
+        if let Some(piece) = resolved.iter().find(|piece| {
+            piece.level.layer == layer
+                && piece.level.level == level
+                && Arc::ptr_eq(&piece.level, &held)
+        }) {
+            return Some(crate::artifacts::SegmentRows::Resolved(Arc::clone(
+                &piece.rows,
+            )));
+        }
+        let segment = segment?;
+        let (rows, cost) = held.resolve(segment);
+        tracing::info!(
+            layer = %layer,
+            level,
+            view = %view,
+            seg_id = %segment.seg_id,
+            rows_tested = cost.rows_tested,
+            rows_interior = cost.rows_interior,
+            elapsed_ms = cost.elapsed_ms,
+            "a geometry publication resolved its segment against a spatial level's shapes"
+        );
+        Some(crate::artifacts::SegmentRows::Resolved(Arc::new(rows)))
     }
 
     /// [`Self::bring_artifacts_forward`] over an `ArtifactGrow` record — the joining sets decoded
@@ -11235,39 +11365,10 @@ impl Executor {
             before,
         );
         let published = Published::registry_applied(&record);
-        // **A shape layer's held structures are rebuilt at publication, and every segment the
-        // generation serves is resolved against them before the ack** (`polygon-membership.md`
-        // §6.3: built at publication and at open, never on a request). The level version moved and
-        // the bring-forward above declined the level — a shape's membership is not in the record
-        // it would have applied — so the cached row form is stale by its own key and the next
-        // request joins the pieces installed here. That decline is load-bearing: a form brought
-        // forward would *hit* on the next request and these pieces would never be read.
-        let generation = self.generation.load_full();
-        let warmed = self.live.with_artifacts(|store| {
-            let (layers, _, _) = self.live.registry_for_publication();
-            // Nothing persisted is claimable here: the level version has just moved past every
-            // file the prefix holds for this layer.
-            self.shapes.warm(
-                &generation.bundle,
-                &layers,
-                store,
-                Some(&layer),
-                &crate::shapes::PersistedPieces::none(),
-            )
-        });
-        if warmed.levels > 0 {
-            tracing::info!(
-                layer = %layer,
-                levels = warmed.levels,
-                artifacts = warmed.artifacts,
-                rows_tested = warmed.rows_tested,
-                build_ms = warmed.build_ms,
-                resolve_ms = warmed.resolve_ms,
-                held_bytes = warmed.held_bytes,
-                "a publication into a shape layer rebuilt its held shapes and resolved every \
-                 segment against them"
-            );
-        }
+        // A shape layer's held shapes were rebuilt inside the bring-forward above, at the version
+        // this record moved the level to, and the new shapes resolved over every segment the
+        // generation serves before the ack (`polygon-membership.md` §6.3: built at publication and
+        // at open, never on a request).
         // Durable in the log, not yet in a manifest. The registry half of this record reaches
         // `SEGMENTS-<n>.json` at the next flush on the deny lane's mechanism; the membership half
         // has nowhere to reach, which is what the rotation pin holds the log for.
@@ -12589,9 +12690,10 @@ impl Executor {
             //
             // **A spatial level is observed over its resolved rows** (`polygon-membership.md`
             // §6.3): every segment the fold wrote is resolved against the level's shapes here,
-            // inside the artifact pass and before anything is written, and the pieces are held
-            // under the new segment ids so the generation about to be published finds them. That
-            // is the fold's re-resolution — everything, because the fold renumbered every row.
+            // inside the artifact pass and before anything is written, and the pieces are staged
+            // under the new segment ids for the derived files this pass writes and for the row
+            // forms the flip's warm builds. That is the fold's re-resolution — everything, because
+            // the fold renumbered every row.
             let spatial = registered.declaration.membership
                 == tessera_types::layer::MembershipSource::Spatial
                 && registered.declaration.shape.is_some();
@@ -12607,6 +12709,8 @@ impl Executor {
                             &crate::shapes::PersistedPieces::none(),
                         );
                         let (piece, cost) = held.resolve(segment);
+                        let piece = Arc::new(piece);
+                        held.stage(&segment.seg_id, Arc::clone(&piece));
                         tracing::info!(
                             layer = %layer,
                             level,
@@ -12767,12 +12871,12 @@ impl Executor {
                 for (view, space) in spaces {
                     let column = if spatial {
                         // The fold's segment is the whole base at row base 0, so the piece
-                        // resolved in `choose_layouts` is the level's membership in this view.
+                        // staged in `choose_layouts` is the level's membership in this view.
                         let piece = self.shapes.get(view, layer, *level).and_then(|held| {
                             fold_segments
                                 .iter()
                                 .find(|(v, _)| v == view)
-                                .and_then(|(_, segment)| held.piece(&segment.seg_id))
+                                .and_then(|(_, segment)| held.staged(&segment.seg_id))
                         });
                         piece.and_then(|piece| {
                             crate::row_column::RowColumn::compose(
@@ -12884,7 +12988,7 @@ impl Executor {
                 let Some(piece) = self
                     .shapes
                     .get(view, layer, *level)
-                    .and_then(|held| held.piece(&segment.seg_id))
+                    .and_then(|held| held.staged(&segment.seg_id))
                 else {
                     tracing::warn!(
                         layer = %layer,
@@ -13135,8 +13239,8 @@ impl Executor {
                     //
                     // **A spatial level is warmed**, because its membership is held rather than
                     // evaluated: the fold's artifact pass resolved the new segments against the
-                    // level's shapes, so the join is the O(containers) step and the form built
-                    // here is the one the next request reads.
+                    // level's shapes and staged the pieces, so the build here is the O(containers)
+                    // assembly of them, and the form it produces is maintained from then on.
                     let registered = self.live.registered_layer(layer);
                     let membership = registered
                         .as_ref()
@@ -13672,34 +13776,14 @@ impl Executor {
             .health
             .flush_lap(crate::flush::FlushStage::WithSegment, *mark);
 
-        // **The segment's shape memberships, installed before the swap** (`polygon-membership.md`
-        // §6.3). The pool resolved them against the levels as held when the flush was planned; a
-        // publication into a shape layer since then rebuilt that level, and a piece resolved over
-        // the old shapes would be installed into nothing a request reads. So each piece is
-        // installed into the level now held, and re-resolved against it where the two differ —
-        // one segment, on this thread, in the window a shape publication and a flush overlap.
-        for piece in completed.shape_pieces {
-            let current = self
-                .shapes
-                .get(&completed.view, &piece.level.layer, piece.level.level);
-            match current {
-                Some(current) if Arc::ptr_eq(&current, &piece.level) => {
-                    current.install(&seg_id, piece.rows);
-                }
-                Some(current) => {
-                    let segment = next_bundle
-                        .partitions
-                        .get(&completed.partition)
-                        .and_then(|p| p.views.get(&completed.view))
-                        .and_then(|v| v.segments.iter().find(|s| s.seg_id == seg_id));
-                    if let Some(segment) = segment {
-                        current.resolve(segment);
-                    }
-                }
-                // The level was dropped meanwhile (its layer was dropped): nothing to hold.
-                None => {}
-            }
-        }
+        // **The segment's shape memberships go into the held forms below, with the stored
+        // levels' rows** (`polygon-membership.md` §6.3). The pool resolved them against the levels
+        // as held when the flush was planned; a publication into a shape layer since then rebuilt
+        // that level, and rows resolved over the old shapes would extend a form that no longer
+        // describes them. So a piece is taken where its level is the one now held, and the
+        // segment is resolved again against the current level where the two differ — one segment,
+        // on this thread, in the window a shape publication and a flush overlap.
+        let shape_pieces = completed.shape_pieces;
         *mark = self
             .health
             .flush_lap(crate::flush::FlushStage::ShapesInstall, *mark);
@@ -13744,27 +13828,36 @@ impl Executor {
             .health
             .flush_lap(crate::flush::FlushStage::Denied, *mark);
 
-        // **And every stored level's held row form gains this segment's rows, before the swap.**
-        // A form covers the whole row space, so a segment nothing added to it would leave every
+        // **And every held row form of the view gains this segment's rows, before the swap.** A
+        // form covers the whole row space, so a segment nothing added to it would leave every
         // artifact one segment short — a member ingested into an artifact counting for nobody
         // until the next fold, which under the nightly gate is hours
-        // (`docs/evidence/memos/2026-09-03-post-flush-artifact-frames.md`). This is the enumerated
-        // twin of the shape pieces installed above: one `project_extents_from` per artifact over
-        // the entities inside this extent's own range, on this thread, against the whole-level
-        // projection the alternative puts on the next request.
+        // (`docs/evidence/memos/2026-09-03-post-flush-artifact-frames.md`). A stored level takes
+        // one `project_extents_from` per artifact over the entities inside this extent's own
+        // range; a spatial level takes the segment's resolution the pool produced above; both on
+        // this thread, against the whole-level projection the alternative puts on the next
+        // request.
         if let (Some(previous), Some(space)) = (
             view_row_space(&live.bundle, &completed.partition, &completed.view),
             view_row_space(&next_bundle, &completed.partition, &completed.view),
         ) {
-            // The same rule the delta path takes, asked per layer because this reaches every level
-            // the view holds a form for: a rule-derived level is fresh by its own version move and
-            // has nothing here to gain.
-            let stored = |layer: &str| {
-                self.live
-                    .registered_layer(layer)
-                    .is_some_and(|held| stored_membership(&held.declaration))
-            };
+            let segment = next_bundle
+                .partitions
+                .get(&completed.partition)
+                .and_then(|p| p.views.get(&completed.view))
+                .and_then(|v| v.segments.iter().find(|s| s.seg_id == seg_id))
+                .map(|s| s.as_ref());
             self.live.with_artifacts(|store| {
+                let rows_of = |layer: &str, level: u32| {
+                    self.segment_rows_of(
+                        &completed.view,
+                        layer,
+                        level,
+                        segment,
+                        &shape_pieces,
+                        store,
+                    )
+                };
                 self.artifact_projections.extend_flushed(
                     &live.prefix,
                     &completed.view,
@@ -13772,7 +13865,7 @@ impl Executor {
                     previous,
                     space,
                     segments_version,
-                    &stored,
+                    &rows_of,
                 )
             });
         }
@@ -14149,17 +14242,6 @@ impl Executor {
     /// [`Self::publish`] over a generation the caller already holds by `Arc` — a geometry
     /// publication needs the same value afterwards, to hand the background refresh.
     fn publish_arc(&self, next: Arc<Generation>, started: std::time::Instant) -> Published {
-        // **The pieces of segments no view serves any more are dropped at the swap** — a merged or
-        // folded segment's rows were renumbered into its successor, which was resolved before this
-        // publication, so nothing reads the consumed ones again (`crate::shapes`).
-        let live: std::collections::HashSet<String> = next
-            .bundle
-            .partitions
-            .values()
-            .flat_map(|p| p.views.values())
-            .flat_map(|v| v.segments.iter().map(|s| s.seg_id.clone()))
-            .collect();
-        self.shapes.retain_segments(&|seg_id| live.contains(seg_id));
         // **The deny mask's derivation rule, enforced at the one place a generation becomes live.**
         // `crate::compose::derive_denied` states the rule; every build site — the incremental
         // addition on a deny window, the rebuild at each geometry publication, the carry-forward

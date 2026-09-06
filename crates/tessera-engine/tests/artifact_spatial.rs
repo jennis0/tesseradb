@@ -4,7 +4,10 @@
 //! A `membership = "spatial"` layer stores no membership at all. Each artifact declares a shape;
 //! its members are the rows whose stored position is inside that shape — closed on every side for
 //! a box, even-odd with an edge inside for a polygon (`polygon-membership.md` §4.1) — resolved
-//! against each segment when the segment is published (§6.3) and joined per generation.
+//! against each segment when the segment is published (§6.3). The level's row form is built once
+//! and maintained by the publications that move it, exactly as a stored level's is
+//! (`crate::artifacts`): a flush extends it by the segment's resolution, a merge rebases the
+//! renumbered span, a publication into the level adds the new shapes' rows.
 //!
 //! **The oracle is the corpus generator and the shape's own direct test**: every count asserted
 //! below is computed by quantising the generator's points to the grid — the same `fixed32` the
@@ -23,8 +26,10 @@
 //! for a box layer and a polygon layer; that a point ingested inside a shape counts on the next
 //! request with nothing rebuilt; that a suppressed member leaves the count and a suppressed
 //! artifact leaves the map; that a fold leaves every answer where it was; that an absolute
-//! criterion fires on such a layer exactly as it does on a stored one; and that the shapes survive
-//! a restart.
+//! criterion fires on such a layer exactly as it does on a stored one; that the shapes survive
+//! a restart; that an open claims what was persisted; and, last, that the form a flush, a merge
+//! and a publication maintained equals one resolved from scratch over the final row space,
+//! ordinal for ordinal.
 
 mod common;
 
@@ -317,9 +322,24 @@ impl Fixture {
     /// test alone. `extra` is points ingested since the build, in extent coordinates and visible to
     /// `grant`; `deleted` is the entities a change has taken away — the same adjustments the
     /// artifact census makes, so the expectation tracks the write cycle rather than only the build.
-    fn expected(&self, grant: &str, deleted: &[u64], extra: &[(f64, f64)]) -> BTreeMap<String, u64> {
+    fn expected(
+        &self,
+        grant: &str,
+        deleted: &[u64],
+        extra: &[(f64, f64)],
+    ) -> BTreeMap<String, u64> {
+        self.expected_over(grant, deleted, extra, &self.shapes())
+    }
+
+    /// [`Self::expected`] over `shapes` — the fixture's plus any published since it was built.
+    fn expected_over(
+        &self,
+        grant: &str,
+        deleted: &[u64],
+        extra: &[(f64, f64)],
+        shapes: &[(String, tessera_spatial::shape::Shape)],
+    ) -> BTreeMap<String, u64> {
         let g = Grant::parse(grant).unwrap();
-        let shapes = self.shapes();
         let mut counts: BTreeMap<String, u64> = BTreeMap::new();
         let mut positions: Vec<(u32, u32)> = Vec::new();
         for e in 0..self.corpus.n() {
@@ -332,7 +352,7 @@ impl Fixture {
         for (x, y) in extra {
             positions.push(grid_of(*x, *y));
         }
-        for (key, shape) in &shapes {
+        for (key, shape) in shapes {
             let count = positions.iter().filter(|p| shape.contains(**p)).count() as u64;
             if count > 0 {
                 counts.insert(key.clone(), count);
@@ -503,6 +523,7 @@ fn a_point_ingested_inside_a_boundary_counts_on_the_next_request() {
         .expect("the fixture draws boxes");
     assert!(before.contains_key(&key), "no box has a visible member");
     let folds = engine.write_executor_stats().folds;
+    let builds = engine.artifact_cache_builds().0;
 
     // The centre of the box; a point 2 units inside the diamond's north-east edge, on which
     // `x + y = 1400` lies; and one 2 units outside it.
@@ -530,6 +551,12 @@ fn a_point_ingested_inside_a_boundary_counts_on_the_next_request() {
         engine.write_executor_stats().folds,
         folds,
         "the count moved because of a fold rather than because of the geometry"
+    );
+    assert_eq!(
+        engine.artifact_cache_builds().0,
+        builds,
+        "the flush extended the levels' held forms by its segment's resolution; nothing was \
+         built again"
     );
 }
 
@@ -821,6 +848,211 @@ fn an_open_claims_the_persisted_pieces_and_resolves_only_the_flushed_segments() 
         served(&engine, "0,1", 0, WHOLE_MAP),
         fx.expected("0,1", &[], &[(3.0, 3.0)])
     );
+}
+
+/// The box this principal sees most of, with its centre — the point a flush lands inside it.
+fn fullest_box(fx: &Fixture, served: &BTreeMap<String, u64>) -> (String, (f64, f64)) {
+    let (key, bbox) = chosen_tiles(&fx.corpus)
+        .into_iter()
+        .map(|(prefix, tx, ty)| (format!("t{prefix}"), box_of(prefix, tx, ty)))
+        .max_by_key(|(key, _)| served.get(key).copied().unwrap_or(0))
+        .expect("the fixture draws boxes");
+    assert!(served.contains_key(&key), "no box has a visible member");
+    (key, ((bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0))
+}
+
+/// Flush enough single-point segments to fill the merge policy's tier, then let one merge publish
+/// — the one publication that renumbers rows the levels' forms hold. Every point is at `at`, so
+/// each lands in the same shapes; returns them for the oracle.
+fn merge(engine: &Engine, at: (f64, f64)) -> Vec<(f64, f64)> {
+    let merges = engine.write_executor_stats().merges;
+    engine.set_merge_for_test(false);
+    for id in ["merge-a", "merge-b", "merge-c", "merge-d"] {
+        ingest_point(engine, id, 0, at.0, at.1);
+        flush(engine);
+    }
+    engine.set_merge_for_test(true);
+    ingest_point(engine, "merge-e", 0, at.0, at.1);
+    flush(engine);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while engine.write_executor_stats().merges == merges {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the merge never published"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    vec![at; 5]
+}
+
+/// Publish one more box into the box layer at run time, as `/control/artifacts` would: no
+/// members, the canonical shape in the record.
+fn publish_box(engine: &Engine, key: &str, bbox: [f64; 4]) -> tessera_spatial::shape::Shape {
+    let canonical = canonical_box(bbox);
+    let shape = tessera_lifecycle::membership::ArtifactShapes::new(vec![(
+        "s0".to_string(),
+        canonical.encode(),
+    )])
+    .expect("one view, one shape");
+    let artifact = tessera_lifecycle::IncomingArtifact {
+        shape: Some(shape),
+        ..tessera_lifecycle::IncomingArtifact::from_entities(Some(key.to_string()), [])
+    };
+    engine
+        .publish_artifacts(LAYER.into(), 0, vec![artifact])
+        .expect("a shape publishes into a spatial layer");
+    canonical
+}
+
+/// Every observable half of one level's held row form, in a shape two forms can be compared on —
+/// `tests/artifact_bring_forward.rs`'s `form_of`, for a spatial level.
+fn form_of(engine: &Engine, layer: &str) -> Vec<String> {
+    let rows = engine
+        .held_artifact_form_for_test("s0", layer, 0)
+        .expect("the level's form is held");
+    let mut out = vec![format!(
+        "ordinals={} layout={:?} row_count={} everywhere={}",
+        rows.len(),
+        rows.layout(),
+        rows.index().row_count(),
+        rows.index().everywhere()
+    )];
+    for ordinal in 0..rows.len() as u32 {
+        let membership = rows
+            .get(ordinal)
+            .map(|bitmap| format!("{:?}", bitmap.to_vec()))
+            .unwrap_or_else(|| "hole".to_string());
+        let declared = rows
+            .column()
+            .map(|column| column.declared_size(ordinal).to_string())
+            .unwrap_or_else(|| "-".to_string());
+        out.push(format!(
+            "{ordinal}: rows={membership} extent={:?} declared={declared}",
+            rows.index().extent(ordinal)
+        ));
+    }
+    out
+}
+
+/// **A flush and a merge bring a boundary's form forward; neither copies or rebuilds it.**
+///
+/// The form is built once, at open. A flush extends it by the segment the pool resolved; a merge
+/// rebases the span it renumbered with the merged segment's resolution. The builds counter is the
+/// witness that nothing was assembled again, and the counts against the oracle are the witness
+/// that what was maintained is right.
+#[test]
+fn a_flush_and_a_merge_extend_a_boundarys_form_rather_than_rebuilding_it() {
+    let fx = fixture("\"none\"");
+    let engine = fx.open();
+    let grant = "0";
+    let before = served(&engine, grant, 0, WHOLE_MAP);
+    let (key, centre) = fullest_box(&fx, &before);
+    let builds = engine.artifact_cache_builds().0;
+
+    ingest_point(&engine, "flushed-inside", 0, centre.0, centre.1);
+    ingest_point(&engine, "flushed-outside", 0, 700.0, 702.0);
+    flush(&engine);
+    let mut extra = vec![centre, (700.0, 702.0)];
+    let after_flush = served(&engine, grant, 0, WHOLE_MAP);
+    assert_eq!(after_flush, fx.expected(grant, &[], &extra));
+    assert_eq!(after_flush[&key], before[&key] + 1);
+    assert_eq!(
+        engine.artifact_cache_builds().0,
+        builds,
+        "the flush extended the form; nothing was assembled again"
+    );
+
+    extra.extend(merge(&engine, centre));
+    let after_merge = served(&engine, grant, 0, WHOLE_MAP);
+    assert_eq!(after_merge, fx.expected(grant, &[], &extra));
+    assert_eq!(after_merge[&key], before[&key] + 6);
+    assert_eq!(
+        engine.artifact_cache_builds().0,
+        builds,
+        "the merge rebased the renumbered span with the merged segment's resolution; nothing \
+         was assembled again"
+    );
+}
+
+/// **The maintained form is the resolved form.**
+///
+/// Shapes from the build, points ingested inside and outside them, a flush, a merge and a shape
+/// published after all of that; then the held form of each spatial level is compared with one
+/// resolved from scratch over the final row space — ordinal for ordinal, bitmap for bitmap,
+/// extent for extent, and on the row-major route count for count — and every count with the
+/// generator's oracle, the published shape included. Nothing along the way was built again.
+#[test]
+fn a_maintained_boundary_form_equals_one_resolved_from_scratch() {
+    let fx = fixture("\"none\"");
+    let engine = fx.open();
+    let grant = "0,1";
+    let before = served(&engine, grant, 0, WHOLE_MAP);
+    let (_, centre) = fullest_box(&fx, &before);
+    let builds = engine.artifact_cache_builds().0;
+
+    // Inside a box, inside the diamond's edge, outside everything: two points per segment.
+    ingest_point(&engine, "d-1", 0, centre.0, centre.1);
+    ingest_point(&engine, "d-2", 0, 700.0, 698.0);
+    flush(&engine);
+    ingest_point(&engine, "d-3", 1, 700.0, 702.0);
+    ingest_point(&engine, "d-4", 1, 200.0, 200.0);
+    flush(&engine);
+    let mut extra = vec![centre, (700.0, 698.0), (700.0, 702.0), (200.0, 200.0)];
+    extra.extend(merge(&engine, (500.0, 500.0)));
+    assert_eq!(
+        served(&engine, grant, 0, WHOLE_MAP),
+        fx.expected(grant, &[], &extra)
+    );
+
+    // A box over the middle of the map, published over a row space that now carries a merged
+    // extent and a flushed one: its rows are resolved over every segment and the form takes them
+    // as the publication's delta.
+    let late = publish_box(&engine, "late", [400.0, 400.0, 600.0, 600.0]);
+    let mut shapes = fx.shapes();
+    shapes.push(("late".to_string(), late));
+    let maintained_answers = served(&engine, grant, 0, WHOLE_MAP);
+    assert_eq!(
+        maintained_answers,
+        fx.expected_over(grant, &[], &extra, &shapes),
+        "the maintained form's counts are the oracle's, the published box included"
+    );
+    assert!(
+        maintained_answers["late"] > 5,
+        "the published box holds the merged points and more: {maintained_answers:?}"
+    );
+    assert_eq!(
+        engine.artifact_cache_builds().0,
+        builds,
+        "two flushes, a merge and a publication were all taken by the held forms"
+    );
+    let maintained: Vec<(String, Vec<String>)> = [LAYER, POLYGONS]
+        .into_iter()
+        .map(|layer| (layer.to_string(), form_of(&engine, layer)))
+        .collect();
+
+    // From scratch: nothing staged, so the build resolves every segment against the shapes.
+    engine.forget_artifact_forms_for_test(LAYER);
+    engine.forget_artifact_forms_for_test(POLYGONS);
+    assert_eq!(
+        served(&engine, grant, 0, WHOLE_MAP),
+        maintained_answers,
+        "a viewer is told the same thing by the two forms"
+    );
+    assert_eq!(engine.artifact_cache_builds().0, builds + 2);
+    for (layer, maintained) in &maintained {
+        let rebuilt = form_of(&engine, layer);
+        assert_eq!(
+            maintained.len(),
+            rebuilt.len(),
+            "{layer}: the two forms cover the same ordinals"
+        );
+        for (held, built) in maintained.iter().zip(&rebuilt) {
+            assert_eq!(
+                held, built,
+                "{layer}: the maintained form and the resolved one describe different levels"
+            );
+        }
+    }
 }
 
 fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {

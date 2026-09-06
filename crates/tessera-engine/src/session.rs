@@ -1542,13 +1542,14 @@ impl Engine {
         );
 
         // **Every spatial level's shapes are decoded and decomposed, and every segment's piece
-        // claimed or resolved, before this engine serves a request** (`polygon-membership.md`
-        // §6.3). The store holds what the manifests seeded plus what the WAL replayed, so the
-        // shapes built here are the ones a publication would have built. The pieces the build or
-        // the last fold persisted — the row-major column, or the `shape-rows` row form — are
-        // claimed under the same coordinate rule as the structures adopted above; what is
-        // resolved is the segments no persisted form covers, the flushed ones. The cost is
-        // reported: it is the open's, and it is the figure stage 2 measures.
+        // claimed or resolved and staged, before this engine serves a request**
+        // (`polygon-membership.md` §6.3). The store holds what the manifests seeded plus what the
+        // WAL replayed, so the shapes built here are the ones a publication would have built. The
+        // pieces the build or the last fold persisted — the row-major column, or the `shape-rows`
+        // row form — are claimed under the same coordinate rule as the structures adopted above;
+        // what is resolved is the segments no persisted form covers, the flushed ones. The row
+        // forms built below take the staged pieces. The cost is reported: it is the open's, and it
+        // is the figure stage 2 measures.
         let shapes = Arc::new(crate::shapes::ShapeStore::new());
         {
             let (layers, _) = write_state.registry.snapshot();
@@ -1556,7 +1557,6 @@ impl Engine {
                 &generation.load().bundle,
                 &layers,
                 &write_state.artifacts,
-                None,
                 &crate::shapes::PersistedPieces {
                     prefix_dir: Some(&prefix_dir),
                     shape_rows: &manifest_shape_rows_extents,
@@ -1651,6 +1651,10 @@ impl Engine {
                 "the engine built every level's artifact row form; no request pays for one"
             );
         }
+        // The pieces the shape warm staged were taken by the builds above; a level nothing built
+        // a form for — a suppressed layer's — would otherwise hold its pieces for the process's
+        // life.
+        engine.shapes.clear_staged();
         Ok(engine)
     }
 
@@ -3069,11 +3073,10 @@ impl Engine {
         self.write.health().stats()
     }
 
-    /// What the last shape warm pass did — the open's, until a publication into a shape layer
-    /// runs another: how many segment pieces were claimed from the prefix's persisted forms and
-    /// how many resolved from the geometry (`crate::shapes`). Operator plane only, beside
-    /// [`Engine::write_executor_stats`]: counts of structures, naming no artifact and no
-    /// principal.
+    /// What the open's shape warm pass did: how many segment pieces were claimed from the
+    /// prefix's persisted forms and how many resolved from the geometry (`crate::shapes`).
+    /// Operator plane only, beside [`Engine::write_executor_stats`]: counts of structures, naming
+    /// no artifact and no principal.
     pub fn shape_warm_report(&self) -> crate::shapes::WarmReport {
         self.shapes.last_warm()
     }

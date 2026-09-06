@@ -1395,7 +1395,11 @@ mod tests {
             assert_eq!(every_pair(&split), every_pair(&whole), "{layout:?}");
             assert_eq!(split.declared, whole.declared, "{layout:?}");
             assert_eq!(split.row_count(), 16, "{layout:?}");
-            assert_eq!(split.base_rows(), 8, "{layout:?}: the pack stops at the base");
+            assert_eq!(
+                split.base_rows(),
+                8,
+                "{layout:?}: the pack stops at the base"
+            );
             assert_eq!(
                 amendment(&split).pairs,
                 vec![(8, 1), (9, 1), (12, 3), (13, 3), (15, 3)],
@@ -1405,8 +1409,9 @@ mod tests {
             assert_eq!(split.histogram(&mask), whole.histogram(&mask), "{layout:?}");
         }
         // Nothing above the base: no amendment at all, so the column can still transpose.
-        let base_only = RowColumn::compose_over_base(&membership, 16, 16, ServingLayout::RowMajorList)
-            .expect("builds");
+        let base_only =
+            RowColumn::compose_over_base(&membership, 16, 16, ServingLayout::RowMajorList)
+                .expect("builds");
         assert!(base_only.added.is_none());
         assert!(base_only.transpose().is_some());
     }
@@ -1434,12 +1439,15 @@ mod tests {
                 RowColumn::compose_over_base(&before, 8, 24, layout).expect("partitions");
             let span: Vec<(u32, u32)> = vec![(13, 0), (12, 0), (8, 1), (9, 1), (15, 3), (14, 3)];
             assert!(column.rebase(8, 16, &span, 24), "{layout:?}");
-            let expected =
-                RowColumn::compose_over_base(&after, 8, 24, layout).expect("partitions");
+            let expected = RowColumn::compose_over_base(&after, 8, 24, layout).expect("partitions");
             assert_eq!(every_pair(&column), every_pair(&expected), "{layout:?}");
             assert_eq!(column.declared, expected.declared, "{layout:?}");
             assert_eq!(amendment(&column), amendment(&expected), "{layout:?}");
-            assert_eq!(column.row_count(), 24, "{layout:?}: a merge preserves the row count");
+            assert_eq!(
+                column.row_count(),
+                24,
+                "{layout:?}: a merge preserves the row count"
+            );
         }
     }
 

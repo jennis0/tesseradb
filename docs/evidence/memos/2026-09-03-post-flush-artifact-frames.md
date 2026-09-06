@@ -22,6 +22,14 @@ module doc is the account of what is maintained and how:
   merged row space's. A form is still checked against the row space at every cache hit
   (`ArtifactRows::covers`), because a request may hold the older of two live generations; on the
   executor a form that was current cannot fail it;
+- a **spatial level's form is the same maintained form** (built 2026-09-06; `crate::shapes`
+  and `crate::artifacts`). It is assembled once from the segments' resolutions — the persisted
+  base piece and the flushed segments' at open, the fold's own at the flip — and then a flush
+  extends it by the segment's resolution, a merge rebases the renumbered span with the merged
+  segment's, and a publication into the level resolves the new shapes over every live segment
+  and takes them as its delta. The per-generation join, the per-segment piece map and the
+  request-path resolve are gone; an attribute predicate is unchanged and still keyed on the
+  geometry, its membership being the value column;
 - the **row-major column takes the delta too** (`RowColumn::amend`) rather than being composed
   again over the amended form. Composing it again cost ~100 s for one entity joining three
   artifacts at rung 3's `mesh/descriptors`, on the executor thread, where it blocks every ingest

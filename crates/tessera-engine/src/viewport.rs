@@ -4704,7 +4704,9 @@ pub(crate) fn predicate_vocabulary<'a>(
 ///
 /// A spatial level's source is its held structures (`crate::shapes`), taken at the store's current
 /// level version — built at open and at every publication into the level, so a request finds them
-/// held; the join over the segments is the request's own O(containers) step.
+/// held. The row form assembled from them is built once and maintained by the publications that
+/// move it (`crate::artifacts`), so a request that reaches the build is one whose level nothing
+/// warmed.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn predicate_source<'a>(
     declaration: &tessera_types::layer::LayerDeclaration,
@@ -4732,8 +4734,7 @@ pub(crate) fn predicate_source<'a>(
         // state this surface has always had, and the one the generator's boundary fixture is in.
         tessera_types::layer::MembershipSource::Spatial => {
             declaration.shape?;
-            // On the request path only where a publication route missed the level; nothing
-            // persisted is claimable here, and the fallback is loud (`crate::shapes`).
+            // Held already unless nothing warmed the level; nothing persisted is claimable here.
             let held = shapes.level(
                 view,
                 &declaration.name,
@@ -5574,8 +5575,7 @@ impl Engine {
             Some(crate::shapes::DrawnShape::Predicate) => {
                 let held = match self.shapes.get(view, layer, level) {
                     Some(held) => held,
-                    // Not yet held for this view — a publication route this module was not
-                    // wired into; the fallback is the loud one every other reader takes.
+                    // Not yet held for this view: nothing warmed the level, so it is built here.
                     None => self.write.with_artifacts(|store| {
                         self.shapes.level(
                             view,
