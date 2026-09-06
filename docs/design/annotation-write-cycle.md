@@ -411,20 +411,28 @@ ruling.)* Each operation's obligation to the form:
 - **A flush** extends every held form of its view by the segment it published, before the
   generation swaps, so an ingested member counts from its flush. Built
   (`ArtifactProjections::extend_flushed`).
-- **A merge** renumbers extent rows the form now holds. It is caught, not rebased: a form records
-  the segments its rows came from and is served only to a row space whose segments it agrees with,
-  so a merged generation misses and the level is projected whole on the next request that names
-  it. ⊘ **Drop-and-rebuild, measured at 108 s on the request that follows the merge** — shed at
-  the 60 s stream deadline at rung 3's 30,217-artifact level, once per merge
-  (`probes/2026-09-05-merge-arm/`). This is the operation the ruling's (b) — the rebuild taken at
-  the publication, on the pool, with the previous form served meanwhile — exists for, and (b) is
-  not built (the memo's built block says so and names the drop paths that remain).
+- **A merge** renumbers extent rows the form now holds. The form takes it in place, at the merge's
+  publication and before the generation swaps: each artifact's rows in the merged span are cleared
+  and re-projected through the merged extent, and the column's amendment in the span is drained and
+  re-added. The base segment is never consumed by a merge, so base rows are untouched and the cost
+  is proportional to the memberships in the merged segments. Built
+  (`ArtifactProjections::rebase_merged`, 2026-09-06); the request after a merge on rung 3's mesh
+  level went from shed at 108 s to 130 ms (`probes/2026-09-05-merge-arm/`). ⊘ The rebase is
+  measured only over a span that relabelled nothing.
 - **The fold** rebuilds the form inline, as before (rep §5.0.3).
 
 The projection is still keyed by prefix, view and store version and *not* by the segments version:
 a flush moves the segments version and extends the form in place, and keying on it would rebuild
 every level on every flush for a set of bits the flush did not move. What the segments version does
 gate is the form's *coverage*, checked at every use, which is what catches the merge.
+
+**A spatial level's form is the same form, maintained the same way** (2026-09-06). Its rows come
+from resolving each segment against the shapes rather than from projecting members, and that is the
+only difference: a flush resolves the new segment and extends, a merge re-resolves the merged
+segment and rebases, a shape publication resolves the new shape over every live segment and takes
+it as a delta. The earlier per-segment piece map, joined into a fresh union on every generation
+move, is gone; a row is tested against the shapes once while the form is maintained, and again only
+when the form is rebuilt.
 
 **Generating sets stay base-only.** A supplied content's `G` is projected at base rows and is not
 extended by a flush: the containment partition beside it is composed from the level's records at a
@@ -802,9 +810,9 @@ For mechanical integration; neither sibling document is edited here.
   above from the cache side.
 - **The merge arm's cost** (spec §4.1): the flush arm is built and measured (a one-row growth
   returns in 0.04 s and the request after it serves in 125 ms, `probes/2026-09-03-growth-trigger/`);
-  the merge arm is drop-and-rebuild, measured at 108 s and shed on the first request after a merge
-  (`probes/2026-09-05-merge-arm/`), a merge being selected every `tier_width` small flushes; the
-  ruling's (b) is what would move it off the request.
+  the merge arm is taken in place since 2026-09-06 (130 ms on the request after a merge,
+  `probes/2026-09-05-merge-arm/after-the-fix/`); what remains unmeasured is a rebase over a span
+  that holds labelled rows.
 - **The runtime create/edit verb's contract shape** (rep §5.1) — carried, still contracts work.
 - **Bulk suppression of a caller-defined *subset* of a layer** (every label whose `G` touches a
   compromised source, say): expressible today as N artifact suppressions; whether a set-valued
