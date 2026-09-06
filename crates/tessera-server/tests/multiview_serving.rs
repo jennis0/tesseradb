@@ -174,6 +174,7 @@ fn build_multiview(dir: &Path) -> std::path::PathBuf {
             GroupDescriptor {
                 // Declared on one group and not the other, so `/v1/meta` is asked both questions.
                 title: Some("Quarters".to_string()),
+                point_default: Some("public".to_string()),
                 visibility: None,
                 name: "quarter".to_string(),
                 members_of: None,
@@ -198,6 +199,7 @@ fn build_multiview(dir: &Path) -> std::path::PathBuf {
             },
             GroupDescriptor {
                 title: None,
+                point_default: Some("public".to_string()),
                 visibility: None,
                 name: "quarter_alt".to_string(),
                 members_of: Some("quarter".to_string()),

@@ -501,7 +501,7 @@ fn a_field_sourced_build_is_byte_identical_to_the_reference_build() {
     let mut reference_args = args_for(&points, &points, temp.path().join("reference"));
     reference_args.views[0].access = tessera_build::config::AccessInput {
         source: tessera_build::config::AccessSource::Field("categories".to_string()),
-        default: "public".to_string(),
+        default: Some("public".to_string()),
     };
     let mut streaming_args = reference_args.clone();
     streaming_args.out = temp.path().join("streaming");

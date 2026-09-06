@@ -4,8 +4,9 @@
 //! What this proves, against a running server: a list column ingests and every element lands as
 //! one term whatever it contains — a label with a comma is one label, not two; a scalar `utf8`
 //! column is refused at the schema naming the column and the shape it takes; an empty list is a
-//! row with no label, accepted and visible to nobody; a null list and a null element are refused
-//! naming the row.
+//! row with no label, which the view's declared `point_visibility.default` fills and which a view
+//! declaring none refuses naming the count (decision 0133); a null list and a null element are
+//! refused naming the row.
 //!
 //! The comma case is the one that found the defect: a corpus whose compartment keys are free text
 //! (`Natural History Museum, Vienna`) split on a wire that carried one string per row, and the
@@ -134,6 +135,30 @@ async fn served() -> (TempDir, TestServer) {
     (tmp, server)
 }
 
+/// The same fixture under a `point_visibility` declaring `default`, or none.
+async fn served_with_default(default: Option<&str>) -> (TempDir, TestServer) {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    let pairs = tmp.path().join("pairs.parquet");
+    build_fixture_with_access(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &pairs,
+        N_ITEMS,
+        tessera_build::config::AccessInput {
+            source: tessera_build::config::AccessSource::Relation(pairs.clone()),
+            default: default.map(str::to_string),
+        },
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+    (tmp, server)
+}
+
 /// Every element is one label, verbatim. A label containing a comma is one term: the rows
 /// labelled `Natural History Museum, Vienna` are visible to a principal holding that label and
 /// to nobody holding `Natural History Museum`, which a comma grammar would have made its first
@@ -189,23 +214,93 @@ async fn a_scalar_utf8_access_column_is_refused_naming_the_column_and_the_shape(
     );
 }
 
-/// An empty list is a row with no label: accepted, and visible to no principal.
+/// An empty list is a row with no label, and the view's declared default fills it (decision
+/// 0133): under `default = "ir:sealed"` the row is served to a principal holding that term and
+/// to no other, as the build serves a null or empty label under the same declaration. A row
+/// carrying labels of its own is not also given the default.
 #[tokio::test]
-async fn an_empty_list_is_a_row_with_no_label() {
-    let (_tmp, server) = served().await;
-    let before = visible_to(&server, &["0"]).await;
+async fn an_empty_list_takes_the_views_declared_default() {
+    let (_tmp, server) = served_with_default(Some("ir:sealed")).await;
+    let sealed_before = visible_to(&server, &["ir:sealed"]).await;
+    let zero_before = visible_to(&server, &["0"]).await;
 
-    let body = body_with_access(1, Arc::new(access_lists(&[&[]])));
+    let body = body_with_access(2, Arc::new(access_lists(&[&[], &["0"]])));
     let resp = ingest(&server, "empty-1", body).await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     let json: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(json["accepted"], 1);
+    assert_eq!(json["accepted"], 2);
     flush(&server).await;
 
     assert_eq!(
+        visible_to(&server, &["ir:sealed"]).await,
+        sealed_before + 1,
+        "the unlabelled row landed under the declared default"
+    );
+    assert_eq!(
         visible_to(&server, &["0"]).await,
-        before,
-        "no label, so no principal sees it"
+        zero_before + 1,
+        "the labelled row kept its own label and was not also given the default"
+    );
+    assert_eq!(
+        visible_to(&server, &[]).await,
+        0,
+        "the default is a label, never everyone"
+    );
+}
+
+/// Under `default = "public"` the same row is public: the fixture every other test here runs on
+/// declares that, so an empty list there is a row every principal sees.
+#[tokio::test]
+async fn an_empty_list_under_a_public_default_is_public() {
+    let (_tmp, server) = served().await;
+    let before = visible_to(&server, &[]).await;
+
+    let body = body_with_access(1, Arc::new(access_lists(&[&[]])));
+    let resp = ingest(&server, "empty-public", body).await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    flush(&server).await;
+
+    assert_eq!(visible_to(&server, &[]).await, before + 1);
+}
+
+/// A view declaring no default refuses the batch (decision 0133), naming the count of unlabelled
+/// rows and the view, in the terms the build refuses the same corpus; the batch has no effect.
+/// An empty *element* stays refused as it was, whatever the view declares.
+#[tokio::test]
+async fn an_empty_list_is_refused_naming_the_count_where_no_default_is_declared() {
+    let (_tmp, server) = served_with_default(None).await;
+    let high_water_before = control_status(&server).await["entity_id_high_water"].clone();
+
+    let body = body_with_access(3, Arc::new(access_lists(&[&[], &["0"], &[]])));
+    let resp = ingest(&server, "empty-refused", body).await;
+    assert_eq!(resp.status(), 422);
+    let detail = resp.text().await.unwrap();
+    assert!(
+        detail.contains("view 's0': 2 row(s) carry an empty access label"),
+        "{detail}"
+    );
+    assert!(
+        detail.contains("declares no `point_visibility.default`"),
+        "{detail}"
+    );
+
+    // A labelled batch on the same view is unaffected: the refusal is about the rows.
+    let body = body_with_access(1, Arc::new(access_lists(&[&["0"]])));
+    let resp = ingest(&server, "labelled", body).await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+
+    // An empty element is not a label, on either declaration.
+    let body = body_with_access(1, Arc::new(access_lists(&[&[""]])));
+    let resp = ingest(&server, "empty-element", body).await;
+    assert_eq!(resp.status(), 422);
+    let detail = resp.text().await.unwrap();
+    assert!(detail.contains("access column"), "{detail}");
+
+    let json = control_status(&server).await;
+    assert_eq!(
+        json["entity_id_high_water"].as_u64().unwrap(),
+        high_water_before.as_u64().unwrap() + 1,
+        "only the labelled batch had an effect"
     );
 }
 

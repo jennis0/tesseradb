@@ -517,10 +517,12 @@ def encode_batch(
     `access` is the wire's **list of labels**, one element per label, each taken verbatim
     (contracts §3.4, decision 0129): a rung's list column travels as itself, a scalar compartment
     column as one-element lists, and a null — a null scalar or a null list — as the empty list,
-    which the server would otherwise refuse for the whole batch. **On the wire the empty list is a
-    row visible to nobody; the build fills a null or empty label with the view's
-    `point_visibility.default`.** The two entry points differ there until the owner rules, and this
-    driver applies no default of its own. Nothing here joins or splits a label, so a compartment
+    which the server would otherwise refuse for the whole batch. **The empty list is a row with no
+    label, and the view's declaration decides it at both entry points** (decision 0133): where the
+    view declares a `point_visibility.default` the server gives the row that label, as the build
+    gives it to a null or empty value; where it declares none the server refuses the batch naming
+    the count, as the build refuses the corpus. This driver applies no default of its own, so an
+    ingest cycle takes the same declaration the build took. Nothing here joins or splits a label, so a compartment
     key containing a comma is one term on both sides of the split. `external_id` is the **source entity id, eight bytes little-endian**, the same form the
     build mints under `--mint-external-ids` (see [`external_ids`]). That is what makes an ingested
     row addressable on `/control/changes` afterwards, and what an artifact's `members` names it by

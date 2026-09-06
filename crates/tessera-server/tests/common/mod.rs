@@ -122,6 +122,25 @@ pub fn write_pairs_n(path: &Path, n: u64) {
 
 /// See [`build_fixture`] — parameterised, same reason as [`write_points_n`].
 pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64) {
+    build_fixture_with_access(
+        out,
+        points_path,
+        pairs_path,
+        n,
+        tessera_build::config::AccessInput::relation(pairs_path.to_path_buf()),
+    );
+}
+
+/// [`build_fixture_n`] under a `point_visibility` of the caller's choosing — the declared
+/// default is what `/control/ingest` fills an empty `access` list with, or refuses on
+/// (decision 0133), so a test of that needs a fixture declaring each.
+pub fn build_fixture_with_access(
+    out: &Path,
+    points_path: &Path,
+    pairs_path: &Path,
+    n: u64,
+    access: tessera_build::config::AccessInput,
+) {
     write_points_n(points_path, n);
     write_pairs_n(pairs_path, n);
     let args = BuildArgs {
@@ -133,7 +152,7 @@ pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64
             points: points_path.to_path_buf(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs_path.to_path_buf()),
+            access,
         }],
         anchor: 0,
         groups: Vec::new(),

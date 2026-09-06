@@ -646,7 +646,8 @@ impl TermDescriptors {
     }
 }
 
-/// The distinct access terms a field-sourced view carries, sorted, with the default among them.
+/// The distinct access terms a field-sourced view carries, sorted, with the default among them
+/// where one is declared — and beside them, how many rows carry a null or empty label.
 ///
 /// **A whole pass over one column before any term id exists**, which is the price of assigning
 /// term ids by a rule both builds can compute: the linear build walks items and interns as it
@@ -655,20 +656,28 @@ impl TermDescriptors {
 /// same ordering. The relation route pays nothing for this — its source terms are already integers
 /// the file supplies.
 ///
-/// The default is always present, because it is what a null or empty row is filled with and a fill
-/// must have a term to fill with.
+/// A declared default is always present, because it is what a null or empty row is filled with
+/// and a fill must have a term to fill with. The unlabelled count is what the caller refuses on
+/// where no default is declared (decision 0133): it is counted here, before any term id exists
+/// and before anything is written, so the refusal names an exact number and costs no output.
 pub fn read_access_vocabulary(
     points: &Path,
     fields: &Fields,
     field: Option<&str>,
-    default: &str,
+    default: Option<&str>,
     limit: Option<u64>,
     select: Option<&ViewSelector>,
-) -> Result<Vec<String>> {
+) -> Result<(Vec<String>, u64)> {
     let mut distinct: BTreeSet<String> = BTreeSet::new();
-    distinct.insert(default.to_string());
+    if let Some(default) = default {
+        distinct.insert(default.to_string());
+    }
+    let mut unlabelled: u64 = 0;
     if let Some(field) = field {
         scan_access_column(points, fields, field, limit, select, |_, terms| {
+            if terms.is_empty() {
+                unlabelled += 1;
+            }
             for term in terms {
                 if !distinct.contains(*term) {
                     distinct.insert((*term).to_string());
@@ -677,7 +686,7 @@ pub fn read_access_vocabulary(
             ControlFlow::Continue(())
         })?;
     }
-    Ok(distinct.into_iter().collect())
+    Ok((distinct.into_iter().collect(), unlabelled))
 }
 
 /// The field route's counterpart to [`scan_pairs`]: one `(source_id, source_term)` per term a
@@ -685,11 +694,12 @@ pub fn read_access_vocabulary(
 ///
 /// Three rules, all of them decided here because this is where a row's value becomes a term:
 ///
-/// - **A null value and an empty list both mean *no access terms*, which means visible to no
-///   principal.** Neither means unrestricted. That is the reading a fill is *for*: where the view
-///   declares a default, those rows get exactly it, and where it declares one that no principal
-///   holds they stay invisible. The permissive misreading — *null is unspecified, so unrestricted*
-///   — would put every unlabelled point in everyone's mask.
+/// - **A null value and an empty list both mean *no access terms*.** Neither means unrestricted.
+///   Where the view declares a default those rows get exactly it, and where it declares one that
+///   no principal holds they stay invisible. Where it declares none the corpus was refused at the
+///   vocabulary pass (decision 0133), so a row reaching this scan with no terms and no default is
+///   a file that changed underneath the build. The permissive misreading — *null is unspecified,
+///   so unrestricted* — would put every unlabelled point in everyone's mask.
 /// - **Terms are trimmed**, matching what `builtin:passthrough` already does to the label it is
 ///   handed, so ` cs.LG` and `cs.LG` are one term rather than two that no credential spells the
 ///   same way. A term that is empty after trimming is not a term.
@@ -697,7 +707,8 @@ pub fn read_access_vocabulary(
 ///   terms are disjunctive — `M_auth` is a union of posting lists — so a label added to a point can
 ///   only widen it, which makes overriding inadmissible rather than merely unwise.
 ///
-/// `field` is `None` for a view declaring only a default, where every point takes it.
+/// `field` is `None` for a view declaring only a default, where every point takes it; a view
+/// declaring neither is refused at the declaration and at [`crate::plan_access`].
 // The eighth argument is the view's selection, and it belongs beside the file it filters: every
 // pass over a form B source takes the same three (`path`, `fields`, `select`) and a struct around
 // them would be a second spelling of `ViewArgs`.
@@ -707,13 +718,20 @@ pub fn scan_access_field<F: FnMut(u64, u64) -> ControlFlow<()>>(
     fields: &Fields,
     field: Option<&str>,
     vocabulary: &[String],
-    default_term: u64,
+    default_term: Option<u64>,
     limit: Option<u64>,
     select: Option<&ViewSelector>,
     mut visit: F,
 ) -> Result<AccessFill> {
     let mut fill = AccessFill::default();
     let Some(field) = field else {
+        let Some(default_term) = default_term else {
+            return Err(BuildError::Invalid(format!(
+                "{}: `point_visibility` names no field, no source and no default, so no point \
+                 has a label (decision 0133)",
+                points.display()
+            )));
+        };
         // Every point takes the default: the corpus with no permission model. Read from the
         // identity column alone, so a view declaring only a default opens no access column at all.
         scan_identity(points, fields, limit, select, |source_id| {
@@ -728,6 +746,18 @@ pub fn scan_access_field<F: FnMut(u64, u64) -> ControlFlow<()>>(
     let mut changed: Option<BuildError> = None;
     scan_access_column(points, fields, field, limit, select, |source_id, terms| {
         if terms.is_empty() {
+            let Some(default_term) = default_term else {
+                changed = Some(BuildError::Schema {
+                    path: points.to_path_buf(),
+                    detail: format!(
+                        "the access column '{field}' now carries a null or empty label, which it \
+                         did not when this build read its vocabulary, and the view declares no \
+                         `point_visibility.default` to fill it with. The file changed underneath \
+                         the build, and the two passes must see one relation"
+                    ),
+                });
+                return ControlFlow::Break(());
+            };
             fill.filled += 1;
             return visit(source_id, default_term);
         }

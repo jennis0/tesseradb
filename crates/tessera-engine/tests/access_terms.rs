@@ -99,7 +99,7 @@ fn write_points(path: &Path, access: impl Fn(u64) -> Option<Vec<&'static str>>) 
     w.close().unwrap();
 }
 
-fn args(points: &Path, out: &Path, default: &str) -> BuildArgs {
+fn args(points: &Path, out: &Path, default: Option<&str>) -> BuildArgs {
     BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,
@@ -111,7 +111,7 @@ fn args(points: &Path, out: &Path, default: &str) -> BuildArgs {
             select: None,
             access: AccessInput {
                 source: AccessSource::Field("categories".to_string()),
-                default: default.to_string(),
+                default: default.map(str::to_string),
             },
         }],
         anchor: 0,
@@ -166,7 +166,7 @@ fn a_field_sourced_view_masks_on_the_terms_its_rows_carry() {
     build(&args(
         &dir.path().join("points.parquet"),
         &dir.path().join("bundle"),
-        "public",
+        Some("public"),
     ))
     .expect("a field-sourced view builds");
 
@@ -192,13 +192,64 @@ fn a_null_row_is_visible_to_no_principal_when_the_default_is_not_public() {
     build(&args(
         &dir.path().join("points.parquet"),
         &dir.path().join("bundle"),
-        "ir:sealed",
+        Some("ir:sealed"),
     ))
     .expect("a field-sourced view builds");
 
     // Only point 3, which wrote `public` itself.
     assert_eq!(visible(dir.path(), &[]), 1);
     // The two filled rows are reachable by the declared label and by nothing else.
+    assert_eq!(visible(dir.path(), &["ir:sealed"]), 3);
+    assert_eq!(visible(dir.path(), &["ir:analyst"]), 3);
+}
+
+/// **No default, and a null or empty row, is a refusal** (decision 0133): the same corpus that
+/// the two tests above fill is refused when the view declares nothing to fill with, naming the
+/// count of such rows and the view, and nothing is written.
+#[test]
+fn a_null_row_is_refused_naming_the_count_when_no_default_is_declared() {
+    let dir = tempfile::tempdir().unwrap();
+    write_points(&dir.path().join("points.parquet"), access_of);
+    let error = build(&args(
+        &dir.path().join("points.parquet"),
+        &dir.path().join("bundle"),
+        None,
+    ))
+    .expect_err("a null row with no declared default is refused");
+    let message = error.to_string();
+    // Points 1 (null) and 2 (empty list) are the two unlabelled rows of `access_of`.
+    assert!(
+        message.contains("view 's0': 2 point row(s) carry a null or empty access label"),
+        "{message}"
+    );
+    assert!(
+        message.contains("declares no `point_visibility.default`"),
+        "{message}"
+    );
+    assert!(
+        !dir.path().join("bundle").join("MANIFEST.json").exists(),
+        "a refused corpus writes no manifest"
+    );
+}
+
+/// A view declaring no default still builds a corpus whose every row carries a label: the
+/// refusal is about the rows, and a corpus with none to refuse is unchanged by it.
+#[test]
+fn a_fully_labelled_corpus_builds_without_a_default() {
+    let dir = tempfile::tempdir().unwrap();
+    write_points(&dir.path().join("points.parquet"), |e| match access_of(e) {
+        Some(terms) if !terms.is_empty() => Some(terms),
+        _ => Some(vec!["ir:sealed"]),
+    });
+    build(&args(
+        &dir.path().join("points.parquet"),
+        &dir.path().join("bundle"),
+        None,
+    ))
+    .expect("a corpus with a label on every row builds without a default");
+    // Points 1 and 2 were relabelled `ir:sealed`; 0 and 4 carry `ir:analyst` of their own and 3
+    // carries `public` alone.
+    assert_eq!(visible(dir.path(), &[]), 1);
     assert_eq!(visible(dir.path(), &["ir:sealed"]), 3);
     assert_eq!(visible(dir.path(), &["ir:analyst"]), 3);
 }
@@ -212,7 +263,7 @@ fn a_default_alone_gives_every_point_the_declared_label() {
     let mut args = args(
         &dir.path().join("points.parquet"),
         &dir.path().join("bundle"),
-        "public",
+        Some("public"),
     );
     args.views[0].access.source = AccessSource::Default;
     build(&args).expect("a default-only view builds");
@@ -236,7 +287,7 @@ fn a_term_containing_a_comma_interns_as_one_term() {
     build(&args(
         &dir.path().join("points.parquet"),
         &dir.path().join("bundle"),
-        "public",
+        Some("public"),
     ))
     .expect("a term carrying a comma builds");
 
@@ -286,7 +337,7 @@ fn a_plain_string_access_column_is_one_term_per_point() {
     w.write(&batch).unwrap();
     w.close().unwrap();
 
-    build(&args(&path, &dir.path().join("bundle"), "public")).expect("a string column builds");
+    build(&args(&path, &dir.path().join("bundle"), Some("public"))).expect("a string column builds");
     // The one point carrying a term of its own is not also given the default; the empty string is
     // no term at all, so that row is filled.
     assert_eq!(visible(dir.path(), &[]), 4);

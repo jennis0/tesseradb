@@ -514,7 +514,8 @@ struct RawIngestItem {
     x: f64,
     y: f64,
     /// The row's labels, one element of the wire's `access` list each, verbatim (decision 0129).
-    /// Empty for a row that carries none; a null list or a null element is refused at the parse.
+    /// Empty for a row that carries none, which the view's `point_default` then fills or refuses
+    /// (decision 0133); a null list or a null element is refused at the parse.
     labels: Vec<Vec<u8>>,
     scalars: Vec<WalScalar>,
     /// The group-scoped values this row carries for its view's group, positional against the
@@ -1537,7 +1538,8 @@ impl LabelCells<'_> {
         }
     }
 
-    /// Row `row`'s labels, verbatim and in order. An empty list is a row with no label.
+    /// Row `row`'s labels, verbatim and in order. An empty list is a row with no label, which the
+    /// view's declared default fills or, where none is declared, refuses (decision 0133).
     ///
     /// **A null list and a null element are both refused**, naming the row. A null list could be
     /// read as "no label" or as "label not supplied", and the two differ in what every principal
@@ -1672,6 +1674,10 @@ fn run_ingest(
     // Read once per batch beside the scalar tail, from the same `meta()` snapshot, so the two
     // cannot come from different generations.
     let projection = view.projection;
+    // **What a row with no label is given** (decision 0133): the view's declared
+    // `point_visibility.default`, read from the same manifest snapshot, so an ingested row and a
+    // built row with a null or empty label take one declaration.
+    let point_default = view.point_default.clone();
     let view = view.id.clone();
 
     // **The layer lookup is the engine's registry, per column, not per row.** A registration is a
@@ -1739,6 +1745,23 @@ fn run_ingest(
         )));
     }
 
+    // **A row with no label, where the view declares no default, refuses the batch** (decision
+    // 0133), naming the count and the view in the terms the build uses for the same corpus.
+    // Counted before the resolve loop below, so a refused batch interns nothing.
+    let unlabelled = items.iter().filter(|item| item.labels.is_empty()).count();
+    if unlabelled > 0 && point_default.is_none() {
+        return Err(ApiError::Contract(format!(
+            "view '{view}': {unlabelled} row(s) carry an empty access label and the view \
+             declares no `point_visibility.default` to fill them with. Declare the label such a \
+             row should carry, or label the rows (decision 0133)"
+        )));
+    }
+    // The default's own descriptors, resolved once: the plugin reads it as it reads a row's
+    // label, so a default the plugin refuses is refused here rather than filled.
+    let default_labels: Option<Vec<Vec<u8>>> = point_default
+        .as_ref()
+        .map(|label| vec![label.as_bytes().to_vec()]);
+
     // Resolve each item's descriptors and terms up front — idempotent even on a replayed
     // request, since `resolve_terms` looks up already-interned descriptors without reassigning
     // (see `Engine::resolve_terms`'s doc).
@@ -1750,11 +1773,17 @@ fn run_ingest(
 
     for item in &items {
         // The list form, the same call a build puts a points file's term column through
-        // (decision 0129): every element is one label and nothing here parses it.
+        // (decision 0129): every element is one label and nothing here parses it. A row with
+        // no label takes the view's declared default (decision 0133), as the build fills it; the
+        // fill never adds to a row carrying labels of its own, which could only widen it.
+        let labels: &[Vec<u8>] = match (&default_labels, item.labels.is_empty()) {
+            (Some(default), true) => default,
+            _ => &item.labels,
+        };
         let descriptors = state
             .engine
             .plugin()
-            .terms_of_labels(&item.labels)
+            .terms_of_labels(labels)
             .map_err(|e| ApiError::Contract(format!("access column: {e}")))?;
         let terms = state.engine.resolve_terms(&descriptors);
         if terms.len() as u32 > bounds.max_terms_per_item {

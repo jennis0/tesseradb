@@ -248,7 +248,7 @@ fn view_args(view: &str, points: &Path, visibility: Option<&[&str]>) -> ViewArgs
         // the dictionary are the words this file writes — which is what lets a gate below name one.
         access: AccessInput {
             source: AccessSource::Field("access".to_string()),
-            default: "public".to_string(),
+            default: Some("public".to_string()),
         },
         visibility: visibility.map(labels),
     }
@@ -320,6 +320,7 @@ fn build_gated(dir: &Path) -> std::path::PathBuf {
                 title: None,
                 name: "quarter".to_string(),
                 members_of: None,
+                point_default: Some("public".to_string()),
                 visibility: None,
                 views: roster(&QUARTERS.map(|(key, _, v)| (key, v))),
                 quantisation: group_frame(),
@@ -331,6 +332,7 @@ fn build_gated(dir: &Path) -> std::path::PathBuf {
                 title: None,
                 name: "sealed".to_string(),
                 members_of: None,
+                point_default: Some("public".to_string()),
                 // **The group's own gate, the outer bound over its whole roster.**
                 visibility: Some(labels(&["finance"])),
                 views: roster(&SEALED.map(|(key, _)| (key, None))),
@@ -1473,6 +1475,7 @@ fn build_shared_sealed(dir: &Path) -> std::path::PathBuf {
                 title: None,
                 name: "sealed".to_string(),
                 members_of: None,
+                point_default: Some("public".to_string()),
                 visibility: Some(labels(&["finance"])),
                 views: roster(&[("s1", None), ("s2", Some(&["legal"]))]),
                 quantisation: group_frame(),
@@ -1484,6 +1487,7 @@ fn build_shared_sealed(dir: &Path) -> std::path::PathBuf {
                 title: None,
                 name: "sealed_map".to_string(),
                 members_of: Some("sealed".to_string()),
+                point_default: Some("public".to_string()),
                 // **Public, and nothing requires it to agree with the owner's gate.** Publishing a
                 // second layout of someone else's quarters is the ordinary reason to declare
                 // `members`, and the sharer's own audience is its own question.

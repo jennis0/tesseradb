@@ -1269,6 +1269,11 @@ pub struct MetaView {
     /// a group's, so a plain view carrying an empty one would invite a client to order a set of
     /// one.
     pub roster: Option<MetaRoster>,
+    /// The declaration's `point_visibility.default`, or `None` where it named none
+    /// (decision 0133). Read by `/control/ingest` to fill a row whose `access` list is empty, or
+    /// to refuse the batch. **On no wire**: `/v1/meta` builds its body by hand and does not
+    /// publish it.
+    pub point_default: Option<String>,
 }
 
 /// One view's roster record, as `GET /v1/meta` publishes it beside the view (`views.md` §3.2).
@@ -1738,6 +1743,7 @@ impl Engine {
                 y: square.y,
             }),
             roster,
+            point_default: s.point_default.clone(),
         };
         // **Serving order is the roster's order** (`views.md` §3.2): the plain views in manifest
         // order, then each group's views in creation order — which is the order the roster

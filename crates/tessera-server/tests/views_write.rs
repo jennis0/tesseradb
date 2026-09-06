@@ -178,6 +178,7 @@ render = true
         groups: vec![
             GroupDescriptor {
                 title: None,
+                point_default: Some("public".to_string()),
                 visibility: None,
                 scoped_scalars: Vec::new(),
                 name: "quarter".to_string(),
@@ -200,6 +201,7 @@ render = true
             },
             GroupDescriptor {
                 title: None,
+                point_default: Some("public".to_string()),
                 visibility: None,
                 scoped_scalars: Vec::new(),
                 name: "quarter_map".to_string(),
@@ -1945,6 +1947,7 @@ async fn serve_families() -> Served {
         anchor: 0,
         groups: vec![GroupDescriptor {
             title: None,
+            point_default: Some("public".to_string()),
             visibility: None,
             scoped_scalars: Vec::new(),
             name: "quarter".to_string(),

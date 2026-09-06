@@ -139,8 +139,10 @@
 //! A view says where each point's access terms are and what a point carrying none gets
 //! ([`AccessInput`]): a `list<string>` field of its own source, a separate exploded
 //! `(entity_id, term_id)` relation, or neither — every point taking the default, which is the
-//! corpus with no permission model. `default` is required on all three, because a point's label has
-//! to come from somewhere and *nowhere* is a decision rather than an omission.
+//! corpus with no permission model. `default` is optional (decision 0133): where a view declares
+//! one, a point carrying no label takes it at the build and on `/control/ingest` alike; where it
+//! declares none, both entry points refuse such a point naming the count. A view declaring neither
+//! an acquisition key nor a default is refused at parse, having no label for any point.
 //!
 //! **Filling never overrides**, and that is inadmissible rather than merely unwise: a point's terms
 //! are disjunctive — `M_auth` is a union of posting lists — so a label added to a point can only
@@ -1970,16 +1972,17 @@ const EXTENT_SPELLINGS: &str = "\n  \
 
 /// Where a build reads each point's access terms, and what a point carrying none is given.
 ///
-/// **The three shapes are one declaration, not three routes.** `default` is required on all of
-/// them (`configuration.md` §1): a point's label has to come from somewhere, and *nowhere* is a
-/// decision rather than an omission — so the acquisition half is what is optional, and a corpus
-/// with no permission model is the one that declares only a default.
+/// **The three shapes are one declaration, not three routes.** The acquisition half is optional,
+/// and a corpus with no permission model is the one that declares only a default. `default` is
+/// optional too (decision 0133), and its absence is a decision: a point carrying no terms is then
+/// refused, at the build and at `/control/ingest` alike, naming the count.
 #[derive(Debug, Clone)]
 pub struct AccessInput {
     pub source: AccessSource,
-    /// What a point carrying no terms of its own is given. Never `inherited` (§1); any other
-    /// string is a term, commas and all — the plugin is handed a list, so nothing splits it.
-    pub default: String,
+    /// What a point carrying no terms of its own is given, or `None` to refuse such a point.
+    /// Never `inherited` (§1); any other string is a term, commas and all — the plugin is handed
+    /// a list, so nothing splits it.
+    pub default: Option<String>,
 }
 
 /// The acquisition half of [`AccessInput`].
@@ -2001,8 +2004,10 @@ impl AccessInput {
     pub fn relation(path: impl Into<PathBuf>) -> AccessInput {
         AccessInput {
             source: AccessSource::Relation(path.into()),
-            default: String::from_utf8(tessera_authz::PUBLIC_LABEL.to_vec())
-                .expect("the reserved label is ASCII"),
+            default: Some(
+                String::from_utf8(tessera_authz::PUBLIC_LABEL.to_vec())
+                    .expect("the reserved label is ASCII"),
+            ),
         }
     }
 }
@@ -2017,7 +2022,9 @@ pub struct PointVisibility {
     /// **Never `inherited`.** A point carrying no terms is in no posting list and so in no
     /// principal's mask, and a gate narrows rather than widens — so there is nothing for a point to
     /// inherit, and the word is refused at parse for points where it is legal for artifacts.
-    pub default: String,
+    /// `None` where the declaration names no default, and a point carrying no terms is then
+    /// refused at both entry points (decision 0133).
+    pub default: Option<String>,
 }
 
 /// The attributes in declaration order, and the vocabularies they reference.
@@ -3602,9 +3609,10 @@ fn compile_point_visibility(
             "{object}: `point_visibility` is required and has no default (configuration.md §1). \
              Write `point_visibility = {{ field = \"<column>\", default = \"<label>\" }}`: `field` \
              says where each point's own access label is, and `default` says what a point carrying \
-             none gets — `public` reaches every principal, any other word is an access label. \
-             There is no default because the value an absent line would supply is one of those \
-             two, and both are decisions"
+             none gets — `public` reaches every principal, any other word is an access label, and \
+             omitting it refuses such a point at both entry points (decision 0133). There is no \
+             default because the value an absent line would supply is one of those, and each is a \
+             decision"
         ))
     })?;
     if let Some(field) = &point.field {
@@ -3631,15 +3639,24 @@ fn compile_point_visibility(
         Some(declared) => Some(sources.path(&format!("{object} point_visibility"), declared)?),
         None => None,
     };
-    let default = point.default.as_deref().ok_or_else(|| {
-        declaration_error(format!(
-            "{object}: `point_visibility.default` is required and has no default. It is what a \
-             point carrying no label of its own gets — `public` reaches every principal, and any \
-             other word is an access label. `inherited` is not available here: a point carrying no \
-             terms is in no posting list and so in no principal's mask, so there is nothing to \
-             inherit"
-        ))
-    })?;
+    // **`default` is optional, and its absence is the decision to refuse** (decision 0133): a
+    // point carrying no label is then refused at the build and on `/control/ingest`, naming the
+    // count. A declaration with no acquisition key and no default has no label for any point, so
+    // it is refused here rather than at the first row.
+    let Some(default) = point.default.as_deref() else {
+        if point.field.is_none() && point.source.is_none() {
+            return Err(declaration_error(format!(
+                "{object}: `point_visibility` names no `field`, no `source` and no `default`, so \
+                 no point has a label. Name where each point's own label is, or the label every \
+                 point takes (configuration.md §1)"
+            )));
+        }
+        return Ok(PointVisibility {
+            field: point.field.clone(),
+            source: labels,
+            default: None,
+        });
+    };
     if default == INHERITED {
         return Err(declaration_error(format!(
             "{object}: `point_visibility.default = \"inherited\"` is refused. A container's gate \
@@ -3653,7 +3670,7 @@ fn compile_point_visibility(
     Ok(PointVisibility {
         field: point.field.clone(),
         source: labels,
-        default: default.to_string(),
+        default: Some(default.to_string()),
     })
 }
 
@@ -6394,6 +6411,9 @@ impl Config {
                     // presented is a fact about the layout (`views.md` §3.3).
                     title: declared.title.clone(),
                     members_of: membership.members_of.clone(),
+                    // The declared group's own point default (decision 0133), on the rule its
+                    // gate and title follow: two groups over one key set are two declarations.
+                    point_default: declared.point_visibility.default.clone(),
                     // **The frame as resolved, not as declared**: a group's `auto` extent is
                     // fitted over every view of it, so the declaration may say `auto` where the
                     // manifest must say numbers. Every view of a group shares one frame by

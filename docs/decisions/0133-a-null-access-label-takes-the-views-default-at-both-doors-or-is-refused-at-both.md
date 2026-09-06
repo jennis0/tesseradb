@@ -1,6 +1,6 @@
 # 0133 — A null access label takes the view's default at both doors, or is refused at both
 
-**Date:** 2026-09-06 · **Status:** Settled (owner ruling) · ⊘ not yet built
+**Date:** 2026-09-06 · **Status:** Settled (owner ruling) · Built 2026-09-06 (`bundle_format` 6: every view and group record carries `point_default`, which `/control/ingest` reads; the `source` route's fill and refusal stay deferred, `configuration.md` §1)
 
 ## What this answers
 

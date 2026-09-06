@@ -622,7 +622,9 @@ pub(crate) struct AccessPlan {
     /// space and every view's labels are interned into the same dictionary, so the vocabulary is
     /// the union over every view's source; what stays per view is which of its entries an
     /// unlabelled point of that view takes.
-    pub default_term: Vec<u64>,
+    /// Per view in [`BuildArgs::views`] order; `None` where the view declares no default, in
+    /// which case the vocabulary pass has already refused every row that would need one.
+    pub default_term: Vec<Option<u64>>,
 }
 
 /// How a build's views declare where their labels come from, checked once (`views.md` §7).
@@ -684,7 +686,7 @@ pub(crate) fn plan_access(args: &BuildArgs) -> Result<AccessPlan> {
         // The relation supplies its own integer term ids and needs no vocabulary pass.
         return Ok(AccessPlan {
             descriptors: input::TermDescriptors::Ids,
-            default_term: vec![0; args.views.len()],
+            default_term: vec![None; args.views.len()],
         });
     }
     // **The union, sorted** — one dictionary over every view's distinct values. With one view
@@ -696,14 +698,27 @@ pub(crate) fn plan_access(args: &BuildArgs) -> Result<AccessPlan> {
             AccessSource::Field(field) => Some(field.as_str()),
             _ => None,
         };
-        vocabulary.extend(input::read_access_vocabulary(
+        let (terms, unlabelled) = input::read_access_vocabulary(
             &view.points,
             &view.point_fields,
             field,
-            &view.access.default,
+            view.access.default.as_deref(),
             args.limit,
             view.select.as_ref(),
-        )?);
+        )?;
+        // **A null or empty label is refused where the view declares no default** (decision
+        // 0133), here, before a term id exists or a byte is written, naming the count and the
+        // view. The same corpus on `/control/ingest` is refused in the same terms. A corpus that
+        // relied on the fill declares the default it was getting.
+        if unlabelled > 0 && view.access.default.is_none() {
+            return Err(BuildError::Invalid(format!(
+                "view '{}': {unlabelled} point row(s) carry a null or empty access label and the \
+                 view declares no `point_visibility.default` to fill them with. Declare the label \
+                 such a point should carry, or label the rows (decision 0133)",
+                view.view_id
+            )));
+        }
+        vocabulary.extend(terms);
     }
     vocabulary.sort_unstable();
     vocabulary.dedup();
@@ -711,10 +726,12 @@ pub(crate) fn plan_access(args: &BuildArgs) -> Result<AccessPlan> {
         .views
         .iter()
         .map(|view| {
-            vocabulary
-                .binary_search_by(|t| t.as_str().cmp(&view.access.default))
-                .expect("every view's default is read into the vocabulary unconditionally")
-                as u64
+            view.access.default.as_deref().map(|default| {
+                vocabulary
+                    .binary_search_by(|t| t.as_str().cmp(default))
+                    .expect("every declared default is read into the vocabulary unconditionally")
+                    as u64
+            })
         })
         .collect();
     Ok(AccessPlan {
@@ -1992,6 +2009,10 @@ fn write_manifests(
                 // group descriptor above; `Manifest::validate_groups` refuses a bundle whose two
                 // copies disagree.
                 visibility: view.visibility.clone(),
+                // **What an unlabelled row is given on `/control/ingest`** (decision 0133): the
+                // declaration this build filled with, or `None` where it refused. The two entry
+                // points read one declaration.
+                point_default: view.access.default.clone(),
             })
             .collect(),
         partitions: vec![PartitionDescriptor {

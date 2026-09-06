@@ -408,6 +408,7 @@ fn build_families(dir: &Path) -> std::path::PathBuf {
         anchor: 0,
         groups: vec![GroupDescriptor {
             title: None,
+            point_default: Some("public".to_string()),
             visibility: None,
             name: "quarter".to_string(),
             members_of: None,

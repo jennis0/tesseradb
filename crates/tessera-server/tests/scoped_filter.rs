@@ -227,6 +227,7 @@ fn build_scoped(dir: &Path) -> std::path::PathBuf {
         groups: vec![
             GroupDescriptor {
                 title: None,
+                point_default: Some("public".to_string()),
                 visibility: None,
                 name: "quarter".to_string(),
                 members_of: None,
@@ -240,6 +241,7 @@ fn build_scoped(dir: &Path) -> std::path::PathBuf {
             },
             GroupDescriptor {
                 title: None,
+                point_default: Some("public".to_string()),
                 visibility: None,
                 name: "quarter_alt".to_string(),
                 members_of: Some("quarter".to_string()),

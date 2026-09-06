@@ -872,7 +872,10 @@ fn a_view_compiles_its_point_visibility() {
         config.views[0].point_visibility.field.as_deref(),
         Some("categories")
     );
-    assert_eq!(config.views[0].point_visibility.default, "public");
+    assert_eq!(
+        config.views[0].point_visibility.default.as_deref(),
+        Some("public")
+    );
 }
 
 #[test]
@@ -888,14 +891,29 @@ fn a_view_must_declare_its_point_visibility() {
     );
     assert!(message.contains("no default"), "{message}");
 
+    // `default` is optional (decision 0133): a view with a field and no default compiles, and
+    // an unlabelled point is then refused at both entry points rather than filled.
     let text = SEVERITY.replace(
         "point_visibility = { field = \"categories\", default = \"public\" }",
         "point_visibility = { field = \"categories\" }",
     );
+    let config = parse_str(&text).unwrap();
+    assert_eq!(
+        config.views[0].point_visibility.field.as_deref(),
+        Some("categories")
+    );
+    assert_eq!(config.views[0].point_visibility.default, None);
+
+    // Neither an acquisition key nor a default names a label for any point, so it is refused at
+    // the declaration rather than at the first row.
+    let text = SEVERITY.replace(
+        "point_visibility = { field = \"categories\", default = \"public\" }",
+        "point_visibility = {}",
+    );
+    let message = err(&text);
     assert!(
-        err(&text).contains("`point_visibility.default` is required"),
-        "{}",
-        err(&text)
+        message.contains("names no `field`, no `source` and no `default`"),
+        "{message}"
     );
 }
 
@@ -2578,7 +2596,8 @@ fn an_access_label_may_contain_a_comma_and_is_one_term() {
     let text = ACQUIRED.replace("default = \"public\"", "default = \"ir:analyst,ir:legal\"");
     let config = bound_ok(&text, &[]);
     assert_eq!(
-        config.views[0].point_visibility.default, "ir:analyst,ir:legal",
+        config.views[0].point_visibility.default.as_deref(),
+        Some("ir:analyst,ir:legal"),
         "carried whole, not split at the comma"
     );
 }
@@ -3026,7 +3045,7 @@ fn every_label_route_acquires() {
         "{:?}",
         acquired.access
     );
-    assert_eq!(acquired.access.default, "public");
+    assert_eq!(acquired.access.default.as_deref(), Some("public"));
 
     let only_default = ACQUIRED.replace(
         "{ source = \"pairs\", default = \"public\" }",
@@ -3040,7 +3059,7 @@ fn every_label_route_acquires() {
         "{:?}",
         acquired.access
     );
-    assert_eq!(acquired.access.default, "ir:analyst");
+    assert_eq!(acquired.access.default.as_deref(), Some("ir:analyst"));
 }
 
 /// An attribute with no source at all: legal to **declare** (§2), and refused at the build that
@@ -3170,7 +3189,7 @@ fn a_group_compiles_its_roster_its_metadata_and_its_shared_settings() {
     let group = &config.view_groups[0];
     assert_eq!(group.name, "quarter");
     assert_eq!(group.source, None, "form A declares no group-level source");
-    assert_eq!(group.point_visibility.default, "public");
+    assert_eq!(group.point_visibility.default.as_deref(), Some("public"));
     assert_eq!(
         group
             .metadata
@@ -3392,7 +3411,7 @@ fn stub_view_args(registry: &[BuildView]) -> Vec<crate::ViewArgs> {
             select: None,
             access: AccessInput {
                 source: AccessSource::Default,
-                default: "public".to_string(),
+                default: Some("public".to_string()),
             },
             visibility: view.visibility.clone(),
         })

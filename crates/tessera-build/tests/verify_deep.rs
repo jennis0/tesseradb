@@ -783,6 +783,7 @@ fn a_missing_scoped_render_lane_is_refused_and_an_intact_one_is_counted() {
         anchor: 0,
         groups: vec![tessera_build::GroupDescriptor {
             title: None,
+            point_default: Some("public".to_string()),
             visibility: None,
             name: "quarter".to_string(),
             members_of: None,

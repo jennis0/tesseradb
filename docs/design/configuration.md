@@ -125,7 +125,7 @@ no `fields` map and so has no way to say otherwise; it is `(entity_id, term_id)`
 | `source` | D | a `[sources]` key; `[defaults].source` where absent |
 | `fields` | D | canonical `entity_id`, and `x`, `y` or `morton` + `residual` — or `lon`, `lat` under a projection. The geometry shapes are mutually exclusive (§8). `entity_id` defaults to `[defaults].entity_id_field` |
 | `extent` | R | the quantisation frame: `"auto"`, `{ auto = true, margin = f }`, `{ min, max }` or `{ x = [a,b], y = [c,d] }` — and under a projection, `"auto"` or `{ lon = [a,b], lat = [c,d] }`. See below |
-| `point_visibility` | R | `{ field, default }`, or `{ source, default }` — where each point's label is, and what a point carrying none gets. See below |
+| `point_visibility` | R | `{ field, default }`, or `{ source, default }` — where each point's label is, and what a point carrying none gets. `default` is optional (decision 0133): where it is declared, the build and `/control/ingest` both give it to a point whose label is null or empty; where it is not, both refuse such a point naming the count and the view. See below |
 | `visibility` | D `public` | the view's own gate — one access label, a list of access labels, or `public` ([`views.md`](views.md) §6). Each label is one term, taken as written, a comma included; a list names several terms, one per element (decision 0132). The labels are resolved to their term set by the plugin and satisfied where that set meets the principal's; `public` is the label every principal holds and compiles to no gate, and is accepted only as the whole of the gate. A list the plugin cannot read, an empty element, or a gate naming no terms, is refused at parse — it would gate the view against everybody |
 
 **`[[view_group]]`** — a set of views sharing every setting, differing by a key and per-view
@@ -382,18 +382,22 @@ point_visibility = { source = "pairs", default = "public" }       # an exploded 
 point_visibility = { default = "public" }                         # no relation: every point takes the default
 ```
 
-Declaring both is refused. `default` is legal alone and is the corpus with no permission model, so
-the two acquisition keys are optional where `default` is not — a point's label has to come from
-somewhere, and *nowhere* is a decision rather than an omission.
+Declaring both is refused. `default` is legal alone and is the corpus with no permission model.
+`default` is itself optional (decision 0133): a view declaring a `field` or a `source` and no
+default has decided that a point carrying no label is refused. A view declaring none of the three
+names no label for any point and is refused at parse.
 
 **A `field` is a `list<string>`, or a plain `string` where a point carries one term**, and its
 terms are minted as an open vocabulary is: whatever the column holds becomes a term. Three rules
 govern what a row means, and each is the fail-closed half of a plausible misreading:
 
-- **A null value and an empty list both mean *no access terms*, which means visible to no
-  principal.** Neither means unrestricted. Where a `default` is declared those are the rows it
-  fills, so under `default = "public"` an unlabelled point is public and under a default nobody
-  holds it is invisible — but the label is the one the declaration named, never *everyone*.
+- **A null value and an empty list both mean *no access terms*.** Neither means unrestricted.
+  Where a `default` is declared those are the rows it fills, so under `default = "public"` an
+  unlabelled point is public and under a default nobody holds it is invisible — but the label is
+  the one the declaration named, never *everyone*. Where no `default` is declared the build
+  refuses the corpus, naming the count of such rows and the view; `/control/ingest` refuses a
+  batch carrying an empty `access` list in the same terms (decision 0133). A fill is a visibility
+  decision, and the declaration is the one place it is made for both entry points.
 - **Terms are trimmed** of surrounding whitespace, matching what the plugin already does to the
   label it is handed, so ` cs.LG` and `cs.LG` are one term rather than two that no credential
   spells the same way. A term empty after trimming is not a term.
@@ -402,11 +406,12 @@ govern what a row means, and each is the fail-closed half of a plausible misread
   disjunctive — `M_auth` is a union of posting lists — so any label added to a point can only widen
   it.
 
-⊘ **The `source` route fills nothing.** A point with no row in the exploded relation carries no
-term and so sits in no principal's mask, where the same point read from a `field` would take the
-default. The two should agree; not filling is the narrow half, so the divergence is a deferral
-rather than a hole, and closing it needs the streaming build to know which ordinals the relation
-never named.
+⊘ **The `source` route fills nothing and refuses nothing.** A point with no row in the exploded
+relation carries no term and so sits in no principal's mask, where the same point read from a
+`field` would take the default or be refused. The two should agree; not filling is the narrow
+half, so the divergence is a deferral rather than a hole, and closing it needs the streaming build
+to know which ordinals the relation never named. A row ingested into such a view is filled or
+refused by its declared `default` as any other view's is.
 
 **`public` is reserved at term `0`** (`per-point-attributes.md` §3.8). Every build interns it first,
 so it is term 0 in every bundle and is minted for no other descriptor; every principal's resolved
@@ -731,7 +736,9 @@ no sources is a legal config rather than a special mode.
   they are declaration, not acquisition, even when written inline.
 - **Labels.** The row carries `access` itself, so `point_visibility.field` — which names a *column*
   — has nothing to name on the wire and is build-only. Its `default` is not: it is what a row
-  supplying no label gets, on either route.
+  supplying no label gets on either route, and where none is declared a row supplying no label is
+  refused on either route (decision 0133). The wire's empty list is the file's null or empty
+  value.
 - **Layers.** `PUT /control/layers` takes the same declaration as JSON, and the build runs the same
   registry and allocator the control plane runs (`annotation-write-cycle.md` §6.1). A `[[layer]]`
   block minus its acquisition keys *is* that payload. `[layer.labels]` expands to a second

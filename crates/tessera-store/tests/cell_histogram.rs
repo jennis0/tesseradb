@@ -147,7 +147,7 @@ fn build_bundle(root: &Path) {
     fs::write(partition_dir.join("SEGMENTS-0.json"), &segments_bytes).expect("write SEGMENTS-0");
 
     let manifest = Manifest {
-        bundle_format: 5,
+        bundle_format: 6,
         created_at: "2026-07-31T00:00:00Z".to_string(),
         data_plugin_hash: tessera_plugin::Passthrough::new().data_plugin_hash(),
         declared_bounds: serde_json::json!({}),
@@ -165,6 +165,7 @@ fn build_bundle(root: &Path) {
         groups: Vec::new(),
         views: vec![ViewDescriptor {
             incarnation: 0,
+            point_default: Some("public".to_string()),
             visibility: None,
             id: "main".to_string(),
             display_name: "Main".to_string(),

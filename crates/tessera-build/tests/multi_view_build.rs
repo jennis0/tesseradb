@@ -141,6 +141,7 @@ fn two_views_are_two_row_spaces_over_one_entity_space() {
             title: None,
             name: "quarter".to_string(),
             members_of: None,
+            point_default: Some("public".to_string()),
             visibility: None,
             scoped_scalars: Vec::new(),
             quantisation: group_frame(),
@@ -288,7 +289,7 @@ fn a_label_that_disagrees_between_views_refuses() {
         select: None,
         access: tessera_build::config::AccessInput {
             source: tessera_build::config::AccessSource::Field("access".to_string()),
-            default: "public".to_string(),
+            default: Some("public".to_string()),
         },
     };
     let error = build(&BuildArgs {
@@ -473,6 +474,7 @@ fn alt_group(keys: &[&str]) -> tessera_store::manifest::GroupDescriptor {
         title: None,
         name: "quarter_alt".to_string(),
         members_of: None,
+        point_default: Some("public".to_string()),
         visibility: None,
         scoped_scalars: Vec::new(),
         quantisation: group_frame(),
@@ -1010,6 +1012,7 @@ fn a_sparse_views_permutation_costs_its_pages_and_not_its_bound() {
             title: None,
             name: "quarter".to_string(),
             members_of: None,
+            point_default: Some("public".to_string()),
             visibility: None,
             scoped_scalars: Vec::new(),
             quantisation: group_frame(),

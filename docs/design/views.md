@@ -1046,7 +1046,11 @@ the individual.
 - **A group's view carries its own `visibility` on the roster** — the inline block's key, the
   roster table's column, the create operation's record — and a view carrying none takes the
   group's, as an artifact's `inherited` takes its layer's.
-- **`point_visibility`** is the item's label and is unchanged.
+- **`point_visibility`** is the item's label and is unchanged. Its `default` is optional
+  (decision 0133): a view that declares one gives it to a point whose label is null or empty, at
+  the build and on `/control/ingest`; a view that declares none refuses such a point at both,
+  naming the count. A view of a group takes the group's, and one created while the service runs
+  takes it from the group's manifest record.
 
 A view of a group is reachable only where its group is: the group's gate is the outer bound and
 the view's is taken as written inside it, so a view gate can narrow and cannot widen — the

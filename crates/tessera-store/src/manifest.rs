@@ -501,6 +501,18 @@ pub struct ViewDescriptor {
     /// one direction a disclosure control must not fail in; a manifest omitting it is malformed
     /// rather than ungated. No bundle predates the field (decision 0048).
     pub visibility: Option<Vec<String>>,
+    /// **What a point carrying no access label of its own is given** — the declaration's
+    /// `point_visibility.default`, or `None` where the declaration named none (decision 0133).
+    ///
+    /// The one input `/control/ingest` reads to decide an empty `access` list: under `Some` the
+    /// row lands under that label's terms, as the build fills a null or empty label; under `None`
+    /// the batch is refused naming the count, as the build refuses the corpus. The two entry
+    /// points read one declaration, which is what decision 0091 asks of them.
+    ///
+    /// **Required, not `default`.** A defaulted `None` would refuse every unlabelled row of a
+    /// corpus whose declaration filled them at the build; a defaulted label would fill with one
+    /// nobody declared. `BUNDLE_FORMAT` 6 is the guard.
+    pub point_default: Option<String>,
 }
 
 /// `groups` entry: one view group and its roster (`views.md` §3.1, §3.2).
@@ -553,6 +565,12 @@ pub struct GroupDescriptor {
     /// Required, for the reason [`ViewDescriptor::visibility`] gives, and in the same shape: a
     /// list of labels, each one term.
     pub visibility: Option<Vec<String>>,
+    /// The group's `point_visibility.default`, or `None` where it declared none
+    /// ([`ViewDescriptor::point_default`]). **Here as well as on each view** for the reason
+    /// `quantisation` is: a view created while the service runs takes it from the group, which
+    /// may have no view yet to read it off. Every view of the group carries the same value, and
+    /// [`Manifest::validate_groups`] refuses a bundle whose copies disagree.
+    pub point_default: Option<String>,
     /// The roster, in creation order — which at a build is declaration order, and afterwards is
     /// the order the creations were appended in (`views.md` §3.2). There is no stored number: the
     /// order is the record order (decision 0113).
@@ -857,6 +875,14 @@ impl Manifest {
                         descriptor.visibility, group.name, view.visibility
                     ));
                 }
+                if descriptor.point_default != group.point_default {
+                    return Err(format!(
+                        "view '{id}' records the point default {:?} and group '{}' records {:?}; \
+                         a group's views share one point default, read from the view by the \
+                         ingest plane and from the group by a create (decision 0133)",
+                        descriptor.point_default, group.name, group.point_default
+                    ));
+                }
                 rostered.push(id);
             }
             // **A family's columns are its group's views.** A named view the roster does not
@@ -1030,6 +1056,7 @@ impl Manifest {
                     },
                 });
                 let (quantisation, projection) = (group.quantisation, group.projection);
+                let point_default = group.point_default.clone();
                 let id = format!("{group_name}{}{}", crate::GROUP_SEPARATOR, view.key);
                 if !manifest.views.iter().any(|v| v.id == id) {
                     manifest.views.push(ViewDescriptor {
@@ -1049,6 +1076,9 @@ impl Manifest {
                         // one coordinate system observed at several keys.
                         quantisation,
                         projection,
+                        // **The group's point default** (decision 0133), for the reason the frame
+                        // is the group's: a key set is one declaration observed at several keys.
+                        point_default,
                     });
                 }
             }

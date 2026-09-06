@@ -161,6 +161,7 @@ pub fn build_bundle(root: &Path, n: u64) {
         groups: Vec::new(),
         views: vec![ViewDescriptor {
             incarnation: 0,
+            point_default: Some("public".to_string()),
             visibility: None,
             id: VIEW.to_string(),
             display_name: VIEW.to_string(),

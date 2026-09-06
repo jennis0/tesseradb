@@ -56,9 +56,10 @@ pub struct ViewDisclosure {
     /// `field`, `relation`, or `default_only` — which of the three shapes `point_visibility`
     /// declares.
     pub labels_from: &'static str,
-    /// What a point carrying no terms of its own is given. Never `inherited`: a point carrying no
-    /// terms sits in no principal's mask.
-    pub default: String,
+    /// What a point carrying no terms of its own is given, or `None` where the declaration names
+    /// none and such a point is refused at both entry points (decision 0133). Never `inherited`:
+    /// a point carrying no terms sits in no principal's mask.
+    pub default: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

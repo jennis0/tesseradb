@@ -997,10 +997,16 @@ fn report_residency(schema: &tessera_build::config::Schema, limit: Option<u64>) 
 fn print_disclosure(disclosure: &tessera_build::disclosure::Disclosure) {
     println!("views");
     for view in &disclosure.views {
-        println!(
-            "  {:<26} labels from {}, default '{}'",
-            view.name, view.labels_from, view.default
-        );
+        match &view.default {
+            Some(default) => println!(
+                "  {:<26} labels from {}, default '{default}'",
+                view.name, view.labels_from
+            ),
+            None => println!(
+                "  {:<26} labels from {}, no default: an unlabelled point is refused",
+                view.name, view.labels_from
+            ),
+        }
     }
     if !disclosure.vocabularies.is_empty() {
         println!("\nvocabularies");

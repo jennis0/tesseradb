@@ -107,9 +107,14 @@ pub struct GenerationStamp {
 // (`tessera_lifecycle::membership`, decision 0077) and in the WAL row. The blob at 4 carried a
 // one-byte tag and one parent, so a reader at 5 would decode its first two bytes as a count and
 // read parents out of the shape bytes that follow; the number is what stops it opening.
+// 6: every `views` entry and every `groups` entry carries `point_default`, the view's declared
+// `point_visibility.default` or `null` where none was declared (decision 0133). `/control/ingest`
+// reads it to fill a row whose access label is empty, or to refuse the batch; a bundle at 5 has no
+// field to read, and a reader defaulting it would either fill with a label nobody declared or
+// refuse every unlabelled row of a corpus whose declaration filled them.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility (decision 0048).
-pub const BUNDLE_FORMAT: u32 = 5;
+pub const BUNDLE_FORMAT: u32 = 6;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;
@@ -133,7 +138,7 @@ mod tests {
     }
     #[test]
     fn constants() {
-        assert_eq!(BUNDLE_FORMAT, 5);
+        assert_eq!(BUNDLE_FORMAT, 6);
         assert_eq!(ROW_ABSENT, 0xFFFF_FFFF);
     }
 }
