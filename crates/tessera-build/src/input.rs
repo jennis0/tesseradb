@@ -2483,50 +2483,64 @@ pub fn read_roster_table(
         })
     }
 
-    /// The gate column's rows as label lists: a string column is one label per row, a
-    /// `list<string>` column is the row's labels, and a null row is no gate of its own.
+    /// The gate column's rows as label lists: a string column is one label per row, a list
+    /// column is the row's labels, and a null row is no gate of its own. Both list widths and
+    /// both string widths are read, as the `access` column's are (contracts §3.4 r78): the width
+    /// is the writer's choice and says nothing about the labels.
     fn gates(
         path: &Path,
         column: &arrow::array::ArrayRef,
         name: &str,
     ) -> Result<Vec<Option<Vec<String>>>> {
-        use arrow::array::{Array as _, ListArray};
-        if let Some(list) = column.as_any().downcast_ref::<ListArray>() {
-            let values = list.values();
-            let labels = values
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or_else(|| BuildError::Schema {
+        use arrow::array::{Array as _, LargeListArray, ListArray};
+        // One row's labels out of the list's value array, `lo..hi` being its offsets.
+        let row = |values: &arrow::array::ArrayRef, i: usize, lo: usize, hi: usize| {
+            let label = |j: usize| -> Result<Option<String>> {
+                if let Some(v) = values.as_any().downcast_ref::<StringArray>() {
+                    return Ok((!v.is_null(j)).then(|| v.value(j).to_string()));
+                }
+                if let Some(v) = values.as_any().downcast_ref::<LargeStringArray>() {
+                    return Ok((!v.is_null(j)).then(|| v.value(j).to_string()));
+                }
+                Err(BuildError::Schema {
                     path: path.to_path_buf(),
                     detail: format!(
                         "the roster column '{name}' is a list of {:?}, and a gate's labels are \
-                         strings (views §6)",
+                         strings: `list<string>` or `large_list<string>`, of `utf8` or \
+                         `large_utf8` (views §6)",
                         values.data_type()
                     ),
-                })?;
+                })
+            };
+            (lo..hi)
+                .map(|j| {
+                    label(j)?.ok_or_else(|| BuildError::Schema {
+                        path: path.to_path_buf(),
+                        detail: format!(
+                            "the roster column '{name}' carries a null element in row {i}, and \
+                             each element of a gate is one label (views §6)"
+                        ),
+                    })
+                })
+                .collect::<Result<Vec<_>>>()
+        };
+        if let Some(list) = column.as_any().downcast_ref::<ListArray>() {
             let offsets = list.value_offsets();
             return (0..list.len())
-                .map(|i| {
-                    if list.is_null(i) {
-                        return Ok(None);
-                    }
-                    (offsets[i]..offsets[i + 1])
-                        .map(|j| {
-                            let j = j as usize;
-                            if labels.is_null(j) {
-                                return Err(BuildError::Schema {
-                                    path: path.to_path_buf(),
-                                    detail: format!(
-                                        "the roster column '{name}' carries a null element in \
-                                         row {i}, and each element of a gate is one label \
-                                         (views §6)"
-                                    ),
-                                });
-                            }
-                            Ok(labels.value(j).to_string())
-                        })
-                        .collect::<Result<Vec<_>>>()
-                        .map(Some)
+                .map(|i| match list.is_null(i) {
+                    true => Ok(None),
+                    false => row(list.values(), i, offsets[i] as usize, offsets[i + 1] as usize)
+                        .map(Some),
+                })
+                .collect();
+        }
+        if let Some(list) = column.as_any().downcast_ref::<LargeListArray>() {
+            let offsets = list.value_offsets();
+            return (0..list.len())
+                .map(|i| match list.is_null(i) {
+                    true => Ok(None),
+                    false => row(list.values(), i, offsets[i] as usize, offsets[i + 1] as usize)
+                        .map(Some),
                 })
                 .collect();
         }

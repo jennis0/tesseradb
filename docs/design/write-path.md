@@ -209,7 +209,7 @@ one view; 422 when ambiguous). In order, before anything is owed:
    or a wrong type is a 422 naming the column, never a silent drop. **The row cap**
    (`ingest_max_batch_rows`, 10,000) is a 422; it necessarily fires after the decode (the row
    count is not knowable earlier), which is why the byte cap sits a layer before it.
-5. **Terms.** Each item's `access` bytes go through the caller's plugin (`terms_of_label`) and
+5. **Terms.** Each item's `access` list goes through the caller's plugin (`terms_of_labels`) and
    the descriptors are interned. An item exceeding the declared per-item term bound is **indexed
    anyway and warned** — counted in `over_bound`, its external id (base64) in `over_bound_ids`
    up to 100 — because a monotone predicate with more terms intends broader visibility, and a
