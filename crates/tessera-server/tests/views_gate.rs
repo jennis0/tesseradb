@@ -13,10 +13,15 @@
 //! - **The refusal is the refusal an unknown name gets** — same status, same detail shape — for a
 //!   gated view and for a key nobody declared. A different code, or a different sentence, is the
 //!   oracle the filtering exists to prevent.
-//! - **Intersection, not the conservative label join.** `atlas` is gated `finance,legal`: a
-//!   principal holding *either* term reaches it and a principal holding *neither* does not. Under
-//!   the required-set reading a disjunctive gate has an empty required set and **every** principal
-//!   passes, so the outsider's 404 on `atlas` is the assertion that separates the two semantics.
+//! - **Intersection, not the conservative label join.** `atlas` is gated on the list
+//!   `["finance", "legal"]`: a principal holding *either* term reaches it and a principal holding
+//!   *neither* does not. Under the required-set reading a disjunctive gate has an empty required
+//!   set and **every** principal passes, so the outsider's 404 on `atlas` is the assertion that
+//!   separates the two semantics.
+//! - **A gate's label is one label** (decision 0132). `ledger` is gated on the one label
+//!   `finance,legal`, which is one term with a comma in it: the principal holding that term
+//!   reaches it, and a principal holding `finance`, `legal` or both does not. A reader that split
+//!   the label would gate `ledger` as `atlas` is gated.
 //! - **The scoped surface collapses whole** (`views.md` §5): for a principal who cannot reach the
 //!   owning group, `sentiment` is undeclared — absent from `filter_operands`, and both leaf
 //!   spellings, bare and pinned, take the ordinary unknown-column `422` that names no group.
@@ -72,14 +77,23 @@ fn label_of(e: u64) -> &'static str {
 /// sees, and the one this file's indistinguishability cases are built on.
 const GATED_QUARTER_KEY: &str = "2026-Q3";
 
-const QUARTERS: [(&str, std::ops::Range<u64>, Option<&str>); 4] = [
+/// A quarter's key, its entities, and its own gate as a list of labels (decision 0132).
+type Quarter = (&'static str, std::ops::Range<u64>, Option<&'static [&'static str]>);
+
+const QUARTERS: [Quarter; 4] = [
     ("2026-Q1", 0..15, None),
     ("2026-Q2", 10..30, None),
     // **A gated view inside a public group**: the group's gate passes for everyone and this one
     // does not, so a failing principal reads the roster with this key simply absent.
-    ("2026-Q3", 5..25, Some("finance")),
+    ("2026-Q3", 5..25, Some(&["finance"])),
     ("2026-Q4", 8..28, None),
 ];
+
+/// The one label `ledger` is gated on: one term, the comma being part of it (decision 0132).
+/// Its entities lie outside every other view's range, so interning the term touches no other
+/// entity's label set.
+const COMMA_TERM: &str = "finance,legal";
+const LEDGER: std::ops::Range<u64> = 40..50;
 
 /// The `sealed` group's own roster. The **group** is gated, so a failing principal sees neither
 /// row nor view nor the attribute scoped to it.
@@ -148,6 +162,18 @@ fn tint(ordinal: usize, e: u64) -> &'static str {
 /// A points file: geometry, the entity's own access label, and — for a view of `sealed` — that
 /// view's own columns of the five scoped families.
 fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>, scoped: Option<usize>) {
+    write_points_labelled(path, view, ids, scoped, label_of)
+}
+
+/// [`write_points`] with the entity's label chosen by the caller, for the one view whose
+/// entities carry a term no other file interns.
+fn write_points_labelled(
+    path: &Path,
+    view: &str,
+    ids: std::ops::Range<u64>,
+    scoped: Option<usize>,
+    label_of: fn(u64) -> &'static str,
+) {
     let mut fields = vec![
         Field::new("entity_id", DataType::UInt64, false),
         Field::new("x", DataType::Float64, false),
@@ -210,7 +236,7 @@ fn group_frame() -> Quantisation {
     }
 }
 
-fn view_args(view: &str, points: &Path, visibility: Option<&str>) -> ViewArgs {
+fn view_args(view: &str, points: &Path, visibility: Option<&[&str]>) -> ViewArgs {
     ViewArgs {
         view_id: view.to_string(),
         projection: tessera_spatial::Projection::None,
@@ -224,8 +250,13 @@ fn view_args(view: &str, points: &Path, visibility: Option<&str>) -> ViewArgs {
             source: AccessSource::Field("access".to_string()),
             default: "public".to_string(),
         },
-        visibility: visibility.map(str::to_string),
+        visibility: visibility.map(labels),
     }
+}
+
+/// A gate as the manifest stores it: one term per element (decision 0132).
+fn labels(labels: &[&str]) -> Vec<String> {
+    labels.iter().map(|l| l.to_string()).collect()
 }
 
 fn sealed_family(attribute: Attribute, views: Vec<usize>) -> ScopedColumnFamily {
@@ -237,12 +268,12 @@ fn sealed_family(attribute: Attribute, views: Vec<usize>) -> ScopedColumnFamily 
     }
 }
 
-fn roster(views: &[(&str, Option<&str>)]) -> Vec<GroupViewDescriptor> {
+fn roster(views: &[(&str, Option<&[&str]>)]) -> Vec<GroupViewDescriptor> {
     views
         .iter()
         .map(|(key, visibility)| GroupViewDescriptor {
             key: key.to_string(),
-            visibility: visibility.map(str::to_string),
+            visibility: visibility.map(labels),
             metadata: Default::default(),
         })
         .collect()
@@ -255,11 +286,16 @@ fn build_gated(dir: &Path) -> std::path::PathBuf {
     write_points(&world_points, "world", 0..20, None);
     let atlas_points = dir.join("atlas.parquet");
     write_points(&atlas_points, "atlas", 0..20, None);
+    let ledger_points = dir.join("ledger.parquet");
+    write_points_labelled(&ledger_points, "ledger", LEDGER, None, |_| COMMA_TERM);
     let mut views = vec![
         view_args("world", &world_points, None),
-        // **A disjunctive gate.** `builtin:passthrough` splits a label on commas, so this is the
-        // term set {finance, legal} and the gate is satisfied by intersection with the principal's.
-        view_args("atlas", &atlas_points, Some("finance,legal")),
+        // **A disjunctive gate.** A gate wanting several terms declares them as a list
+        // (decision 0132): this is the term set {finance, legal}, and the gate is satisfied by
+        // intersection with the principal's.
+        view_args("atlas", &atlas_points, Some(&["finance", "legal"])),
+        // **One label with a comma in it**: one term, gating exactly the principals who hold it.
+        view_args("ledger", &ledger_points, Some(&[COMMA_TERM])),
     ];
     for (key, members, visibility) in QUARTERS {
         let id = format!("quarter:{key}");
@@ -296,7 +332,7 @@ fn build_gated(dir: &Path) -> std::path::PathBuf {
                 name: "sealed".to_string(),
                 members_of: None,
                 // **The group's own gate, the outer bound over its whole roster.**
-                visibility: Some("finance".to_string()),
+                visibility: Some(labels(&["finance"])),
                 views: roster(&SEALED.map(|(key, _)| (key, None))),
                 quantisation: group_frame(),
                 projection: tessera_spatial::Projection::None,
@@ -612,7 +648,7 @@ async fn meta_publishes_the_views_a_principal_may_reach_and_no_others() {
 }
 
 /// **The gate is satisfied by intersection** (`views.md` §6.1), which is what a disjunctive gate
-/// needs: `atlas` is `finance,legal`, and either term alone reaches it.
+/// needs: `atlas` is gated on the list `["finance", "legal"]`, and either term alone reaches it.
 ///
 /// The **discriminating** assertion is the outsider's, not the holders'. Under the conservative
 /// label join's required-set reading a disjunctive gate yields an empty required set, which is
@@ -624,7 +660,7 @@ async fn a_disjunctive_gate_admits_either_term_and_neither_admits_nobody() {
         let held = meta(&served, &token(&served, &[term]).await).await;
         assert!(
             view_ids(&held).contains("atlas"),
-            "'{term}' alone satisfies the gate `finance,legal`"
+            "'{term}' alone satisfies the gate [\"finance\", \"legal\"]"
         );
     }
     let out = meta(&served, &token(&served, &[]).await).await;
@@ -643,6 +679,34 @@ async fn a_disjunctive_gate_admits_either_term_and_neither_admits_nobody() {
         !view_ids(&legal).contains("sealed:s1"),
         "holding one term does not satisfy a gate naming another"
     );
+}
+
+/// **A gate's label is one label, taken verbatim** (`views.md` §6, decision 0132): `ledger` is
+/// gated on `finance,legal`, which is one term with a comma in it. The principal holding that
+/// term reaches the view; a principal holding `finance`, `legal` or both does not, because none of
+/// those is the term. A reader that split the label on the comma would admit all three and gate
+/// `ledger` exactly as `atlas` is gated, so the holders of the fragments are the discriminating
+/// assertion.
+#[tokio::test]
+async fn a_label_containing_a_comma_is_one_term() {
+    let served = serve().await;
+    let held = meta(&served, &token(&served, &[COMMA_TERM]).await).await;
+    assert!(
+        view_ids(&held).contains("ledger"),
+        "the principal holding the term `finance,legal` reaches the view gated on it"
+    );
+    assert!(
+        !view_ids(&held).contains("atlas"),
+        "and that term is neither `finance` nor `legal`, so it does not open `atlas`"
+    );
+    for fragments in [&["finance"][..], &["legal"], &["finance", "legal"]] {
+        let out = meta(&served, &token(&served, fragments).await).await;
+        assert!(
+            !view_ids(&out).contains("ledger"),
+            "{fragments:?} does not satisfy the one-label gate `finance,legal`: a fragment of a \
+             label is not the label"
+        );
+    }
 }
 
 /// **Each served layer's `views` list is inside the gate too** — the gate governs every
@@ -1090,9 +1154,11 @@ async fn a_view_created_after_a_session_authorised_waits_for_re_authorisation() 
     );
 }
 
-/// **A created view may carry a gate, and the label is checked against the plugin that will
-/// evaluate it.** A label naming no terms is refused rather than stored: it would be a gate
-/// satisfied by nobody, the view reachable by no principal including its author.
+/// **A created view may carry a gate, and the labels are checked against the plugin that will
+/// evaluate them** (decision 0132). One label is a string and several are a list, each element
+/// one term; a gate naming no terms, or carrying an empty element, is refused rather than stored:
+/// it would be a gate satisfied by nobody, the view reachable by no principal including its
+/// author.
 #[tokio::test]
 async fn a_create_takes_a_gate_and_refuses_one_no_principal_could_satisfy() {
     let served = serve().await;
@@ -1108,20 +1174,50 @@ async fn a_create_takes_a_gate_and_refuses_one_no_principal_could_satisfy() {
         201
     );
     assert_eq!(
-        create_view(&served, "quarter", "empty", json!({"visibility": " , , "}))
+        create_view(
+            &served,
+            "quarter",
+            "either",
+            json!({"visibility": ["finance", "legal"]})
+        )
+        .await
+        .status(),
+        201,
+        "a list declares one term per element"
+    );
+    assert_eq!(
+        create_view(&served, "quarter", "empty", json!({"visibility": []}))
             .await
             .status(),
         422,
-        "a label naming no terms is refused at acceptance"
+        "a gate naming no terms is refused at acceptance"
+    );
+    assert_eq!(
+        create_view(&served, "quarter", "hole", json!({"visibility": ["finance", ""]}))
+            .await
+            .status(),
+        422,
+        "an empty element is no label, and is refused at acceptance"
     );
 
     let holder = token(&served, &["finance"]).await;
+    let legal = token(&served, &["legal"]).await;
     let outsider = token(&served, &[]).await;
     assert!(view_ids(&meta(&served, &holder).await).contains("quarter:gated"));
     assert!(!view_ids(&meta(&served, &outsider).await).contains("quarter:gated"));
     assert_eq!(
         viewport(&served, &outsider, "quarter:gated", None).await.0,
         404
+    );
+    for (name, token) in [("finance", &holder), ("legal", &legal)] {
+        assert!(
+            view_ids(&meta(&served, token).await).contains("quarter:either"),
+            "'{name}' alone satisfies the gate created as [\"finance\", \"legal\"]"
+        );
+    }
+    assert!(
+        !view_ids(&meta(&served, &outsider).await).contains("quarter:either"),
+        "and a principal holding neither does not"
     );
 }
 
@@ -1356,7 +1452,7 @@ fn build_shared_sealed(dir: &Path) -> std::path::PathBuf {
         family_views.push(views.len());
         // `s2` carries a view gate inside the group, so a `finance` holder reaches its key only
         // through the public sharer.
-        let gate = (*key == "s2").then_some("legal");
+        let gate: Option<&[&str]> = (*key == "s2").then_some(&["legal"]);
         views.push(view_args(&id, &points, gate));
     }
     // The sharer's views: public, a different layout over the same keys, and carrying no scoped
@@ -1377,8 +1473,8 @@ fn build_shared_sealed(dir: &Path) -> std::path::PathBuf {
                 title: None,
                 name: "sealed".to_string(),
                 members_of: None,
-                visibility: Some("finance".to_string()),
-                views: roster(&[("s1", None), ("s2", Some("legal"))]),
+                visibility: Some(labels(&["finance"])),
+                views: roster(&[("s1", None), ("s2", Some(&["legal"]))]),
                 quantisation: group_frame(),
                 projection: tessera_spatial::Projection::None,
                 metadata: Vec::new(),

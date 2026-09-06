@@ -1809,14 +1809,6 @@ struct ParkingPlugin {
 }
 
 impl tessera_plugin::Plugin for ParkingPlugin {
-    fn terms_of_label(
-        &self,
-        access: &[u8],
-    ) -> Result<Vec<tessera_plugin::Descriptor>, tessera_plugin::PluginError> {
-        // A view gate's label; `/control/ingest` never reaches it (decision 0129).
-        self.inner.terms_of_label(access)
-    }
-
     fn terms_of_labels(
         &self,
         labels: &[tessera_plugin::Descriptor],

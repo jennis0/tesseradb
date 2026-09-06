@@ -52,7 +52,7 @@ is unchanged (expr §3).
 
 | | Today (§6.1) | This design |
 |---|---|---|
-| `terms_of_label` returns | set of term descriptors | one expression over atomic-token descriptors |
+| `terms_of_labels` returns | one term descriptor per label | one expression over atomic-token descriptors |
 | `terms_of_auth` returns | set of *satisfied* term descriptors | set of *held* atomic-token descriptors |
 | Boolean structure lives | in both plugins, twice, agreeing by I5 | in the core, once |
 | Visibility rule | term sets intersect | expression evaluates true over held tokens |

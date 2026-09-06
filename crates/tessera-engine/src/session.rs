@@ -2669,7 +2669,7 @@ impl Engine {
     }
 
     /// The plugin this engine was opened with — the `/control/ingest` handler calls
-    /// `terms_of_label` through this to turn an item's `access` bytes into descriptors.
+    /// `terms_of_labels` through this to turn an item's `access` labels into descriptors.
     pub fn plugin(&self) -> &Arc<dyn Plugin> {
         &self.plugin
     }
@@ -3415,41 +3415,60 @@ impl Engine {
     /// is state only the write executor may read — a handler that checked first could be
     /// overtaken between its check and the enqueue.
     ///
-    /// The **gate label** is the exception, and it is here because only the engine holds the
-    /// plugin. A view's gate is satisfied by exactly the item-visibility predicate
-    /// (`views.md` §6), so the label is put through the same [`Plugin::terms_of_label`] call an
-    /// item's `access` bytes take at `/control/ingest`, and a label the plugin cannot read — or
-    /// one that names no terms at all — is refused rather than stored. Stored, it would be a gate
-    /// no principal could ever satisfy: a view created and reachable by nobody, including the
-    /// operator who created it. `public` is not asked about — it is the label every principal
-    /// holds inside the trust boundary (decision 0088), and the roster stores its absence.
+    /// The **gate's labels** are the exception, and they are here because only the engine holds
+    /// the plugin. A view's gate is satisfied by exactly the item-visibility predicate
+    /// (`views.md` §6), so the labels are put through the same [`Plugin::terms_of_labels`] call
+    /// an item's `access` list takes at `/control/ingest`, each element one label taken verbatim
+    /// (decision 0132), and a list the plugin cannot read — an empty element, or no element at
+    /// all — is refused rather than stored. Stored, it would be a gate no principal could ever
+    /// satisfy: a view created and reachable by nobody, including the operator who created it.
+    /// `public` is not asked about — it is the label every principal holds inside the trust
+    /// boundary (decision 0088), and the roster stores its absence. It is recognised only as the
+    /// whole of the list: beside another label it would be a gate everybody passes, spelled as
+    /// if it were narrower.
     pub fn create_view(
         &self,
         group: String,
         key: String,
-        visibility: Option<String>,
+        visibility: Option<Vec<String>>,
         metadata: std::collections::BTreeMap<String, tessera_types::view::ViewMetadataValue>,
     ) -> std::result::Result<(), crate::write::AcceptError> {
-        if let Some(label) = visibility.as_deref().filter(|l| {
-            *l != std::str::from_utf8(tessera_authz::PUBLIC_LABEL).expect("the label is ASCII")
-        }) {
+        let public = std::str::from_utf8(tessera_authz::PUBLIC_LABEL).expect("the label is ASCII");
+        if let Some(labels) = visibility.as_deref().filter(|l| *l != [public]) {
             let refused = |detail: String| {
                 crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::LayerRefused {
                     detail,
                 })
             };
-            let descriptors = self.plugin.terms_of_label(label.as_bytes()).map_err(|e| {
+            if labels.is_empty() {
+                return Err(refused(
+                    "visibility = [] names no terms. A gate is satisfied where its term set meets \
+                     the principal's, so an empty one is satisfied by nobody and the view would be \
+                     reachable by no principal at all. Write `public`, or the labels the gate \
+                     names, one per element (views §6)"
+                        .to_string(),
+                ));
+            }
+            if labels.iter().any(|l| l == public) {
+                return Err(refused(format!(
+                    "visibility = {labels:?} lists `public` beside another label. `public` is the \
+                     label every principal holds, so a gate naming it is satisfied by everybody; \
+                     write `public` alone, or leave it out of the list (views §6)"
+                )));
+            }
+            let descriptors: Vec<Vec<u8>> = labels.iter().map(|l| l.as_bytes().to_vec()).collect();
+            let descriptors = self.plugin.terms_of_labels(&descriptors).map_err(|e| {
                 refused(format!(
-                    "visibility = '{label}' is not a label the plugin can read ({e}). A view's \
-                     gate is satisfied by the item-visibility predicate (views §6), so a label the \
-                     plugin cannot turn into terms is one no principal could satisfy"
+                    "visibility = {labels:?} is not a label list the plugin can read ({e}). A \
+                     view's gate is satisfied by the item-visibility predicate (views §6), so a \
+                     label the plugin cannot turn into a term is one no principal could satisfy"
                 ))
             })?;
             if descriptors.is_empty() {
                 return Err(refused(format!(
-                    "visibility = '{label}' names no terms. A gate is satisfied where its term \
+                    "visibility = {labels:?} names no terms. A gate is satisfied where its term \
                      set meets the principal's, so an empty one is satisfied by nobody and the \
-                     view would be reachable by no principal at all. Write `public`, or a label \
+                     view would be reachable by no principal at all. Write `public`, or labels \
                      naming terms"
                 )));
             }

@@ -1076,13 +1076,6 @@ fn engine_open_refuses_an_out_of_range_allocator_seed() {
 struct RelabellingPlugin;
 
 impl tessera_plugin::Plugin for RelabellingPlugin {
-    fn terms_of_label(
-        &self,
-        access: &[u8],
-    ) -> Result<Vec<tessera_plugin::Descriptor>, tessera_plugin::PluginError> {
-        Passthrough::new().terms_of_label(access)
-    }
-
     fn terms_of_labels(
         &self,
         labels: &[tessera_plugin::Descriptor],

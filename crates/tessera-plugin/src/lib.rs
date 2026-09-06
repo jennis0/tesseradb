@@ -75,28 +75,19 @@ impl std::error::Error for PluginError {}
 
 /// The plugin surface, mirroring the ABI's entry points (contracts §4).
 pub trait Plugin: Send + Sync {
-    /// Map one label string to the descriptors it names (the *data* side, scalar form).
+    /// Map a list of labels, one element each, to the descriptors they name (the *data* side).
     ///
-    /// The callers are a view gate's `visibility` label (`views.md` §6), compiled at the build
-    /// and checked when a view is created while the service runs. An item's labels do not come
-    /// through here: both entry points carry them as a list and take
-    /// [`Plugin::terms_of_labels`] (decision 0129).
+    /// Every label reader takes this call: a points file's term column at the build, the wire's
+    /// `access` column at `/control/ingest` (decision 0129), and a view gate's `visibility` at
+    /// the declaration, at `PUT /control/views/{group}/{key}` and at authorise (decision 0132).
+    /// Each is a list with one label per element, so there is nothing to parse and no separator
+    /// a label's own bytes could be split on.
+    ///
+    /// Required, without a default. A default would be a labelling rule a plugin author never
+    /// wrote; a plugin that folds or rewrites terms must say so here in its own words or not
+    /// compile.
     ///
     /// Deterministic: identical bytes in, identical descriptors out, every time.
-    fn terms_of_label(&self, access: &[u8]) -> Result<Vec<Descriptor>, PluginError>;
-
-    /// Map an item's labels, one element each, to its authorisation descriptors (the *data* side,
-    /// list form).
-    ///
-    /// This is the entry point both the build and `/control/ingest` use: a points file's term
-    /// column and the wire's `access` column are each a list with one label per element, so
-    /// there is nothing to parse and nothing a separator could split wrongly.
-    ///
-    /// Required, deliberately without a default. A default would be a labelling rule a plugin
-    /// author never wrote, silently inherited; a plugin that folds or rewrites terms must say so
-    /// here in its own words or not compile.
-    ///
-    /// Deterministic, on the same terms as [`Plugin::terms_of_label`].
     fn terms_of_labels(&self, labels: &[Descriptor]) -> Result<Vec<Descriptor>, PluginError>;
 
     /// Map a credential's `auth_data` bytes to the descriptors it authorises (the *auth* side).
@@ -135,10 +126,8 @@ pub trait Plugin: Send + Sync {
 /// `builtin:passthrough`: the identity plugin, and the only one this build can run. The
 /// conformance oracle implements the same mapping.
 ///
-/// * an item's label *list* — a points file's term column at the build, the wire's `access`
-///   column at ingest — is taken verbatim, one descriptor per element.
-/// * a single label string (a view gate's) is a UTF-8 comma-separated descriptor list — split
-///   on `,`, trim, drop empties.
+/// * a label list — a points file's term column at the build, the wire's `access` column at
+///   ingest, a view gate's `visibility` — is taken verbatim, one descriptor per element.
 /// * `auth_data` is JSON `{"terms": ["<descriptor>", …]}`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Passthrough;
@@ -156,17 +145,6 @@ impl Passthrough {
 }
 
 impl Plugin for Passthrough {
-    fn terms_of_label(&self, access: &[u8]) -> Result<Vec<Descriptor>, PluginError> {
-        let text = std::str::from_utf8(access)
-            .map_err(|e| PluginError::Malformed(format!("access is not valid UTF-8: {e}")))?;
-        Ok(text
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| s.as_bytes().to_vec())
-            .collect())
-    }
-
     /// The identity — and identity is a *rule*, not the absence of one.
     ///
     /// Each label's bytes become exactly one descriptor, verbatim and in the order given: no
@@ -259,28 +237,6 @@ fn hex_lower(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn terms_of_label_splits_trims_and_drops_empties() {
-        let p = Passthrough::new();
-        assert_eq!(
-            p.terms_of_label(b" 1207 ,, 9,cs.LG,").unwrap(),
-            vec![b"1207".to_vec(), b"9".to_vec(), b"cs.LG".to_vec()]
-        );
-    }
-
-    #[test]
-    fn empty_label_yields_no_terms() {
-        let p = Passthrough::new();
-        assert!(p.terms_of_label(b"").unwrap().is_empty());
-        assert!(p.terms_of_label(b" , , ").unwrap().is_empty());
-    }
-
-    #[test]
-    fn terms_of_label_rejects_non_utf8() {
-        let p = Passthrough::new();
-        assert!(p.terms_of_label(&[0xff, 0xfe]).is_err());
-    }
 
     #[test]
     fn terms_of_labels_is_the_identity_one_descriptor_per_label() {

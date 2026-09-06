@@ -482,8 +482,9 @@ pub struct ViewDescriptor {
     /// as `none` is the misread again.
     #[serde(with = "projection_name")]
     pub projection: Projection,
-    /// **This view's own gate** (`views.md` §6): an access label a principal must satisfy to reach
-    /// the view at all, or `None` for `public` — the label every principal holds by construction
+    /// **This view's own gate** (`views.md` §6): the labels a principal must hold one of to reach
+    /// the view at all, each element one term taken verbatim (decision 0132), or `None` for
+    /// `public` — the label every principal holds by construction
     /// ([decision 0088](../../../docs/decisions/0088-visibility-is-two-axes-and-the-membership-test-is-one.md)),
     /// which is why the ordinary case stores nothing rather than storing the word.
     ///
@@ -499,7 +500,7 @@ pub struct ViewDescriptor {
     /// **Required, not `default`.** A gate that went missing would read as `public`, which is the
     /// one direction a disclosure control must not fail in; a manifest omitting it is malformed
     /// rather than ungated. No bundle predates the field (decision 0048).
-    pub visibility: Option<String>,
+    pub visibility: Option<Vec<String>>,
 }
 
 /// `groups` entry: one view group and its roster (`views.md` §3.1, §3.2).
@@ -549,8 +550,9 @@ pub struct GroupDescriptor {
     /// two layouts, and which principals may see each layout is a fact about the layout
     /// (`views.md` §3.3).
     ///
-    /// Required, for the reason [`ViewDescriptor::visibility`] gives.
-    pub visibility: Option<String>,
+    /// Required, for the reason [`ViewDescriptor::visibility`] gives, and in the same shape: a
+    /// list of labels, each one term.
+    pub visibility: Option<Vec<String>>,
     /// The roster, in creation order — which at a build is declaration order, and afterwards is
     /// the order the creations were appended in (`views.md` §3.2). There is no stored number: the
     /// order is the record order (decision 0113).
@@ -709,7 +711,7 @@ pub struct GroupViewDescriptor {
     /// being checked equal at [`Manifest::validate_groups`]: one input decides a view's own half
     /// of the gate whether the view is a plain one or a group's, and the copy that would otherwise
     /// drift is refused at open instead.
-    pub visibility: Option<String>,
+    pub visibility: Option<Vec<String>>,
     /// The typed per-view values this view carries, one per name the owning group declared.
     /// Empty on a `members` group's views, whose metadata belongs to the owner.
     pub metadata: BTreeMap<String, ViewMetadataValue>,
@@ -850,8 +852,8 @@ impl Manifest {
                 if descriptor.visibility != view.visibility {
                     return Err(format!(
                         "view '{id}' records the gate {:?} and the roster of group '{}' records \
-                         {:?}; a view's gate is one label, published on the roster and evaluated \
-                         from the view (views §6)",
+                         {:?}; a view's gate is one list of labels, published on the roster and \
+                         evaluated from the view (views §6)",
                         descriptor.visibility, group.name, view.visibility
                     ));
                 }

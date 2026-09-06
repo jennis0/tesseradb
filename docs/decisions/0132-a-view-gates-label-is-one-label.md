@@ -1,6 +1,6 @@
 # 0132 — A view gate's label is one label
 
-**Date:** 2026-09-06 · **Status:** Settled (owner ruling) · ⊘ not yet built
+**Date:** 2026-09-06 · **Status:** Settled (owner ruling) · Built 2026-09-06 (contracts §3.4 r79)
 
 ## What this answers
 

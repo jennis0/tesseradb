@@ -2393,9 +2393,10 @@ mod tests {
 #[derive(Debug, Clone)]
 pub struct RosterRow {
     pub key: String,
-    /// The view's own gate, where the table carries a `visibility` column and this row a value.
-    /// `None` takes the group's (`views.md` §6).
-    pub visibility: Option<String>,
+    /// The view's own gate, where the table carries a `visibility` column and this row a value:
+    /// one label from a string column, or the elements of a `list<string>` column, each one
+    /// label verbatim (`views.md` §6, decision 0132). `None` takes the group's.
+    pub visibility: Option<Vec<String>>,
     pub metadata: std::collections::BTreeMap<String, crate::config::MetadataValue>,
 }
 
@@ -2408,7 +2409,8 @@ pub struct RosterRow {
 /// one an update fills in later — the same rule the inline block is held to.
 ///
 /// `visibility` is the one optional column: a table carrying none is a roster of views that all
-/// take the group's gate.
+/// take the group's gate. Where it is carried it is a `string` — one label per row — or a
+/// `list<string>` whose elements are the row's labels, each one term (decision 0132).
 pub fn read_roster_table(
     path: &Path,
     fields: &Fields,
@@ -2481,12 +2483,79 @@ pub fn read_roster_table(
         })
     }
 
+    /// The gate column's rows as label lists: a string column is one label per row, a list
+    /// column is the row's labels, and a null row is no gate of its own. Both list widths and
+    /// both string widths are read, as the `access` column's are (contracts §3.4 r78): the width
+    /// is the writer's choice and says nothing about the labels.
+    fn gates(
+        path: &Path,
+        column: &arrow::array::ArrayRef,
+        name: &str,
+    ) -> Result<Vec<Option<Vec<String>>>> {
+        use arrow::array::{Array as _, LargeListArray, ListArray};
+        // One row's labels out of the list's value array, `lo..hi` being its offsets.
+        let row = |values: &arrow::array::ArrayRef, i: usize, lo: usize, hi: usize| {
+            let label = |j: usize| -> Result<Option<String>> {
+                if let Some(v) = values.as_any().downcast_ref::<StringArray>() {
+                    return Ok((!v.is_null(j)).then(|| v.value(j).to_string()));
+                }
+                if let Some(v) = values.as_any().downcast_ref::<LargeStringArray>() {
+                    return Ok((!v.is_null(j)).then(|| v.value(j).to_string()));
+                }
+                Err(BuildError::Schema {
+                    path: path.to_path_buf(),
+                    detail: format!(
+                        "the roster column '{name}' is a list of {:?}, and a gate's labels are \
+                         strings: `list<string>` or `large_list<string>`, of `utf8` or \
+                         `large_utf8` (views §6)",
+                        values.data_type()
+                    ),
+                })
+            };
+            (lo..hi)
+                .map(|j| {
+                    label(j)?.ok_or_else(|| BuildError::Schema {
+                        path: path.to_path_buf(),
+                        detail: format!(
+                            "the roster column '{name}' carries a null element in row {i}, and \
+                             each element of a gate is one label (views §6)"
+                        ),
+                    })
+                })
+                .collect::<Result<Vec<_>>>()
+        };
+        if let Some(list) = column.as_any().downcast_ref::<ListArray>() {
+            let offsets = list.value_offsets();
+            return (0..list.len())
+                .map(|i| match list.is_null(i) {
+                    true => Ok(None),
+                    false => row(list.values(), i, offsets[i] as usize, offsets[i + 1] as usize)
+                        .map(Some),
+                })
+                .collect();
+        }
+        if let Some(list) = column.as_any().downcast_ref::<LargeListArray>() {
+            let offsets = list.value_offsets();
+            return (0..list.len())
+                .map(|i| match list.is_null(i) {
+                    true => Ok(None),
+                    false => row(list.values(), i, offsets[i] as usize, offsets[i + 1] as usize)
+                        .map(Some),
+                })
+                .collect();
+        }
+        Ok(strings(path, column, name)?
+            .into_iter()
+            .map(|label| label.map(|l| vec![l]))
+            .collect())
+    }
+
     let mut rows: Vec<RosterRow> = Vec::new();
     for batch in reader {
         let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
         let keys = strings(path, batch.column(key_idx), &key_name)?;
         let gates = match visibility_idx {
-            Some(idx) => strings(path, batch.column(idx), &visibility_name)?,
+            Some(idx) => gates(path, batch.column(idx), &visibility_name)?,
             None => vec![None; keys.len()],
         };
         // One decode per column per batch, as every other reader here does: the roster is a

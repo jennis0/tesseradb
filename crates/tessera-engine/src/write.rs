@@ -3131,7 +3131,7 @@ impl WritePath {
         &self,
         group: String,
         key: String,
-        visibility: Option<String>,
+        visibility: Option<Vec<String>>,
         metadata: std::collections::BTreeMap<String, tessera_types::view::ViewMetadataValue>,
     ) -> Result<(), AcceptError> {
         let receipt = self.handle()?.submit(Command::CreateView {
@@ -11568,7 +11568,7 @@ impl Executor {
         &mut self,
         group: String,
         key: String,
-        visibility: Option<String>,
+        visibility: Option<Vec<String>>,
         metadata: std::collections::BTreeMap<String, tessera_types::view::ViewMetadataValue>,
         respond: Responder,
     ) {

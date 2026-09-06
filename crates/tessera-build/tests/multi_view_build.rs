@@ -652,6 +652,93 @@ fields = { key = "quarter" }
     assert_eq!(config.anchor_view(&registry).expect("the anchor"), 0);
 }
 
+/// **A roster table's `visibility` column may be a list, at either width** (`views.md` §6,
+/// decision 0132): each element is one label taken verbatim, a comma included, and the list
+/// width and the string width are the writer's choice. `large_list<large_utf8>` is the widest
+/// spelling and the one a reader of `list<utf8>` alone would refuse.
+#[test]
+fn a_roster_tables_gate_column_may_be_a_large_list_of_large_strings() {
+    use arrow::array::{Int64Array, LargeListArray, LargeStringArray, StringArray};
+    use arrow::buffer::OffsetBuffer;
+
+    let dir = tempfile::tempdir().unwrap();
+    write_discriminated(
+        &dir.path().join("quarter-alt.parquet"),
+        &[("2026-Q2", WORLD), ("2026-Q3", QUARTER), ("2026-Q4", QUARTER)],
+    );
+    let roster = dir.path().join("roster.parquet");
+    let gate_field = Arc::new(Field::new("item", DataType::LargeUtf8, false));
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("quarter", DataType::Utf8, false),
+        Field::new("visibility", DataType::LargeList(gate_field.clone()), true),
+        Field::new("label", DataType::Utf8, false),
+        Field::new("starts", DataType::Int64, false),
+    ]));
+    // Q2: two labels; Q3: one label with a comma in it; Q4: null, so the group's gate.
+    let labels = LargeStringArray::from(vec!["finance", "legal", "finance,legal"]);
+    let gates = LargeListArray::try_new(
+        gate_field,
+        OffsetBuffer::new(vec![0i64, 2, 3, 3].into()),
+        Arc::new(labels),
+        Some(vec![true, true, false].into()),
+    )
+    .unwrap();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["2026-Q2", "2026-Q3", "2026-Q4"])),
+            Arc::new(gates),
+            Arc::new(StringArray::from(vec!["Q2", "Q3", "Q4"])),
+            Arc::new(Int64Array::from(vec![1i64, 2, 3])),
+        ],
+    )
+    .unwrap();
+    let mut writer = ArrowWriter::try_new(File::create(&roster).unwrap(), schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+
+    let config = dir.path().join("corpus.toml");
+    std::fs::write(
+        &config,
+        r#"
+[sources]
+alt    = "quarter-alt.parquet"
+roster = "roster.parquet"
+
+[defaults]
+allocation_view = "quarter:2026-Q2"
+
+[[view_group]]
+name             = "quarter"
+extent           = { x = [0.0, 1000.0], y = [0.0, 1000.0] }
+source           = "alt"
+fields           = { view = "quarter" }
+point_visibility = { field = "access", default = "public" }
+metadata         = { label = "text", starts = "timestamp_us" }
+
+[view_group.views]
+source = "roster"
+fields = { key = "quarter" }
+"#,
+    )
+    .unwrap();
+    let config = tessera_build::config::Config::parse(&config, &Default::default())
+        .expect("the declaration parses");
+    let registry = config.build_views().expect("the roster enumerates");
+    let gate_of = |i: usize| registry[i].visibility.clone();
+    assert_eq!(
+        gate_of(0),
+        Some(vec!["finance".to_string(), "legal".to_string()]),
+        "a two-element list is two terms"
+    );
+    assert_eq!(
+        gate_of(1),
+        Some(vec!["finance,legal".to_string()]),
+        "a comma inside an element is part of the label"
+    );
+    assert_eq!(gate_of(2), None, "a null row takes the group's gate");
+}
+
 /// **A listed key with no rows is an empty view** (`views.md` §3.1) — declared, materialised, and
 /// holding nobody: its permutation is sentinel everywhere and its segment has no rows.
 #[test]
