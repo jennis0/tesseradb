@@ -448,8 +448,12 @@ is written into **the serving layout the existing pick chooses** (decision 0094)
 The masked count is then whatever the layout's existing path computes — one `and_cardinality` per
 artifact under `rows`, the row-major histogram over `column ∩ M_auth` under the other two — and the
 first draft of this section, which fixed a bitmap per artifact, was fixing the layout the layout
-machinery exists to choose. **Per generation** the per-segment pieces are joined with the row bases
-applied — an O(containers) union for `rows`, a concatenation for the columns.
+machinery exists to choose. **The level's row form is then maintained, not rejoined** (amended
+2026-09-06; `annotation-write-cycle.md` §4.1): a segment's resolved rows are taken into the held
+form once, with the row base applied — a flush extends the form by its segment, a merge clears the
+merged span and takes the merged segment's rows, a shape publication resolves the new shape over
+every live segment and takes that as its delta. *An earlier revision joined per-segment pieces into
+a fresh union on every generation move, a copy of the whole form per flush; that join is gone.*
 
 **Per level — a spatial index over the artifacts.** Each artifact's bounding tiles at depth 8,
 geometry-derived and principal-independent, mapping tile → artifacts
@@ -499,8 +503,12 @@ said at `warn`; a segment no file names — a flushed one — is said at `info`.
 layer moves its level version past every file the prefix holds for it, so until the next fold an
 open re-resolves that layer alone. A merge resolves its merged segment before publishing it, the
 consumed segments' pieces not carrying over. Every route that
-introduces a segment resolves it before the swap; a request finding one unresolved resolves it on
-the request path and warns, so the fallback keeps R2 and the hooks keep the cost budget.
+introduces a segment resolves it before the swap and takes it into the form. The backstop is the
+form's own coverage check, read at every use: a form whose segments do not agree with the row
+space it is asked for is dropped and the level resolved again from every segment, which is a cost
+and never an absent row — so R2 holds by the check and the cost budget by the hooks. *(Amended
+2026-09-06: the earlier request-path resolve of a single unresolved segment went with the piece
+map.)*
 
 **Small shapes are all boundary, and that is the enumerated layout arriving by another door.** A
 neighbourhood two cells across, or a cluster's radius at a fine extent, has no interior tile; every
