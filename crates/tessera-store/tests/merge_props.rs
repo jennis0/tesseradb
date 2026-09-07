@@ -180,6 +180,7 @@ proptest! {
                 identity_key: &key(),
                 shard_id: 0,
                 scalar_schema: &schema,
+                absent_ok: &[],
                 row_base: 0,
                 watermark: 10_000,
                 entity_id_high_water: 10_000,

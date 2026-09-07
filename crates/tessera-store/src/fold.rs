@@ -111,6 +111,10 @@ pub struct FoldRowSpaceSpec<'a> {
     pub identity_key: &'a IdentityKey,
     pub shard_id: u32,
     pub scalar_schema: &'a [(String, ScalarType)],
+    /// The columns of `scalar_schema` an input may lawfully lack (`segment_cursor::gather_scalars`):
+    /// the view's group-scoped render lanes and the columns declared at a running service since
+    /// the inputs were written. Any other column an input lacks fails the operation.
+    pub absent_ok: &'a [String],
     /// `D₀` — the fold plan's tombstone clone (compaction §5), entity ids as a Roaring bitmap
     /// (matching `tessera_lifecycle::Overlay::deleted`'s representation). A row whose entity is a
     /// member is dropped: not appended to the output segment, not scattered into
@@ -280,6 +284,7 @@ pub fn fold_row_space(
         let scalars = gather_scalars(
             &cursor.columns,
             spec.scalar_schema,
+            spec.absent_ok,
             row,
             &cursor.seg_id,
             OP,
@@ -418,6 +423,7 @@ mod tests {
                 identity_key: &key(),
                 shard_id: 0,
                 scalar_schema: &schema(),
+                absent_ok: &[],
                 tombstones,
                 permutation_bound: 8,
             },

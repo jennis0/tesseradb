@@ -4326,6 +4326,26 @@ pub(crate) fn view_scalar_schema_of(
     schema
 }
 
+/// The columns of one view's writer schema an input segment may lawfully lack, for a merge or a
+/// fold of segments written before them (`tessera_store::segment_cursor::gather_scalars`): the
+/// group-scoped render lanes, which begin at `entity_scoped` in the schema (`views.md` §5), and
+/// the entity-scoped columns declared at a running service and not yet folded (`ingest.md` §6.3).
+/// Every other column of the schema is one every input holds, and one missing is a torn segment.
+pub(crate) fn lawful_absences(
+    schema: &[(String, ScalarType)],
+    entity_scoped: usize,
+    runtime: &[String],
+) -> Vec<String> {
+    schema
+        .iter()
+        .enumerate()
+        .filter(|(position, (name, _))| {
+            *position >= entity_scoped || runtime.iter().any(|held| held == name)
+        })
+        .map(|(_, (name, _))| name.clone())
+        .collect()
+}
+
 /// The filterable columns, with the position each occupies in a buffered row's scalar list.
 ///
 /// **Positional against the full `declared_scalars`, not against the render tail.** A row's scalars
@@ -6069,6 +6089,14 @@ impl Executor {
         // **This view's schema, not the bundle's** — the merged segment must carry the scoped
         // render lanes its inputs carry, or the rewrite serves them as absence (`views.md` §5).
         let scalar_schema = view_scalar_schema_of(manifest, &plan.view);
+        let runtime: Vec<String> = self
+            .live
+            .attributes_for_publication()
+            .0
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        let absent_ok = lawful_absences(&scalar_schema, scalar_schema_of(manifest).len(), &runtime);
         let Some(partition_data) = generation.bundle.partitions.get(&plan.partition) else {
             return;
         };
@@ -6084,6 +6112,7 @@ impl Executor {
             identity_key: self.identity_key,
             shard_id: manifest.identity.shard_id,
             scalar_schema,
+            absent_ok,
             watermark: generation.watermark,
             entity_id_high_water: partition_data.manifest.entity_id_high_water,
         };
@@ -6701,6 +6730,23 @@ impl Executor {
                 scoped.into_iter().map(|f| f.name).collect::<Vec<_>>(),
             )
         };
+        // Per view, the columns an input segment may lawfully lack: the runtime columns above and
+        // the view's group-scoped lanes. Any other missing column fails the fold as a torn segment.
+        // Read from `runtime_attributes` rather than from a second snapshot of the live list: a
+        // declaration landing between two reads would put a column on one list and not the other,
+        // and the fold would then either refuse a lawful absence or accept a torn one.
+        let absent_ok: std::collections::BTreeMap<String, Vec<String>> = {
+            let entity_scoped = scalar_schema_of(manifest).len();
+            scalar_schema
+                .iter()
+                .map(|(view, schema)| {
+                    (
+                        view.clone(),
+                        lawful_absences(schema, entity_scoped, &runtime_attributes),
+                    )
+                })
+                .collect()
+        };
         let to_prefix = match crate::compact::next_prefix_name(&self.bundle_root) {
             Ok(prefix) => prefix,
             Err(e) => {
@@ -6719,6 +6765,7 @@ impl Executor {
             identity_key: self.identity_key,
             shard_id: manifest.identity.shard_id,
             scalar_schema,
+            absent_ok,
             runtime_attributes,
             runtime_scoped_attributes,
             // The same never-reused shape a flush's and a merge's `seg_id` have (contracts §2.1).
@@ -12860,9 +12907,7 @@ impl Executor {
         n: u64,
         retired: &croaring::Bitmap,
     ) -> tessera_store::Result<Vec<tessera_store::manifest::MembershipExtent>> {
-        let ready = self
-            .live
-            .with_artifacts(|store| store.repack_all(retired));
+        let ready = self.live.with_artifacts(|store| store.repack_all(retired));
         if ready.is_empty() {
             return Ok(Vec::new());
         }

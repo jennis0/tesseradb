@@ -158,6 +158,11 @@ pub(crate) struct MergeContext {
     pub(crate) identity_key: IdentityKey,
     pub(crate) shard_id: u32,
     pub(crate) scalar_schema: Vec<(String, tessera_spatial::tiler::ScalarType)>,
+    /// The columns an input segment may lawfully lack: the view's group-scoped render lanes and
+    /// the entity-scoped columns declared at a running service and not yet folded
+    /// (`tessera_store::segment_cursor::gather_scalars`). Any other missing column is a torn
+    /// segment and fails the merge.
+    pub(crate) absent_ok: Vec<String>,
     /// The live partition watermark and allocator high-water, **passed through untouched**. A
     /// merge moves neither: deriving `entity_hi + 1` from the inputs would move the watermark
     /// *backwards* on any interior merge, and composition treats everything at or above it as
@@ -224,6 +229,7 @@ pub(crate) fn execute(plan: MergePlan, ctx: MergeContext) -> Result<CompletedMer
             identity_key: &ctx.identity_key,
             shard_id: ctx.shard_id,
             scalar_schema: &ctx.scalar_schema,
+            absent_ok: &ctx.absent_ok,
             row_base: plan.row_base,
             watermark: ctx.watermark,
             entity_id_high_water: ctx.entity_id_high_water,

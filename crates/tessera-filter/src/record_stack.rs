@@ -104,8 +104,10 @@ impl RecordStack {
         })
     }
 
-    /// How many rows [`Self::fields_of`] has decoded from a layer since this stack (or the stack
-    /// it was extended from) was opened.
+    /// How many rows [`Self::fields_of`] and [`Self::for_each_row_in`] have decoded from a layer
+    /// since this stack (or the stack it was extended from) was opened. Both read routes count,
+    /// one per row decoded, or a caller taking the many-row route would report no blob reads at
+    /// all.
     pub fn reads(&self) -> u64 {
         self.reads.load(std::sync::atomic::Ordering::Relaxed)
     }
@@ -146,7 +148,11 @@ impl RecordStack {
         f: &mut dyn FnMut(u32, Vec<RecordField>) -> Result<(), RecordError>,
     ) -> Result<(), RecordError> {
         for layer in &self.layers {
-            layer.for_each_row_in(wanted, f)?;
+            layer.for_each_row_in(wanted, &mut |entity, fields| {
+                self.reads
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                f(entity, fields)
+            })?;
         }
         Ok(())
     }

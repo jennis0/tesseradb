@@ -160,6 +160,7 @@ fn main() {
                     identity_key: &key(),
                     shard_id: 0,
                     scalar_schema: &schema,
+                    absent_ok: &[],
                     row_base: 0,
                     watermark: rows * segments,
                     entity_id_high_water: rows * segments,

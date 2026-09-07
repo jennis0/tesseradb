@@ -232,6 +232,11 @@ fn batch(rows: &[Row], runtime: bool) -> Vec<u8> {
 
 /// Ingest and answer the `tessera_id`s the batch was given, in row order.
 async fn ingest(served: &Served, batch_id: &str, body: Vec<u8>) -> Vec<u64> {
+    ingest_with_receipt(served, batch_id, body).await.0
+}
+
+/// [`ingest`], with the receipt's `padded_columns` beside the ids.
+async fn ingest_with_receipt(served: &Served, batch_id: &str, body: Vec<u8>) -> (Vec<u64>, u64) {
     let resp = served
         .server
         .client
@@ -239,7 +244,7 @@ async fn ingest(served: &Served, batch_id: &str, body: Vec<u8>) -> Vec<u64> {
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", batch_id)
         .header("x-tessera-view", "s0")
-        .header("content-type", "application/octet-stream")
+        .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
         .await
@@ -247,7 +252,7 @@ async fn ingest(served: &Served, batch_id: &str, body: Vec<u8>) -> Vec<u64> {
     let status = resp.status().as_u16();
     let body: Value = resp.json().await.unwrap();
     assert_eq!(status, 200, "batch {batch_id} is accepted: {body}");
-    body["tessera_ids"]
+    let ids = body["tessera_ids"]
         .as_array()
         .unwrap()
         .iter()
@@ -256,7 +261,8 @@ async fn ingest(served: &Served, batch_id: &str, body: Vec<u8>) -> Vec<u64> {
                 .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
                 .unwrap()
         })
-        .collect()
+        .collect();
+    (ids, body["padded_columns"].as_u64().unwrap())
 }
 
 async fn flush(served: &Served) {
@@ -443,13 +449,13 @@ async fn a_batch_carries_the_column_or_omits_it_and_every_reader_answers_it() {
         ),
     )
     .await;
-    let omitting = ingest(
+    let (omitting, padded) = ingest_with_receipt(
         &served,
         "omitting",
         batch(
             &[Row {
                 id: "o1",
-                score: 4.0,
+                score: 40.0,
                 sentiment: None,
                 tag: None,
             }],
@@ -457,6 +463,30 @@ async fn a_batch_carries_the_column_or_omits_it_and_every_reader_answers_it() {
         ),
     )
     .await;
+    assert_eq!(
+        padded, 2,
+        "the receipt counts the declared columns the batch omitted"
+    );
+    // The JSON door pads the same way: a declared column no object names is omitted from the
+    // batch, and one an object names with `null` is a cell absent in that row and nothing padded.
+    let resp = served
+        .server
+        .client
+        .post(served.server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "json-omitting")
+        .header("x-tessera-view", "s0")
+        .header("content-type", "application/json")
+        .body(
+            r#"[{"external_id":"ajE=","x":500.0,"y":500.0,"access":["0"],"score":50.0,"sentiment":null}]"#,
+        )
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let receipt: Value = resp.json().await.unwrap();
+    assert_eq!(status, 200, "{receipt}");
+    assert_eq!(receipt["padded_columns"], json!(1), "{receipt}");
     flush(&served).await;
 
     assert_eq!(
@@ -468,6 +498,13 @@ async fn a_batch_carries_the_column_or_omits_it_and_every_reader_answers_it() {
         filtered(&served, json!({ "sentiment": { "range": { "gte": 0.0 } } })).await,
         BTreeSet::from([carrying[0], carrying[1]]),
         "a row with a null cell and a row from a batch omitting the column carry no value"
+    );
+    assert_eq!(
+        filtered(&served, json!({ "score": { "range": { "gte": 40.0 } } }))
+            .await
+            .len(),
+        2,
+        "the JSON row landed beside the Arrow one; no build row scores past 6"
     );
     assert_eq!(
         filtered(&served, json!({ "tag": { "eq": "ops" } })).await,
@@ -482,7 +519,7 @@ async fn a_batch_carries_the_column_or_omits_it_and_every_reader_answers_it() {
     );
     assert_eq!(record["fields"]["tag"], json!("eng"));
     let record = item(&served, omitting[0]).await;
-    assert_eq!(record["fields"]["score"], json!(4.0));
+    assert_eq!(record["fields"]["score"], json!(40.0));
     assert!(
         record["fields"].get("sentiment").is_none() && record["fields"].get("tag").is_none(),
         "a row from a batch omitting the column carries none: {record}"

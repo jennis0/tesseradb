@@ -85,18 +85,22 @@ impl SegmentCursor {
 /// here would let a rewrite put a value under a width the manifest does not declare, which the
 /// next reader opens as garbage rather than as an error.
 ///
-/// **A column the input's schema lacks is absent, at every position** (`ingest.md` §6.3). Two
-/// states produce it and a segment cannot tell them apart: a view's **group-scoped** render lane
-/// that a segment of the view was written without (`views.md` §5), and an entity-scoped column
-/// declared at a running service after the segment was written. Such a column takes the render
-/// placeholder, the type's zero, which is what an absent value is written as anyway (decision
-/// 0064); the caller records the absence in the column's presence bitmap from the same schema
-/// fact, and the row keeps its position. Answered from the schema alone: the absence is never
-/// looked up in the record blob. Dropping the column instead would shift every later scalar up a
-/// position and transpose the output segment with no count or digest to show it.
+/// **A column the input's schema lacks is absent when `absent_ok` names it, and a malformed
+/// bundle otherwise.** Two states lawfully produce the absence, and the caller knows which
+/// columns they cover: a view's **group-scoped** render lane that a segment of the view was
+/// written without (`views.md` §5), and an entity-scoped column declared at a running service
+/// after the segment was written (`ingest.md` §6.3). Such a column takes the render placeholder,
+/// the type's zero, which is what an absent value is written as anyway (decision 0064); the
+/// caller records the absence in the column's presence bitmap from the same schema fact, and the
+/// row keeps its position. Answered from the schema alone: the absence is never looked up in the
+/// record blob. A column absent for any other reason is a torn or mismatched segment, and writing
+/// it as absence would blank every row's value and then reclaim the input it was read from: the
+/// operation fails instead, naming the column. Dropping the column would shift every later
+/// scalar up a position and transpose the output segment with no count or digest to show it.
 pub(crate) fn gather_scalars(
     columns: &ColumnsRef,
     schema: &[(String, ScalarType)],
+    absent_ok: &[String],
     row: usize,
     seg_id: &str,
     op: &str,
@@ -111,7 +115,17 @@ pub(crate) fn gather_scalars(
         .iter()
         .map(|(name, declared)| {
             let Some(view) = columns.scalar(name) else {
-                return Ok(ScalarValue::Null.or_render_placeholder(*declared));
+                if absent_ok.iter().any(|lawful| lawful == name) {
+                    return Ok(ScalarValue::Null.or_render_placeholder(*declared));
+                }
+                return Err(StoreError::MalformedBundle {
+                    detail: format!(
+                        "{op}: segment '{seg_id}' has no scalar column '{name}', which this \
+                         bundle declares and no declaration made since the segment explains; \
+                         writing the rows as absent would blank the column and reclaim the \
+                         segment, so the operation is refused"
+                    ),
+                });
             };
             // Each arm pairs the *stored* type with the *declared* one and the fallthrough
             // refuses: a narrowing or widening coercion here would let a merge rewrite a column

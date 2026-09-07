@@ -580,6 +580,9 @@ fn coordinate_columns(projection: Projection) -> (&'static str, &'static str) {
 struct ParsedBatch {
     items: Vec<RawIngestItem>,
     artifacts: BatchArtifacts,
+    /// How many declared columns the batch omitted, each padded with its absence in every row
+    /// (`ingest.md` §7.1). Reported so a pipeline that stopped sending a column is seen.
+    padded_columns: u64,
     /// Rows whose latitude fell outside the projection's own domain and were moved onto the
     /// frame's edge (`projections.md` §7). Always `0` under `projection = "none"`, which has no
     /// domain.
@@ -1129,9 +1132,16 @@ fn parse_ingest_batch(
     let mut items = Vec::new();
     let mut tally = MembershipTally::default();
     let mut clipped = 0u64;
+    let mut padded: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for batch in batches {
         let batch = batch?;
         let schema = batch.schema();
+        padded.extend(
+            declared
+                .iter()
+                .filter(|d| batch.column_by_name(&d.name).is_none())
+                .map(|d| d.name.as_str()),
+        );
         // Where this record batch's rows start in the request's own row numbering — what a
         // membership names, since the executor indexes one flat list of rows per batch id.
         let offset = items.len();
@@ -1349,6 +1359,7 @@ fn parse_ingest_batch(
     Ok(ParsedBatch {
         items,
         artifacts: tally.into_artifacts(),
+        padded_columns: padded.len() as u64,
         clipped,
     })
 }
@@ -1700,6 +1711,11 @@ struct IngestResp {
     /// batch at a time has no build to print anything, so this is the only report those rows get.
     /// Always `0` under `projection = "none"`, which has no domain to leave.
     clipped: u64,
+    /// How many declared columns this batch omitted, each taken as absent in every row
+    /// (`ingest.md` §7.1). An omission is lawful, since a column declared at a running service is
+    /// one an older client's batches do not carry; the count is what lets an operator see a
+    /// pipeline that stopped sending one.
+    padded_columns: u64,
     /// Contracts §3.4: `external_id` is optional, so an accepted item may be addressable
     /// only by its `tessera_id` -- returned here per accepted row, in the same order as the
     /// request batch, so a caller can correlate. Present for every accepted row, whether or not
@@ -1779,6 +1795,7 @@ fn run_ingest(
     let ParsedBatch {
         items,
         artifacts,
+        padded_columns,
         clipped,
     } = parse_ingest_batch(
         encoding,
@@ -1894,6 +1911,7 @@ fn run_ingest(
                 // identical body, which is what makes the two agree. `minted` is 0 beside it
                 // because minting *is* an effect and this submission had none.
                 clipped,
+                padded_columns,
                 tessera_ids,
                 // A replay creates nothing: the artifacts this batch's keys named were minted when
                 // it was first accepted, and this submission had no effect at all.
@@ -2094,6 +2112,7 @@ fn run_ingest(
         over_bound,
         over_bound_ids,
         clipped,
+        padded_columns,
         tessera_ids,
         minted,
     })

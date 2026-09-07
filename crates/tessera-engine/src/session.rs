@@ -941,6 +941,46 @@ pub struct Engine {
 /// currently stands, so an unsuppressed entity is simply absent from it; inventing an
 /// `Unsuppress` for an absent entity would let an older manifest clear a suppression the WAL
 /// still holds.
+/// The runtime attribute columns the side manifests carry (`ingest.md` §6.3), **in one order**.
+///
+/// A column's position in the served list is what every buffered row, record-blob tag and
+/// segment tail is positional against, so the order the manifests' lists are appended in decides
+/// which column a value is read under. The partitions are a hash map; they are walked by key,
+/// ascending, so two opens of one bundle build the same list. With one partition this is that
+/// partition's lists; with several, every declaration is a deployment-level fact every partition
+/// publishes alike, and a name met again is skipped by `Manifest::with_attributes`.
+fn side_manifest_attributes(
+    bundle: &Bundle,
+) -> (
+    Vec<tessera_store::manifest::DeclaredScalar>,
+    Vec<tessera_store::manifest::ScopedScalar>,
+) {
+    let mut keys: Vec<&String> = bundle.partitions.keys().collect();
+    keys.sort();
+    let mut attributes = Vec::new();
+    let mut scoped = Vec::new();
+    for key in keys {
+        let manifest = &bundle.partitions[key].manifest;
+        for d in &manifest.attributes {
+            if !attributes
+                .iter()
+                .any(|held: &tessera_store::manifest::DeclaredScalar| held.name == d.name)
+            {
+                attributes.push(d.clone());
+            }
+        }
+        for f in &manifest.scoped_attributes {
+            if !scoped
+                .iter()
+                .any(|held: &tessera_store::manifest::ScopedScalar| held.name == f.name)
+            {
+                scoped.push(f.clone());
+            }
+        }
+    }
+    (attributes, scoped)
+}
+
 fn initial_deny_of(bundle: &Bundle) -> Vec<(EntityId, ChangeOp)> {
     let mut out = Vec::new();
     for partition in bundle.partitions.values() {
@@ -1007,16 +1047,7 @@ impl Engine {
         // — the vocabulary seed's widths, the record blob's field tags, the flush's writer schema,
         // `/v1/meta` — takes it from the bundle manifest. Declarations the log holds past the
         // last publication are appended after replay, below.
-        let side_attributes: Vec<tessera_store::manifest::DeclaredScalar> = bundle
-            .partitions
-            .values()
-            .flat_map(|partition| partition.manifest.attributes.iter().cloned())
-            .collect();
-        let side_scoped_attributes: Vec<tessera_store::manifest::ScopedScalar> = bundle
-            .partitions
-            .values()
-            .flat_map(|partition| partition.manifest.scoped_attributes.iter().cloned())
-            .collect();
+        let (side_attributes, side_scoped_attributes) = side_manifest_attributes(&bundle);
         bundle.manifest = bundle
             .manifest
             .with_attributes(&side_attributes, &side_scoped_attributes);
@@ -3476,6 +3507,18 @@ impl Engine {
         self.write.drop_layer(name)
     }
 
+    /// Declare an attribute column while the service runs (`PUT /control/attributes`;
+    /// `ingest.md` §1.3, §6.3). Answers `true` where a column of that name already carried
+    /// exactly this identity and nothing was appended.
+    ///
+    /// Blocking — a tokio handler must call this inside `spawn_blocking`.
+    pub fn declare_attribute(
+        &self,
+        request: tessera_lifecycle::AttributeRequest,
+    ) -> std::result::Result<bool, crate::write::AcceptError> {
+        self.write.declare_attribute(request)
+    }
+
     /// Create a view of a view group while the service runs (`views.md` §3.2, decision 0108).
     ///
     /// **Almost nothing is validated here**, on `register_layer`'s rule: whether the key is free
@@ -3493,18 +3536,6 @@ impl Engine {
     /// boundary (decision 0088), and the roster stores its absence. It is recognised only as the
     /// whole of the list: beside another label it would be a gate everybody passes, spelled as
     /// if it were narrower.
-    /// Declare an attribute column while the service runs (`PUT /control/attributes`;
-    /// `ingest.md` §1.3, §6.3). Answers `true` where a column of that name already carried
-    /// exactly this identity and nothing was appended.
-    ///
-    /// Blocking — a tokio handler must call this inside `spawn_blocking`.
-    pub fn declare_attribute(
-        &self,
-        request: tessera_lifecycle::AttributeRequest,
-    ) -> std::result::Result<bool, crate::write::AcceptError> {
-        self.write.declare_attribute(request)
-    }
-
     pub fn create_view(
         &self,
         group: String,
@@ -3919,18 +3950,8 @@ pub(crate) fn open_rotation(
     // The columns declared while the fold ran, appended on `Engine::open`'s rule: the new
     // `MANIFEST.json` carries the schema as it stood at the plan, and the side manifest the
     // fold published carries the rest (`ingest.md` §6.3).
-    let side_attributes: Vec<tessera_store::manifest::DeclaredScalar> = bundle
-        .partitions
-        .values()
-        .flat_map(|partition| partition.manifest.attributes.iter().cloned())
-        .collect();
-    let side_scoped_attributes: Vec<tessera_store::manifest::ScopedScalar> = bundle
-        .partitions
-        .values()
-        .flat_map(|partition| partition.manifest.scoped_attributes.iter().cloned())
-        .collect();
-    let unfolded_attributes: Vec<String> =
-        side_attributes.iter().map(|d| d.name.clone()).collect();
+    let (side_attributes, side_scoped_attributes) = side_manifest_attributes(&bundle);
+    let unfolded_attributes: Vec<String> = side_attributes.iter().map(|d| d.name.clone()).collect();
     bundle.manifest = bundle
         .manifest
         .with_attributes(&side_attributes, &side_scoped_attributes);

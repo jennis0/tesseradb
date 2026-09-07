@@ -823,6 +823,11 @@ pub(crate) struct FoldContext {
     /// bundle-wide schema was the defect — a fold rewriting a group's view dropped the family's
     /// lane, and its values came back as the type's zero.
     pub(crate) scalar_schema: BTreeMap<String, Vec<(String, ScalarType)>>,
+    /// Per view, the columns of its schema an input segment may lawfully lack
+    /// (`write::lawful_absences`): the view's group-scoped lanes and the runtime columns below.
+    /// A column missing for any other reason is a torn segment, and pass 1 refuses it rather
+    /// than blanking the column and reclaiming the input.
+    pub(crate) absent_ok: BTreeMap<String, Vec<String>>,
     /// The entity-scoped columns declared at a running service and not yet folded, by name, as
     /// the live list stood at the plan (`ingest.md` §6.3). None has a base: pass 4a folds each
     /// from its extents alone and writes the base every later reader opens, and the publication
@@ -1162,6 +1167,7 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
                 identity_key: &ctx.identity_key,
                 shard_id: ctx.shard_id,
                 scalar_schema: view_schema,
+                absent_ok: ctx.absent_ok.get(&view.view).map_or(&[][..], Vec::as_slice),
                 // `D₀`, whole and unmodified. See the module doc.
                 tombstones: &plan.tombstones,
                 permutation_bound: view.permutation_bound,
@@ -1372,8 +1378,7 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
             attr_read += file_len(&ctx.from_prefix_dir.join(&extent.values))
                 + file_len(&ctx.from_prefix_dir.join(&extent.presence));
         }
-        let layers: Vec<&tessera_filter::ValueColumn> =
-            base.iter().chain(extents.iter()).collect();
+        let layers: Vec<&tessera_filter::ValueColumn> = base.iter().chain(extents.iter()).collect();
         // A keyword layer's dictionary, opened beside its ordinals and in the same order, because
         // an ordinal names a position in *its own* layer's dictionary and nothing anywhere else.
         // Empty for every other family, which is what selects the generic fold below.
@@ -1580,8 +1585,7 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
                 attr_read += file_len(&ctx.from_prefix_dir.join(rel));
             }
         }
-        let layers: Vec<&tessera_filter::RecordBlob> =
-            base.iter().chain(extents.iter()).collect();
+        let layers: Vec<&tessera_filter::RecordBlob> = base.iter().chain(extents.iter()).collect();
 
         let blocks_rel = format!("{record_rel}/{}", tessera_filter::RECORD_BLOCKS_FILE);
         let hasrow_rel = format!("{record_rel}/{}", tessera_filter::RECORD_HASROW_FILE);
@@ -2765,4 +2769,3 @@ mod tests {
         assert_eq!(disc_estimate(u64::MAX), u64::MAX / 100);
     }
 }
-

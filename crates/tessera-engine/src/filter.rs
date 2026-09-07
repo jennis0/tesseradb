@@ -2772,12 +2772,16 @@ impl FilterColumns {
             .columns
             .get(column)
             .ok_or_else(|| FilterError::UndeclaredColumn(column.to_string()))?;
-        // A column declared at a running service has no base and no postings until the fold
-        // (`ingest.md` §6.3); its members are in the extents alone, which the sweep below covers.
-        // A column with a base and no postings is one whose member sets cannot be read.
+        // A column declared at a running service holds no base until the fold (`ingest.md`
+        // §6.3): its layers are the flushes' extents, every member is in them, and the sweep
+        // below is the whole answer. A column that holds a **base** layer (the one opened with no
+        // `values_rel`) and no postings is one whose member sets cannot be read, since the base's
+        // members are in the postings and nowhere else; answering from the extents alone would
+        // offer a value to nobody who sees only its base members.
+        let holds_base = layers.layers.iter().any(|l| l.values_rel.is_none());
         let postings: Option<&ColumnPostings> = match layers.postings.as_deref() {
             Some(postings) => Some(postings),
-            None if layers.layers.iter().all(|l| l.values_rel.is_some()) => None,
+            None if !holds_base => None,
             None => return Err(FilterError::MembershipUnavailable(column.to_string())),
         };
 

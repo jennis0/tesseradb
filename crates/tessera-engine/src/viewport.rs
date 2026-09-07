@@ -3567,8 +3567,7 @@ impl Engine {
             check_cancelled(&cancel)?;
             let mut stats = TileProbe::new();
             let parts = SelectionParts::new(&ts.parts);
-            let mut tile_points =
-                gather_tile_columns(&parts, &ts.rows, render_scalars)?;
+            let mut tile_points = gather_tile_columns(&parts, &ts.rows, render_scalars)?;
             if let Some(membership) = &membership {
                 tile_points.membership = membership.columns_for(&ts.rows);
             }

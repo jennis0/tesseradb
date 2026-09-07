@@ -163,6 +163,10 @@ pub struct MergeSpec<'a> {
     pub identity_key: &'a IdentityKey,
     pub shard_id: u32,
     pub scalar_schema: &'a [(String, ScalarType)],
+    /// The columns of `scalar_schema` an input may lawfully lack (`segment_cursor::gather_scalars`):
+    /// the view's group-scoped render lanes and the columns declared at a running service since
+    /// the inputs were written. Any other column an input lacks fails the operation.
+    pub absent_ok: &'a [String],
     /// Where the merged extent begins in view row space — the **first consumed extent's**
     /// `row_base`. A merge emits exactly as many rows as it consumed, so no later extent's
     /// `row_base` moves and `RowSpace::collapsing` puts this where the consumed run was.
@@ -317,6 +321,7 @@ pub fn execute_merge(
         let scalars = gather_scalars(
             &cursor.columns,
             spec.scalar_schema,
+            spec.absent_ok,
             row,
             &cursor.seg_id,
             OP,
@@ -563,6 +568,7 @@ mod tests {
                 identity_key: &key,
                 shard_id: 0,
                 scalar_schema: &schema(),
+                absent_ok: &[],
                 row_base: 0,
                 watermark: 8,
                 entity_id_high_water: 8,
@@ -618,6 +624,7 @@ mod tests {
                 identity_key: &key,
                 shard_id: 0,
                 scalar_schema: &schema(),
+                absent_ok: &[],
                 row_base: 0,
                 watermark: 2,
                 entity_id_high_water: 2,

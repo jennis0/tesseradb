@@ -24,8 +24,8 @@ use parquet::arrow::ArrowWriter;
 use common::*;
 use tessera_engine::filter::{Endpoint, FilterExpr, FilterOperand, Scalar};
 use tessera_engine::{
-    AcceptError, AttributeRequest, CategoryQuery, ColumnBuf, Engine, ScalarOut,
-    Session, ViewportRequest,
+    AcceptError, AttributeRequest, CategoryQuery, ColumnBuf, Engine, ScalarOut, Session,
+    ViewportRequest,
 };
 use tessera_lifecycle::command::UnallocatedRow;
 use tessera_lifecycle::wal::WalScalar;
@@ -244,17 +244,28 @@ fn request(name: &str, ty: &str) -> AttributeRequest {
     }
 }
 
-/// One row carrying the build's two columns and nothing else, at the arity the build declared.
+/// One row carrying the build's two columns and nothing else, at the arity the build declared,
+/// under the label every principal of the fixture holds.
 fn row(external_id: &str, terms: &Engine, scalars: Vec<WalScalar>) -> UnallocatedRow {
+    row_under(external_id, terms, b"0", scalars)
+}
+
+/// [`row`] under one label of the caller's choosing.
+fn row_under(
+    external_id: &str,
+    terms: &Engine,
+    label: &[u8],
+    scalars: Vec<WalScalar>,
+) -> UnallocatedRow {
     UnallocatedRow {
         external_id: Some(external_id.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
-        descriptors: vec![b"0".to_vec()],
+        descriptors: vec![label.to_vec()],
         x: 500.0,
         y: 500.0,
         scalars,
-        terms: terms.resolve_terms(&[b"0".to_vec()]),
+        terms: terms.resolve_terms(&[label.to_vec()]),
         scoped: Vec::new(),
     }
 }
@@ -302,7 +313,11 @@ impl ViewportOut {
         let ColumnBuf::F32(values) = &self.scalars[position] else {
             panic!("'{name}' is served as f32");
         };
-        self.ids.iter().copied().zip(values.iter().copied()).collect()
+        self.ids
+            .iter()
+            .copied()
+            .zip(values.iter().copied())
+            .collect()
     }
 }
 
@@ -412,7 +427,9 @@ fn every_family_declares_at_runtime_and_earlier_entities_read_absent_without_a_b
     ];
     for r in declared {
         assert!(
-            !engine.declare_attribute(r.clone()).expect("the declaration is accepted"),
+            !engine
+                .declare_attribute(r.clone())
+                .expect("the declaration is accepted"),
             "'{}' is a new column",
             r.name
         );
@@ -520,10 +537,7 @@ fn every_family_declares_at_runtime_and_earlier_entities_read_absent_without_a_b
             viewport(
                 &engine,
                 &session,
-                Some(leaf(
-                    "note",
-                    FilterOperand::TextEquals("alpha".to_string())
-                ))
+                Some(leaf("note", FilterOperand::TextEquals("alpha".to_string())))
             )
             .ids
         ),
@@ -572,7 +586,11 @@ fn every_family_declares_at_runtime_and_earlier_entities_read_absent_without_a_b
         .unwrap()
         .expect("a runtime category column answers");
     let keys: Vec<&str> = page.values.iter().map(|v| v.key.as_str()).collect();
-    assert_eq!(keys, ["eng", "ops"], "only the values an ingested row carries");
+    assert_eq!(
+        keys,
+        ["eng", "ops"],
+        "only the values an ingested row carries"
+    );
 
     // And the suggest verb, whose index the declaration built for a vocabulary no build column
     // named: a value a visible member carries is offered, one nothing carries is not.
@@ -623,7 +641,14 @@ fn a_declaration_mid_ingest_pads_earlier_rows_and_neither_panics_nor_fails_the_f
         )
         .expect_err("a row longer than the schema is refused");
     assert!(
-        matches!(refused, AcceptError::ScalarArity { got: 4, expected: 3, .. }),
+        matches!(
+            refused,
+            AcceptError::ScalarArity {
+                got: 4,
+                expected: 3,
+                ..
+            }
+        ),
         "{refused}"
     );
     let carrying = ingest(
@@ -642,7 +667,11 @@ fn a_declaration_mid_ingest_pads_earlier_rows_and_neither_panics_nor_fails_the_f
     let out = viewport(&engine, &session, None);
     let late = out.f32_column("late");
     let id = |e: EntityId| engine.tessera_id_of(e).unwrap().raw();
-    assert_eq!(late[&id(before[0])], 0.0, "padded with the column's absence");
+    assert_eq!(
+        late[&id(before[0])],
+        0.0,
+        "padded with the column's absence"
+    );
     assert_eq!(late[&id(after[0])], 0.0, "padded with the column's absence");
     assert_eq!(late[&id(carrying[0])], 0.75);
     assert!(
@@ -704,7 +733,11 @@ fn a_restart_replays_the_declaration_from_the_log_and_from_the_manifest() {
         .values()
         .flat_map(|p| p.manifest.attributes.iter().map(|d| d.name.as_str()))
         .collect();
-    assert_eq!(published, ["sentiment"], "the segments manifest is the durable home");
+    assert_eq!(
+        published,
+        ["sentiment"],
+        "the segments manifest is the durable home"
+    );
 
     // Published: the manifest carries it, and the log may not.
     let engine = restart(&fx, engine);
@@ -798,13 +831,7 @@ fn the_fold_carries_a_runtime_column_into_the_base() {
         viewport(
             &engine,
             &session,
-            Some(leaf(
-                "never",
-                FilterOperand::Range {
-                    lo: None,
-                    hi: None
-                }
-            ))
+            Some(leaf("never", FilterOperand::Range { lo: None, hi: None }))
         )
         .ids
         .is_empty(),
@@ -822,6 +849,188 @@ fn the_fold_carries_a_runtime_column_into_the_base() {
         viewport(&engine, &session, Some(leaf("sentiment", at_least(0.5)))).ids,
         vec![id]
     );
+}
+
+/// **A runtime category's vocabulary is offered from inside each principal's mask** (I2,
+/// per-point-attributes §3.3): each principal is offered the values its own visible rows carry
+/// and nothing a row outside its mask carries. The fixture's two principals hold one term each
+/// (`common::terms_of`), so a row under either label is visible to one of them only. The column
+/// has no base postings before the fold, so the answer comes from the extents alone.
+#[test]
+fn a_runtime_category_offers_a_restricted_principal_only_its_visible_values() {
+    let fx = fixture();
+    let engine = engine_over(&fx);
+    engine
+        .declare_attribute(AttributeRequest {
+            vocabulary: Some("dept".to_string()),
+            width: Some("u8".to_string()),
+            index: true,
+            ..request("tag", "category")
+        })
+        .expect("the declaration is accepted");
+    let tagged = |id: &str, label: &[u8], tag: &str| {
+        let mut scalars = build_columns("mid", 1.0);
+        scalars.push(WalScalar::Utf8(tag.to_string()));
+        row_under(id, &engine, label, scalars)
+    };
+    // `eng` only on a row under label 0, which the principal holding term 1 cannot see; `ops`
+    // only on a row under label 1, which the principal holding term 0 cannot.
+    ingest(
+        &engine,
+        "labelled",
+        vec![tagged("e1", b"0", "eng"), tagged("o1", b"1", "ops")],
+    );
+    flush(&engine);
+
+    let offered = |credential: &[u8]| -> Vec<String> {
+        let session = engine.authorise(credential).unwrap();
+        engine
+            .categories(
+                &session,
+                "tag",
+                CategoryQuery::Page {
+                    after: None,
+                    limit: 10,
+                },
+            )
+            .unwrap()
+            .expect("the column answers")
+            .values
+            .into_iter()
+            .map(|v| v.key)
+            .collect()
+    };
+    assert_eq!(
+        offered(&full_coverage_credential()),
+        ["eng"],
+        "a value carried only by rows outside the principal's mask is not offered"
+    );
+    assert_eq!(offered(&subset_credential()), ["ops"]);
+}
+
+/// **A declaration made while a fold is in flight survives the publication at the same tail
+/// position** (`ingest.md` §6.3): the fold's `MANIFEST.json` carries the schema as it stood at
+/// the plan, the side manifest carries the declaration made since, and the reopen appends it
+/// after the folded columns, which is where every row buffered under it holds its value.
+#[test]
+fn a_declaration_during_a_fold_survives_the_publication_at_the_same_tail_position() {
+    let fx = fixture();
+    let engine = engine_over(&fx);
+    engine
+        .declare_attribute(AttributeRequest {
+            index: true,
+            render: true,
+            ..request("before", "f32")
+        })
+        .expect("the declaration is accepted");
+    ingest(
+        &engine,
+        "before",
+        vec![row("b1", &engine, {
+            let mut s = build_columns("mid", 1.0);
+            s.push(WalScalar::F32(0.25));
+            s
+        })],
+    );
+    flush(&engine);
+
+    engine.set_fold_paused_for_test(true);
+    let stats_before = engine.write_executor_stats();
+    engine.request_fold();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !engine.fold_is_holding_for_test() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the fold's passes never finished"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    // Declared while the fold holds: after `before`, at position 3.
+    engine
+        .declare_attribute(AttributeRequest {
+            index: true,
+            render: true,
+            ..request("during", "f32")
+        })
+        .expect("a declaration during a fold is accepted");
+    let during = ingest(
+        &engine,
+        "during",
+        vec![row("d1", &engine, {
+            let mut s = build_columns("high", 2.0);
+            s.extend([WalScalar::F32(0.5), WalScalar::F32(0.75)]);
+            s
+        })],
+    );
+    engine.set_fold_paused_for_test(false);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        let now = engine.write_executor_stats();
+        assert_eq!(
+            now.fold_failures, stats_before.fold_failures,
+            "the fold published"
+        );
+        if now.folds > stats_before.folds {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the fold never published"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        declared_names(&engine),
+        ["band", "score", "before", "during"],
+        "the folded column keeps its place and the one declared during the fold follows it"
+    );
+    let folded = open_bundle(&fx.root).unwrap();
+    assert_eq!(
+        folded
+            .manifest
+            .declared_scalars
+            .iter()
+            .map(|d| d.name.as_str())
+            .collect::<Vec<_>>(),
+        ["band", "score", "before"],
+        "the fold's MANIFEST.json carries the schema as it stood at the plan"
+    );
+    let side: Vec<&str> = folded
+        .partitions
+        .values()
+        .flat_map(|p| p.manifest.attributes.iter().map(|d| d.name.as_str()))
+        .collect();
+    assert_eq!(
+        side,
+        ["during"],
+        "the declaration made during the fold is on the side manifest"
+    );
+
+    flush(&engine);
+    let check = |engine: &Engine| {
+        let session = session(engine);
+        let out = viewport(engine, &session, None);
+        assert_eq!(out.names, ["band", "score", "before", "during"]);
+        let id = engine.tessera_id_of(during[0]).unwrap().raw();
+        assert_eq!(
+            out.f32_column("before")[&id],
+            0.5,
+            "each value under its own name"
+        );
+        assert_eq!(out.f32_column("during")[&id], 0.75);
+        assert_eq!(
+            viewport(engine, &session, Some(leaf("during", at_least(0.7)))).ids,
+            vec![id]
+        );
+    };
+    check(&engine);
+    let engine = restart(&fx, engine);
+    assert_eq!(
+        declared_names(&engine),
+        ["band", "score", "before", "during"]
+    );
+    check(&engine);
 }
 
 /// **An identical redeclaration answers the column that exists; a differing one is a conflict;
