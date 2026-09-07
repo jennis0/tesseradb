@@ -452,14 +452,106 @@ pub enum WalRecord {
         level: u32,
         growth: Vec<MembershipGrowth>,
     },
+    /// A fixed part filled on an artifact that exists (`ingest.md` §1.5): a parent list, an
+    /// attachment, a shape, or one content's values. Its own record beside the publication rather
+    /// than a rewrite of it, so the log says what happened in the order it happened, and a repeat
+    /// is compared digest to digest against the stored part.
+    ///
+    /// Not built yet: nothing writes this record, and a replay that meets one refuses to open
+    /// naming track T2a ([`unbuilt_track`]) rather than applying it as nothing.
+    ArtifactFill {
+        layer: String,
+        level: u32,
+        /// Resolved from the caller's key on the executor and recorded, on
+        /// [`MembershipGrowth::ordinal`]'s rule.
+        ordinal: u32,
+        part: ArtifactPart,
+    },
+    /// An accepted `POST /control/values` batch (`ingest.md` §1.4): attribute values for entities
+    /// that exist, one row per entity, applied per cell under the fill rule. `batch_id` and
+    /// `body_hash` are the idempotency key, as [`WalRecord::IngestBatch`]'s are. A layer column on
+    /// a values row is not carried here: it is a membership join and travels as an
+    /// [`WalRecord::ArtifactGrow`] in the same commit.
+    ///
+    /// Not built yet: nothing writes this record, and a replay that meets one refuses to open
+    /// naming track T3 ([`unbuilt_track`]).
+    ValuesBatch {
+        batch_id: String,
+        body_hash: [u8; 32],
+        /// The view header, present where a column below is a group-scoped family and absent
+        /// where every column is entity-scoped (`ingest.md` §1.4).
+        view: Option<String>,
+        /// The columns the batch carries, by declared name, in the batch's own order. Every row's
+        /// values are positional to this list, so a batch may carry any subset of the schema.
+        columns: Vec<String>,
+        rows: Vec<ValuesRow>,
+    },
+    /// An attribute column declared while the service runs (`PUT /control/attributes`,
+    /// `ingest.md` §1.3, §6.3). The segments manifest is the declaration's durable home; this
+    /// record is what puts it back between a publication and a restart.
+    ///
+    /// Not built yet: nothing writes this record, and a replay that meets one refuses to open
+    /// naming track T4 ([`unbuilt_track`]).
+    AttributeDeclare {
+        declaration: Box<AttributeDeclaration>,
+    },
+    /// A vocabulary declared while the service runs (`PUT /control/vocabularies/{name}`,
+    /// `ingest.md` §1.3), with the values that fitted the declaration. Values paged afterwards
+    /// arrive as [`WalRecord::VocabularyMint`] records, one per value, as a discovered value does.
+    ///
+    /// Not built yet: nothing writes this record, and a replay that meets one refuses to open
+    /// naming track T5 ([`unbuilt_track`]).
+    VocabularyDeclare {
+        declaration: Box<VocabularyDeclaration>,
+    },
+    /// A view group declared while the service runs (`PUT /control/view_groups/{name}`,
+    /// `ingest.md` §1.3). Its views follow as [`WalRecord::ViewCreate`] records, one each.
+    ///
+    /// Not built yet: nothing writes this record, and a replay that meets one refuses to open
+    /// naming track T6 ([`unbuilt_track`]).
+    ViewGroupCreate {
+        declaration: Box<ViewGroupDeclaration>,
+    },
 }
 
-/// One artifact's growth inside a [`WalRecord::ArtifactGrow`].
+/// The track of `ingest.md` §8 whose apply path a record waits on, and the record's own name, or
+/// `None` for a record every reader applies.
+///
+/// The variants and fields that exist for a later track are in the format so that every track
+/// lands against one log (T0). A record whose meaning is not built must not be applied as a
+/// no-op: a log carrying one was written by a binary this one is not, and replaying past it would
+/// serve state that omits what the record said. Every replay asks this before it applies anything
+/// and refuses to open, naming the track.
+pub fn unbuilt_track(record: &WalRecord) -> Option<(&'static str, &'static str)> {
+    match record {
+        WalRecord::ArtifactGrow { growth, .. }
+            if growth.iter().any(|g| {
+                !g.leaving.is_empty() || matches!(g.set, GrownSet::GeneratingSet { .. })
+            }) =>
+        {
+            Some(("ArtifactGrow with a leaving set or a rank", "T2b"))
+        }
+        WalRecord::ArtifactPublish { artifacts, .. }
+            if artifacts.iter().any(|a| a.view.is_some()) =>
+        {
+            Some(("ArtifactPublish naming a view", "T2c"))
+        }
+        WalRecord::ArtifactFill { .. } => Some(("ArtifactFill", "T2a")),
+        WalRecord::ValuesBatch { .. } => Some(("ValuesBatch", "T3")),
+        WalRecord::AttributeDeclare { .. } => Some(("AttributeDeclare", "T4")),
+        WalRecord::VocabularyDeclare { .. } => Some(("VocabularyDeclare", "T5")),
+        WalRecord::ViewGroupCreate { .. } => Some(("ViewGroupCreate", "T6")),
+        _ => None,
+    }
+}
+
+/// One artifact's growth inside a [`WalRecord::ArtifactGrow`]: a delta to one of its sets, the
+/// membership or one content's generating set (`ingest.md` §1.1).
 ///
 /// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MembershipGrowth {
-    /// The position in the level whose membership grows. **Resolved from the caller's key on the
+    /// The position in the level whose set grows. **Resolved from the caller's key on the
     /// executor and recorded**, exactly as a publication records the ordinals it claimed: replay
     /// applies what was decided rather than re-resolving a key whose index has since moved.
     pub ordinal: u32,
@@ -467,6 +559,153 @@ pub struct MembershipGrowth {
     /// [`PublishedArtifact::members`]'s reason (a row-space set is a frozen projection); a delta
     /// for this variant's own.
     pub joining: Vec<u8>,
+    /// The entities leaving, CRoaring portable, on `joining`'s terms. Empty on every record the
+    /// membership route writes: a membership never shrinks (`ingest.md` §10, R7), and the one set
+    /// that may is a generating set, changed only by a page at its rank. Within one record joins
+    /// apply before leaves (`ingest.md` §1.1). Not built yet: a record carrying a non-empty set
+    /// refuses at replay naming T2b ([`unbuilt_track`]).
+    pub leaving: Vec<u8>,
+    /// Which of the artifact's sets this delta moves.
+    pub set: GrownSet,
+}
+
+/// Which set of an artifact a [`MembershipGrowth`] moves.
+///
+/// On-disk format: variants are positional under postcard — see [`WalRecord`]'s note.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GrownSet {
+    /// The membership (`rank: null` on the wire). Its size is derived from the set and never
+    /// stored ([`crate::membership::ArtifactRecord::declared_size`]).
+    Membership,
+    /// The generating set of the content at `rank`, with the set's **stored cardinality** after
+    /// this delta (`ingest.md` §1.1): the number the executor publishes beside the set's row-space
+    /// operator at the tick, so that a containment test reads a pair derived together and never
+    /// a cardinality from one version of the set against an operator from another. Not built yet:
+    /// refused at replay naming T2b ([`unbuilt_track`]).
+    GeneratingSet { rank: u16, cardinality: u64 },
+}
+
+/// The fixed part an [`WalRecord::ArtifactFill`] supplies (`ingest.md` §1.5). Each is filled once;
+/// a later record carrying the part is compared to the stored one and accepted only where
+/// identical, by the stored digest for a content or a shape.
+///
+/// On-disk format: variants are positional under postcard — see [`WalRecord`]'s note.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ArtifactPart {
+    /// The parent list, resolved and ordered as [`PublishedArtifact::parents`] is.
+    Parents(Vec<ParentRef>),
+    /// The attachment, resolved as [`PublishedArtifact::attached_to`] is.
+    AttachedTo(PublishedAttachment),
+    /// The canonical shapes, as [`PublishedArtifact::shape`] carries them.
+    Shape(crate::membership::ArtifactShapes),
+    /// One content's values at `rank`, with their digest ([`PublishedContent::digest`]). The
+    /// content's generating set is a set part and travels as a growth at the same rank.
+    Content {
+        rank: u16,
+        values: Vec<String>,
+        digest: [u8; 32],
+    },
+}
+
+/// One row of a [`WalRecord::ValuesBatch`]: the entity the values fill, resolved at admission from
+/// the external id or the `tessera_id` the caller named (I10), and its values positional to the
+/// batch's `columns`.
+///
+/// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ValuesRow {
+    pub entity_id: EntityId,
+    pub values: Vec<WalScalar>,
+}
+
+/// An attribute column as `PUT /control/attributes` declares it: the `[[attribute]]` block minus
+/// its acquisition keys (`ingest.md` §1.3), which is what `MANIFEST.declared_scalars` and a
+/// group's `scoped_scalars` record for a built one (contracts §2.2).
+///
+/// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AttributeDeclaration {
+    pub name: String,
+    pub title: Option<String>,
+    /// The declared type by its contracts §2.2 name (`u32`, `f64`, `keyword`, `text`, …). Carried
+    /// as the name because the engine's type lives in `tessera-spatial`, which this crate does
+    /// not see; the door parses it and refuses a name outside the set before a record is
+    /// prepared, so a record never carries one.
+    pub ty: String,
+    /// The vocabulary a category column draws its codes from; `None` for a plain column.
+    pub vocabulary: Option<String>,
+    /// The analyser's full `<name>/<version>` identity for a `text` column (decision 0070), and
+    /// `None` for every other type.
+    pub analyser: Option<String>,
+    pub index: bool,
+    pub render: bool,
+    /// Entity-scoped, or a family per view of a group (`views.md` §5).
+    pub scope: tessera_types::layer::LayerScope,
+}
+
+/// A vocabulary as `PUT /control/vocabularies/{name}` declares it: the `[[vocabulary]]` block minus
+/// its source (`ingest.md` §1.3), with the values that fitted the declaration inline.
+///
+/// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VocabularyDeclaration {
+    pub name: String,
+    pub title: Option<String>,
+    pub kind: tessera_types::vocabulary::VocabularyKind,
+    pub visibility: tessera_types::vocabulary::Visibility,
+    /// The code space's width, by its contracts §2.2 name, on [`AttributeDeclaration::ty`]'s
+    /// terms.
+    pub width: String,
+    /// The values declared inline. A value paged afterwards is a [`WalRecord::VocabularyMint`].
+    pub values: Vec<DeclaredVocabularyValue>,
+    /// Retired codes, never reassigned.
+    pub reserved: Vec<u32>,
+}
+
+/// One value inside a [`VocabularyDeclaration`]: the key, the code the caller pinned or `None`
+/// for one the executor assigns, and the value's presentation.
+///
+/// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeclaredVocabularyValue {
+    pub key: String,
+    pub code: Option<u32>,
+    pub title: Option<String>,
+}
+
+/// A view group as `PUT /control/view_groups/{name}` declares it: the `[[view_group]]` block minus
+/// its roster and source (`ingest.md` §1.3). The frame and the projection are declared, as a
+/// deployment that ingests declares them (`ingest.md` §5): there is no data to fit them to.
+///
+/// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ViewGroupDeclaration {
+    pub name: String,
+    pub title: Option<String>,
+    /// The projection's canonical name (`projections.md` §5), as the manifest records it.
+    pub projection: String,
+    /// The frame every view of the group is quantised against, immutable for the group's life
+    /// (decision 0040).
+    pub frame: DeclaredFrame,
+    /// The group's own gate, a list of labels each one term (decision 0132); `None` is `public`.
+    pub visibility: Option<Vec<String>>,
+    /// The group's `point_visibility.default`, or `None` where it declares none (decision 0133).
+    pub point_default: Option<String>,
+    /// The group whose views these are, where this group declares `members` (`views.md` §3.3).
+    pub members: Option<String>,
+    /// The per-view metadata names and types, in declaration order.
+    pub metadata: Vec<tessera_types::view::GroupMetadataField>,
+}
+
+/// A declared quantisation frame, the four bounds `MANIFEST.views[..].quantisation` carries.
+///
+/// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct DeclaredFrame {
+    pub x_min: f64,
+    pub x_max: f64,
+    pub y_min: f64,
+    pub y_max: f64,
 }
 
 /// One artifact inside a [`WalRecord::ArtifactPublish`].
@@ -482,6 +721,11 @@ pub struct PublishedArtifact {
     pub entity: EntityId,
     /// The caller's own key, if they supplied one.
     pub key: Option<String>,
+    /// The view this artifact belongs to, on a layer scoped to a group: part of the identity, since
+    /// keys are unique per `(layer, view)` and edges may not cross views (`ingest.md` §1.5,
+    /// `views.md` §3.5). `None` on an entity-scoped layer. Not built yet: every writer records
+    /// `None`, and a record carrying a view refuses at replay naming T2c ([`unbuilt_track`]).
+    pub view: Option<String>,
     /// Entity-space membership, CRoaring portable. **Entity space and not row space** — a row-space
     /// membership is a frozen projection, correct until the first fold and then naming other
     /// people's documents (`membership.rs`).
@@ -554,10 +798,20 @@ pub struct PublishedContent {
     /// the record blob at publication; they ride the log too because the log is what replay has
     /// before any extent exists.
     pub values: Vec<String>,
+    /// SHA-256 over `values` ([`crate::membership::content_digest`]), stored with the content at
+    /// publication and at a fill so that a later record carrying the part is compared digest to
+    /// digest (`ingest.md` §1.5). Stored rather than recomputed because the extent a repack
+    /// writes holds the digest and not the values (decision 0077), and the comparison has to
+    /// survive the repack. Read by T2a.
+    pub digest: [u8; 32],
     /// The entity-space generating set, CRoaring portable. Empty means corpus-independent, which is
     /// a declaration rather than an omission — a set supplied where none is tested is refused at
     /// admission.
     pub generated_from: Vec<u8>,
+    /// The generating set's **stored cardinality** (`ingest.md` §1.1), `generated_from`'s at
+    /// publication and thereafter moved only by a page at this content's rank
+    /// ([`GrownSet::GeneratingSet`]). Read by T2b, which publishes it beside the set's operator.
+    pub cardinality: u64,
 }
 
 /// WAL-level failures. [`WalError::WalCorruption`], [`WalError::BadHeader`] and
@@ -675,7 +929,15 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 // `LayerCreate` record carried inside its declaration. Postcard is positional, so the field is
 // on-disk format and a log at 19 is refused rather than read a boolean's byte as the start of the
 // `depends_on` list.
-const WAL_VERSION: u16 = 20;
+// **21**: the ingest design's format, in one bump before any of its tracks (`ingest.md` §7.1, §8;
+// decision 0136). `MembershipGrowth` gained `leaving` and `set` (a rank and the moved
+// cardinality), `PublishedArtifact` gained `view`, `PublishedContent` gained `digest` and
+// `cardinality`, and the variant table gained `ArtifactFill`, `ValuesBatch`, `AttributeDeclare`,
+// `VocabularyDeclare` and `ViewGroupCreate`, appended so no existing discriminant moves. Postcard
+// is positional, so a 20 growth read at 21 takes the next record's leading bytes for the leaving
+// set it does not carry, and a 20 publication takes the members' length for the view's; a log at
+// 20 is refused.
+const WAL_VERSION: u16 = 21;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts
@@ -2024,6 +2286,7 @@ mod tests {
                     ordinal: 65_535,
                     entity: EntityId::new(4_294_836_223),
                     key: Some("c-0017".into()),
+                    view: None,
                     members: serialise_members(&first),
                     contents: Vec::new(),
                     attached_to: None,
@@ -2037,10 +2300,16 @@ mod tests {
                     ordinal: 65_536,
                     entity: EntityId::new(4_294_705_152),
                     key: None,
+                    // The view is the first optional the identity carries (T2c reads it); set
+                    // here so a record naming one round-trips and a reader that lost it would
+                    // read the members' length as the view's.
+                    view: Some("s0".into()),
                     members: serialise_members(&second),
                     contents: vec![PublishedContent {
                         values: vec!["a label".into()],
+                        digest: crate::membership::content_digest(&["a label".to_string()]),
                         generated_from: serialise_members(&first),
+                        cardinality: 5,
                     }],
                     // A label attached to a cluster — the third optional field, and the one whose
                     // loss is a fail-open rather than a missing name: an attachment read back as
@@ -2092,6 +2361,164 @@ mod tests {
         };
         assert_eq!(deserialise_members(&artifacts[0].members), Some(first));
         assert_eq!(deserialise_members(&artifacts[1].members), Some(second));
+    }
+
+    /// **The ingest design's records round-trip, and each names the track that applies it.**
+    ///
+    /// The five variants and the widened growth are in the format ahead of their tracks
+    /// (`ingest.md` §7.1, §8), so what this checks is the two halves of that arrangement: every
+    /// field survives the log verbatim, and [`unbuilt_track`] names each record's track so a
+    /// replay refuses rather than passes over it. Every optional and every list is set, which is
+    /// the arrangement a positional decoder misreads first.
+    #[test]
+    fn the_ingest_designs_records_round_trip_and_name_their_tracks() {
+        use crate::membership::{content_digest, serialise_members, ArtifactShapes};
+        use croaring::Bitmap;
+        use tessera_types::view::{GroupMetadataField, ViewMetadataType};
+        use tessera_types::vocabulary::{Visibility, VocabularyKind};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal");
+
+        let values = vec!["a label".to_string(), "a second kind".to_string()];
+        let records = vec![
+            WalRecord::ArtifactGrow {
+                layer: "topics/openalex".into(),
+                level: 0,
+                growth: vec![MembershipGrowth {
+                    ordinal: 3,
+                    joining: serialise_members(&Bitmap::of(&[1, 2])),
+                    leaving: serialise_members(&Bitmap::of(&[70_000])),
+                    set: GrownSet::GeneratingSet {
+                        rank: 1,
+                        cardinality: 2,
+                    },
+                }],
+            },
+            WalRecord::ArtifactFill {
+                layer: "topics/openalex".into(),
+                level: 0,
+                ordinal: 3,
+                part: ArtifactPart::Content {
+                    rank: 0,
+                    values: values.clone(),
+                    digest: content_digest(&values),
+                },
+            },
+            WalRecord::ArtifactFill {
+                layer: "topics/openalex".into(),
+                level: 0,
+                ordinal: 3,
+                part: ArtifactPart::Shape(
+                    ArtifactShapes::new(vec![("s0".into(), vec![4, 0, 1])]).unwrap(),
+                ),
+            },
+            WalRecord::ArtifactFill {
+                layer: "topics/openalex".into(),
+                level: 1,
+                ordinal: 0,
+                part: ArtifactPart::Parents(vec![ParentRef {
+                    level: 0,
+                    ordinal: 3,
+                }]),
+            },
+            WalRecord::ArtifactFill {
+                layer: "labels/openalex".into(),
+                level: 0,
+                ordinal: 9,
+                part: ArtifactPart::AttachedTo(PublishedAttachment {
+                    layer: "topics/openalex".into(),
+                    level: 0,
+                    ordinal: 3,
+                    entity: EntityId::new(4_294_836_223),
+                }),
+            },
+            WalRecord::ValuesBatch {
+                batch_id: "sentiment-0".into(),
+                body_hash: [9u8; 32],
+                view: Some("quarter:2026-Q1".into()),
+                columns: vec!["sentiment".into(), "reviewed".into()],
+                rows: vec![ValuesRow {
+                    entity_id: EntityId::new(41),
+                    values: vec![WalScalar::F32(0.25), WalScalar::Null],
+                }],
+            },
+            WalRecord::AttributeDeclare {
+                declaration: Box::new(AttributeDeclaration {
+                    name: "sentiment".into(),
+                    title: Some("Sentiment".into()),
+                    ty: "f32".into(),
+                    vocabulary: None,
+                    analyser: None,
+                    index: true,
+                    render: true,
+                    scope: tessera_types::layer::LayerScope::Group("quarter".into()),
+                }),
+            },
+            WalRecord::VocabularyDeclare {
+                declaration: Box::new(VocabularyDeclaration {
+                    name: "departments".into(),
+                    title: None,
+                    kind: VocabularyKind::Declared,
+                    visibility: Visibility::Public,
+                    width: "u16".into(),
+                    values: vec![DeclaredVocabularyValue {
+                        key: "k9-unit".into(),
+                        code: Some(31_337),
+                        title: Some("K9 unit".into()),
+                    }],
+                    reserved: vec![7],
+                }),
+            },
+            WalRecord::ViewGroupCreate {
+                declaration: Box::new(ViewGroupDeclaration {
+                    name: "quarter".into(),
+                    title: Some("By quarter".into()),
+                    projection: "equirectangular".into(),
+                    frame: DeclaredFrame {
+                        x_min: -180.0,
+                        x_max: 180.0,
+                        y_min: -90.0,
+                        y_max: 90.0,
+                    },
+                    visibility: Some(vec!["finance".into()]),
+                    point_default: Some("public".into()),
+                    members: None,
+                    metadata: vec![GroupMetadataField {
+                        name: "label".into(),
+                        ty: ViewMetadataType::Text,
+                        vocabulary: None,
+                    }],
+                }),
+            },
+        ];
+        let tracks: Vec<&str> = records
+            .iter()
+            .map(|record| unbuilt_track(record).expect("every record here waits on a track").1)
+            .collect();
+        assert_eq!(
+            tracks,
+            ["T2b", "T2a", "T2a", "T2a", "T2a", "T3", "T4", "T5", "T6"]
+        );
+
+        let (mut wal, _) = Wal::open(&path).unwrap();
+        for record in &records {
+            wal.append(record).unwrap();
+        }
+        wal.fsync().unwrap();
+        drop(wal);
+
+        let (_wal, replayed) = Wal::open(&path).unwrap();
+        assert_eq!(replayed, records);
+
+        // The membership route's own growth is what every reader applies today.
+        let membership = crate::membership::growth_record(
+            "topics/openalex",
+            0,
+            [(3u32, &Bitmap::of(&[1, 2]))],
+        )
+        .unwrap();
+        assert_eq!(unbuilt_track(&membership), None);
     }
 
     /// Overwrite `[from, to)` with zeroes through a second handle, standing in for pages a failed

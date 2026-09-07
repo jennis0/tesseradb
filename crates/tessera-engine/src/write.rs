@@ -2394,6 +2394,20 @@ impl WritePath {
     ) -> Result<(Overlay, IngestBuffer, WritePathState), EngineError> {
         let (wal, records) = Wal::open(wal_path).map_err(EngineError::Wal)?;
 
+        // **A record whose meaning is not built refuses the open, before anything is applied.**
+        // The ingest design's records and fields are in the format ahead of their tracks
+        // (`ingest.md` §7.1, §8) so that every track lands against one log; a log carrying one
+        // was written by a binary this one is not, and replaying past it would serve state that
+        // omits what the record said. Naming the track is what tells the operator which binary.
+        for record in &records {
+            if let Some((kind, track)) = tessera_lifecycle::wal::unbuilt_track(record) {
+                return Err(EngineError::Malformed(format!(
+                    "the WAL carries a {kind} record, whose apply path is track {track}'s and is \
+                     not built (ingest.md §8); this node does not open"
+                )));
+            }
+        }
+
         // **Mints apply over the manifest seed, in log order** — the same seed-before-replay rule
         // the deny state follows below, and for the same reason: every WAL record postdates the
         // manifests. The caller has already seeded from `MANIFEST.vocabularies` and the served
@@ -4431,6 +4445,10 @@ mod vocabulary_extensions_tests {
             layer_tombstones: Vec::new(),
             views: Vec::new(),
             scoped_columns: Vec::new(),
+            attributes: Vec::new(),
+            scoped_attributes: Vec::new(),
+            vocabularies: Vec::new(),
+            groups: Vec::new(),
             dead_view_incarnations: Vec::new(),
             membership_extents: Vec::new(),
             level_versions: Vec::new(),
@@ -7242,6 +7260,14 @@ impl Executor {
             // here would be a second copy of a fact the prefix's own manifest now states
             // (`views.md` §5).
             scoped_columns: Vec::new(),
+            // **Carried from the live manifest, on the roster's argument**: a declaration made
+            // while the fold ran must survive the publication that lands. Whether a fold writes
+            // these into the next `MANIFEST.json` and empties them here, as it does the scoped
+            // columns, is decided where each list is first written (T4, T5, T6; `ingest.md` §8).
+            attributes: live_manifest.attributes.clone(),
+            scoped_attributes: live_manifest.scoped_attributes.clone(),
+            vocabularies: live_manifest.vocabularies.clone(),
+            groups: live_manifest.groups.clone(),
             dead_view_incarnations,
             // **The pass's own output, not the live list.** The paths are prefix-relative and the
             // fold publishes a *new* prefix, so what step 3a wrote is the only list that names

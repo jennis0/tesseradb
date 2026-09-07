@@ -25,6 +25,9 @@ tessera-authz = { path = "../tessera-authz" }
 postcard = { workspace = true }
 crc32fast = { workspace = true }
 serde = { workspace = true }
+# The stored digest of a content's values and of a shape (`ingest.md` §1.5): computed where the
+# record is built, so the extent and the log carry one number for one part.
+sha2 = { workspace = true }
 rustc-hash = "1"
 
 [dev-dependencies]

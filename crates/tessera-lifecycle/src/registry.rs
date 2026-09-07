@@ -990,13 +990,19 @@ impl LayerRegistry {
                     ordinal: ordinal as u32,
                     entity: EntityId::new(entity),
                     key: artifact.key.clone(),
+                    // The view is part of the identity on a group-scoped layer (`ingest.md`
+                    // §1.5) and is recorded by T2c; until then every publication is entity-scoped
+                    // here and a record naming a view refuses at replay.
+                    view: None,
                     members: serialise_members(&artifact.members),
                     contents: artifact
                         .contents
                         .iter()
                         .map(|v| crate::wal::PublishedContent {
                             values: v.values.clone(),
+                            digest: crate::membership::content_digest(&v.values),
                             generated_from: serialise_members(&v.generated_from),
+                            cardinality: v.generated_from.cardinality(),
                         })
                         .collect(),
                     attached_to: attachments[i]

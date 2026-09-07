@@ -2219,8 +2219,11 @@ fn main() {
                     } else {
                         generating_entities(i, rank as u32, spread, gset, &bases)
                     };
+                    let values = vec![format!("a label, rank {rank}")];
                     ContentSet {
-                        values: Some(vec![format!("a label, rank {rank}")]),
+                        digest: tessera_lifecycle::membership::content_digest(&values),
+                        values: Some(values),
+                        cardinality: generated_from.cardinality(),
                         generated_from,
                     }
                 })

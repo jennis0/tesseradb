@@ -15,6 +15,12 @@ pub mod layer;
 #[cfg(feature = "serde")]
 pub mod view;
 
+/// A vocabulary's two declared discriminants, shared by the manifest that carries a built one and
+/// the WAL record that makes a runtime declaration durable. Behind `serde` for [`layer`]'s reason,
+/// and here for the crate-graph reason [`view`] gives.
+#[cfg(feature = "serde")]
+pub mod vocabulary;
+
 /// Macro for creating ID newtypes with no cross-space conversions (invariant I4).
 /// Each type gets new(raw) and raw(self) methods, with derives Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug.
 /// Under the (off-by-default) `serde` feature, also derives `Serialize`/`Deserialize`
@@ -112,9 +118,15 @@ pub struct GenerationStamp {
 // reads it to fill a row whose access label is empty, or to refuse the batch; a bundle at 5 has no
 // field to read, and a reader defaulting it would either fill with a label nobody declared or
 // refuse every unlabelled row of a corpus whose declaration filled them.
+// 7: the record blob stores a digest and the generating set's cardinality beside every content and
+// a digest beside every shape (`ingest.md` §1.5, §7.1; decision 0136), and the segments manifest
+// gains the four lists that are the durable home of a declaration made while the service runs
+// (`attributes`, `scoped_attributes`, `vocabularies`, `groups`). A reader at 7 would take the
+// first forty bytes of a 6 blob's generating set as a digest and a cardinality and read the set
+// out of the bytes that follow; the number is what stops it opening.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility (decision 0048).
-pub const BUNDLE_FORMAT: u32 = 6;
+pub const BUNDLE_FORMAT: u32 = 7;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;
@@ -138,7 +150,7 @@ mod tests {
     }
     #[test]
     fn constants() {
-        assert_eq!(BUNDLE_FORMAT, 6);
+        assert_eq!(BUNDLE_FORMAT, 7);
         assert_eq!(ROW_ABSENT, 0xFFFF_FFFF);
     }
 }

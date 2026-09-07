@@ -216,60 +216,10 @@ pub struct ManifestVocabulary {
     pub reserved: Vec<u32>,
 }
 
-/// Whether a vocabulary's value set is closed at build or grows as the corpus supplies keys.
-///
-/// The distinction is only ever consulted at a *write*: it decides what happens to a key nothing
-/// has bound yet. Every read path treats the two identically, because a bound key is a bound key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum VocabularyKind {
-    /// The value set is closed: every key is authored, and an unknown one is refused
-    /// (declare-then-use, §5). A typo must not create a category.
-    Declared,
-    /// The value set grows: a key nothing has bound acquires a scattered code at the commit-window
-    /// close, recorded beside it and pinned forever (§3.4).
-    Discovered,
-}
-
-/// Whether the *existence* of a value is sensitive — the disclosure control of §3.8, orthogonal to
-/// [`VocabularyKind`]'s operational question.
-///
-/// **One spelling, from the declaration through to the wire** (`configuration.md` §1): the config
-/// word, the manifest discriminant and what `/v1/meta` publishes are the same two strings. The
-/// second spelling this type used to carry — `derived` on the manifest against `derived` in the
-/// declaration — cost a translation table in the build and gave one control two words in review.
-///
-/// **Typed rather than a string, because it is load-bearing.** It decides whether `/v1/categories`
-/// filters a value set per principal, so a spelling no reader recognises must refuse the manifest
-/// at the parse rather than fall through to a default — and both defaults are wrong in a direction
-/// that matters: `public` publishes a gated value set, `derived` withholds a published one and
-/// looks like a permission bug.
-///
-/// **`Derived` is the membership axis and `Public` the label one**
-/// (decision 0088): `Derived` says the viewer must already see *some* member —
-/// `require_member_visibility = "any"` — where `Public` names an access label. They share a key
-/// because that is what the configuration surface declares today (`configuration.md` §1); the
-/// decision retires the word `derived` without ruling on what fills the slot, so the surface
-/// governs the spelling and this note records why one type carries two readings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Visibility {
-    /// The value set is filtered per principal: a value appears only if the principal can see at
-    /// least one item carrying it (per-point-attributes §3.3).
-    Derived,
-    /// The value set is published as authored, to every principal with a session. Legal only for a
-    /// `declared` vocabulary, where an accountable party wrote the names down (§3.8).
-    Public,
-}
-
-impl Visibility {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Visibility::Derived => "derived",
-            Visibility::Public => "public",
-        }
-    }
-}
+/// The two vocabulary discriminants are defined in `tessera-types` so the WAL's
+/// `VocabularyDeclare` record (`ingest.md` §1.3, T5) and this manifest read one type; re-exported
+/// here so every reader of the manifest keeps its path.
+pub use tessera_types::vocabulary::{Visibility, VocabularyKind};
 
 /// One value of a vocabulary: its stable opaque key, its pinned code, and its presentation.
 ///
@@ -1761,6 +1711,35 @@ pub struct SegmentsManifest {
     /// column-free, and the two are indistinguishable under a default while only one is safe to
     /// serve.
     pub scoped_columns: Vec<ScopedColumn>,
+    /// Every entity-scoped attribute column **declared while the service runs**
+    /// (`ingest.md` §1.3, §6.3), complete current state, in declaration order.
+    ///
+    /// **This is the declaration's durable home, and the WAL is not**, on [`Self::views`]'
+    /// argument: rotation reclaims the `AttributeDeclare` record, and a column whose declaration
+    /// lived only there comes back from a restart as one no reader knows exists. The columns a
+    /// build declared are in `MANIFEST.json` and are not restated here; the served schema is the
+    /// two together, and the fold writes the union into the next `MANIFEST.json`. Not built yet:
+    /// every writer publishes an empty list and no reader consults it; T4 writes and reads it.
+    ///
+    /// No `serde(default)`, on `layers`' argument: a manifest omitting it is malformed, not
+    /// declaration-free, and the two are indistinguishable under a default while only one is safe
+    /// to serve.
+    pub attributes: Vec<DeclaredScalar>,
+    /// Every group-scoped attribute family declared while the service runs, on
+    /// [`Self::attributes`]' argument. Separate from it because a family has no slot in the flat
+    /// list ([`GroupDescriptor::scoped_scalars`]). Not built yet: empty from every writer; T4.
+    pub scoped_attributes: Vec<ScopedScalar>,
+    /// Every vocabulary declared while the service runs (`ingest.md` §1.3), complete current state
+    /// with its values as last published, on [`Self::attributes`]' argument. A value minted into
+    /// one of these at a window close reaches the log as a `VocabularyMint` and this list at the
+    /// next publication, as [`Self::vocabulary_extensions`] does for a built vocabulary. Not built
+    /// yet: empty from every writer; T5.
+    pub vocabularies: Vec<ManifestVocabulary>,
+    /// Every view group declared while the service runs (`ingest.md` §1.3), complete current
+    /// state, on [`Self::attributes`]' argument. Its roster is [`Self::views`], which already
+    /// carries every view created at a running service whichever group owns it. Not built yet:
+    /// empty from every writer; T6.
+    pub groups: Vec<GroupDescriptor>,
     /// Every **incarnation of a key that has died** and whose artifacts a fold has not yet
     /// reclaimed (`views.md` §3.4, decision 0115).
     ///
@@ -2196,6 +2175,10 @@ mod tests {
             layer_tombstones: Vec::new(),
             views: Vec::new(),
             scoped_columns: Vec::new(),
+            attributes: Vec::new(),
+            scoped_attributes: Vec::new(),
+            vocabularies: Vec::new(),
+            groups: Vec::new(),
             dead_view_incarnations: Vec::new(),
             membership_extents: Vec::new(),
             level_versions: Vec::new(),

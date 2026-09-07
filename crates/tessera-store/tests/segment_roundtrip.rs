@@ -477,7 +477,7 @@ fn a_view_without_a_quantisation_extent_is_a_typed_error() {
     // of them silently. Pre-release there is no older shape to tolerate (decision 0048), so the
     // missing field refuses at open. This is the same rule `projection` beside it keeps.
     let json = serde_json::json!({
-        "bundle_format": 6,
+        "bundle_format": 7,
         "created_at": "2026-08-30T00:00:00Z",
         "data_plugin_hash": tessera_plugin::Passthrough::new().data_plugin_hash(),
         "vocabularies": [],

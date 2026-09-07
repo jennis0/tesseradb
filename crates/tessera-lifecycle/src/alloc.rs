@@ -263,6 +263,22 @@ pub fn high_water_from(records: &[WalRecord]) -> u64 {
             | WalRecord::ArtifactGrow { .. }
             | WalRecord::ViewCreate { .. }
             | WalRecord::ViewDrop { .. } => {}
+            // A values row names an entity that exists, so it raises the floor exactly as an
+            // overlay entry does: a weak bound, not the mechanism. The declarations allocate
+            // nothing: a column, a vocabulary and a group hold no entity, and a fill names an
+            // artifact that already has its ordinal and its entity.
+            WalRecord::ValuesBatch { rows, .. } => {
+                for row in rows {
+                    let candidate = row.entity_id.raw() + 1;
+                    if candidate > hw {
+                        hw = candidate;
+                    }
+                }
+            }
+            WalRecord::ArtifactFill { .. }
+            | WalRecord::AttributeDeclare { .. }
+            | WalRecord::VocabularyDeclare { .. }
+            | WalRecord::ViewGroupCreate { .. } => {}
         }
     }
     hw

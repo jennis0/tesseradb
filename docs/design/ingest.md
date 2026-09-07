@@ -697,6 +697,14 @@ cardinality, `ArtifactPublish` a view, and the log gains `ArtifactFill`, `Values
 `AttributeDeclare`, `VocabularyDeclare` and `ViewGroupCreate`. Postcard is positional, so a stale
 log is refused rather than read.
 
+**Built 2026-09-07, the format half (T0):** `WAL_VERSION` 21 and `bundle_format` 7, with every
+record variant and field above present and serialised. A generating set's cardinality and a
+content's digest travel in the `ArtifactPublish` record and the record blob, a shape's digest with
+the shape, and the growth record carries its rank, leaving set and moved cardinality as one
+`set` discriminant. The runtime-declared lists live in the segments manifest (`attributes`,
+`scoped_attributes`, `vocabularies`, `groups`), empty until their tracks. A record whose meaning
+is not built refuses the open naming its track; nothing in the rest of this section is built.
+
 **An attribute declared mid-ingest appends at the end of the scalar tail**, and the rows already
 buffered for the next flush are padded with absence for it, so one flush writes one schema; a
 batch arriving after the declaration carries the column or omits it, either being lawful (T4).

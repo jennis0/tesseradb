@@ -152,6 +152,10 @@ fn build_fixture_n(artifacts: u32) -> Fixture {
                     .into_iter()
                     .map(|set| ContentSet {
                         values: Some(vec!["text".to_string()]),
+                        digest: tessera_lifecycle::membership::content_digest(&[
+                            "text".to_string()
+                        ]),
+                        cardinality: set.len() as u64,
                         generated_from: set.into_iter().collect(),
                     })
                     .collect(),

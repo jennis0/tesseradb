@@ -160,6 +160,8 @@ fn build_fixture(shape: Shape) -> Fixture {
                 let set: Bitmap = (0..width).map(|_| rng.gen_range(0..UNIVERSE)).collect();
                 ContentSet {
                     values: Some(vec!["text".to_string()]),
+                    digest: tessera_lifecycle::membership::content_digest(&["text".to_string()]),
+                    cardinality: set.cardinality(),
                     generated_from: set,
                 }
             })

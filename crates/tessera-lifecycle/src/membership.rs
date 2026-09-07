@@ -108,6 +108,12 @@ pub type PendingRange = (String, u32, u32, u32);
 pub struct ArtifactShapes {
     /// `(view, canonical bytes)`, ascending by view, no view twice.
     by_view: Vec<(String, Vec<u8>)>,
+    /// SHA-256 over the per-view encoding ([`Self::content_text`]'s bytes), computed at
+    /// construction and stored with the shape in the log and the record blob (`ingest.md` §1.5).
+    /// A later record carrying a shape for an artifact that holds one is compared digest to
+    /// digest, which is what makes a repeated publication safe after the level is repacked.
+    /// Read by T2a; the blob decoder checks it against the bytes it decodes.
+    digest: [u8; 32],
 }
 
 impl ArtifactShapes {
@@ -120,7 +126,19 @@ impl ArtifactShapes {
         if by_view.windows(2).any(|w| w[0].0 == w[1].0) {
             return None;
         }
-        Some(ArtifactShapes { by_view })
+        let mut shapes = ArtifactShapes {
+            by_view,
+            digest: [0; 32],
+        };
+        let mut encoded = Vec::with_capacity(shapes.byte_len() + 8);
+        shapes.encode_into(&mut encoded);
+        shapes.digest = sha256(&encoded);
+        Some(shapes)
+    }
+
+    /// The stored digest ([`Self::digest`]'s field).
+    pub fn digest(&self) -> [u8; 32] {
+        self.digest
     }
 
     /// The canonical bytes for one view, or `None` where the shape was not canonicalised for it.
@@ -669,11 +687,37 @@ pub struct ContentSet {
     /// with its identity and its count and no description is the in-between state decision 0076
     /// forbids.
     pub values: Option<Vec<String>>,
+    /// SHA-256 over the values ([`content_digest`]), carried in every copy including the one a
+    /// packed extent restores, which holds no values: it is what a later record carrying this
+    /// content is compared against (`ingest.md` §1.5). Read by T2a.
+    pub digest: [u8; 32],
     /// Entity-space, canonical. **Empty means corpus-independent** — containment is vacuous and the
     /// content serves to everyone who reaches the layer — and that is a real declaration rather
     /// than a missing one: a layer whose kinds are all corpus-independent is refused a generating
     /// set at publish, so an empty set here cannot be an omission.
     pub generated_from: Bitmap,
+    /// The set's **stored cardinality** (`ingest.md` §1.1): `generated_from`'s at publication,
+    /// moved afterwards only by a page at this content's rank, and published beside the set's
+    /// row-space operator at the tick so a containment test never reads a cardinality from one
+    /// version of the set against an operator from another. Read by T2b.
+    pub cardinality: u64,
+}
+
+/// The digest a content's values are stored with: SHA-256 over each value's UTF-8 bytes, each
+/// preceded by its length as a `u32` LE, so that two value lists that concatenate to the same
+/// bytes digest differently.
+pub fn content_digest(values: &[String]) -> [u8; 32] {
+    let mut bytes = Vec::with_capacity(values.iter().map(|v| v.len() + 4).sum());
+    for value in values {
+        bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(value.as_bytes());
+    }
+    sha256(&bytes)
+}
+
+fn sha256(bytes: &[u8]) -> [u8; 32] {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes).into()
 }
 
 impl ArtifactRecord {
@@ -956,6 +1000,11 @@ impl ArtifactStore {
                 level,
                 growth,
             } => self.apply_growth(layer, *level, growth, position),
+            // A fill has no apply path until T2a (`ArtifactStore::fill`, `ingest.md` §1.5).
+            // Counted as refused rather than passed over: the replay refuses to open before it
+            // reaches here (`crate::wal::unbuilt_track`), and this arm is what keeps a caller that
+            // did not ask from applying the record as nothing.
+            crate::wal::WalRecord::ArtifactFill { .. } => 1,
             _ => 0,
         }
     }
@@ -986,7 +1035,9 @@ impl ArtifactStore {
                 .map(|v| {
                     deserialise_members(&v.generated_from).map(|generated_from| ContentSet {
                         values: Some(v.values.clone()),
+                        digest: v.digest,
                         generated_from,
+                        cardinality: v.cardinality,
                     })
                 })
                 .collect();
@@ -1032,6 +1083,16 @@ impl ArtifactStore {
     ) -> usize {
         let mut refused = 0;
         for grown in growth {
+            // A leave, or a delta to a generating set, has no apply path until T2b (`ingest.md`
+            // §1.1, §8). Refused and counted on the fill's argument: the replay refuses to open
+            // before it reaches here (`crate::wal::unbuilt_track`), and applying the joins of
+            // such a record while passing over its leaves would serve a set nobody declared.
+            if !grown.leaving.is_empty()
+                || matches!(grown.set, crate::wal::GrownSet::GeneratingSet { .. })
+            {
+                refused += 1;
+                continue;
+            }
             // Damage is a refusal, not an empty delta, on the publication's argument: a growth
             // decoded short is an acked join that silently did not happen, and the artifact then
             // serves the count it had before — which nothing distinguishes from a criterion it
@@ -1774,14 +1835,17 @@ impl ArtifactStore {
 ///             | attachment
 ///             | parents
 ///             | shape
-/// content    := u32 LE set_len | generating-set bytes (portable Roaring)
+/// content    := digest (32 bytes, SHA-256 of the values)
+///             | u64 LE cardinality                       -- the set's stored cardinality
+///             | u32 LE set_len | generating-set bytes (portable Roaring)
 /// attachment := u8 0                                     -- unattached
 ///             | u8 1 | u16 LE layer_len | layer bytes (UTF-8)
 ///                    | u32 LE level | u32 LE ordinal | u64 LE target entity
 /// parents    := u16 LE parent_count                      -- 0 at a root
 ///             | per parent, ascending by (level, ordinal): u32 LE level | u32 LE ordinal
 /// shape      := u8 0                                     -- no declared shape
-///             | u8 3 | u16 LE views
+///             | u8 3 | digest (32 bytes, SHA-256 of what follows)
+///                    | u16 LE views
 ///                    | per view: u16 LE view_len | view bytes (UTF-8)
 ///                                | u32 LE shape_len | canonical shape bytes
 /// ```
@@ -1789,6 +1853,12 @@ impl ArtifactStore {
 /// The canonical shape bytes are `tessera_spatial::shape`'s own encoding (`polygon-membership.md`
 /// §6.6 — tag 1 a box, 2 a conic, 4 a polygon), held here opaquely; tag 3 is the per-view wrapper
 /// and is this blob's, which is why the shape module leaves it unused.
+///
+/// **A content's digest and cardinality, and a shape's digest, are stored** (`ingest.md` §1.5,
+/// `bundle_format` 7). The extent carries no content values, so the digest is the only thing a
+/// repeated publication can be compared against once the level is repacked; the cardinality is
+/// the set's stored property, moved by a page and published beside the set's operator. The
+/// decoder checks a shape's digest against the bytes it decodes and refuses a disagreement.
 ///
 /// **The attachment is stored and not re-derived**, on the reason [`Attachment`] gives: it is a
 /// term of the visibility predicate, so an artifact restored without it is one that serves where
@@ -1817,7 +1887,7 @@ pub fn encode_record(record: &ArtifactRecord, shape: Option<&ArtifactShapes>) ->
         .map(|v| serialise_members(&v.generated_from))
         .collect();
     let mut out = Vec::with_capacity(
-        8 + key.len() + members.len() + sets.iter().map(Vec::len).sum::<usize>(),
+        8 + key.len() + members.len() + sets.iter().map(|s| s.len() + 44).sum::<usize>(),
     );
     // A key longer than a `u16` cannot round-trip, and truncating one would silently rename an
     // artifact. The control plane bounds the request body long before this, so the clamp is a
@@ -1836,7 +1906,9 @@ pub fn encode_record(record: &ArtifactRecord, shape: Option<&ArtifactShapes>) ->
     out.extend_from_slice(&(members.len() as u32).to_le_bytes());
     out.extend_from_slice(&members);
     if count != u16::MAX {
-        for set in &sets {
+        for (content, set) in record.contents.iter().zip(&sets) {
+            out.extend_from_slice(&content.digest);
+            out.extend_from_slice(&content.cardinality.to_le_bytes());
             out.extend_from_slice(&(set.len() as u32).to_le_bytes());
             out.extend_from_slice(set);
         }
@@ -1883,6 +1955,7 @@ pub fn encode_record(record: &ArtifactRecord, shape: Option<&ArtifactShapes>) ->
         None => out.push(0),
         Some(shapes) => {
             out.push(3);
+            out.extend_from_slice(&shapes.digest);
             shapes.encode_into(&mut out);
         }
     }
@@ -1947,13 +2020,17 @@ pub fn decode_record(
     let members = deserialise_members(take(members_len)?)?;
     let mut contents = Vec::with_capacity(count);
     for _ in 0..count {
+        let digest: [u8; 32] = take(32)?.try_into().ok()?;
+        let cardinality = u64::from_le_bytes(take(8)?.try_into().ok()?);
         let set_len = u32::from_le_bytes(take(4)?.try_into().ok()?) as usize;
         contents.push(ContentSet {
             // ⊘ The extent carries no values — see [`ContentSet::values`]. A restored content is
             // therefore unservable until the blob write lands, which is fail-closed and loud rather
             // than an artifact served with its description missing.
             values: None,
+            digest,
             generated_from: deserialise_members(take(set_len)?)?,
+            cardinality,
         });
     }
     // An attachment absent is one byte and never zero bytes: *unattached* and *this reader does not
@@ -2003,6 +2080,7 @@ pub fn decode_record(
     let shape = match take(1)?[0] {
         0 => None,
         3 => {
+            let digest: [u8; 32] = take(32)?.try_into().ok()?;
             let views = u16::from_le_bytes(take(2)?.try_into().ok()?) as usize;
             let mut by_view = Vec::with_capacity(views);
             for _ in 0..views {
@@ -2011,7 +2089,13 @@ pub fn decode_record(
                 let shape_len = u32::from_le_bytes(take(4)?.try_into().ok()?) as usize;
                 by_view.push((view, take(shape_len)?.to_vec()));
             }
-            Some(ArtifactShapes::new(by_view)?)
+            let shapes = ArtifactShapes::new(by_view)?;
+            // The stored digest names the bytes the writer held; a disagreement is a blob this
+            // reader did not write, refused as any other framing fault is.
+            if shapes.digest != digest {
+                return None;
+            }
+            Some(shapes)
         }
         _ => return None,
     };
@@ -2062,6 +2146,10 @@ pub fn growth_record<'a>(
         .map(|(ordinal, joining)| crate::wal::MembershipGrowth {
             ordinal,
             joining: serialise_members(joining),
+            // A membership never shrinks (`ingest.md` §10, R7); a generating-set page is T2b's
+            // record and takes the other variant.
+            leaving: Vec::new(),
+            set: crate::wal::GrownSet::Membership,
         })
         .collect();
     (!growth.is_empty()).then(|| crate::wal::WalRecord::ArtifactGrow {
@@ -2404,7 +2492,9 @@ mod tests {
         record.key = Some("a-key".to_string());
         record.contents = vec![ContentSet {
             values: Some(vec!["topic".to_string()]),
+            digest: content_digest(&["topic".to_string()]),
             generated_from: Bitmap::of(&[2, 3]),
+            cardinality: 2,
         }];
         record.attached_to = Some(Attachment {
             layer: "labels/x".to_string(),
@@ -2586,7 +2676,9 @@ mod tests {
         r.key = Some("l0".into());
         r.contents = vec![ContentSet {
             values: Some(vec!["a label".into()]),
+            digest: content_digest(&["a label".to_string()]),
             generated_from: Bitmap::of(&[1, 2]),
+            cardinality: 2,
         }];
         r.attached_to = Some(Attachment {
             layer: "clusters/a".into(),
@@ -2659,6 +2751,8 @@ mod tests {
             growth: vec![crate::wal::MembershipGrowth {
                 ordinal,
                 joining: serialise_members(&Bitmap::of(joining)),
+                leaving: Vec::new(),
+                set: crate::wal::GrownSet::Membership,
             }],
         }
     }
@@ -2679,6 +2773,7 @@ mod tests {
                 ordinal,
                 entity: EntityId::new(entity),
                 key: Some(format!("c{ordinal}")),
+                view: None,
                 members: serialise_members(&Bitmap::of(members)),
                 contents: Vec::new(),
                 attached_to: None,
@@ -2700,7 +2795,9 @@ mod tests {
         if let crate::wal::WalRecord::ArtifactPublish { artifacts, .. } = &mut record {
             artifacts[0].contents = vec![crate::wal::PublishedContent {
                 values: vec!["a label".to_string()],
+                digest: content_digest(&["a label".to_string()]),
                 generated_from: serialise_members(&Bitmap::of(sources)),
+                cardinality: sources.len() as u64,
             }];
         }
         record
@@ -2859,6 +2956,8 @@ mod tests {
             growth: vec![crate::wal::MembershipGrowth {
                 ordinal: 0,
                 joining: vec![0xff, 0xff, 0xff, 0xff],
+                leaving: Vec::new(),
+                set: crate::wal::GrownSet::Membership,
             }],
         };
         assert_eq!(store.apply(&damaged, 8), 1);
