@@ -293,8 +293,11 @@ lineage version, which a growth does not move. A layer declaring supplied conten
 artifact without it and the count is reported; the artifact is withheld until a content is
 filled. Two things wait on later tracks. A content fill carries values and no generating set,
 since the set is a page at the rank (T2b), so on a layer whose content requires every member
-visible a fill is refused in the words a publication with an empty set is; the set arrives with
-the content on the `PUT` until then. And a content filled at a further rank on an artifact whose
+visible a fill is refused, and a set supplied beside a content fill on any layer is refused; a
+content and its set arrive together on a new artifact's publication until then. A key repeated
+within one batch is refused at both routes where any of its rows carries a fixed part, since
+two rows filling one part would each read it as absent; a `PATCH` repeating a key with members
+alone is a join twice. And a content filled at a further rank on an artifact whose
 content row is already in a durable extent is refused, because the record blob holds one row per
 entity until the per-column read (§1.4, T3); a first content on an artifact that has none is
 written beside the level's tail whichever side of the high-water the artifact sits. A fill pins

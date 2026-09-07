@@ -186,6 +186,11 @@ pub enum RegistryError {
         key: String,
         part: String,
     },
+    /// One batch names a key more than once and one of its rows carries a fixed part. Two rows
+    /// filling one part would each compare it as absent, and the second's record would fail at
+    /// apply after the batch was acknowledged; refused before anything is appended, naming the
+    /// key. A key repeated with members alone is a join twice and stays lawful.
+    RepeatedKey { layer: String, key: String },
 }
 
 /// **No artifact is about to exist** — the `pending` answer every caller but the ingest route's
@@ -430,9 +435,36 @@ impl std::fmt::Display for RegistryError {
                  the record supplies a different one. A fixed part is written once; what changes \
                  an artifact is a delete and a re-publish (ingest.md §1.5)"
             ),
+            RegistryError::RepeatedKey { layer, key } => write!(
+                f,
+                "{layer}: the key {key} appears more than once in this batch and a row of it \
+                 carries a fixed part. A fixed part is filled once, so name a key once per \
+                 batch where it carries a parent, an attachment, a content or a shape"
+            ),
             RegistryError::Alloc(e) => write!(f, "{e}"),
         }
     }
+}
+
+/// The keys a batch names more than once where any of their rows carries a fixed part — the
+/// [`RegistryError::RepeatedKey`] check, one body for both routes.
+fn repeated_key_with_parts<'a>(
+    rows: impl Iterator<Item = (Option<&'a str>, bool)>,
+) -> Option<String> {
+    let mut seen: std::collections::HashMap<&str, (usize, bool)> = std::collections::HashMap::new();
+    for (key, carries_part) in rows {
+        let Some(key) = key else { continue };
+        let entry = seen.entry(key).or_insert((0, false));
+        entry.0 += 1;
+        entry.1 |= carries_part;
+    }
+    let mut repeated: Vec<&str> = seen
+        .iter()
+        .filter(|(_, (count, carries_part))| *count > 1 && *carries_part)
+        .map(|(key, _)| *key)
+        .collect();
+    repeated.sort_unstable();
+    repeated.first().map(|key| key.to_string())
 }
 
 impl std::error::Error for RegistryError {}
@@ -691,6 +723,20 @@ impl LayerRegistry {
         // not hold or no key at all, is new. Resolved against the store's key index and never the
         // served view, on `resolve_or_mint`'s argument: a suppressed artifact resolves like any
         // other, so its key is never minted again under it.
+        if let Some(key) = repeated_key_with_parts(incoming.iter().map(|artifact| {
+            (
+                artifact.key.as_deref(),
+                !artifact.parent_keys.is_empty()
+                    || artifact.attached_to.is_some()
+                    || !artifact.contents.is_empty()
+                    || artifact.shape.is_some(),
+            )
+        })) {
+            return Err(RegistryError::RepeatedKey {
+                layer: layer_name.to_string(),
+                key,
+            });
+        }
         let held: Vec<Option<u32>> = incoming
             .iter()
             .map(|artifact| {
@@ -783,10 +829,13 @@ impl LayerRegistry {
                 &mut batch_edges,
             )?;
             // A generating set is compared by equality, never joined: a set page is track T2b's,
-            // and until then a re-`PUT` says the set it said before or refuses.
+            // and until then a re-`PUT` says the set it said before or refuses. A set beside a
+            // content the artifact does not hold is refused for the same reason: a content fill
+            // carries no set, and dropping one the caller supplied would serve the content
+            // against a set they did not declare.
             for (rank, content) in artifact.contents.iter().enumerate() {
-                if let Some(held) = record.contents.get(rank) {
-                    if held.generated_from != content.generated_from {
+                match record.contents.get(rank) {
+                    Some(held) if held.generated_from != content.generated_from => {
                         return Err(RegistryError::PartConflict {
                             layer: layer_name.to_string(),
                             level,
@@ -794,6 +843,19 @@ impl LayerRegistry {
                             part: format!("content[{rank}].generated_from"),
                         });
                     }
+                    Some(_) => {}
+                    None if !content.generated_from.is_empty() => {
+                        return Err(RegistryError::Content {
+                            layer: layer_name.to_string(),
+                            detail: format!(
+                                "the artifact keyed {key}: content[{rank}] is a fill and carries \
+                                 a generating set, and a content fill cannot carry one until the \
+                                 set page exists (ingest.md §8, T2b); a content and its set are \
+                                 supplied together on a new artifact's publication"
+                            ),
+                        });
+                    }
+                    None => {}
                 }
             }
             fills.extend(prepared.into_iter().map(|part| WalRecord::ArtifactFill {
@@ -1019,9 +1081,10 @@ impl LayerRegistry {
                 .any(|s| s.require_member_visibility.requires_all_members())
             {
                 return Err(refuse_content(format!(
-                    "content[{rank}] declares no generating set, and this layer's content \
-                     requires every member visible; a set is supplied with the content at \
-                     publication, and a page at a rank is not built yet (ingest.md §8, T2b)"
+                    "content[{rank}] is a fill, and a content fill cannot carry a generating set \
+                     until the set page exists (ingest.md §8, T2b); this layer's content \
+                     requires every member visible, so a content and its set are supplied \
+                     together on a new artifact's publication"
                 )));
             }
             if store.content_row_is_packed(layer_name, level, ordinal) {
@@ -1639,6 +1702,16 @@ impl LayerRegistry {
         let mut growth = Vec::with_capacity(incoming.len());
         let mut fills = Vec::new();
         let mut filled = Vec::with_capacity(incoming.len());
+        if let Some(key) = repeated_key_with_parts(
+            incoming
+                .iter()
+                .map(|join| (Some(join.key.as_str()), !join.parts.is_empty())),
+        ) {
+            return Err(RegistryError::RepeatedKey {
+                layer: layer_name.to_string(),
+                key,
+            });
+        }
         let mut batch_edges = BTreeMap::new();
         for join in incoming {
             let ordinal = self.resolve_growth_key(layer_name, level, &join.key, store)?;
@@ -3535,8 +3608,162 @@ mod tests {
             .prepare_grow("topics/all", 0, &[join], &store)
             .unwrap_err();
         assert!(
-            matches!(&refused, RegistryError::Content { detail, .. } if detail.contains("declares no generating set")),
+            matches!(&refused, RegistryError::Content { detail, .. } if detail.contains("cannot carry a generating set")),
             "{refused}"
+        );
+    }
+
+    /// **A key named twice in one batch with a fixed part on either row is refused at both
+    /// routes**, naming the key and before anything is appended: two rows filling one part would
+    /// each read it as absent, and the second record would fail at apply after the ack. A `PATCH`
+    /// repeating a key with members alone stays a join twice.
+    #[test]
+    fn a_key_repeated_in_one_batch_with_a_fixed_part_is_refused_at_both_routes() {
+        let mut reg = LayerRegistry::new();
+        let mut store = ArtifactStore::new();
+        let mut alloc = Allocator::new(0);
+        register(
+            &mut reg,
+            &mut alloc,
+            treed("clusters/t", HierarchyKind::Nested),
+        )
+        .unwrap();
+        publish(
+            &mut reg,
+            &mut store,
+            &mut alloc,
+            "clusters/t",
+            &[under("a", &[]), under("b", &[]), under("k", &[])],
+        )
+        .unwrap();
+
+        let mark = alloc.low_water();
+        let refused = reg
+            .prepare_put(
+                "clusters/t",
+                0,
+                &[under("k", &["a"]), under("k", &["b"])],
+                &store,
+                &mut alloc,
+            )
+            .unwrap_err();
+        assert_eq!(
+            refused,
+            RegistryError::RepeatedKey {
+                layer: "clusters/t".into(),
+                key: "k".into(),
+            }
+        );
+        // The same with one row carrying the part and the other members alone, and with the
+        // repeated key new rather than held.
+        let mut members_only = incoming("k", &[5]);
+        members_only.parent_keys = Vec::new();
+        let refused = reg
+            .prepare_put(
+                "clusters/t",
+                0,
+                &[under("k", &["a"]), members_only],
+                &store,
+                &mut alloc,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(refused, RegistryError::RepeatedKey { .. }),
+            "{refused:?}"
+        );
+        let refused = reg
+            .prepare_put(
+                "clusters/t",
+                0,
+                &[under("n", &["a"]), under("n", &["b"])],
+                &store,
+                &mut alloc,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(refused, RegistryError::RepeatedKey { .. }),
+            "{refused:?}"
+        );
+        assert_eq!(
+            alloc.low_water(),
+            mark,
+            "refused before anything was allocated"
+        );
+        assert!(store.get("clusters/t", 0, 2).unwrap().parents.is_empty());
+        assert_eq!(store.next_ordinal("clusters/t", 0), 3);
+
+        let mut first = crate::membership::IncomingGrowth::from_entities("k".into(), []);
+        first.parts.parent_keys = vec!["a".into()];
+        let mut second = crate::membership::IncomingGrowth::from_entities("k".into(), []);
+        second.parts.parent_keys = vec!["b".into()];
+        let refused = reg
+            .prepare_grow("clusters/t", 0, &[first.clone(), second], &store)
+            .unwrap_err();
+        assert_eq!(
+            refused,
+            RegistryError::RepeatedKey {
+                layer: "clusters/t".into(),
+                key: "k".into(),
+            }
+        );
+        let members =
+            crate::membership::IncomingGrowth::from_entities("k".into(), [EntityId::new(9)]);
+        let refused = reg
+            .prepare_grow("clusters/t", 0, &[first, members.clone()], &store)
+            .unwrap_err();
+        assert!(
+            matches!(refused, RegistryError::RepeatedKey { .. }),
+            "{refused:?}"
+        );
+
+        // Members alone, twice: lawful, and a join twice.
+        let prepared = reg
+            .prepare_grow("clusters/t", 0, &[members.clone(), members], &store)
+            .unwrap();
+        assert!(prepared.fills.is_empty());
+        assert!(prepared.growth.is_some());
+    }
+
+    /// **A generating set beside a content fill is refused**, whatever the layer's requirement:
+    /// a fill carries no set until the set page exists, and dropping one the caller supplied
+    /// would serve the content against a set they did not declare. The same set on a new key is
+    /// the publication's own `422`, so the two doors agree.
+    #[test]
+    fn a_generating_set_beside_a_content_fill_is_refused_rather_than_dropped() {
+        let mut reg = LayerRegistry::new();
+        let mut store = ArtifactStore::new();
+        let mut alloc = Allocator::new(0);
+        register(&mut reg, &mut alloc, described("topics/t")).unwrap();
+        let put = reg
+            .prepare_put("topics/t", 0, &[incoming("t0", &[1])], &store, &mut alloc)
+            .unwrap();
+        apply_put(&mut reg, &mut store, &put);
+
+        let mut with_set = incoming("t0", &[]);
+        with_set.contents = vec![crate::membership::IncomingContent::new(
+            vec!["a topic".into()],
+            [EntityId::new(1)],
+        )];
+        let refused = reg
+            .prepare_put("topics/t", 0, &[with_set], &store, &mut alloc)
+            .unwrap_err();
+        assert!(
+            matches!(&refused, RegistryError::Content { detail, .. } if detail.contains("cannot carry one until the set page exists")),
+            "{refused:?}"
+        );
+        assert!(store.get("topics/t", 0, 0).unwrap().contents.is_empty());
+
+        let mut new_with_set = incoming("t1", &[2]);
+        new_with_set.contents = vec![crate::membership::IncomingContent::new(
+            vec!["a topic".into()],
+            [EntityId::new(2)],
+        )];
+        let refused = reg
+            .prepare_put("topics/t", 0, &[new_with_set], &store, &mut alloc)
+            .unwrap_err();
+        assert!(
+            matches!(&refused, RegistryError::Content { detail, .. } if detail.contains("declares a generating set, and none of this layer's content requires")),
+            "{refused:?}"
         );
     }
 }

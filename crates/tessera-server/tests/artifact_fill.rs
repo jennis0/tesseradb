@@ -356,3 +356,88 @@ async fn a_parent_is_filled_by_patch_and_a_held_key_on_put_mints_nothing() {
         "every fill replayed"
     );
 }
+
+/// **A key repeated within one batch with a fixed part on any of its rows is a `422` naming the
+/// key, on both routes**, and nothing lands; repeated with members alone on `PATCH` it joins
+/// twice.
+#[tokio::test]
+async fn a_key_repeated_in_one_batch_with_a_fixed_part_is_422_at_both_routes() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    register(&server, declaration(TREE, false, "nested")).await;
+    let (status, body) = put(
+        &server,
+        TREE,
+        json!([
+            { "key": "a", "members": members(0..10) },
+            { "key": "b", "members": members(10..20) },
+            { "key": "k", "members": members(20..30) },
+        ]),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+
+    let (status, body) = patch(
+        &server,
+        TREE,
+        json!([
+            { "key": "k", "parent": ["a"] },
+            { "key": "k", "parent": ["b"] },
+        ]),
+    )
+    .await;
+    assert_eq!(status, 422, "{body}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("the key k appears more than once"),
+        "{body}"
+    );
+
+    let (status, body) = put(
+        &server,
+        TREE,
+        json!([
+            { "key": "k", "members": [], "parent": ["a"] },
+            { "key": "k", "members": members(30..35) },
+        ]),
+    )
+    .await;
+    assert_eq!(status, 422, "{body}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("the key k appears more than once"),
+        "{body}"
+    );
+    assert_eq!(
+        served(&server, TREE).await,
+        vec![
+            ("a".to_string(), 10),
+            ("b".to_string(), 10),
+            ("k".to_string(), 10)
+        ],
+        "nothing landed: no edge, no members"
+    );
+
+    let (status, body) = patch(
+        &server,
+        TREE,
+        json!([
+            { "key": "k", "members": members(30..35) },
+            { "key": "k", "members": members(35..40) },
+        ]),
+    )
+    .await;
+    assert_eq!(status, 200, "members alone may repeat a key: {body}");
+    assert_eq!(
+        served(&server, TREE).await,
+        vec![
+            ("a".to_string(), 10),
+            ("b".to_string(), 10),
+            ("k".to_string(), 20)
+        ]
+    );
+}
