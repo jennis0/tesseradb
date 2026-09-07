@@ -13,6 +13,8 @@
 
 ---
 
+> **I8 withdrawn and the strict/permissive modes dropped, 2026-09-07** ([decision 0135](../decisions/0135-a-generating-set-is-the-callers-claim-i8-withdrawn.md)): sentences below that rest on an immutable generating set or on the two modes are superseded; a generating set is the caller's claim, changeable at ingest, and the fold withdraws content whose set lost a member.
+
 ## 1. The question this answers
 
 The model says an artifact is an identity, a membership, a gate and content, grouped into layers
